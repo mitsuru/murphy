@@ -1,0 +1,8 @@
+# Toolchain for Murphy. Managed by mise (https://mise.jdx.dev).
+# Rust: native core, CLI, native cops. prism Rust binding spike (Spike 0.1).
+[tools]
+rust = "1.95.0"
+
+[env]
+# Keep cargo artifacts inside the repo (already gitignored: /target).
+CARGO_TERM_COLOR = "always"
