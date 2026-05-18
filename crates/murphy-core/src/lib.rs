@@ -1,8 +1,10 @@
 //! Murphy core: the native engine for the Murphy Ruby linter/formatter.
 
+mod cop;
 mod offense;
 mod parse;
 
+pub use cop::{Cop, CopContext, run_cops};
 pub use offense::{Offense, Range, Severity};
 pub use parse::{Ast, ParseError, parse};
 
