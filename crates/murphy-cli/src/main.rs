@@ -1,9 +1,11 @@
-//! `murphy` command-line entry point (Task 7).
+//! `murphy` command-line entry point (Task 7; multi-file in Task 9).
 //!
-//! Phase 1 shape: `murphy lint <file>` runs the single-parse pipeline over
-//! one file and prints the aggregated offenses as a JSON array on stdout.
-//! Argument parsing is hand-rolled (one subcommand, one arg — no `clap`;
-//! YAGNI until the CLI actually grows, design/plan).
+//! Phase 1 shape: `murphy lint <file>...` runs the single-parse pipeline
+//! over each explicitly-listed file (no directory discovery yet — plan
+//! Task 9: "loop over the explicit file list"), aggregates the offenses
+//! *across all files*, and prints them as one JSON array on stdout.
+//! Argument parsing is hand-rolled (one subcommand, one-or-more file args —
+//! no `clap`; YAGNI until the CLI actually grows, design/plan).
 //!
 //! ## stdout / stderr split
 //!
@@ -87,40 +89,22 @@ fn main() -> ExitCode {
     ExitCode::from(code)
 }
 
-/// Parse args, run the pipeline, and return the exit code (or an [`AppError`]
-/// carrying a non-success code + stderr message).
+/// Lint a single file: read it, run the single-parse pipeline, and return
+/// the offenses found in it (unaggregated — the caller aggregates *across*
+/// all files so cross-file ordering/dedupe is one pass).
 ///
-/// Returns `Ok(code)` for the *expected* outcomes (`0` clean / `1` offenses);
-/// `Err` for setup-class failures (`2`). Panics propagate to the guard in
-/// [`main`] and become `3`.
-fn run(args: &[String]) -> Result<u8, AppError> {
-    // args[0] is the program name. Expect exactly: `lint <file>`.
-    // `get(1..)` instead of `&args[1..]` so `run(&[])` (a future unit test /
-    // refactor) yields a usage error, not a slice-index panic→exit 3.
-    let rest = args.get(1..).unwrap_or(&[]);
-    let (subcommand, file) = match rest {
-        [subcommand, file] => (subcommand.as_str(), file.as_str()),
-        _ => {
-            return Err(AppError::setup("usage: murphy lint <file>"));
-        }
-    };
-
-    if subcommand != "lint" {
-        return Err(AppError::setup(format!(
-            "unknown subcommand {subcommand:?} (usage: murphy lint <file>)"
-        )));
-    }
-
+/// This is a pure extraction of what was the inline per-file block (Task 7/8)
+/// — no behavior change for the one-file case. `Err` is a setup-class failure
+/// (the file is missing/unreadable, design exit `2`). A *parse* failure is
+/// NOT an `Err`: per design §6 it becomes exactly one synthetic
+/// `Murphy/Syntax` offense in the returned `Vec` and the cop pass is skipped
+/// (there is no AST). Returning `Ok` for a parse failure is what lets a
+/// broken file in a multi-file run still exit `1` like any other offense
+/// *without aborting the other files*.
+fn lint_one_file(file: &str) -> Result<Vec<Offense>, AppError> {
     let source = std::fs::read_to_string(Path::new(file))
         .map_err(|e| AppError::setup(format!("cannot read {file:?}: {e}")))?;
 
-    // Syntax-error file behavior (design §6, plan Task 8): a parse failure is
-    // NOT a setup error. prism's first error becomes exactly ONE synthetic
-    // `Murphy/Syntax` offense and the cop pass is SKIPPED for this file (there
-    // is no AST). We do not early-`return Err`: the offense flows into the same
-    // sink → aggregate → serialize → exit path, so the file naturally exits `1`
-    // (offenses non-empty) and — crucially for multi-file later — a parse
-    // failure on one file does not abort processing of the others.
     let mut sink: Vec<Offense> = Vec::new();
     match parse(&source) {
         Ok(ast) => {
@@ -139,6 +123,46 @@ fn run(args: &[String]) -> Result<u8, AppError> {
                 &e.message,
             ));
         }
+    }
+    Ok(sink)
+}
+
+/// Parse args, run the pipeline, and return the exit code (or an [`AppError`]
+/// carrying a non-success code + stderr message).
+///
+/// Returns `Ok(code)` for the *expected* outcomes (`0` clean / `1` offenses);
+/// `Err` for setup-class failures (`2`). Panics propagate to the guard in
+/// [`main`] and become `3`.
+fn run(args: &[String]) -> Result<u8, AppError> {
+    // args[0] is the program name. Expect: `lint <file>...` (one or more
+    // files; processed in arg order, but final output ordering is from
+    // `aggregate`, not arg order). `get(1..)` instead of `&args[1..]` so
+    // `run(&[])` yields a usage error, not a slice-index panic→exit 3.
+    let rest = args.get(1..).unwrap_or(&[]);
+    let (subcommand, files) = match rest {
+        // `files @ ..` must be non-empty: `lint` with zero files is bad usage.
+        [subcommand, files @ ..] if !files.is_empty() => (subcommand.as_str(), files),
+        _ => {
+            return Err(AppError::setup("usage: murphy lint <file>..."));
+        }
+    };
+
+    if subcommand != "lint" {
+        return Err(AppError::setup(format!(
+            "unknown subcommand {subcommand:?} (usage: murphy lint <file>...)"
+        )));
+    }
+
+    // Loop over the explicit file list (single-threaded; no discovery yet —
+    // plan Task 9 / YAGNI). Collect every file's offenses into one flat sink,
+    // then aggregate ACROSS all files in a single pass — the cross-file
+    // (file, start_offset) sort is what makes the multi-file output
+    // deterministic regardless of arg order. A missing/unreadable file is
+    // still a setup error (`?` → exit 2); a parse failure on one file does
+    // not abort the others (it is an offense in that file's Vec, not `Err`).
+    let mut sink: Vec<Offense> = Vec::new();
+    for file in files {
+        sink.extend(lint_one_file(file)?);
     }
     let offenses = aggregate(sink);
 

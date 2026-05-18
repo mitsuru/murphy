@@ -1,0 +1,42 @@
+[
+  {
+    "file": "broken.rb",
+    "cop_name": "Murphy/Syntax",
+    "range": {
+      "start_offset": 106,
+      "end_offset": 107
+    },
+    "severity": "error",
+    "message": "expected a receiver for the method definition"
+  },
+  {
+    "file": "dirty.rb",
+    "cop_name": "Murphy/NoReceiverPuts",
+    "range": {
+      "start_offset": 90,
+      "end_offset": 94
+    },
+    "severity": "warning",
+    "message": "Use a logger instead of puts"
+  },
+  {
+    "file": "dirty.rb",
+    "cop_name": "Murphy/NoReceiverPuts",
+    "range": {
+      "start_offset": 100,
+      "end_offset": 105
+    },
+    "severity": "warning",
+    "message": "Use a logger instead of puts"
+  },
+  {
+    "file": "multibyte.rb",
+    "cop_name": "Murphy/NoReceiverPuts",
+    "range": {
+      "start_offset": 903,
+      "end_offset": 907
+    },
+    "severity": "warning",
+    "message": "Use a logger instead of puts"
+  }
+]
