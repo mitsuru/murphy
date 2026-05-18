@@ -271,7 +271,7 @@ Each case: input source → expected offense count + expected `range` on the met
 ### Task 9: Multi-file integration snapshot
 
 **Files:**
-- Create: `crates/murphy-cli/tests/fixtures/sample_project/` (a few `.rb` files, one clean, one dirty, one broken)
+- Create: `crates/murphy-cli/tests/fixtures/sample_project/` (a few `.rb` files: one clean, one dirty, one broken, **and one containing non-ASCII / multibyte content** — exercises the ADR 0001 byte-offset rule in a real snapshot before Phase 1 closes)
 - Test: `crates/murphy-cli/tests/integration_snapshot.rs`
 
 **Step 1: Write the failing test** — `murphy lint <dir-of-files...>` (loop over the explicit file list; no discovery yet) produces a stable JSON snapshot (sorted, deterministic).

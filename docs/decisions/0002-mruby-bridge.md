@@ -77,17 +77,17 @@ the first was live — confirming the per-cop isolated-state precondition
    could otherwise deref freed AST. Phase 3 must encode this ordering in types
    (e.g. the cop runner owns the mrb_state in a field declared *after* the AST
    borrow, or closes explicitly before returning).
-5. **Phase 3 forward-flag — UNPROVEN (do not solve here):** the PoC uses a
+4. **Phase 3 forward-flag — UNPROVEN (do not solve here):** the PoC uses a
    *snapshot* model (names pre-collected into `AstContext.names`; primitives
    read the Vec). The Decision's "resolve handle → live prism node and read it
    directly" is **not yet proven**. Live resolution must return data from a
    `ParseResult<'pr>` that borrows the source — the borrow cannot be carried
    through an integer handle, so Phase 3 will need a `*const T` reached via
    `ud` + manual lifetime discipline tied to the Core's sibling source+AST
-   ownership and the drop-order rule (3). This is the same root cause as the
-   E0106 hit here. Whoever opens Phase 3 (`murphy-5gf`) must design live
+   ownership and the drop-order rule (item 3). This is the same root cause as
+   the E0106 hit here. Whoever opens Phase 3 (`murphy-5gf`) must design live
    resolution explicitly and not read "bridge proven" as "resolution proven".
-4. **Spike 0.3 forward-flag (do not solve here):** `mrb_state` in this
+5. **Spike 0.3 forward-flag (do not solve here):** `mrb_state` in this
    `mruby3-sys` build does **not** expose `code_fetch_hook` / instruction-hook
    fields (default mruby build = no `MRB_USE_DEBUG_HOOK`). Spike 0.3's runaway-
    cop deadline therefore likely needs an OS-thread + watchdog/timeout, or a
