@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Murphy** is a from-scratch, high-speed Ruby linter/formatter — "Ruff for Ruby". It is **not** a port of RuboCop and shares no code with `rfmt`. The goal is to eliminate RuboCop's slowness (Ruby VM startup + hundreds of cops in Ruby + multi-pass autocorrect reparsing + GVL-bound parallelism) with a native Rust core.
 
-**Status: design-only.** There is no source code yet. The authoritative design — architecture, locked decisions, and explicitly rejected alternatives with rationale — lives in `docs/plans/2026-05-19-murphy-design.md`. Read it before any implementation work. Do not invent build/test commands; the Build & Test section below stays a placeholder until the Rust toolchain lands (the project will be Rust — `/target` is already gitignored).
+**Status: Phase 0 (de-risking spikes), no production code yet.** The authoritative design — architecture, locked decisions, rejected alternatives with rationale — lives in `docs/plans/2026-05-19-murphy-design.md`. The phased implementation plan is `docs/plans/2026-05-19-murphy-implementation-plan.md`. Resolved Phase-0 decisions are ADRs in `docs/decisions/` (read these before Phase 1 / Phase 3 — they carry load-bearing constraints). Spike PoCs under `spikes/` are throwaway and are NOT promoted into `crates/`.
+
+**Security posture (ADR 0004):** v1 ships **no sandbox** for user cops — a `.rb` in `cops/` is **trusted code** run in-process with full host privileges. Per-cop isolation (ADR 0002/0003) is *fault* isolation, not a security boundary. Treat adding a cop like adding a git hook. A real sandbox for third-party cops is a hard Phase 7 prerequisite.
 
 ## Architecture (from the design doc)
 
