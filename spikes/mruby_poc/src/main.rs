@@ -189,6 +189,7 @@ fn main() {
         "must have walked at least one node"
     );
 
-    // Box (and ParseResult inside it) drops here — after mrb_close. Correct.
+    // `boxed` (handles) and `result`/`src` (AST + source) drop here — after
+    // mrb_close. Correct ordering.
     println!("\nALL ASSERTIONS PASSED — mruby walked the live prism AST, no serialization");
 }
