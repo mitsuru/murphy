@@ -1,5 +1,9 @@
 //! Murphy core: the native engine for the Murphy Ruby linter/formatter.
 
+mod offense;
+
+pub use offense::{Offense, Range, Severity};
+
 /// Returns the Murphy core crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
