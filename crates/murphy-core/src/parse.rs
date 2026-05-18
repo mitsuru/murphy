@@ -130,13 +130,9 @@ pub fn parse(src: &str) -> Result<Ast<'_>, ParseError> {
         // prism `warnings()` are intentionally NOT surfaced in Phase 1: design
         // §6 centers offense reporting on syntax errors only.
         let loc = err.location();
-        // The guard above proved `src.len() <= u32::MAX`, so every offset into
-        // this source fits in `u32`; the narrowing is now enforced, not assumed.
-        #[allow(clippy::cast_possible_truncation)]
-        let range = Range {
-            start_offset: loc.start_offset() as u32,
-            end_offset: loc.end_offset() as u32,
-        };
+        // ADR 0001 narrowing lives in exactly one audited place; see
+        // `Range::from_prism_location`.
+        let range = Range::from_prism_location(&loc);
         let message = String::from_utf8_lossy(err.message().as_bytes()).into_owned();
         return Err(ParseError { message, range });
     }

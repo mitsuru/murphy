@@ -19,6 +19,25 @@ pub struct Range {
     pub end_offset: u32,
 }
 
+impl Range {
+    /// Build a byte-offset [`Range`] from a prism `Location`.
+    ///
+    /// **This is the single audited site for the `usize -> u32` narrowing
+    /// of prism offsets (ADR 0001).** `parse()` rejects any source longer
+    /// than `u32::MAX` bytes up front, so every offset into a successfully
+    /// parsed source provably fits in `u32`; the `as u32` cast is therefore
+    /// sound here without a re-guard. Both [`crate::parse`] and every cop
+    /// MUST go through this function rather than re-deriving the narrowing,
+    /// so the soundness argument and the `#[allow]` live in exactly one place.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn from_prism_location(loc: &ruby_prism::Location<'_>) -> Range {
+        Range {
+            start_offset: loc.start_offset() as u32,
+            end_offset: loc.end_offset() as u32,
+        }
+    }
+}
+
 /// How serious an offense is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,6 +63,27 @@ pub struct Offense {
     pub severity: Severity,
     /// Human-readable explanation of the offense.
     pub message: String,
+}
+
+impl Offense {
+    /// Construct an [`Offense`], taking `&str` and doing the owned-string
+    /// conversions internally so a cop emits one in a single call instead of
+    /// a 5-field literal with repeated `.into()`s.
+    pub fn new(
+        file: &str,
+        cop_name: &str,
+        range: Range,
+        severity: Severity,
+        message: &str,
+    ) -> Offense {
+        Offense {
+            file: file.into(),
+            cop_name: cop_name.into(),
+            range,
+            severity,
+            message: message.into(),
+        }
+    }
 }
 
 #[cfg(test)]
