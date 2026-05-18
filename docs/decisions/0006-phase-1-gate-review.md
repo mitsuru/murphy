@@ -58,6 +58,16 @@ Full suite: **20 tests, 0 failed** (`murphy-cli` cli 5 + integration_snapshot
 All three are correctly Phase-2 scope; none weakens the frozen Phase-1
 contract.
 
+## Scope honesty note
+
+Murphy is branded a "linter/**formatter**" (design §1). **Phase 1 is the lint
+path only** — there is no `murphy format` subcommand and no formatting output.
+This was always the Phase 1 scope (plan §"Phase 1 Vertical slice"); the gate
+PASSES against that scope. Formatting/autocorrect derives from Phase 4
+(autocorrect) onward. The frozen contract above is the **offense-JSON / exit-code
+contract** and does not cover a future `format` command. README states this
+explicitly so "formatter" is not misread as available.
+
 ## Carried-forward UNRESOLVED (correct to pass open)
 
 Phase 3 live-resolution of mruby handles (ADR 0002 Finding 4) and the Phase 7

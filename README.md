@@ -14,8 +14,11 @@ eliminate RuboCop's slowness with a native Rust core.
 - JSON array of offenses printed to stdout; multi-file aggregation.
 - Exit codes 0/1/2/3.
 
-Not yet production-ready. There is **no** mruby user-cop runtime, autocorrect,
-config format, or parallelism yet — those are later phases. See
+Not yet production-ready. Murphy is described as a "linter/formatter", but
+**only the lint path exists today** — there is **no** `murphy format`
+subcommand, mruby user-cop runtime, autocorrect, config format, or parallelism
+yet. Formatting/autocorrect derives from Phase 4 onward; the rest are later
+phases too. See
 [`docs/plans/2026-05-19-murphy-design.md`](docs/plans/2026-05-19-murphy-design.md)
 for the full design and
 [`docs/plans/2026-05-19-murphy-implementation-plan.md`](docs/plans/2026-05-19-murphy-implementation-plan.md)
