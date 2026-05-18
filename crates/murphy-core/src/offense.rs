@@ -6,6 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Stable cop_name for the synthetic parser-level syntax-error offense
+/// (design §6); consumer-facing contract — snapshot-stable.
+pub const SYNTAX_COP_NAME: &str = "Murphy/Syntax";
+
 /// A source span, expressed as **byte offsets** into the original source.
 ///
 /// ADR 0001: these are byte offsets (`u32`), never char indices. All cop

@@ -15,13 +15,16 @@
 //!
 //! - `0` — no offenses.
 //! - `1` — one or more offenses.
-//! - `2` — config/cop/file-setup error. For Task 7 that is a missing or
-//!   unreadable file, a parse failure (Task 8 will turn this into a
-//!   syntax-error *offense* instead), or bad CLI usage.
+//! - `2` — config/cop/file-setup error: a missing or unreadable file, or bad
+//!   CLI usage. A *parse* failure is NOT exit 2 — per design §6 (Task 8) it
+//!   becomes one `Murphy/Syntax` offense, so the file exits `1` like any other
+//!   offense.
 //! - `3` — internal failure: a panic anywhere in the run is caught and mapped
 //!   here instead of aborting the process.
 
-use murphy_core::{Cop, NoReceiverPuts, Offense, aggregate, parse, run_cops};
+use murphy_core::{
+    Cop, NoReceiverPuts, Offense, SYNTAX_COP_NAME, Severity, aggregate, parse, run_cops,
+};
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
@@ -35,7 +38,8 @@ const EXIT_OK: u8 = 0;
 /// Exit code: lint found one or more offenses.
 const EXIT_OFFENSES: u8 = 1;
 /// Exit code: config/cop/file-setup error (bad usage, missing/unreadable
-/// file, parse failure in Phase 1).
+/// file). A parse failure is NOT this — it is a `Murphy/Syntax` offense
+/// (design §6), so a syntax-error file exits `1`.
 const EXIT_SETUP_ERROR: u8 = 2;
 /// Exit code: internal failure (a caught panic).
 const EXIT_INTERNAL: u8 = 3;
@@ -110,13 +114,32 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     let source = std::fs::read_to_string(Path::new(file))
         .map_err(|e| AppError::setup(format!("cannot read {file:?}: {e}")))?;
 
-    // Phase 1: a parse failure is a setup-class error (exit 2). Task 8 will
-    // replace this with emitting a syntax-error offense instead.
-    let ast = parse(&source).map_err(|e| AppError::setup(format!("{file}: {e}")))?;
-
-    let cops: Vec<Box<dyn Cop>> = vec![Box::new(NoReceiverPuts)];
+    // Syntax-error file behavior (design §6, plan Task 8): a parse failure is
+    // NOT a setup error. prism's first error becomes exactly ONE synthetic
+    // `Murphy/Syntax` offense and the cop pass is SKIPPED for this file (there
+    // is no AST). We do not early-`return Err`: the offense flows into the same
+    // sink → aggregate → serialize → exit path, so the file naturally exits `1`
+    // (offenses non-empty) and — crucially for multi-file later — a parse
+    // failure on one file does not abort processing of the others.
     let mut sink: Vec<Offense> = Vec::new();
-    run_cops(&ast, file, &cops, &mut sink);
+    match parse(&source) {
+        Ok(ast) => {
+            let cops: Vec<Box<dyn Cop>> = vec![Box::new(NoReceiverPuts)];
+            run_cops(&ast, file, &cops, &mut sink);
+        }
+        Err(e) => {
+            // Use `e.message` verbatim (prism's first-error text); the Display
+            // impl would prepend "parse error at bytes ..", which §6 does not
+            // ask for. Range is the prism first-error byte span (ADR 0001).
+            sink.push(Offense::new(
+                file,
+                SYNTAX_COP_NAME,
+                e.range,
+                Severity::Error,
+                &e.message,
+            ));
+        }
+    }
     let offenses = aggregate(sink);
 
     // stdout is exclusively the JSON array (design §5). `serde_json` cannot

@@ -9,7 +9,7 @@ mod parse;
 pub use aggregator::aggregate;
 pub use cop::{Cop, CopContext, run_cops};
 pub use cops::no_receiver_puts::NoReceiverPuts;
-pub use offense::{Offense, Range, Severity};
+pub use offense::{Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
 
 /// Returns the Murphy core crate version.
