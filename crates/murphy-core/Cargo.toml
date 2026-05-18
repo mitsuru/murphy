@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# Exact pin (ADR 0001): a prism node-schema change must not ride in silently
+# on the load-bearing byte offsets; bumping is a deliberate, re-verified step.
+ruby-prism = "=1.9.0"
 
 [dev-dependencies]
 serde_json = "1"

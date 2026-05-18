@@ -1,8 +1,10 @@
 //! Murphy core: the native engine for the Murphy Ruby linter/formatter.
 
 mod offense;
+mod parse;
 
 pub use offense::{Offense, Range, Severity};
+pub use parse::{Ast, ParseError, parse};
 
 /// Returns the Murphy core crate version.
 pub fn version() -> &'static str {
