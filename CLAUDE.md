@@ -38,11 +38,20 @@ TDD is mandatory for cops: write the failing fixture test before implementing. A
 
 ## Build & Test
 
-_No toolchain yet (design-only). Will be Rust/Cargo._
+Rust/Cargo workspace: `crates/murphy-core` (lib) + `crates/murphy-cli` (bin `murphy`). Toolchain is mise-pinned (Rust 1.95.0).
 
 ```bash
-# Add cargo build / test / single-test commands here once the crate exists
+cargo build                                       # debug build (./target/debug/murphy)
+cargo build --release                             # release build
+cargo run -p murphy-cli -- lint <file>...         # run the linter
+cargo test --workspace                            # full suite (Phase 1: 20 tests, all pass)
+cargo test -p murphy-core <name>                  # single test, e.g. offense_serializes_to_contract
+cargo test -p murphy-cli --test cli               # one integration target (also: --test integration_snapshot)
+cargo fmt --check                                 # formatting gate (must be clean)
+cargo clippy --all-targets -- -D warnings         # lint gate (must be clean)
 ```
+
+Exit codes: `0` no offenses / `1` offenses / `2` config-or-cop-or-file-setup error / `3` internal failure.
 
 ## Shell Command Safety
 
