@@ -1,0 +1,3 @@
+/target
+*.gem
+.DS_Store
