@@ -1,0 +1,11 @@
+[package]
+name = "murphy-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "murphy"
+path = "src/main.rs"
+
+[dependencies]
+murphy-core = { path = "../murphy-core" }
