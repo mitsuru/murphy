@@ -27,7 +27,8 @@
 //!   is still bad usage → exit 2 (distinct: that path never reaches discovery).
 //! - A non-existent path arg is neither a file nor a dir → it falls through
 //!   the explicit-file path and the existing missing-file→exit 2 logic
-//!   (`lint_one_file`'s read error) catches it, unchanged.
+//!   (`read_source`'s read error, hit in `lint_files_memoized`'s read phase)
+//!   catches it, unchanged.
 //! - Mixed args (some files, some dirs) → the explicit files plus everything
 //!   discovered under the dirs, unioned (deduped, sorted).
 //!
@@ -52,7 +53,7 @@ use murphy_core::{
     Cop, NoReceiverPuts, Offense, SYNTAX_COP_NAME, Severity, aggregate, discover, parse, run_cops,
 };
 use rayon::prelude::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -115,24 +116,60 @@ fn main() -> ExitCode {
     ExitCode::from(code)
 }
 
-/// Lint a single file: read it, run the single-parse pipeline, and return
-/// the offenses found in it (unaggregated — the caller aggregates *across*
-/// all files so cross-file ordering/dedupe is one pass).
+/// `#[cfg(test)]`-only counter of how many times the parse+cop pipeline
+/// (`lint_source`) actually ran. The in-run memoization (Task 7) parses each
+/// **unique content** once and fans the result out to every path that shares
+/// it; this counter is the *deterministic* (not timing-based) proof of that:
+/// a unit test drives `lint_files_memoized` over a synthetic set with
+/// duplicate content and asserts the count equals the number of UNIQUE
+/// contents, not the number of paths. Test-only so release builds carry zero
+/// instrumentation.
 ///
-/// This is a pure extraction of what was the inline per-file block (Task 7/8)
-/// — no behavior change for the one-file case. `Err` is a setup-class failure
-/// (the file is missing/unreadable, design exit `2`). A *parse* failure is
-/// NOT an `Err`: per design §6 it becomes exactly one synthetic
-/// `Murphy/Syntax` offense in the returned `Vec` and the cop pass is skipped
-/// (there is no AST). Returning `Ok` for a parse failure is what lets a
-/// broken file in a multi-file run still exit `1` like any other offense
-/// *without aborting the other files*.
-fn lint_one_file(file: &str) -> Result<Vec<Offense>, AppError> {
-    let source = std::fs::read_to_string(Path::new(file))
-        .map_err(|e| AppError::setup(format!("cannot read {file:?}: {e}")))?;
+/// Test-only instrumentation, NOT a runtime counter. **Exactly ONE** unit
+/// test (`memoization_parses_unique_then_no_duplicate_in_one_test`) asserts
+/// on this static; it `store(0)`s the counter at the top of EACH sub-scenario
+/// it runs. Because only that single test ever touches `PARSE_CALLS`, there
+/// is no cross-test ordering invariant and no global lock is needed. Do NOT
+/// add a second counter-asserting test — extend the existing one with another
+/// sub-scenario (reset the counter again at its top) instead, or the
+/// implicit single-asserter invariant that lets us drop the lock breaks.
+#[cfg(test)]
+static PARSE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Read a file's contents off disk (the **abort-on-Err → exit 2** path).
+///
+/// This is the ONLY concern of the old `lint_one_file` that can fail: a
+/// missing or unreadable file is a setup-class error (design exit `2`).
+/// Splitting it out (P2 Task 5 review Minor 1) is what makes [`lint_source`]
+/// path-independent — and therefore safely memoizable: the same content read
+/// from two different paths parses identically, so it need only parse once.
+/// Behavior is byte-for-byte the old read: `std::fs::read_to_string` with the
+/// exact same `AppError::setup` message shape, so the missing-file→exit-2
+/// contract (`lint_multi_file_with_one_missing_exits_2`) is unchanged.
+fn read_source(path: &str) -> Result<String, AppError> {
+    std::fs::read_to_string(Path::new(path))
+        .map_err(|e| AppError::setup(format!("cannot read {path:?}: {e}")))
+}
+
+/// Run the single-parse pipeline over already-read `source`, labeling every
+/// offense with `file`.
+///
+/// `file` is used **only** as the `Offense.file` label (including the
+/// synthetic syntax offense). Parsing and the cop pass are otherwise
+/// completely path-independent — that path-independence is exactly what makes
+/// in-run memoization correct: byte-identical content yields byte-identical
+/// offenses modulo the `file` label, so two paths with the same content can
+/// share one parse and differ only by a per-path `file` rewrite.
+///
+/// NEVER returns `Err`: a parse failure is the one synthetic `Murphy/Syntax`
+/// offense (design §6, cops skipped — there is no AST), not a setup error.
+/// The setup-class failure (missing/unreadable file) is [`read_source`]'s.
+fn lint_source(source: &str, file: &str) -> Vec<Offense> {
+    #[cfg(test)]
+    PARSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let mut sink: Vec<Offense> = Vec::new();
-    match parse(&source) {
+    match parse(source) {
         Ok(ast) => {
             let cops: Vec<Box<dyn Cop>> = vec![Box::new(NoReceiverPuts)];
             run_cops(&ast, file, &cops, &mut sink);
@@ -150,7 +187,90 @@ fn lint_one_file(file: &str) -> Result<Vec<Offense>, AppError> {
             ));
         }
     }
-    Ok(sink)
+    sink
+}
+
+/// Read, parse+lint, and aggregate every file — with **in-run content
+/// memoization** (Phase 2 Task 7, Scope Fence 3: in-memory, single run only).
+///
+/// Two-phase, output byte-identical to the non-memoized Task 5 result for
+/// *any* input (the common no-duplicate case is a 1:1 no-op):
+///
+/// 1. **Read phase.** Read every path. Reading is the only I/O that can
+///    `Err` → exit 2; collecting into `Result<Vec<_>, AppError>` keeps the
+///    Task-5 abort-on-first-`Err` short-circuit (a missing file anywhere
+///    aborts the whole run), so `lint_multi_file_with_one_missing_exits_2`
+///    is preserved. Reads are independent → done in parallel.
+/// 2. **Lint phase.** Group paths by their **content `String`** (keyed on the
+///    content itself, not a hash — zero collision risk, zero new dependency;
+///    the plan explicitly prefers this and Phase-2 scale makes holding the
+///    contents a non-concern). `par_iter` over the UNIQUE contents (this
+///    preserves Task 5's parallelism — the unique set has the same length as
+///    `files` when nothing is duplicated), running `lint_source` ONCE per
+///    unique content against a deterministic representative path (the first
+///    path in `BTreeMap`/sorted order — deterministic for defense-in-depth
+///    only; `lint_source` never writes stderr, a parse failure becomes a
+///    `Murphy/Syntax` OFFENSE whose `file` is rewritten per-path in the
+///    fan-out and `aggregate` re-sorts, so the representative choice is not
+///    observable). Then fan out: every path sharing that content gets that
+///    content's offenses with `Offense.file` rewritten to its own path
+///    (offsets/cop_name/severity/message are identical because the bytes are).
+///
+/// The flattened per-path offenses go to `aggregate` UNCHANGED — it remains
+/// the single determinism point (the total-order sort/dedupe, Task 2), so
+/// neither read/lint parallelism nor the fan-out order can perturb output.
+fn lint_files_memoized(files: &[String]) -> Result<Vec<Offense>, AppError> {
+    // Phase 1: read every path. `?` on the collected Result short-circuits on
+    // the first read error (missing/unreadable → exit 2), exactly as the
+    // Task-5 `par_iter().collect::<Result<_,_>>()` did.
+    let contents: Vec<String> = files
+        .par_iter()
+        .map(|f| read_source(f))
+        .collect::<Result<_, AppError>>()?;
+
+    // Group paths by content. `BTreeMap` keyed on the owned content `String`
+    // gives a deterministic representative (the first path, since `files` is
+    // already sorted upstream) and zero collision risk vs a hash. Values are
+    // the paths (in `files` order) that share that exact content.
+    let mut by_content: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (path, content) in files.iter().zip(contents.iter()) {
+        by_content
+            .entry(content.as_str())
+            .or_default()
+            .push(path.as_str());
+    }
+
+    // Phase 2: lint each UNIQUE content ONCE, in parallel (same parallelism
+    // as Task 5 when there are no dups), then fan out per path with the
+    // `Offense.file` rewritten. The representative is the first path for that
+    // content (deterministic for defense-in-depth only — `lint_source` never
+    // writes stderr; a parse failure is a `Murphy/Syntax` offense whose `file`
+    // is rewritten per real path below and `aggregate` re-sorts, so the
+    // representative choice is not observable).
+    let unique: Vec<(&&str, &Vec<&str>)> = by_content.iter().collect();
+    let per_unique: Vec<Vec<Offense>> = unique
+        .par_iter()
+        .map(|(content, paths)| {
+            let representative = paths[0];
+            let base = lint_source(content, representative);
+            // Fan out: one offense list per path sharing this content, with
+            // `file` set to that path. Identical content ⇒ identical
+            // offsets/cop/severity/message; only `file` differs.
+            paths
+                .iter()
+                .flat_map(|p| {
+                    base.iter().map(move |o| {
+                        let mut o = o.clone();
+                        o.file = (*p).to_owned();
+                        o
+                    })
+                })
+                .collect::<Vec<Offense>>()
+        })
+        .collect();
+
+    // `aggregate` is the single, unchanged determinism point (Task 2).
+    Ok(aggregate(per_unique.into_iter().flatten().collect()))
 }
 
 /// Parse args, run the pipeline, and return the exit code (or an [`AppError`]
@@ -214,10 +334,10 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         }
     }
 
-    // `lint_one_file` takes `&str` (unchanged — Task 7 refactors it, not us).
-    // A non-UTF-8 path can't be losslessly passed; treat it as a setup error
-    // rather than silently lossy-converting (paths here come from the FS walk
-    // or CLI args — practically always UTF-8).
+    // The memo pipeline takes `&[String]`. A non-UTF-8 path can't be
+    // losslessly passed; treat it as a setup error rather than silently
+    // lossy-converting (paths here come from the FS walk or CLI args —
+    // practically always UTF-8).
     let files: Vec<String> = targets
         .into_iter()
         .map(|p| {
@@ -227,27 +347,14 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         })
         .collect::<Result<_, AppError>>()?;
 
-    // Lint every file in the explicit list IN PARALLEL across rayon's default
-    // (core-sized) thread pool — `lint_one_file` parses its own file into an
-    // immutable AST with no shared mutable state, and `Box<dyn Cop>` is
-    // `Send + Sync` (Task 4), so this is an embarrassingly parallel map.
-    //
-    // Determinism does NOT depend on thread/arg/completion order: every file's
-    // offenses land in one flat `Vec` whose final ordering comes entirely from
-    // `aggregate`'s total order `(file, start, end, cop_name, message,
-    // severity)` (Task 2). Thread interleaving cannot perturb the output
-    // because `aggregate` re-sorts; `tests/parallel_determinism.rs` is the
-    // permanent byte-identity guard for this.
-    //
-    // Abort-on-first-Err → exit 2 is preserved: collecting into
-    // `Result<Vec<Vec<Offense>>, AppError>` short-circuits on the first `Err`
-    // (a missing/unreadable file), and the `?` propagates it as a setup error.
-    // Under parallelism *which* erroring file's message wins is
-    // nondeterministic, but that is acceptable — only the exit *code* (2) is
-    // contract; the stderr message is diagnostic-only (design §6).
-    let per_file: Result<Vec<Vec<Offense>>, AppError> =
-        files.par_iter().map(|file| lint_one_file(file)).collect();
-    let offenses = aggregate(per_file?.into_iter().flatten().collect());
+    // Read + parse + lint + aggregate every file, with in-run content
+    // memoization (Task 7): byte-identical content is parsed/linted ONCE and
+    // fanned out per path. Parallelism (read and per-unique-content lint),
+    // abort-on-first-read-Err → exit 2, and `aggregate` as the single
+    // determinism point are all preserved inside `lint_files_memoized`; the
+    // no-duplicate case is a 1:1 no-op so the snapshot stays byte-identical.
+    // `tests/parallel_determinism.rs` is the permanent byte-identity guard.
+    let offenses = lint_files_memoized(&files)?;
 
     // stdout is exclusively the JSON array (design §5). `serde_json` cannot
     // fail serializing `Vec<Offense>` (all fields are plain owned data), but
@@ -270,4 +377,158 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     } else {
         EXIT_OFFENSES
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// `AppError` deliberately isn't `Debug` (it carries a stderr message,
+    /// not a programmer-facing repr). Unwrap it in tests via its `code`
+    /// rather than adding a derive to a non-test type just for `.expect()`.
+    fn expect_ok(r: Result<Vec<Offense>, AppError>) -> Vec<Offense> {
+        match r {
+            Ok(v) => v,
+            Err(e) => panic!("expected Ok, got AppError {{ code: {} }}", e.code),
+        }
+    }
+
+    /// In-run memoization, both scenarios in ONE test (the ONLY test that
+    /// asserts on the process-global `PARSE_CALLS`). Because exactly one test
+    /// touches the counter there is no cross-test ordering invariant and no
+    /// global lock is needed; the counter is `store(0)`-reset at the top of
+    /// EACH sub-scenario below. The parse count is proven by the deterministic
+    /// `#[cfg(test)]` atomic counter incremented inside `lint_source`, NOT by
+    /// timing. To add coverage, add another sub-scenario here (reset the
+    /// counter again at its top) — do NOT add a second counter-asserting test.
+    ///
+    /// Sub-scenario 1 — duplicate fan-out: a 3-path set whose first two paths
+    /// have byte-identical content parses+lints ONCE per UNIQUE content (2),
+    /// not once per path (3), and still fans out to 3 paths' worth of offenses
+    /// with the correct per-path `file`.
+    ///
+    /// Sub-scenario 2 — no-duplicate 1:1 no-op: N distinct contents → exactly
+    /// N parse calls (full Task-5 parallelism, no memo win), output unchanged.
+    /// This is the equivalence guard's unit-level companion (the snapshot /
+    /// `parallel_determinism` integration tests are the byte-identity guard).
+    #[test]
+    fn memoization_parses_unique_then_no_duplicate_in_one_test() {
+        // ---- Sub-scenario 1: duplicate content fans out, parsed once. ----
+        let dir = tempfile::tempdir().expect("create tempdir");
+        // Two byte-identical dirty files + one distinct dirty file. All dirty
+        // so every path contributes an offense (proves the fan-out, not just
+        // the parse count).
+        let dup_a = dir.path().join("dup_a.rb");
+        let dup_b = dir.path().join("dup_b.rb");
+        let other = dir.path().join("other.rb");
+        std::fs::write(&dup_a, "puts \"x\"\n").expect("write dup_a.rb");
+        std::fs::write(&dup_b, "puts \"x\"\n").expect("write dup_b.rb");
+        std::fs::write(&other, "puts \"y\"\n").expect("write other.rb");
+
+        let files: Vec<String> = vec![
+            dup_a.to_str().unwrap().to_owned(),
+            dup_b.to_str().unwrap().to_owned(),
+            other.to_str().unwrap().to_owned(),
+        ];
+
+        PARSE_CALLS.store(0, Ordering::Relaxed);
+        let offenses = expect_ok(lint_files_memoized(&files));
+
+        // (a) UNIQUE content parsed once each: 2 unique contents → exactly 2
+        // parse calls, NOT 3 (the duplicate is NOT re-parsed).
+        assert_eq!(
+            PARSE_CALLS.load(Ordering::Relaxed),
+            2,
+            "two unique contents must parse exactly twice (dup parsed once), got {}",
+            PARSE_CALLS.load(Ordering::Relaxed)
+        );
+
+        // (b) Output has 3 paths' worth of offenses (one NoReceiverPuts per
+        // dirty file) with the correct per-path `file` label.
+        assert_eq!(
+            offenses.len(),
+            3,
+            "3 dirty paths → 3 offenses (dup fanned out), got {offenses:?}"
+        );
+        let mut files_seen: Vec<&str> = offenses.iter().map(|o| o.file.as_str()).collect();
+        files_seen.sort_unstable();
+        let mut expected = vec![
+            dup_a.to_str().unwrap(),
+            dup_b.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            files_seen, expected,
+            "each path gets its own offense with its own `file`"
+        );
+        for o in &offenses {
+            assert_eq!(o.cop_name, "Murphy/NoReceiverPuts");
+        }
+
+        // The two duplicate paths' offenses are identical modulo `file`
+        // (offsets/cop/severity/message), proving the fan-out is a pure
+        // per-path `file` rewrite of one parse.
+        let a = offenses
+            .iter()
+            .find(|o| o.file == dup_a.to_str().unwrap())
+            .expect("dup_a offense");
+        let b = offenses
+            .iter()
+            .find(|o| o.file == dup_b.to_str().unwrap())
+            .expect("dup_b offense");
+        assert_eq!(a.range, b.range);
+        assert_eq!(a.cop_name, b.cop_name);
+        assert_eq!(a.severity, b.severity);
+        assert_eq!(a.message, b.message);
+        assert_ne!(a.file, b.file);
+
+        // ---- Sub-scenario 2: no duplicates → 1:1 no-op, N parses for N. ----
+        // Same test body (no second #[test], no global lock): reset the
+        // counter again at the top of this sub-scenario.
+        let dir2 = tempfile::tempdir().expect("create tempdir");
+        let nd_a = dir2.path().join("a.rb");
+        let nd_b = dir2.path().join("b.rb");
+        std::fs::write(&nd_a, "x = 1\n").expect("write a.rb");
+        std::fs::write(&nd_b, "y = 2\n").expect("write b.rb");
+
+        let files2: Vec<String> = vec![
+            nd_a.to_str().unwrap().to_owned(),
+            nd_b.to_str().unwrap().to_owned(),
+        ];
+
+        PARSE_CALLS.store(0, Ordering::Relaxed);
+        let offenses2 = expect_ok(lint_files_memoized(&files2));
+
+        assert_eq!(
+            PARSE_CALLS.load(Ordering::Relaxed),
+            2,
+            "2 distinct contents → 2 parse calls (1:1, no memo win)"
+        );
+        assert!(
+            offenses2.is_empty(),
+            "both clean → zero offenses, got {offenses2:?}"
+        );
+    }
+
+    /// Read phase preserves abort-on-first-Err → exit 2: a missing path
+    /// anywhere in the set makes `lint_files_memoized` return the setup
+    /// `AppError` (code 2), even though a sibling file is readable+clean.
+    /// This is the unit-level mirror of `lint_multi_file_with_one_missing_exits_2`.
+    #[test]
+    fn missing_file_in_set_aborts_with_setup_error() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let good = dir.path().join("good.rb");
+        std::fs::write(&good, "x = 1\n").expect("write good.rb");
+        let missing = dir.path().join("does_not_exist.rb");
+
+        let files: Vec<String> = vec![
+            good.to_str().unwrap().to_owned(),
+            missing.to_str().unwrap().to_owned(),
+        ];
+
+        let err = lint_files_memoized(&files).expect_err("missing file must abort");
+        assert_eq!(err.code, EXIT_SETUP_ERROR, "missing file → exit 2");
+    }
 }

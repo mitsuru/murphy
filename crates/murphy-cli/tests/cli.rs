@@ -378,3 +378,53 @@ fn lint_directory_with_malformed_murphy_toml_exits_2() {
         assert.get_output().stdout
     );
 }
+
+/// In-run content memoization (Phase 2 Task 7): two explicit files with
+/// byte-identical content each get the offense in the output — once per
+/// path, differing ONLY in `file` (offsets/cop/severity/message identical
+/// because the content is). The dedup is a pure speed/correctness no-op on
+/// output: linting one dup file twice would (modulo `file`) yield the same
+/// JSON. Separate tempdir — NOT the `sample_project` snapshot dir (whose 4
+/// fixtures have no dup content, so the snapshot stays a memo no-op).
+#[test]
+fn lint_two_identical_content_files_emits_offense_per_path() {
+    let dir = tempdir().expect("create tempdir");
+    let dup_a = dir.path().join("dup_a.rb");
+    let dup_b = dir.path().join("dup_b.rb");
+    fs::write(&dup_a, "puts \"x\"\n").expect("write dup_a.rb");
+    fs::write(&dup_b, "puts \"x\"\n").expect("write dup_b.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg(&dup_a)
+        .arg(&dup_b)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        2,
+        "two dup-content files → one offense per path (2 total), got {parsed:?}"
+    );
+
+    let a = parsed
+        .iter()
+        .find(|o| o["file"].as_str() == Some(dup_a.to_str().unwrap()))
+        .expect("dup_a offense present");
+    let b = parsed
+        .iter()
+        .find(|o| o["file"].as_str() == Some(dup_b.to_str().unwrap()))
+        .expect("dup_b offense present");
+
+    // Differ ONLY in `file`: every other field is byte-identical because the
+    // source bytes are identical (single shared parse, per-path `file` rewrite).
+    assert_ne!(a["file"], b["file"]);
+    assert_eq!(a["cop_name"], b["cop_name"]);
+    assert_eq!(a["cop_name"], "Murphy/NoReceiverPuts");
+    assert_eq!(a["range"], b["range"]);
+    assert_eq!(a["severity"], b["severity"]);
+    assert_eq!(a["message"], b["message"]);
+}
