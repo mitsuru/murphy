@@ -535,3 +535,114 @@ fn fix_follows_symlink_and_keeps_link_intact() {
         "symlink destination must be rewritten, got: {real_after:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// roborev iter2 regressions: `--` separator, accurate summary denominator on
+// write error, and Converged-with-conflicts --debug clarity.
+// ---------------------------------------------------------------------------
+
+/// roborev low: a path starting with `-` regressed to "unknown flag". The
+/// `--` end-of-flags separator must let such a file be linted again.
+#[test]
+fn double_dash_allows_dash_prefixed_path() {
+    let dir = tempdir().expect("tempdir");
+    // A file literally named "-weird.rb".
+    fs::write(dir.path().join("-weird.rb"), "x = 1\n").expect("write -weird.rb");
+    let proj = TempDir::new().expect("proj");
+    // Without `--`: unknown-flag → exit 2.
+    let mut bad = Command::cargo_bin("murphy").expect("bin");
+    bad.current_dir(dir.path()).arg("lint").arg("-weird.rb");
+    let bad_out = bad.assert().get_output().clone();
+    assert_eq!(
+        exit_code(&bad_out),
+        2,
+        "`-weird.rb` w/o `--` is unknown flag"
+    );
+    // With `--`: linted as a path → clean file → exit 0, empty offenses.
+    let mut ok = Command::cargo_bin("murphy").expect("bin");
+    ok.current_dir(dir.path())
+        .arg("lint")
+        .arg("--")
+        .arg("-weird.rb");
+    let ok_out = ok.assert().get_output().clone();
+    assert_eq!(exit_code(&ok_out), 0, "`-- -weird.rb` lints the file");
+    assert!(parse_offenses(&ok_out).is_empty());
+    let _ = &proj;
+}
+
+/// roborev medium: when a write-back error aborts the pass, the summary
+/// denominator must be the files ACTUALLY processed, not the full target
+/// count (no "fixed 0 of 2" when only 1 file was ever attempted).
+#[test]
+#[cfg(unix)]
+fn write_error_summary_denominator_is_processed_not_total() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let proj = project_with_cops("puts \"hi\"\n", &[("puts_to_logger", PUTS_TO_LOGGER_COP)]);
+    // Second target in its own subdir we will make read-only so the
+    // sibling-temp write fails for it.
+    let sub = proj.path().join("ro");
+    fs::create_dir(&sub).expect("mkdir ro");
+    fs::write(sub.join("b.rb"), "puts \"bye\"\n").expect("write b.rb");
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o555)).expect("chmod ro 555");
+
+    let out = run_murphy(&proj, &["--fix"], &["app.rb", "ro/b.rb"]);
+    // Restore perms so TempDir cleanup succeeds.
+    let _ = fs::set_permissions(&sub, fs::Permissions::from_mode(0o755));
+
+    assert_eq!(
+        exit_code(&out),
+        2,
+        "write-back failure → setup error exit 2"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let summary = stderr
+        .lines()
+        .find(|l| l.starts_with("murphy: fixed "))
+        .expect("summary line present");
+    // app.rb processed+fixed, ro/b.rb processed then write failed → aborted.
+    // processed == 2 (both attempted), fixed == 1 (only app.rb written).
+    assert!(
+        summary.contains("1 of 2"),
+        "denominator must be files processed, got: {summary:?}"
+    );
+}
+
+/// roborev medium: a cop whose only edit is out-of-bounds yields a stable
+/// source (Converged) but with an unresolved conflict. `--debug` must NOT
+/// present that identically to a clean converge — it emits an explicit
+/// "converged with N unresolved conflict(s)" warning.
+#[test]
+fn debug_flags_converged_with_conflicts() {
+    const OOB_FIX_COP: &str = r#"
+class OobFixCop < Murphy::Cop
+  def on_call_node(node)
+    return unless node.name == :puts && node.receiver_nil?
+    loc = node.message_loc
+    return unless loc
+    add_offense(loc, message: "oob fix") do |fix|
+      fix.replace(Murphy::Range.new(0, 99999), "x")
+    end
+  end
+end
+"#;
+    let proj = project_with_cops("puts \"hi\"\n", &[("oob", OOB_FIX_COP)]);
+    let out = run_murphy(&proj, &["--fix", "--debug"], &["app.rb"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Source unchanged (only edit was OOB → dropped), offense remains → exit 1.
+    let after = fs::read_to_string(proj.path().join("app.rb")).expect("read app.rb");
+    assert_eq!(after, "puts \"hi\"\n", "OOB edit must not change the file");
+    assert_eq!(exit_code(&out), 1, "offense remains → exit 1");
+    // The debug status is Converged (source IS a stable fixed point)…
+    assert!(
+        stderr.contains("status=Converged"),
+        "stable source → Converged, got stderr: {stderr}"
+    );
+    // …but it must be explicitly flagged as converged-with-conflicts, not a
+    // silent clean converge.
+    assert!(
+        stderr.contains("converged with") && stderr.contains("unresolved conflict"),
+        "Converged-with-conflicts must be spelled out, got stderr: {stderr}"
+    );
+}

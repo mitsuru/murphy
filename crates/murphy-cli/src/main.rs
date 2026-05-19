@@ -749,17 +749,30 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // BEFORE path classification.  Any other token starting with `-` is an
     // unknown flag → setup error exit 2 (consistent with unknown-subcommand
     // handling; do NOT silently treat as a path).
+    //
+    // `--` is the end-of-flags separator (POSIX convention): every token
+    // AFTER it is a path even if it starts with `-` (so `murphy lint --
+    // -foo.rb` lints a file literally named `-foo.rb`). This restores the
+    // pre-.6 ability to name `-`-prefixed files, which the flag check above
+    // would otherwise reject as an unknown flag (roborev low: regression).
     let mut fix = false;
     let mut debug = false;
     let mut path_args: Vec<&str> = Vec::new();
+    let mut flags_done = false;
 
     for token in post_subcommand {
+        if flags_done {
+            path_args.push(token.as_str());
+            continue;
+        }
         match token.as_str() {
+            "--" => flags_done = true,
             "--fix" | "-a" => fix = true,
             "--debug" => debug = true,
             flag if flag.starts_with('-') => {
                 return Err(AppError::setup(format!(
-                    "unknown flag {flag:?} (usage: murphy lint [--fix|-a] [--debug] [path]...)"
+                    "unknown flag {flag:?} (usage: murphy lint [--fix|-a] [--debug] \
+                     [--] [path]...; use `--` before a path that starts with `-`)"
                 )));
             }
             path => path_args.push(path),
@@ -852,17 +865,21 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         // Files are processed deterministically (files is already sorted from
         // BTreeSet). Debug info is collected in order and printed after all
         // writes (APIN4 scope: autocorrect observability only).
-        let total_files = files.len();
         let mut fixed_count: usize = 0;
+        let mut processed: usize = 0;
         let mut debug_infos: Vec<FileDebugInfo> = Vec::with_capacity(files.len());
-        // Errors are collected and returned after the summary so the exit code
-        // and summary line appear consistently; the first write error aborts.
+        // The first write-back error aborts the pass. The summary is still
+        // emitted (APIN3: exactly one line whenever --fix runs a pass) but its
+        // denominator is the number of files ACTUALLY processed, not the full
+        // target count — claiming "N of <all>" when later files were never
+        // touched is inaccurate (roborev medium).
         let mut write_error: Option<AppError> = None;
 
         for file in &files {
             if write_error.is_some() {
                 break;
             }
+            processed += 1;
             let original = read_source(file)?;
             let file_str: &str = file.as_str();
             let registry_ref = &registry;
@@ -903,8 +920,11 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         }
 
         // APIN3: ALWAYS emit exactly one summary line to stderr (regardless of
-        // --debug), even if a write error occurs.
-        eprintln!("murphy: fixed {fixed_count} of {total_files} files");
+        // --debug). Denominator = files actually processed (== total_files on
+        // a clean pass; < total_files if a write error aborted partway, so the
+        // count never overstates work that did not happen).
+        debug_assert!(processed <= files.len());
+        eprintln!("murphy: fixed {fixed_count} of {processed} files");
 
         // APIN4 --debug: emit per-file autocorrect observability to STDERR.
         // Scope boundary: ONLY fixpoint iterations / status / conflicts.
@@ -931,6 +951,18 @@ fn run(args: &[String]) -> Result<u8, AppError> {
                     eprintln!(
                         "murphy: WARNING: {} did not converge (status={status_label})",
                         info.path
+                    );
+                } else if info.conflict_count > 0 {
+                    // status == Converged but the final round still produced
+                    // conflicts: the source is a stable fixed point (correct
+                    // per run_to_fixpoint), yet some edits were never applied.
+                    // Spell this out so a bare "Converged" is not read as
+                    // "fully resolved" (roborev medium: Converged-with-
+                    // conflicts must not look identical to a clean converge).
+                    eprintln!(
+                        "murphy: WARNING: {} converged with {} unresolved conflict(s) \
+                         (source stable but some edits could not be applied)",
+                        info.path, info.conflict_count
                     );
                 }
             }
