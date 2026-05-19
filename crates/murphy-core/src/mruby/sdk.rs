@@ -270,9 +270,18 @@ unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) 
     // `CopRun` set by `run_mruby_cop`, alive for the whole call.
     let run = unsafe { cop_run(mrb) };
 
-    // A user cop must not crash the engine: a negative/inverted offense range
-    // is dropped (no offense emitted) rather than panicking.
-    if start < 0 || end < 0 || start > end {
+    // A user cop must not crash the engine: a negative/inverted/out-of-domain
+    // offense range is dropped (no offense emitted) rather than panicking.
+    // The `range` arg is a cop-constructed `Murphy::Range` — a cop can pass
+    // `Murphy::Range.new(2**32, …)`, so (like edit offsets) nothing upstream
+    // bounds it to the u32 domain; the `> u32::MAX` terms make the `as u32`
+    // narrowing below value-preserving (ADR 0001 / PIN C).
+    if start < 0
+        || end < 0
+        || start > end
+        || start > u32::MAX as mrb_int
+        || end > u32::MAX as mrb_int
+    {
         // SAFETY: `mrb` valid & non-null; `c"nil"` is a trivial literal.
         return unsafe { eval_nil(mrb) };
     }
@@ -348,13 +357,20 @@ unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) 
 ///
 /// ## Error handling (PIN B: degrade-not-panic)
 ///
-/// - A malformed header (parse failure, negative value, or `start > end`) →
-///   that edit is **silently dropped**; the remaining blob is not parseable
-///   (we can't safely re-sync), so parsing stops. The offense + any previously
-///   decoded edits survive.
-/// - A `replen` that would run past the blob end → same silent drop + stop.
-/// - `start < 0 || end < 0` → silent drop (can't happen for non-negative
-///   decimal ASCII, but the `i64` parse domain makes it explicit).
+/// Resync hinges on `replen`: once the three headers are read and `replen`
+/// fits the blob, this record's byte span is known, so a bad *range* can drop
+/// just this edit and continue with the next. Only an unparseable header or a
+/// span we can't compute forces a full stop.
+///
+/// - Unreadable header (parse failure / no separator) OR `replen < 0` OR a
+///   `replen` that runs past the blob end → we cannot locate the next record
+///   boundary → parsing **stops**. The offense + any previously decoded edits
+///   survive.
+/// - Header + `replen` OK but the range is invalid (`start < 0 || end < 0 ||
+///   start > end || start > u32::MAX || end > u32::MAX`) → **only this edit**
+///   is silently dropped; the cursor skips its `replen` bytes and decoding
+///   continues with the next record (PIN B: one bad edit must not lose the
+///   valid edits after it).
 ///
 /// ## Narrowing (ADR 0001 / PIN C)
 ///
@@ -376,28 +392,31 @@ fn decode_edit_blob(blob: &[u8]) -> Vec<Edit> {
         let Some((replen, rest3)) = read_decimal_i64(rest2) else {
             break;
         };
-        // PIN B: invalid range or replen → silent drop, stop parsing.
-        // PIN C: narrowing guard (ADR 0001 single audited site for edits).
-        // Edits arrive straight from Ruby ints (NOT via a prism `Location`),
-        // so — unlike the offense range — nothing upstream bounds them to the
-        // u32 offset domain: a cop can fabricate `Murphy::Range.new(2**32, …)`.
-        // The `> u32::MAX` terms make the `as u32` below a non-truncating
-        // narrowing for every value that reaches it (ADR 0001).
-        if start < 0
-            || end < 0
-            || start > end
-            || replen < 0
-            || start > u32::MAX as i64
-            || end > u32::MAX as i64
-        {
+        // Unrecoverable: a negative `replen`, or one that overruns the blob,
+        // means this record's byte span is unknown → we cannot find the next
+        // boundary, so stop (offense + already-decoded edits survive).
+        if replen < 0 {
             break;
         }
         let replen = replen as usize;
         if rest3.len() < replen {
-            break; // blob truncated → stop
+            break; // blob truncated → can't resync → stop
         }
         let replacement_bytes = &rest3[..replen];
         let remaining = &rest3[replen..];
+
+        // Span IS known now (replen bytes), so a bad RANGE drops only this
+        // edit and decoding continues with `remaining` (PIN B: one inverted /
+        // out-of-domain edit must not discard the valid edits after it).
+        // PIN C: edits arrive straight from Ruby ints (NOT via a prism
+        // `Location`), so — unlike a prism-derived span — nothing upstream
+        // bounds them to the u32 offset domain (a cop can fabricate
+        // `Murphy::Range.new(2**32, …)`); the `> u32::MAX` terms make the
+        // `as u32` narrowing below value-preserving (ADR 0001).
+        if start < 0 || end < 0 || start > end || start > u32::MAX as i64 || end > u32::MAX as i64 {
+            cursor = remaining;
+            continue;
+        }
 
         // ADR 0001: narrowing from i64 to u32. The predicate above proves
         // `0 <= start <= end <= u32::MAX`, so both `i64 as u32` casts are
@@ -910,6 +929,37 @@ mod tests {
                     end_offset: u32::MAX
                 },
                 replacement: String::new(),
+            }]
+        );
+    }
+
+    /// PIN B: a bad edit (here an out-of-domain range, `replen` known) drops
+    /// ONLY itself — a valid edit after it MUST still decode. Regression for
+    /// the roborev finding that the old `break` discarded later valid edits.
+    #[test]
+    fn decode_edit_blob_skips_bad_edit_and_keeps_following_valid_one() {
+        // Record 1: 0..2**32 (end out of domain), replen 0 → dropped, resync.
+        // Record 2: 0..4 "logger.info" → valid, survives.
+        assert_eq!(
+            decode_edit_blob(b"0 4294967296 0 0 4 11 logger.info"),
+            vec![Edit {
+                range: Range {
+                    start_offset: 0,
+                    end_offset: 4
+                },
+                replacement: "logger.info".into(),
+            }]
+        );
+        // An unparseable header still stops (can't resync): the valid edit
+        // BEFORE it survives, nothing after is attempted.
+        assert_eq!(
+            decode_edit_blob(b"0 4 3 abcnotanumber"),
+            vec![Edit {
+                range: Range {
+                    start_offset: 0,
+                    end_offset: 4
+                },
+                replacement: "abc".into(),
             }]
         );
     }
