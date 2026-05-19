@@ -81,7 +81,7 @@ pub struct AstContext {
     //     fields is provably harmless.
     //
     //   * Abandon path (ADR 0009 rule 1, ADR 0010 interlock): the `ud` raw
-    //     pointer set via `MrubyState::set_user_data` does NOT keep this alive.
+    //     pointer set via `MrubyState::set_cop_run` does NOT keep this alive.
     //     Per-cop liveness past a deferred teardown is guaranteed solely by the
     //     worker thread owning its own `Arc<AstContext>` clone (Task 5). The
     //     explicit-drop discipline governs the *normal* teardown ordering
@@ -232,7 +232,7 @@ unsafe impl Sync for AstContext {}
 /// RAII wrapper owning exactly one `mrb_state`, created and closed per cop run
 /// on the worker thread (design §6 per-cop isolation; ADR 0009).
 ///
-/// Lifecycle: [`MrubyState::open`] (`mrb_open`) → [`MrubyState::set_user_data`]
+/// Lifecycle: [`MrubyState::open`] (`mrb_open`) → `MrubyState::set_cop_run`
 /// → [`MrubyState::eval`] (`mrb_load_string`) → drop (`mrb_close`).
 ///
 /// `MrubyState` is intentionally NOT `Send`/`Sync`: `*mut mrb_state` is a
@@ -293,12 +293,32 @@ impl MrubyState {
     /// NOT and CANNOT guarantee that — it is ADR 0009 rule 1 / the ADR 0010
     /// interlock, and it lives in the worker, not here. Passing a pointer to an
     /// `Arc` that is dropped before `eval` completes is UB.
-    pub fn set_user_data(&mut self, ctx: &Arc<AstContext>) {
-        let ud = Arc::as_ptr(ctx) as *mut c_void;
-        // SAFETY: `self.mrb` is a valid owned `mrb_state` (non-null since
-        // `open`). Writing the `ud` field is the documented mruby mechanism
-        // for native-callback context. The pointee's liveness is the caller's
-        // contract per the doc above (ADR 0009 rule 1) — not established here.
+    /// Store the per-cop-run [`crate::mruby::sdk::CopRun`] payload pointer in
+    /// `mrb_state.ud`.
+    ///
+    /// Task 2/3 originally put `Arc::as_ptr(&AstContext)` here; Task 4 widened
+    /// the `ud` payload to the cop-run-owned `CopRun` (it carries the
+    /// `Arc<AstContext>` AND the cop-run-owned offense sink — ADR 0009 rule 2,
+    /// NOT a `thread_local!`). Task-3's `primitives::ctx` now projects
+    /// `&(*p).ctx`. This is the anticipated extension point — Task 2's `raw()`
+    /// and Task 3's `register` docstrings both say "Task 4 lands the first
+    /// non-test caller".
+    ///
+    /// # Liveness is the CALLER's responsibility (ADR 0009 rule 1)
+    ///
+    /// The `ud` pointer touches no refcount — it does NOT keep the `CopRun`
+    /// (nor its inner `Arc<AstContext>`) alive. The caller ([`crate::mruby::
+    /// sdk::run_mruby_cop`]; the per-cop worker in Task 5) MUST keep the owned
+    /// `CopRun` alive for at least as long as any `eval` (and any in-flight
+    /// native call) can run, and MUST close this state (`mrb_close`, via the
+    /// `MrubyState` `Drop`) BEFORE the `CopRun` drops. Passing a pointer to a
+    /// `CopRun` dropped before `eval` completes is UB.
+    pub(crate) fn set_cop_run(&mut self, run: &crate::mruby::sdk::CopRun) {
+        let ud = (run as *const crate::mruby::sdk::CopRun) as *mut c_void;
+        // SAFETY: `self.mrb` is a valid owned non-null `mrb_state` (since
+        // `open`). Writing the `ud` field is the documented mruby
+        // native-callback context mechanism. The pointee's liveness is the
+        // caller's contract per the doc above (ADR 0009 rule 1).
         unsafe {
             (*self.mrb).ud = ud;
         }
@@ -508,21 +528,28 @@ mod tests {
         // observable here.
         let ctx = AstContext::new(b"x = 1\n".to_vec());
         let worker_clone = Arc::clone(&ctx); // ADR 0009 rule 1: worker owns it.
+        // Task-4 ud-payload: `set_cop_run` takes the cop-run-owned `CopRun`
+        // (it carries this Arc clone). The CopRun outlives the `MrubyState`
+        // (mrb_close) — same normal-path ordering this test pins.
+        let cop_run = crate::mruby::sdk::CopRun::for_test(Arc::clone(&worker_clone));
 
         {
             let mut st = MrubyState::open();
-            st.set_user_data(&worker_clone);
+            st.set_cop_run(&cop_run);
             st.eval("y = 1 + 1; y");
             // `st` drops at this block's end → mrb_close runs HERE, while
-            // `worker_clone` (and `ctx`) are still alive. Close-before-AST-drop.
+            // `cop_run`/`worker_clone`/`ctx` are still alive. Close-before-AST-drop.
         }
 
-        // Only now is the AST released — strictly after mrb_close.
+        // Only now is the AST released — strictly after mrb_close. The CopRun
+        // holds one clone (the Arc Task-3's `ctx()` projects), plus the host
+        // and `worker_clone` → strong count 3.
         assert_eq!(
             Arc::strong_count(&ctx),
-            2,
-            "host + worker clone both still alive after mrb_close"
+            3,
+            "host + worker clone + CopRun's clone all alive after mrb_close"
         );
+        drop(cop_run);
         drop(worker_clone);
         drop(ctx);
     }
