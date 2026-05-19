@@ -19,10 +19,10 @@
 2. **Spike-first.** Tasks after the Spike Gate are detailed *bite-sized TDD*; tasks before it are **time-boxed spikes** (deliverable = ADR + throwaway `spikes/*` PoC, NOT TDD). The walking-skeleton code blocks are *representative* — substitute the mechanism the Spike ADRs actually prove (exactly as Phase 1 substituted the Spike 0.1 binding).
 3. **Cop loading = fixed `cops/` dir** from the project root (ADR 0004 mitigation 2: "v1 loads cops only from the project's own configured `cops/` path"). **NO `[cops]` in `murphy.toml`** — Phase 2's `#[serde(deny_unknown_fields)]` stays; per-cop config / enable-disable / severity-override / `.rubocop.yml` migration are **Phase 5**. `--debug` listing loaded cop paths (ADR 0004 mitigation 3) is a coarse post-skeleton item.
 4. **Cop registry is a Phase 3 deliverable, not Phase 6.** The P2-Task-7 review's deferred "lift `vec![Box::new(NoReceiverPuts)]` to a caller-provided registry" is **required here** — Phase 3 needs one collection holding native + mruby cops. Do not push it further to Phase 6.
-5. **Severity precedence is Phase 3's job (ADR 0006 says so explicitly).** Native + mruby offenses now merge; a 4-tuple `(file,cop_name,range,message)` collision across engines must resolve by **severity precedence**, replacing Phase 1's input-order "first wins". This is a **deliberate internal extension of `aggregate`'s dedupe semantics** recorded in a **new ADR 0010** — the offense **JSON shape is unchanged** (only *which* offense survives a collision changes). It flips the Phase-1 `severity_only_dup_collapses_to_first_phase1_behavior` test exactly as that test's phase-bound comment predicted (that flip is correct evolution, not a regression).
+5. **Severity precedence is Phase 3's job (ADR 0006 says so explicitly).** Native + mruby offenses now merge; a 4-tuple `(file,cop_name,range,message)` collision across engines must resolve by **severity precedence**, replacing Phase 1's input-order "first wins". This is a **deliberate internal extension of `aggregate`'s dedupe semantics** recorded in a **new ADR 0011** — the offense **JSON shape is unchanged** (only *which* offense survives a collision changes). It flips the Phase-1 `severity_only_dup_collapses_to_first_phase1_behavior` test exactly as that test's phase-bound comment predicted (that flip is correct evolution, not a regression).
 6. **Deadline = ADR 0003 Mechanism A only.** Per-cop OS thread + wall-clock watchdog + abandon-on-timeout; the abandoned thread holds `Arc<AstContext>` (ADR 0005 drop⇄Arc interlock — abandoned thread keeps the AST alive, `mrb_close` is NOT called on the abandon path; on the normal path `mrb_close` precedes AST drop). v1 is **wall-clock time only** (no instruction-step budget — the hook is unavailable per ADR 0003; that stays a Phase 7 item). Deadline value: a sane hardcoded default in Phase 3; configurability is coarse/later.
-7. **ADR 0006/0007 frozen contract preserved** except the deliberate, ADR-0010-documented severity-precedence dedupe change (JSON shape, exit codes, `SYNTAX_COP_NAME`, byte offsets all unchanged). Regression guard: `integration_snapshot` + `parallel_determinism` use only `NoReceiverPuts` over `sample_project` (no mruby cop, no severity collision there) → those snapshots MUST stay byte-identical. mruby-cop tests use a SEPARATE fixture dir + `cops/`, never `sample_project`.
-8. **Phase 3 Gate (exit criteria):** end-to-end — a user writes `cops/no_puts.rb`; `murphy lint <dir>` discovers files (Phase 2) and the cop (from `cops/`), runs it on its own isolated `mrb_state` + watchdog **in parallel with** native `NoReceiverPuts`, reading the live AST via native primitives (no serialization); a deliberately broken/looping cop degrades to one `error offense` for that cop×file and the run continues; output is aggregated + deterministic; the offense JSON shape is the ADR 0006 frozen shape (autocorrect absent). Spike ADRs 0008/0009 + the severity-precedence ADR 0010 written; all quality gates green.
+7. **ADR 0006/0007 frozen contract preserved** except the deliberate, ADR-0011-documented severity-precedence dedupe change (JSON shape, exit codes, `SYNTAX_COP_NAME`, byte offsets all unchanged). Regression guard: `integration_snapshot` + `parallel_determinism` use only `NoReceiverPuts` over `sample_project` (no mruby cop, no severity collision there) → those snapshots MUST stay byte-identical. mruby-cop tests use a SEPARATE fixture dir + `cops/`, never `sample_project`.
+8. **Phase 3 Gate (exit criteria):** end-to-end — a user writes `cops/no_puts.rb`; `murphy lint <dir>` discovers files (Phase 2) and the cop (from `cops/`), runs it on its own isolated `mrb_state` + watchdog **in parallel with** native `NoReceiverPuts`, reading the live AST via native primitives (no serialization); a deliberately broken/looping cop degrades to one `error offense` for that cop×file and the run continues; output is aggregated + deterministic; the offense JSON shape is the ADR 0006 frozen shape (autocorrect absent). Spike ADRs 0008/0009, the Spike Gate ADR 0010, and the severity-precedence ADR 0011 written; all quality gates green.
 
 ---
 
@@ -48,7 +48,7 @@ These resolve the load-bearing UNPROVEN assumptions. Same discipline as Phase 0:
 
 ### Phase 3 Spike Gate
 
-Review ADR 0008 + 0009 together (as Phase 0 Gate reviewed its four). Confirm: the walking-skeleton parse/handle/registry/deadline tasks can be written against the proven mechanisms; the ADR 0006 frozen JSON shape is untouched by the bridge; the severity-precedence change (ADR 0010, written in the skeleton) is the only deliberate contract-semantics extension and its scope is understood. Record the verdict in a gate ADR (0011-style, mirroring ADR 0005/0006/0007). Bite-sized tasks below MUST NOT start until this gate passes.
+Review ADR 0008 + 0009 together (as Phase 0 Gate reviewed its four). Confirm: the walking-skeleton parse/handle/registry/deadline tasks can be written against the proven mechanisms; the ADR 0006 frozen JSON shape is untouched by the bridge; the severity-precedence change (ADR 0011, written in the skeleton) is the only deliberate contract-semantics extension and its scope is understood. The verdict is recorded in **ADR 0010** (this Spike Gate, mirroring ADR 0005/0006/0007). Bite-sized tasks below MUST NOT start until this gate passes.
 
 ---
 
@@ -98,11 +98,11 @@ Vertical slice: **one user mruby cop, end-to-end, merged with the native cop.** 
 - TDD: `cops/loops.rb` (`while true; end`) → one error offense for it, the native cop's offenses still present, exit code correct; `cops/boom.rb` (`raise`) → one error offense, others unaffected.
 - Commit.
 
-### Task 6: Severity-precedence dedupe in `aggregate` (ADR 0010 — deliberate, JSON shape unchanged)
+### Task 6: Severity-precedence dedupe in `aggregate` (ADR 0011 — deliberate, JSON shape unchanged)
 
-**Files:** Modify `crates/murphy-core/src/aggregator.rs`; Create `docs/decisions/0010-severity-precedence.md`. Test: aggregator + the flipped Phase-1 test.
+**Files:** Modify `crates/murphy-core/src/aggregator.rs`; Create `docs/decisions/0011-severity-precedence.md`. Test: aggregator + the flipped Phase-1 test.
 
-- Cross-engine 4-tuple collision now resolves by severity precedence (ADR 0006 "Phase 3 owns severity precedence"). Write ADR 0010 first (the decision: precedence order, why JSON shape is unchanged, that it flips `severity_only_dup_collapses_to_first_phase1_behavior`). Update that Phase-1 test to assert the new deterministic precedence (its comment predicted this).
+- Cross-engine 4-tuple collision now resolves by severity precedence (ADR 0006 "Phase 3 owns severity precedence"). Write ADR 0011 first (the decision: precedence order, why JSON shape is unchanged, that it flips `severity_only_dup_collapses_to_first_phase1_behavior`). Update that Phase-1 test to assert the new deterministic precedence (its comment predicted this).
 - TDD: native+mruby offense colliding on the 4-tuple, differing severity → higher-precedence survives, deterministic regardless of engine/thread order; `sample_project` snapshots still byte-identical (no collision there).
 - Commit.
 
@@ -116,9 +116,9 @@ Vertical slice: **one user mruby cop, end-to-end, merged with the native cop.** 
 
 ### Task 8: Docs + Phase 3 Gate
 
-**Files:** `README.md`, `CLAUDE.md` (status → Phase 3; honest scope: user mruby cops work, but fix is captured-not-applied / no autocorrect output yet / no `[cops]` config / cops only from `cops/`); Create `docs/decisions/0011-phase-3-gate-review.md`.
+**Files:** `README.md`, `CLAUDE.md` (status → Phase 3; honest scope: user mruby cops work, but fix is captured-not-applied / no autocorrect output yet / no `[cops]` config / cops only from `cops/`); Create `docs/decisions/0012-phase-3-gate-review.md`.
 
-- Verify every documented command. Gate: end-to-end demo (Scope Fence 8), spike + severity ADRs in place, frozen `sample_project` snapshots byte-identical, all gates green. ADR 0011 records the verdict + what stayed frozen + Phase-4/5/6 deferred items.
+- Verify every documented command. Gate: end-to-end demo (Scope Fence 8), spike + severity ADRs in place, frozen `sample_project` snapshots byte-identical, all gates green. ADR 0012 records the verdict + what stayed frozen + Phase-4/5/6 deferred items.
 - Commit. Phase 3 complete.
 
 ---
