@@ -358,10 +358,12 @@ unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) 
 ///
 /// ## Narrowing (ADR 0001 / PIN C)
 ///
-/// `start` and `end` are parsed as `i64` (so negative is representable for
-/// the guard), then narrowed to `u32` under one `#[allow]` + SAFETY doc
-/// after the `start < 0 || end < 0 || start > end` predicate, matching the
-/// existing offense-range narrowing pattern.
+/// `start` and `end` are parsed as `i64` (so out-of-domain values — negative
+/// or `> u32::MAX` — are representable for the guard), then narrowed to `u32`
+/// under one `#[allow]` after the
+/// `start < 0 || end < 0 || start > end || start > u32::MAX || end > u32::MAX`
+/// predicate. Edit offsets are NOT prism-derived, so this predicate — not an
+/// upstream parse bound — is what keeps the narrowing value-preserving.
 fn decode_edit_blob(blob: &[u8]) -> Vec<Edit> {
     let mut edits = Vec::new();
     let mut cursor = blob;
@@ -376,7 +378,18 @@ fn decode_edit_blob(blob: &[u8]) -> Vec<Edit> {
         };
         // PIN B: invalid range or replen → silent drop, stop parsing.
         // PIN C: narrowing guard (ADR 0001 single audited site for edits).
-        if start < 0 || end < 0 || start > end || replen < 0 {
+        // Edits arrive straight from Ruby ints (NOT via a prism `Location`),
+        // so — unlike the offense range — nothing upstream bounds them to the
+        // u32 offset domain: a cop can fabricate `Murphy::Range.new(2**32, …)`.
+        // The `> u32::MAX` terms make the `as u32` below a non-truncating
+        // narrowing for every value that reaches it (ADR 0001).
+        if start < 0
+            || end < 0
+            || start > end
+            || replen < 0
+            || start > u32::MAX as i64
+            || end > u32::MAX as i64
+        {
             break;
         }
         let replen = replen as usize;
@@ -386,9 +399,10 @@ fn decode_edit_blob(blob: &[u8]) -> Vec<Edit> {
         let replacement_bytes = &rest3[..replen];
         let remaining = &rest3[replen..];
 
-        // ADR 0001: narrowing from i64 to u32. The `start >= 0 && end >= 0`
-        // guard above makes the `i64 as u32` cast safe (i64 non-negative and
-        // the source was u32-bounded by prism / cop_prelude, so no truncation).
+        // ADR 0001: narrowing from i64 to u32. The predicate above proves
+        // `0 <= start <= end <= u32::MAX`, so both `i64 as u32` casts are
+        // value-preserving (no truncation). This is the single audited
+        // narrowing site for edit offsets (PIN C).
         #[allow(clippy::cast_possible_truncation)]
         let edit = Edit {
             range: Range {
@@ -861,6 +875,44 @@ fn error_offense(file: &str, cop_name: &str, message: &str) -> Offense {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PIN C / ADR 0001: an edit whose offset exceeds the `u32` domain MUST be
+    /// dropped, never `as u32`-truncated. Edits come straight from Ruby ints
+    /// (no prism bound), so `decode_edit_blob`'s own predicate is the only
+    /// guard. Regression test for the roborev medium finding (sdk.rs:386).
+    #[test]
+    fn decode_edit_blob_drops_offsets_past_u32_max() {
+        // Well-formed, in-domain → one edit.
+        assert_eq!(
+            decode_edit_blob(b"0 4 11 logger.info"),
+            vec![Edit {
+                range: Range {
+                    start_offset: 0,
+                    end_offset: 4
+                },
+                replacement: "logger.info".into(),
+            }]
+        );
+        // end = u32::MAX + 1: in range vs start, non-negative, but out of the
+        // u32 offset domain → dropped (would truncate to 0 without the guard).
+        assert_eq!(decode_edit_blob(b"0 4294967296 0 "), Vec::<Edit>::new());
+        // start = u32::MAX + 1 → dropped.
+        assert_eq!(
+            decode_edit_blob(b"4294967296 4294967296 0 "),
+            Vec::<Edit>::new()
+        );
+        // Exact boundary u32::MAX is still valid (inclusive end of domain).
+        assert_eq!(
+            decode_edit_blob(b"0 4294967295 0 "),
+            vec![Edit {
+                range: Range {
+                    start_offset: 0,
+                    end_offset: u32::MAX
+                },
+                replacement: String::new(),
+            }]
+        );
+    }
 
     /// Phase-4 deliberate inversion of the Phase-3 soft-(a) invariant (ADR 0013).
     ///
