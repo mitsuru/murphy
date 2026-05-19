@@ -500,6 +500,49 @@ fn shuffle_determinism() {
     }
 }
 
+/// Inverted range (`start_offset > end_offset`) must NOT panic (roborev high
+/// regression). The mruby blob decoder drops inverted edits, but the public
+/// `apply_edits_logged` API takes `Edit` directly (native cops / deserialized
+/// JSON), so an in-bounds, char-aligned but inverted `[4,1)` edit must be
+/// dropped as `InvalidRange` — never reach `replace_range(4..1, …)` (panic).
+/// A valid edit in the same set still applies.
+#[test]
+fn inverted_range_is_invalidrange_conflict_not_panic() {
+    let source = "abcdef";
+    let inverted = Edit {
+        range: Range {
+            start_offset: 4,
+            end_offset: 1,
+        },
+        replacement: "X".into(),
+    };
+    let valid = Edit {
+        range: Range {
+            start_offset: 0,
+            end_offset: 1,
+        },
+        replacement: "A".into(),
+    };
+
+    let outcome = apply_edits_logged(source, &[inverted.clone(), valid.clone()]);
+
+    assert_eq!(
+        outcome.corrected, "Abcdef",
+        "only the valid [0,1)->\"A\" edit applies; inverted edit dropped"
+    );
+    assert_eq!(
+        outcome.conflicts.len(),
+        1,
+        "exactly the inverted edit is logged"
+    );
+    assert_eq!(outcome.conflicts[0].dropped, inverted);
+    assert_eq!(outcome.conflicts[0].conflicts_with, None);
+    assert_eq!(outcome.conflicts[0].reason, ConflictReason::InvalidRange);
+
+    // apply_edits (thin wrapper) must likewise not panic.
+    assert_eq!(apply_edits(source, &[inverted]), "abcdef");
+}
+
 /// Same-range, different-replacement determinism (roborev medium regression).
 ///
 /// Two edits over the IDENTICAL byte range `[0,1)` with different replacement

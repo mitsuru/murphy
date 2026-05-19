@@ -60,8 +60,14 @@ pub enum ConflictReason {
     /// The edit's byte range overlaps an already-accepted edit in the stable
     /// total order (half-open `[start, end)` predicate).
     Overlap,
+    /// `start_offset > end_offset` — the range is inverted/malformed. The
+    /// mruby blob decoder already drops these, but the public
+    /// [`apply_edits`]/[`apply_edits_logged`] API accepts `Edit` directly
+    /// (native cops, deserialized JSON), so this is validated here too —
+    /// otherwise `replace_range(start..end, …)` would panic. Checked first.
+    InvalidRange,
     /// `start > source.len()` or `end > source.len()` — edit is outside the
-    /// source buffer entirely.  Checked before overlap detection.
+    /// source buffer entirely.  Checked after `InvalidRange`.
     OutOfBounds,
     /// `!source.is_char_boundary(start)` or `!source.is_char_boundary(end)` —
     /// the edit cuts inside a multibyte codepoint.  Checked after bounds.
@@ -160,6 +166,20 @@ pub fn apply_edits_logged(source: &str, edits: &[Edit]) -> ApplyOutcome {
     for &edit in &ordered {
         let start = edit.range.start_offset as usize;
         let end = edit.range.end_offset as usize;
+
+        // Inverted/malformed range. The mruby decoder drops these, but a
+        // native cop or a deserialized `Offense` can hand an inverted `Edit`
+        // straight to this public API; without this guard the descending
+        // `replace_range(start..end, …)` below would panic. Checked first
+        // (a range that is inverted is malformed regardless of bounds).
+        if start > end {
+            conflicts.push(Conflict {
+                dropped: (*edit).clone(),
+                conflicts_with: None,
+                reason: ConflictReason::InvalidRange,
+            });
+            continue;
+        }
 
         // PIN 1: bounds check (against original source).
         if start > source_len || end > source_len {
