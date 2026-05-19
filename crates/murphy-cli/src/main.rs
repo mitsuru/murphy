@@ -483,17 +483,42 @@ fn lint_source_mruby(source: &str, file: &str, mruby_cops: &[MrubyCop]) -> Vec<O
 /// `std::fs::write` truncates the target file before writing — if the process
 /// is interrupted between truncate and write, the file is lost. Instead:
 ///
-/// 1. Write `corrected` to a sibling temp file `.murphy-fix-<pid>-<N>.tmp` in
-///    the same directory as `target` (same filesystem → `rename` is atomic on
-///    POSIX).
-/// 2. `std::fs::rename(temp, target)` — atomic on the same filesystem; no
-///    truncation window.
-/// 3. On any error, attempt to clean up the temp file (best-effort).
+/// 1. **Resolve symlinks.** `read_source` reads *through* a symlink, so the
+///    write must target the link's destination too. `canonicalize` resolves
+///    `target` to the real file; the temp + rename happen in the **real
+///    file's** directory. Renaming onto the link path itself would replace the
+///    symlink with a regular file and leave the real destination stale
+///    (roborev medium) — resolving first preserves the link and updates the
+///    actual content.
+/// 2. **Preserve mode.** A fresh temp gets umask permissions, so an executable
+///    Ruby script or a group-writable file would silently lose its mode after
+///    `--fix` (roborev medium). The real file's `Permissions` are captured
+///    before writing and applied to the temp before the rename. (Owner/group
+///    and timestamps are intentionally not replicated — out of scope for v1;
+///    `rename` keeps the destination inode's owner on POSIX overwrite.)
+/// 3. Write `corrected` to a sibling temp `.murphy-fix-<pid>-<N>.tmp` in the
+///    real file's directory (same filesystem → `rename` is atomic on POSIX),
+///    `set_permissions`, then `rename` over the real path — no truncation
+///    window. On any error, best-effort temp cleanup.
 ///
 /// The `tempfile` crate is in `[dev-dependencies]` only and MUST NOT be used
 /// here. This manual implementation is the production write-back path.
 fn write_back_atomic(target: &Path, corrected: &str) -> Result<(), AppError> {
-    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    // Resolve symlinks: write the link's destination, not the link itself.
+    let real = std::fs::canonicalize(target).map_err(|e| {
+        AppError::setup(format!(
+            "cannot resolve {} for --fix: {e}",
+            target.display()
+        ))
+    })?;
+
+    // Capture the real file's permissions so the rewritten file keeps its mode
+    // (executable scripts, group-writable, …) instead of inheriting umask.
+    let perms = std::fs::metadata(&real)
+        .map_err(|e| AppError::setup(format!("cannot stat {} for --fix: {e}", real.display())))?
+        .permissions();
+
+    let parent = real.parent().unwrap_or_else(|| Path::new("."));
     let counter = FIX_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     let tmp_name = format!(".murphy-fix-{pid}-{counter}.tmp");
@@ -509,13 +534,24 @@ fn write_back_atomic(target: &Path, corrected: &str) -> Result<(), AppError> {
         )));
     }
 
-    // Atomic rename: temp → target (same directory → same filesystem).
-    if let Err(e) = std::fs::rename(&tmp_path, target) {
+    // Restore the original file's mode onto the temp before renaming.
+    if let Err(e) = std::fs::set_permissions(&tmp_path, perms) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(AppError::setup(format!(
+            "cannot set permissions on temp file {}: {e}",
+            tmp_path.display()
+        )));
+    }
+
+    // Atomic rename: temp → real file (same directory → same filesystem).
+    // Renaming onto the resolved real path (not `target`) keeps any symlink
+    // pointing at it intact.
+    if let Err(e) = std::fs::rename(&tmp_path, &real) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(AppError::setup(format!(
             "cannot rename {} → {}: {e}",
             tmp_path.display(),
-            target.display()
+            real.display()
         )));
     }
 

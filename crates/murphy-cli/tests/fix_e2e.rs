@@ -466,3 +466,72 @@ fn fix_summary_counts_changed_files_accurately() {
         "expected 'fixed 1 of 2 files', got: {summary:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// roborev regression: write-back must preserve file mode and follow symlinks
+// (unix-only — exercises permission bits / symlink semantics).
+// ---------------------------------------------------------------------------
+
+/// An executable Ruby script must stay executable after `--fix`. The
+/// sibling-temp+rename path captures the real file's permissions and applies
+/// them to the temp before the rename (roborev medium: a fresh temp would
+/// otherwise inherit umask and drop the +x bit).
+#[test]
+#[cfg(unix)]
+fn fix_preserves_executable_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let proj = project_with_cops("puts \"hi\"\n", &[("puts_to_logger", PUTS_TO_LOGGER_COP)]);
+    let path = proj.path().join("app.rb");
+    // Make it -rwxr-xr-x.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod 755");
+
+    let out = run_murphy(&proj, &["--fix"], &["app.rb"]);
+    assert_eq!(exit_code(&out), 0, "fix should succeed");
+
+    let after = fs::read_to_string(&path).expect("read app.rb after");
+    assert!(after.contains("logger.info"), "file must be rewritten");
+
+    let mode = fs::metadata(&path)
+        .expect("stat app.rb")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o755,
+        "executable mode must be preserved across --fix write-back, got {:o}",
+        mode & 0o777
+    );
+}
+
+/// `--fix` on a symlink must update the link's *destination* and keep the
+/// symlink intact (roborev medium: renaming onto the link path would replace
+/// the link with a regular file and leave the real target stale).
+#[test]
+#[cfg(unix)]
+fn fix_follows_symlink_and_keeps_link_intact() {
+    use std::os::unix::fs::symlink;
+
+    let proj = project_with_cops("x = 1\n", &[("puts_to_logger", PUTS_TO_LOGGER_COP)]);
+    // Real file lives elsewhere; `app_link.rb` is a symlink to it.
+    let real = proj.path().join("real_src.rb");
+    fs::write(&real, "puts \"hi\"\n").expect("write real_src.rb");
+    let link = proj.path().join("app_link.rb");
+    symlink(&real, &link).expect("create symlink");
+
+    let out = run_murphy(&proj, &["--fix"], &["app_link.rb"]);
+    assert_eq!(exit_code(&out), 0, "fix via symlink should succeed");
+
+    // The link must STILL be a symlink (not replaced by a regular file).
+    let link_meta = fs::symlink_metadata(&link).expect("lstat link");
+    assert!(
+        link_meta.file_type().is_symlink(),
+        "app_link.rb must remain a symlink after --fix"
+    );
+    // The real destination's content must have been rewritten.
+    let real_after = fs::read_to_string(&real).expect("read real_src.rb after");
+    assert!(
+        real_after.contains("logger.info") && !real_after.contains("puts"),
+        "symlink destination must be rewritten, got: {real_after:?}"
+    );
+}
