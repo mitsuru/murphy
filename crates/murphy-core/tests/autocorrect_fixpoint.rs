@@ -176,8 +176,9 @@ fn oscillation() {
     );
     // APIN1: corrected = the re-visited state (next, which was "a" the second time
     // we see it — the original source, not "b").
-    // Round 1: state="a"→ next="b". seen={a,b}. state="b". iterations=1.
-    // Round 2: state="b"→ next="a". "a" ∈ seen → Oscillation, corrected="a".
+    // Round 1: state="a"→ apply (iterations=1) → next="b". seen={a,b}. state="b".
+    // Round 2: state="b"→ apply (iterations=2) → next="a". "a" ∈ seen →
+    //          Oscillation, corrected="a", iterations=2 (terminal round counted).
     assert_eq!(
         outcome.corrected, "a",
         "oscillation: APIN1 — corrected must be the re-visited state (next==\"a\")"
@@ -269,11 +270,13 @@ fn conflict_passthrough() {
         outcome.corrected, source,
         "conflict_passthrough: corrected must equal source (no valid edit applied)"
     );
-    // One apply round was performed (edits were non-empty), all were OOB,
-    // next==state → Converged.  iterations == 0 because state did not advance.
+    // One apply round WAS performed (edits non-empty, all OOB conflicts) so it
+    // is counted: iterations == 1 even though state did not advance (next==state
+    // → step 4 Converged). `iterations` counts performed apply rounds, not
+    // state-advancing rounds.
     assert_eq!(
-        outcome.iterations, 0,
-        "conflict_passthrough: 0 state-advancing rounds (next==state → step 4)"
+        outcome.iterations, 1,
+        "conflict_passthrough: 1 apply round performed (all conflicts, next==state)"
     );
     assert_eq!(
         outcome.conflicts.len(),
@@ -369,10 +372,11 @@ fn apin2_all_edits_conflict_converged_not_oscillation() {
         outcome.corrected, source,
         "apin2_order: corrected must equal original source"
     );
-    // iterations == 0: state did not advance (step 4 fires, no increment)
+    // iterations == 1: one apply round was performed and counted before the
+    // step-4 check; next==state → Converged (NOT iterations==0).
     assert_eq!(
-        outcome.iterations, 0,
-        "apin2_order: 0 rounds (next==state path does not increment)"
+        outcome.iterations, 1,
+        "apin2_order: 1 apply round performed (counted before step 4)"
     );
 }
 
@@ -423,7 +427,10 @@ fn apin3_max_zero_no_lint_called() {
 
 // ---------------------------------------------------------------------------
 // 9. APIN3 max≥1 + already_clean: Converged, iterations==0, corrected==source.
-// Invariant: (iterations==0 && status==Converged) ⇔ corrected==source.
+// Invariant (corrected post-iter-2 fix): iterations==0 ⟹ first lint empty ⟹
+// Converged && corrected==source. (The reverse is NOT an iff: corrected==source
+// can also hold with iterations>=1 — an all-conflict no-op round, see
+// conflict_passthrough.) This test pins the already-clean direction.
 // ---------------------------------------------------------------------------
 
 #[test]
