@@ -1,12 +1,12 @@
-//! Integration test for the `Murphy::Cop` mruby SDK base (Phase 3 Task 4).
+//! Integration test for the `Murphy::Cop` mruby SDK base (Phase 4 Task 2).
 //!
 //! This exercises the public surface a downstream consumer sees:
 //! `murphy_core::{parse_for_mruby (AstContext::new), run_mruby_cop, Offense}`.
 //! It loads a `.rb` user cop written in the design §4 style, runs it over a
 //! really-parsed source via the Task-3 live native primitives, and asserts the
-//! emitted `Offense`s are the ADR 0006 frozen JSON shape — `autocorrect` is
-//! ABSENT even when the cop writes a `fix` block (Scope Fence 1, soft-(a):
-//! the fix is captured-stored-only, never applied, never serialized).
+//! emitted `Offense`s carry the ADR 0013 Phase-4 `autocorrect` field when a
+//! `fix` block is present — `edits` contains the REAL `[start, end, replacement]`
+//! values marshalled from Ruby into Rust (ADR 0013).
 //!
 //! ADR 0001: offense ranges are **byte** offsets; the positive cases pin the
 //! exact `puts` selector range hand-computed from the source.
@@ -31,9 +31,9 @@ class NoPutsCop < Murphy::Cop
 end
 "#;
 
-/// Same cop, but ALSO writing a `fix` block. Soft-(a): the fix MUST be
-/// captured-stored-only — the emitted offense must be BYTE-IDENTICAL (when
-/// serialized) to the no-fix variant. `autocorrect` is never serialized.
+/// Same cop, but ALSO writing a `fix` block. Phase 4 (ADR 0013): the fix
+/// MUST appear in the serialized offense as `autocorrect:{edits:[{range,replacement}]}`
+/// with the REAL `[start, end, replacement]` values — no longer captured-only.
 const NO_PUTS_FIX_RB: &str = r#"
 class NoPutsFixCop < Murphy::Cop
   MSG = "Use a logger instead of puts"
@@ -92,8 +92,17 @@ fn no_puts_cop_emits_one_offense_adr0006_shape_no_autocorrect() {
     );
 }
 
+/// Phase-4 deliberate inversion of the Phase-3 soft-(a) invariant (ADR 0013).
+///
+/// Phase 3 asserted: fix-cop and no-fix-cop emit BYTE-IDENTICAL JSON (autocorrect absent).
+/// Phase 4 (this test) asserts the OPPOSITE: a fix block produces `autocorrect:{edits:[...]}`
+/// with the REAL `[start, end, replacement]` values from `fix.replace`; a no-fix cop still
+/// has `autocorrect` ABSENT. This is the deliberate inversion point documented in ADR 0013.
 #[test]
-fn fix_block_is_captured_only_offense_byte_identical_to_no_fix() {
+fn fix_block_produces_real_edit_values_in_offense_autocorrect() {
+    // ADR 0013: deliberate inversion of Phase-3 soft-(a) "captured-only" invariant.
+    // `puts "x"\n` — selector `puts` = bytes [0, 4) (ADR 0001).
+    // fix.replace(node.message_loc, "logger.info") → start=0, end=4, replacement="logger.info"
     let src = "puts \"x\"\n";
     let no_fix = run(NO_PUTS_RB, "Murphy/NoPuts", "t.rb", src);
     let with_fix = run(NO_PUTS_FIX_RB, "Murphy/NoPuts", "t.rb", src);
@@ -101,18 +110,99 @@ fn fix_block_is_captured_only_offense_byte_identical_to_no_fix() {
     assert_eq!(no_fix.len(), 1);
     assert_eq!(with_fix.len(), 1);
 
-    // Soft-(a): the `fix.replace(...)` is captured-stored-only. The emitted
-    // offense — and its serialized JSON — is byte-identical to the no-fix
-    // variant. The fix never reaches the contract.
-    let j_no_fix = serde_json::to_string(&no_fix[0]).unwrap();
-    let j_with_fix = serde_json::to_string(&with_fix[0]).unwrap();
-    assert_eq!(
-        j_no_fix, j_with_fix,
-        "fix is captured-only: serialized offense must be byte-identical"
-    );
+    // No-fix cop: autocorrect ABSENT (unchanged invariant).
+    let j_no_fix: serde_json::Value = serde_json::to_value(&no_fix[0]).unwrap();
     assert!(
-        !j_with_fix.contains("autocorrect") && !j_with_fix.contains("logger.info"),
-        "the captured fix MUST NOT leak into the serialized offense: {j_with_fix}"
+        j_no_fix.as_object().unwrap().get("autocorrect").is_none(),
+        "no-fix cop: autocorrect key must be ABSENT from JSON: {j_no_fix}"
+    );
+
+    // Fix cop: autocorrect PRESENT with REAL values (Phase 4 — ADR 0013 inversion).
+    let j_with_fix: serde_json::Value = serde_json::to_value(&with_fix[0]).unwrap();
+    let autocorrect = j_with_fix
+        .as_object()
+        .unwrap()
+        .get("autocorrect")
+        .expect("fix cop: autocorrect key MUST be present (ADR 0013 Phase 4)");
+    let edits = autocorrect["edits"]
+        .as_array()
+        .expect("autocorrect.edits must be an array");
+    assert_eq!(edits.len(), 1, "one fix.replace → one edit");
+    // Exact real values from fix.replace(node.message_loc, "logger.info"):
+    //   puts "x"\n: `puts` selector = bytes [0, 4).
+    assert_eq!(
+        edits[0]["range"]["start_offset"], 0,
+        "edit start must be the real `puts` selector start offset"
+    );
+    assert_eq!(
+        edits[0]["range"]["end_offset"], 4,
+        "edit end must be the real `puts` selector end offset"
+    );
+    assert_eq!(
+        edits[0]["replacement"].as_str().unwrap(),
+        "logger.info",
+        "edit replacement must be the real replacement text from fix.replace"
+    );
+}
+
+/// PIN B: an invalid edit (inverted range) is silently dropped; the offense still emits.
+/// A cop that produces one valid edit AND one invalid edit → autocorrect present with 1 edit.
+#[test]
+fn invalid_range_edit_is_silently_dropped_valid_edit_survives() {
+    // fix.replace at [0,4] is valid; fix.replace at [4,0] is inverted (start > end) → dropped.
+    const COP: &str = r#"
+class InvRangeCop < Murphy::Cop
+  def on_call_node(n)
+    return unless n.name == :puts && n.receiver_nil?
+    add_offense(n.message_loc, message: "m") do |fix|
+      fix.replace(n.message_loc, "ok")  # valid: [0, 4]
+      # Inverted range (start > end) — must be silently dropped (PIN B).
+      fix.replace(Murphy::Range.new(4, 0), "bad")
+    end
+  end
+end
+"#;
+    let offenses = run(COP, "Murphy/InvRange", "t.rb", "puts \"x\"\n");
+    assert_eq!(
+        offenses.len(),
+        1,
+        "offense is still emitted despite dropped invalid edit"
+    );
+    let j: serde_json::Value = serde_json::to_value(&offenses[0]).unwrap();
+    let edits = j["autocorrect"]["edits"]
+        .as_array()
+        .expect("autocorrect present: 1 valid edit survived");
+    assert_eq!(
+        edits.len(),
+        1,
+        "exactly the valid edit; inverted-range edit was silently dropped"
+    );
+    assert_eq!(edits[0]["range"]["start_offset"], 0);
+    assert_eq!(edits[0]["range"]["end_offset"], 4);
+    assert_eq!(edits[0]["replacement"].as_str().unwrap(), "ok");
+}
+
+/// PIN B: if ALL edits are invalid, autocorrect is ABSENT (not `edits:[]`).
+#[test]
+fn all_edits_invalid_autocorrect_absent() {
+    // Both edits have inverted ranges → both dropped → Vec<Edit> empty → no autocorrect.
+    const COP: &str = r#"
+class AllBadCop < Murphy::Cop
+  def on_call_node(n)
+    return unless n.name == :puts && n.receiver_nil?
+    add_offense(n.message_loc, message: "m") do |fix|
+      fix.replace(Murphy::Range.new(4, 0), "bad1")
+      fix.replace(Murphy::Range.new(9, 2), "bad2")
+    end
+  end
+end
+"#;
+    let offenses = run(COP, "Murphy/AllBad", "t.rb", "puts \"x\"\n");
+    assert_eq!(offenses.len(), 1, "offense is still emitted");
+    let j: serde_json::Value = serde_json::to_value(&offenses[0]).unwrap();
+    assert!(
+        j.as_object().unwrap().get("autocorrect").is_none(),
+        "all edits invalid → autocorrect ABSENT (not edits:[]): {j}"
     );
 }
 
