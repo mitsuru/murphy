@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Murphy** is a from-scratch, high-speed Ruby linter/formatter — "Ruff for Ruby". It is **not** a port of RuboCop and shares no code with `rfmt`. The goal is to eliminate RuboCop's slowness (Ruby VM startup + hundreds of cops in Ruby + multi-pass autocorrect reparsing + GVL-bound parallelism) with a native Rust core.
 
-**Status: Phase 1 walking skeleton complete.** `crates/murphy-core` + `crates/murphy-cli` build a working `murphy lint <file>...` (prism parse → `NoReceiverPuts` native cop + `Murphy/Syntax` offenses → aggregated JSON stdout → exit codes 0/1/2/3). The offense-JSON contract, exit codes, and TDD/snapshot harness are **frozen** (ADR 0006); Phase 2+ build on them without renegotiating. The authoritative design — architecture, locked decisions, rejected alternatives with rationale — lives in `docs/plans/2026-05-19-murphy-design.md`. The phased implementation plan is `docs/plans/2026-05-19-murphy-implementation-plan.md`. Resolved Phase-0/gate decisions are ADRs in `docs/decisions/` (read these before Phase 2 / Phase 3 — they carry load-bearing constraints). Spike PoCs under `spikes/` are throwaway and are NOT promoted into `crates/`.
+**Status: Phase 2 — native engine scale-out complete.** `crates/murphy-core` + `crates/murphy-cli` build a working `murphy lint` that takes file args, directory args, or zero path args (discover from cwd via discovery-only `murphy.toml` `[files] include`/`exclude` + `.murphyignore`; `.gitignore` deliberately not honored), lints **file-level parallel across all cores** with deterministic output, and parses byte-identical files once per run (in-run memoization only — no persistent cache). The offense-JSON contract, exit codes, and TDD/snapshot harness are **frozen** (ADR 0006) and Phase 2 preserved them unchanged (ADR 0007); Phase 3+ build on them without renegotiating. The authoritative design — architecture, locked decisions, rejected alternatives with rationale — lives in `docs/plans/2026-05-19-murphy-design.md`. The phased implementation plan is `docs/plans/2026-05-19-murphy-implementation-plan.md`. Resolved Phase-0/gate decisions are ADRs in `docs/decisions/` (read these before Phase 2 / Phase 3 — they carry load-bearing constraints). Spike PoCs under `spikes/` are throwaway and are NOT promoted into `crates/`.
 
 **Security posture (ADR 0004):** v1 ships **no sandbox** for user cops — a `.rb` in `cops/` is **trusted code** run in-process with full host privileges. Per-cop isolation (ADR 0002/0003) is *fault* isolation, not a security boundary. Treat adding a cop like adding a git hook. A real sandbox for third-party cops is a hard Phase 7 prerequisite.
 
@@ -38,13 +38,15 @@ TDD is mandatory for cops: write the failing fixture test before implementing. A
 
 ## Build & Test
 
-Rust/Cargo workspace: `crates/murphy-core` (lib) + `crates/murphy-cli` (bin `murphy`). Toolchain is mise-pinned (Rust 1.95.0).
+Rust/Cargo workspace: `crates/murphy-core` (lib) + `crates/murphy-cli` (bin `murphy`). Toolchain pinned to Rust 1.95.0 via `rust-toolchain.toml` (cargo-native; matches `mise.toml`).
 
 ```bash
 cargo build                                       # debug build (./target/debug/murphy)
 cargo build --release                             # release build
-cargo run -p murphy-cli -- lint <file>...         # run the linter
-cargo test --workspace                            # full suite (Phase 1: 20 tests, all pass)
+cargo run -p murphy-cli -- lint <file>...         # lint explicit files
+cargo run -p murphy-cli -- lint <dir>             # lint a directory (recursive .rb walk)
+cargo run -p murphy-cli -- lint                   # discover from cwd (murphy.toml / .murphyignore)
+cargo test --workspace                            # full suite (Phase 2: 43 tests, all pass)
 cargo test -p murphy-core <name>                  # single test, e.g. offense_serializes_to_contract
 cargo test -p murphy-cli --test cli               # one integration target (also: --test integration_snapshot)
 cargo fmt --check                                 # formatting gate (must be clean)
