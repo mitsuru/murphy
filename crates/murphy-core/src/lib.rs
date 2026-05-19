@@ -11,7 +11,10 @@ mod parse;
 mod registry;
 
 pub use aggregator::aggregate;
-pub use autocorrect::{ApplyOutcome, Conflict, ConflictReason, apply_edits, apply_edits_logged};
+pub use autocorrect::{
+    ApplyOutcome, Conflict, ConflictReason, FixpointOutcome, FixpointStatus, apply_edits,
+    apply_edits_logged, run_to_fixpoint,
+};
 pub use cop::{Cop, CopContext, run_cops};
 pub use cops::no_receiver_puts::NoReceiverPuts;
 pub use discovery::{ConfigError, discover};
