@@ -6,6 +6,7 @@ mod cops;
 mod discovery;
 mod offense;
 mod parse;
+mod registry;
 
 pub use aggregator::aggregate;
 pub use cop::{Cop, CopContext, run_cops};
@@ -13,6 +14,7 @@ pub use cops::no_receiver_puts::NoReceiverPuts;
 pub use discovery::{ConfigError, discover};
 pub use offense::{Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
+pub use registry::CopRegistry;
 
 /// Returns the Murphy core crate version.
 pub fn version() -> &'static str {

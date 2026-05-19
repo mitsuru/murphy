@@ -50,7 +50,7 @@
 //!   here instead of aborting the process.
 
 use murphy_core::{
-    Cop, NoReceiverPuts, Offense, SYNTAX_COP_NAME, Severity, aggregate, discover, parse, run_cops,
+    Cop, CopRegistry, Offense, SYNTAX_COP_NAME, Severity, aggregate, discover, parse, run_cops,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -164,15 +164,20 @@ fn read_source(path: &str) -> Result<String, AppError> {
 /// NEVER returns `Err`: a parse failure is the one synthetic `Murphy/Syntax`
 /// offense (design §6, cops skipped — there is no AST), not a setup error.
 /// The setup-class failure (missing/unreadable file) is [`read_source`]'s.
-fn lint_source(source: &str, file: &str) -> Vec<Offense> {
+///
+/// `cops` is the registry-owned native cop slice (P3 Task 1): the per-call
+/// inline `vec![Box::new(NoReceiverPuts)]` was lifted into a once-built
+/// [`CopRegistry`] threaded down from [`run`]. Behavior is byte-identical —
+/// only the *source* of the cop vector changed (inline literal →
+/// `registry.native_cops()`); the same one native cop still runs.
+fn lint_source(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> Vec<Offense> {
     #[cfg(test)]
     PARSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let mut sink: Vec<Offense> = Vec::new();
     match parse(source) {
         Ok(ast) => {
-            let cops: Vec<Box<dyn Cop>> = vec![Box::new(NoReceiverPuts)];
-            run_cops(&ast, file, &cops, &mut sink);
+            run_cops(&ast, file, cops, &mut sink);
         }
         Err(e) => {
             // Use `e.message` verbatim (prism's first-error text); the Display
@@ -219,7 +224,7 @@ fn lint_source(source: &str, file: &str) -> Vec<Offense> {
 /// The flattened per-path offenses go to `aggregate` UNCHANGED — it remains
 /// the single determinism point (the total-order sort/dedupe, Task 2), so
 /// neither read/lint parallelism nor the fan-out order can perturb output.
-fn lint_files_memoized(files: &[String]) -> Result<Vec<Offense>, AppError> {
+fn lint_files_memoized(files: &[String], registry: &CopRegistry) -> Result<Vec<Offense>, AppError> {
     // Phase 1: read every path. `?` on the collected Result short-circuits on
     // the first read error (missing/unreadable → exit 2), exactly as the
     // Task-5 `par_iter().collect::<Result<_,_>>()` did.
@@ -252,7 +257,7 @@ fn lint_files_memoized(files: &[String]) -> Result<Vec<Offense>, AppError> {
         .par_iter()
         .map(|(content, paths)| {
             let representative = paths[0];
-            let base = lint_source(content, representative);
+            let base = lint_source(content, representative, registry.native_cops());
             // Fan out: one offense list per path sharing this content, with
             // `file` set to that path. Identical content ⇒ identical
             // offsets/cop/severity/message; only `file` differs.
@@ -305,6 +310,35 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         )));
     }
 
+    // Build the cop registry ONCE per run (P3 Task 1) and share it: the
+    // per-call inline `vec![Box::new(NoReceiverPuts)]` is lifted here. The
+    // registry holds the native cops (the only cops that RUN today) and
+    // ENUMERATES (does not load) `./cops/*.rb` for P3 Task 3/4.
+    //
+    // `cops/` is resolved CWD-RELATIVE: `Path::new(".")` = the project root =
+    // the directory `murphy` was invoked from. This is DELIBERATELY and
+    // permanently INDEPENDENT of the lint-target path arg(s) parsed below:
+    // `cd /repo && murphy lint subproject/` lints `subproject/` files but
+    // loads cops from `/repo/cops/`, NOT `/repo/subproject/cops/`. That is the
+    // intended reading of ADR 0004 mitigation 2 — cops come from the project's
+    // own `cops/` (the dir you ran `murphy` in), never auto-discovered from
+    // whatever sub-path (possibly a dependency tree) you point the linter at.
+    // It is also consistent with the zero-arg `discover(Path::new("."))`
+    // convention used below for file discovery. The decision is pinned in
+    // `registry.rs` (test
+    // `cops_dir_is_resolved_at_the_given_root_not_a_lint_subdir`): invisible
+    // in Task 1 (enumerate-only) but observable once Task 3/4 RUN the cops, so
+    // it is locked NOW. "Walk up for the nearest `cops/`" is out of scope for
+    // v1.
+    //
+    // An absent `cops/` is fine (no user cops), a real I/O error on an
+    // existing one is a setup error → exit 2. The registry is `Sync`, so a
+    // borrow of its native slice safely crosses the rayon `par_iter` boundary
+    // inside `lint_files_memoized`. Behavior is byte-identical to Phase 2:
+    // only the *source* of the cop vector moved (inline literal → registry).
+    let registry =
+        CopRegistry::discover(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))?;
+
     // Classify each path arg (module doc precedence). Existing files go to the
     // explicit list (Phase 1 path, frozen-contract preserving). Directories
     // are discovered. Zero path args → discover the cwd. A non-existent path
@@ -354,7 +388,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // determinism point are all preserved inside `lint_files_memoized`; the
     // no-duplicate case is a 1:1 no-op so the snapshot stays byte-identical.
     // `tests/parallel_determinism.rs` is the permanent byte-identity guard.
-    let offenses = lint_files_memoized(&files)?;
+    let offenses = lint_files_memoized(&files, &registry)?;
 
     // stdout is exclusively the JSON array (design §5). `serde_json` cannot
     // fail serializing `Vec<Offense>` (all fields are plain owned data), but
@@ -432,8 +466,13 @@ mod tests {
             other.to_str().unwrap().to_owned(),
         ];
 
+        // Native-only registry: these tests assert the native cop pipeline
+        // (parse-count memo + fan-out), not `cops/` discovery, so no tempdir
+        // root / cwd dependence is wanted here.
+        let registry = CopRegistry::native_only();
+
         PARSE_CALLS.store(0, Ordering::Relaxed);
-        let offenses = expect_ok(lint_files_memoized(&files));
+        let offenses = expect_ok(lint_files_memoized(&files, &registry));
 
         // (a) UNIQUE content parsed once each: 2 unique contents → exactly 2
         // parse calls, NOT 3 (the duplicate is NOT re-parsed).
@@ -499,7 +538,7 @@ mod tests {
         ];
 
         PARSE_CALLS.store(0, Ordering::Relaxed);
-        let offenses2 = expect_ok(lint_files_memoized(&files2));
+        let offenses2 = expect_ok(lint_files_memoized(&files2, &registry));
 
         assert_eq!(
             PARSE_CALLS.load(Ordering::Relaxed),
@@ -528,7 +567,8 @@ mod tests {
             missing.to_str().unwrap().to_owned(),
         ];
 
-        let err = lint_files_memoized(&files).expect_err("missing file must abort");
+        let registry = CopRegistry::native_only();
+        let err = lint_files_memoized(&files, &registry).expect_err("missing file must abort");
         assert_eq!(err.code, EXIT_SETUP_ERROR, "missing file → exit 2");
     }
 }
