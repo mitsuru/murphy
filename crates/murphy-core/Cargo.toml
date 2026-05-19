@@ -8,6 +8,12 @@ serde = { version = "1", features = ["derive"] }
 # Exact pin (ADR 0001): a prism node-schema change must not ride in silently
 # on the load-bearing byte offsets; bumping is a deliberate, re-verified step.
 ruby-prism = "=1.9.0"
+# Exact pin (ADR 0002 discipline, identical to ruby-prism): a contract-affecting
+# native binding. mruby's embedding ABI is load-bearing for the user-cop engine
+# (ADR 0008/0009/0010); a bump is a deliberate, re-verified step — never a
+# silent caret upgrade. (The spikes use a caret pin; that is spike laxness and
+# is intentionally NOT propagated into crates/.)
+mruby3-sys = "=3.2.0"
 # File discovery (Task 6, discovery.rs ADR-style doc). Pure-Rust, caret-pinned
 # per project convention (exact `=` pins are reserved for the contract-affecting
 # native bindings only). `ignore` = ripgrep's walker (.murphyignore via custom

@@ -4,6 +4,7 @@ mod aggregator;
 mod cop;
 mod cops;
 mod discovery;
+mod mruby;
 mod offense;
 mod parse;
 mod registry;
@@ -12,6 +13,10 @@ pub use aggregator::aggregate;
 pub use cop::{Cop, CopContext, run_cops};
 pub use cops::no_receiver_puts::NoReceiverPuts;
 pub use discovery::{ConfigError, discover};
+// Phase 3 Task 2 keystone — the mruby lifecycle/ownership wrapper. Re-exported
+// for later tasks (3/4/5/7) and the wrapper's own tests; nothing in the CLI
+// pipeline calls this yet (Task 7 wires it).
+pub use mruby::{AstContext, MrubyState};
 pub use offense::{Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
 pub use registry::CopRegistry;
