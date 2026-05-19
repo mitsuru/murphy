@@ -127,6 +127,7 @@ mod tests {
                 },
                 severity: Severity::Warning,
                 message: "stub".into(),
+                autocorrect: None,
             });
         }
     }

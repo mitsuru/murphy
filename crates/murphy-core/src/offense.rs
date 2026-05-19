@@ -74,9 +74,37 @@ const _: () = assert!(
      aggregate's descending tiebreaker depends on derive Ord == ascending severity"
 );
 
+/// A single text edit that autocorrect applies to the source (design §5).
+///
+/// `Edit` is the wire-contract type for the `autocorrect.edits` array in an
+/// offense JSON. It is separate from `mruby::sdk::FixEdit` (a crate-private
+/// synthetic placeholder); marshalling from mruby `fix` blocks into `Edit`
+/// values is Phase 4 Task 2's responsibility (ADR 0013).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edit {
+    /// The source span to replace (byte offsets).
+    pub range: Range,
+    /// The text to substitute in place of `range`.
+    pub replacement: String,
+}
+
+/// The autocorrect payload carried by an [`Offense`] that has a fix (design §5).
+///
+/// Serialises as `{"edits": [...]}`. When `None` on the enclosing `Offense`,
+/// the `"autocorrect"` key is **absent** from JSON (not present with `null`),
+/// preserved by `#[serde(skip_serializing_if = "Option::is_none")]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Autocorrect {
+    /// Ordered list of edits to apply to produce the corrected source.
+    pub edits: Vec<Edit>,
+}
+
 /// A single rule violation reported by a cop (design §5).
 ///
-/// Phase 1 subset: no `autocorrect` field yet (deferred to Phase 4).
+/// The five fields `file`, `cop_name`, `range`, `severity`, `message` are the
+/// frozen ADR 0006/0007 contract, unchanged since Phase 1.
+/// Phase 4 (ADR 0013) adds the optional `autocorrect` field; it is absent from
+/// JSON when `None`, preserving byte-identity for existing snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Offense {
     /// Path of the file the offense was found in.
@@ -89,12 +117,23 @@ pub struct Offense {
     pub severity: Severity,
     /// Human-readable explanation of the offense.
     pub message: String,
+    /// Optional autocorrect payload (Phase 4, ADR 0013).
+    ///
+    /// `None` (the common case) is **omitted from JSON** via
+    /// `skip_serializing_if`; the key is absent, not `null`. `default`
+    /// ensures forward-compatible deserialization of older JSON that lacks
+    /// the key — it deserializes as `None` without error.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub autocorrect: Option<Autocorrect>,
 }
 
 impl Offense {
     /// Construct an [`Offense`], taking `&str` and doing the owned-string
     /// conversions internally so a cop emits one in a single call instead of
     /// a 5-field literal with repeated `.into()`s.
+    ///
+    /// `autocorrect` is initialised to `None`. Use [`Offense::with_autocorrect`]
+    /// to attach a fix after construction.
     pub fn new(
         file: &str,
         cop_name: &str,
@@ -108,7 +147,17 @@ impl Offense {
             range,
             severity,
             message: message.into(),
+            autocorrect: None,
         }
+    }
+
+    /// Builder: attach an [`Autocorrect`] payload and return `self`.
+    ///
+    /// Allows fluent construction: `Offense::new(...).with_autocorrect(ac)`.
+    #[must_use]
+    pub fn with_autocorrect(mut self, ac: Autocorrect) -> Offense {
+        self.autocorrect = Some(ac);
+        self
     }
 }
 
@@ -127,6 +176,7 @@ mod tests {
             },
             severity: Severity::Warning,
             message: "Use a logger instead of puts".into(),
+            autocorrect: None,
         };
         let j: serde_json::Value = serde_json::to_value(&o).unwrap();
         assert_eq!(j["range"]["start_offset"], 0);
@@ -136,5 +186,62 @@ mod tests {
 
         let round_tripped: Offense = serde_json::from_value(j.clone()).unwrap();
         assert_eq!(round_tripped, o);
+    }
+
+    #[test]
+    fn offense_with_autocorrect_serializes_to_phase4_shape() {
+        let o = Offense::new(
+            "b.rb",
+            "Murphy/FooBar",
+            Range {
+                start_offset: 10,
+                end_offset: 20,
+            },
+            Severity::Warning,
+            "use foo instead",
+        )
+        .with_autocorrect(Autocorrect {
+            edits: vec![Edit {
+                range: Range {
+                    start_offset: 10,
+                    end_offset: 20,
+                },
+                replacement: "foo".into(),
+            }],
+        });
+
+        let j: serde_json::Value = serde_json::to_value(&o).unwrap();
+
+        // §5 wire shape: autocorrect.edits[0].range.start_offset etc.
+        assert_eq!(j["autocorrect"]["edits"][0]["range"]["start_offset"], 10);
+        assert_eq!(j["autocorrect"]["edits"][0]["range"]["end_offset"], 20);
+        assert_eq!(j["autocorrect"]["edits"][0]["replacement"], "foo");
+
+        // round-trip
+        let round_tripped: Offense = serde_json::from_value(j.clone()).unwrap();
+        assert_eq!(round_tripped, o);
+    }
+
+    #[test]
+    fn offense_without_fix_has_autocorrect_absent_not_null() {
+        let o = Offense::new(
+            "c.rb",
+            "Murphy/NoPuts",
+            Range {
+                start_offset: 0,
+                end_offset: 4,
+            },
+            Severity::Warning,
+            "no puts",
+        );
+
+        let j: serde_json::Value = serde_json::to_value(&o).unwrap();
+
+        // Key must be ABSENT (not present with null value).
+        // serde skip_serializing_if = "Option::is_none" guarantees this.
+        assert!(
+            j.as_object().unwrap().get("autocorrect").is_none(),
+            "\"autocorrect\" key must be absent from JSON when there is no fix"
+        );
     }
 }
