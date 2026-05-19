@@ -3,12 +3,14 @@
 mod aggregator;
 mod cop;
 mod cops;
+mod discovery;
 mod offense;
 mod parse;
 
 pub use aggregator::aggregate;
 pub use cop::{Cop, CopContext, run_cops};
 pub use cops::no_receiver_puts::NoReceiverPuts;
+pub use discovery::{ConfigError, discover};
 pub use offense::{Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
 

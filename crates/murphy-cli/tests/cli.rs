@@ -166,11 +166,12 @@ fn lint_syntax_error_file_exits_1_with_one_syntax_offense() {
 
 /// Multi-file list where ONE path is missing → exit `2`.
 ///
-/// `run` does `sink.extend(lint_one_file(file)?)` in a loop: an unreadable
-/// file is a setup-class `AppError` and the `?` aborts the WHOLE run with
+/// `run` does `files.par_iter().map(lint_one_file).collect::<Result<_, _>>()?`:
+/// an unreadable file is a setup-class `AppError` and the fallible `collect`
+/// short-circuits on the first `Err`, so the `?` aborts the WHOLE run with
 /// exit `2` — it is NOT a per-file skip (design §6: an I/O error aborts the
 /// run; a *parse* failure, by contrast, is an offense and would exit `1`).
-/// Task 5's parallel `?`-collect must keep this exact semantics.
+/// Task 6's discovery wiring leaves this explicit-file path unchanged.
 #[test]
 fn lint_multi_file_with_one_missing_exits_2() {
     let dir = tempdir().expect("create tempdir");
@@ -264,7 +265,10 @@ fn lint_offense_run_stderr_is_empty() {
     );
 }
 
-/// Missing subcommand / wrong usage → exit 2 (bad CLI usage is a setup error).
+/// Missing subcommand (`murphy` with no args at all) → exit 2 (bad CLI usage
+/// is a setup error). Distinct from `murphy lint` with zero PATHS, which is
+/// now a cwd discovery (Phase 2 Task 6): this case never has a subcommand, so
+/// it stays bad-usage→2 and never reaches discovery.
 #[test]
 fn bad_usage_exits_2() {
     let assert = Command::cargo_bin("murphy")
@@ -276,6 +280,101 @@ fn bad_usage_exits_2() {
     assert!(
         assert.get_output().stdout.is_empty(),
         "error path must write nothing to stdout, got {:?}",
+        assert.get_output().stdout
+    );
+}
+
+// --- Phase 2 Task 6: directory / zero-arg discovery ---
+
+/// `murphy lint <dir>` discovers `.rb` files under the dir (default
+/// `**/*.rb`), honoring a `murphy.toml` `exclude`. The clean+dirty tree →
+/// exit 1 with exactly the dirty file's NoReceiverPuts offense; the excluded
+/// file is NOT discovered.
+#[test]
+fn lint_directory_discovers_and_applies_murphy_toml_exclude() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("clean.rb"), "x = 1\n").expect("write clean.rb");
+    fs::write(root.join("dirty.rb"), "puts \"hi\"\n").expect("write dirty.rb");
+    fs::create_dir_all(root.join("vendor")).expect("mkdir vendor");
+    // A receiver-less puts that WOULD be flagged — proves exclude prunes it.
+    fs::write(root.join("vendor").join("dep.rb"), "puts \"v\"\n").expect("write dep.rb");
+    fs::write(
+        root.join("murphy.toml"),
+        "[files]\ninclude = [\"**/*.rb\"]\nexclude = [\"vendor/**\"]\n",
+    )
+    .expect("write murphy.toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .arg(".")
+        .assert()
+        .code(1);
+
+    let stdout = &assert.get_output().stdout;
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "only dirty.rb is discovered+dirty (clean.rb clean, vendor excluded), got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+    assert!(
+        !parsed
+            .iter()
+            .any(|o| o["file"].as_str().is_some_and(|f| f.contains("vendor"))),
+        "excluded vendor/ must not appear, got {parsed:?}"
+    );
+}
+
+/// `murphy lint` with ZERO path args discovers from the cwd (Phase 2 Task 6
+/// behavior change — this is NOT bad usage). A clean-only cwd → exit 0, empty
+/// array. Distinct from `bad_usage_exits_2` (no subcommand → still exit 2).
+#[test]
+fn lint_zero_paths_discovers_cwd() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("a.rb"), "x = 1\n").expect("write a.rb");
+    fs::write(root.join("b.rb"), "y = 2\n").expect("write b.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .assert()
+        .code(0);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert!(
+        parsed.is_empty(),
+        "clean cwd discovery yields zero offenses, got {parsed:?}"
+    );
+}
+
+/// A malformed `murphy.toml` in a discovered dir → exit 2 (ConfigError), NOT
+/// a panic (exit 3) and NOT silently ignored. stdout stays empty.
+#[test]
+fn lint_directory_with_malformed_murphy_toml_exits_2() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("a.rb"), "x = 1\n").expect("write a.rb");
+    fs::write(root.join("murphy.toml"), "not = valid = toml [[[\n").expect("write murphy.toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .arg(".")
+        .assert()
+        .code(2);
+
+    assert!(
+        assert.get_output().stdout.is_empty(),
+        "config-error path must write nothing to stdout, got {:?}",
         assert.get_output().stdout
     );
 }

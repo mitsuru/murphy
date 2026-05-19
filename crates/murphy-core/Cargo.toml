@@ -8,6 +8,16 @@ serde = { version = "1", features = ["derive"] }
 # Exact pin (ADR 0001): a prism node-schema change must not ride in silently
 # on the load-bearing byte offsets; bumping is a deliberate, re-verified step.
 ruby-prism = "=1.9.0"
+# File discovery (Task 6, discovery.rs ADR-style doc). Pure-Rust, caret-pinned
+# per project convention (exact `=` pins are reserved for the contract-affecting
+# native bindings only). `ignore` = ripgrep's walker (.murphyignore via custom
+# ignore filename); `globset` = include/exclude glob matching; `toml` = parse
+# the discovery-only `murphy.toml` `[files]` table.
+ignore = "0.4"
+globset = "0.4"
+toml = "0.8"
 
 [dev-dependencies]
 serde_json = "1"
+# discovery.rs tests build temp trees with murphy.toml / .murphyignore.
+tempfile = "3"

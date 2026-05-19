@@ -1,11 +1,35 @@
-//! `murphy` command-line entry point (Task 7; multi-file in Task 9).
+//! `murphy` command-line entry point (Task 7; multi-file Task 9; discovery
+//! Phase 2 Task 6).
 //!
-//! Phase 1 shape: `murphy lint <file>...` runs the single-parse pipeline
-//! over each explicitly-listed file (no directory discovery yet — plan
-//! Task 9: "loop over the explicit file list"), aggregates the offenses
-//! *across all files*, and prints them as one JSON array on stdout.
-//! Argument parsing is hand-rolled (one subcommand, one-or-more file args —
-//! no `clap`; YAGNI until the CLI actually grows, design/plan).
+//! `murphy lint <path>...` runs the single-parse pipeline over a set of `.rb`
+//! files, aggregates the offenses *across all files*, and prints them as one
+//! JSON array on stdout. Argument parsing is hand-rolled (one subcommand,
+//! zero-or-more path args — no `clap`; YAGNI until the CLI actually grows,
+//! design/plan).
+//!
+//! ## Path-arg precedence (Phase 2 Task 6, exact)
+//!
+//! Each path arg is classified by what it is on disk:
+//!
+//! - **Existing files** are linted *explicitly* — exactly the Phase 1
+//!   behavior: NO directory walk, NO `murphy.toml`, NO `.murphyignore`. This
+//!   keeps the frozen contract (ADR 0006) byte-identical: the snapshot /
+//!   determinism tests pass explicit fixture filenames and are untouched.
+//! - **Directory args** are *discovered* via `murphy_core::discover` (walks
+//!   the tree, honoring an optional `<dir>/murphy.toml` `[files]`
+//!   include/exclude and `.murphyignore`). An explicitly-passed directory arg
+//!   roots the walk AT that dir, so a `.murphyignore` in a PARENT of it does
+//!   not apply (explicit dir arg = "I mean this dir", consistent with
+//!   explicit-file-bypasses-discovery).
+//! - **Zero path args** (`murphy lint`) discovers from the cwd (`.`). This is
+//!   the one Phase 1 behavior change: zero files used to be bad-usage→exit 2;
+//!   it is now "discover cwd". A *missing* subcommand or a *wrong* subcommand
+//!   is still bad usage → exit 2 (distinct: that path never reaches discovery).
+//! - A non-existent path arg is neither a file nor a dir → it falls through
+//!   the explicit-file path and the existing missing-file→exit 2 logic
+//!   (`lint_one_file`'s read error) catches it, unchanged.
+//! - Mixed args (some files, some dirs) → the explicit files plus everything
+//!   discovered under the dirs, unioned (deduped, sorted).
 //!
 //! ## stdout / stderr split
 //!
@@ -25,12 +49,13 @@
 //!   here instead of aborting the process.
 
 use murphy_core::{
-    Cop, NoReceiverPuts, Offense, SYNTAX_COP_NAME, Severity, aggregate, parse, run_cops,
+    Cop, NoReceiverPuts, Offense, SYNTAX_COP_NAME, Severity, aggregate, discover, parse, run_cops,
 };
 use rayon::prelude::*;
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 // Convention inherited by Tasks 8/9: a closed stdout pipe (`murphy ... | head`)
@@ -135,24 +160,72 @@ fn lint_one_file(file: &str) -> Result<Vec<Offense>, AppError> {
 /// `Err` for setup-class failures (`2`). Panics propagate to the guard in
 /// [`main`] and become `3`.
 fn run(args: &[String]) -> Result<u8, AppError> {
-    // args[0] is the program name. Expect: `lint <file>...` (one or more
-    // files; processed in arg order, but final output ordering is from
-    // `aggregate`, not arg order). `get(1..)` instead of `&args[1..]` so
-    // `run(&[])` yields a usage error, not a slice-index panic→exit 3.
+    // args[0] is the program name. Expect: `lint [path]...` — the subcommand
+    // then ZERO-or-more path args (a path is a file OR a dir; precedence in
+    // the module doc). `get(1..)` instead of `&args[1..]` so `run(&[])` yields
+    // a usage error, not a slice-index panic→exit 3.
+    //
+    // Subcommand is extracted FIRST and validated independently of path
+    // count: a missing subcommand (`murphy`) or a wrong one is bad usage →
+    // exit 2 and never reaches discovery. ZERO paths is NOT bad usage (Task 6
+    // change): `murphy lint` discovers from the cwd. This distinction is the
+    // whole point — `bad_usage_exits_2` invokes `murphy` with no subcommand,
+    // which still exits 2; `murphy lint` (zero paths) now discovers cwd.
     let rest = args.get(1..).unwrap_or(&[]);
-    let (subcommand, files) = match rest {
-        // `files @ ..` must be non-empty: `lint` with zero files is bad usage.
-        [subcommand, files @ ..] if !files.is_empty() => (subcommand.as_str(), files),
-        _ => {
-            return Err(AppError::setup("usage: murphy lint <file>..."));
+    let (subcommand, paths) = match rest {
+        [subcommand, paths @ ..] => (subcommand.as_str(), paths),
+        [] => {
+            return Err(AppError::setup("usage: murphy lint [path]..."));
         }
     };
 
     if subcommand != "lint" {
         return Err(AppError::setup(format!(
-            "unknown subcommand {subcommand:?} (usage: murphy lint <file>...)"
+            "unknown subcommand {subcommand:?} (usage: murphy lint [path]...)"
         )));
     }
+
+    // Classify each path arg (module doc precedence). Existing files go to the
+    // explicit list (Phase 1 path, frozen-contract preserving). Directories
+    // are discovered. Zero path args → discover the cwd. A non-existent path
+    // is neither file nor dir → it stays in the explicit list so the existing
+    // missing-file→exit 2 read error in `lint_one_file` catches it unchanged.
+    //
+    // The combined list is a `BTreeSet<PathBuf>` so mixed args (`lint d/ d/x.rb`)
+    // dedupe and the rayon input is sorted (deterministic — defense in depth;
+    // `aggregate` re-sorts the output anyway).
+    let mut targets: BTreeSet<PathBuf> = BTreeSet::new();
+    if paths.is_empty() {
+        // Zero path args: discover from the cwd.
+        for p in discover(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))? {
+            targets.insert(p);
+        }
+    } else {
+        for arg in paths {
+            let path = Path::new(arg);
+            if path.is_dir() {
+                for p in discover(path).map_err(|e| AppError::setup(e.to_string()))? {
+                    targets.insert(p);
+                }
+            } else {
+                // Existing file OR non-existent path: explicit (Phase 1).
+                targets.insert(path.to_path_buf());
+            }
+        }
+    }
+
+    // `lint_one_file` takes `&str` (unchanged — Task 7 refactors it, not us).
+    // A non-UTF-8 path can't be losslessly passed; treat it as a setup error
+    // rather than silently lossy-converting (paths here come from the FS walk
+    // or CLI args — practically always UTF-8).
+    let files: Vec<String> = targets
+        .into_iter()
+        .map(|p| {
+            p.to_str().map(str::to_owned).ok_or_else(|| {
+                AppError::setup(format!("non-UTF-8 path cannot be linted: {}", p.display()))
+            })
+        })
+        .collect::<Result<_, AppError>>()?;
 
     // Lint every file in the explicit list IN PARALLEL across rayon's default
     // (core-sized) thread pool — `lint_one_file` parses its own file into an
