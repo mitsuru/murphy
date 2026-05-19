@@ -114,13 +114,27 @@ de-facto contract (serde_json serialises struct fields in declaration order).
 in JSON. This convention must be preserved if the field list is ever extended
 further.
 
-### `Offense::new` signature is unchanged
+### `Offense::new` signature is unchanged; `Offense` is `#[non_exhaustive]`
 
 The existing five-argument `Offense::new(file, cop_name, range, severity,
 message)` is preserved exactly. `autocorrect` is initialised to `None`. Callers
 that need to attach a fix use the new builder method
 `Offense::with_autocorrect(ac: Autocorrect) -> Offense` (fluent/consuming
-setter). No existing call site is broken.
+setter). Every existing in-tree call site uses `Offense::new` (verified:
+`murphy-cli` constructs only via `Offense::new`; struct-literal construction
+occurs only inside `murphy-core`), so no existing call site is broken.
+
+Adding a `pub` field to a fully-`pub` struct **is** a source-breaking change
+for any out-of-crate caller that builds the struct by literal. To make the
+"contract fields can grow without a Rust source break" claim mechanically true
+rather than aspirational, `Offense` carries `#[non_exhaustive]`. This forbids
+struct-literal construction (and exhaustive destructuring) from outside
+`murphy-core`, so the stable Rust surface is exactly `Offense::new` +
+`Offense::with_autocorrect`. In-crate literals (cops, tests) are unaffected by
+`#[non_exhaustive]`. Phase 4+ may add further contract fields without a Rust
+source break for downstream crates. The JSON wire shape (§ above) and these two
+constructors are the only stable surfaces; out-of-crate struct-literal
+construction is explicitly unsupported.
 
 ## Rust types added (Phase 4 Task 1)
 

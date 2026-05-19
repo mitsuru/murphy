@@ -105,7 +105,15 @@ pub struct Autocorrect {
 /// frozen ADR 0006/0007 contract, unchanged since Phase 1.
 /// Phase 4 (ADR 0013) adds the optional `autocorrect` field; it is absent from
 /// JSON when `None`, preserving byte-identity for existing snapshots.
+///
+/// `#[non_exhaustive]` (ADR 0013): the stable Rust surface is [`Offense::new`]
+/// plus [`Offense::with_autocorrect`], NOT struct-literal construction. This
+/// mechanically enforces the ADR claim that adding contract fields (Phase 4+)
+/// is not a source-breaking change for out-of-crate callers — they cannot
+/// build `Offense` by literal, so a new field cannot break them. In-crate
+/// literals (cops, tests) are unaffected by `#[non_exhaustive]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Offense {
     /// Path of the file the offense was found in.
     pub file: String,
