@@ -43,7 +43,14 @@ impl Range {
 }
 
 /// How serious an offense is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Ord`/`PartialOrd` exist purely so the aggregator can use `severity` as the
+/// FINAL sort tiebreaker (making dedupe's "first" deterministic — see
+/// `aggregator::aggregate`). The variant order `Warning < Error` is
+/// arbitrary-but-stable: it is NOT a severity *precedence* policy (Phase 3 owns
+/// that). Derive additions do not affect serde output — `#[serde(rename_all =
+/// "lowercase")]` JSON is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// A non-fatal style/correctness concern.
