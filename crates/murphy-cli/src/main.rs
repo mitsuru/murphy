@@ -27,6 +27,7 @@
 use murphy_core::{
     Cop, NoReceiverPuts, Offense, SYNTAX_COP_NAME, Severity, aggregate, parse, run_cops,
 };
+use rayon::prelude::*;
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
@@ -153,18 +154,27 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         )));
     }
 
-    // Loop over the explicit file list (single-threaded; no discovery yet —
-    // plan Task 9 / YAGNI). Collect every file's offenses into one flat sink,
-    // then aggregate ACROSS all files in a single pass — the cross-file
-    // (file, start_offset) sort is what makes the multi-file output
-    // deterministic regardless of arg order. A missing/unreadable file is
-    // still a setup error (`?` → exit 2); a parse failure on one file does
-    // not abort the others (it is an offense in that file's Vec, not `Err`).
-    let mut sink: Vec<Offense> = Vec::new();
-    for file in files {
-        sink.extend(lint_one_file(file)?);
-    }
-    let offenses = aggregate(sink);
+    // Lint every file in the explicit list IN PARALLEL across rayon's default
+    // (core-sized) thread pool — `lint_one_file` parses its own file into an
+    // immutable AST with no shared mutable state, and `Box<dyn Cop>` is
+    // `Send + Sync` (Task 4), so this is an embarrassingly parallel map.
+    //
+    // Determinism does NOT depend on thread/arg/completion order: every file's
+    // offenses land in one flat `Vec` whose final ordering comes entirely from
+    // `aggregate`'s total order `(file, start, end, cop_name, message,
+    // severity)` (Task 2). Thread interleaving cannot perturb the output
+    // because `aggregate` re-sorts; `tests/parallel_determinism.rs` is the
+    // permanent byte-identity guard for this.
+    //
+    // Abort-on-first-Err → exit 2 is preserved: collecting into
+    // `Result<Vec<Vec<Offense>>, AppError>` short-circuits on the first `Err`
+    // (a missing/unreadable file), and the `?` propagates it as a setup error.
+    // Under parallelism *which* erroring file's message wins is
+    // nondeterministic, but that is acceptable — only the exit *code* (2) is
+    // contract; the stderr message is diagnostic-only (design §6).
+    let per_file: Result<Vec<Vec<Offense>>, AppError> =
+        files.par_iter().map(|file| lint_one_file(file)).collect();
+    let offenses = aggregate(per_file?.into_iter().flatten().collect());
 
     // stdout is exclusively the JSON array (design §5). `serde_json` cannot
     // fail serializing `Vec<Offense>` (all fields are plain owned data), but
