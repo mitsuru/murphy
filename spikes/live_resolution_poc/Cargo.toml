@@ -1,0 +1,13 @@
+# Standalone throwaway spike: empty [workspace] makes this its own workspace
+# root so it does NOT join the murphy root workspace (which excludes spikes/*).
+# This is the cargo-documented fix and touches no non-spike file.
+[workspace]
+
+[package]
+name = "live_resolution_poc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mruby3-sys = "3.2.0"
+ruby-prism = "1.9.0"
