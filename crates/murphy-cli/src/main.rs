@@ -316,7 +316,7 @@ fn read_batch_sources(
                             .push((path.clone(), source));
                     }
                     Err(err) => {
-                        let should_capture = {
+                        let was_set = {
                             let mut lock = first_error.lock().expect("first error lock poisoned");
                             let was_set = lock.is_some();
                             if lock.is_none() {
@@ -324,10 +324,10 @@ fn read_batch_sources(
                             }
                             was_set
                         };
-                        if !should_capture {
+                        if !was_set {
                             cancel.store(true, Ordering::Release);
-                            return;
                         }
+                        return;
                     }
                 }
             }
