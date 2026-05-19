@@ -206,68 +206,95 @@ fn lint_source(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> Vec<Offense> 
 ///    Task-5 abort-on-first-`Err` short-circuit (a missing file anywhere
 ///    aborts the whole run), so `lint_multi_file_with_one_missing_exits_2`
 ///    is preserved. Reads are independent → done in parallel.
-/// 2. **Lint phase.** Group paths by their **content `String`** (keyed on the
-///    content itself, not a hash — zero collision risk, zero new dependency;
-///    the plan explicitly prefers this and Phase-2 scale makes holding the
-///    contents a non-concern). `par_iter` over the UNIQUE contents (this
-///    preserves Task 5's parallelism — the unique set has the same length as
-///    `files` when nothing is duplicated), running `lint_source` ONCE per
-///    unique content against a deterministic representative path (the first
-///    path in `BTreeMap`/sorted order — deterministic for defense-in-depth
-///    only; `lint_source` never writes stderr, a parse failure becomes a
-///    `Murphy/Syntax` OFFENSE whose `file` is rewritten per-path in the
-///    fan-out and `aggregate` re-sorts, so the representative choice is not
-///    observable). Then fan out: every path sharing that content gets that
-///    content's offenses with `Offense.file` rewritten to its own path
-///    (offsets/cop_name/severity/message are identical because the bytes are).
+/// 2. **Lint phase.** Group and lint in bounded-size batches to avoid
+///    holding every discovered file body simultaneously: read a batch, dedupe by
+///    content (exact equality via `String` key), lint only newly seen batch
+///    contents in parallel, and keep parsed base offenses for fan-out.
+///    `aggregate` remains the single determinism point.
 ///
 /// The flattened per-path offenses go to `aggregate` UNCHANGED — it remains
 /// the single determinism point (the total-order sort/dedupe, Task 2), so
 /// neither read/lint parallelism nor the fan-out order can perturb output.
 fn lint_files_memoized(files: &[String], registry: &CopRegistry) -> Result<Vec<Offense>, AppError> {
-    // Phase 1: read every path. `?` on the collected Result short-circuits on
-    // the first read error (missing/unreadable → exit 2), exactly as the
-    // Task-5 `par_iter().collect::<Result<_,_>>()` did.
-    let contents: Vec<String> = files
-        .par_iter()
-        .map(|f| read_source(f))
-        .collect::<Result<_, AppError>>()?;
-
-    // Group paths by content. `BTreeMap` keyed on the owned content `String`
-    // gives a deterministic representative (the first path, since `files` is
-    // already sorted upstream) and zero collision risk vs a hash. Values are
-    // the paths (in `files` order) that share that exact content.
-    let mut by_content: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (path, content) in files.iter().zip(contents.iter()) {
-        by_content
-            .entry(content.as_str())
-            .or_default()
-            .push(path.as_str());
+    #[derive(Default)]
+    struct ContentGroup {
+        representative: String,
+        paths: Vec<String>,
+        base_offenses: Vec<Offense>,
     }
 
-    // Phase 2: lint each UNIQUE content ONCE, in parallel (same parallelism
-    // as Task 5 when there are no dups), then fan out per path with the
-    // `Offense.file` rewritten. The representative is the first path for that
-    // content (deterministic for defense-in-depth only — `lint_source` never
-    // writes stderr; a parse failure is a `Murphy/Syntax` offense whose `file`
-    // is rewritten per real path below and `aggregate` re-sorts, so the
-    // representative choice is not observable).
-    let unique: Vec<(&&str, &Vec<&str>)> = by_content.iter().collect();
-    let per_unique: Vec<Vec<Offense>> = unique
-        .par_iter()
-        .map(|(content, paths)| {
-            let representative = paths[0];
-            let base = lint_source(content, representative, registry.native_cops());
-            // Fan out: one offense list per path sharing this content, with
-            // `file` set to that path. Identical content ⇒ identical
-            // offsets/cop/severity/message; only `file` differs.
-            paths
+    const BATCH_SIZE: usize = 128;
+
+    // Phase 1+2 (streaming): read in bounded batches, then lint each batch's
+    // newly-seen content once. This keeps the read-source peak memory bounded,
+    // while still preserving byte-for-byte output when combined with the final
+    // aggregate determinism point.
+    let mut by_content: BTreeMap<String, ContentGroup> = BTreeMap::new();
+    for chunk in files.chunks(BATCH_SIZE) {
+        let read: Vec<(String, String)> = chunk
+            .par_iter()
+            .map(|path| read_source(path).map(|source| (path.clone(), source)))
+            .collect::<Result<_, AppError>>()?;
+
+        // Track newly introduced content keys so we can parse each exactly once.
+        let mut newly_seen: Vec<String> = Vec::new();
+        for (path, source) in read {
+            match by_content.entry(source) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().paths.push(path);
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let content_key = entry.key().clone();
+                    entry.insert(ContentGroup {
+                        representative: path.clone(),
+                        paths: vec![path],
+                        base_offenses: Vec::new(),
+                    });
+                    newly_seen.push(content_key);
+                }
+            }
+        }
+
+        // Parse/lint each newly introduced content exactly once, in parallel.
+        let parse_jobs: Vec<(String, String)> = newly_seen
+            .iter()
+            .map(|content| {
+                let representative = by_content
+                    .get(content)
+                    .expect("newly discovered content must exist")
+                    .representative
+                    .clone();
+                (content.clone(), representative)
+            })
+            .collect();
+
+        let parsed = parse_jobs
+            .par_iter()
+            .map(|(content, representative)| {
+                let base = lint_source(content, representative, registry.native_cops());
+                (content.clone(), base)
+            })
+            .collect::<Vec<(String, Vec<Offense>)>>();
+
+        for (content, base_offenses) in parsed {
+            by_content
+                .get_mut(&content)
+                .expect("parsed content must still exist")
+                .base_offenses = base_offenses;
+        }
+    }
+
+    let per_unique: Vec<Vec<Offense>> = by_content
+        .into_values()
+        .map(|group| {
+            group
+                .paths
                 .iter()
-                .flat_map(|p| {
-                    base.iter().map(move |o| {
-                        let mut o = o.clone();
-                        o.file = (*p).to_owned();
-                        o
+                .flat_map(|path| {
+                    group.base_offenses.iter().map(|offense| {
+                        let mut offense = offense.clone();
+                        offense.file = path.to_owned();
+                        offense
                     })
                 })
                 .collect::<Vec<Offense>>()
