@@ -71,9 +71,11 @@ for the full design,
 [`docs/plans/2026-05-19-murphy-implementation-plan.md`](docs/plans/2026-05-19-murphy-implementation-plan.md)
 for the roadmap,
 [`docs/plans/2026-05-19-murphy-phase-2-plan.md`](docs/plans/2026-05-19-murphy-phase-2-plan.md)
-for the Phase 2 detailed plan, and
+for the Phase 2 detailed plan,
 [`docs/plans/2026-05-19-murphy-phase-3-plan.md`](docs/plans/2026-05-19-murphy-phase-3-plan.md)
-for the Phase 3 detailed plan.
+for the Phase 3 detailed plan, and
+[`docs/decisions/0014-phase-4-gate-review.md`](docs/decisions/0014-phase-4-gate-review.md)
+for the Phase 4 gate ADR (autocorrect).
 
 ## Quickstart
 
