@@ -6,7 +6,7 @@ eliminate RuboCop's slowness with a native Rust core.
 
 ## Status
 
-**Phase 3 — user mruby cops (complete).** Working today:
+**Phase 4 — autocorrect (complete).** Working today:
 
 - `murphy lint <file>...` parses Ruby via prism (single parse) — unchanged
   Phase-1 behavior.
@@ -38,6 +38,15 @@ eliminate RuboCop's slowness with a native Rust core.
 - Cop SDK (`Murphy::Cop` base): an `on_call_node(node)` visitor with
   `node.name` / `node.receiver_nil?` / `node.message_loc`,
   `add_offense(range, message:, severity:)`, and a `fix` block.
+- **Autocorrect:** a cop's `fix` block is now applied to source via
+  `murphy lint --fix` (or `-a`). Edits are applied in descending-offset order,
+  overlapping edits are conflict-logged and skipped, and Murphy re-parses and
+  re-lints until a fixpoint or max-iter cutoff (`--debug` prints per-file
+  iteration count, status, and conflict count). `--` separates file args from
+  flags. The `Offense.autocorrect` JSON field appears when a fix is available
+  and is absent (not `null`) when it is not — existing tooling that reads only
+  the five frozen fields (`file`, `cop_name`, `range`, `severity`, `message`)
+  is unaffected (ADR 0013).
 - A user cop whose derived name (`Murphy/<PascalCase(file-stem)>`) collides
   with a reserved engine name (e.g. `cops/no_receiver_puts.rb` →
   `Murphy/NoReceiverPuts`, `cops/syntax.rb` → `Murphy/Syntax`) is rejected
@@ -47,17 +56,16 @@ eliminate RuboCop's slowness with a native Rust core.
 - Exit codes 0/1/2/3. A malformed or unknown-key `murphy.toml` exits 2.
 
 Not yet production-ready. Murphy is described as a "linter/formatter", but
-**only the lint path exists today**. User mruby cops run, but their `fix`
-block is **captured, not applied** — there is **no** `autocorrect` field in
-the offense JSON and **no** autocorrect output yet (autocorrect *application*
-and the `Offense.autocorrect` contract are Phase 4). There is also **no**
-`murphy format` subcommand or formatter, **no** `[cops]` config or per-cop
-enable / severity-override (`murphy.toml` is discovery-only:
+**only the lint path exists today**. Autocorrect (`murphy lint --fix`/`-a`)
+applies fix blocks to source with conflict-safe descending-offset apply, a
+reparse-rerun fixpoint loop, and idempotency guarantees (ADR 0013). There is
+**no** `murphy format` subcommand or formatter, **no** `[cops]` config or
+per-cop enable / severity-override (`murphy.toml` is discovery-only:
 `[files] include`/`exclude`; cops are loaded only from `cops/`), **no**
 persistent cache (in-run memoization only), **no** LSP, and **no**
 node-pattern DSL. `.gitignore` is intentionally **not** consulted.
-Autocorrect application derives from Phase 4 onward; `[cops]` config and
-`.rubocop.yml` migration are Phase 5; the rest are later phases too. See
+`[cops]` config and `.rubocop.yml` migration are Phase 5; the rest are later
+phases too. See
 [`docs/plans/2026-05-19-murphy-design.md`](docs/plans/2026-05-19-murphy-design.md)
 for the full design,
 [`docs/plans/2026-05-19-murphy-implementation-plan.md`](docs/plans/2026-05-19-murphy-implementation-plan.md)
@@ -172,19 +180,41 @@ end
 
 The user cop's offense (`Murphy/NoPuts`) is merged with the native
 `Murphy/NoReceiverPuts` into one deterministic array (here the native cop also
-flags the receiver-less `print`):
+flags the receiver-less `print`). Because `NoPuts` has a `fix` block, its
+offense includes the `autocorrect` field (ADR 0013); offenses without a fix
+omit it entirely:
 
 ```console
 $ ./target/debug/murphy lint app.rb
-[{"file":"app.rb","cop_name":"Murphy/NoPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Do not use puts"},{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Use a logger instead of puts"},{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":13,"end_offset":18},"severity":"warning","message":"Use a logger instead of puts"}]
+[{"file":"app.rb","cop_name":"Murphy/NoPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Do not use puts","autocorrect":{"edits":[{"range":{"start_offset":0,"end_offset":4},"replacement":"logger.info"}]}},{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Use a logger instead of puts"},{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":13,"end_offset":18},"severity":"warning","message":"Use a logger instead of puts"}]
 $ echo $?
 1
 ```
 
-> **Scope note (Phase 3):** the `fix` block above is **captured but not
-> applied** — there is no `autocorrect` field in the offense JSON and no
-> autocorrect output. Autocorrect application is Phase 4; writing a `fix`
-> today only makes the cop forward-compatible.
+Apply the fix with `--fix` (or `-a`). Murphy re-parses and re-lints until a
+fixpoint; after fixing, the `puts` is replaced with `logger.info` and `app.rb`
+becomes `logger.info "hello"\nprint "world"\n`. The `print` offense from
+`Murphy/NoReceiverPuts` has no fix and remains (exit 1):
+
+```console
+$ ./target/debug/murphy lint --fix app.rb
+murphy: fixed 1 of 1 files
+[{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":20,"end_offset":25},"severity":"warning","message":"Use a logger instead of puts"}]
+$ echo $?
+1
+```
+
+Add `--debug` to see per-file iteration count, convergence status, and conflict
+count:
+
+```console
+$ ./target/debug/murphy lint --fix --debug app.rb
+murphy: fixed 1 of 1 files
+murphy: debug: app.rb iterations=1 status=Converged conflicts=0 written=true
+[{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":20,"end_offset":25},"severity":"warning","message":"Use a logger instead of puts"}]
+$ echo $?
+1
+```
 
 A broken cop is **isolated**, not fatal. Add `cops/bad.rb`:
 
@@ -201,7 +231,7 @@ It degrades to exactly one `severity:"error"` offense for that cop×file and
 
 ```console
 $ ./target/debug/murphy lint app.rb
-[{"file":"app.rb","cop_name":"Murphy/Bad","range":{"start_offset":0,"end_offset":0},"severity":"error","message":"cop `Murphy/Bad` raised an exception (isolated; design §6)"},{"file":"app.rb","cop_name":"Murphy/NoPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Do not use puts"},{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Use a logger instead of puts"},{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":13,"end_offset":18},"severity":"warning","message":"Use a logger instead of puts"}]
+[{"file":"app.rb","cop_name":"Murphy/Bad","range":{"start_offset":0,"end_offset":0},"severity":"error","message":"cop `Murphy/Bad` raised an exception (isolated; design §6)"},{"file":"app.rb","cop_name":"Murphy/NoPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Do not use puts","autocorrect":{"edits":[{"range":{"start_offset":0,"end_offset":4},"replacement":"logger.info"}]}},{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Use a logger instead of puts"},{"file":"app.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":13,"end_offset":18},"severity":"warning","message":"Use a logger instead of puts"}]
 $ echo $?
 1
 ```
@@ -258,6 +288,15 @@ cargo test -p murphy-core <name>             # single test by name
 cargo test -p murphy-cli --test cli          # one integration test target
 cargo fmt --check                            # formatting gate
 cargo clippy --all-targets -- -D warnings    # lint gate
+```
+
+Autocorrect commands:
+
+```bash
+murphy lint --fix <file>...         # apply fix blocks, write files back
+murphy lint -a <file>...            # alias for --fix
+murphy lint --fix --debug <file>... # also print per-file iteration/status/conflict line
+murphy lint --fix -- <file>...      # -- separates files from flags
 ```
 
 See [`CLAUDE.md`](CLAUDE.md) for the contributor command reference.
