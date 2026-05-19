@@ -206,17 +206,20 @@ unsafe fn cop_run<'a>(mrb: *mut mrb_state) -> &'a CopRun {
 ///
 /// Arg shape (mruby `mrb_get_args` `"iisss"`): two `i` byte offsets, an `s`
 /// message (ptr+len, NUL-safe), an `s` severity name, and an `s` edit blob
-/// (ptr+len, arbitrary bytes / NUL-safe via the `s` ptr+len format). A
-/// bad/inverted offense range degrades to no offense (a user cop must not be
-/// able to crash the engine). Invalid edits in the blob are silently dropped
-/// (PIN B); if all edits are invalid the `autocorrect` key is absent.
+/// (ptr+len; the `s` format makes the transport byte-exact so NUL / newline in
+/// legitimate source text survive — but the replacement contract is UTF-8, not
+/// arbitrary binary). A bad/inverted offense range degrades to no offense (a
+/// user cop must not be able to crash the engine). Invalid edits in the blob
+/// (bad range or non-UTF-8 replacement) are silently dropped (PIN B); if all
+/// edits are invalid the `autocorrect` key is absent.
 ///
 /// ## Edit blob wire format (kept in sync with cop_prelude.rb Fix#to_blob)
 ///
 /// Zero or more concatenated edit records:
-///   `"<start_decimal> <end_decimal> <replen_decimal> "` + exactly `replen` raw bytes.
+///   `"<start_decimal> <end_decimal> <replen_decimal> "` + exactly `replen` bytes.
 /// All numeric fields are non-negative decimal ASCII integers followed by a
-/// single space. Replacement is exactly `replen` raw bytes after the space.
+/// single space. Replacement is exactly `replen` bytes after the space and
+/// MUST be valid UTF-8 source text (non-UTF-8 → that edit dropped, PIN B).
 /// Empty blob (no fix block, or all edits dropped) → no `autocorrect` attached.
 ///
 /// Example: `fix.replace(Range.new(0,4), "hi")` encodes as `"0 4 2 hi"`.
@@ -349,11 +352,12 @@ unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) 
 /// ## Blob format (must stay in sync with `cop_prelude.rb Fix#to_blob`)
 ///
 /// Zero or more concatenated edit records:
-///   `"<start_decimal> <end_decimal> <replen_decimal> "` + exactly `replen` raw bytes.
+///   `"<start_decimal> <end_decimal> <replen_decimal> "` + exactly `replen` bytes.
 ///
 /// Each numeric field is a non-negative decimal ASCII integer followed by a
-/// single ASCII space (`0x20`). Replacement is exactly `replen` raw bytes
-/// immediately after the trailing space.
+/// single ASCII space (`0x20`). Replacement is exactly `replen` bytes
+/// immediately after the trailing space and must be valid UTF-8 source text
+/// (a non-UTF-8 replacement drops that edit — PIN B).
 ///
 /// ## Error handling (PIN B: degrade-not-panic)
 ///
@@ -367,10 +371,11 @@ unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) 
 ///   boundary → parsing **stops**. The offense + any previously decoded edits
 ///   survive.
 /// - Header + `replen` OK but the range is invalid (`start < 0 || end < 0 ||
-///   start > end || start > u32::MAX || end > u32::MAX`) → **only this edit**
-///   is silently dropped; the cursor skips its `replen` bytes and decoding
-///   continues with the next record (PIN B: one bad edit must not lose the
-///   valid edits after it).
+///   start > end || start > u32::MAX || end > u32::MAX`), OR the `replen`
+///   replacement bytes are not valid UTF-8 (the contract is UTF-8 source
+///   text, not arbitrary binary) → **only this edit** is silently dropped;
+///   the cursor skips its `replen` bytes and decoding continues with the next
+///   record (PIN B: one bad edit must not lose the valid edits after it).
 ///
 /// ## Narrowing (ADR 0001 / PIN C)
 ///
@@ -418,6 +423,19 @@ fn decode_edit_blob(blob: &[u8]) -> Vec<Edit> {
             continue;
         }
 
+        // `Edit.replacement` is a `String` and serialises as a JSON string, so
+        // the contract is valid UTF-8 (Ruby source replacement text). The
+        // length prefix only guarantees the *transport* is byte-exact (NUL /
+        // newline / comma in legitimate multi-byte source survive intact) — it
+        // does NOT widen the contract to arbitrary binary. A replacement that
+        // is not valid UTF-8 cannot be represented losslessly, so that edit is
+        // dropped (PIN B silent-drop; span known → resync & continue) rather
+        // than `from_utf8_lossy`-mangled into different bytes than requested.
+        let Ok(replacement) = std::str::from_utf8(replacement_bytes) else {
+            cursor = remaining;
+            continue;
+        };
+
         // ADR 0001: narrowing from i64 to u32. The predicate above proves
         // `0 <= start <= end <= u32::MAX`, so both `i64 as u32` casts are
         // value-preserving (no truncation). This is the single audited
@@ -428,7 +446,7 @@ fn decode_edit_blob(blob: &[u8]) -> Vec<Edit> {
                 start_offset: start as u32,
                 end_offset: end as u32,
             },
-            replacement: String::from_utf8_lossy(replacement_bytes).into_owned(),
+            replacement: replacement.to_owned(),
         };
         edits.push(edit);
         cursor = remaining;
@@ -960,6 +978,29 @@ mod tests {
                     end_offset: 4
                 },
                 replacement: "abc".into(),
+            }]
+        );
+    }
+
+    /// `Edit.replacement` is a `String`/JSON string — the contract is UTF-8
+    /// source text, NOT arbitrary binary. A non-UTF-8 replacement must drop
+    /// only that edit (span known → resync), never be `from_utf8_lossy`-
+    /// mangled into different bytes. Regression for the roborev finding.
+    #[test]
+    fn decode_edit_blob_drops_non_utf8_replacement_keeps_following_valid() {
+        // Record 1: replen 2, bytes 0xFF 0xFE (invalid UTF-8) → dropped.
+        // Record 2: 0..4 "logger.info" → valid, survives.
+        let mut blob = b"0 4 2 ".to_vec();
+        blob.extend_from_slice(&[0xFF, 0xFE]);
+        blob.extend_from_slice(b"0 4 11 logger.info");
+        assert_eq!(
+            decode_edit_blob(&blob),
+            vec![Edit {
+                range: Range {
+                    start_offset: 0,
+                    end_offset: 4
+                },
+                replacement: "logger.info".into(),
             }]
         );
     }

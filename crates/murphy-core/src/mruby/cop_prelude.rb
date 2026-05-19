@@ -24,14 +24,19 @@
 #
 # ## Edit blob wire format (Phase 4 Task 2 — kept in sync with native_emit_offense)
 #
-# `add_offense` passes fix.edits to the host as a single binary blob String
-# built by Murphy::Fix#to_blob. The blob is NUL-safe (arbitrary replacement
-# bytes); the host decodes it with the `s` (ptr+len) mrb_get_args format.
+# `add_offense` passes fix.edits to the host as a single blob String built by
+# Murphy::Fix#to_blob; the host decodes it with the `s` (ptr+len) mrb_get_args
+# format. The length prefix makes the *transport* byte-exact so NUL / newline /
+# comma inside legitimate multi-byte source text survive intact — it does NOT
+# widen the contract to arbitrary binary. `Edit.replacement` is a Rust `String`
+# serialised as a JSON string, so a replacement MUST be valid UTF-8 (it is
+# replacement *source text*); the host drops any edit whose replacement bytes
+# are not valid UTF-8 rather than corrupting them.
 #
 # Blob = zero or more concatenated edit records:
-#   "<start_decimal> <end_decimal> <replen_decimal> " + exactly replen raw bytes
+#   "<start_decimal> <end_decimal> <replen_decimal> " + exactly replen bytes
 # Fields are non-negative decimal ASCII integers followed by a single space.
-# Replacement is exactly replen raw bytes immediately after the trailing space.
+# Replacement is exactly replen bytes (UTF-8 source text) after that space.
 # Empty blob (no edits) → zero Edit records → no autocorrect attached.
 #
 # Example: fix.replace(Range.new(0,4), "hi") encodes as "0 4 2 hi"
@@ -112,10 +117,11 @@ class Murphy
       @edits << [range.start_offset, range.end_offset, ""]
     end
 
-    # Encode all edits as a single binary blob (see format spec at top of file).
-    # Each edit: "<start> <end> <replen> " + exactly replen raw bytes.
-    # Uses String#<< for NUL-safe binary concatenation (no pack available).
-    # Returns a binary String (arbitrary bytes).
+    # Encode all edits as a single blob (see format spec at top of file).
+    # Each edit: "<start> <end> <replen> " + exactly replen bytes of UTF-8
+    # replacement source text. String#<< concatenation is byte-exact (no pack
+    # available) so the length-prefixed transport stays lossless; the host
+    # drops any edit whose replacement is not valid UTF-8.
     def to_blob
       blob = ""
       @edits.each do |(start, stop, rep)|
