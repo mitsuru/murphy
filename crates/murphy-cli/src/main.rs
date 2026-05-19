@@ -1,5 +1,5 @@
 //! `murphy` command-line entry point (Task 7; multi-file Task 9; discovery
-//! Phase 2 Task 6).
+//! Phase 2 Task 6; --fix / -a / --debug Phase 4 Task 6).
 //!
 //! `murphy lint <path>...` runs the single-parse pipeline over a set of `.rb`
 //! files, aggregates the offenses *across all files*, and prints them as one
@@ -50,8 +50,8 @@
 //!   here instead of aborting the process.
 
 use murphy_core::{
-    AstContext, Cop, CopRegistry, Offense, SYNTAX_COP_NAME, Severity, aggregate, discover, parse,
-    run_cops, run_mruby_cop_isolated,
+    AstContext, Cop, CopRegistry, FixpointStatus, Offense, SYNTAX_COP_NAME, Severity, aggregate,
+    discover, parse, run_cops, run_mruby_cop_isolated, run_to_fixpoint,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::thread;
 
@@ -70,6 +70,23 @@ use std::thread;
 // the JSON to stdout exits `0` (see `run`), not `2`.
 /// Exit code: clean — zero offenses.
 const EXIT_OK: u8 = 0;
+
+/// Maximum autocorrect fixpoint iterations per file (Phase 4 Task 6, APIN5).
+///
+/// Rationale: 10 rounds is ample for any realistic cop fixpoint — cops are
+/// expected to converge in 1-2 iterations. `run_to_fixpoint` detects
+/// oscillation independently of this cap, so a cyclic cop degrades gracefully
+/// (Oscillation status) well before 10 rounds. A zero-budget (`0`) would call
+/// `lint` never, so we use a positive value. See design §5 ("最大反復で打切り").
+const MAX_FIX_ITERATIONS: u32 = 10;
+
+/// Global monotonic counter for unique sibling-temp filenames.
+///
+/// Each `write_back_atomic` call increments this before constructing the temp
+/// filename: `.murphy-fix-<pid>-<counter>.tmp`.  `AtomicU64` prevents
+/// collisions across rayon worker threads writing different files in the same
+/// run.
+static FIX_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Exit code: lint found one or more offenses.
 const EXIT_OFFENSES: u8 = 1;
 /// Exit code: config/cop/file-setup error (bad usage, missing/unreadable
@@ -459,6 +476,88 @@ fn lint_source_mruby(source: &str, file: &str, mruby_cops: &[MrubyCop]) -> Vec<O
     sink
 }
 
+/// Write `corrected` to `target` atomically using a sibling-temp + rename.
+///
+/// # APIN2 (data-safety, BLOCKER)
+///
+/// `std::fs::write` truncates the target file before writing — if the process
+/// is interrupted between truncate and write, the file is lost. Instead:
+///
+/// 1. Write `corrected` to a sibling temp file `.murphy-fix-<pid>-<N>.tmp` in
+///    the same directory as `target` (same filesystem → `rename` is atomic on
+///    POSIX).
+/// 2. `std::fs::rename(temp, target)` — atomic on the same filesystem; no
+///    truncation window.
+/// 3. On any error, attempt to clean up the temp file (best-effort).
+///
+/// The `tempfile` crate is in `[dev-dependencies]` only and MUST NOT be used
+/// here. This manual implementation is the production write-back path.
+fn write_back_atomic(target: &Path, corrected: &str) -> Result<(), AppError> {
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let counter = FIX_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let tmp_name = format!(".murphy-fix-{pid}-{counter}.tmp");
+    let tmp_path = parent.join(&tmp_name);
+
+    // Write corrected content to the temp file.
+    if let Err(e) = std::fs::write(&tmp_path, corrected) {
+        // Best-effort cleanup — ignore errors (file may not exist yet).
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(AppError::setup(format!(
+            "cannot write temp file {}: {e}",
+            tmp_path.display()
+        )));
+    }
+
+    // Atomic rename: temp → target (same directory → same filesystem).
+    if let Err(e) = std::fs::rename(&tmp_path, target) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(AppError::setup(format!(
+            "cannot rename {} → {}: {e}",
+            tmp_path.display(),
+            target.display()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Build the lint closure for `run_to_fixpoint`: parse `source`, run native +
+/// mruby cops, aggregate, then collect every `autocorrect.edits` into
+/// `Vec<Edit>`.
+///
+/// `aggregate` is called inside the closure so cross-engine determinism is
+/// preserved on every fixpoint iteration, not just the final one.
+fn lint_closure_edits<'a>(
+    source: &str,
+    file: &'a str,
+    registry: &'a CopRegistry,
+    mruby_cops: &'a [MrubyCop],
+) -> Vec<murphy_core::Edit> {
+    let mut sink = lint_source(source, file, registry.native_cops());
+    sink.extend(lint_source_mruby(source, file, mruby_cops));
+    aggregate(sink)
+        .into_iter()
+        .filter_map(|o| o.autocorrect.map(|ac| ac.edits))
+        .flatten()
+        .collect()
+}
+
+/// Per-file debug info collected during `--fix` (APIN4).
+///
+/// **Scope boundary (APIN4)**: `.6 --debug` emits ONLY autocorrect
+/// observability (fixpoint iterations, status, conflicts).  Per-cop timing /
+/// deadline / exception observability is explicitly OUT of `.6` scope and will
+/// be added in a future issue.  This type is intentionally minimal.
+struct FileDebugInfo {
+    path: String,
+    iterations: u32,
+    status: FixpointStatus,
+    conflict_count: usize,
+    conflict_reasons: Vec<murphy_core::ConflictReason>,
+    was_written: bool,
+}
+
 /// Read, parse+lint, and aggregate every file — with **in-run content
 /// memoization** (Phase 2 Task 7, Scope Fence 3: in-memory, single run only).
 ///
@@ -585,20 +684,18 @@ fn lint_files_memoized(
 /// `Err` for setup-class failures (`2`). Panics propagate to the guard in
 /// [`main`] and become `3`.
 fn run(args: &[String]) -> Result<u8, AppError> {
-    // args[0] is the program name. Expect: `lint [path]...` — the subcommand
-    // then ZERO-or-more path args (a path is a file OR a dir; precedence in
-    // the module doc). `get(1..)` instead of `&args[1..]` so `run(&[])` yields
-    // a usage error, not a slice-index panic→exit 3.
+    // args[0] is the program name. Expect: `lint [flags...] [path]...` — the
+    // subcommand then ZERO-or-more flag/path args. `get(1..)` instead of
+    // `&args[1..]` so `run(&[])` yields a usage error, not a slice-index
+    // panic→exit 3.
     //
     // Subcommand is extracted FIRST and validated independently of path
     // count: a missing subcommand (`murphy`) or a wrong one is bad usage →
     // exit 2 and never reaches discovery. ZERO paths is NOT bad usage (Task 6
-    // change): `murphy lint` discovers from the cwd. This distinction is the
-    // whole point — `bad_usage_exits_2` invokes `murphy` with no subcommand,
-    // which still exits 2; `murphy lint` (zero paths) now discovers cwd.
+    // change): `murphy lint` discovers from the cwd.
     let rest = args.get(1..).unwrap_or(&[]);
-    let (subcommand, paths) = match rest {
-        [subcommand, paths @ ..] => (subcommand.as_str(), paths),
+    let (subcommand, post_subcommand) = match rest {
+        [subcommand, rest @ ..] => (subcommand.as_str(), rest),
         [] => {
             return Err(AppError::setup("usage: murphy lint [path]..."));
         }
@@ -608,6 +705,29 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         return Err(AppError::setup(format!(
             "unknown subcommand {subcommand:?} (usage: murphy lint [path]...)"
         )));
+    }
+
+    // ── Phase 4 Task 6: flag extraction ────────────────────────────────────
+    //
+    // Strip `--fix` / `-a` / `--debug` from the post-subcommand token list
+    // BEFORE path classification.  Any other token starting with `-` is an
+    // unknown flag → setup error exit 2 (consistent with unknown-subcommand
+    // handling; do NOT silently treat as a path).
+    let mut fix = false;
+    let mut debug = false;
+    let mut path_args: Vec<&str> = Vec::new();
+
+    for token in post_subcommand {
+        match token.as_str() {
+            "--fix" | "-a" => fix = true,
+            "--debug" => debug = true,
+            flag if flag.starts_with('-') => {
+                return Err(AppError::setup(format!(
+                    "unknown flag {flag:?} (usage: murphy lint [--fix|-a] [--debug] [path]...)"
+                )));
+            }
+            path => path_args.push(path),
+        }
     }
 
     // Build the cop registry ONCE per run (P3 Task 1) and share it: the
@@ -658,13 +778,13 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // dedupe and the rayon input is sorted (deterministic — defense in depth;
     // `aggregate` re-sorts the output anyway).
     let mut targets: BTreeSet<PathBuf> = BTreeSet::new();
-    if paths.is_empty() {
+    if path_args.is_empty() {
         // Zero path args: discover from the cwd.
         for p in discover(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))? {
             targets.insert(p);
         }
     } else {
-        for arg in paths {
+        for arg in &path_args {
             let path = Path::new(arg);
             if path.is_dir() {
                 for p in discover(path).map_err(|e| AppError::setup(e.to_string()))? {
@@ -689,6 +809,136 @@ fn run(args: &[String]) -> Result<u8, AppError> {
             })
         })
         .collect::<Result<_, AppError>>()?;
+
+    // ── --fix pipeline (Phase 4 Task 6) ────────────────────────────────────
+    if fix {
+        // Per-file fixpoint: read → run_to_fixpoint → write-back if changed.
+        // Files are processed deterministically (files is already sorted from
+        // BTreeSet). Debug info is collected in order and printed after all
+        // writes (APIN4 scope: autocorrect observability only).
+        let total_files = files.len();
+        let mut fixed_count: usize = 0;
+        let mut debug_infos: Vec<FileDebugInfo> = Vec::with_capacity(files.len());
+        // Errors are collected and returned after the summary so the exit code
+        // and summary line appear consistently; the first write error aborts.
+        let mut write_error: Option<AppError> = None;
+
+        for file in &files {
+            if write_error.is_some() {
+                break;
+            }
+            let original = read_source(file)?;
+            let file_str: &str = file.as_str();
+            let registry_ref = &registry;
+            let mruby_cops_ref = &mruby_cops;
+
+            let outcome = run_to_fixpoint(
+                &original,
+                |s| lint_closure_edits(s, file_str, registry_ref, mruby_cops_ref),
+                MAX_FIX_ITERATIONS,
+            );
+
+            let was_written = if outcome.corrected != original {
+                // APIN2: sibling-temp + rename (never std::fs::write in-place).
+                match write_back_atomic(Path::new(file), &outcome.corrected) {
+                    Ok(()) => {
+                        fixed_count += 1;
+                        true
+                    }
+                    Err(e) => {
+                        write_error = Some(e);
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+            if debug {
+                debug_infos.push(FileDebugInfo {
+                    path: file.clone(),
+                    iterations: outcome.iterations,
+                    status: outcome.status,
+                    conflict_count: outcome.conflicts.len(),
+                    conflict_reasons: outcome.conflicts.iter().map(|c| c.reason.clone()).collect(),
+                    was_written,
+                });
+            }
+        }
+
+        // APIN3: ALWAYS emit exactly one summary line to stderr (regardless of
+        // --debug), even if a write error occurs.
+        eprintln!("murphy: fixed {fixed_count} of {total_files} files");
+
+        // APIN4 --debug: emit per-file autocorrect observability to STDERR.
+        // Scope boundary: ONLY fixpoint iterations / status / conflicts.
+        // Per-cop timing / deadline / exception observability is OUT of .6
+        // scope — see APIN4 in the issue design.
+        if debug {
+            for info in &debug_infos {
+                let status_label = match info.status {
+                    FixpointStatus::Converged => "Converged",
+                    FixpointStatus::MaxIterations => "MaxIterations",
+                    FixpointStatus::Oscillation => "Oscillation",
+                };
+                eprintln!(
+                    "murphy: debug: {} iterations={} status={} conflicts={} written={}",
+                    info.path, info.iterations, status_label, info.conflict_count, info.was_written,
+                );
+                for reason in &info.conflict_reasons {
+                    eprintln!("murphy: debug:   conflict reason={reason:?}");
+                }
+                if matches!(
+                    info.status,
+                    FixpointStatus::MaxIterations | FixpointStatus::Oscillation
+                ) {
+                    eprintln!(
+                        "murphy: WARNING: {} did not converge (status={status_label})",
+                        info.path
+                    );
+                }
+            }
+        }
+
+        // Surface a deferred write error after the summary.
+        if let Some(err) = write_error {
+            return Err(err);
+        }
+
+        // APIN1: stdout = offenses on the NOW-ON-DISK source (post-fix lint).
+        // Implemented by re-running `lint_files_memoized` on the same paths —
+        // this IS the same call as a plain lint, so the invariant holds by
+        // construction.
+        let offenses = lint_files_memoized(&files, &registry, &mruby_cops)?;
+
+        let json = serde_json::to_string(&offenses)
+            .map_err(|e| AppError::setup(format!("failed to serialize offenses: {e}")))?;
+        let mut stdout = std::io::stdout().lock();
+        if let Err(e) = writeln!(stdout, "{json}") {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(EXIT_OK);
+            }
+            return Err(AppError::setup(format!("failed to write stdout: {e}")));
+        }
+
+        return Ok(if offenses.is_empty() {
+            EXIT_OK
+        } else {
+            EXIT_OFFENSES
+        });
+    }
+
+    // ── Non-fix path (default): BYTE-IDENTICAL to pre-.6 behavior ──────────
+    //
+    // When NEITHER --fix NOR --debug is in effect, the pipeline is unchanged:
+    // same `lint_files_memoized` call, same stdout, same exit codes.
+    // This preserves ADR 0006/0007 frozen contract (integration_snapshot /
+    // parallel_determinism unchanged).
+    //
+    // --debug without --fix: no fixpoint runs, no autocorrect-specific output.
+    // APIN4 scope: per-cop timing etc. is NOT emitted here (out of .6 scope).
+    // `debug` is used only in the --fix branch above.
+    let _ = debug; // suppress unused-variable warning when debug=true but fix=false
 
     // Read + parse + lint + aggregate every file, with in-run content
     // memoization (Task 7): byte-identical content is parsed/linted ONCE and
