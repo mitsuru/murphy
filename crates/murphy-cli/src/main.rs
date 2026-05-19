@@ -368,20 +368,11 @@ fn lint_source_mruby(source: &str, file: &str, mruby_cops: &[MrubyCop]) -> Vec<O
 ///    Task-5 abort-on-first-`Err` short-circuit (a missing file anywhere
 ///    aborts the whole run), so `lint_multi_file_with_one_missing_exits_2`
 ///    is preserved. Reads are independent → done in parallel.
-/// 2. **Lint phase.** Group paths by their **content `String`** (keyed on the
-///    content itself, not a hash — zero collision risk, zero new dependency;
-///    the plan explicitly prefers this and Phase-2 scale makes holding the
-///    contents a non-concern). `par_iter` over the UNIQUE contents (this
-///    preserves Task 5's parallelism — the unique set has the same length as
-///    `files` when nothing is duplicated), running `lint_source` ONCE per
-///    unique content against a deterministic representative path (the first
-///    path in `BTreeMap`/sorted order — deterministic for defense-in-depth
-///    only; `lint_source` never writes stderr, a parse failure becomes a
-///    `Murphy/Syntax` OFFENSE whose `file` is rewritten per-path in the
-///    fan-out and `aggregate` re-sorts, so the representative choice is not
-///    observable). Then fan out: every path sharing that content gets that
-///    content's offenses with `Offense.file` rewritten to its own path
-///    (offsets/cop_name/severity/message are identical because the bytes are).
+/// 2. **Lint phase.** Group and lint in bounded-size batches to avoid
+///    holding every discovered file body simultaneously: read a batch, dedupe by
+///    content (exact equality via `String` key), lint only newly seen batch
+///    contents in parallel, and keep parsed base offenses for fan-out.
+///    `aggregate` remains the single determinism point.
 ///
 /// The flattened per-path offenses go to `aggregate` UNCHANGED — it remains
 /// the single determinism point (the total-order sort/dedupe, Task 2), so
@@ -436,11 +427,11 @@ fn lint_files_memoized(
             // offsets/cop/severity/message; only `file` differs.
             paths
                 .iter()
-                .flat_map(|p| {
-                    base.iter().map(move |o| {
-                        let mut o = o.clone();
-                        o.file = (*p).to_owned();
-                        o
+                .flat_map(|path| {
+                    base.iter().map(|offense| {
+                        let mut offense = offense.clone();
+                        offense.file = (*path).to_owned();
+                        offense
                     })
                 })
                 .collect::<Vec<Offense>>()
