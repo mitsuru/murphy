@@ -334,6 +334,13 @@ fn lint_source(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> Vec<Offense> 
 /// the syntax error is already reported once. (`AstContext::new` is only built
 /// when `parse` succeeded, so this is also strictly less work.)
 fn lint_source_mruby(source: &str, file: &str, mruby_cops: &[MrubyCop]) -> Vec<Offense> {
+    // I-2 (deferred to Phase 4, tracked): this `parse(source).is_err()` then
+    // `AstContext::new` (which parses again) double-parses unique cop'd content.
+    // It is NOT collapsed into a single `ctx.parse_result().errors()` check
+    // because `crate::parse::parse` ALSO applies the `exceeds_offset_domain`
+    // u32 byte-offset guard up front, which `ParseResult::errors()` does not
+    // subsume — collapsing would silently drop that guard, so it is not
+    // provably byte-identical (murphy-cql hard gate: any doubt ⇒ defer).
     if mruby_cops.is_empty() || parse(source).is_err() {
         return Vec::new();
     }

@@ -413,6 +413,68 @@ unsafe fn register_sdk(mrb: *mut mrb_state) {
     }
 }
 
+/// `Murphy.__test_sleep_ms(n)` — **TEST-ONLY**, `#[cfg(test)]`-gated.
+///
+/// A cop calls this to sleep a controlled `n` milliseconds on the per-cop
+/// child thread. It is the *deterministic* mechanism for the late-finish
+/// stress test ([`tests::late_finish_after_timeout_is_sound_under_load`]): a
+/// cop that calls `Murphy.__test_sleep_ms(deadline + ε)` reliably returns
+/// *just after* the watchdog `recv_timeout` fired, hitting the
+/// detached-`MrubyState::Drop`-while-the-caller-has-moved-on window — without
+/// the timing fragility of a calibrated busy-loop.
+///
+/// This compiles ONLY under `cfg(test)` (the lib's own unit-test build); it is
+/// absent from every production build and adds no production surface (ADR 0003
+/// fence: a test affordance must not affect production). It is registered by
+/// the matching `#[cfg(test)]` arm in [`cop_run_body`].
+///
+/// # Safety
+///
+/// Standard native-callback contract: `mrb` is a valid non-null `mrb_state`;
+/// one required `i` arg. Sleeps the calling (child) thread only; touches no
+/// `ud`/AST state, so it cannot perturb the soundness argument.
+#[cfg(test)]
+unsafe extern "C" fn native_test_sleep_ms(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+    let mut ms: mrb_int = 0;
+    // SAFETY: native callback; `mrb` valid & non-null; `c"i"` requests exactly
+    // one `mrb_int`; `&mut ms` is a live, correctly-typed local out-pointer
+    // that outlives the call.
+    unsafe {
+        mrb_get_args(mrb, c"i".as_ptr(), &mut ms as *mut mrb_int);
+    }
+    if ms > 0 {
+        thread::sleep(Duration::from_millis(ms as u64));
+    }
+    // SAFETY: `mrb` valid & non-null.
+    unsafe { eval_nil(mrb) }
+}
+
+/// Register the `#[cfg(test)]`-only `Murphy.__test_sleep_ms` on the `Murphy`
+/// class (which `primitives::register` defined first). Called ONLY from the
+/// `#[cfg(test)]` arm in [`cop_run_body`]; never compiled into production.
+///
+/// # Safety
+///
+/// `mrb` must be a valid non-null `mrb_state`; the `Murphy` class must already
+/// exist (`primitives::register` ran first). Defines a function only.
+#[cfg(test)]
+unsafe fn register_test_sleep(mrb: *mut mrb_state) {
+    // SAFETY: `mrb` valid & non-null; `Murphy` exists (register ran first);
+    // the name is a static NUL-terminated id; the fn matches the mruby
+    // native-callback ABI; `args_req(1)` reproduces `MRB_ARGS_REQ` for the
+    // single `n` arg (ADR 0002 finding 1).
+    unsafe {
+        let murphy = mrb_class_get(mrb, c"Murphy".as_ptr());
+        mrb_define_module_function(
+            mrb,
+            murphy,
+            c"__test_sleep_ms".as_ptr(),
+            Some(native_test_sleep_ms),
+            args_req(1),
+        );
+    }
+}
+
 /// The embedded `Murphy::Cop` SDK prelude (the sibling `cop_prelude.rb`),
 /// `include_str!`-baked into the binary so a cop author needs no toolchain —
 /// they just drop a `.rb` into `cops/` (design §2/§4). Loaded into the
@@ -501,6 +563,16 @@ fn cop_run_body(cop_run: &CopRun, cop_source: &str) -> bool {
     unsafe {
         crate::mruby::primitives::register(st.raw());
         register_sdk(st.raw());
+    }
+    // TEST-ONLY (cfg(test)): also expose `Murphy.__test_sleep_ms` so the
+    // late-finish stress test can deterministically land a cop just past the
+    // injected deadline. Absent from every production build — Task-5
+    // production logic is unchanged (this block does not exist there).
+    #[cfg(test)]
+    // SAFETY: `st.raw()` is the same valid non-null `mrb_state`; `Murphy`
+    // exists (`primitives::register` ran above). Defines a function only.
+    unsafe {
+        register_test_sleep(st.raw());
     }
     // The prelude defines the SDK base; it must not raise. The cop `.rb` and
     // the dispatch (`BOOTSTRAP`, which invokes `on_call_node`) can both raise
@@ -653,6 +725,14 @@ pub fn run_mruby_cop_isolated_with_deadline(
         };
         // If the caller already timed out, `rx` is dropped and this `send`
         // fails harmlessly (ADR 0009 rule 6) — the thread just exits.
+        //
+        // SOLE-SEND INVARIANT (Task 7+/Phase 4 MUST NOT break): this is the
+        // ONLY `tx.send` on this channel — the child sends EXACTLY ONCE unless
+        // it panics or is abandoned (runaway stuck in `mrb_load_string`). The
+        // watchdog's `Disconnected` arm reports "worker thread died
+        // unexpectedly" on the strength of that invariant; a future early
+        // `return` that skips this `send` would make a normal exit look like a
+        // panic. Do NOT add a code path that leaves this `send` unreached.
         let _ = tx.send(outcome);
         // `cop_run` (incl. the captured-only `fixes`, soft-(a)) drops here,
         // AFTER `mrb_close` ran inside `cop_run_body` — never applied /
@@ -752,6 +832,235 @@ end
         assert!(
             !jb.contains("autocorrect"),
             "ADR 0006: no autocorrect in the serialized contract: {jb}"
+        );
+    }
+
+    // ===================================================================
+    // Late-finish-after-timeout stress test (P3 Task 8 / ADR 0012 gate
+    // prerequisite — murphy-cql).
+    //
+    // ## ThreadSanitizer — recommended future CI (ADR-0009 TSan loop)
+    //
+    // The `Send + Sync` / concurrency soundness of the `crates/` embedded-
+    // mruby path does NOT rest on a sanitizer run. It rests on, in order:
+    //
+    //   1. ADR 0009's read-only-immutable-arena reasoning — the prism arena
+    //      is only ever read (rule 3), the offense `sink`/`fixes` are
+    //      `CopRun`-disjoint fields (the field-disjointness argument on
+    //      `CopRun`), and each child owns its OWN `Arc<AstContext>` clone so
+    //      the AST outlives any late zombie native call (rule 1);
+    //   2. the spike's concurrent-stress evidence (`composition_poc`); and
+    //   3. THIS late-finish stress test, which exercises the one window
+    //      ADR 0009 rule 6 reasons about but no prior test forced under
+    //      load: a child's `MrubyState::Drop` (`mrb_close` + GC finalizers)
+    //      running CONCURRENTLY with the caller having moved on and dropped
+    //      its own `Arc<AstContext>`.
+    //
+    // Running ThreadSanitizer over this path remains a RECOMMENDED future
+    // CI addition (ADR 0009's honest stated limitation: the soundness
+    // argument is by-construction, not yet machine-checked). It is NOT a
+    // Phase-3 blocker — by-construction soundness + this guard is the
+    // Phase-3 bar; TSan is the belt-and-suspenders follow-up. This module
+    // doc is the documentation that closes the ADR-0009 TSan loop for
+    // Phase 3.
+    //
+    // ## RED honesty
+    //
+    // This is NOT a TDD RED→GREEN test. The late-finish path is sound by
+    // construction (ADR 0009 rule 1: each child owns its own `Arc` clone;
+    // `composition_poc`-precedented) — there is no honest pre-implementation
+    // RED for "no UB", just as `parallel_determinism` has none. The value
+    // here is a PERMANENT regression / UB guard that additionally drives
+    // the detached-Drop window under load (timing jitter across many
+    // iterations), so a future change that breaks the per-child-Arc rule or
+    // the drop ordering is caught.
+    // ===================================================================
+
+    /// Injected deadline for the late-finish stress. Short so 100 iterations
+    /// stay fast, yet far above thread-spawn + cold-mruby-init noise.
+    #[cfg(test)]
+    const LF_DEADLINE_MS: u64 = 60;
+    /// The test cop sleeps this long on its child thread — comfortably PAST
+    /// `LF_DEADLINE_MS` (3× margin) so the watchdog `recv_timeout` ALWAYS
+    /// fires first and the child returns *just after*, deterministically
+    /// landing in the detached-`MrubyState::Drop`-while-caller-moved-on
+    /// window. A calibrated busy-loop would be jitter-fragile here; a real
+    /// `thread::sleep` via the cfg(test) `Murphy.__test_sleep_ms` primitive
+    /// makes "reliably just-late" hold even on a loaded CI host.
+    #[cfg(test)]
+    const LF_SLEEP_MS: u64 = 180;
+
+    /// A cop whose `on_call_node` sleeps PAST the injected deadline (via the
+    /// cfg(test) `Murphy.__test_sleep_ms`). It DOES finish (not a runaway):
+    /// it returns `LF_SLEEP_MS - LF_DEADLINE_MS` ms *after* the watchdog has
+    /// already timed out, dropped `rx`, and the caller has moved on and
+    /// dropped its `Arc<AstContext>` — the precise window under test.
+    #[cfg(test)]
+    fn late_finish_rb() -> String {
+        // The sleep value is `LF_SLEEP_MS` (single source of truth), spliced
+        // into the cop so the Ruby and the Rust margin assertion can never
+        // drift apart.
+        format!(
+            r#"
+class LateFinishCop < Murphy::Cop
+  def on_call_node(node)
+    return unless node.name == :puts && node.receiver_nil?
+    Murphy.__test_sleep_ms({LF_SLEEP_MS})
+    add_offense(node.message_loc, message: "late but finished")
+  end
+end
+"#
+        )
+    }
+
+    /// Known-good cop run AFTER each abandoned late-finisher, on a FRESH
+    /// `Arc<AstContext>`, to prove the abandoned thread's concurrent
+    /// `mrb_close`/Drop did not corrupt a subsequent good run.
+    #[cfg(test)]
+    const GOOD_RB: &str = r#"
+class GoodAfterCop < Murphy::Cop
+  def on_call_node(node)
+    return unless node.name == :puts && node.receiver_nil?
+    add_offense(node.message_loc, message: "no bare puts")
+  end
+end
+"#;
+
+    /// **Late-finish-after-timeout stress (murphy-cql core deliverable).**
+    ///
+    /// Mechanism — RELIABLY hitting the window: the cop calls the
+    /// `#[cfg(test)]` `Murphy.__test_sleep_ms(LF_SLEEP_MS=180)` from inside
+    /// `on_call_node`, while the watchdog runs with an injected
+    /// `LF_DEADLINE_MS=60`. The 3× margin makes the ordering deterministic:
+    /// the watchdog's `recv_timeout(60ms)` ALWAYS fires first → it returns
+    /// one deadline `error offense` and DROPS `rx`; the caller returns and
+    /// drops ITS `Arc<AstContext>`; ~120 ms later the abandoned child wakes,
+    /// finishes `cop_run_body` (its `MrubyState::Drop` runs `mrb_close` + GC
+    /// finalizers), its `let _ = tx.send` fails harmlessly into the dropped
+    /// `rx`, then `CopRun` + the child-owned `Arc` clone drop — all
+    /// CONCURRENTLY with the caller already having moved on. That is exactly
+    /// the detached-Drop-after-caller-moved-on window (ADR 0009 rules 1 & 6).
+    /// Repeated `ITERS=100` times to cover scheduler timing jitter where the
+    /// child's `mrb_close`/Drop overlaps the caller's `Arc` drop differently.
+    ///
+    /// Assertions, per the murphy-cql scope:
+    ///   (a) NO crash / panic / abort / UB across ALL iterations — the test
+    ///       process stays alive and the test completes;
+    ///   (b) a subsequent KNOWN-GOOD cop on a FRESH `Arc<AstContext>` after
+    ///       each abandoned late-finisher is uncorrupted (exactly its one
+    ///       expected `Warning` offense) — the abandoned thread's concurrent
+    ///       `mrb_close`/Drop did not poison later runs;
+    ///   (c) BOUNDED: each late-finish iteration returns in ~deadline (NOT
+    ///       hung — `< LF_DEADLINE_MS * 8`), and the late-finish run yields
+    ///       exactly ONE deadline `error offense` (the deterministic
+    ///       contract: the child's `send` lands after `rx` is dropped).
+    #[test]
+    fn late_finish_after_timeout_is_sound_under_load() {
+        const ITERS: usize = 100;
+        // The margin invariant the deterministic ordering rests on: the cop
+        // sleeps comfortably PAST the deadline (3× margin) so the watchdog
+        // always fires first (reliably-just-late, not jitter-fragile).
+        // Compile-time enforced — a future tweak to either constant that
+        // narrows the margin fails the build, not a flaky run.
+        const _: () = assert!(LF_SLEEP_MS >= LF_DEADLINE_MS * 3);
+        let deadline = Duration::from_millis(LF_DEADLINE_MS);
+        let bound = deadline * 8;
+        let src = b"puts \"hi\"\n".to_vec();
+        let late_finish_rb = late_finish_rb();
+
+        let suite_start = std::time::Instant::now();
+
+        for i in 0..ITERS {
+            // FRESH ctx each iteration: the caller's `Arc` is created here and
+            // dropped at end of iteration, while the previous iteration's
+            // abandoned child may still be mid-`mrb_close`/Drop on ITS OWN
+            // (different) child-owned clone — the strongest form of the
+            // window (drop-while-detached-child-still-running).
+            let ctx_late: Arc<AstContext> = AstContext::new(src.clone());
+
+            let t0 = std::time::Instant::now();
+            let late = run_mruby_cop_isolated_with_deadline(
+                &ctx_late,
+                &late_finish_rb,
+                "Murphy/LateFinish",
+                "late.rb",
+                deadline,
+            );
+            let elapsed = t0.elapsed();
+
+            // (c) BOUNDED — the caller was not held hostage by the sleeping
+            // (then late-finishing) child; it returned at ~deadline.
+            assert!(
+                elapsed < bound,
+                "iter {i}: late-finish run must be bounded by the watchdog \
+                 (elapsed {elapsed:?}, deadline {deadline:?}) — not hung"
+            );
+            // (c) Deterministic contract: the child's `send` lands AFTER the
+            // watchdog dropped `rx`, so this is exactly one deadline error
+            // offense (never the cop's real offense — that arrives too late).
+            assert_eq!(
+                late.len(),
+                1,
+                "iter {i}: late-finish → exactly one deadline error offense \
+                 (got {late:?})"
+            );
+            assert_eq!(late[0].severity, Severity::Error, "iter {i}: {late:?}");
+            assert_eq!(late[0].cop_name, "Murphy/LateFinish", "iter {i}");
+            assert!(
+                late[0].message.to_lowercase().contains("deadline"),
+                "iter {i}: must be the deadline error offense: {}",
+                late[0].message
+            );
+
+            // Caller drops its `Arc<AstContext>` HERE while the abandoned
+            // child is (likely) still finishing its `mrb_close`/Drop on its
+            // own clone — the concurrent-Drop window.
+            drop(ctx_late);
+
+            // (b) A KNOWN-GOOD cop on a FRESH `Arc` right after the abandoned
+            // late-finisher must be uncorrupted: exactly its one expected
+            // Warning offense. (Run via the SAME isolated path so a poisoned
+            // worker/thread-local or a torn AST would show here.)
+            let ctx_good: Arc<AstContext> = AstContext::new(src.clone());
+            let good = run_mruby_cop_isolated_with_deadline(
+                &ctx_good,
+                GOOD_RB,
+                "Murphy/GoodAfter",
+                "good.rb",
+                Duration::from_secs(2),
+            );
+            assert_eq!(
+                good.len(),
+                1,
+                "iter {i}: a good cop after the abandoned late-finisher must \
+                 be uncorrupted — exactly one offense (got {good:?})"
+            );
+            assert_eq!(good[0].severity, Severity::Warning, "iter {i}: {good:?}");
+            assert_eq!(good[0].cop_name, "Murphy/GoodAfter", "iter {i}");
+            assert_eq!(good[0].message, "no bare puts", "iter {i}");
+        }
+
+        // (a) Reaching here = NO crash / panic / abort / UB across all 100
+        // iterations (the process stayed alive, the test completed). Also
+        // bound the whole suite: 100 iters × ~deadline ≈ 6 s ceiling — proof
+        // the suite itself is bounded, not silently hanging on one iteration.
+        let suite = suite_start.elapsed();
+        assert!(
+            suite < deadline * (ITERS as u32) * 2 + Duration::from_secs(10),
+            "the whole late-finish stress suite must be bounded \
+             (elapsed {suite:?}) — no iteration hung"
+        );
+        // FLOOR: each late-finish iteration MUST have actually reached the
+        // watchdog timeout (not all completed fast — which would mean the
+        // detached-Drop window was never exercised and this guard is vacuous).
+        // Each iteration cannot return before its `deadline` elapses, so the
+        // suite wall time must exceed `ITERS × deadline`. This makes the test
+        // self-prove it is genuinely hitting the window even on a slow CI host.
+        assert!(
+            suite > deadline * (ITERS as u32),
+            "the suite must exceed ITERS×deadline (elapsed {suite:?}) — \
+             proves every iteration actually hit the watchdog timeout and \
+             exercised the late-finish/detached-Drop window (not vacuous)"
         );
     }
 }
