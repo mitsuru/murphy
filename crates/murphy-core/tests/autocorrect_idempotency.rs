@@ -19,16 +19,17 @@
 //!
 //! * `apply_matches_expected` — verifies `apply_edits(input, edits) == expected`.
 //!   This requires the descending-offset algorithm; un-ignored by `.4`.
-//! * `idempotency_no_oscillation` — verifies that applying the same edit set to
-//!   the already-corrected source yields the same result (no oscillation / no
-//!   double-apply).  Un-ignored by `.4`.
 //!
 //! ## What is deferred to murphy-hwe.5
 //!
 //! True idempotency requires the **re-derive-from-corrected-source** form:
 //! run all cops on `apply_edits(input, edits)`, get zero new edits, repeat
-//! until stable.  That needs the reparse loop (`.5`) and is not encoded here.
-//! The harness uses the weaker *same-edit-set-twice* form as a placeholder.
+//! until stable.  That needs the reparse loop (`.5`) and is NOT encoded here.
+//!
+//! Note: the "same-edit-set twice" form does NOT hold in general (applying
+//! the same byte-range edits to already-shifted source corrupts it), so it is
+//! deliberately NOT in this harness.  murphy-hwe.5's reparse loop encodes the
+//! correct "re-derive edits from corrected source → zero new edits" property.
 //!
 //! ## Fixture table
 //!
@@ -57,7 +58,7 @@ struct Case {
     expected: &'static str,
 }
 
-/// Build the canonical fixture table used by all three test functions.
+/// Build the canonical fixture table used by all test functions.
 ///
 /// Fixtures are defined once here to avoid duplication across test functions.
 fn cases() -> Vec<Case> {
@@ -121,44 +122,7 @@ fn cases() -> Vec<Case> {
 }
 
 // ---------------------------------------------------------------------------
-// Helper
-// ---------------------------------------------------------------------------
-
-/// Assert the idempotency property for ONE fixture row.
-///
-/// **Green today (murphy-hwe.3):** The empty-edits identity half —
-/// `apply_edits(expected, &[]) == expected`.
-///
-/// **`#[ignore]`'d halves (murphy-hwe.4):**
-/// * `apply_edits(input, edits) == expected` (apply correctness).
-/// * `apply_edits(expected, edits) == expected` (same-edit-set non-oscillation).
-///
-/// This helper is called by the three test functions below; each function
-/// carries its own `#[ignore]` as appropriate so the non-apply parts are
-/// always exercised while the apply-dependent parts are pinned.
-fn assert_idempotent_empty_half(case: &Case) {
-    // Weak idempotency form (always assertable): corrected source + empty edits
-    // = corrected source.  This is `apply_edits(expected, &[]) == expected`.
-    let re_applied = apply_edits(case.expected, &[]);
-    assert_eq!(
-        re_applied, case.expected,
-        "empty-edits identity failed for case {:?}: \
-         apply_edits(expected, &[]) should equal expected",
-        case.name
-    );
-
-    // Also assert the same for input (empty edits leave input unchanged).
-    let input_unchanged = apply_edits(case.input, &[]);
-    assert_eq!(
-        input_unchanged, case.input,
-        "empty-edits identity failed for case {:?}: \
-         apply_edits(input, &[]) should equal input",
-        case.name
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test functions
+// Tests
 // ---------------------------------------------------------------------------
 
 /// Empty-edits identity holds for all fixture rows (no `#[ignore]` — green now).
@@ -169,7 +133,24 @@ fn assert_idempotent_empty_half(case: &Case) {
 #[test]
 fn empty_edits_is_identity() {
     for case in &cases() {
-        assert_idempotent_empty_half(case);
+        // Empty edits leave input unchanged.
+        let input_unchanged = apply_edits(case.input, &[]);
+        assert_eq!(
+            input_unchanged, case.input,
+            "empty-edits identity failed for case {:?}: \
+             apply_edits(input, &[]) should equal input",
+            case.name
+        );
+
+        // Weak idempotency form (DECISION 4): corrected source + empty edits
+        // = corrected source.  This is `apply_edits(expected, &[]) == expected`.
+        let re_applied = apply_edits(case.expected, &[]);
+        assert_eq!(
+            re_applied, case.expected,
+            "empty-edits identity failed for case {:?}: \
+             apply_edits(expected, &[]) should equal expected",
+            case.name
+        );
     }
 }
 
@@ -186,30 +167,6 @@ fn apply_matches_expected() {
         assert_eq!(
             corrected, case.expected,
             "apply correctness failed for case {:?}",
-            case.name
-        );
-    }
-}
-
-/// Re-applying the same edit set to the already-corrected source yields the
-/// same result — no oscillation (requires descending-offset apply — murphy-hwe.4).
-///
-/// Un-ignored and made green by murphy-hwe.4.  Note: TRUE idempotency (re-derive
-/// edits from corrected source, get zero) requires the reparse loop (murphy-hwe.5)
-/// and is not encoded here.  This is the weaker "same-edit-set-twice" form.
-#[test]
-#[ignore = "apply lands in murphy-hwe.4 (this harness pins the property first)"]
-fn idempotency_no_oscillation() {
-    for case in &cases() {
-        // First apply: input → expected_corrected.
-        let first = apply_edits(case.input, &case.edits);
-        // Second apply: same edit set on already-corrected source should be
-        // stable (idempotent under same-edit-set semantics).
-        let second = apply_edits(&first, &case.edits);
-        assert_eq!(
-            second, first,
-            "no-oscillation failed for case {:?}: \
-             applying edits twice produced different output",
             case.name
         );
     }
