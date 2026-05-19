@@ -13,9 +13,11 @@ pub use aggregator::aggregate;
 pub use cop::{Cop, CopContext, run_cops};
 pub use cops::no_receiver_puts::NoReceiverPuts;
 pub use discovery::{ConfigError, discover};
-// Phase 3 Task 2 keystone — the mruby lifecycle/ownership wrapper. Re-exported
-// for later tasks (3/4/5/7) and the wrapper's own tests; nothing in the CLI
-// pipeline calls this yet (Task 7 wires it).
+// Phase 3 Task 2 keystone — the mruby lifecycle/ownership wrapper. Task 3's
+// read-only native-primitive IDL registration (`register_primitives`) is
+// in-crate only (`pub(crate)` in `mruby`), so it is deliberately NOT
+// re-exported here — Task 4/5/7 reach it via `crate::mruby::register_primitives`.
+// Nothing in the CLI pipeline calls it yet (Task 7 wires it).
 pub use mruby::{AstContext, MrubyState};
 pub use offense::{Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};

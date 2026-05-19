@@ -304,6 +304,26 @@ impl MrubyState {
         }
     }
 
+    /// The raw `*mut mrb_state` this wrapper owns, for registering native
+    /// primitives / dispatching cops **on the same thread** (Task 3's
+    /// `primitives::register`; Task 4's dispatch). Purely additive — it touches
+    /// nothing about lifecycle, ownership, drop ordering, or `Send`/`Sync`.
+    ///
+    /// The returned pointer is valid only while `&self` is alive and MUST NOT
+    /// be passed to `mrb_close` (this wrapper's `Drop` is the unique closer —
+    /// normal-path only). `pub(crate)`: an in-crate detail (Tasks 3/4), not
+    /// public API.
+    ///
+    /// `allow(dead_code)`: Task 3's only consumer is the `primitives` module's
+    /// `#[cfg(test)]` `.rb`-driven tests; the non-test call site (the per-cop
+    /// worker registering primitives) lands in Task 4. The accessor is shipped
+    /// now because Task 3 genuinely requires it (registering primitives needs
+    /// the raw `mrb_state`), avoiding a fragile layout transmute in the tests.
+    #[allow(dead_code)]
+    pub(crate) fn raw(&self) -> *mut mrb_state {
+        self.mrb
+    }
+
     /// Evaluate a Ruby `script` in this state (`mrb_load_string`).
     ///
     /// Task 2 scope: enough to prove open→run→close. Exception isolation
