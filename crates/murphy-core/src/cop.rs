@@ -35,8 +35,19 @@ pub struct CopContext<'a> {
 /// A cop inspects nodes and pushes [`Offense`]s into `sink`. It is given an
 /// immutable borrow of the node and no means to mutate the tree, by design.
 ///
-/// Phase 2 will add `Send + Sync` for all-core parallel dispatch (design §3); Phase-1 cops are stateless and will satisfy it.
-pub trait Cop {
+/// `Send + Sync` (ADR 0002 phase-2 flag) so a cop can be fanned across OS
+/// threads for all-core parallel dispatch (design §3; Task 5 wires the actual
+/// parallelism). This is the *minimal* bound — just the two auto-markers, no
+/// `'static`/`Clone`/etc. — so a future Phase-3 mruby-backed cop wrapper that
+/// moves to a worker thread (ADR 0003) can still satisfy it. Phase-1 cops are
+/// stateless unit structs and auto-satisfy it with no impl change.
+///
+/// Phase-3 trap: a Phase-3 mruby cop satisfies this bound only because the
+/// wrapper holds `Send + Sync` data (config, script path, `Arc<AstContext>`);
+/// the `mrb_state` is created on the per-cop worker thread (ADR 0003) and MUST
+/// NOT be stored in a cop struct field — `mrb_state` is not `Sync`, so storing
+/// it would silently break this bound (and the ADR 0002 drop-order rule).
+pub trait Cop: Send + Sync {
     /// The cop's name (e.g. used for [`Offense::cop_name`]).
     fn name(&self) -> &str;
 
@@ -140,6 +151,117 @@ mod tests {
         let cops: Vec<Box<dyn Cop>> = vec![Box::new(CountingStubCop), Box::new(CountingStubCop)];
         run_cops(&ast, "t.rb", &cops, &mut sink);
         assert_eq!(sink.len(), 4);
+    }
+
+    /// Test-only stub cop "A": one offense per call node at the selector
+    /// (`message_loc`) range. Distinct `name()` from [`StubCopB`] so the
+    /// Task-2 total-order `cop_name` tiebreak yields a deterministic
+    /// interleave. Never compiled into the binary (`#[cfg(test)]` only).
+    #[derive(Default)]
+    struct StubCopA;
+
+    impl Cop for StubCopA {
+        fn name(&self) -> &str {
+            "Test/StubA"
+        }
+
+        fn on_call_node(
+            &self,
+            node: &ruby_prism::CallNode<'_>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
+        ) {
+            let Some(loc) = node.message_loc() else {
+                return;
+            };
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range::from_prism_location(&loc),
+                Severity::Warning,
+                "stub",
+            ));
+        }
+    }
+
+    /// Test-only stub cop "B": identical shape to [`StubCopA`] but a distinct
+    /// `name()`, so two-cop fan-out over a multi-call source produces a fully
+    /// deterministic aggregated `Vec` (`Test/StubA` < `Test/StubB`).
+    #[derive(Default)]
+    struct StubCopB;
+
+    impl Cop for StubCopB {
+        fn name(&self) -> &str {
+            "Test/StubB"
+        }
+
+        fn on_call_node(
+            &self,
+            node: &ruby_prism::CallNode<'_>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
+        ) {
+            let Some(loc) = node.message_loc() else {
+                return;
+            };
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range::from_prism_location(&loc),
+                Severity::Warning,
+                "stub",
+            ));
+        }
+    }
+
+    #[test]
+    fn two_distinct_cops_dispatch_and_total_order_is_deterministic() {
+        // SCOPE: this proves SEQUENTIAL input-order independence only — a
+        // single-threaded `run_cops` whose output is made deterministic by
+        // `aggregate`'s Task-2 total order. It does NOT exercise Task 5's
+        // scenario (offenses from multiple files merged across rayon threads),
+        // so it is NOT evidence of parallel-dispatch determinism. Task 5
+        // (murphy-aom) MUST add its own parallel-dispatch determinism test;
+        // this test does not cover that.
+        //
+        // `foo; bar\n`: `foo` selector = bytes 0..3, `bar` selector = 5..8
+        // (ADR 0001 bare-identifier CallNodes). 2 cops × 2 nodes = 4
+        // offenses; `aggregate`'s Task-2 total order
+        // `(file, start, end, cop_name, message, severity)` makes the
+        // combined Vec fully deterministic: per offset, `Test/StubA` sorts
+        // before `Test/StubB`.
+        let src = "foo; bar\n";
+        let ast = parse(src).unwrap();
+        let mut sink = Vec::new();
+        // ADR 0002 phase-2 flag: `Cop` is `Send + Sync` so cops can be
+        // fanned across OS threads (Task 5 parallel dispatch). This static
+        // assertion fails to compile until the supertrait bound is added.
+        fn assert_send_sync<T: Send + Sync + ?Sized>() {}
+        assert_send_sync::<dyn Cop>();
+
+        // Constructed directly (not `::default()`) to match this file's
+        // existing `CountingStubCop` convention and clippy's
+        // `default_constructed_unit_structs` lint; `#[derive(Default)]` on
+        // each stub still satisfies the ADR 0002 forward-flag requirement.
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(StubCopA), Box::new(StubCopB)];
+        run_cops(&ast, "t.rb", &cops, &mut sink);
+        let out = crate::aggregate(sink);
+
+        let foo = Range {
+            start_offset: 0,
+            end_offset: 3,
+        };
+        let bar = Range {
+            start_offset: 5,
+            end_offset: 8,
+        };
+        let expected = vec![
+            Offense::new("t.rb", "Test/StubA", foo, Severity::Warning, "stub"),
+            Offense::new("t.rb", "Test/StubB", foo, Severity::Warning, "stub"),
+            Offense::new("t.rb", "Test/StubA", bar, Severity::Warning, "stub"),
+            Offense::new("t.rb", "Test/StubB", bar, Severity::Warning, "stub"),
+        ];
+        assert_eq!(out, expected);
     }
 
     #[test]
