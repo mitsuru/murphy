@@ -177,3 +177,10 @@ correctly and is a hard failure.
   loop, idempotency, etc.) is Phase 4.
 - No changes to exit codes, CLI output format, or any other contract.
 - No changes to `crates/murphy-cli` in this task.
+
+## Phase 4 Task 2 update (murphy-hwe.2)
+
+`mruby::sdk::FixEdit` and `CopRun.fixes` were removed in Phase 4 Task 2.
+The ADR 0009 field-disjointness soundness argument now covers only the
+`ctx ↔ sink` pair (no second `UnsafeCell`); the prior `sink`/`fixes` single-writer
+clause is no longer applicable and has been removed from the `CopRun` doc.
