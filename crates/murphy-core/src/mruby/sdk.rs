@@ -46,6 +46,9 @@
 
 use std::cell::UnsafeCell;
 use std::sync::Arc;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use mruby3_sys::{
     RClass, mrb_class_get, mrb_define_module_function, mrb_get_args, mrb_int, mrb_state, mrb_value,
@@ -450,26 +453,12 @@ pub fn run_mruby_cop(
     // The worker owns its OWN `Arc<AstContext>` clone (ADR 0009 rule 1): the
     // `ud` raw pointer is not the liveness guarantee.
     let cop_run = CopRun::new(Arc::clone(ctx), cop_name, file);
-
-    {
-        let mut st = MrubyState::open();
-        st.set_cop_run(&cop_run);
-        // SAFETY: `st.raw()` is a valid non-null `mrb_state` living as long as
-        // `st`; `ud` was set to `&cop_run` (alive for this whole scope, which
-        // ends AFTER `st` drops). `primitives::register` defines the
-        // read-only node IDL; `register_sdk` then defines `__emit_offense`
-        // (it requires `Murphy` to already exist, hence the order). Both only
-        // define functions — they read nothing.
-        unsafe {
-            crate::mruby::primitives::register(st.raw());
-            register_sdk(st.raw());
-        }
-        st.eval(PRELUDE);
-        st.eval(cop_source);
-        st.eval(BOOTSTRAP);
-        // `st` drops here → `mrb_close`, BEFORE `cop_run` (and its Arc clone)
-        // drop below — the Task-2 normal-path ordering (ADR 0009 rule 4).
-    }
+    // Task 4 is the synchronous path: a `raise` is observed (Task 5's
+    // exception-checked eval) but mapped to no offense here — exception→
+    // error-offense is `run_mruby_cop_isolated`'s job, NOT this primitive's
+    // (Task-4 scope is unchanged: load+run a cop synchronously for its own
+    // tests). `_raised` is discarded deliberately.
+    let _raised = cop_run_body(&cop_run, cop_source);
 
     // Drain the cop-run-owned sink. `cop_run` is solely owned here and the
     // `mrb_state` is closed, so no native callback can be running: taking the
@@ -478,6 +467,249 @@ pub fn run_mruby_cop(
     // `cop_run` (incl. the captured-only `fixes`) drops here — soft-(a): the
     // recorded fix is in-memory only and dropped, never applied/serialized.
     offenses
+}
+
+/// The shared open→register→eval→close cop-run body, factored out of
+/// [`run_mruby_cop`] so [`run_mruby_cop_isolated`] runs the IDENTICAL
+/// lifecycle **on the per-cop child thread** (the ADR 0009 / `composition_poc`
+/// proven shape — the entire mruby lifecycle lives on the child thread so a
+/// timed-out thread stuck inside `mrb_load_string` simply never reaches this
+/// `MrubyState`'s `Drop`; no `mrb_close`, no forget hack — see
+/// [`run_mruby_cop_isolated`]).
+///
+/// Returns `true` iff the cop left a pending mruby exception — at cop-file
+/// load OR (I-3) from inside `on_call_node`, surfacing through the `BOOTSTRAP`
+/// dispatch eval. Caught via [`MrubyState::eval_checked`] (mruby never unwinds
+/// into Rust — design §6).
+///
+/// Drop order (ADR 0009 rule 4 / Task-2 normal path): `MrubyState` is closed
+/// (`mrb_close`) at the inner scope's end, BEFORE the caller drops the
+/// `CopRun` (and its `Arc<AstContext>` clone) — so no still-defined native /
+/// GC finalizer can deref a freed tree. On the ABANDON path this fn never
+/// returns (the thread is stuck in `eval_checked`'s `mrb_load_string`), so
+/// `st` is never dropped and `mrb_close` is never called — exactly ADR 0003
+/// Mechanism A.
+fn cop_run_body(cop_run: &CopRun, cop_source: &str) -> bool {
+    let mut st = MrubyState::open();
+    st.set_cop_run(cop_run);
+    // SAFETY: `st.raw()` is a valid non-null `mrb_state` living as long as
+    // `st`; `ud` was set to `cop_run` (alive for this whole call — the caller
+    // owns it past `st`'s drop). `primitives::register` defines the read-only
+    // node IDL; `register_sdk` then defines `__emit_offense` (it requires
+    // `Murphy` to already exist, hence the order). Both only define functions
+    // — they read nothing.
+    unsafe {
+        crate::mruby::primitives::register(st.raw());
+        register_sdk(st.raw());
+    }
+    // The prelude defines the SDK base; it must not raise. The cop `.rb` and
+    // the dispatch (`BOOTSTRAP`, which invokes `on_call_node`) can both raise
+    // — at LOAD or IN-VISITOR (I-3). `||` short-circuits, so a load-time
+    // `raise` skips the dispatch (a half-defined cop is not dispatched), and
+    // an in-visitor `raise` is caught at `BOOTSTRAP`. Either ⇒ `true`.
+    st.eval(PRELUDE);
+    st.eval_checked(cop_source) || st.eval_checked(BOOTSTRAP)
+    // `st` drops HERE → `mrb_close`, BEFORE the caller drops `cop_run` (and
+    // its Arc clone) — the Task-2 normal-path ordering (ADR 0009 rule 4).
+    // (Abandon path: control never reaches here.)
+}
+
+/// A hardcoded, sane per-cop wall-clock deadline (ADR 0003: v1 is wall-clock
+/// time only, no instruction-step budget; "Hardcoded sane deadline value,
+/// configurability is later/coarse"). 2 s is far above any reasonable cop's
+/// per-file cost yet bounds a runaway. Configurable / per-file-vs-per-cop
+/// scoping is an explicit ADR-0003 forward item, NOT Task 5.
+pub const COP_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Outcome the per-cop child thread sends back over the channel.
+///
+/// There is intentionally NO `TimedOut` variant: a timeout is detected by the
+/// watchdog (`recv_timeout` returning `Err(Timeout)` in the CALLER), never
+/// produced by the child — the child either completes or catches a raise. The
+/// child cannot report its own timeout (a runaway child is stuck in
+/// `mrb_load_string` and sends nothing at all; Mechanism A).
+enum CopOutcome {
+    /// The cop completed within the deadline; here are its offenses.
+    Completed(Vec<Offense>),
+    /// The cop raised an mruby exception (at load OR in-visitor — I-3).
+    Raised,
+}
+
+/// Run ONE mruby user cop `.rb` over a parsed `AstContext` **with per-cop
+/// isolation** (Phase 3 Task 5; ADR 0003 Mechanism A; ADR 0009 composition):
+///
+///   * a dedicated per-cop OS thread + a wall-clock watchdog
+///     (`recv_timeout(deadline)`) sitting in THIS (caller) thread;
+///   * abandon-on-timeout — the child thread is never joined; for a runaway
+///     cop it is stuck forever inside `mrb_load_string`, so its stack-local
+///     `MrubyState`/`CopRun` `Drop` is **unreachable** ⇒ NO `mrb_close`
+///     (ADR 0003 Mechanism A / ADR 0009 rule 4). The child thread **owns its
+///     own `Arc<AstContext>` clone** (built inside the closure, ADR 0009
+///     rule 1), so the AST stays alive for any late zombie native call even
+///     after this caller returns and drops its own `Arc`;
+///   * a Ruby exception (at cop-file load OR — I-3 — inside `on_call_node`)
+///     is caught (`(*mrb).exc`; mruby does not unwind into Rust, design §6);
+///   * timeout OR exception ⇒ **exactly one `error offense`** for that
+///     cop×file (`Severity::Error`, the cop's own `cop_name`, a message
+///     naming the cause, ADR 0006 frozen shape — no `autocorrect`); the run
+///     continues. M-3: if the `.rb` defines several cops they ALL run on the
+///     one thread (the `BOOTSTRAP` dispatches every registered subclass);
+///     their offenses merge — same as multiple native cops.
+///
+/// ## Deadline-boundary race (ADR 0009 rule 6 — handled, documented)
+///
+/// A cop finishing *exactly* as the watchdog fires can `send` after
+/// `recv_timeout` already returned `Timeout`. We handle this per ADR 0009
+/// rule 6 option (a): the `Receiver` is **dropped immediately** when
+/// `recv_timeout` returns `Timeout` (it goes out of scope as we leave the
+/// `match` arm and `return` the `TimedOut` mapping), so any late `tx.send`
+/// from the child fails harmlessly (`Err`, ignored via `let _ =`) instead of
+/// being observed. Determinism scope (ADR 0006/0007): the "byte-identical
+/// across repeated/shuffled runs" guarantee holds **only for cops with
+/// deadline headroom**. For a cop landing *exactly* on the wall-clock
+/// boundary, whether it resolves as `Completed` vs one `error offense` is
+/// inherently non-deterministic (wall-clock; impossible to make the exact
+/// boundary deterministic by design) and that is **accepted, not a contract
+/// breach** — it is the documented scope of the determinism contract, not a
+/// guarantee silently assumed away. All Task-5 fixtures have ample headroom
+/// (runaway: never completes; well-behaved: sub-millisecond ≪ deadline), so
+/// every Task-5 assertion is on the deterministic side of that boundary.
+///
+/// The deadline is the **hardcoded sane** [`COP_DEADLINE`] (ADR 0003: v1 is
+/// wall-clock only; configurability is an explicit forward item, not Task 5).
+/// This is the API Task 7 wires into the rayon pipeline. Tests inject a short
+/// deadline via the `pub(crate)` [`run_mruby_cop_isolated_with_deadline`] so a
+/// runaway-cop assertion does not wait the full production deadline.
+pub fn run_mruby_cop_isolated(
+    ctx: &Arc<AstContext>,
+    cop_source: &str,
+    cop_name: &str,
+    file: &str,
+) -> Vec<Offense> {
+    run_mruby_cop_isolated_with_deadline(ctx, cop_source, cop_name, file, COP_DEADLINE)
+}
+
+/// [`run_mruby_cop_isolated`] with an explicit wall-clock `deadline`.
+///
+/// A testability + forward-compat seam so Task-5 tests (and a future
+/// per-file/per-cop-configurable deadline — an explicit ADR-0003 forward
+/// item) can inject a deadline without paying the full hardcoded
+/// [`COP_DEADLINE`]. The hardcoded-deadline production entry point is
+/// [`run_mruby_cop_isolated`] (Task 7 wires THAT). All the
+/// isolation/abandon/exception/race semantics documented on
+/// [`run_mruby_cop_isolated`] apply identically here — this is its body.
+pub fn run_mruby_cop_isolated_with_deadline(
+    ctx: &Arc<AstContext>,
+    cop_source: &str,
+    cop_name: &str,
+    file: &str,
+    deadline: Duration,
+) -> Vec<Offense> {
+    // Owned, `Send` move-ins for the child thread. The AST is shared by a
+    // child-OWNED `Arc` clone (ADR 0009 rule 1: the `ud` raw pointer is NOT
+    // the liveness guarantee — this clone, owned on the child thread's stack,
+    // is). `cop_source`/`cop_name`/`file` are copied so the child needs no
+    // borrow of the caller's stack (the caller may return before an abandoned
+    // child).
+    let child_ctx: Arc<AstContext> = Arc::clone(ctx);
+    let child_cop_source = cop_source.to_owned();
+    let child_cop_name = cop_name.to_owned();
+    let child_file = file.to_owned();
+    // Separate owned copies for the watchdog's error-offense attribution (the
+    // child moves its own copies in; an abandoned child must not be borrowed
+    // from here — it may outlive this call).
+    let cop_name = cop_name.to_owned();
+    let file = file.to_owned();
+
+    let (tx, rx) = mpsc::channel::<CopOutcome>();
+
+    thread::spawn(move || {
+        // THE ABANDON SEAM (I-2, the proven `composition_poc` shape):
+        // the ENTIRE per-cop mruby lifecycle — `CopRun` (owning the
+        // child's own `Arc<AstContext>` clone), `MrubyState`
+        // (`mrb_open`→register→eval→`mrb_close`) — is created and owned
+        // ON THIS CHILD THREAD's stack inside `cop_run_body`. For a
+        // runaway cop this thread blocks forever inside
+        // `mrb_load_string` (in `cop_run_body`'s `eval_checked`), so it
+        // NEVER returns, the stack-local `MrubyState`/`CopRun` are never
+        // dropped, and `MrubyState`'s `Drop` (`mrb_close`) is therefore
+        // UNREACHABLE — no `mrb_close` on the abandon path (ADR 0003
+        // Mechanism A / ADR 0009 rule 4), with NO `std::mem::forget`
+        // hack and NO change to Task-2's unconditional-`mrb_close`
+        // `Drop`. The child-owned `Arc<AstContext>` clone (held by the
+        // never-dropped `CopRun`) keeps `source` + the prism arena alive
+        // for any late zombie native call — even after the caller
+        // returns and drops ITS `Arc` (ADR 0009 rule 1).
+        let cop_run = CopRun::new(child_ctx, &child_cop_name, &child_file);
+        let raised = cop_run_body(&cop_run, &child_cop_source);
+        // Reached ONLY on the normal/exception path (a runaway cop never
+        // gets here). `cop_run_body` has already run `mrb_close` (its `st`
+        // dropped at its scope end) BEFORE we touch `cop_run` — Task-2
+        // normal-path ordering.
+        let outcome = if raised {
+            CopOutcome::Raised
+        } else {
+            CopOutcome::Completed(cop_run.sink.into_inner())
+        };
+        // If the caller already timed out, `rx` is dropped and this `send`
+        // fails harmlessly (ADR 0009 rule 6) — the thread just exits.
+        let _ = tx.send(outcome);
+        // `cop_run` (incl. the captured-only `fixes`, soft-(a)) drops here,
+        // AFTER `mrb_close` ran inside `cop_run_body` — never applied /
+        // serialized. The child-owned Arc clone drops last.
+    });
+
+    match rx.recv_timeout(deadline) {
+        Ok(CopOutcome::Completed(offenses)) => offenses,
+        Ok(CopOutcome::Raised) => vec![error_offense(
+            &file,
+            &cop_name,
+            &format!("cop `{cop_name}` raised an exception (isolated; design §6)"),
+        )],
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // ADR 0009 rule 6 option (a): `rx` is dropped as this arm
+            // returns, so any late child `tx.send` fails harmlessly. The
+            // child thread is ABANDONED (never joined): for a runaway cop it
+            // spins/blocks until process exit (acceptable for the one-shot
+            // CLI — ADR 0003 Consequence 1), kept AST-safe by its own Arc
+            // clone (ADR 0009 rule 1). One error offense, run continues.
+            vec![error_offense(
+                &file,
+                &cop_name,
+                &format!(
+                    "cop `{cop_name}` exceeded the {deadline:?} deadline (abandoned; ADR 0003)"
+                ),
+            )]
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            // The child panicked before sending (it should not — the cop run
+            // is FFI, not panicking Rust — but a panic must still degrade to
+            // one error offense for that cop×file, never abort the run).
+            vec![error_offense(
+                &file,
+                &cop_name,
+                &format!("cop `{cop_name}` worker thread died unexpectedly (isolated)"),
+            )]
+        }
+    }
+}
+
+/// Build the single `error offense` for a timed-out / raising / dead cop×file.
+/// ADR 0006 frozen shape (`Offense::new`): `Severity::Error`, the cop's own
+/// `cop_name`, a zero range (the failure is not tied to a source span), the
+/// cause in the message. NO `autocorrect` field — the JSON contract is
+/// unchanged by Task 5.
+fn error_offense(file: &str, cop_name: &str, message: &str) -> Offense {
+    Offense::new(
+        file,
+        cop_name,
+        Range {
+            start_offset: 0,
+            end_offset: 0,
+        },
+        Severity::Error,
+        message,
+    )
 }
 
 #[cfg(test)]

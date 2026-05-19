@@ -14,5 +14,7 @@ pub mod state;
 // No `register` re-export: it is `pub(crate)` and in-crate only — Task 4/5/7
 // reach it directly via `crate::mruby::primitives::register` (one extra path
 // segment, no redundant alias). Same Task-2 `raw()` discipline.
-pub use sdk::run_mruby_cop;
+pub use sdk::{
+    COP_DEADLINE, run_mruby_cop, run_mruby_cop_isolated, run_mruby_cop_isolated_with_deadline,
+};
 pub use state::{AstContext, MrubyState};
