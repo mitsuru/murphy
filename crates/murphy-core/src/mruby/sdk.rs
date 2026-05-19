@@ -1,4 +1,4 @@
-//! `Murphy::Cop` mruby SDK base — Phase 3 Task 4.
+//! `Murphy::Cop` mruby SDK base — Phase 4 Task 2 (murphy-hwe.2).
 //!
 //! This is the THIN Ruby-glue layer ("fast core, scripted glue", design
 //! §2/§4) that turns a user's `cops/*.rb` into offenses, on top of:
@@ -10,11 +10,11 @@
 //!     (`Murphy.node_count` / `node_name` / `node_receiver_nil?` /
 //!     `node_msg_range` / `source_slice`). Reused, not reimplemented.
 //!
-//! What Task 4 adds:
+//! What Task 4 (original P3 T4) adds:
 //!
 //!   * The embedded **`cop_prelude.rb`** (`include_str!` of the sibling
 //!     `cop_prelude.rb`): `Murphy::Cop` base, the `Node` handle-wrapper, a
-//!     `Murphy::Range` value object, the captured-only `Murphy::Fix` recorder,
+//!     `Murphy::Range` value object, the `Murphy::Fix` recorder,
 //!     and `Cop#__run` (walk `0...node_count`, dispatch `on_call_node`).
 //!   * The **`Murphy.__emit_offense`** native: a cop's `add_offense` crosses
 //!     here; the host builds a Rust [`crate::Offense`] and pushes it into the
@@ -23,20 +23,19 @@
 //!     `AstContext`, returning `Vec<Offense>` — the same `Vec<Offense>` shape
 //!     native cops produce.
 //!
-//! ## Scope fence (Phase 3 plan, Task 4)
+//! ## Phase 4 Task 2 change (ADR 0013 — murphy-hwe.2)
 //!
-//!   * **Soft-(a) (Scope Fence 1):** the SDK provides `add_offense` AND a
-//!     `fix` block, but in Phase 3 the fix is **captured-stored-only** — never
-//!     applied, never serialized. The emitted [`crate::Offense`] is the
-//!     ADR 0006 frozen shape; **no `autocorrect` field is ever added** to the
-//!     struct or JSON. Phase 4 owns autocorrect application. The captured-fix
-//!     count is kept in-memory on [`CopRun`] purely so cop authors write
-//!     Phase-4-ready cops today; it is dropped when the run ends.
-//!   * Deliberately NOT here: the per-cop OS thread + watchdog + deadline +
-//!     abandon + Ruby-exception→error-offense (Task 5 — Task 4 loads+runs a
-//!     cop synchronously, in-process, for its own tests); severity-precedence
-//!     dedupe (Task 6); registry/pipeline/rayon wiring (Task 7 — the CLI does
-//!     not run mruby cops yet, `sample_project` is unchanged); `[cops]` config.
+//! The Phase-3 soft-(a) seam (`FixEdit` placeholder + `CopRun.fixes` sink) has
+//! been replaced with real mruby→Rust edit marshalling:
+//!
+//!   * `cop_prelude.rb Fix#to_blob` encodes `fix.edits` as a binary blob.
+//!   * `__emit_offense` (arg fmt `"iisss"`, blob as 5th `s`) decodes the blob
+//!     via [`decode_edit_blob`] into `Vec<`[`Edit`]`>`.
+//!   * Non-empty edits are attached via [`Offense::with_autocorrect`].
+//!   * `FixEdit` and `CopRun.fixes` are removed; ADR 0009 field-disjointness
+//!     now covers only the `ctx ↔ sink` pair (ADR 0013).
+//!   * Invalid edits (inverted range) are silently dropped (PIN B / degrade-not-panic).
+//!   * `sample_project` has no fix-emitting cops → snapshot BYTE-IDENTICAL (ADR 0007).
 //!
 //! ## `unsafe_op_in_unsafe_fn`
 //!
@@ -55,48 +54,8 @@ use mruby3_sys::{
 };
 
 use crate::mruby::{AstContext, MrubyState};
+use crate::offense::{Autocorrect, Edit};
 use crate::{Offense, Range, Severity};
-
-/// A single captured text-edit suggestion from a cop's `fix` block.
-///
-/// **Captured-stored-only (Scope Fence 1, soft-(a)).** This is internal,
-/// in-memory state on [`CopRun`], dropped when the run ends. It is NEVER
-/// applied to source and NEVER serialized into the [`Offense`] contract — the
-/// `Offense` JSON stays the ADR 0006 frozen 5-field shape with no
-/// `autocorrect` field. Phase 4 owns autocorrect application + the contract
-/// extension. It exists so a cop author can write a Phase-4-ready `fix` block
-/// today and have the *fact that it fired* recorded (not silently dropped at
-/// parse time).
-///
-/// ## Phase 3: the field values are intentionally SYNTHETIC placeholders
-///
-/// Only the *count* of `FixEdit`s per emit is meaningful in Phase 3 — that is
-/// the sole assertion target of soft-(a) ("a `fix` block was recorded"). The
-/// fields below do NOT carry the cop's real edit: the Ruby `Murphy::Fix`
-/// collects the real `[start, end, replacement]` triples, but `add_offense`
-/// hands only `fix.length` across the boundary, and `__emit_offense`
-/// reconstructs `fix_count` `FixEdit`s using the *offense* range and an empty
-/// replacement. The real `(start, end, replacement)` payload stays in Ruby and
-/// is GC-dropped at run end (soft-(a): nothing is serialized or applied, so the
-/// synthetic values are never observed). Phase 4 owns marshalling the real edit
-/// payload across the boundary and the `Offense.autocorrect` contract; it rips
-/// this placeholder shape out, so the field types are not load-bearing.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Phase 4 reads this; Phase 3 only proves it is recorded.
-pub(crate) struct FixEdit {
-    /// Phase 3: SYNTHETIC placeholder — set to the *offense* range start, NOT
-    /// the edit's real start. The real value stays in Ruby (soft-(a));
-    /// Phase 4 marshals the true edit start (ADR 0001).
-    pub(crate) start_offset: u32,
-    /// Phase 3: SYNTHETIC placeholder — set to the *offense* range end, NOT
-    /// the edit's real end. The real value stays in Ruby (soft-(a));
-    /// Phase 4 marshals the true edit end (ADR 0001).
-    pub(crate) end_offset: u32,
-    /// Phase 3: SYNTHETIC placeholder — always empty, NOT the cop's real
-    /// replacement text. The real value stays in Ruby (soft-(a)); Phase 4
-    /// marshals the true replacement (empty == deletion then).
-    pub(crate) replacement: String,
-}
 
 /// The **cop-run-owned** payload reachable from the native callbacks via
 /// `mrb_state.ud` (ADR 0009 rule 2).
@@ -121,37 +80,34 @@ pub(crate) struct FixEdit {
 /// guarantees this by owning the `CopRun` for the whole `eval` scope and
 /// closing the `MrubyState` (`mrb_close`) BEFORE the `CopRun` drops.
 ///
-/// ## Interior mutability — SAFETY (field disjointness)
+/// ## Interior mutability — SAFETY (field disjointness, Phase 4 reduced set)
 ///
 /// The native `__emit_offense` callback only holds `*const CopRun` (it is the
-/// raw `ud`), so the sink/fixes use [`UnsafeCell`] to be pushed to without
+/// raw `ud`), so the `sink` uses [`UnsafeCell`] to be pushed to without
 /// forming `&mut` through a shared `&`.
 ///
 /// SAFETY — the *real* soundness argument is **field disjointness**, not
 /// no-reentrancy or single-threadedness. `ctx` (reached only via a shared
-/// `&(*p).ctx` by Task-3 primitives) and `sink`/`fixes` (the ONLY
-/// `UnsafeCell`s) are *disjoint fields* of `CopRun` — distinct, non-overlapping
-/// memory. Therefore: even if a native primitive holds a live shared
-/// `&(*p).ctx` and re-enters the mruby VM (e.g. a future primitive doing
-/// `mrb_funcall` into user code) which in turn re-enters `__emit_offense`, the
+/// `&(*p).ctx` by Task-3 primitives) and `sink` (the ONLY `UnsafeCell`) are
+/// *disjoint fields* of `CopRun` — distinct, non-overlapping memory.
+/// Therefore: even if a native primitive holds a live shared `&(*p).ctx` and
+/// re-enters the mruby VM (e.g. a future primitive doing `mrb_funcall` into
+/// user code) which in turn re-enters `__emit_offense`, the
 /// `&mut *(*p).sink.get()` formed there CANNOT alias that live `&ctx` —
 /// they name different fields / different memory. No aliasing UB exists
 /// regardless of reentrancy.
 ///
-/// The single-writer-per-`CopRun` invariant is what additionally keeps
-/// `sink`/`fixes` unaliased among *themselves* (no two overlapping `&mut` into
-/// the same `UnsafeCell`).
+/// Phase 4 (ADR 0013): the `fixes: UnsafeCell<Vec<FixEdit>>` field has been
+/// removed. The Phase-3 field-disjointness soundness argument collapses to the
+/// simpler `ctx ↔ sink` disjointness only (ADR 0013 / ADR 0009 re-justification):
+/// there is no second `UnsafeCell`, so the single-writer-among-`UnsafeCell`s
+/// concern is gone. The `ctx ↔ sink` disjointness is still the load-bearing
+/// invariant: `&ctx` and `&mut *sink.get()` name different memory.
 ///
 /// Soundness explicitly does **NOT** rest on no-reentrancy or
 /// single-threadedness — those are incidental properties of the current
-/// synchronous, single-`mrb_state` run, not the load-bearing invariant. The
-/// invariant a future primitive (or Task 5's watchdog/abandon path) MUST
-/// preserve to stay sound is the field-disjointness property above: a
-/// primitive that calls back into user code while holding `&ctx` is fine
-/// precisely because `&ctx` and the `sink`/`fixes` `UnsafeCell`s are disjoint
-/// fields — it must not introduce a path that forms a `&mut` overlapping a
-/// live `&ctx`. Task 5 also keeps one `CopRun` per worker thread and the
-/// single-writer-per-`CopRun` invariant.
+/// synchronous, single-`mrb_state` run, not the load-bearing invariant. Task 5
+/// keeps one `CopRun` per worker thread.
 pub(crate) struct CopRun {
     /// The shared parsed tree. Task-3 primitives reach this via `&(*p).ctx`.
     /// The worker owns this `Arc` clone (ADR 0009 rule 1) for the whole run.
@@ -164,9 +120,6 @@ pub(crate) struct CopRun {
     /// The cop-run-owned offense sink (ADR 0009 rule 2 — NOT a
     /// `thread_local!`). Drained back to the caller after the run.
     sink: UnsafeCell<Vec<Offense>>,
-    /// Captured-only fix edits (soft-(a)). In-memory; dropped after the run;
-    /// never applied/serialized. Phase 4 owns the contract extension.
-    fixes: UnsafeCell<Vec<FixEdit>>,
 }
 
 impl CopRun {
@@ -176,7 +129,6 @@ impl CopRun {
             cop_name: cop_name.to_owned(),
             file: file.to_owned(),
             sink: UnsafeCell::new(Vec::new()),
-            fixes: UnsafeCell::new(Vec::new()),
         }
     }
 
@@ -187,7 +139,7 @@ impl CopRun {
     }
 
     /// Construct a minimal `CopRun` for Task-3's `#[cfg(test)]` primitive
-    /// tests, which only need the `ctx` projection (no offenses/fixes). Keeps
+    /// tests, which only need the `ctx` projection (no offenses). Keeps
     /// those tests calling the same `ud`-payload contract Task 4 ships,
     /// instead of a fragile layout transmute.
     #[cfg(test)]
@@ -198,18 +150,19 @@ impl CopRun {
 
 // SAFETY: `CopRun` is `Send` so Task 5 can `move` exactly one `CopRun` into a
 // per-cop worker thread (the `Arc<AstContext>` is `Send + Sync`; `String` is
-// `Send`; `UnsafeCell<Vec<_>>` is `Send` when its contents are `Send`, which
-// `Offense`/`FixEdit` are). The interior-mutability soundness this `Send`
-// relies on is **field disjointness**, NOT no-reentrancy / single-threadedness:
-// `ctx` and the `sink`/`fixes` `UnsafeCell`s are disjoint fields of `CopRun`,
-// so a `&mut` formed through a `sink`/`fixes` `UnsafeCell` can never alias a
-// live shared `&ctx` even under VM re-entry (see the `CopRun`
-// "Interior mutability — SAFETY" doc for the full argument). It is deliberately
-// NOT `Sync`: a `CopRun` is touched by ONE thread for one synchronous cop run
-// (the single-writer-per-`CopRun` invariant that keeps `sink`/`fixes`
-// unaliased among themselves) — mirroring `MrubyState`'s thread-confinement.
-// `UnsafeCell` is already `!Sync`; we add no `unsafe impl Sync`, so the
-// compiler enforces "never shared across threads".
+// `Send`; `UnsafeCell<Vec<Offense>>` is `Send` when its contents are `Send`,
+// which `Offense` is). The interior-mutability soundness this `Send` relies on
+// is **field disjointness** (ctx ↔ sink), NOT no-reentrancy /
+// single-threadedness: `ctx` and the `sink` `UnsafeCell` are disjoint fields
+// of `CopRun`, so a `&mut` formed through `sink`'s `UnsafeCell` can never
+// alias a live shared `&ctx` even under VM re-entry (see the `CopRun`
+// "Interior mutability — SAFETY" doc for the full argument). Phase 4 (ADR
+// 0013): the `fixes` field is removed; the soundness argument is now the
+// simpler `ctx ↔ sink` disjointness only. It is deliberately NOT `Sync`: a
+// `CopRun` is touched by ONE thread for one synchronous cop run — mirroring
+// `MrubyState`'s thread-confinement. `UnsafeCell` is already `!Sync`; we add
+// no `unsafe impl Sync`, so the compiler enforces "never shared across
+// threads".
 unsafe impl Send for CopRun {}
 
 /// `MRB_ARGS_REQ(n)` — absent from the bindgen output (ADR 0002 finding 1);
@@ -244,17 +197,43 @@ unsafe fn cop_run<'a>(mrb: *mut mrb_state) -> &'a CopRun {
     unsafe { &*ud }
 }
 
-/// `Murphy.__emit_offense(start, end, message, severity, fix_count)`.
+/// `Murphy.__emit_offense(start, end, message, severity, edit_blob)`.
 ///
 /// A cop's `add_offense` (in `cop_prelude.rb`) crosses here. The host builds a
-/// Rust [`crate::Offense`] (ADR 0006 frozen shape) into the cop-run-owned sink
-/// and records the captured-fix count (soft-(a): stored-only, never
-/// serialized). Returns `nil`.
+/// Rust [`crate::Offense`] and, when the `edit_blob` is non-empty, decodes it
+/// into [`Edit`] records and attaches them via [`Offense::with_autocorrect`].
+/// Returns `nil`.
 ///
-/// Arg shape (mruby `mrb_get_args` `"iissi"`): two `i` byte offsets, an `s`
-/// message (ptr+len, NUL-safe), an `s` severity name, and an `i` captured-fix
-/// edit count. A bad/inverted range degrades to no offense (a user cop must
-/// not be able to crash the engine).
+/// Arg shape (mruby `mrb_get_args` `"iisss"`): two `i` byte offsets, an `s`
+/// message (ptr+len, NUL-safe), an `s` severity name, and an `s` edit blob
+/// (ptr+len, arbitrary bytes / NUL-safe via the `s` ptr+len format). A
+/// bad/inverted offense range degrades to no offense (a user cop must not be
+/// able to crash the engine). Invalid edits in the blob are silently dropped
+/// (PIN B); if all edits are invalid the `autocorrect` key is absent.
+///
+/// ## Edit blob wire format (kept in sync with cop_prelude.rb Fix#to_blob)
+///
+/// Zero or more concatenated edit records:
+///   `"<start_decimal> <end_decimal> <replen_decimal> "` + exactly `replen` raw bytes.
+/// All numeric fields are non-negative decimal ASCII integers followed by a
+/// single space. Replacement is exactly `replen` raw bytes after the space.
+/// Empty blob (no fix block, or all edits dropped) → no `autocorrect` attached.
+///
+/// Example: `fix.replace(Range.new(0,4), "hi")` encodes as `"0 4 2 hi"`.
+/// Example: `fix.remove(Range.new(5,9))` encodes as `"5 9 0 "` (0-byte replacement).
+///
+/// MUST stay in sync with the encoder in `cop_prelude.rb` `Fix#to_blob`. Both
+/// files carry this format spec to prevent encoder/decoder drift.
+///
+/// ## Narrowing (ADR 0001 single audited site, PIN C)
+///
+/// The `start`/`end` offense range and each edit's `(start, end)` are
+/// narrowed `mrb_int -> u32` at a SINGLE site here, next to the existing
+/// offense-range narrowing. The predicate `val < 0 || val > u32::MAX as mrb_int`
+/// guards the cast; for edits the additional `start > end` check applies
+/// (invalid range → silent drop, PIN B). This follows ADR 0001's mandate that
+/// the `usize->u32` narrowing lives in exactly one audited place per
+/// subsystem.
 unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
     let mut start: mrb_int = -1;
     let mut end: mrb_int = -1;
@@ -262,12 +241,15 @@ unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) 
     let mut msg_len: mrb_int = 0;
     let mut sev_ptr: *const std::os::raw::c_char = std::ptr::null();
     let mut sev_len: mrb_int = 0;
-    let mut fix_count: mrb_int = 0;
+    let mut blob_ptr: *const std::os::raw::c_char = std::ptr::null();
+    let mut blob_len: mrb_int = 0;
 
-    let fmt = c"iissi";
+    // fmt changed from "iissi" (Phase 3, fix count) to "iisss" (Phase 4, edit blob).
+    // arg count is still 5; `args_req(5)` in `register_sdk` is unchanged.
+    let fmt = c"iisss";
     // SAFETY: `mrb` is a valid non-null `mrb_state`; `fmt` requests exactly
-    // two `mrb_int`s, two (ptr,len) string pairs, and one `mrb_int`; every
-    // out-pointer is a live, correctly-typed local that outlives the call.
+    // two `mrb_int`s and three (ptr,len) string pairs; every out-pointer is a
+    // live, correctly-typed local that outlives the call.
     // `mrb_get_args` is the documented argument extractor.
     unsafe {
         mrb_get_args(
@@ -279,7 +261,8 @@ unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) 
             &mut msg_len as *mut mrb_int,
             &mut sev_ptr as *mut *const std::os::raw::c_char,
             &mut sev_len as *mut mrb_int,
-            &mut fix_count as *mut mrb_int,
+            &mut blob_ptr as *mut *const std::os::raw::c_char,
+            &mut blob_len as *mut mrb_int,
         );
     }
 
@@ -287,8 +270,8 @@ unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) 
     // `CopRun` set by `run_mruby_cop`, alive for the whole call.
     let run = unsafe { cop_run(mrb) };
 
-    // A user cop must not crash the engine: a negative/inverted range is
-    // dropped (no offense emitted) rather than panicking.
+    // A user cop must not crash the engine: a negative/inverted offense range
+    // is dropped (no offense emitted) rather than panicking.
     if start < 0 || end < 0 || start > end {
         // SAFETY: `mrb` valid & non-null; `c"nil"` is a trivial literal.
         return unsafe { eval_nil(mrb) };
@@ -307,48 +290,134 @@ unsafe extern "C" fn native_emit_offense(mrb: *mut mrb_state, _self: mrb_value) 
         _ => Severity::Warning,
     };
 
+    // ADR 0001 single audited narrowing site for offense range (unchanged from Phase 3).
+    #[allow(clippy::cast_possible_truncation)]
     let range = Range {
         start_offset: start as u32,
         end_offset: end as u32,
     };
+
+    // Decode the edit blob into Vec<Edit>. Invalid edits are silently dropped
+    // (PIN B): start<0 || end<0 || start>end → drop that edit only, offense
+    // and other edits survive. Empty result → no autocorrect attached.
+    //
+    // SAFETY: when `mrb_get_args` succeeds with `s`, mruby guarantees `blob_ptr`
+    // is valid for `blob_len` bytes for the duration of the callback.
+    let edits: Vec<Edit> = if blob_ptr.is_null() || blob_len <= 0 {
+        Vec::new()
+    } else {
+        let blob = unsafe { std::slice::from_raw_parts(blob_ptr as *const u8, blob_len as usize) };
+        decode_edit_blob(blob)
+    };
+
     let offense = Offense::new(&run.file, &run.cop_name, range, severity, &message);
+    let offense = if edits.is_empty() {
+        offense
+    } else {
+        offense.with_autocorrect(Autocorrect { edits })
+    };
 
     // SAFETY (ADR 0009 rule 2 + the `CopRun` interior-mutability contract):
     // the `&mut Vec<Offense>` formed from `run.sink`'s `UnsafeCell` is sound by
-    // **field disjointness** — `sink` is a distinct field from `ctx`, so this
-    // `&mut` cannot alias any live shared `&(*p).ctx` a Task-3 primitive holds,
-    // even if a primitive re-entered the VM and that re-entered here (different
-    // memory; soundness does NOT rest on no-reentrancy / single-threadedness —
-    // see the `CopRun` "Interior mutability — SAFETY" doc). The
-    // single-writer-per-`CopRun` invariant additionally keeps this `&mut`
-    // unaliased against the `fixes` write below: each is short-lived, pushed,
-    // and dropped before returning (Task 5 keeps one `CopRun` per worker
-    // thread, still single-writer-per-`CopRun`).
+    // **field disjointness** (ctx ↔ sink, Phase 4 ADR 0013) — `sink` is a
+    // distinct field from `ctx`, so this `&mut` cannot alias any live shared
+    // `&(*p).ctx` a Task-3 primitive holds, even if a primitive re-entered the
+    // VM and that re-entered here (different memory; soundness does NOT rest on
+    // no-reentrancy / single-threadedness — see the `CopRun`
+    // "Interior mutability — SAFETY" doc). Phase 4: there is no `fixes` field;
+    // the field-disjointness argument is now the simpler ctx ↔ sink only.
     unsafe {
         (*run.sink.get()).push(offense);
     }
 
-    // Soft-(a): record the captured-fix edits as count-only sentinels. This is
-    // internal, dropped after the run, NEVER serialized — proving the fix was
-    // recorded without extending the ADR 0006 `Offense` contract. (The real
-    // edit payload threads through in Phase 4; Phase 3 only needs "recorded".)
-    if fix_count > 0 {
-        // SAFETY: same field-disjointness argument as `sink` above — `fixes` is
-        // a distinct field from `ctx`, so this `&mut` cannot alias a live
-        // `&ctx` under re-entry; the single-writer-per-`CopRun` invariant keeps
-        // it unaliased against the `sink` `&mut` (already dropped here).
-        let fixes = unsafe { &mut *run.fixes.get() };
-        for _ in 0..fix_count {
-            fixes.push(FixEdit {
-                start_offset: range.start_offset,
-                end_offset: range.end_offset,
-                replacement: String::new(),
-            });
-        }
-    }
-
     // SAFETY: `mrb` valid & non-null.
     unsafe { eval_nil(mrb) }
+}
+
+/// Decode the binary edit blob produced by `Murphy::Fix#to_blob` (cop_prelude.rb)
+/// into a `Vec<Edit>`.
+///
+/// ## Blob format (must stay in sync with `cop_prelude.rb Fix#to_blob`)
+///
+/// Zero or more concatenated edit records:
+///   `"<start_decimal> <end_decimal> <replen_decimal> "` + exactly `replen` raw bytes.
+///
+/// Each numeric field is a non-negative decimal ASCII integer followed by a
+/// single ASCII space (`0x20`). Replacement is exactly `replen` raw bytes
+/// immediately after the trailing space.
+///
+/// ## Error handling (PIN B: degrade-not-panic)
+///
+/// - A malformed header (parse failure, negative value, or `start > end`) →
+///   that edit is **silently dropped**; the remaining blob is not parseable
+///   (we can't safely re-sync), so parsing stops. The offense + any previously
+///   decoded edits survive.
+/// - A `replen` that would run past the blob end → same silent drop + stop.
+/// - `start < 0 || end < 0` → silent drop (can't happen for non-negative
+///   decimal ASCII, but the `i64` parse domain makes it explicit).
+///
+/// ## Narrowing (ADR 0001 / PIN C)
+///
+/// `start` and `end` are parsed as `i64` (so negative is representable for
+/// the guard), then narrowed to `u32` under one `#[allow]` + SAFETY doc
+/// after the `start < 0 || end < 0 || start > end` predicate, matching the
+/// existing offense-range narrowing pattern.
+fn decode_edit_blob(blob: &[u8]) -> Vec<Edit> {
+    let mut edits = Vec::new();
+    let mut cursor = blob;
+
+    while let Some((start, rest1)) = read_decimal_i64(cursor) {
+        // Read the remaining two header fields; break on any parse failure.
+        let Some((end, rest2)) = read_decimal_i64(rest1) else {
+            break;
+        };
+        let Some((replen, rest3)) = read_decimal_i64(rest2) else {
+            break;
+        };
+        // PIN B: invalid range or replen → silent drop, stop parsing.
+        // PIN C: narrowing guard (ADR 0001 single audited site for edits).
+        if start < 0 || end < 0 || start > end || replen < 0 {
+            break;
+        }
+        let replen = replen as usize;
+        if rest3.len() < replen {
+            break; // blob truncated → stop
+        }
+        let replacement_bytes = &rest3[..replen];
+        let remaining = &rest3[replen..];
+
+        // ADR 0001: narrowing from i64 to u32. The `start >= 0 && end >= 0`
+        // guard above makes the `i64 as u32` cast safe (i64 non-negative and
+        // the source was u32-bounded by prism / cop_prelude, so no truncation).
+        #[allow(clippy::cast_possible_truncation)]
+        let edit = Edit {
+            range: Range {
+                start_offset: start as u32,
+                end_offset: end as u32,
+            },
+            replacement: String::from_utf8_lossy(replacement_bytes).into_owned(),
+        };
+        edits.push(edit);
+        cursor = remaining;
+    }
+
+    edits
+}
+
+/// Read a non-negative decimal ASCII integer from the front of `bytes`,
+/// consuming the trailing space separator. Returns `(value, rest_after_space)`
+/// or `None` if the input is empty, has no space, or is not decimal.
+fn read_decimal_i64(bytes: &[u8]) -> Option<(i64, &[u8])> {
+    let space = bytes.iter().position(|&b| b == b' ')?;
+    let digits = &bytes[..space];
+    let rest = &bytes[space + 1..];
+    // Allow empty digits to return None (malformed).
+    if digits.is_empty() {
+        return None;
+    }
+    let s = std::str::from_utf8(digits).ok()?;
+    let val: i64 = s.parse().ok()?;
+    Some((val, rest))
 }
 
 /// Copy a `(ptr, len)` mruby string view into an owned `String`
@@ -489,7 +558,7 @@ const BOOTSTRAP: &str = "Murphy::Cop.__registered.each { |k| k.new.__run }";
 
 /// Load and run ONE mruby user cop `.rb` over a parsed `AstContext`, returning
 /// the offenses it emitted as the SAME `Vec<Offense>` shape native cops
-/// produce (ADR 0006).
+/// produce (ADR 0006 / ADR 0013).
 ///
 /// `cop_name` is the fully-qualified name the host attributes the offenses to
 /// (e.g. `Murphy/NoPuts`) — the `.rb` names its Ruby class; the host names the
@@ -497,10 +566,9 @@ const BOOTSTRAP: &str = "Murphy::Cop.__registered.each { |k| k.new.__run }";
 ///
 /// Synchronous + in-process (Task 4 scope): NO per-cop OS thread, watchdog,
 /// deadline, abandon, or Ruby-exception→error-offense — that hardening is
-/// Task 5. Soft-(a): a cop's `fix` block is captured-stored-only on the
-/// internal [`CopRun`] and dropped here; it is never applied or serialized,
-/// and the returned `Offense`s are the ADR 0006 frozen shape (no
-/// `autocorrect`).
+/// Task 5. Phase 4 (ADR 0013): a cop's `fix` block is marshalled from Ruby as
+/// a binary blob and decoded into `Vec<Edit>` by `native_emit_offense`;
+/// non-empty edits are attached to the `Offense` via `with_autocorrect`.
 ///
 /// Drop order (ADR 0009 rule 4 / Task-2 normal path): the `MrubyState` is
 /// closed (`mrb_close`) at the end of the inner scope, BEFORE the `CopRun`
@@ -525,10 +593,8 @@ pub fn run_mruby_cop(
     // Drain the cop-run-owned sink. `cop_run` is solely owned here and the
     // `mrb_state` is closed, so no native callback can be running: taking the
     // `Vec` out of the `UnsafeCell` is race-free.
-    let offenses = cop_run.sink.into_inner();
-    // `cop_run` (incl. the captured-only `fixes`) drops here — soft-(a): the
-    // recorded fix is in-memory only and dropped, never applied/serialized.
-    offenses
+    // Phase 4: offenses may carry `autocorrect` (marshalled from the fix blob).
+    cop_run.sink.into_inner()
 }
 
 /// The shared open→register→eval→close cop-run body, factored out of
@@ -734,9 +800,9 @@ pub fn run_mruby_cop_isolated_with_deadline(
         // `return` that skips this `send` would make a normal exit look like a
         // panic. Do NOT add a code path that leaves this `send` unreached.
         let _ = tx.send(outcome);
-        // `cop_run` (incl. the captured-only `fixes`, soft-(a)) drops here,
-        // AFTER `mrb_close` ran inside `cop_run_body` — never applied /
-        // serialized. The child-owned Arc clone drops last.
+        // `cop_run` drops here, AFTER `mrb_close` ran inside `cop_run_body`.
+        // Phase 4 (ADR 0013): no `fixes` field; offenses carry `autocorrect`
+        // when the cop emitted a fix blob. The child-owned Arc clone drops last.
     });
 
     match rx.recv_timeout(deadline) {
@@ -796,13 +862,18 @@ fn error_offense(file: &str, cop_name: &str, message: &str) -> Offense {
 mod tests {
     use super::*;
 
-    /// The captured-fix is NEVER reflected in the `Offense` — a cop that
-    /// writes a `fix` and one that does not emit byte-identical serialized
-    /// offenses, and neither serialization contains an `autocorrect` field
-    /// (ADR 0006 frozen shape; soft-(a)). This is the in-crate unit-level
-    /// guard; `tests/cop_no_puts_mruby.rs` is the integration-level guard.
+    /// Phase-4 deliberate inversion of the Phase-3 soft-(a) invariant (ADR 0013).
+    ///
+    /// Phase 3 asserted: fix-cop offense JSON byte-identical to no-fix, no `autocorrect`.
+    /// Phase 4 (this test) asserts the OPPOSITE: a `fix` block produces `autocorrect:{edits:[...]}`
+    /// carrying the REAL `[start, end, replacement]` values marshalled from Ruby;
+    /// a no-fix cop still has `autocorrect` ABSENT. See `tests/cop_no_puts_mruby.rs`
+    /// for the integration-level assertion; this is the unit-level guard.
+    /// ADR 0013 cross-reference: this is the deliberate inversion point.
     #[test]
-    fn fix_is_captured_only_and_offense_json_has_no_autocorrect() {
+    fn fix_block_produces_real_edit_in_offense_autocorrect() {
+        // ADR 0013: deliberate inversion of Phase-3 soft-(a) "captured-only" invariant.
+        // `puts 1\n` — selector `puts` = bytes [0, 4) (ADR 0001).
         let ctx = AstContext::new(b"puts 1\n".to_vec());
 
         const NOFIX: &str = r#"
@@ -826,12 +897,91 @@ end
         assert_eq!(a.len(), 1);
         assert_eq!(b.len(), 1);
 
-        let ja = serde_json::to_string(&a[0]).unwrap();
-        let jb = serde_json::to_string(&b[0]).unwrap();
-        assert_eq!(ja, jb, "fix captured-only → byte-identical offense JSON");
+        // No-fix cop: autocorrect ABSENT.
+        let ja: serde_json::Value = serde_json::to_value(&a[0]).unwrap();
         assert!(
-            !jb.contains("autocorrect"),
-            "ADR 0006: no autocorrect in the serialized contract: {jb}"
+            ja.as_object().unwrap().get("autocorrect").is_none(),
+            "no-fix cop: autocorrect must be ABSENT: {ja}"
+        );
+
+        // Fix cop: autocorrect PRESENT with REAL values (Phase 4 — ADR 0013 inversion).
+        // fix.replace(n.message_loc, "x"): `puts` selector = bytes [0, 4); replacement = "x".
+        let jb: serde_json::Value = serde_json::to_value(&b[0]).unwrap();
+        let autocorrect = jb
+            .as_object()
+            .unwrap()
+            .get("autocorrect")
+            .expect("fix cop: autocorrect key MUST be present (ADR 0013 Phase 4)");
+        let edits = autocorrect["edits"]
+            .as_array()
+            .expect("autocorrect.edits must be an array");
+        assert_eq!(edits.len(), 1, "one fix.replace → one edit");
+        assert_eq!(
+            edits[0]["range"]["start_offset"], 0,
+            "real edit start offset"
+        );
+        assert_eq!(edits[0]["range"]["end_offset"], 4, "real edit end offset");
+        assert_eq!(
+            edits[0]["replacement"].as_str().unwrap(),
+            "x",
+            "real replacement"
+        );
+    }
+
+    /// Native cop parity: a test-only native cop that emits an `Edit` via
+    /// `with_autocorrect` produces the SAME `Offense.autocorrect` JSON shape as
+    /// the mruby path (native<->mruby parity, Phase 4 Task 2 boundary test).
+    ///
+    /// This proves the native cop path can emit the same contract without going
+    /// through the mruby FFI boundary — the `with_autocorrect` builder is the
+    /// shared surface.
+    #[test]
+    fn native_cop_with_autocorrect_has_same_json_shape_as_mruby_cop() {
+        use crate::offense::{Autocorrect, Edit};
+        use crate::{Range, Severity};
+
+        // Build a native offense with autocorrect (the native path: direct Rust).
+        let native_offense = Offense::new(
+            "t.rb",
+            "Murphy/NativeTest",
+            Range {
+                start_offset: 0,
+                end_offset: 4,
+            },
+            Severity::Warning,
+            "m",
+        )
+        .with_autocorrect(Autocorrect {
+            edits: vec![Edit {
+                range: Range {
+                    start_offset: 0,
+                    end_offset: 4,
+                },
+                replacement: "x".into(),
+            }],
+        });
+
+        // Build the equivalent via mruby (the mruby path).
+        let ctx = AstContext::new(b"puts 1\n".to_vec());
+        const MRUBY_COP: &str = r#"
+class MrubyTestCop < Murphy::Cop
+  def on_call_node(n)
+    return unless n.name == :puts && n.receiver_nil?
+    add_offense(n.message_loc, message: "m") { |f| f.replace(n.message_loc, "x") }
+  end
+end
+"#;
+        let mruby_offenses = run_mruby_cop(&ctx, MRUBY_COP, "Murphy/NativeTest", "t.rb");
+        assert_eq!(mruby_offenses.len(), 1);
+
+        // Both paths must produce the same autocorrect JSON shape.
+        let jn: serde_json::Value = serde_json::to_value(&native_offense).unwrap();
+        let jm: serde_json::Value = serde_json::to_value(&mruby_offenses[0]).unwrap();
+
+        // The autocorrect shapes must match (same start, end, replacement).
+        assert_eq!(
+            jn["autocorrect"], jm["autocorrect"],
+            "native<->mruby parity: autocorrect JSON shape must be identical"
         );
     }
 
