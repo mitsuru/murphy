@@ -144,10 +144,12 @@ fn count_call_nodes(ctx: &AstContext) -> usize {
 /// # Safety
 ///
 /// The caller (the per-cop worker, Task 5; the Task-3 tests) MUST have stored
-/// `Arc::as_ptr(&ctx) as *mut c_void` in `(*mrb).ud` via
-/// [`crate::MrubyState::set_user_data`], and the owning `Arc<AstContext>` MUST
-/// be alive for the entire duration of any native call (ADR 0008 / ADR 0009
-/// rule 1 — the `ud` raw pointer is NOT itself a liveness guarantee). The
+/// the cop-run-owned `CopRun` pointer in `(*mrb).ud` via
+/// `crate::MrubyState::set_cop_run` (Task-4 ud-payload widening — `ud` carries
+/// a `CopRun`, and `ctx` projects `&(*p).ctx`), and the owning `CopRun` (with
+/// its `Arc<AstContext>` clone) MUST be alive for the entire duration of any
+/// native call (ADR 0008 / ADR 0009 rule 1 — the `ud` raw pointer is NOT
+/// itself a liveness guarantee). The
 /// pointee is only ever read here (ADR 0009 rule 3 — no `&mut` is formed).
 ///
 /// `'a` is unconstrained in the signature but is, by caller convention, the
@@ -158,19 +160,29 @@ unsafe fn ctx<'a>(mrb: *mut mrb_state) -> &'a AstContext {
     // SAFETY: `mrb` is a valid non-null `mrb_state` passed by mruby into the
     // native callback. Reading the `ud` field is the documented mruby
     // mechanism for native-callback context.
-    let ud = unsafe { (*mrb).ud } as *const AstContext;
+    //
+    // Task-4 ud-payload widening: `ud` now carries the cop-run-owned `CopRun`
+    // (ADR 0009 rule 2 — it bundles the `Arc<AstContext>` AND the offense
+    // sink, and is NOT a `thread_local!`), not a bare `Arc::as_ptr(
+    // &AstContext)`. We project the `&AstContext` back out via `CopRun::ctx`.
+    // This is the anticipated extension point (Task-3's `register` docstring:
+    // "Task 4 lands the first non-test caller"); Task-3's own `#[cfg(test)]`
+    // sites construct a `CopRun::for_test` so they keep driving this same
+    // contract.
+    let ud = unsafe { (*mrb).ud } as *const crate::mruby::sdk::CopRun;
     assert!(
         !ud.is_null(),
-        "mrb_state.ud must hold the AstContext pointer (set via set_user_data)"
+        "mrb_state.ud must hold the CopRun pointer (set via set_cop_run)"
     );
-    // SAFETY: `ud` is `Arc::as_ptr(&AstContext)` (see the fn-level # Safety):
-    // a valid, aligned, initialized `*const AstContext` whose owning `Arc` is
-    // alive for the whole native call. The context is shared-immutable behind
-    // `Arc` (ADR 0009 rule 3); we form only a shared `&`, never `&mut`. The
-    // returned reference's lifetime is unbounded `'a` but is only ever used
-    // within the synchronous body of one native callback, strictly inside the
-    // window the owning `Arc` is alive.
-    unsafe { &*ud }
+    // SAFETY: `ud` is `&CopRun as *const _` (see the fn-level # Safety): a
+    // valid, aligned, initialized `*const CopRun` whose owner is alive for the
+    // whole native call (ADR 0009 rule 1). The projected `AstContext` is
+    // shared-immutable behind `Arc` (ADR 0009 rule 3); we form only a shared
+    // `&`, never `&mut`. The returned reference's lifetime is unbounded `'a`
+    // but is only ever used within the synchronous body of one native
+    // callback, strictly inside the window the owner is alive.
+    let run: &crate::mruby::sdk::CopRun = unsafe { &*ud };
+    run.ctx()
 }
 
 /// Read the single required `i` (handle) argument from an mruby native call.
@@ -372,9 +384,10 @@ unsafe extern "C" fn native_source_slice(mrb: *mut mrb_state, _self: mrb_value) 
 /// Register the read-only native primitives on `mrb` as module functions of a
 /// `Murphy` class (matching the proven spike's `Murphy.node_*` surface).
 ///
-/// The caller MUST have already stored the live `Arc<AstContext>` pointer in
-/// `(*mrb).ud` (via [`crate::MrubyState::set_user_data`]) and MUST keep that
-/// `Arc` alive for the whole duration of any subsequent `eval` (ADR 0009
+/// The caller MUST have already stored the live `CopRun` pointer in
+/// `(*mrb).ud` (via `crate::MrubyState::set_cop_run`; `ctx` projects
+/// `&(*p).ctx`) and MUST keep that `CopRun` (with its `Arc<AstContext>`
+/// clone) alive for the whole duration of any subsequent `eval` (ADR 0009
 /// rule 1). This only *defines* the functions; it reads nothing.
 ///
 /// # Safety
@@ -391,6 +404,9 @@ unsafe extern "C" fn native_source_slice(mrb: *mut mrb_state, _self: mrb_value) 
 // Task 4 lands the first non-test caller; remove this allow when wired.
 #[allow(dead_code)]
 pub(crate) unsafe fn register(mrb: *mut mrb_state) {
+    // COUPLING: `cop_prelude.rb` REOPENS `Murphy` with `class Murphy` — it must
+    // stay a class. Do NOT switch this to `mrb_define_module` without updating
+    // the prelude, or the prelude eval raises `TypeError` (class vs module).
     // SAFETY: `mrb` is a valid non-null `mrb_state`; "Object" is a built-in
     // class always present in a fresh mruby state; `mrb_class_get` /
     // `mrb_define_class` are the documented class-definition entry points.
@@ -515,21 +531,29 @@ mod tests {
         // ADR 0009 rule 1: the worker owns its own Arc clone (here the test is
         // the "worker"); `ud` is not the liveness guarantee.
         let worker = std::sync::Arc::clone(&ctx);
+        // Task-4 ud-payload: `ud` now carries a `CopRun` (not a bare
+        // `Arc<AstContext>`); the primitives project `&AstContext` via
+        // `CopRun::ctx`. Task-3's tests only need the `ctx` projection, so a
+        // minimal `CopRun::for_test` exercises the exact same contract Task 4
+        // ships. The `CopRun` is owned by this scope and outlives the `eval`
+        // (ADR 0009 rule 1), dropping AFTER `st` (mrb_close).
+        let cop_run = crate::mruby::sdk::CopRun::for_test(std::sync::Arc::clone(&worker));
         {
             let mut st = MrubyState::open();
-            st.set_user_data(&worker);
+            st.set_cop_run(&cop_run);
             // SAFETY: `st.raw()` is a valid non-null `mrb_state` (lives as
-            // long as `st`); `ud` was set to the live `Arc<AstContext>` ptr
-            // above and `worker`/`ctx` stay alive across the `eval`.
+            // long as `st`); `ud` was set to the live `CopRun` ptr above and
+            // `cop_run`/`worker`/`ctx` stay alive across the `eval`.
             // `register` only defines functions, reads nothing.
             unsafe {
                 register(st.raw());
                 register_test_report(st.raw());
             }
             st.eval(DRIVER);
-            // `st` drops here → mrb_close, BEFORE the Arc clones drop
+            // `st` drops here → mrb_close, BEFORE the CopRun / Arc clones drop
             // (normal-path ordering, ADR 0009 rule 4).
         }
+        drop(cop_run);
         drop(worker);
         drop(ctx);
         drain_sink()
@@ -642,10 +666,11 @@ mod tests {
         let _g = lock_sink();
         let ctx = AstContext::new(b"puts 1\n".to_vec());
         let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = crate::mruby::sdk::CopRun::for_test(std::sync::Arc::clone(&worker));
         {
             let mut st = MrubyState::open();
-            st.set_user_data(&worker);
-            // SAFETY: see `run_driver_over` — valid state, live ctx in ud.
+            st.set_cop_run(&cop_run);
+            // SAFETY: see `run_driver_over` — valid state, live CopRun in ud.
             unsafe {
                 register(st.raw());
                 register_test_report(st.raw());
@@ -675,6 +700,7 @@ mod tests {
             "##,
             );
         }
+        drop(cop_run);
         drop(worker);
         drop(ctx);
         let out = drain_sink();
