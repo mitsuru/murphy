@@ -50,7 +50,8 @@
 //!   here instead of aborting the process.
 
 use murphy_core::{
-    Cop, CopRegistry, Offense, SYNTAX_COP_NAME, Severity, aggregate, discover, parse, run_cops,
+    AstContext, Cop, CopRegistry, Offense, SYNTAX_COP_NAME, Severity, aggregate, discover, parse,
+    run_cops, run_mruby_cop_isolated,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,6 +59,7 @@ use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 // Convention inherited by Tasks 8/9: a closed stdout pipe (`murphy ... | head`)
 // is NOT a setup error — the consumer hung up. A `BrokenPipe` failure writing
@@ -151,6 +153,112 @@ fn read_source(path: &str) -> Result<String, AppError> {
         .map_err(|e| AppError::setup(format!("cannot read {path:?}: {e}")))
 }
 
+/// A discovered user cop, loaded ONCE per run (P3 Task 7): its host-attributed
+/// `cop_name` and the `.rb` source text. Reading the cop file is a
+/// **setup-class** concern — a `cops/*.rb` that the registry enumerated but we
+/// cannot read is a config/cop-setup error (exit 2, consistent with ADR 0004
+/// trusted-cops + discovery's `ConfigError` → exit 2), so it is read here,
+/// up-front, ONCE per run — never once per (file × cop).
+struct MrubyCop {
+    /// `Murphy/<PascalCase(stem)>` — feeds `Offense.cop_name` and the
+    /// `aggregate` dedupe key (see [`mruby_cop_name`]).
+    cop_name: String,
+    /// The `.rb` cop source, read once. `run_mruby_cop_isolated` takes
+    /// `&str`; this owns it for the whole run so every (file × cop) call
+    /// borrows the same loaded text (no re-read).
+    source: String,
+}
+
+/// Derive a stable host cop name from a `cops/<stem>.rb` path:
+/// `Murphy/<PascalCase(stem)>`. snake_case `_`/`-` segments are dropped and
+/// each non-empty segment is capitalized — `no_puts.rb` → `Murphy/NoPuts`,
+/// `bad.rb` → `Murphy/Bad`. This is ONE pinned scheme (the e2e test asserts
+/// it): it is what `Offense.cop_name` carries for a user cop and therefore
+/// part of `aggregate`'s 4-tuple dedupe key. A file with no usable stem (no
+/// file name / non-UTF-8) falls back to `Murphy/Cop` rather than panicking —
+/// the registry only ever enumerates real `*.rb` regular files so this is
+/// defensive, not a normal path.
+fn mruby_cop_name(path: &Path) -> String {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let mut pascal = String::new();
+    for seg in stem.split(['_', '-']) {
+        let mut chars = seg.chars();
+        if let Some(first) = chars.next() {
+            pascal.extend(first.to_uppercase());
+            pascal.push_str(chars.as_str());
+        }
+    }
+    if pascal.is_empty() {
+        pascal.push_str("Cop");
+    }
+    format!("Murphy/{pascal}")
+}
+
+/// Load every registry-enumerated `cops/*.rb` ONCE, up-front (NOT per file).
+///
+/// A read failure on a cop file the registry enumerated is a setup/config
+/// error → `AppError::setup` (exit 2), exactly like `read_source` for a lint
+/// target and like discovery's `ConfigError`. Doing it here (once per run, in
+/// `run()`, before the per-file fan-out) — rather than inside the rayon
+/// per-file worker — guarantees each cop file is read exactly once regardless
+/// of how many lint targets there are.
+///
+/// ## Reserved-name collision guard (P3 Task 7 review I-1, ADR-0006 cop_name)
+///
+/// `mruby_cop_name` derives `Murphy/<PascalCase(stem)>` with no namespace
+/// separation from engine-owned names. If a user drops `cops/no_receiver_puts.rb`
+/// it derives `Murphy/NoReceiverPuts` — byte-identical to the native cop's
+/// `name()` — or `cops/syntax.rb` → [`SYNTAX_COP_NAME`]. Because `aggregate`'s
+/// dedupe key is the 4-tuple `(file, cop_name, range, message)`, a user offense
+/// at the same range+message as the native/synthetic one would be silently
+/// merged away with NO diagnostic — a contract hole the Task-8 gate must not
+/// freeze. So: build the RESERVED set from the registry's own native cops
+/// (every `registry.native_cops()[*].name()`, derived from the cop — NOT a
+/// hardcoded string, so it tracks the registry and cannot drift) plus
+/// `SYNTAX_COP_NAME`, and reject any user cop whose derived name collides with
+/// a reserved name as a setup/config error (exit 2, ADR-0004 trusted-cop /
+/// config-setup error class). The stderr message names the offending cop file
+/// path and the reserved name so the user can rename the file.
+///
+/// NOTE: this guards ONLY collisions with the RESERVED engine names. Two
+/// DISTINCT user cop files deriving the SAME `Murphy/...` name (e.g.
+/// `foo_bar.rb` + `foo__bar.rb`) is a separate tracked issue (M-1) and is
+/// deliberately NOT guarded here.
+fn load_mruby_cops(registry: &CopRegistry) -> Result<Vec<MrubyCop>, AppError> {
+    // RESERVED = engine-owned names a user cop must not shadow. Derived from
+    // the live registry (every native cop's own `name()`) + the synthetic
+    // syntax-offense name — NOT hardcoded, so adding a native cop automatically
+    // extends the reserved set with zero drift.
+    let reserved: BTreeSet<&str> = registry
+        .native_cops()
+        .iter()
+        .map(|c| c.name())
+        .chain(std::iter::once(SYNTAX_COP_NAME))
+        .collect();
+
+    registry
+        .mruby_cop_paths()
+        .iter()
+        .map(|p| {
+            let cop_name = mruby_cop_name(p);
+            if reserved.contains(cop_name.as_str()) {
+                return Err(AppError::setup(format!(
+                    "cop file {} derives the reserved engine cop name {:?}; \
+                     rename the file (a user cop must not shadow an \
+                     engine-owned name — its offenses would be silently \
+                     deduped against the engine's)",
+                    p.display(),
+                    cop_name
+                )));
+            }
+            let source = std::fs::read_to_string(p).map_err(|e| {
+                AppError::setup(format!("cannot read cop file {}: {e}", p.display()))
+            })?;
+            Ok(MrubyCop { cop_name, source })
+        })
+        .collect()
+}
+
 /// Run the single-parse pipeline over already-read `source`, labeling every
 /// offense with `file`.
 ///
@@ -195,6 +303,60 @@ fn lint_source(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> Vec<Offense> 
     sink
 }
 
+/// Run every discovered mruby user cop over `source` ONCE, labeling every
+/// offense (real OR error offense) with `file` (P3 Task 7).
+///
+/// One `AstContext` (Task 2) is built **once for this source** and shared (by
+/// `Arc`) across all user cops — the user cops and the native pass see the
+/// SAME bytes for this file (semantic "one parse per file": `AstContext::new`
+/// is mruby's parse seam; native uses `parse` directly; both consume the
+/// identical `source`, so offsets/ranges agree). Per (file × cop) we make
+/// exactly ONE `run_mruby_cop_isolated` call — Task 5 OWNS the per-cop
+/// OS-thread + wall-clock watchdog + abandon-on-timeout + Ruby-exception → one
+/// error offense; this site does NOT re-implement any of that and does NOT
+/// join/block the (possibly abandoned) cop thread. Each
+/// `run_mruby_cop_isolated` call clones its OWN child `Arc<AstContext>` (ADR
+/// 0009 rule 1), so an abandoned late-finishing cop keeps the AST alive on its
+/// own clone independently of `ctx` here — dropping `ctx` at the end of this
+/// function never pulls the arena out from under a zombie cop thread.
+///
+/// Determinism / memo interaction: this is called ONCE per UNIQUE content
+/// (the [`lint_files_memoized`] caller fans the result out per path with
+/// `Offense.file` rewritten, exactly as for the native pass), so duplicate
+/// content is NOT re-run and the byte-identical-regardless-of-duplication
+/// property holds. Final ordering/dedupe across native + every user cop is
+/// `aggregate`'s sole responsibility (Task 6 total order + severity
+/// precedence) — this function only collects.
+///
+/// A source that fails to parse: native already emitted the one
+/// `Murphy/Syntax` offense and skipped its cops (design §6, no AST). The user
+/// cops are likewise skipped here — there is no usable tree to traverse and
+/// the syntax error is already reported once. (`AstContext::new` is only built
+/// when `parse` succeeded, so this is also strictly less work.)
+fn lint_source_mruby(source: &str, file: &str, mruby_cops: &[MrubyCop]) -> Vec<Offense> {
+    // I-2 (deferred to Phase 4, tracked): this `parse(source).is_err()` then
+    // `AstContext::new` (which parses again) double-parses unique cop'd content.
+    // It is NOT collapsed into a single `ctx.parse_result().errors()` check
+    // because `crate::parse::parse` ALSO applies the `exceeds_offset_domain`
+    // u32 byte-offset guard up front, which `ParseResult::errors()` does not
+    // subsume — collapsing would silently drop that guard, so it is not
+    // provably byte-identical (murphy-cql hard gate: any doubt ⇒ defer).
+    if mruby_cops.is_empty() || parse(source).is_err() {
+        return Vec::new();
+    }
+    let ctx: Arc<AstContext> = AstContext::new(source.as_bytes().to_vec());
+    let mut sink: Vec<Offense> = Vec::new();
+    for cop in mruby_cops {
+        sink.extend(run_mruby_cop_isolated(
+            &ctx,
+            &cop.source,
+            &cop.cop_name,
+            file,
+        ));
+    }
+    sink
+}
+
 /// Read, parse+lint, and aggregate every file — with **in-run content
 /// memoization** (Phase 2 Task 7, Scope Fence 3: in-memory, single run only).
 ///
@@ -215,85 +377,60 @@ fn lint_source(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> Vec<Offense> 
 /// The flattened per-path offenses go to `aggregate` UNCHANGED — it remains
 /// the single determinism point (the total-order sort/dedupe, Task 2), so
 /// neither read/lint parallelism nor the fan-out order can perturb output.
-fn lint_files_memoized(files: &[String], registry: &CopRegistry) -> Result<Vec<Offense>, AppError> {
-    #[derive(Default)]
-    struct ContentGroup {
-        representative: String,
-        paths: Vec<String>,
-        base_offenses: Vec<Offense>,
+fn lint_files_memoized(
+    files: &[String],
+    registry: &CopRegistry,
+    mruby_cops: &[MrubyCop],
+) -> Result<Vec<Offense>, AppError> {
+    // Phase 1: read every path. `?` on the collected Result short-circuits on
+    // the first read error (missing/unreadable → exit 2), exactly as the
+    // Task-5 `par_iter().collect::<Result<_,_>>()` did.
+    let contents: Vec<String> = files
+        .par_iter()
+        .map(|f| read_source(f))
+        .collect::<Result<_, AppError>>()?;
+
+    // Group paths by content. `BTreeMap` keyed on the owned content `String`
+    // gives a deterministic representative (the first path, since `files` is
+    // already sorted upstream) and zero collision risk vs a hash. Values are
+    // the paths (in `files` order) that share that exact content.
+    let mut by_content: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (path, content) in files.iter().zip(contents.iter()) {
+        by_content
+            .entry(content.as_str())
+            .or_default()
+            .push(path.as_str());
     }
 
-    const BATCH_SIZE: usize = 128;
-
-    // Phase 1+2 (streaming): read in bounded batches, then lint each batch's
-    // newly-seen content once. This keeps the read-source peak memory bounded,
-    // while still preserving byte-for-byte output when combined with the final
-    // aggregate determinism point.
-    let mut by_content: BTreeMap<String, ContentGroup> = BTreeMap::new();
-    for chunk in files.chunks(BATCH_SIZE) {
-        let read: Vec<(String, String)> = chunk
-            .par_iter()
-            .map(|path| read_source(path).map(|source| (path.clone(), source)))
-            .collect::<Result<_, AppError>>()?;
-
-        // Track newly introduced content keys so we can parse each exactly once.
-        let mut newly_seen: Vec<String> = Vec::new();
-        for (path, source) in read {
-            match by_content.entry(source) {
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().paths.push(path);
-                }
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    let content_key = entry.key().clone();
-                    entry.insert(ContentGroup {
-                        representative: path.clone(),
-                        paths: vec![path],
-                        base_offenses: Vec::new(),
-                    });
-                    newly_seen.push(content_key);
-                }
-            }
-        }
-
-        // Parse/lint each newly introduced content exactly once, in parallel.
-        let parse_jobs: Vec<(String, String)> = newly_seen
-            .iter()
-            .map(|content| {
-                let representative = by_content
-                    .get(content)
-                    .expect("newly discovered content must exist")
-                    .representative
-                    .clone();
-                (content.clone(), representative)
-            })
-            .collect();
-
-        let parsed = parse_jobs
-            .par_iter()
-            .map(|(content, representative)| {
-                let base = lint_source(content, representative, registry.native_cops());
-                (content.clone(), base)
-            })
-            .collect::<Vec<(String, Vec<Offense>)>>();
-
-        for (content, base_offenses) in parsed {
-            by_content
-                .get_mut(&content)
-                .expect("parsed content must still exist")
-                .base_offenses = base_offenses;
-        }
-    }
-
-    let per_unique: Vec<Vec<Offense>> = by_content
-        .into_values()
-        .map(|group| {
-            group
-                .paths
+    // Phase 2: lint each UNIQUE content ONCE, in parallel (same parallelism
+    // as Task 5 when there are no dups), then fan out per path with the
+    // `Offense.file` rewritten. The representative is the first path for that
+    // content (deterministic for defense-in-depth only — `lint_source` never
+    // writes stderr; a parse failure is a `Murphy/Syntax` offense whose `file`
+    // is rewritten per real path below and `aggregate` re-sorts, so the
+    // representative choice is not observable).
+    let unique: Vec<(&&str, &Vec<&str>)> = by_content.iter().collect();
+    let per_unique: Vec<Vec<Offense>> = unique
+        .par_iter()
+        .map(|(content, paths)| {
+            let representative = paths[0];
+            // Native + every discovered mruby user cop, over the SAME unique
+            // content, computed ONCE here (the memo guarantee: duplicate
+            // content is never re-run; both engines' offenses are fanned out
+            // per path with `Offense.file` rewritten, identically). `aggregate`
+            // (called once on the flattened result) is the SOLE cross-engine
+            // ordering/dedupe point (Task 6 total order + severity precedence).
+            let mut base = lint_source(content, representative, registry.native_cops());
+            base.extend(lint_source_mruby(content, representative, mruby_cops));
+            // Fan out: one offense list per path sharing this content, with
+            // `file` set to that path. Identical content ⇒ identical
+            // offsets/cop/severity/message; only `file` differs.
+            paths
                 .iter()
                 .flat_map(|path| {
-                    group.base_offenses.iter().map(|offense| {
+                    base.iter().map(|offense| {
                         let mut offense = offense.clone();
-                        offense.file = path.to_owned();
+                        offense.file = (*path).to_owned();
                         offense
                     })
                 })
@@ -366,6 +503,15 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     let registry =
         CopRegistry::discover(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))?;
 
+    // Load every enumerated `cops/*.rb` ONCE, up-front (P3 Task 7). Reading a
+    // cop file the registry enumerated but cannot be read is a setup/config
+    // error → exit 2 (ADR 0004 trusted-cops + discovery `ConfigError` → exit
+    // 2), so it is surfaced HERE — before any linting and exactly once per
+    // run, NOT once per (file × cop). An empty `cops/` (or none) → empty Vec,
+    // so the native-only path (e.g. `sample_project`) is byte-identical: the
+    // mruby pass is a no-op when there are no user cops.
+    let mruby_cops = load_mruby_cops(&registry)?;
+
     // Classify each path arg (module doc precedence). Existing files go to the
     // explicit list (Phase 1 path, frozen-contract preserving). Directories
     // are discovered. Zero path args → discover the cwd. A non-existent path
@@ -415,7 +561,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // determinism point are all preserved inside `lint_files_memoized`; the
     // no-duplicate case is a 1:1 no-op so the snapshot stays byte-identical.
     // `tests/parallel_determinism.rs` is the permanent byte-identity guard.
-    let offenses = lint_files_memoized(&files, &registry)?;
+    let offenses = lint_files_memoized(&files, &registry, &mruby_cops)?;
 
     // stdout is exclusively the JSON array (design §5). `serde_json` cannot
     // fail serializing `Vec<Offense>` (all fields are plain owned data), but
@@ -499,7 +645,11 @@ mod tests {
         let registry = CopRegistry::native_only();
 
         PARSE_CALLS.store(0, Ordering::Relaxed);
-        let offenses = expect_ok(lint_files_memoized(&files, &registry));
+        // No user cops here: this test pins the NATIVE memo (parse-count +
+        // fan-out), so the mruby slice is empty (the mruby pass is then a
+        // strict no-op and does not perturb `PARSE_CALLS`, which only
+        // `lint_source` increments).
+        let offenses = expect_ok(lint_files_memoized(&files, &registry, &[]));
 
         // (a) UNIQUE content parsed once each: 2 unique contents → exactly 2
         // parse calls, NOT 3 (the duplicate is NOT re-parsed).
@@ -565,7 +715,7 @@ mod tests {
         ];
 
         PARSE_CALLS.store(0, Ordering::Relaxed);
-        let offenses2 = expect_ok(lint_files_memoized(&files2, &registry));
+        let offenses2 = expect_ok(lint_files_memoized(&files2, &registry, &[]));
 
         assert_eq!(
             PARSE_CALLS.load(Ordering::Relaxed),
@@ -595,7 +745,7 @@ mod tests {
         ];
 
         let registry = CopRegistry::native_only();
-        let err = lint_files_memoized(&files, &registry).expect_err("missing file must abort");
+        let err = lint_files_memoized(&files, &registry, &[]).expect_err("missing file must abort");
         assert_eq!(err.code, EXIT_SETUP_ERROR, "missing file → exit 2");
     }
 }

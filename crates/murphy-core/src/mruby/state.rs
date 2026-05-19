@@ -360,6 +360,47 @@ impl MrubyState {
             mrb_load_string(self.mrb, cscript.as_ptr());
         }
     }
+
+    /// Evaluate a Ruby `script` and report whether it left a pending mruby
+    /// exception (`(*mrb).exc != NULL`) — Task 5 exception isolation
+    /// (design §6 / ADR 0009 "Exception isolation").
+    ///
+    /// mruby exceptions do NOT unwind into Rust: a `raise` (at cop-file load
+    /// OR — I-3 — inside `on_call_node`, surfacing through the dispatch eval)
+    /// returns control normally with `(*mrb).exc` set. Task-2's [`eval`]
+    /// deliberately did not check this, so an in-visitor `raise` was a silent
+    /// no-op. This method checks `(*mrb).exc` after the eval and, if an
+    /// exception is pending, **clears it** (`(*mrb).exc = NULL`) so the
+    /// next eval on this state starts clean. The caller (the per-cop worker,
+    /// [`crate::mruby::run_mruby_cop_isolated`]) maps a `true` return to
+    /// exactly one `error offense` for that cop×file and continues.
+    ///
+    /// Purely ADDITIVE to Task 2: it does not touch `Drop`, `Send`/`Sync`,
+    /// the `ud` payload, or the existing [`eval`]; it only adds an
+    /// exception-state read+clear.
+    ///
+    /// Panics if `script` contains an interior NUL byte (cannot be a C string).
+    pub fn eval_checked(&mut self, script: &str) -> bool {
+        let cscript = CString::new(script).expect("script contains an interior NUL byte");
+        // SAFETY: `self.mrb` is a valid owned non-null `mrb_state` (since
+        // `open`, never closed before `Drop`); `cscript` is a valid
+        // NUL-terminated C string that outlives this call; `mrb_load_string`
+        // is the documented string-eval entry point. Reading `(*mrb).exc`
+        // (a `*mut RObject`) and writing it back to null is the documented
+        // mruby pending-exception state — mruby never unwinds into Rust, so
+        // this read is the ONLY way to observe a `raise` (design §6). Writing
+        // `null` clears the pending exception so a subsequent eval on the same
+        // state is not poisoned; the `RObject` itself is owned by the mruby GC
+        // (we never free it here — `mrb_close` in `Drop` reclaims it).
+        unsafe {
+            mrb_load_string(self.mrb, cscript.as_ptr());
+            let raised = !(*self.mrb).exc.is_null();
+            if raised {
+                (*self.mrb).exc = std::ptr::null_mut();
+            }
+            raised
+        }
+    }
 }
 
 impl Drop for MrubyState {

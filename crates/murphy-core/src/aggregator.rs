@@ -1,35 +1,46 @@
 //! Offense aggregator (design §5).
 //!
-//! Phase 1 scope: deterministic ordering + exact-duplicate removal only.
-//! Severity-precedence / cross-engine (native + mruby) priority resolution is
-//! explicitly Phase 3 and is intentionally NOT done here.
+//! Deterministic ordering + exact-duplicate removal, with **severity-precedence
+//! collision resolution** (ADR 0011, Phase 3 Task 6): when offenses collide on
+//! the 4-tuple `(file, cop_name, range, message)` but differ in `severity`, the
+//! **maximum-severity** offense survives (`Error > Warning`), deterministically
+//! and independent of input/engine/thread order.
 
 use crate::offense::Offense;
 
 /// Aggregate a flat list of offenses into the canonical output order.
 ///
 /// 1. **Sort** by the total order
-///    `(file, start_offset, end_offset, cop_name, message, severity)`. This key
-///    covers ALL five `Offense` fields, so it is a genuine total order: any two
-///    distinct offenses compare unequal on it. `severity` is the FINAL
-///    tiebreaker — its sole purpose here is to make step 2's "first" wholly
-///    deterministic when two offenses are 4-tuple-equal but differ only in
-///    `severity` (otherwise input/thread order would decide the survivor; this
-///    is exactly the non-determinism parallel collection would expose). Using
-///    `severity` as the last tiebreaker asserts NO severity *precedence* policy
-///    (Phase 3 owns that, see below); it only fixes *which* of an otherwise
-///    identical pair sorts first. Because the key is now total, the stable
-///    `sort_by` is genuinely belt-and-suspenders rather than load-bearing.
+///    `(file, start_offset, end_offset, cop_name, message, DESC severity)`.
+///    The first five components cover the 4-tuple identity plus offsets, so the
+///    key remains a genuine total order over all five `Offense` fields: any two
+///    distinct offenses still compare unequal on it (reversing one component's
+///    direction keeps a total order). `severity` is the FINAL tiebreaker, now
+///    sorted **descending** (ADR 0011): when two offenses are 4-tuple-equal but
+///    differ only in `severity`, the **maximum** severity (`Error > Warning`)
+///    sorts FIRST, so step 2's keep-first dedupe yields the max-severity
+///    survivor — deterministically, independent of input/engine/thread order.
 /// 2. **Dedupe** exact duplicates keyed by the 4-tuple
 ///    `(file, cop_name, range, message)`, keeping the first occurrence.
 ///
-/// Note: `severity` is **deliberately excluded** from the dedupe *key* (it is
-/// only in the sort key). Two offenses identical on the 4-tuple but differing
-/// only in `severity` collapse to the first — and after step 1 that "first" is
-/// the deterministic enum-min severity (`Warning < Error` by derive order),
-/// independent of input order. Severity/priority *precedence* resolution across
-/// native + mruby engines is owned by Phase 3 and intentionally not done here;
-/// this comparator only makes the choice deterministic, it picks no policy.
+/// Note: `severity` is **deliberately excluded from the dedupe key** (it is
+/// only in the sort key). It is the collision *resolution* rule, not part of
+/// offense identity (ADR 0011): two offenses identical on the 4-tuple but
+/// differing only in `severity` are "the same offense" and must collapse to
+/// one — and per ADR 0011 that survivor is the **maximum** severity (`Error`),
+/// so a real `Error` is never masked by a duplicate `Warning` once the native
+/// and mruby engines can both flag the same site. ADR 0006/0007 reserved this
+/// precedence for Phase 3; this is the one deliberate, predicted behavior
+/// change of Task 6 (Phase 1/2 kept the enum-min `Warning` as a placeholder).
+///
+/// Determinism (ADR 0007) is preserved: distinct *surviving* offenses differ
+/// in the 4-tuple, so their relative order is decided by an EARLIER sort
+/// component — the severity tiebreaker is reached only *within* a single
+/// collision group (all four 4-tuple components equal), every member of which
+/// deduped to one. Reversing the severity direction therefore changes ONLY
+/// which collision-group member is kept; it cannot reorder two offenses that
+/// both survive. Output ordering is bitwise-identical to before for any input
+/// with no severity-only collision.
 pub fn aggregate(mut offenses: Vec<Offense>) -> Vec<Offense> {
     offenses.sort_by(|a, b| {
         a.file
@@ -38,7 +49,10 @@ pub fn aggregate(mut offenses: Vec<Offense>) -> Vec<Offense> {
             .then(a.range.end_offset.cmp(&b.range.end_offset))
             .then(a.cop_name.cmp(&b.cop_name))
             .then(a.message.cmp(&b.message))
-            .then(a.severity.cmp(&b.severity))
+            // DESC severity (ADR 0011): max-severity sorts first within a
+            // 4-tuple-equal group so keep-first dedupe yields the higher
+            // severity (Error > Warning). Note `b` vs `a` — intentional.
+            .then(b.severity.cmp(&a.severity))
     });
 
     // Order-preserving dedupe on the 4-tuple (file, cop_name, range, message).
@@ -47,7 +61,9 @@ pub fn aggregate(mut offenses: Vec<Offense>) -> Vec<Offense> {
     // explicit seen-list (not just `dedup_by` on neighbours) makes the dedupe
     // robust regardless of adjacency while preserving first-occurrence order.
     // A `Vec` seen-list (`Range` is `Eq` but not `Hash`, and Task 6 must not
-    // touch the offense contract type) keeps this minimal for Phase 1.
+    // touch the offense contract type) keeps this minimal. The dedupe logic is
+    // UNCHANGED by ADR 0011 — collision resolution is done entirely by the DESC
+    // severity sort term above, so keep-first now yields the max severity.
     let mut kept: Vec<Offense> = Vec::with_capacity(offenses.len());
     for o in offenses {
         let is_dup = kept.iter().any(|k| {
@@ -118,45 +134,77 @@ mod tests {
         );
     }
 
-    /// Phase 1 behavior: same 4-tuple `(file,cop_name,range,message)` differing
-    /// ONLY in `severity` collapses to ONE survivor. The dedupe key is still the
-    /// 4-tuple (severity excluded) and dedupe is still first-wins — but with
-    /// `severity` as the FINAL sort tiebreaker (C1), "first" is now the
-    /// DETERMINISTIC enum-min severity (`Warning < Error` by derive order),
-    /// **independent of input order**. So forward and reversed input must yield
-    /// the SAME survivor, and that survivor is `Warning` — now because of the
-    /// deterministic severity sort order, NOT because it happened to be first in
-    /// the input. This asserts no severity *precedence* policy: Phase 3
-    /// (severity/priority resolution across native + mruby engines, design §5)
-    /// will redefine which severity wins — flipping THIS test is correct
-    /// evolution, not a regression. Isolated from the main 4-tuple contract test
-    /// so a Phase 3 dev sees the change here, not a scary failure in a test
-    /// named like a load-bearing contract guarantee.
+    /// Phase 3 severity precedence (ADR 0011): same 4-tuple
+    /// `(file,cop_name,range,message)` differing ONLY in `severity` collapses to
+    /// ONE survivor — the **maximum severity** (`Error > Warning`),
+    /// deterministically and **independent of input order**.
+    ///
+    /// This test was Phase-1 `severity_only_dup_collapses_to_first_phase1_behavior`,
+    /// which asserted the enum-MIN (`Warning`) survivor. Its Phase-1 comment
+    /// **explicitly predicted this Phase-3 flip** ("Phase 3 … will redefine
+    /// which severity wins — flipping THIS test is correct evolution, not a
+    /// regression"). ADR 0006/0007 reserved severity precedence for Phase 3;
+    /// ADR 0011 makes the call: max-severity wins so a real `Error` is never
+    /// masked by a duplicate `Warning` once the native + mruby engines can both
+    /// flag the same site. The dedupe KEY is still the 4-tuple (severity
+    /// excluded — severity is the collision *resolution* rule, not identity);
+    /// only *which* collision-equal offense survives changed. This flip is the
+    /// one intended, documented behavior change of Task 6 — correct evolution
+    /// per ADR 0006/0011, NOT a regression.
     #[test]
-    fn severity_only_dup_collapses_to_first_phase1_behavior() {
+    fn severity_collision_resolves_to_higher_severity_phase3() {
         // Warning-then-Error and the reversed Error-then-Warning must collapse
         // to the IDENTICAL, input-order-independent survivor.
         let warn = off("a.rb", "CopY", 5, 7, Severity::Warning, "same msg");
         let err = off("a.rb", "CopY", 5, 7, Severity::Error, "same msg");
 
         let forward = aggregate(vec![warn.clone(), err.clone()]);
-        let reversed = aggregate(vec![err, warn.clone()]);
+        let reversed = aggregate(vec![err.clone(), warn]);
 
         // Input-order-independent: same survivor regardless of feed order.
         assert_eq!(
             forward, reversed,
-            "severity-only near-dup survivor must NOT depend on input order"
+            "severity-collision survivor must NOT depend on input order"
         );
 
-        // The deterministic survivor is the enum-min severity (Warning < Error
-        // by derive order) — not "first by input order", but by the severity
-        // sort tiebreaker.
-        let expected = vec![warn];
+        // ADR 0011: the survivor is the MAXIMUM severity (Error > Warning),
+        // NOT the Phase-1 enum-min (Warning). Severity remains excluded from
+        // the dedupe key; it is the collision-resolution rule.
+        let expected = vec![err];
         assert_eq!(
             forward, expected,
-            "Phase 1: severity-only near-dup collapses to the deterministic \
-             enum-min severity (Warning) via the severity sort tiebreaker; \
-             severity is still excluded from the dedupe key"
+            "Phase 3 (ADR 0011): severity-only collision resolves to the \
+             higher severity (Error), deterministically; severity is still \
+             excluded from the dedupe key"
+        );
+    }
+
+    /// ADR 0011 with a genuine cross-engine collision: a native cop and an
+    /// mruby cop fire at the SAME `(file, cop_name, range, message)` but the
+    /// native one is `Error` and the mruby one is `Warning` (the Phase-3
+    /// motivating case — masking a real Error behind a duplicate Warning is
+    /// wrong). `aggregate` operates on `Vec<Offense>`, so feeding two colliding
+    /// `Offense` values directly is the right level (no mruby cop run needed,
+    /// mirroring the other aggregator unit tests). The `Error` must survive
+    /// regardless of which engine's offense appears first in the flat list.
+    #[test]
+    fn cross_engine_severity_collision_keeps_error_input_order_independent() {
+        // Same 4-tuple; "native" emits Error, "mruby" emits Warning.
+        let native_err = off("app.rb", "Murphy/Foo", 12, 18, Severity::Error, "bad");
+        let mruby_warn = off("app.rb", "Murphy/Foo", 12, 18, Severity::Warning, "bad");
+
+        let native_first = aggregate(vec![native_err.clone(), mruby_warn.clone()]);
+        let mruby_first = aggregate(vec![mruby_warn, native_err.clone()]);
+
+        assert_eq!(
+            native_first, mruby_first,
+            "cross-engine collision survivor must be engine/input-order independent"
+        );
+        assert_eq!(
+            native_first,
+            vec![native_err],
+            "ADR 0011: cross-engine 4-tuple collision keeps the Error, not the \
+             Warning — a real Error is never masked by a duplicate Warning"
         );
     }
 
@@ -206,8 +254,11 @@ mod tests {
         }
 
         // (d) tie on (file,start,end,cop_name,message); differ severity ONLY.
-        // These are 4-tuple-equal, so dedupe collapses them — but the survivor
-        // must be the DETERMINISTIC enum-min severity regardless of input order.
+        // These are 4-tuple-equal, so dedupe collapses them — and per ADR 0011
+        // the survivor is the MAXIMUM severity (Error > Warning),
+        // deterministically regardless of input order. (Phase 1 asserted the
+        // enum-min Warning here; ADR 0011 flips it — same predicted flip as
+        // `severity_collision_resolves_to_higher_severity_phase3`.)
         {
             let warn = off("a.rb", "Cop", 5, 7, Severity::Warning, "m");
             let err = off("a.rb", "Cop", 5, 7, Severity::Error, "m");
@@ -217,8 +268,8 @@ mod tests {
             assert_eq!(fwd.len(), 1, "(d) 4-tuple-equal pair dedupes to one");
             assert_eq!(
                 fwd[0].severity,
-                Severity::Warning,
-                "(d) deterministic enum-min severity (Warning < Error) survives"
+                Severity::Error,
+                "(d) ADR 0011: maximum severity (Error > Warning) survives"
             );
         }
     }

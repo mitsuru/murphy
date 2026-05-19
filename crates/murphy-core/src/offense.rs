@@ -44,12 +44,16 @@ impl Range {
 
 /// How serious an offense is.
 ///
-/// `Ord`/`PartialOrd` exist purely so the aggregator can use `severity` as the
-/// FINAL sort tiebreaker (making dedupe's "first" deterministic — see
-/// `aggregator::aggregate`). The variant order `Warning < Error` is
-/// arbitrary-but-stable: it is NOT a severity *precedence* policy (Phase 3 owns
-/// that). Derive additions do not affect serde output — `#[serde(rename_all =
-/// "lowercase")]` JSON is unchanged.
+/// `Ord`/`PartialOrd` on `Severity` are LOAD-BEARING (ADR 0011):
+/// `aggregator::aggregate` resolves a `(file, cop_name, range, message)`
+/// collision to the MAXIMUM-severity offense via a *descending* severity sort
+/// term. That yields "max by real severity" ONLY because the variants are
+/// declared least-severe → most-severe, so derive `Ord` == ascending severity.
+/// ANY new variant MUST be inserted in its true severity position (an `Info`
+/// BEFORE `Warning`; a `Fatal` AFTER `Error`) — adding it in the wrong position
+/// silently inverts collision precedence with NO failing test. Serde output is
+/// unaffected by variant order (`#[serde(rename_all = "lowercase")]` controls
+/// the wire form).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -58,6 +62,17 @@ pub enum Severity {
     /// A serious problem.
     Error,
 }
+
+// ADR 0011 compile-time anchor: the descending-severity tiebreaker in
+// `aggregator::aggregate` only yields "max by real severity" while derive `Ord`
+// equals ascending severity, i.e. variants declared least-severe → most-severe.
+// This fails to BUILD (not at runtime) if `Warning`/`Error` are reordered,
+// forcing a conscious decision when a `Severity` variant is added/moved.
+const _: () = assert!(
+    (Severity::Warning as u8) < (Severity::Error as u8),
+    "ADR 0011: Severity variants MUST be declared least-severe -> most-severe; \
+     aggregate's descending tiebreaker depends on derive Ord == ascending severity"
+);
 
 /// A single rule violation reported by a cop (design §5).
 ///

@@ -18,7 +18,10 @@ pub use discovery::{ConfigError, discover};
 // in-crate only (`pub(crate)` in `mruby`), so it is deliberately NOT
 // re-exported here — Task 4/5/7 reach it via `crate::mruby::register_primitives`.
 // Nothing in the CLI pipeline calls it yet (Task 7 wires it).
-pub use mruby::{AstContext, MrubyState, run_mruby_cop};
+pub use mruby::{
+    AstContext, COP_DEADLINE, MrubyState, run_mruby_cop, run_mruby_cop_isolated,
+    run_mruby_cop_isolated_with_deadline,
+};
 pub use offense::{Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
 pub use registry::CopRegistry;

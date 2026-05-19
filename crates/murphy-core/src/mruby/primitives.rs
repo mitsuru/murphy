@@ -404,6 +404,9 @@ unsafe extern "C" fn native_source_slice(mrb: *mut mrb_state, _self: mrb_value) 
 // Task 4 lands the first non-test caller; remove this allow when wired.
 #[allow(dead_code)]
 pub(crate) unsafe fn register(mrb: *mut mrb_state) {
+    // COUPLING: `cop_prelude.rb` REOPENS `Murphy` with `class Murphy` — it must
+    // stay a class. Do NOT switch this to `mrb_define_module` without updating
+    // the prelude, or the prelude eval raises `TypeError` (class vs module).
     // SAFETY: `mrb` is a valid non-null `mrb_state`; "Object" is a built-in
     // class always present in a fresh mruby state; `mrb_class_get` /
     // `mrb_define_class` are the documented class-definition entry points.
