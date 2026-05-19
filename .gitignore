@@ -1,3 +1,6 @@
+# Git worktrees (isolated workspaces)
+.worktrees/
+
 # Rust build output (root workspace, spikes, any crate)
 target/
 *.gem
