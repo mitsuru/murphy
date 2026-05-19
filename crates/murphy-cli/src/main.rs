@@ -59,7 +59,11 @@ use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use std::thread;
 
 // Convention inherited by Tasks 8/9: a closed stdout pipe (`murphy ... | head`)
 // is NOT a setup error — the consumer hung up. A `BrokenPipe` failure writing
@@ -259,6 +263,104 @@ fn load_mruby_cops(registry: &CopRegistry) -> Result<Vec<MrubyCop>, AppError> {
         .collect()
 }
 
+/// Read a bounded batch in parallel with a cancellation token.
+///
+/// Returns `Err` on the first setup error and requests worker threads to
+/// stop reading further files as soon as possible. In-flight workers may still
+/// be finishing one file read, but we avoid scheduling / executing the next
+/// iteration once cancellation is observed.
+fn read_batch_sources(
+    paths: &[String],
+    worker_count: usize,
+) -> Result<Vec<(String, String)>, AppError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let shared_paths = Arc::new(paths.to_vec());
+    let shared_next = Arc::new(AtomicUsize::new(0));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let results: Arc<Mutex<Vec<(String, String)>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(paths.len())));
+    let first_error: Arc<Mutex<Option<AppError>>> = Arc::new(Mutex::new(None));
+
+    let workers = worker_count.max(1).min(paths.len());
+    let mut handles = Vec::with_capacity(workers);
+
+    for _ in 0..workers {
+        let shared_paths = Arc::clone(&shared_paths);
+        let shared_next = Arc::clone(&shared_next);
+        let cancel = Arc::clone(&cancel);
+        let results = Arc::clone(&results);
+        let first_error = Arc::clone(&first_error);
+
+        let handle = thread::spawn(move || {
+            while !cancel.load(Ordering::Acquire) {
+                let index = shared_next.fetch_add(1, Ordering::AcqRel);
+                if index >= shared_paths.len() {
+                    return;
+                }
+
+                let path = &shared_paths[index];
+                match read_source(path) {
+                    Ok(source) => {
+                        // If a setup error arrived while this worker was reading,
+                        // keep side effects minimal and skip enqueueing the stale
+                        // result.
+                        if cancel.load(Ordering::Acquire) {
+                            return;
+                        }
+                        results
+                            .lock()
+                            .expect("result sink lock poisoned")
+                            .push((path.clone(), source));
+                    }
+                    Err(err) => {
+                        let should_capture = {
+                            let mut lock = first_error.lock().expect("first error lock poisoned");
+                            let was_set = lock.is_some();
+                            if lock.is_none() {
+                                *lock = Some(err);
+                            }
+                            was_set
+                        };
+                        if !should_capture {
+                            cancel.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("failed to join fast-abort read worker thread");
+    }
+
+    if let Some(error) = first_error
+        .lock()
+        .expect("first error lock poisoned")
+        .take()
+    {
+        return Err(error);
+    }
+
+    let mut source_paths = results
+        .lock()
+        .expect("result sink lock poisoned")
+        .drain(..)
+        .collect::<Vec<(String, String)>>();
+
+    // Keep file order deterministic for downstream grouping/replay logic.
+    source_paths.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(source_paths)
+}
+
 /// Run the single-parse pipeline over already-read `source`, labeling every
 /// offense with `file`.
 ///
@@ -382,53 +484,87 @@ fn lint_files_memoized(
     registry: &CopRegistry,
     mruby_cops: &[MrubyCop],
 ) -> Result<Vec<Offense>, AppError> {
-    // Phase 1: read every path. `?` on the collected Result short-circuits on
-    // the first read error (missing/unreadable → exit 2), exactly as the
-    // Task-5 `par_iter().collect::<Result<_,_>>()` did.
-    let contents: Vec<String> = files
-        .par_iter()
-        .map(|f| read_source(f))
-        .collect::<Result<_, AppError>>()?;
-
-    // Group paths by content. `BTreeMap` keyed on the owned content `String`
-    // gives a deterministic representative (the first path, since `files` is
-    // already sorted upstream) and zero collision risk vs a hash. Values are
-    // the paths (in `files` order) that share that exact content.
-    let mut by_content: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (path, content) in files.iter().zip(contents.iter()) {
-        by_content
-            .entry(content.as_str())
-            .or_default()
-            .push(path.as_str());
+    #[derive(Default)]
+    struct ContentGroup {
+        representative: String,
+        paths: Vec<String>,
+        base_offenses: Vec<Offense>,
     }
 
-    // Phase 2: lint each UNIQUE content ONCE, in parallel (same parallelism
-    // as Task 5 when there are no dups), then fan out per path with the
-    // `Offense.file` rewritten. The representative is the first path for that
-    // content (deterministic for defense-in-depth only — `lint_source` never
-    // writes stderr; a parse failure is a `Murphy/Syntax` offense whose `file`
-    // is rewritten per real path below and `aggregate` re-sorts, so the
-    // representative choice is not observable).
-    let unique: Vec<(&&str, &Vec<&str>)> = by_content.iter().collect();
-    let per_unique: Vec<Vec<Offense>> = unique
-        .par_iter()
-        .map(|(content, paths)| {
-            let representative = paths[0];
-            // Native + every discovered mruby user cop, over the SAME unique
-            // content, computed ONCE here (the memo guarantee: duplicate
-            // content is never re-run; both engines' offenses are fanned out
-            // per path with `Offense.file` rewritten, identically). `aggregate`
-            // (called once on the flattened result) is the SOLE cross-engine
-            // ordering/dedupe point (Task 6 total order + severity precedence).
-            let mut base = lint_source(content, representative, registry.native_cops());
-            base.extend(lint_source_mruby(content, representative, mruby_cops));
-            // Fan out: one offense list per path sharing this content, with
-            // `file` set to that path. Identical content ⇒ identical
-            // offsets/cop/severity/message; only `file` differs.
-            paths
+    const BATCH_SIZE: usize = 128;
+
+    // Phase 1+2 (streaming): read in bounded batches, then lint each batch's
+    // newly-seen content once. This keeps the read-source peak memory bounded,
+    // while still preserving byte-for-byte output when combined with the final
+    // aggregate determinism point.
+
+    // `available_parallelism` fallback is safe and keeps behavior deterministic
+    // across platforms without external config.
+    let worker_count = thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+
+    let mut by_content: BTreeMap<String, ContentGroup> = BTreeMap::new();
+    for chunk in files.chunks(BATCH_SIZE) {
+        let read: Vec<(String, String)> = read_batch_sources(chunk, worker_count)?;
+
+        // Track newly introduced content keys so we can parse each exactly once.
+        let mut newly_seen: Vec<String> = Vec::new();
+        for (path, source) in read {
+            match by_content.entry(source) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().paths.push(path);
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let content_key = entry.key().clone();
+                    entry.insert(ContentGroup {
+                        representative: path.clone(),
+                        paths: vec![path],
+                        base_offenses: Vec::new(),
+                    });
+                    newly_seen.push(content_key);
+                }
+            }
+        }
+
+        // Parse/lint each newly introduced content exactly once, in parallel.
+        let parse_jobs: Vec<(String, String)> = newly_seen
+            .iter()
+            .map(|content| {
+                let representative = by_content
+                    .get(content)
+                    .expect("newly discovered content must exist")
+                    .representative
+                    .clone();
+                (content.clone(), representative)
+            })
+            .collect();
+
+        let parsed = parse_jobs
+            .par_iter()
+            .map(|(content, representative)| {
+                let mut base = lint_source(content, representative, registry.native_cops());
+                base.extend(lint_source_mruby(content, representative, mruby_cops));
+                (content.clone(), base)
+            })
+            .collect::<Vec<(String, Vec<Offense>)>>();
+
+        for (content, base_offenses) in parsed {
+            by_content
+                .get_mut(&content)
+                .expect("parsed content must still exist")
+                .base_offenses = base_offenses;
+        }
+    }
+
+    let per_unique: Vec<Vec<Offense>> = by_content
+        .into_values()
+        .map(|group| {
+            group
+                .paths
                 .iter()
                 .flat_map(|path| {
-                    base.iter().map(|offense| {
+                    group.base_offenses.iter().map(|offense| {
                         let mut offense = offense.clone();
                         offense.file = (*path).to_owned();
                         offense
