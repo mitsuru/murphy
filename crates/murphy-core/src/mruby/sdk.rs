@@ -470,7 +470,7 @@ unsafe fn register_sdk(mrb: *mut mrb_state) {
     // SAFETY: `mrb` valid & non-null; `murphy` is the existing class; the name
     // is a static NUL-terminated id; the fn pointer matches the mruby
     // native-callback ABI; `args_req(5)` reproduces `MRB_ARGS_REQ` (ADR 0002
-    // finding 1) for the `(start, end, message, severity, fix_count)` arity.
+    // finding 1) for the `(start, end, message, severity, edit_blob)` arity.
     unsafe {
         mrb_define_module_function(
             mrb,
