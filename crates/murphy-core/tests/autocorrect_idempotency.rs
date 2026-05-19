@@ -22,11 +22,15 @@
 //! * `apply_matches_expected` — verifies `apply_edits(input, edits) == expected`.
 //!   This requires the descending-offset algorithm; un-ignored in `.4`.
 //!
-//! ## What is deferred to murphy-hwe.5
+//! ## What was deferred to murphy-hwe.5 (now encoded in murphy-hwe.5)
 //!
 //! True idempotency requires the **re-derive-from-corrected-source** form:
 //! run all cops on `apply_edits(input, edits)`, get zero new edits, repeat
-//! until stable.  That needs the reparse loop (`.5`) and is NOT encoded here.
+//! until stable.  That needs the reparse loop (`.5`), which is now implemented.
+//! The `strong_idempotency` test in
+//! `crates/murphy-core/tests/autocorrect_fixpoint.rs` encodes this property:
+//! `run_to_fixpoint(corrected, same_closure, max)` yields `Converged`,
+//! `corrected` unchanged, and `iterations == 0`.
 //!
 //! Note: the "same-edit-set twice" form does NOT hold in general (applying
 //! the same byte-range edits to already-shifted source corrupts it), so it is

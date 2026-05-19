@@ -184,3 +184,13 @@ correctly and is a hard failure.
 The ADR 0009 field-disjointness soundness argument now covers only the
 `ctx ↔ sink` pair (no second `UnsafeCell`); the prior `sink`/`fixes` single-writer
 clause is no longer applicable and has been removed from the `CopRun` doc.
+
+## Phase 4 Task 5 update (murphy-hwe.5)
+
+`run_to_fixpoint` (in `crates/murphy-core/src/autocorrect.rs`) implements the
+reparse-and-rerun loop with max-iteration cutoff and oscillation detection.
+
+Oscillation semantics (APIN1): `FixpointOutcome::corrected` = the re-visited
+state at cycle detection (`next`, which was found already in `seen`), NOT the
+previous round's output.  Rationale: re-feeding this value to `run_to_fixpoint`
+immediately re-detects the oscillation and is therefore stable (weak idempotency).
