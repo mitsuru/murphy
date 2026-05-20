@@ -429,4 +429,64 @@ mod tests {
             ),
         }
     }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn discover_includes_builtin_pack_then_configured_native_pack() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("core crate has parent")
+            .parent()
+            .expect("crates dir has parent")
+            .to_path_buf();
+
+        let status = std::process::Command::new("cargo")
+            .current_dir(&root)
+            .args(["build", "-p", "murphy-example-pack"])
+            .status()
+            .expect("build example pack for test");
+        assert!(
+            status.success(),
+            "example pack should build in test environment"
+        );
+
+        let target_dir = match std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from) {
+            Some(path) if path.is_absolute() => path,
+            Some(path) => root.join(path),
+            None => root.join("target"),
+        };
+        let dylib_name = format!(
+            "{}murphy_example_pack{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        );
+        let dylib = target_dir.join("debug").join(dylib_name);
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::fs::write(
+            dir.path().join("murphy.toml"),
+            format!(
+                "[[cop_packs]]\nname = \"murphy-example-pack\"\npath = {}\nversion = \"0.1.0\"\n",
+                format_args!("{:?}", dylib.to_string_lossy())
+            ),
+        )
+        .expect("write config");
+
+        let registry = CopRegistry::discover(dir.path()).expect("discover with configured pack");
+        let pack_names: Vec<&str> = registry
+            .native_pack_names()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(pack_names, ["builtin", "murphy-example-pack"]);
+
+        let names: Vec<&str> = registry
+            .native_cops()
+            .iter()
+            .map(|cop| cop.name())
+            .collect();
+        assert_eq!(names.len(), EXPECTED_NATIVE_COPS.len() + 1);
+        assert_eq!(&names[..EXPECTED_NATIVE_COPS.len()], &EXPECTED_NATIVE_COPS);
+        assert_eq!(names[EXPECTED_NATIVE_COPS.len()], "Example/FileBanner");
+    }
 }
