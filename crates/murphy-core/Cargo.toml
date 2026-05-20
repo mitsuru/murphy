@@ -23,6 +23,7 @@ ignore = "0.4"
 globset = "0.4"
 toml = "0.8"
 serde_yaml = "0.9"
+sha2 = "0.10"
 
 [dev-dependencies]
 serde_json = "1"
