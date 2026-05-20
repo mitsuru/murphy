@@ -1,0 +1,11 @@
+[cops.rules."Style/FrozenStringLiteralComment"]
+enabled = false
+
+[cops.rules."Style/StringLiterals"]
+enabled = false
+
+[cops.rules."Style/SymbolArray"]
+enabled = false
+
+[cops.rules."Style/WordArray"]
+enabled = false
