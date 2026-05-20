@@ -33,18 +33,23 @@ impl Cop for TrailingWhitespace {
 }
 
 fn inspect_line(ctx: &CopContext<'_>, sink: &mut Vec<Offense>, line_start: usize, line_end: usize) {
-    let mut trim_start = line_end;
+    let whitespace_end = if line_end > line_start && ctx.source[line_end - 1] == b'\r' {
+        line_end - 1
+    } else {
+        line_end
+    };
+    let mut trim_start = whitespace_end;
     while trim_start > line_start && matches!(ctx.source[trim_start - 1], b' ' | b'\t') {
         trim_start -= 1;
     }
 
-    if trim_start == line_end {
+    if trim_start == whitespace_end {
         return;
     }
 
     let range = Range {
         start_offset: u32::try_from(trim_start).expect("source offset fits in u32"),
-        end_offset: u32::try_from(line_end).expect("source offset fits in u32"),
+        end_offset: u32::try_from(whitespace_end).expect("source offset fits in u32"),
     };
     sink.push(offense_with_edit(
         ctx.file,
@@ -73,5 +78,18 @@ mod tests {
         assert_eq!(autocorrect.edits.len(), 1);
         assert_eq!(autocorrect.edits[0].range, offense.range);
         assert_eq!(autocorrect.edits[0].replacement, "");
+    }
+
+    #[test]
+    fn removes_trailing_spaces_before_crlf_and_preserves_crlf() {
+        let source = "x = 1  \r\n";
+        let offenses = run_single_cop(Box::new(TrailingWhitespace), source);
+
+        assert_eq!(offenses.len(), 1);
+        let offense = &offenses[0];
+        assert_eq!(offense.range.start_offset, 5);
+        assert_eq!(offense.range.end_offset, 7);
+        let autocorrect = offense.autocorrect.as_ref().expect("autocorrect");
+        assert_eq!(crate::apply_edits(source, &autocorrect.edits), "x = 1\r\n");
     }
 }

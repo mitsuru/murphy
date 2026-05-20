@@ -14,8 +14,8 @@
 //!
 //! > Enumerating `cops/*.rb` cannot change linter output. Adding a `.rb` cop
 //! > to a project under test is inert until Task 3/4 wires loading. Only the
-//! > native cops RUN (today: exactly `Murphy/NoReceiverPuts`), so the frozen
-//! > snapshot (ADR 0006/0007) stays byte-identical.
+//! > configured native cops run, so this phase's snapshot contract stays tied
+//! > to the native set explicitly registered below.
 //!
 //! ## `cops/` location & enumeration rule (ADR 0004 mitigation 2)
 //!
@@ -49,9 +49,9 @@ use std::path::{Path, PathBuf};
 /// `Vec<PathBuf>` is `Send + Sync`. That matters: the native-cop slice crosses
 /// the rayon `par_iter` boundary in the CLI's memoized lint phase.
 pub struct CopRegistry {
-    /// The native cops, reimplemented in Rust. Today this is exactly
-    /// `Murphy/NoReceiverPuts`; more are added as they are ported. This is the
-    /// slice `run_cops` consumes — the ONLY cops that actually run in Task 1.
+    /// The native cops reimplemented in Rust. This is the slice `run_cops`
+    /// consumes; discovered mruby paths are kept separately and loaded by the
+    /// mruby pipeline.
     native: Vec<Box<dyn Cop>>,
     /// Discovered `cops/*.rb` paths, sorted. Populated by [`Self::discover`]
     /// but **not loaded/run in Task 1** — consumed in P3 Task 3/4 (mruby
@@ -134,9 +134,7 @@ impl CopRegistry {
         })
     }
 
-    /// The native cops, as the `&[Box<dyn Cop>]` slice `run_cops` takes. This
-    /// is the ONLY cop set that runs in Task 1 (mruby paths are enumerated but
-    /// inert until Task 3/4).
+    /// The native cops, as the `&[Box<dyn Cop>]` slice `run_cops` takes.
     pub fn native_cops(&self) -> &[Box<dyn Cop>] {
         &self.native
     }
