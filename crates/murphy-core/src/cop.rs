@@ -88,6 +88,15 @@ pub trait Cop: Send + Sync {
         _sink: &mut Vec<Offense>,
     ) {
     }
+
+    /// Called once per unless node during the single AST traversal.
+    fn on_unless_node(
+        &self,
+        _node: &ruby_prism::UnlessNode<'_>,
+        _ctx: &CopContext<'_>,
+        _sink: &mut Vec<Offense>,
+    ) {
+    }
 }
 
 /// Internal visitor that performs the single AST pass and fans every visited
@@ -129,6 +138,13 @@ impl<'pr> Visit<'pr> for Dispatcher<'_> {
             cop.on_case_node(node, &self.ctx, self.sink);
         }
         ruby_prism::visit_case_node(self, node);
+    }
+
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        for cop in self.cops {
+            cop.on_unless_node(node, &self.ctx, self.sink);
+        }
+        ruby_prism::visit_unless_node(self, node);
     }
 }
 
@@ -429,6 +445,66 @@ mod tests {
         assert_eq!(sink.len(), 3);
         assert_eq!(sink[0].cop_name, "Test/IfHook");
         assert_eq!(sink[0].message, "if hook");
+        assert_eq!(sink[1].message, "call hook");
+        assert_eq!(sink[2].message, "call hook");
+    }
+
+    #[derive(Default)]
+    struct UnlessHookStubCop;
+
+    impl Cop for UnlessHookStubCop {
+        fn name(&self) -> &str {
+            "Test/UnlessHook"
+        }
+
+        fn on_call_node(
+            &self,
+            _node: &ruby_prism::CallNode<'_>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
+        ) {
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Warning,
+                "call hook",
+            ));
+        }
+
+        fn on_unless_node(
+            &self,
+            _node: &ruby_prism::UnlessNode<'_>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
+        ) {
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Warning,
+                "unless hook",
+            ));
+        }
+    }
+
+    #[test]
+    fn dispatch_invokes_unless_hook_for_unless_nodes() {
+        let ast = parse("unless foo\nbar\nend\n").unwrap();
+        let mut sink = Vec::new();
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(UnlessHookStubCop)];
+
+        run_cops(&ast, "t.rb", &cops, &mut sink);
+
+        assert_eq!(sink.len(), 3);
+        assert_eq!(sink[0].cop_name, "Test/UnlessHook");
+        assert_eq!(sink[0].message, "unless hook");
         assert_eq!(sink[1].message, "call hook");
         assert_eq!(sink[2].message, "call hook");
     }

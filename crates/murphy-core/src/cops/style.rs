@@ -4,6 +4,7 @@
 
 pub mod and_or;
 pub mod frozen_string_literal_comment;
+pub mod if_unless_modifier;
 pub mod nil_comparison;
 pub mod redundant_return;
 pub mod string_literals;
@@ -12,6 +13,7 @@ pub mod word_array;
 
 pub use and_or::AndOr;
 pub use frozen_string_literal_comment::FrozenStringLiteralComment;
+pub use if_unless_modifier::IfUnlessModifier;
 pub use nil_comparison::NilComparison;
 pub use redundant_return::RedundantReturn;
 pub use string_literals::StringLiterals;

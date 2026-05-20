@@ -34,6 +34,9 @@ impl Cop for AndOr {
         if has_ambiguous_content(condition) {
             return;
         }
+        if has_assignment(condition) {
+            return;
+        }
         if has_trailing_comment(ctx.source, condition_range.end_offset as usize) {
             return;
         }
@@ -118,6 +121,82 @@ fn has_ambiguous_content(condition: &[u8]) -> bool {
         .any(|byte| matches!(*byte, b'#' | b'\'' | b'"' | b'`' | b'%' | b'/'))
 }
 
+fn has_assignment(condition: &[u8]) -> bool {
+    let mut idx = 0;
+    while idx < condition.len() {
+        if condition[idx] != b'=' {
+            idx += 1;
+            continue;
+        }
+
+        if condition.get(idx + 1) == Some(&b'=') {
+            idx += 2;
+            continue;
+        }
+        if condition.get(idx + 1) == Some(&b'~') {
+            idx += 1;
+            continue;
+        }
+
+        if has_prev_non_whitespace(condition, idx, is_assignment_target_char)
+            && condition
+                .get(idx + 1..)
+                .and_then(|slice| slice.iter().find(|byte| !byte.is_ascii_whitespace()))
+                .is_some_and(|next| {
+                    is_word_like(*next) || matches!(*next, b'(' | b'[' | b'.' | b'{' | b'"' | b'\'')
+                })
+        {
+            return true;
+        }
+
+        if has_prev_non_whitespace(condition, idx, is_assignment_operator_char)
+            || has_next_non_whitespace(condition, idx, is_word_like)
+        {
+            return true;
+        }
+
+        idx += 1;
+    }
+
+    false
+}
+
+fn has_prev_non_whitespace<F>(condition: &[u8], idx: usize, pred: F) -> bool
+where
+    F: Fn(u8) -> bool,
+{
+    condition[..idx]
+        .iter()
+        .rev()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| pred(*byte))
+}
+
+fn has_next_non_whitespace<F>(condition: &[u8], idx: usize, pred: F) -> bool
+where
+    F: Fn(u8) -> bool,
+{
+    condition
+        .get(idx + 1..)
+        .and_then(|slice| slice.iter().find(|byte| !byte.is_ascii_whitespace()))
+        .is_some_and(|byte| pred(*byte))
+}
+
+fn is_assignment_target_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b')' || byte == b']'
+}
+
+fn is_assignment_operator_char(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'<' | b'>'
+    )
+}
+
+fn is_word_like(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 fn has_trailing_comment(source: &[u8], start: usize) -> bool {
     let Some(rest) = source.get(start..) else {
         return false;
@@ -196,5 +275,14 @@ mod tests {
         let offenses = run_single_cop(Box::new(AndOr), "if \"a and b\"\nend\n");
 
         assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn assignment_in_if_condition_remains_clean() {
+        for source in ["if x = foo or bar\nend\n", "if foo ||= bar or baz\nend\n"] {
+            let offenses = run_single_cop(Box::new(AndOr), source);
+
+            assert!(offenses.is_empty(), "{source:?}");
+        }
     }
 }

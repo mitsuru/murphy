@@ -88,10 +88,122 @@ fn simple_double_quoted_literals(source: &[u8]) -> Vec<Literal<'_>> {
                 }
                 idx = end + 1;
             }
+            b'<' => {
+                if let Some(end) = skip_heredoc(source, idx) {
+                    idx = end;
+                } else {
+                    idx += 1;
+                }
+            }
             _ => idx += 1,
         }
     }
     literals
+}
+
+fn skip_heredoc(source: &[u8], start: usize) -> Option<usize> {
+    let Some((delimiter, strip_indent, mut idx)) = heredoc_delimiter(source, start) else {
+        return None;
+    };
+
+    while idx < source.len() {
+        let line_end = idx
+            + source[idx..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .unwrap_or(source.len() - idx);
+        let line = &source[idx..line_end];
+
+        if is_heredoc_terminator(line, &delimiter, strip_indent) {
+            return Some(if line_end < source.len() {
+                line_end + 1
+            } else {
+                line_end
+            });
+        }
+
+        if line_end >= source.len() {
+            break;
+        }
+
+        idx = line_end + 1;
+    }
+
+    None
+}
+
+fn heredoc_delimiter(source: &[u8], start: usize) -> Option<(Vec<u8>, bool, usize)> {
+    if source.get(start) != Some(&b'<') || source.get(start + 1) != Some(&b'<') {
+        return None;
+    }
+
+    let mut idx = start + 2;
+    let mut strip_indent = false;
+
+    if source.get(idx) == Some(&b'~') {
+        strip_indent = true;
+        idx += 1;
+    } else if source.get(idx) == Some(&b'-') {
+        idx += 1;
+    }
+
+    if source.get(idx) == Some(&b'~') {
+        strip_indent = true;
+        idx += 1;
+    }
+
+    let delimiter_start = idx;
+    let delimiter = if source.get(idx) == Some(&b'\'') || source.get(idx) == Some(&b'"') {
+        let quote = source[idx];
+        let quote_end = skip_quoted(source, idx, quote);
+        if quote_end <= idx + 1 {
+            return None;
+        }
+        let text = &source[idx + 1..quote_end - 1];
+        idx = quote_end;
+        text.to_vec()
+    } else {
+        while idx < source.len() && (source[idx].is_ascii_alphanumeric() || source[idx] == b'_') {
+            idx += 1;
+        }
+        if idx == delimiter_start {
+            return None;
+        }
+        source[delimiter_start..idx].to_vec()
+    };
+
+    while idx < source.len() && source[idx].is_ascii_whitespace() && source[idx] != b'\n' {
+        idx += 1;
+    }
+    if idx >= source.len() {
+        return None;
+    }
+    if source[idx] != b'\n' {
+        return None;
+    }
+
+    Some((delimiter, strip_indent, idx + 1))
+}
+
+fn is_heredoc_terminator(line: &[u8], delimiter: &[u8], strip_indent: bool) -> bool {
+    let mut idx = 0;
+    if strip_indent {
+        while idx < line.len() && line[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+    }
+
+    if delimiter.is_empty() || line.len() < idx + delimiter.len() {
+        return false;
+    }
+
+    if !line[idx..].starts_with(delimiter) {
+        return false;
+    }
+
+    line[idx + delimiter.len()..]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
 }
 
 fn closing_quote(source: &[u8], start: usize) -> Option<usize> {
@@ -235,6 +347,30 @@ mod tests {
             let offenses = run_single_cop(Box::new(StringLiterals), source);
             assert!(offenses.is_empty(), "{source:?}");
         }
+    }
+
+    #[test]
+    fn quoted_text_in_heredoc_body_remains_clean() {
+        let source = "x = <<~TEXT\n\"abc\"\nTEXT\n";
+        let offenses = run_single_cop(Box::new(StringLiterals), source);
+
+        assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn quoted_text_in_dash_heredoc_body_remains_clean() {
+        let source = "x = <<-TEXT\n'abc'\nTEXT\n";
+        let offenses = run_single_cop(Box::new(StringLiterals), source);
+
+        assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn quoted_text_in_quoted_delimiter_heredoc_body_remains_clean() {
+        let source = "x = <<\"TEXT\"\n\"abc\"\nTEXT\n";
+        let offenses = run_single_cop(Box::new(StringLiterals), source);
+
+        assert!(offenses.is_empty());
     }
 
     #[test]
