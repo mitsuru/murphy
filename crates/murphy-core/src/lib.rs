@@ -18,7 +18,7 @@ pub use autocorrect::{
 };
 pub use config::{CopRule, MurphyConfig, migrate_rubocop_yml_to_murphy_toml};
 pub use cop::{Cop, CopContext, run_cops};
-pub use cops::no_receiver_puts::NoReceiverPuts;
+pub use cops::NoReceiverPuts;
 pub use discovery::{ConfigError, discover, discover_with_config};
 // Phase 3 Task 2 keystone — the mruby lifecycle/ownership wrapper. Task 3's
 // read-only native-primitive IDL registration (`register_primitives`) is

@@ -217,6 +217,15 @@ mod tests {
         assert_eq!(names, vec!["Murphy/NoReceiverPuts"]);
     }
 
+    #[test]
+    fn native_cop_names_are_unique_and_include_existing_cop() {
+        let names = CopRegistry::native_cop_names();
+        let unique: std::collections::BTreeSet<_> = names.iter().cloned().collect();
+
+        assert_eq!(names.len(), unique.len(), "native cop names must be unique");
+        assert!(names.iter().any(|name| name == "Murphy/NoReceiverPuts"));
+    }
+
     /// Absent `cops/` directory → empty mruby-cop path list, NOT an error
     /// (a project with no user cops is normal).
     #[test]
