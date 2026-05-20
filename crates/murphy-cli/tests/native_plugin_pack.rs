@@ -54,9 +54,11 @@ fn example_native_pack_loads_and_emits_offense() {
     assert!(status.success(), "example pack must build before e2e test");
 
     let dir = tempdir().expect("create tempdir");
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join("target"));
+    let target_dir = match std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => root.join(path),
+        None => root.join("target"),
+    };
     let dylib_name = format!(
         "{}murphy_example_pack{}",
         std::env::consts::DLL_PREFIX,
