@@ -84,6 +84,10 @@ Rules:
   documented in the struct field.
 - Plugin libraries stay loaded for the full Murphy process lifetime; registered
   function pointers are never used after unload.
+- Plugin callbacks may be invoked concurrently from multiple OS threads because
+  Murphy keeps its existing file-level `rayon` parallelism. A plugin must treat
+  callbacks as thread-safe, synchronize any shared mutable state itself, and must
+  not retain host-owned pointers after the callback returns.
 
 The first executable cop ABI should be intentionally narrow: file-level callback
 with source bytes and a host offense sink. Node-level callbacks can be added in a
@@ -143,6 +147,11 @@ Runtime panics in Rust plugin code cannot be safely recovered across FFI. Plugin
 callbacks must be `extern "C"` functions that do not unwind. Murphy should treat
 an explicit plugin error return as a setup/runtime plugin error and exit 2 for
 the first implementation.
+
+Plugin authors should avoid process-global mutable state unless it is protected
+with normal Rust synchronization primitives such as `Mutex`, `RwLock`, or
+atomics. Thread-local state must not be used to infer cop identity because Murphy
+may reuse worker threads across files and cops.
 
 ## Data Flow
 
