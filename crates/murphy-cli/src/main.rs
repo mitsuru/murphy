@@ -49,6 +49,8 @@
 //! - `3` — internal failure: a panic anywhere in the run is caught and mapped
 //!   here instead of aborting the process.
 
+mod lsp;
+
 use murphy_core::{
     AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
     aggregate_with_config, discover_with_config, migrate_rubocop_yml_to_murphy_toml, parse,
@@ -749,7 +751,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         [subcommand, rest @ ..] => (subcommand.as_str(), rest),
         [] => {
             return Err(AppError::setup(
-                "usage: murphy lint [path]... | murphy migrate <.rubocop.yml>",
+                "usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp",
             ));
         }
     };
@@ -773,9 +775,13 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         return Ok(EXIT_OK);
     }
 
+    if subcommand == "lsp" {
+        return lsp::run(post_subcommand);
+    }
+
     if subcommand != "lint" {
         return Err(AppError::setup(format!(
-            "unknown subcommand {subcommand:?} (usage: murphy lint [path]... | murphy migrate <.rubocop.yml>)"
+            "unknown subcommand {subcommand:?} (usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp)"
         )));
     }
 
