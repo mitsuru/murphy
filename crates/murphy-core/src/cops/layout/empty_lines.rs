@@ -49,7 +49,13 @@ fn inspect_line(
     content_end: usize,
     blank_run_len: &mut usize,
 ) {
-    let is_blank = ctx.source[line_start..content_end]
+    let effective_content_end = if content_end > line_start && ctx.source[content_end - 1] == b'\r'
+    {
+        content_end - 1
+    } else {
+        content_end
+    };
+    let is_blank = ctx.source[line_start..effective_content_end]
         .iter()
         .all(|byte| matches!(byte, b' ' | b'\t'));
     if !is_blank {
@@ -95,6 +101,22 @@ mod tests {
         assert_eq!(
             apply_edits(source, edits),
             "class A\n\n  def x\n  end\nend\n"
+        );
+    }
+
+    #[test]
+    fn deletes_extra_crlf_blank_line_and_preserves_crlf() {
+        let source = "class A\r\n\r\n\r\n  def x\r\n  end\r\nend\r\n";
+        let offenses = run_single_cop(Box::new(EmptyLines), source);
+
+        assert_eq!(offenses.len(), 1);
+        let offense = &offenses[0];
+        assert_eq!(offense.range.start_offset, 11);
+        assert_eq!(offense.range.end_offset, 13);
+        let edits = &offense.autocorrect.as_ref().expect("autocorrect").edits;
+        assert_eq!(
+            apply_edits(source, edits),
+            "class A\r\n\r\n  def x\r\n  end\r\nend\r\n"
         );
     }
 }
