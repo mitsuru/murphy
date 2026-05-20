@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -355,6 +356,89 @@ pub fn run_mruby_cop_sandboxed(
     offenses
 }
 
+pub fn run_mruby_cop_sandboxed_with_package(
+    ctx: &Arc<AstContext>,
+    package: &SandboxPackage,
+    cop_path: &Path,
+    cop_source: &str,
+    cop_name: &str,
+    file: &str,
+) -> Vec<Offense> {
+    match expand_package_requires(package, cop_path, cop_source) {
+        Ok(expanded) => run_mruby_cop_sandboxed(ctx, &expanded, cop_name, file),
+        Err(err) => vec![sandbox_error_offense(file, cop_name, err.capability())],
+    }
+}
+
+fn expand_package_requires(
+    package: &SandboxPackage,
+    from_file: &Path,
+    source: &str,
+) -> Result<String, SandboxViolation> {
+    let mut seen = HashSet::new();
+    expand_package_requires_inner(package, from_file, source, &mut seen)
+}
+
+fn expand_package_requires_inner(
+    package: &SandboxPackage,
+    from_file: &Path,
+    source: &str,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<String, SandboxViolation> {
+    let resolver = package.resolver();
+    let mut out = String::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(spec) = quoted_require_arg(trimmed, "require_relative") {
+            let resolved = resolver.resolve_require_relative(spec, from_file)?;
+            append_resolved_require(package, &resolved, &mut out, seen)?;
+            continue;
+        }
+        if let Some(spec) = quoted_require_arg(trimmed, "require") {
+            let resolved = resolver.resolve_require(spec)?;
+            append_resolved_require(package, &resolved, &mut out, seen)?;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    Ok(out)
+}
+
+fn append_resolved_require(
+    package: &SandboxPackage,
+    resolved: &ResolvedRequire,
+    out: &mut String,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), SandboxViolation> {
+    if resolved.kind() == ResolvedRequireKind::MurphyStdlib {
+        return Ok(());
+    }
+
+    let path = resolved.path();
+    if !seen.insert(path.clone()) {
+        return Ok(());
+    }
+    let source = fs::read_to_string(&path)
+        .map_err(|err| SandboxViolation::new(format!("package require read: {err}")))?;
+    out.push_str(&expand_package_requires_inner(
+        package, &path, &source, seen,
+    )?);
+    Ok(())
+}
+
+fn quoted_require_arg<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(keyword)?.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let rest = &rest[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(&rest[..end])
+}
+
 fn sandboxed_cop_source(cop_source: &str) -> String {
     format!(
         r#"
@@ -416,6 +500,19 @@ fn rewrite_isolated_exception_as_sandbox_violation(offenses: &mut [Offense]) {
             };
         }
     }
+}
+
+fn sandbox_error_offense(file: &str, cop_name: &str, capability: &str) -> Offense {
+    Offense::new(
+        file,
+        cop_name,
+        Range {
+            start_offset: 0,
+            end_offset: 0,
+        },
+        Severity::Error,
+        &format!("Sandbox violation: {capability}"),
+    )
 }
 
 #[cfg(test)]
@@ -634,5 +731,31 @@ mod tests {
         assert_eq!(bad[0].severity, crate::Severity::Error);
         assert_eq!(good.len(), 1);
         assert_eq!(good[0].message, "good");
+    }
+
+    #[test]
+    fn sandbox_package_runner_loads_package_relative_helper_through_resolver() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("lib")).expect("create lib");
+        fs::write(
+            dir.path().join("lib/helper.rb"),
+            "HELPER_MESSAGE = 'from helper'\n",
+        )
+        .expect("write helper");
+        let cop_path = dir.path().join("cop.rb");
+        let package = super::SandboxPackage::new("pkg", dir.path()).expect("package");
+        let ctx = crate::mruby::AstContext::new(b"puts 'hi'\n".to_vec());
+
+        let offenses = super::run_mruby_cop_sandboxed_with_package(
+            &ctx,
+            &package,
+            &cop_path,
+            "require_relative 'lib/helper'\nclass Good < Murphy::Cop\n  def on_call_node(node)\n    add_offense(node.message_loc, message: HELPER_MESSAGE)\n  end\nend\n",
+            "ThirdParty/Good",
+            "sample.rb",
+        );
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].message, "from helper");
     }
 }

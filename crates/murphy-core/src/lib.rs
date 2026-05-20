@@ -29,7 +29,7 @@ pub use mruby::sandbox::{
     PackageCacheKey, PackageFingerprint, ResolvedRequire, ResolvedRequireKind,
     SANDBOX_POLICY_VERSION, STDLIB_ALLOWLIST_VERSION, SandboxBootError, SandboxPackage,
     SandboxViolation, boot_self_check, run_mruby_cop_sandboxed,
-    validate_denied_capabilities_absent,
+    run_mruby_cop_sandboxed_with_package, validate_denied_capabilities_absent,
 };
 pub use mruby::{
     AstContext, COP_DEADLINE, MrubyState, run_mruby_cop, run_mruby_cop_isolated,
