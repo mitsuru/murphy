@@ -4,7 +4,7 @@ use murphy_core::{
     MurphyPluginCopV1, MurphyPluginV1, MURPHY_PLUGIN_ABI_VERSION,
 };
 
-const COPS: [MurphyPluginCopV1; 11] = [
+const COPS: [MurphyPluginCopV1; 13] = [
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cop::rails::action_filter::NAME,
@@ -52,6 +52,11 @@ const COPS: [MurphyPluginCopV1; 11] = [
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
+        name: cop::rails::render_inline::NAME,
+        run_file: Some(cop::rails::render_inline::run),
+    },
+    MurphyPluginCopV1 {
+        size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cop::rails::render_text::NAME,
         run_file: Some(cop::rails::render_text::run),
     },
@@ -59,6 +64,11 @@ const COPS: [MurphyPluginCopV1; 11] = [
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cop::rails::read_write_attribute::NAME,
         run_file: Some(cop::rails::read_write_attribute::run),
+    },
+    MurphyPluginCopV1 {
+        size: std::mem::size_of::<MurphyPluginCopV1>(),
+        name: cop::rails::link_to_blank::NAME,
+        run_file: Some(cop::rails::link_to_blank::run),
     },
 ];
 
