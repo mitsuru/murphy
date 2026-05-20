@@ -1,6 +1,6 @@
-use murphy_core::{aggregate_with_config, CopRegistry, MurphyConfig, Offense, Severity};
+use murphy_core::{CopRegistry, MurphyConfig, Offense, Severity, aggregate_with_config};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -10,8 +10,8 @@ const LSP_ERROR_METHOD_NOT_FOUND: i32 = -32601;
 const LSP_ERROR_INVALID_PARAMS: i32 = -32602;
 
 pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
-    let config = MurphyConfig::load(Path::new("."))
-        .map_err(|e| super::AppError::setup(e.to_string()))?;
+    let config =
+        MurphyConfig::load(Path::new(".")).map_err(|e| super::AppError::setup(e.to_string()))?;
 
     let registry = CopRegistry::discover_with_config(Path::new("."), &config)
         .map_err(|e| super::AppError::setup(e.to_string()))?;
@@ -23,9 +23,9 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
 
     let mut stdin = io::stdin();
     let mut all = Vec::new();
-    stdin.read_to_end(&mut all).map_err(|e| {
-        super::AppError::setup(format!("failed to read stdin: {e}"))
-    })?;
+    stdin
+        .read_to_end(&mut all)
+        .map_err(|e| super::AppError::setup(format!("failed to read stdin: {e}")))?;
 
     let mut cursor = 0usize;
     let mut stdout = io::stdout().lock();
@@ -208,13 +208,11 @@ fn parse_message(input: &[u8]) -> Option<(Value, usize)> {
     };
 
     let header = std::str::from_utf8(&input[..header_end - 4]).ok()?;
-    let length = header
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("Content-Length:")
-                .map(str::trim)
-                .and_then(|value| value.parse::<usize>().ok())
-        })?;
+    let length = header.lines().find_map(|line| {
+        line.strip_prefix("Content-Length:")
+            .map(str::trim)
+            .and_then(|value| value.parse::<usize>().ok())
+    })?;
 
     let body_start = header_end;
     let body_end = body_start + length;
@@ -229,29 +227,34 @@ fn parse_message(input: &[u8]) -> Option<(Value, usize)> {
 }
 
 fn write_message<W: Write>(out: &mut W, message: &Value) -> Result<(), super::AppError> {
-    let body = serde_json::to_vec(message).map_err(|e| {
-        super::AppError::setup(format!("failed to serialize LSP response: {e}"))
-    })?;
+    let body = serde_json::to_vec(message)
+        .map_err(|e| super::AppError::setup(format!("failed to serialize LSP response: {e}")))?;
 
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     if let Err(err) = out.write_all(header.as_bytes()) {
         if err.kind() == io::ErrorKind::BrokenPipe {
             return Ok(());
         }
-        return Err(super::AppError::setup(format!("failed to write stdout: {err}")));
+        return Err(super::AppError::setup(format!(
+            "failed to write stdout: {err}"
+        )));
     }
     if let Err(err) = out.write_all(&body) {
         if err.kind() == io::ErrorKind::BrokenPipe {
             return Ok(());
         }
-        return Err(super::AppError::setup(format!("failed to write stdout: {err}")));
+        return Err(super::AppError::setup(format!(
+            "failed to write stdout: {err}"
+        )));
     }
 
     if let Err(err) = out.flush() {
         if err.kind() == io::ErrorKind::BrokenPipe {
             return Ok(());
         }
-        return Err(super::AppError::setup(format!("failed to write stdout: {err}")));
+        return Err(super::AppError::setup(format!(
+            "failed to write stdout: {err}"
+        )));
     }
 
     Ok(())

@@ -121,10 +121,13 @@ fn lsp_initialize_and_open_publishes_diagnostics() {
     let output = assert.get_output().stdout.clone();
     let frames = parse_frames(&output);
 
-    let has_initialize = frames.iter().any(|m| {
-        m.get("id") == Some(&json!(1)) && m.get("result").is_some()
-    });
-    assert!(has_initialize, "initialize response with id=1 must be present");
+    let has_initialize = frames
+        .iter()
+        .any(|m| m.get("id") == Some(&json!(1)) && m.get("result").is_some());
+    assert!(
+        has_initialize,
+        "initialize response with id=1 must be present"
+    );
 
     let diagnostics_message = frames
         .into_iter()
@@ -153,12 +156,17 @@ fn lsp_initialize_and_open_publishes_diagnostics() {
         .get("severity")
         .and_then(Value::as_u64)
         .expect("diagnostic severity must be present");
-    assert_eq!(severity, 2, "warning maps to LSP severity Warning by convention");
+    assert_eq!(
+        severity, 2,
+        "warning maps to LSP severity Warning by convention"
+    );
 
-    let code = first
-        .get("code")
-        .and_then(Value::as_str)
-        .or_else(|| first.get("code").and_then(|c| c.get("value")).and_then(Value::as_str));
+    let code = first.get("code").and_then(Value::as_str).or_else(|| {
+        first
+            .get("code")
+            .and_then(|c| c.get("value"))
+            .and_then(Value::as_str)
+    });
     assert!(
         code.is_some(),
         "diagnostic code should map from offense.cop_name"
@@ -247,7 +255,10 @@ fn lsp_did_close_clears_diagnostics() {
         })
         .collect();
 
-    assert!(diagnostics.len() >= 2, "open and close should emit diagnostics twice");
+    assert!(
+        diagnostics.len() >= 2,
+        "open and close should emit diagnostics twice"
+    );
 
     let open_diagnostics = diagnostics[0]
         .get("params")
@@ -255,7 +266,10 @@ fn lsp_did_close_clears_diagnostics() {
         .get("diagnostics")
         .and_then(Value::as_array)
         .expect("diagnostics must be an array");
-    assert!(!open_diagnostics.is_empty(), "open should emit at least one diagnostic");
+    assert!(
+        !open_diagnostics.is_empty(),
+        "open should emit at least one diagnostic"
+    );
 
     let close_diagnostics = diagnostics[1]
         .get("params")
@@ -263,7 +277,10 @@ fn lsp_did_close_clears_diagnostics() {
         .get("diagnostics")
         .and_then(Value::as_array)
         .expect("diagnostics must be an array");
-    assert!(close_diagnostics.is_empty(), "close should clear diagnostics");
+    assert!(
+        close_diagnostics.is_empty(),
+        "close should clear diagnostics"
+    );
 }
 
 #[test]
@@ -326,18 +343,19 @@ fn lsp_non_file_uri_returns_invalid_params() {
 
     let frames = parse_frames(&output);
 
-    let has_invalid = frames
-        .into_iter()
-        .any(|frame| {
-            frame.get("id") == Some(&json!(2))
-                && frame.get("error").is_some()
-                && frame
-                    .get("error")
-                    .and_then(|error| error.get("code").and_then(Value::as_i64))
-                    == Some(-32602)
-        });
+    let has_invalid = frames.into_iter().any(|frame| {
+        frame.get("id") == Some(&json!(2))
+            && frame.get("error").is_some()
+            && frame
+                .get("error")
+                .and_then(|error| error.get("code").and_then(Value::as_i64))
+                == Some(-32602)
+    });
 
-    assert!(has_invalid, "didOpen with non-file URI should return InvalidParams");
+    assert!(
+        has_invalid,
+        "didOpen with non-file URI should return InvalidParams"
+    );
 }
 
 #[test]
@@ -403,16 +421,17 @@ fn lsp_non_file_uri_change_returns_invalid_params() {
 
     let frames = parse_frames(&output);
 
-    let has_invalid = frames
-        .into_iter()
-        .any(|frame| {
-            frame.get("id") == Some(&json!(2))
-                && frame.get("error").is_some()
-                && frame
-                    .get("error")
-                    .and_then(|error| error.get("code").and_then(Value::as_i64))
-                    == Some(-32602)
-        });
+    let has_invalid = frames.into_iter().any(|frame| {
+        frame.get("id") == Some(&json!(2))
+            && frame.get("error").is_some()
+            && frame
+                .get("error")
+                .and_then(|error| error.get("code").and_then(Value::as_i64))
+                == Some(-32602)
+    });
 
-    assert!(has_invalid, "didChange with non-file URI should return InvalidParams");
+    assert!(
+        has_invalid,
+        "didChange with non-file URI should return InvalidParams"
+    );
 }
