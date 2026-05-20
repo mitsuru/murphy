@@ -50,8 +50,9 @@
 //!   here instead of aborting the process.
 
 use murphy_core::{
-    AstContext, Cop, CopRegistry, FixpointStatus, Offense, SYNTAX_COP_NAME, Severity, aggregate,
-    discover, parse, run_cops, run_mruby_cop_isolated, run_to_fixpoint,
+    AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
+    aggregate_with_config, discover_with_config, migrate_rubocop_yml_to_murphy_toml, parse,
+    run_cops, run_mruby_cop_isolated, run_to_fixpoint,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -245,16 +246,20 @@ fn mruby_cop_name(path: &Path) -> String {
 /// DISTINCT user cop files deriving the SAME `Murphy/...` name (e.g.
 /// `foo_bar.rb` + `foo__bar.rb`) is a separate tracked issue (M-1) and is
 /// deliberately NOT guarded here.
-fn load_mruby_cops(registry: &CopRegistry) -> Result<Vec<MrubyCop>, AppError> {
+fn load_mruby_cops(
+    registry: &CopRegistry,
+    config: &MurphyConfig,
+) -> Result<Vec<MrubyCop>, AppError> {
     // RESERVED = engine-owned names a user cop must not shadow. Derived from
     // the live registry (every native cop's own `name()`) + the synthetic
     // syntax-offense name — NOT hardcoded, so adding a native cop automatically
     // extends the reserved set with zero drift.
-    let reserved: BTreeSet<&str> = registry
+    let reserved: BTreeSet<String> = registry
         .native_cops()
         .iter()
-        .map(|c| c.name())
-        .chain(std::iter::once(SYNTAX_COP_NAME))
+        .map(|c| c.name().to_string())
+        .chain(CopRegistry::native_cop_names())
+        .chain(std::iter::once(SYNTAX_COP_NAME.to_string()))
         .collect();
 
     registry
@@ -262,7 +267,10 @@ fn load_mruby_cops(registry: &CopRegistry) -> Result<Vec<MrubyCop>, AppError> {
         .iter()
         .map(|p| {
             let cop_name = mruby_cop_name(p);
-            if reserved.contains(cop_name.as_str()) {
+            if !config.cop_enabled(&cop_name) {
+                return Ok(None);
+            }
+            if reserved.contains(&cop_name) {
                 return Err(AppError::setup(format!(
                     "cop file {} derives the reserved engine cop name {:?}; \
                      rename the file (a user cop must not shadow an \
@@ -275,9 +283,10 @@ fn load_mruby_cops(registry: &CopRegistry) -> Result<Vec<MrubyCop>, AppError> {
             let source = std::fs::read_to_string(p).map_err(|e| {
                 AppError::setup(format!("cannot read cop file {}: {e}", p.display()))
             })?;
-            Ok(MrubyCop { cop_name, source })
+            Ok(Some(MrubyCop { cop_name, source }))
         })
-        .collect()
+        .collect::<Result<Vec<Option<MrubyCop>>, AppError>>()
+        .map(|cops| cops.into_iter().flatten().collect())
 }
 
 /// Read a bounded batch in parallel with a cancellation token.
@@ -569,10 +578,11 @@ fn lint_closure_edits<'a>(
     file: &'a str,
     registry: &'a CopRegistry,
     mruby_cops: &'a [MrubyCop],
+    config: &'a MurphyConfig,
 ) -> Vec<murphy_core::Edit> {
     let mut sink = lint_source(source, file, registry.native_cops());
     sink.extend(lint_source_mruby(source, file, mruby_cops));
-    aggregate(sink)
+    aggregate_with_config(sink, config)
         .into_iter()
         .filter_map(|o| o.autocorrect.map(|ac| ac.edits))
         .flatten()
@@ -618,6 +628,7 @@ fn lint_files_memoized(
     files: &[String],
     registry: &CopRegistry,
     mruby_cops: &[MrubyCop],
+    config: &MurphyConfig,
 ) -> Result<Vec<Offense>, AppError> {
     #[derive(Default)]
     struct ContentGroup {
@@ -710,7 +721,10 @@ fn lint_files_memoized(
         .collect();
 
     // `aggregate` is the single, unchanged determinism point (Task 2).
-    Ok(aggregate(per_unique.into_iter().flatten().collect()))
+    Ok(aggregate_with_config(
+        per_unique.into_iter().flatten().collect(),
+        config,
+    ))
 }
 
 /// Parse args, run the pipeline, and return the exit code (or an [`AppError`]
@@ -720,7 +734,8 @@ fn lint_files_memoized(
 /// `Err` for setup-class failures (`2`). Panics propagate to the guard in
 /// [`main`] and become `3`.
 fn run(args: &[String]) -> Result<u8, AppError> {
-    // args[0] is the program name. Expect: `lint [flags...] [path]...` — the
+    // args[0] is the program name. Expect: `lint [flags...] [path]...` or
+    // `migrate <.rubocop.yml>` — the
     // subcommand then ZERO-or-more flag/path args. `get(1..)` instead of
     // `&args[1..]` so `run(&[])` yields a usage error, not a slice-index
     // panic→exit 3.
@@ -733,13 +748,34 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     let (subcommand, post_subcommand) = match rest {
         [subcommand, rest @ ..] => (subcommand.as_str(), rest),
         [] => {
-            return Err(AppError::setup("usage: murphy lint [path]..."));
+            return Err(AppError::setup(
+                "usage: murphy lint [path]... | murphy migrate <.rubocop.yml>",
+            ));
         }
     };
 
+    if subcommand == "migrate" {
+        let path = match post_subcommand {
+            [path] => path,
+            _ => return Err(AppError::setup("usage: murphy migrate <.rubocop.yml>")),
+        };
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| AppError::setup(format!("cannot read {path:?}: {e}")))?;
+        let toml = migrate_rubocop_yml_to_murphy_toml(&text)
+            .map_err(|e| AppError::setup(e.to_string()))?;
+        let mut stdout = std::io::stdout().lock();
+        if let Err(e) = write!(stdout, "{toml}") {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(EXIT_OK);
+            }
+            return Err(AppError::setup(format!("failed to write stdout: {e}")));
+        }
+        return Ok(EXIT_OK);
+    }
+
     if subcommand != "lint" {
         return Err(AppError::setup(format!(
-            "unknown subcommand {subcommand:?} (usage: murphy lint [path]...)"
+            "unknown subcommand {subcommand:?} (usage: murphy lint [path]... | murphy migrate <.rubocop.yml>)"
         )));
     }
 
@@ -805,8 +841,9 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // borrow of its native slice safely crosses the rayon `par_iter` boundary
     // inside `lint_files_memoized`. Behavior is byte-identical to Phase 2:
     // only the *source* of the cop vector moved (inline literal → registry).
-    let registry =
-        CopRegistry::discover(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))?;
+    let config = MurphyConfig::load(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))?;
+    let registry = CopRegistry::discover_with_config(Path::new("."), &config)
+        .map_err(|e| AppError::setup(e.to_string()))?;
 
     // Load every enumerated `cops/*.rb` ONCE, up-front (P3 Task 7). Reading a
     // cop file the registry enumerated but cannot be read is a setup/config
@@ -815,7 +852,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // run, NOT once per (file × cop). An empty `cops/` (or none) → empty Vec,
     // so the native-only path (e.g. `sample_project`) is byte-identical: the
     // mruby pass is a no-op when there are no user cops.
-    let mruby_cops = load_mruby_cops(&registry)?;
+    let mruby_cops = load_mruby_cops(&registry, &config)?;
 
     // Classify each path arg (module doc precedence). Existing files go to the
     // explicit list (Phase 1 path, frozen-contract preserving). Directories
@@ -829,14 +866,23 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     let mut targets: BTreeSet<PathBuf> = BTreeSet::new();
     if path_args.is_empty() {
         // Zero path args: discover from the cwd.
-        for p in discover(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))? {
+        for p in discover_with_config(Path::new("."), &config)
+            .map_err(|e| AppError::setup(e.to_string()))?
+        {
             targets.insert(p);
         }
     } else {
         for arg in &path_args {
             let path = Path::new(arg);
             if path.is_dir() {
-                for p in discover(path).map_err(|e| AppError::setup(e.to_string()))? {
+                let dir_config = if path == Path::new(".") {
+                    config.clone()
+                } else {
+                    MurphyConfig::load(path).map_err(|e| AppError::setup(e.to_string()))?
+                };
+                for p in discover_with_config(path, &dir_config)
+                    .map_err(|e| AppError::setup(e.to_string()))?
+                {
                     targets.insert(p);
                 }
             } else {
@@ -887,7 +933,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
 
             let outcome = run_to_fixpoint(
                 &original,
-                |s| lint_closure_edits(s, file_str, registry_ref, mruby_cops_ref),
+                |s| lint_closure_edits(s, file_str, registry_ref, mruby_cops_ref, &config),
                 MAX_FIX_ITERATIONS,
             );
 
@@ -977,7 +1023,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         // Implemented by re-running `lint_files_memoized` on the same paths —
         // this IS the same call as a plain lint, so the invariant holds by
         // construction.
-        let offenses = lint_files_memoized(&files, &registry, &mruby_cops)?;
+        let offenses = lint_files_memoized(&files, &registry, &mruby_cops, &config)?;
 
         let json = serde_json::to_string(&offenses)
             .map_err(|e| AppError::setup(format!("failed to serialize offenses: {e}")))?;
@@ -1015,7 +1061,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // determinism point are all preserved inside `lint_files_memoized`; the
     // no-duplicate case is a 1:1 no-op so the snapshot stays byte-identical.
     // `tests/parallel_determinism.rs` is the permanent byte-identity guard.
-    let offenses = lint_files_memoized(&files, &registry, &mruby_cops)?;
+    let offenses = lint_files_memoized(&files, &registry, &mruby_cops, &config)?;
 
     // stdout is exclusively the JSON array (design §5). `serde_json` cannot
     // fail serializing `Vec<Offense>` (all fields are plain owned data), but
@@ -1103,7 +1149,8 @@ mod tests {
         // fan-out), so the mruby slice is empty (the mruby pass is then a
         // strict no-op and does not perturb `PARSE_CALLS`, which only
         // `lint_source` increments).
-        let offenses = expect_ok(lint_files_memoized(&files, &registry, &[]));
+        let config = MurphyConfig::default();
+        let offenses = expect_ok(lint_files_memoized(&files, &registry, &[], &config));
 
         // (a) UNIQUE content parsed once each: 2 unique contents → exactly 2
         // parse calls, NOT 3 (the duplicate is NOT re-parsed).
@@ -1169,7 +1216,7 @@ mod tests {
         ];
 
         PARSE_CALLS.store(0, Ordering::Relaxed);
-        let offenses2 = expect_ok(lint_files_memoized(&files2, &registry, &[]));
+        let offenses2 = expect_ok(lint_files_memoized(&files2, &registry, &[], &config));
 
         assert_eq!(
             PARSE_CALLS.load(Ordering::Relaxed),
@@ -1199,7 +1246,9 @@ mod tests {
         ];
 
         let registry = CopRegistry::native_only();
-        let err = lint_files_memoized(&files, &registry, &[]).expect_err("missing file must abort");
+        let config = MurphyConfig::default();
+        let err = lint_files_memoized(&files, &registry, &[], &config)
+            .expect_err("missing file must abort");
         assert_eq!(err.code, EXIT_SETUP_ERROR, "missing file → exit 2");
     }
 }

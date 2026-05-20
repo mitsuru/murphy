@@ -36,6 +36,7 @@
 
 use crate::ConfigError;
 use crate::Cop;
+use crate::MurphyConfig;
 use crate::NoReceiverPuts;
 use std::path::{Path, PathBuf};
 
@@ -64,6 +65,13 @@ impl CopRegistry {
     /// one-line change in one place instead of at every `run_cops` call site.
     fn native_cops_list() -> Vec<Box<dyn Cop>> {
         vec![Box::new(NoReceiverPuts)]
+    }
+
+    pub fn native_cop_names() -> Vec<String> {
+        Self::native_cops_list()
+            .into_iter()
+            .map(|cop| cop.name().to_string())
+            .collect()
     }
 
     /// Build a registry whose mruby-cop path list is empty (no `cops/`
@@ -104,9 +112,18 @@ impl CopRegistry {
     /// `cops/`" (RuboCop-style) is **explicitly out of scope for v1** (YAGNI;
     /// would also widen the ADR 0004 trust surface).
     pub fn discover(root: &Path) -> Result<Self, ConfigError> {
-        let mruby_cop_paths = enumerate_cop_paths(root)?;
+        let config = MurphyConfig::load(root)?;
+        Self::discover_with_config(root, &config)
+    }
+
+    pub fn discover_with_config(root: &Path, config: &MurphyConfig) -> Result<Self, ConfigError> {
+        let mruby_cop_paths = enumerate_cop_paths(root, &config.cops.path)?;
+        let native = Self::native_cops_list()
+            .into_iter()
+            .filter(|cop| config.cop_enabled(cop.name()))
+            .collect();
         Ok(CopRegistry {
-            native: Self::native_cops_list(),
+            native,
             mruby_cop_paths,
         })
     }
@@ -128,8 +145,8 @@ impl CopRegistry {
 /// Enumerate `<root>/cops/*.rb` (flat, non-recursive), filtered to regular
 /// files with a `.rb` extension, sorted. Absent `cops/` → empty (no error);
 /// a real I/O error on an existing `cops/` → [`ConfigError::Io`].
-fn enumerate_cop_paths(root: &Path) -> Result<Vec<PathBuf>, ConfigError> {
-    let cops_dir = root.join("cops");
+fn enumerate_cop_paths(root: &Path, cops_path: &Path) -> Result<Vec<PathBuf>, ConfigError> {
+    let cops_dir = root.join(cops_path);
     let entries = match std::fs::read_dir(&cops_dir) {
         Ok(entries) => entries,
         // No `cops/` directory is the normal "this project has no user cops"

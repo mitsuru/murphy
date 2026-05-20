@@ -36,9 +36,10 @@
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
-use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
+
+use crate::MurphyConfig;
 
 /// A discovery/config setup failure. The CLI maps every variant to exit `2`
 /// (config/cop/file-setup error, design §6) via its `AppError::setup`.
@@ -57,46 +58,12 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::BadToml(m) => write!(f, "invalid murphy.toml: {m}"),
             ConfigError::BadGlob(m) => write!(f, "invalid glob in murphy.toml: {m}"),
-            ConfigError::Io(m) => write!(f, "cannot discover files: {m}"),
+            ConfigError::Io(m) => write!(f, "{m}"),
         }
     }
 }
 
 impl std::error::Error for ConfigError {}
-
-/// The single `murphy.toml` table Murphy understands (Scope Fence 2). Unknown
-/// keys are rejected so a typo or an out-of-scope section (`[cops]`, severity,
-/// …) is a loud `ConfigError`, not a silent no-op.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MurphyToml {
-    #[serde(default)]
-    files: FilesTable,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FilesTable {
-    /// Globs selecting files; default `["**/*.rb"]` when the key/file is absent.
-    #[serde(default = "default_include")]
-    include: Vec<String>,
-    /// Globs pruned *after* `include`; default empty.
-    #[serde(default)]
-    exclude: Vec<String>,
-}
-
-impl Default for FilesTable {
-    fn default() -> Self {
-        FilesTable {
-            include: default_include(),
-            exclude: Vec::new(),
-        }
-    }
-}
-
-fn default_include() -> Vec<String> {
-    vec!["**/*.rb".to_string()]
-}
 
 /// Build a [`GlobSet`] from glob strings, surfacing a bad pattern as a
 /// structured [`ConfigError::BadGlob`].
@@ -124,21 +91,16 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet, ConfigError> {
 /// Errors (malformed `murphy.toml`, bad glob, unreadable root) are a
 /// structured [`ConfigError`]; the CLI maps these to exit `2`.
 pub fn discover(root: &Path) -> Result<Vec<PathBuf>, ConfigError> {
-    // Load optional <root>/murphy.toml. Absent → defaults. Present but
-    // malformed / out-of-scope key → BadToml (exit 2), never a silent skip.
-    let config_path = root.join("murphy.toml");
-    let files_cfg = match std::fs::read_to_string(&config_path) {
-        Ok(text) => {
-            let parsed: MurphyToml =
-                toml::from_str(&text).map_err(|e| ConfigError::BadToml(e.to_string()))?;
-            parsed.files
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => FilesTable::default(),
-        Err(e) => return Err(ConfigError::Io(format!("{}: {e}", config_path.display()))),
-    };
+    let config = MurphyConfig::load(root)?;
+    discover_with_config(root, &config)
+}
 
-    let include = build_globset(&files_cfg.include)?;
-    let exclude = build_globset(&files_cfg.exclude)?;
+pub fn discover_with_config(
+    root: &Path,
+    config: &MurphyConfig,
+) -> Result<Vec<PathBuf>, ConfigError> {
+    let include = build_globset(&config.files.include)?;
+    let exclude = build_globset(&config.files.exclude)?;
 
     // Walk: ONLY `.murphyignore` prunes (gitignore semantics). Every ambient
     // source is disabled so pruning is exactly `.murphyignore` + `exclude`.
@@ -158,7 +120,7 @@ pub fn discover(root: &Path) -> Result<Vec<PathBuf>, ConfigError> {
 
     let mut out: Vec<PathBuf> = Vec::new();
     for entry in builder.build() {
-        let entry = entry.map_err(|e| ConfigError::Io(e.to_string()))?;
+        let entry = entry.map_err(|e| ConfigError::Io(format!("cannot discover files: {e}")))?;
         // Only regular files; the walker yields directories too.
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
@@ -168,6 +130,9 @@ pub fn discover(root: &Path) -> Result<Vec<PathBuf>, ConfigError> {
         // globs (`vendor/**`, `**/*.rb`) match user-meaningful paths, not the
         // `./` / `<root>/` prefix the walker carries.
         let rel = path.strip_prefix(root).unwrap_or(path);
+        if rel.starts_with(&config.cops.path) {
+            continue;
+        }
         if include.is_match(rel) && !exclude.is_match(rel) {
             out.push(path.to_path_buf());
         }

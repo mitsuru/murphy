@@ -4,65 +4,60 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-**Murphy** is a from-scratch, high-speed Ruby linter/formatter — "Ruff for Ruby". It is **not** a port of RuboCop and shares no code with `rfmt`. The goal is to eliminate RuboCop's slowness (Ruby VM startup + hundreds of cops in Ruby + multi-pass autocorrect reparsing + GVL-bound parallelism) with a native Rust core.
+**Murphy** is a from-scratch, high-speed Ruby linter/formatter — "Ruff for Ruby". It is **not** a port of RuboCop and shares no code with `rfmt`. The goal is to eliminate RuboCop's slowness with a native Rust core.
 
-**Status: Phase 4 — autocorrect complete.** `crates/murphy-core` + `crates/murphy-cli` build a working `murphy lint` that takes file args, directory args, or zero path args (discover from cwd via discovery-only `murphy.toml` `[files] include`/`exclude` + `.murphyignore`; `.gitignore` deliberately not honored), lints **file-level parallel across all cores** with deterministic output, and parses byte-identical files once per run (in-run memoization only — no persistent cache). User cops dropped as `.rb` into `cops/` (cwd-relative, ADR 0004) run **in-process via embedded mruby**, per-cop isolated (own `mrb_state`) + deadline-guarded + exception-isolated (a raising/runaway cop → one `severity:"error"` offense for that cop×file, run continues), reading the live shared prism AST through native primitives (no serialization), merged with the native cops into one deterministic array. The `Offense.autocorrect` contract (ADR 0013) is shipped: a cop's `fix` block is now **applied** via `murphy lint --fix`/`-a` — edits applied in conflict-safe descending-offset order, conflict log, reparse-rerun fixpoint with oscillation/max-iter cutoff, idempotency. The offense-JSON contract, exit codes, and TDD/snapshot harness are **frozen** (ADR 0006); Phase 4 extends the shape with an optional `autocorrect` field (`skip_serializing_if = "Option::is_none"` preserves byte-identity for offenses without a fix — `sample_project.json` is unchanged through all of Phase 4, proven by ADR 0014). Phase 3 added cross-engine severity-precedence collision resolution (Error > Warning on a 4-tuple collision, ADR 0011); Phase 4 is gated by ADR 0014. Phase 5+ build on this without renegotiating. The authoritative design — architecture, locked decisions, rejected alternatives with rationale — lives in `docs/plans/2026-05-19-murphy-design.md`. The phased implementation plan is `docs/plans/2026-05-19-murphy-implementation-plan.md`. Resolved Phase-0/gate decisions are ADRs in `docs/decisions/` (read these before Phase 2 / Phase 3 / Phase 4 — they carry load-bearing constraints). Spike PoCs under `spikes/` are throwaway and are NOT promoted into `crates/`.
+**Status: Phase 5 — config + migrate complete.** `crates/murphy-core` + `crates/murphy-cli` build a working `murphy lint` that takes file args, directory args, or zero path args. Directory discovery uses `murphy.toml` `[files] include`/`exclude` plus `.murphyignore`; `.gitignore` is deliberately not honored. User cops are loaded from configured `[cops].path` (default `cops/`, cwd-relative, ADR 0004) and run in-process via embedded mruby with per-cop isolation, wall-clock deadline guarding, and exception isolation. `murphy.toml` is Murphy-owned, not RuboCop-compatible: `[cops.rules."Cop/Name"]` supports `enabled = false` and `severity = "warning" | "error"`; configured cops path is excluded from directory discovery. `murphy migrate <.rubocop.yml>` is a one-way lossy bootstrap helper. Autocorrect is available via `murphy lint --fix`/`-a`. Default offense JSON and exit-code contracts remain frozen (ADR 0006); Phase 5 is gated by ADR 0017. Config schema is ADR 0015; migration mapping is ADR 0016.
 
-**Security posture (ADR 0004):** v1 ships **no sandbox** for user cops — a `.rb` in `cops/` is **trusted code** run in-process with full host privileges. Per-cop isolation (ADR 0002/0003) is *fault* isolation, not a security boundary. Treat adding a cop like adding a git hook. A real sandbox for third-party cops is a hard Phase 7 prerequisite.
+**Security posture (ADR 0004):** v1 ships **no sandbox** for user cops — a `.rb` in the configured cops path is **trusted code** run in-process with full host privileges. Per-cop isolation is fault isolation, not a security boundary.
 
-## Architecture (from the design doc)
+## Architecture
 
-Single-parse, dual-engine pipeline over one shared immutable AST:
-
-```
-source ─▶ prism parse (once) ─▶ shared immutable AST
-                                   ├─▶ Native cop engine (standard cops, Rust, all-core parallel)
-                                   └─▶ Embedded mruby runtime (user cops, .rb as-is)
-                                          ↑ Rust native primitives (traversal / pattern / range)
-                                   └─▶ Offense Aggregator ─▶ output / autocorrect
+```text
+source -> prism parse once -> shared immutable AST
+                         |-> native Rust cops
+                         |-> embedded mruby user cops via native primitives
+                         -> offense aggregator -> output / autocorrect
 ```
 
-Load-bearing decisions (see doc §2 for rationale and rejected options like Spinel/CRuby-embed/Rune):
+Load-bearing decisions:
 
-- **Core in Rust.** Standard cops are reimplemented natively and run across all cores.
-- **User cops stay as `.rb`**, run via **in-process embedded mruby** — no daemon, no IPC, no Spinel/CRuby embedding. Authors drop a `.rb` into `cops/`; no build toolchain required of them.
-- **"Fast core, scripted glue":** heavy AST work is in Rust native primitives; mruby is a thin visitor layer (`on_<prism_node_type>`). Cops are read-only traversal + text-edit suggestions — **no AST mutation**.
-- **One prism parse**, shared in-memory tree exposed to mruby via native handles — **no serialization round-trip**.
-- **Isolation is per-cop:** each cop gets an independent mruby state with execution/time deadlines; a crashing or runaway cop degrades to an `error offense` for that cop×file only — everything else continues.
-- **Config:** own format + one-way `.rubocop.yml` migration (`murphy migrate`). Not RuboCop-compatible by design.
+- Core in Rust; standard cops are native and run across all cores.
+- User cops stay as `.rb`, run via embedded mruby, and are loaded from configured `[cops].path`.
+- One prism parse is shared in-memory; no AST serialization round-trip.
+- Offense aggregation is the determinism point and applies severity precedence.
+- Config is Murphy-owned; `.rubocop.yml` migration is one-way and lossy.
 - Exit codes: `0` clean / `1` offenses / `2` config-or-cop-setup error / `3` internal failure.
 
-## Testing Philosophy (applies once code exists)
+## Testing Philosophy
 
-TDD is mandatory for cops: write the failing fixture test before implementing. Autocorrect must be **idempotent** — pin the idempotency test (re-running on corrected source yields no change) before writing autocorrect logic. Design doc §7 has the full test-layer matrix: table-driven cop tests, native↔mruby boundary tests, snapshot integration, and hyperfine perf-regression in CI.
+TDD is mandatory for behavior changes: write the failing test before implementing. Autocorrect must remain idempotent. Snapshot and determinism tests protect the JSON contract.
 
 ## Build & Test
 
-Rust/Cargo workspace: `crates/murphy-core` (lib) + `crates/murphy-cli` (bin `murphy`). Toolchain pinned to Rust 1.95.0 via `rust-toolchain.toml` (cargo-native; matches `mise.toml`).
+Rust/Cargo workspace: `crates/murphy-core` (lib) + `crates/murphy-cli` (bin `murphy`). Toolchain is pinned via `rust-toolchain.toml`.
 
 ```bash
-cargo build                                       # debug build (./target/debug/murphy)
+cargo build                                       # debug build
 cargo build --release                             # release build
 cargo run -p murphy-cli -- lint <file>...         # lint explicit files
-cargo run -p murphy-cli -- lint <dir>             # lint a directory (recursive .rb walk)
-cargo run -p murphy-cli -- lint                   # discover from cwd (murphy.toml / .murphyignore)
-(cd <proj> && murphy lint .)                      # proj with cops/*.rb → native + user mruby cops merged
-cargo run -p murphy-cli -- lint --fix <file>...   # apply fix blocks and write files back
+cargo run -p murphy-cli -- lint <dir>             # lint a directory
+cargo run -p murphy-cli -- lint                   # discover from cwd
+cargo run -p murphy-cli -- lint --fix <file>...   # apply fix blocks
 cargo run -p murphy-cli -- lint -a <file>...      # alias for --fix
-cargo run -p murphy-cli -- lint --fix --debug ... # also print per-file iteration/status/conflict line
+cargo run -p murphy-cli -- lint --fix --debug ... # print fixpoint debug info
 cargo run -p murphy-cli -- lint --fix -- <file>   # -- separates files from flags
-cargo test --workspace                            # full suite (Phase 4: 131 tests, all pass)
-cargo test -p murphy-core <name>                  # single test, e.g. offense_serializes_to_contract
-cargo test -p murphy-cli --test cli               # one integration target (also: --test integration_snapshot)
-cargo fmt --check                                 # formatting gate (must be clean)
-cargo clippy --all-targets -- -D warnings         # lint gate (must be clean)
+cargo run -p murphy-cli -- migrate .rubocop.yml   # one-way migration to stdout
+cargo test --workspace                            # full suite
+cargo test -p murphy-core <name>                  # single core test
+cargo test -p murphy-cli --test cli               # CLI integration target
+cargo test -p murphy-cli --test migrate           # migration integration target
+cargo fmt --check                                 # formatting gate
+cargo clippy --workspace --all-targets -- -D warnings
 ```
-
-Exit codes: `0` no offenses / `1` offenses / `2` config-or-cop-or-file-setup error / `3` internal failure.
 
 ## Shell Command Safety
 
-`cp`/`mv`/`rm` may be aliased to interactive (`-i`) mode and hang the agent on a y/n prompt. Always use non-interactive forms: `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`. Also `ssh`/`scp` with `-o BatchMode=yes`, `apt-get -y`.
+`cp`/`mv`/`rm` may be aliased to interactive (`-i`) mode and hang the agent. Always use non-interactive forms: `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`. Also use `ssh`/`scp` with `-o BatchMode=yes`, and `apt-get -y`.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
@@ -84,7 +79,7 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export.
 
 ## Session Completion
 

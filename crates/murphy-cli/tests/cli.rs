@@ -379,6 +379,105 @@ fn lint_directory_with_malformed_murphy_toml_exits_2() {
     );
 }
 
+#[test]
+fn cops_config_can_disable_native_cop() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("dirty.rb"), "puts \"hi\"\n").expect("write dirty.rb");
+    fs::write(
+        root.join("murphy.toml"),
+        "[cops.rules.\"Murphy/NoReceiverPuts\"]\nenabled = false\n",
+    )
+    .expect("write murphy.toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+#[test]
+fn cops_config_can_override_native_cop_severity() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("dirty.rb"), "puts \"hi\"\n").expect("write dirty.rb");
+    fs::write(
+        root.join("murphy.toml"),
+        "[cops.rules.\"Murphy/NoReceiverPuts\"]\nseverity = \"error\"\n",
+    )
+    .expect("write murphy.toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(parsed.len(), 1, "got {parsed:?}");
+    assert_eq!(parsed[0]["severity"], "error");
+}
+
+#[test]
+fn directory_discovery_excludes_configured_cops_path() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("app.rb"), "x = 1\n").expect("write app.rb");
+    fs::create_dir(root.join("cops")).expect("mkdir cops");
+    fs::write(root.join("cops").join("broken.rb"), "puts \"x\"\ndef (\n")
+        .expect("write broken cop");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "only the loaded broken cop should report, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["file"], "./app.rb");
+    assert_eq!(parsed[0]["cop_name"], "Murphy/Broken");
+}
+
+#[test]
+fn explicit_cop_file_path_is_still_linted_as_a_target() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::create_dir(root.join("cops")).expect("mkdir cops");
+    fs::write(
+        root.join("cops").join("target.rb"),
+        "class TargetCop < Murphy::Cop\n  def helper\n    puts \"x\"\n  end\nend\n",
+    )
+    .expect("write target");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .arg("cops/target.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert!(
+        parsed.iter().any(|o| o["file"] == "cops/target.rb"),
+        "explicit file should not be discovery-excluded, got {parsed:?}"
+    );
+}
+
 /// In-run content memoization (Phase 2 Task 7): two explicit files with
 /// byte-identical content each get the offense in the output — once per
 /// path, differing ONLY in `file` (offsets/cop/severity/message identical
