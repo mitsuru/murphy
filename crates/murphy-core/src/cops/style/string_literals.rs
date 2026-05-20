@@ -226,6 +226,7 @@ mod tests {
             "x = \"a\\\\b\"\n",
             "x = \"a\\\"b\"\n",
             "x = %Q[\"foo\"]\n",
+            "x = %Q[[\"foo\"] \"bar\"]\n",
             "x = /\"foo\"/\n",
         ] {
             let offenses = run_single_cop(Box::new(StringLiterals), source);

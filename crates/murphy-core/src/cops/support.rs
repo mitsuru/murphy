@@ -78,6 +78,7 @@ pub(crate) fn percent_literal_end(source: &[u8], start: usize) -> Option<usize> 
         return None;
     }
 
+    let paired = matches!(delimiter, b'(' | b'[' | b'{' | b'<');
     let closing = match delimiter {
         b'(' => b')',
         b'[' => b']',
@@ -85,11 +86,22 @@ pub(crate) fn percent_literal_end(source: &[u8], start: usize) -> Option<usize> 
         b'<' => b'>',
         other => other,
     };
+    let mut depth = 1usize;
     let mut idx = delimiter_idx + 1;
     while idx < source.len() {
         match source[idx] {
             b'\\' => idx += 2,
-            byte if byte == closing => return Some(idx + 1),
+            byte if paired && byte == delimiter => {
+                depth += 1;
+                idx += 1;
+            }
+            byte if byte == closing => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx + 1);
+                }
+                idx += 1;
+            }
             _ => idx += 1,
         }
     }
