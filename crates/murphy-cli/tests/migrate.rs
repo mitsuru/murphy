@@ -64,7 +64,11 @@ fn migrated_output_roundtrips_to_lint_behavior() {
         .code(0);
     fs::write(root.join("murphy.toml"), &migrate.get_output().stdout)
         .expect("write migrated murphy.toml");
-    fs::write(root.join("dirty.rb"), "puts \"hi\"\n").expect("write dirty.rb");
+    fs::write(
+        root.join("dirty.rb"),
+        "# frozen_string_literal: true\n\nputs 'hi'\n",
+    )
+    .expect("write dirty.rb");
 
     let lint = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
