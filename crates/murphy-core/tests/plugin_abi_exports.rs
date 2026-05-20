@@ -1,6 +1,6 @@
 use murphy_core::{
-    MurphyEmitOffense, MurphyFileContext, MurphyPluginCopV1, MurphyPluginOffense, MurphyPluginV1,
-    MurphyRange, MurphyRunFile, MurphySlice,
+    MurphyEmitOffense, MurphyFileContext, MurphyPluginCopV1, MurphyPluginEdit,
+    MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunFile, MurphySlice,
 };
 
 unsafe extern "C" fn noop_run_file(
@@ -29,6 +29,7 @@ fn native_plugin_abi_types_are_public() {
     let _ = std::mem::size_of::<MurphyFileContext>();
     let _ = std::mem::size_of::<MurphyPluginCopV1>();
     let _ = std::mem::size_of::<MurphyPluginV1>();
+    let _ = std::mem::size_of::<MurphyPluginEdit>();
     let _: Option<MurphyEmitOffense> = None;
     let _: Option<MurphyRunFile> = None;
 }

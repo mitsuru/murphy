@@ -43,8 +43,9 @@ pub use ast_sexp::ast_to_sexp;
 #[cfg(not(target_os = "windows"))]
 pub use plugin::dynamic::{LoadedPluginPack, load_plugin_pack};
 pub use plugin::{
-    MURPHY_PLUGIN_ABI_VERSION, MurphyEmitOffense, MurphyFileContext, MurphyPluginCopV1,
-    MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunFile, MurphySlice, PluginFileCop,
+    MURPHY_PLUGIN_ABI_VERSION, MurphyEmitOffense, MurphyFileContext,
+    MurphyPluginAutocorrect, MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense,
+    MurphyPluginV1, MurphyRange, MurphyRunFile, MurphySlice, PluginFileCop,
     validate_plugin_cop_ids,
 };
 pub use registry::CopRegistry;

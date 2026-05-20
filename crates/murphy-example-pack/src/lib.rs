@@ -27,6 +27,7 @@ unsafe extern "C" fn run_file(
             end_offset: 0,
         },
         severity: 0,
+        autocorrect: std::ptr::null(),
     };
     unsafe { emit(sink, &offense) };
     0

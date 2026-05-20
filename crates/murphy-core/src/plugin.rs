@@ -1,4 +1,4 @@
-use crate::{Cop, CopContext, Offense, Range, Severity};
+use crate::{Autocorrect, Cop, CopContext, Edit, Offense, Range, Severity};
 use std::ffi::c_void;
 
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 1;
@@ -19,11 +19,26 @@ pub struct MurphyRange {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct MurphyPluginEdit {
+    pub range: MurphyRange,
+    pub replacement: MurphySlice,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MurphyPluginAutocorrect {
+    pub edits_ptr: *const MurphyPluginEdit,
+    pub edits_len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct MurphyPluginOffense {
     pub cop_name: MurphySlice,
     pub message: MurphySlice,
     pub range: MurphyRange,
     pub severity: u32,
+    pub autocorrect: *const MurphyPluginAutocorrect,
 }
 
 #[repr(C)]
@@ -54,6 +69,8 @@ pub struct MurphyPluginV1 {
 // contract.
 unsafe impl Sync for MurphySlice {}
 unsafe impl Sync for MurphyRange {}
+unsafe impl Sync for MurphyPluginEdit {}
+unsafe impl Sync for MurphyPluginAutocorrect {}
 unsafe impl Sync for MurphyPluginOffense {}
 unsafe impl Sync for MurphyFileContext {}
 unsafe impl Sync for MurphyPluginCopV1 {}
@@ -208,7 +225,7 @@ unsafe extern "C" fn emit_offense(sink: *mut c_void, offense: *const MurphyPlugi
     } else {
         Severity::Warning
     };
-    sink.offenses.push(Offense::new(
+    let mut output = Offense::new(
         sink.file,
         cop_name,
         Range {
@@ -217,7 +234,62 @@ unsafe extern "C" fn emit_offense(sink: *mut c_void, offense: *const MurphyPlugi
         },
         severity,
         message,
-    ));
+    );
+
+    if let Some(autocorrect) = plugin_autocorrect_from_raw(offense.autocorrect, sink.source_len) {
+        output = output.with_autocorrect(autocorrect);
+    }
+
+    sink.offenses.push(output);
+}
+
+fn plugin_autocorrect_from_raw(
+    offense_autocorrect: *const MurphyPluginAutocorrect,
+    source_len: usize,
+) -> Option<Autocorrect> {
+    if offense_autocorrect.is_null() {
+        return None;
+    }
+
+    let plugin_autocorrect = unsafe { &*offense_autocorrect };
+    if plugin_autocorrect.edits_len == 0 {
+        return None;
+    }
+    if plugin_autocorrect.edits_ptr.is_null() {
+        return None;
+    }
+
+    let edits = unsafe { std::slice::from_raw_parts(plugin_autocorrect.edits_ptr, plugin_autocorrect.edits_len) }
+        .iter()
+        .filter_map(|edit| {
+            if edit.range.start_offset > edit.range.end_offset {
+                return None;
+            }
+
+            let Some(replacement) = slice_to_str(&edit.replacement) else {
+                return None;
+            };
+            let start_offset = usize::try_from(edit.range.start_offset).ok()?;
+            let end_offset = usize::try_from(edit.range.end_offset).ok()?;
+            if end_offset > source_len || start_offset > source_len {
+                return None;
+            }
+
+            Some(Edit {
+                range: Range {
+                    start_offset: edit.range.start_offset,
+                    end_offset: edit.range.end_offset,
+                },
+                replacement: replacement.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if edits.is_empty() {
+        return None;
+    }
+
+    Some(Autocorrect { edits })
 }
 
 fn slice_to_str(slice: &MurphySlice) -> Option<&str> {
@@ -396,6 +468,7 @@ mod tests {
                 end_offset: 5,
             },
             severity: 0,
+            autocorrect: std::ptr::null(),
         };
         let mut offenses = Vec::new();
         let mut sink = OffenseSink {
@@ -407,6 +480,92 @@ mod tests {
         unsafe { emit_offense((&mut sink as *mut OffenseSink<'_>).cast(), &offense) };
 
         assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn emit_offense_includes_autocorrect_payload() {
+        let cop_name = MurphySlice {
+            ptr: b"Plugin/Test".as_ptr(),
+            len: b"Plugin/Test".len(),
+        };
+        let message = MurphySlice {
+            ptr: b"with fix".as_ptr(),
+            len: b"with fix".len(),
+        };
+        let replacement = b"replacement";
+        let edit = MurphyPluginEdit {
+            range: MurphyRange {
+                start_offset: 0,
+                end_offset: 4,
+            },
+            replacement: MurphySlice {
+                ptr: replacement.as_ptr(),
+                len: replacement.len(),
+            },
+        };
+        let autocorrect = MurphyPluginAutocorrect {
+            edits_ptr: &edit,
+            edits_len: 1,
+        };
+        let offense = MurphyPluginOffense {
+            cop_name,
+            message,
+            range: MurphyRange {
+                start_offset: 0,
+                end_offset: 4,
+            },
+            severity: 0,
+            autocorrect: &autocorrect,
+        };
+
+        let mut offenses = Vec::new();
+        let mut sink = OffenseSink {
+            file: "t.rb",
+            source_len: 10,
+            offenses: &mut offenses,
+        };
+
+        unsafe { emit_offense((&mut sink as *mut OffenseSink<'_>).cast(), &offense) };
+
+        assert_eq!(offenses.len(), 1);
+        let o = &offenses[0];
+        let autocorrect = o.autocorrect.as_ref().expect("autocorrect should be present");
+        assert_eq!(autocorrect.edits.len(), 1);
+        assert_eq!(autocorrect.edits[0].replacement, "replacement");
+        assert_eq!(autocorrect.edits[0].range.start_offset, 0);
+        assert_eq!(autocorrect.edits[0].range.end_offset, 4);
+    }
+
+    #[test]
+    fn emit_offense_ignores_invalid_autocorrect_payload() {
+        let offense = MurphyPluginOffense {
+            cop_name: MurphySlice {
+                ptr: b"Plugin/Test".as_ptr(),
+                len: b"Plugin/Test".len(),
+            },
+            message: MurphySlice {
+                ptr: b"bad fix".as_ptr(),
+                len: b"bad fix".len(),
+            },
+            range: MurphyRange {
+                start_offset: 0,
+                end_offset: 4,
+            },
+            severity: 0,
+            autocorrect: std::ptr::null(),
+        };
+
+        let mut offenses = Vec::new();
+        let mut sink = OffenseSink {
+            file: "t.rb",
+            source_len: 10,
+            offenses: &mut offenses,
+        };
+
+        unsafe { emit_offense((&mut sink as *mut OffenseSink<'_>).cast(), &offense) };
+
+        assert_eq!(offenses.len(), 1);
+        assert!(offenses[0].autocorrect.is_none());
     }
 
     #[test]

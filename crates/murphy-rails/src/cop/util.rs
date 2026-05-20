@@ -1,4 +1,7 @@
-use murphy_core::{MurphyEmitOffense, MurphyPluginOffense, MurphyRange, MurphySlice};
+use murphy_core::{
+    MurphyEmitOffense, MurphyPluginAutocorrect, MurphyPluginEdit, MurphyPluginOffense, MurphyRange,
+    MurphySlice,
+};
 use std::ffi::c_void;
 
 pub(crate) const fn slice(bytes: &'static [u8]) -> MurphySlice {
@@ -15,6 +18,71 @@ pub(crate) fn emit_match(
     cop_name: MurphySlice,
     message: MurphySlice,
     require_line_without: Option<&[u8]>,
+    emit: MurphyEmitOffense,
+    sink: *mut c_void,
+) -> i32 {
+    emit_match_with_replacement_opt(
+        source,
+        pattern,
+        cop_name,
+        message,
+        require_line_without,
+        None,
+        emit,
+        sink,
+    )
+}
+
+#[inline]
+pub(crate) fn emit_match_simple(
+    source: &[u8],
+    pattern: &[u8],
+    cop_name: MurphySlice,
+    message: MurphySlice,
+    emit: MurphyEmitOffense,
+    sink: *mut c_void,
+) -> i32 {
+    emit_match(
+        source,
+        pattern,
+        cop_name,
+        message,
+        None,
+        emit,
+        sink,
+    )
+}
+
+#[inline]
+pub(crate) fn emit_match_with_replacement(
+    source: &[u8],
+    pattern: &[u8],
+    cop_name: MurphySlice,
+    message: MurphySlice,
+    require_line_without: Option<&[u8]>,
+    replacement: &'static [u8],
+    emit: MurphyEmitOffense,
+    sink: *mut c_void,
+) -> i32 {
+    emit_match_with_replacement_opt(
+        source,
+        pattern,
+        cop_name,
+        message,
+        require_line_without,
+        Some(replacement),
+        emit,
+        sink,
+    )
+}
+
+fn emit_match_with_replacement_opt(
+    source: &[u8],
+    pattern: &[u8],
+    cop_name: MurphySlice,
+    message: MurphySlice,
+    require_line_without: Option<&[u8]>,
+    replacement: Option<&'static [u8]>,
     emit: MurphyEmitOffense,
     sink: *mut c_void,
 ) -> i32 {
@@ -41,6 +109,30 @@ pub(crate) fn emit_match(
                     Err(_) => return 1,
                 };
 
+                let autocorrect: Option<(MurphyPluginEdit, MurphyPluginAutocorrect)> =
+                    replacement.map(|replacement| {
+                        let edit = MurphyPluginEdit {
+                            range: MurphyRange {
+                                start_offset: start,
+                                end_offset: end,
+                            },
+                            replacement: MurphySlice {
+                                ptr: replacement.as_ptr(),
+                                len: replacement.len(),
+                            },
+                        };
+                        let plugin_autocorrect = MurphyPluginAutocorrect {
+                            edits_ptr: &edit,
+                            edits_len: 1,
+                        };
+                        (edit, plugin_autocorrect)
+                    });
+                let autocorrect_ptr = autocorrect
+                    .as_ref()
+                    .map_or(std::ptr::null(), |(_, plugin_autocorrect)| {
+                        plugin_autocorrect as *const MurphyPluginAutocorrect
+                    });
+
                 let offense = MurphyPluginOffense {
                     cop_name,
                     message,
@@ -49,7 +141,9 @@ pub(crate) fn emit_match(
                         end_offset: end,
                     },
                     severity: 0,
+                    autocorrect: autocorrect_ptr,
                 };
+
                 unsafe { emit(sink, &offense) };
             }
 
@@ -93,24 +187,4 @@ fn requires_line_without_match(
     } else {
         true
     }
-}
-
-#[inline]
-pub(crate) fn emit_match_simple(
-    source: &[u8],
-    pattern: &[u8],
-    cop_name: MurphySlice,
-    message: MurphySlice,
-    emit: MurphyEmitOffense,
-    sink: *mut c_void,
-) -> i32 {
-    emit_match(
-        source,
-        pattern,
-        cop_name,
-        message,
-        None,
-        emit,
-        sink,
-    )
 }
