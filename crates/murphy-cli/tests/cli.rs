@@ -20,12 +20,17 @@ use murphy_core::SYNTAX_COP_NAME;
 use std::fs;
 use tempfile::tempdir;
 
+const CLEAN_SOURCE: &str = "# frozen_string_literal: true\n\nx = 1\n";
+const CLEAN_SOURCE_2: &str = "# frozen_string_literal: true\n\ny = 2\n";
+const DIRTY_PUTS_SOURCE: &str = "# frozen_string_literal: true\n\nputs 'hi'\n";
+const DIRTY_PUTS_X_SOURCE: &str = "# frozen_string_literal: true\n\nputs 'x'\n";
+
 /// `lint` a clean file → exit 0, stdout is an empty JSON array.
 #[test]
 fn lint_clean_file_exits_0_with_empty_json_array() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("clean.rb");
-    fs::write(&path, "x = 1\n").expect("write clean.rb");
+    fs::write(&path, CLEAN_SOURCE).expect("write clean.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -48,7 +53,7 @@ fn lint_clean_file_exits_0_with_empty_json_array() {
 fn lint_dirty_file_exits_1_with_one_offense() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("dirty.rb");
-    fs::write(&path, "puts \"hi\"\n").expect("write dirty.rb");
+    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -176,7 +181,7 @@ fn lint_syntax_error_file_exits_1_with_one_syntax_offense() {
 fn lint_multi_file_with_one_missing_exits_2() {
     let dir = tempdir().expect("create tempdir");
     let good = dir.path().join("good.rb");
-    fs::write(&good, "x = 1\n").expect("write good.rb");
+    fs::write(&good, CLEAN_SOURCE).expect("write good.rb");
 
     // Bare filenames + current_dir = the tempdir, consistent with the other
     // cli tests. `good.rb` is readable & clean; `does_not_exist.rb` is absent
@@ -209,7 +214,7 @@ fn lint_multi_file_with_one_missing_exits_2() {
 fn lint_clean_only_stdout_is_exactly_empty_array() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("clean.rb");
-    fs::write(&path, "x = 1\n").expect("write clean.rb");
+    fs::write(&path, CLEAN_SOURCE).expect("write clean.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -237,7 +242,7 @@ fn lint_clean_only_stdout_is_exactly_empty_array() {
 fn lint_offense_run_stderr_is_empty() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("dirty.rb");
-    fs::write(&path, "puts \"x\"\n").expect("write dirty.rb");
+    fs::write(&path, DIRTY_PUTS_X_SOURCE).expect("write dirty.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -294,11 +299,15 @@ fn bad_usage_exits_2() {
 fn lint_directory_discovers_and_applies_murphy_toml_exclude() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
-    fs::write(root.join("clean.rb"), "x = 1\n").expect("write clean.rb");
-    fs::write(root.join("dirty.rb"), "puts \"hi\"\n").expect("write dirty.rb");
+    fs::write(root.join("clean.rb"), CLEAN_SOURCE).expect("write clean.rb");
+    fs::write(root.join("dirty.rb"), DIRTY_PUTS_SOURCE).expect("write dirty.rb");
     fs::create_dir_all(root.join("vendor")).expect("mkdir vendor");
     // A receiver-less puts that WOULD be flagged — proves exclude prunes it.
-    fs::write(root.join("vendor").join("dep.rb"), "puts \"v\"\n").expect("write dep.rb");
+    fs::write(
+        root.join("vendor").join("dep.rb"),
+        "# frozen_string_literal: true\n\nputs 'v'\n",
+    )
+    .expect("write dep.rb");
     fs::write(
         root.join("murphy.toml"),
         "[files]\ninclude = [\"**/*.rb\"]\nexclude = [\"vendor/**\"]\n",
@@ -337,8 +346,8 @@ fn lint_directory_discovers_and_applies_murphy_toml_exclude() {
 fn lint_zero_paths_discovers_cwd() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
-    fs::write(root.join("a.rb"), "x = 1\n").expect("write a.rb");
-    fs::write(root.join("b.rb"), "y = 2\n").expect("write b.rb");
+    fs::write(root.join("a.rb"), CLEAN_SOURCE).expect("write a.rb");
+    fs::write(root.join("b.rb"), CLEAN_SOURCE_2).expect("write b.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -361,7 +370,7 @@ fn lint_zero_paths_discovers_cwd() {
 fn lint_directory_with_malformed_murphy_toml_exits_2() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
-    fs::write(root.join("a.rb"), "x = 1\n").expect("write a.rb");
+    fs::write(root.join("a.rb"), CLEAN_SOURCE).expect("write a.rb");
     fs::write(root.join("murphy.toml"), "not = valid = toml [[[\n").expect("write murphy.toml");
 
     let assert = Command::cargo_bin("murphy")
@@ -383,7 +392,7 @@ fn lint_directory_with_malformed_murphy_toml_exits_2() {
 fn cops_config_can_disable_native_cop() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
-    fs::write(root.join("dirty.rb"), "puts \"hi\"\n").expect("write dirty.rb");
+    fs::write(root.join("dirty.rb"), DIRTY_PUTS_SOURCE).expect("write dirty.rb");
     fs::write(
         root.join("murphy.toml"),
         "[cops.rules.\"Murphy/NoReceiverPuts\"]\nenabled = false\n",
@@ -404,7 +413,7 @@ fn cops_config_can_disable_native_cop() {
 fn cops_config_can_override_native_cop_severity() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
-    fs::write(root.join("dirty.rb"), "puts \"hi\"\n").expect("write dirty.rb");
+    fs::write(root.join("dirty.rb"), DIRTY_PUTS_SOURCE).expect("write dirty.rb");
     fs::write(
         root.join("murphy.toml"),
         "[cops.rules.\"Murphy/NoReceiverPuts\"]\nseverity = \"error\"\n",
@@ -453,7 +462,7 @@ fn syntax_error_severity_cannot_be_downgraded_by_config() {
 fn directory_discovery_excludes_configured_cops_path() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
-    fs::write(root.join("app.rb"), "x = 1\n").expect("write app.rb");
+    fs::write(root.join("app.rb"), CLEAN_SOURCE).expect("write app.rb");
     fs::create_dir(root.join("cops")).expect("mkdir cops");
     fs::write(root.join("cops").join("broken.rb"), "puts \"x\"\ndef (\n")
         .expect("write broken cop");
@@ -515,8 +524,8 @@ fn lint_two_identical_content_files_emits_offense_per_path() {
     let dir = tempdir().expect("create tempdir");
     let dup_a = dir.path().join("dup_a.rb");
     let dup_b = dir.path().join("dup_b.rb");
-    fs::write(&dup_a, "puts \"x\"\n").expect("write dup_a.rb");
-    fs::write(&dup_b, "puts \"x\"\n").expect("write dup_b.rb");
+    fs::write(&dup_a, DIRTY_PUTS_X_SOURCE).expect("write dup_a.rb");
+    fs::write(&dup_b, DIRTY_PUTS_X_SOURCE).expect("write dup_b.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
