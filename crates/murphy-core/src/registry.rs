@@ -58,6 +58,7 @@ pub struct CopRegistry {
     /// consumes; discovered mruby paths are kept separately and loaded by the
     /// mruby pipeline.
     native: Vec<Box<dyn Cop>>,
+    native_pack_names: Vec<String>,
     /// Discovered `cops/*.rb` paths, sorted. Populated by [`Self::discover`]
     /// but **not loaded/run in Task 1** — consumed in P3 Task 3/4 (mruby
     /// loading). Exposed via [`Self::mruby_cop_paths`] (exercised by tests so
@@ -103,6 +104,7 @@ impl CopRegistry {
     pub fn native_only() -> Self {
         CopRegistry {
             native: Self::native_cops_list(),
+            native_pack_names: vec!["builtin".to_string()],
             mruby_cop_paths: Vec::new(),
         }
     }
@@ -147,6 +149,7 @@ impl CopRegistry {
             .collect();
         Ok(CopRegistry {
             native,
+            native_pack_names: vec!["builtin".to_string()],
             mruby_cop_paths,
         })
     }
@@ -154,6 +157,10 @@ impl CopRegistry {
     /// The native cops, as the `&[Box<dyn Cop>]` slice `run_cops` takes.
     pub fn native_cops(&self) -> &[Box<dyn Cop>] {
         &self.native
+    }
+
+    pub fn native_pack_names(&self) -> &[String] {
+        &self.native_pack_names
     }
 
     /// The discovered `cops/*.rb` paths, sorted. **Enumerated, not loaded** in
@@ -250,6 +257,14 @@ mod tests {
         // Same native set when discovered against a root with no `cops/`.
         let dir = tempfile::tempdir().expect("create tempdir");
         let reg = CopRegistry::discover(dir.path()).expect("discover with no cops/ is Ok");
+        let names: Vec<&str> = reg.native_cops().iter().map(|c| c.name()).collect();
+        assert_eq!(names, EXPECTED_NATIVE_COPS);
+    }
+
+    #[test]
+    fn registry_exposes_builtin_pack_metadata() {
+        let reg = CopRegistry::native_only();
+        assert_eq!(reg.native_pack_names(), &["builtin".to_string()]);
         let names: Vec<&str> = reg.native_cops().iter().map(|c| c.name()).collect();
         assert_eq!(names, EXPECTED_NATIVE_COPS);
     }
