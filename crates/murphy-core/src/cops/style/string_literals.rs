@@ -60,7 +60,7 @@ fn simple_double_quoted_literals(source: &[u8]) -> Vec<Literal<'_>> {
                 }
             }
             b'/' => {
-                if let Some(end) = slash_literal_end(source, idx) {
+                if is_regex_like(source, idx) && let Some(end) = slash_literal_end(source, idx) {
                     idx = end;
                 } else {
                     idx += 1;
@@ -136,6 +136,9 @@ fn heredoc_delimiter(source: &[u8], start: usize) -> Option<(Vec<u8>, bool, usiz
     if source.get(start) != Some(&b'<') || source.get(start + 1) != Some(&b'<') {
         return None;
     }
+    if !heredoc_prefix_allows(source, start) {
+        return None;
+    }
 
     let mut idx = start + 2;
     let mut strip_indent = false;
@@ -179,10 +182,45 @@ fn heredoc_delimiter(source: &[u8], start: usize) -> Option<(Vec<u8>, bool, usiz
         return None;
     }
     if source[idx] != b'\n' {
+        if !is_heredoc_suffix_allowed(source, idx) {
+            return None;
+        }
+        idx = source[idx..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(source.len(), |offset| idx + offset);
+        if idx >= source.len() {
+            return None;
+        }
+    }
+
+    if source[idx] != b'\n' {
         return None;
     }
 
     Some((delimiter, strip_indent, idx + 1))
+}
+
+fn heredoc_prefix_allows(source: &[u8], start: usize) -> bool {
+    let Some(prev) = previous_significant_byte(source, start) else {
+        return true;
+    };
+    !prev.is_ascii_alphanumeric()
+        && prev != b'_'
+        && prev != b')'
+        && prev != b']'
+        && prev != b'}'
+}
+
+fn is_heredoc_suffix_allowed(source: &[u8], idx: usize) -> bool {
+    if idx >= source.len() {
+        return false;
+    }
+
+    matches!(
+        source[idx],
+        b'.' | b',' | b')' | b']' | b'}' | b'#' | b'\n' | b'\r' | b'\t' | b' '
+    )
 }
 
 fn is_heredoc_terminator(line: &[u8], delimiter: &[u8], strip_indent: bool) -> bool {
@@ -278,6 +316,21 @@ fn previous_significant_byte(source: &[u8], before: usize) -> Option<u8> {
         .find(|byte| !byte.is_ascii_whitespace())
 }
 
+fn is_regex_like(source: &[u8], idx: usize) -> bool {
+    let Some(prev) = previous_significant_byte(source, idx) else {
+        return true;
+    };
+    if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b')' || prev == b']' || prev == b'}' {
+        return false;
+    }
+
+    let Some(next) = source.get(idx + 1) else {
+        return false;
+    };
+
+    !matches!(next, b'\n' | b'\r' | b';')
+}
+
 fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
     while bytes.first().is_some_and(u8::is_ascii_whitespace) {
         bytes = &bytes[1..];
@@ -350,8 +403,38 @@ mod tests {
     }
 
     #[test]
+    fn division_operator_does_not_skip_scanned_string() {
+        let source = "x = a / \"abc\" / b\n";
+        let offenses = run_single_cop(Box::new(StringLiterals), source);
+
+        assert_eq!(offenses.len(), 1, "{offenses:?}");
+        let edit = &offenses[0].autocorrect.as_ref().unwrap().edits[0];
+        assert_eq!(edit.replacement, "'abc'");
+        assert_eq!(
+            apply_edits(source, std::slice::from_ref(edit)),
+            "x = a / 'abc' / b\n"
+        );
+    }
+
+    #[test]
     fn quoted_text_in_heredoc_body_remains_clean() {
         let source = "x = <<~TEXT\n\"abc\"\nTEXT\n";
+        let offenses = run_single_cop(Box::new(StringLiterals), source);
+
+        assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn quoted_text_in_method_applied_heredoc_body_remains_clean() {
+        let source = "x = <<~TEXT.strip\n\"abc\"\nTEXT\n";
+        let offenses = run_single_cop(Box::new(StringLiterals), source);
+
+        assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn quoted_text_in_call_argument_heredoc_body_remains_clean() {
+        let source = "puts(<<TEXT, 1)\n\"abc\"\nTEXT\n";
         let offenses = run_single_cop(Box::new(StringLiterals), source);
 
         assert!(offenses.is_empty());

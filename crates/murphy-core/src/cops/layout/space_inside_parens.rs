@@ -153,8 +153,19 @@ fn skip_heredoc(source: &[u8], start: usize) -> Option<usize> {
     None
 }
 
+fn previous_significant_byte(source: &[u8], before: usize) -> Option<u8> {
+    source[..before]
+        .iter()
+        .rev()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+}
+
 fn heredoc_delimiter(source: &[u8], start: usize) -> Option<(Vec<u8>, bool, usize)> {
     if source.get(start) != Some(&b'<') || source.get(start + 1) != Some(&b'<') {
+        return None;
+    }
+    if !heredoc_prefix_allows(source, start) {
         return None;
     }
 
@@ -199,10 +210,45 @@ fn heredoc_delimiter(source: &[u8], start: usize) -> Option<(Vec<u8>, bool, usiz
         return None;
     }
     if source[idx] != b'\n' {
+        if !is_heredoc_suffix_allowed(source, idx) {
+            return None;
+        }
+        idx = source[idx..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(source.len(), |offset| idx + offset);
+        if idx >= source.len() {
+            return None;
+        }
+    }
+
+    if source[idx] != b'\n' {
         return None;
     }
 
     Some((delim, strip_indent, idx + 1))
+}
+
+fn heredoc_prefix_allows(source: &[u8], start: usize) -> bool {
+    let Some(prev) = previous_significant_byte(source, start) else {
+        return true;
+    };
+    !prev.is_ascii_alphanumeric()
+        && prev != b'_'
+        && prev != b')'
+        && prev != b']'
+        && prev != b'}'
+}
+
+fn is_heredoc_suffix_allowed(source: &[u8], idx: usize) -> bool {
+    if idx >= source.len() {
+        return false;
+    }
+
+    matches!(
+        source[idx],
+        b'.' | b',' | b')' | b']' | b'}' | b'#' | b'\n' | b'\r' | b'\t' | b' '
+    )
 }
 
 fn is_heredoc_terminator(line: &[u8], delimiter: &[u8], strip_indent: bool) -> bool {
@@ -288,6 +334,14 @@ mod tests {
     #[test]
     fn ignores_spaces_in_parentheses_in_double_quoted_string_alone() {
         let source = "x = \"( 1 )\"\n";
+        let offenses = run_single_cop(Box::new(SpaceInsideParens), source);
+
+        assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn ignores_spaces_in_parentheses_in_heredoc_body_for_suffixes() {
+        let source = "puts(<<TEXT, 1)\n( 1 )\nTEXT\n";
         let offenses = run_single_cop(Box::new(SpaceInsideParens), source);
 
         assert!(offenses.is_empty());

@@ -24,42 +24,61 @@ impl Cop for AndOr {
         ctx: &CopContext<'_>,
         sink: &mut Vec<Offense>,
     ) {
-        let condition_range = Range::from_prism_location(&node.predicate().location());
-        let Some(condition) = ctx
-            .source
-            .get(condition_range.start_offset as usize..condition_range.end_offset as usize)
-        else {
-            return;
-        };
-        if has_ambiguous_content(condition) {
-            return;
-        }
-        if has_assignment(condition) {
-            return;
-        }
-        if has_trailing_comment(ctx.source, condition_range.end_offset as usize) {
-            return;
-        }
+        inspect_condition(self.name(), node.predicate().location(), ctx, sink);
+    }
 
-        for operator in and_or_tokens(condition) {
-            let start = condition_range.start_offset + operator.start as u32;
-            let end = condition_range.start_offset + operator.end as u32;
-            let (message, replacement) = if operator.word == b"and" {
-                ("Use `&&` instead of `and`.", "&&")
-            } else {
-                ("Use `||` instead of `or`.", "||")
-            };
-            sink.push(offense_with_edit(
-                ctx.file,
-                self.name(),
-                Range {
-                    start_offset: start,
-                    end_offset: end,
-                },
-                message,
-                replace_edit(start, end, replacement),
-            ));
-        }
+    fn on_unless_node(
+        &self,
+        node: &ruby_prism::UnlessNode<'_>,
+        ctx: &CopContext<'_>,
+        sink: &mut Vec<Offense>,
+    ) {
+        inspect_condition(self.name(), node.predicate().location(), ctx, sink);
+    }
+}
+
+fn inspect_condition(
+    name: &str,
+    predicate: ruby_prism::Location<'_>,
+    ctx: &CopContext<'_>,
+    sink: &mut Vec<Offense>,
+) {
+    let condition_range = Range::from_prism_location(&predicate);
+    let Some(condition) = ctx
+        .source
+        .get(condition_range.start_offset as usize..condition_range.end_offset as usize)
+    else {
+        return;
+    };
+
+    if has_ambiguous_content(condition) {
+        return;
+    }
+    if has_assignment(condition) {
+        return;
+    }
+    if has_trailing_comment(ctx.source, condition_range.end_offset as usize) {
+        return;
+    }
+
+    for operator in and_or_tokens(condition) {
+        let start = condition_range.start_offset + operator.start as u32;
+        let end = condition_range.start_offset + operator.end as u32;
+        let (message, replacement) = if operator.word == b"and" {
+            ("Use `&&` instead of `and`.", "&&")
+        } else {
+            ("Use `||` instead of `or`.", "||")
+        };
+        sink.push(offense_with_edit(
+            ctx.file,
+            name,
+            Range {
+                start_offset: start,
+                end_offset: end,
+            },
+            message,
+            replace_edit(start, end, replacement),
+        ));
     }
 }
 
@@ -284,5 +303,28 @@ mod tests {
 
             assert!(offenses.is_empty(), "{source:?}");
         }
+    }
+
+    #[test]
+    fn autocorrects_or_in_unless_condition() {
+        let source = "unless a or b\nend\n";
+        let offenses = run_single_cop(Box::new(AndOr), source);
+
+        assert_eq!(offenses.len(), 1);
+        let edit = &offenses[0].autocorrect.as_ref().unwrap().edits[0];
+        assert_eq!(edit.range.start_offset, 9);
+        assert_eq!(edit.range.end_offset, 11);
+        assert_eq!(edit.replacement, "||");
+        assert_eq!(
+            apply_edits(source, std::slice::from_ref(edit)),
+            "unless a || b\nend\n"
+        );
+    }
+
+    #[test]
+    fn commented_unless_condition_remains_clean() {
+        let offenses = run_single_cop(Box::new(AndOr), "unless a or b # comment\nend\n");
+
+        assert!(offenses.is_empty());
     }
 }
