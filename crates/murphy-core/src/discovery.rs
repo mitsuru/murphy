@@ -47,6 +47,8 @@ use crate::MurphyConfig;
 pub enum ConfigError {
     /// `murphy.toml` exists but is not valid TOML or violates the schema.
     BadToml(String),
+    /// `.rubocop.yml` exists but is not valid YAML for migration.
+    BadYaml(String),
     /// An `include`/`exclude` entry is not a valid glob.
     BadGlob(String),
     /// The discovery root is unreadable / the walk hit an I/O error.
@@ -57,6 +59,7 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::BadToml(m) => write!(f, "invalid murphy.toml: {m}"),
+            ConfigError::BadYaml(m) => write!(f, "invalid .rubocop.yml: {m}"),
             ConfigError::BadGlob(m) => write!(f, "invalid glob in murphy.toml: {m}"),
             ConfigError::Io(m) => write!(f, "{m}"),
         }

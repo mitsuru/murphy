@@ -425,6 +425,31 @@ fn cops_config_can_override_native_cop_severity() {
 }
 
 #[test]
+fn syntax_error_severity_cannot_be_downgraded_by_config() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("broken.rb"), "def (\n").expect("write broken.rb");
+    fs::write(
+        root.join("murphy.toml"),
+        "[cops.rules.\"Murphy/Syntax\"]\nseverity = \"warning\"\n",
+    )
+    .expect("write murphy.toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(parsed.len(), 1, "got {parsed:?}");
+    assert_eq!(parsed[0]["cop_name"], SYNTAX_COP_NAME);
+    assert_eq!(parsed[0]["severity"], "error");
+}
+
+#[test]
 fn directory_discovery_excludes_configured_cops_path() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();

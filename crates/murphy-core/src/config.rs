@@ -161,67 +161,49 @@ fn toml_array(values: &[String]) -> String {
 }
 
 pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigError> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
     let mut include: Vec<String> = Vec::new();
     let mut exclude: Vec<String> = Vec::new();
     let mut rules: BTreeMap<String, CopRule> = BTreeMap::new();
-    let mut section: Option<String> = None;
-    let mut list_key: Option<String> = None;
 
-    for raw in text.lines() {
-        let line = raw.trim_end();
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed == "---" {
+    let serde_yaml::Value::Mapping(top) = yaml else {
+        return Err(ConfigError::BadYaml(
+            "top-level document must be a mapping".to_string(),
+        ));
+    };
+
+    for (key, value) in top {
+        let Some(section) = key.as_str() else {
+            continue;
+        };
+        let serde_yaml::Value::Mapping(map) = value else {
+            continue;
+        };
+        if section == "AllCops" {
+            include = yaml_string_list(map.get(serde_yaml::Value::String("Include".to_string())));
+            exclude = yaml_string_list(map.get(serde_yaml::Value::String("Exclude".to_string())));
             continue;
         }
-
-        let indent = line.len() - line.trim_start().len();
-        if indent == 0 && trimmed.ends_with(':') {
-            section = Some(trimmed.trim_end_matches(':').to_string());
-            list_key = None;
-            continue;
+        let mut rule = CopRule::default();
+        if let Some(enabled) = map
+            .get(serde_yaml::Value::String("Enabled".to_string()))
+            .and_then(serde_yaml::Value::as_bool)
+        {
+            rule.enabled = Some(enabled);
         }
-
-        if indent == 2 && trimmed.ends_with(':') {
-            list_key = Some(trimmed.trim_end_matches(':').to_string());
-            continue;
-        }
-
-        if indent >= 4 && trimmed.starts_with('-') {
-            let value = trimmed
-                .trim_start_matches('-')
-                .trim()
-                .trim_matches('"')
-                .trim_matches('\'');
-            match (section.as_deref(), list_key.as_deref()) {
-                (Some("AllCops"), Some("Include")) => include.push(value.to_string()),
-                (Some("AllCops"), Some("Exclude")) => exclude.push(value.to_string()),
+        if let Some(severity) = map
+            .get(serde_yaml::Value::String("Severity".to_string()))
+            .and_then(serde_yaml::Value::as_str)
+        {
+            match severity {
+                "warning" => rule.severity = Some(Severity::Warning),
+                "error" => rule.severity = Some(Severity::Error),
                 _ => {}
             }
-            continue;
         }
-
-        if indent == 2 {
-            let Some((key, value)) = trimmed.split_once(':') else {
-                continue;
-            };
-            let key = key.trim();
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-            if let Some(cop_name) = section.as_deref().filter(|name| *name != "AllCops") {
-                let rule = rules.entry(cop_name.to_string()).or_default();
-                match key {
-                    "Enabled" => match value {
-                        "true" => rule.enabled = Some(true),
-                        "false" => rule.enabled = Some(false),
-                        _ => {}
-                    },
-                    "Severity" => match value {
-                        "warning" => rule.severity = Some(Severity::Warning),
-                        "error" => rule.severity = Some(Severity::Error),
-                        _ => {}
-                    },
-                    _ => {}
-                }
-            }
+        if rule.enabled.is_some() || rule.severity.is_some() {
+            rules.insert(section.to_string(), rule);
         }
     }
 
@@ -250,6 +232,18 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
         }
     }
     Ok(out)
+}
+
+fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Vec<String> {
+    match value {
+        Some(serde_yaml::Value::Sequence(values)) => values
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(serde_yaml::Value::String(value)) => vec![value.clone()],
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]

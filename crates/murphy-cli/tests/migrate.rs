@@ -89,3 +89,49 @@ fn migrate_missing_file_exits_2() {
 
     assert!(assert.get_output().stdout.is_empty());
 }
+
+#[test]
+fn migrate_malformed_rubocop_yml_exits_2() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join(".rubocop.yml"), "AllCops: [\n").expect("write malformed yaml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("migrate")
+        .arg(".rubocop.yml")
+        .assert()
+        .code(2);
+
+    assert!(assert.get_output().stdout.is_empty());
+}
+
+#[test]
+fn migrate_inline_yaml_arrays() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(
+        root.join(".rubocop.yml"),
+        r#"AllCops:
+  Include: ["lib/**/*.rb"]
+  Exclude: ["vendor/**"]
+"#,
+    )
+    .expect("write rubocop config");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("migrate")
+        .arg(".rubocop.yml")
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    assert!(
+        stdout.contains("include = [\"lib/**/*.rb\"]"),
+        "got {stdout}"
+    );
+    assert!(stdout.contains("exclude = [\"vendor/**\"]"), "got {stdout}");
+}
