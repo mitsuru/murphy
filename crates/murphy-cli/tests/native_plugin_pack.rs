@@ -134,7 +134,7 @@ fn rails_native_pack_loads_expected_cops() {
     .expect("write config");
     fs::write(
         dir.path().join("rails_sample.rb"),
-        "has_and_belongs_to_many :groups\nitems = Item.find(:all).to_a\ntext = html_safe('x')\n",
+        "has_and_belongs_to_many :groups\nitems = Item.find(:all).to_a\ntext = html_safe('x')\ndefault_scope { order(created_at: :desc) }\nhas_many :projects\nrequest.referer\nDate.today\nTime.now\n",
     )
     .expect("write source");
 
@@ -159,6 +159,10 @@ fn rails_native_pack_loads_expected_cops() {
         "Rails/HasAndBelongsToMany",
         "Rails/FindEach",
         "Rails/HtmlSafe",
+        "Rails/Date",
+        "Rails/DefaultScope",
+        "Rails/HasManyOrHasOneDependent",
+        "Rails/RequestReferer",
     ];
     for required_name in required {
         assert!(
