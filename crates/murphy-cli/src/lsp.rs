@@ -1,6 +1,6 @@
-use murphy_core::{CopRegistry, MurphyConfig, Offense, Severity, aggregate_with_config};
+use murphy_core::{aggregate_with_config, CopRegistry, MurphyConfig, Offense, Severity};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::Path;
