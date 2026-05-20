@@ -34,9 +34,10 @@
 //!
 //! ## stdout / stderr split
 //!
-//! stdout is **only ever** a JSON array of offenses (design §5), so it stays
-//! machine-parseable. Every diagnostic (bad usage, unreadable file, parse
-//! error) goes to **stderr**; error exits print nothing to stdout.
+//! The lint path prints a JSON array of offenses to stdout on success. The
+//! `ast --format sexp` path prints sexp text to stdout on success.
+//! Diagnostics (bad usage, unreadable file, parse error) always go to
+//! **stderr** for both paths, so error exits print nothing to stdout.
 //!
 //! ## Exit codes (design doc + plan Task 7)
 //!
@@ -185,8 +186,7 @@ fn read_ast_source(path: &str) -> Result<String, AppError> {
             .map_err(|e| AppError::setup(format!("cannot read stdin: {e}")))?;
         return Ok(source);
     }
-    std::fs::read_to_string(Path::new(path))
-        .map_err(|e| AppError::setup(format!("cannot read {path:?}: {e}")))
+    read_source(path)
 }
 
 /// A discovered user cop, loaded ONCE per run (P3 Task 7): its host-attributed
