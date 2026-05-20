@@ -1,5 +1,7 @@
 use crate::cop::{Cop, CopContext};
-use crate::cops::support::{offense_with_edit, replace_edit};
+use crate::cops::support::{
+    offense_with_edit, percent_literal_end, replace_edit, slash_literal_end,
+};
 use crate::{Offense, Range};
 
 pub struct SymbolArray;
@@ -81,6 +83,20 @@ fn simple_array_bodies(source: &[u8]) -> Vec<(usize, usize, &[u8])> {
         match source[idx] {
             b'#' => idx = skip_until_newline(source, idx),
             b'\'' | b'"' => idx = skip_quoted(source, idx, source[idx]),
+            b'%' => {
+                if let Some(end) = percent_literal_end(source, idx) {
+                    idx = end;
+                } else {
+                    idx += 1;
+                }
+            }
+            b'/' => {
+                if let Some(end) = slash_literal_end(source, idx) {
+                    idx = end;
+                } else {
+                    idx += 1;
+                }
+            }
             b'[' => {
                 if let Some(end) = source[idx + 1..].iter().position(|byte| *byte == b']') {
                     let end = idx + 1 + end;
@@ -175,6 +191,7 @@ mod tests {
             "x = [:foo, :'bar baz']\n",
             "x = [:foo, # c\n:bar]\n",
             "obj[:foo, :bar]\n",
+            "x = /[:foo, :bar]/\n",
         ] {
             let offenses = run_single_cop(Box::new(SymbolArray), source);
             assert!(offenses.is_empty(), "{source:?}");

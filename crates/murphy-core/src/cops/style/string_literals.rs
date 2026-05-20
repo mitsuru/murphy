@@ -1,5 +1,7 @@
 use crate::cop::{Cop, CopContext};
-use crate::cops::support::{offense_with_edit, replace_edit};
+use crate::cops::support::{
+    offense_with_edit, percent_literal_end, replace_edit, slash_literal_end,
+};
 use crate::{Offense, Range};
 
 pub struct StringLiterals;
@@ -48,6 +50,20 @@ fn simple_double_quoted_literals(source: &[u8]) -> Vec<Literal<'_>> {
         match source[idx] {
             b'#' => idx = skip_until_newline(source, idx),
             b'\'' => idx = skip_quoted(source, idx, b'\''),
+            b'%' => {
+                if let Some(end) = percent_literal_end(source, idx) {
+                    idx = end;
+                } else {
+                    idx += 1;
+                }
+            }
+            b'/' => {
+                if let Some(end) = slash_literal_end(source, idx) {
+                    idx = end;
+                } else {
+                    idx += 1;
+                }
+            }
             b'[' => {
                 if let Some(end) = simple_word_array_end(source, idx) {
                     idx = end;
@@ -206,7 +222,12 @@ mod tests {
 
     #[test]
     fn unsafe_escaped_quotes_and_backslashes_remain_clean() {
-        for source in ["x = \"a\\\\b\"\n", "x = \"a\\\"b\"\n"] {
+        for source in [
+            "x = \"a\\\\b\"\n",
+            "x = \"a\\\"b\"\n",
+            "x = %Q[\"foo\"]\n",
+            "x = /\"foo\"/\n",
+        ] {
             let offenses = run_single_cop(Box::new(StringLiterals), source);
             assert!(offenses.is_empty(), "{source:?}");
         }
