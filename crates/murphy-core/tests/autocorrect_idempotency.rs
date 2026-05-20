@@ -22,11 +22,15 @@
 //! * `apply_matches_expected` — verifies `apply_edits(input, edits) == expected`.
 //!   This requires the descending-offset algorithm; un-ignored in `.4`.
 //!
-//! ## What is deferred to murphy-hwe.5
+//! ## What was deferred to murphy-hwe.5 (now encoded in murphy-hwe.5)
 //!
 //! True idempotency requires the **re-derive-from-corrected-source** form:
 //! run all cops on `apply_edits(input, edits)`, get zero new edits, repeat
-//! until stable.  That needs the reparse loop (`.5`) and is NOT encoded here.
+//! until stable.  That needs the reparse loop (`.5`), which is now implemented.
+//! The `strong_idempotency` test in
+//! `crates/murphy-core/tests/autocorrect_fixpoint.rs` encodes this property:
+//! `run_to_fixpoint(corrected, same_closure, max)` yields `Converged`,
+//! `corrected` unchanged, and `iterations == 0`.
 //!
 //! Note: the "same-edit-set twice" form does NOT hold in general (applying
 //! the same byte-range edits to already-shifted source corrupts it), so it is
@@ -177,14 +181,14 @@ fn apply_matches_expected() {
 // ---------------------------------------------------------------------------
 
 /// Two overlapping edits: only the one that is earlier in the stable total
-/// order (highest start_offset wins first, then end_offset, then original
-/// index tiebreak) is applied; the other is logged as `Overlap`.
+/// order (highest start_offset wins first, then end_offset, then replacement
+/// text ascending) is applied; the other is logged as `Overlap`.
 ///
 /// Source: `"abcdef"` (6 bytes)
-///   edit A: bytes [1,4) → "XY"  (original index 0)
-///   edit B: bytes [2,5) → "ZZ"  (original index 1)
+///   edit A: bytes [1,4) → "XY"
+///   edit B: bytes [2,5) → "ZZ"
 ///
-/// Total order (start DESC, end DESC, index ASC tiebreak):
+/// Total order (start DESC, end DESC, replacement ASC tiebreak):
 ///   B.start=2 > A.start=1 → B is first in sort order.
 ///   B is applied first: source "abcdef" → "ab" + "ZZ" + "f" = "abZZf".
 ///   Then A's range [1,4) overlaps B's [2,5): overlap = (1 < 5 && 2 < 4) = true.
@@ -420,7 +424,7 @@ fn non_char_boundary_edit_dropped() {
 ///   edit B: [3,6) → "BB"   replaces "def"
 ///   edit C: [4,7) → "CC"   replaces "efg"  (overlaps B: 3<7 && 4<6 → true)
 ///
-/// Total sort order (start DESC, end DESC, original-index ASC tiebreak):
+/// Total sort order (start DESC, end DESC, replacement ASC tiebreak):
 ///   C(start=4) > B(start=3) > A(start=0)
 ///   → C applied first: "abcd" + "CC" + "h" = "abcdCCh"
 ///   → B overlaps C (3<7 && 4<6 = true) → B dropped, Overlap, conflicts_with=Some(C)
@@ -494,6 +498,98 @@ fn shuffle_determinism() {
             );
         }
     }
+}
+
+/// Inverted range (`start_offset > end_offset`) must NOT panic (roborev high
+/// regression). The mruby blob decoder drops inverted edits, but the public
+/// `apply_edits_logged` API takes `Edit` directly (native cops / deserialized
+/// JSON), so an in-bounds, char-aligned but inverted `[4,1)` edit must be
+/// dropped as `InvalidRange` — never reach `replace_range(4..1, …)` (panic).
+/// A valid edit in the same set still applies.
+#[test]
+fn inverted_range_is_invalidrange_conflict_not_panic() {
+    let source = "abcdef";
+    let inverted = Edit {
+        range: Range {
+            start_offset: 4,
+            end_offset: 1,
+        },
+        replacement: "X".into(),
+    };
+    let valid = Edit {
+        range: Range {
+            start_offset: 0,
+            end_offset: 1,
+        },
+        replacement: "A".into(),
+    };
+
+    let outcome = apply_edits_logged(source, &[inverted.clone(), valid.clone()]);
+
+    assert_eq!(
+        outcome.corrected, "Abcdef",
+        "only the valid [0,1)->\"A\" edit applies; inverted edit dropped"
+    );
+    assert_eq!(
+        outcome.conflicts.len(),
+        1,
+        "exactly the inverted edit is logged"
+    );
+    assert_eq!(outcome.conflicts[0].dropped, inverted);
+    assert_eq!(outcome.conflicts[0].conflicts_with, None);
+    assert_eq!(outcome.conflicts[0].reason, ConflictReason::InvalidRange);
+
+    // apply_edits (thin wrapper) must likewise not panic.
+    assert_eq!(apply_edits(source, &[inverted]), "abcdef");
+}
+
+/// Same-range, different-replacement determinism (roborev medium regression).
+///
+/// Two edits over the IDENTICAL byte range `[0,1)` with different replacement
+/// text ("A" vs "B"). They overlap (0 < 1 && 0 < 1), so exactly one is applied
+/// and the other is logged as `Overlap`. The winner MUST be decided by the
+/// content tiebreak (replacement ASC ⇒ "A" wins), NOT by input position — so
+/// BOTH input orders yield an identical `ApplyOutcome`. An original-index
+/// tiebreak (the pre-fix behaviour) would make the winner depend on cop /
+/// aggregation order: silent non-determinism. This test pins the fix.
+#[test]
+fn same_range_winner_is_content_deterministic_not_input_order() {
+    let source = "xyz";
+    let edit_a = Edit {
+        range: Range {
+            start_offset: 0,
+            end_offset: 1,
+        },
+        replacement: "A".into(),
+    };
+    let edit_b = Edit {
+        range: Range {
+            start_offset: 0,
+            end_offset: 1,
+        },
+        replacement: "B".into(),
+    };
+
+    let ab = apply_edits_logged(source, &[edit_a.clone(), edit_b.clone()]);
+    let ba = apply_edits_logged(source, &[edit_b.clone(), edit_a.clone()]);
+
+    // Replacement-ASC tiebreak ⇒ "A" wins regardless of input order.
+    assert_eq!(
+        ab.corrected, "Ayz",
+        "AB order: 'A' (lower replacement) wins"
+    );
+    assert_eq!(
+        ba.corrected, "Ayz",
+        "BA order: identical outcome — winner is content-determined, not positional"
+    );
+    assert_eq!(
+        ab, ba,
+        "same-range conflict ApplyOutcome must be invariant under input order"
+    );
+    // The dropped edit is the "B" one in both orders.
+    assert_eq!(ab.conflicts.len(), 1);
+    assert_eq!(ab.conflicts[0].dropped.replacement, "B");
+    assert_eq!(ab.conflicts[0].reason, ConflictReason::Overlap);
 }
 
 /// Zero-width insertions at the same point are NOT a conflict.
