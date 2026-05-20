@@ -6,7 +6,8 @@
 //! **maximum-severity** offense survives (`Error > Warning`), deterministically
 //! and independent of input/engine/thread order.
 
-use crate::offense::Offense;
+use crate::config::MurphyConfig;
+use crate::offense::{Offense, SYNTAX_COP_NAME};
 
 /// Aggregate a flat list of offenses into the canonical output order.
 ///
@@ -78,6 +79,18 @@ pub fn aggregate(mut offenses: Vec<Offense>) -> Vec<Offense> {
     }
 
     kept
+}
+
+pub fn aggregate_with_config(mut offenses: Vec<Offense>, config: &MurphyConfig) -> Vec<Offense> {
+    for offense in &mut offenses {
+        if offense.cop_name == SYNTAX_COP_NAME {
+            continue;
+        }
+        if let Some(severity) = config.severity_override(&offense.cop_name) {
+            offense.severity = severity;
+        }
+    }
+    aggregate(offenses)
 }
 
 #[cfg(test)]

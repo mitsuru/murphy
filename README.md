@@ -6,7 +6,7 @@ eliminate RuboCop's slowness with a native Rust core.
 
 ## Status
 
-**Phase 4 — autocorrect (complete).** Working today:
+**Phase 5 — config + migrate (complete).** Working today:
 
 - `murphy lint <file>...` parses Ruby via prism (single parse) — unchanged
   Phase-1 behavior.
@@ -22,6 +22,13 @@ eliminate RuboCop's slowness with a native Rust core.
   linted once (**in-run memoization only — no persistent cache**); output is
   identical to the non-memoized result.
 - One native cop: `Murphy/NoReceiverPuts`.
+- `murphy.toml` also supports `[cops]`: a configurable user-cop path, per-cop
+  `enabled = false`, and per-cop `severity = "warning" | "error"` override.
+  Directory discovery excludes the configured cops path so cop implementation
+  files are not linted as ordinary source unless named explicitly.
+- `murphy migrate <.rubocop.yml>` writes one-way, lossy Murphy TOML to stdout.
+  It maps `AllCops.Include`/`Exclude` plus per-cop `Enabled`/`Severity`; it is
+  not a RuboCop compatibility layer.
 - **User cops:** drop a `.rb` file into a `cops/` directory and Murphy runs
   it **in addition to** the native cops, merged into one deterministic JSON
   offense array. `cops/` is resolved relative to the invocation working
@@ -59,13 +66,10 @@ Not yet production-ready. Murphy is described as a "linter/formatter", but
 **only the lint path exists today**. Autocorrect (`murphy lint --fix`/`-a`)
 applies fix blocks to source with conflict-safe descending-offset apply, a
 reparse-rerun fixpoint loop, and idempotency guarantees (ADR 0013). There is
-**no** `murphy format` subcommand or formatter, **no** `[cops]` config or
-per-cop enable / severity-override (`murphy.toml` is discovery-only:
-`[files] include`/`exclude`; cops are loaded only from `cops/`), **no**
-persistent cache (in-run memoization only), **no** LSP, and **no**
-node-pattern DSL. `.gitignore` is intentionally **not** consulted.
-`[cops]` config and `.rubocop.yml` migration are Phase 5; the rest are later
-phases too. See
+**no** `murphy format` subcommand or formatter, **no** persistent cache (in-run
+memoization only), **no** LSP, and **no** node-pattern DSL. `.gitignore` is
+intentionally **not** consulted. Broader standard-cop coverage and perf gates
+are Phase 6; sandboxing remains later. See
 [`docs/plans/2026-05-19-murphy-design.md`](docs/plans/2026-05-19-murphy-design.md)
 for the full design,
 [`docs/plans/2026-05-19-murphy-implementation-plan.md`](docs/plans/2026-05-19-murphy-implementation-plan.md)
@@ -75,7 +79,13 @@ for the Phase 2 detailed plan,
 [`docs/plans/2026-05-19-murphy-phase-3-plan.md`](docs/plans/2026-05-19-murphy-phase-3-plan.md)
 for the Phase 3 detailed plan, and
 [`docs/decisions/0014-phase-4-gate-review.md`](docs/decisions/0014-phase-4-gate-review.md)
-for the Phase 4 gate ADR (autocorrect).
+for the Phase 4 gate ADR (autocorrect),
+[`docs/decisions/0015-phase-5-config-schema.md`](docs/decisions/0015-phase-5-config-schema.md)
+for the Phase 5 config schema,
+[`docs/decisions/0016-rubocop-yml-migration-mapping.md`](docs/decisions/0016-rubocop-yml-migration-mapping.md)
+for migration mapping, and
+[`docs/decisions/0017-phase-5-gate-review.md`](docs/decisions/0017-phase-5-gate-review.md)
+for the Phase 5 gate ADR.
 
 ## Quickstart
 
@@ -126,16 +136,20 @@ $ echo $?
 Output is deterministic regardless of argument or thread order; linting runs
 in parallel across all cores.
 
-Prune files with a `murphy.toml` `[files] exclude` glob list (the schema is
-discovery-only — exactly `[files]` `include`/`exclude`; no per-cop or
-severity keys exist yet):
+Prune files and configure cops with `murphy.toml`:
 
 ```console
 $ cat murphy.toml
 [files]
 exclude = ["sub/**"]
+
+[cops]
+path = "cops"
+
+[cops.rules."Murphy/NoReceiverPuts"]
+severity = "error"
 $ /path/to/murphy lint
-[{"file":"./a.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Use a logger instead of puts"}]
+[{"file":"./a.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":0,"end_offset":4},"severity":"error","message":"Use a logger instead of puts"}]
 $ echo $?
 1
 ```
@@ -265,6 +279,14 @@ $ echo $?
 2
 ```
 
+Migrate a subset of `.rubocop.yml` to Murphy TOML:
+
+```console
+$ ./target/debug/murphy migrate .rubocop.yml > murphy.toml
+$ echo $?
+0
+```
+
 You can also run via cargo without the explicit binary path:
 
 ```bash
@@ -288,6 +310,7 @@ cargo build --release                        # release build
 cargo test --workspace                       # full test suite
 cargo test -p murphy-core <name>             # single test by name
 cargo test -p murphy-cli --test cli          # one integration test target
+cargo test -p murphy-cli --test migrate      # migration integration tests
 cargo fmt --check                            # formatting gate
 cargo clippy --all-targets -- -D warnings    # lint gate
 ```

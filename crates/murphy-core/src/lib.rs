@@ -2,6 +2,7 @@
 
 mod aggregator;
 pub mod autocorrect;
+mod config;
 mod cop;
 mod cops;
 mod discovery;
@@ -10,14 +11,15 @@ mod offense;
 mod parse;
 mod registry;
 
-pub use aggregator::aggregate;
+pub use aggregator::{aggregate, aggregate_with_config};
 pub use autocorrect::{
     ApplyOutcome, Conflict, ConflictReason, FixpointOutcome, FixpointStatus, apply_edits,
     apply_edits_logged, run_to_fixpoint,
 };
+pub use config::{CopRule, MurphyConfig, migrate_rubocop_yml_to_murphy_toml};
 pub use cop::{Cop, CopContext, run_cops};
 pub use cops::no_receiver_puts::NoReceiverPuts;
-pub use discovery::{ConfigError, discover};
+pub use discovery::{ConfigError, discover, discover_with_config};
 // Phase 3 Task 2 keystone — the mruby lifecycle/ownership wrapper. Task 3's
 // read-only native-primitive IDL registration (`register_primitives`) is
 // in-crate only (`pub(crate)` in `mruby`), so it is deliberately NOT
