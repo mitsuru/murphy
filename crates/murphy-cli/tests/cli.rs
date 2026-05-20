@@ -76,6 +76,134 @@ fn lint_dirty_file_exits_1_with_one_offense() {
     );
 }
 
+#[test]
+fn lint_file_with_disable_comment_suppresses_offenses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("with_disable.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# murphy:disable Murphy/NoReceiverPuts\nputs 'x'\n",
+    )
+    .expect("write with_disable.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+#[test]
+fn lint_file_with_disable_then_enable_comment_only_reattaches() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("with_enable.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n# murphy:disable Murphy/NoReceiverPuts\nputs 'suppressed'\n# murphy:enable\nputs 'reported'\n",
+    )
+    .expect("write with_enable.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "enable must re-enable the cop for following lines, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+}
+
+#[test]
+fn lint_file_with_todo_comment_skips_current_line_only() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("with_todo.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\nputs 'suppressed' # murphy:todo Murphy/NoReceiverPuts\nputs 'reported'\n",
+    )
+    .expect("write with_todo.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "todo must suppress only that line, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+}
+
+#[test]
+fn lint_file_with_todo_without_cop_suppresses_all_offenses_on_line() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("with_todo_all.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\nputs 'first' # murphy:todo\nputs 'second'\n",
+    )
+    .expect("write with_todo_all.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "todo without cop should only suppress current-line offenses, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+}
+
+#[test]
+fn lint_file_with_disable_comment_does_not_hide_syntax_offenses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("syntax_with_disable.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n# murphy:disable\ndef broken(\n",
+    )
+    .expect("write syntax_with_disable.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "syntax offenses should still be reported despite inline disable directives"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Murphy/Syntax");
+}
+
 /// `lint` a path that does not exist → exit 2 (file/setup error).
 #[test]
 fn lint_missing_file_exits_2() {

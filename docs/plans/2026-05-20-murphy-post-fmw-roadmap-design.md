@@ -261,8 +261,8 @@ Phase 8 完了後。優先度低、ただし採用拡大のためには必要。
 
 - **MVP-Z1: Inline disable / enable / todo comment**
   (`# murphy:disable Cop/Name`, `# murphy:enable`, `# murphy:todo`)
-  現状 Murphy に未実装・未 issue 化。**MVP 必須機能**として `murphy-fmw` 完了前に
-  別 issue 化し、Phase 6 と並走で入れる。post-fmw roadmap には載せない。
+  当時の未実装機能として murphy-fmw 配下に抽出し、Phase 6 と並走で
+  `murphy-fmw.4` として実装済み。
 - **D 軸候補: Brakeman 互換 SAST パック**
   cross-file 解析 + taint tracking + Rails-aware project model を要する重量級拡張。
   A6a プラガブル cop パック機構の上に「重量級パック」として乗せる前提なら自然。

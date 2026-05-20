@@ -60,6 +60,15 @@ eliminate RuboCop's slowness with a native Rust core.
   `Murphy/NoReceiverPuts`, `cops/syntax.rb` → `Murphy/Syntax`) is rejected
   with exit 2, so a user cop cannot silently shadow an engine cop.
 - Syntax errors reported as `Murphy/Syntax` offenses.
+- `# murphy:disable`, `# murphy:enable`, `# murphy:todo` inline directives are
+  supported in comments:
+  - `# murphy:disable Cop/Name` disables a cop from that line onward
+  - `# murphy:disable` disables all cops from that line onward
+  - `# murphy:enable Cop/Name` re-enables one cop from that line onward
+  - `# murphy:enable` re-enables all cops
+  - `# murphy:todo Cop/Name` suppresses only offenses on that line
+  - `# murphy:todo` suppresses all cop offenses only on that line
+  - Syntax offenses are never suppressed by inline directives.
 - JSON array of offenses printed to stdout; multi-file aggregation.
 - Exit codes 0/1/2/3. A malformed or unknown-key `murphy.toml` exits 2.
 

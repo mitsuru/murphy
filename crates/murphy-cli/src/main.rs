@@ -442,7 +442,129 @@ fn lint_source(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> Vec<Offense> 
             ));
         }
     }
-    sink
+    apply_inline_directive_filter(sink, source)
+}
+
+#[derive(Debug, Clone)]
+enum InlineDirectiveKind {
+    Disable,
+    Enable,
+    Todo,
+}
+
+#[derive(Debug, Clone)]
+struct InlineDirective {
+    kind: InlineDirectiveKind,
+    cop: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DirectiveState {
+    disable_all: bool,
+    disabled_cops: BTreeSet<String>,
+    todo_all: bool,
+    todo_cops: BTreeSet<String>,
+    line_start: usize,
+    line_end: usize,
+}
+
+fn parse_inline_directive(line: &str) -> Option<InlineDirective> {
+    let hash_pos = line.find('#')?;
+    let comment = line[hash_pos + 1..].trim_start();
+
+    let rest = comment.strip_prefix("murphy:")?;
+    let mut parts = rest.split_whitespace();
+    let keyword = parts.next()?;
+
+    let cop = parts.next().map(str::to_string);
+
+    let kind = match keyword {
+        "disable" => InlineDirectiveKind::Disable,
+        "enable" => InlineDirectiveKind::Enable,
+        "todo" => InlineDirectiveKind::Todo,
+        _ => return None,
+    };
+
+    Some(InlineDirective { kind, cop })
+}
+
+fn directive_states_by_line(source: &str) -> Vec<DirectiveState> {
+    let mut states = Vec::new();
+    let mut disable_all = false;
+    let mut disabled_cops: BTreeSet<String> = BTreeSet::new();
+
+    let mut offset = 0usize;
+    for line in source.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + line.len();
+        let mut todo_all = false;
+        let mut todo_cops: BTreeSet<String> = BTreeSet::new();
+
+        if let Some(directive) = parse_inline_directive(line) {
+            match (directive.kind, directive.cop) {
+                (InlineDirectiveKind::Disable, Some(cop)) => {
+                    disabled_cops.insert(cop);
+                }
+                (InlineDirectiveKind::Disable, None) => {
+                    disable_all = true;
+                }
+                (InlineDirectiveKind::Enable, Some(cop)) => {
+                    disabled_cops.remove(&cop);
+                }
+                (InlineDirectiveKind::Enable, None) => {
+                    disable_all = false;
+                    disabled_cops.clear();
+                }
+                (InlineDirectiveKind::Todo, Some(cop)) => {
+                    todo_cops.insert(cop);
+                }
+                (InlineDirectiveKind::Todo, None) => {
+                    todo_all = true;
+                }
+            }
+        }
+
+        states.push(DirectiveState {
+            disable_all,
+            disabled_cops: disabled_cops.clone(),
+            todo_all,
+            todo_cops,
+            line_start,
+            line_end,
+        });
+
+        offset = line_end;
+    }
+
+    states
+}
+
+fn is_directive_disabled(offense: &Offense, states: &[DirectiveState]) -> bool {
+    if offense.cop_name == SYNTAX_COP_NAME {
+        return false;
+    }
+
+    let start = offense.range.start_offset as usize;
+    for state in states {
+        if start >= state.line_start && start < state.line_end {
+            return state.disable_all
+                || state.disabled_cops.contains(&offense.cop_name)
+                || state.todo_all
+                || state.todo_cops.contains(&offense.cop_name);
+        }
+    }
+
+    false
+}
+
+fn apply_inline_directive_filter(mut offenses: Vec<Offense>, source: &str) -> Vec<Offense> {
+    if offenses.is_empty() {
+        return Vec::new();
+    }
+
+    let states = directive_states_by_line(source);
+    offenses.retain(|offense| !is_directive_disabled(offense, &states));
+    offenses
 }
 
 /// Run every discovered mruby user cop over `source` ONCE, labeling every
@@ -496,7 +618,7 @@ fn lint_source_mruby(source: &str, file: &str, mruby_cops: &[MrubyCop]) -> Vec<O
             file,
         ));
     }
-    sink
+    apply_inline_directive_filter(sink, source)
 }
 
 /// Write `corrected` to `target` atomically using a sibling-temp + rename.
