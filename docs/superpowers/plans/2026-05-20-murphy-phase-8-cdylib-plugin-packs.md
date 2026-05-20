@@ -926,14 +926,14 @@ bd close murphy-fmw.1.5 --reason "Documented cop pack ABI and versioning contrac
 
 Expected: all three issues close successfully.
 
-- [ ] **Step 4: Commit ADR and any final fixes**
+- [x] **Step 4: Commit ADR and any final fixes**
 
 ```bash
 git add docs/decisions/0031-native-plugin-pack-abi.md .beads/issues.jsonl
 git commit -m "docs: define native cop pack contract"
 ```
 
-- [ ] **Step 5: Push session work**
+- [x] **Step 5: Push session work**
 
 ```bash
 git pull --rebase
