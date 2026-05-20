@@ -28,3 +28,7 @@ serde_yaml = "0.9"
 serde_json = "1"
 # discovery.rs tests build temp trees with murphy.toml / .murphyignore.
 tempfile = "3"
+
+[features]
+default = []
+mruby-custom-build = []

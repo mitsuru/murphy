@@ -7,14 +7,17 @@
 //! `Murphy::Cop` SDK (Task 4), the deadline/abandon watchdog (Task 5), and
 //! pipeline integration (Task 7) land in their own tasks.
 
+pub(crate) mod build;
 pub mod primitives;
 pub(crate) mod sdk;
 pub mod state;
 
+#[allow(unused_imports)]
 // No `register` re-export: it is `pub(crate)` and in-crate only — Task 4/5/7
 // reach it directly via `crate::mruby::primitives::register` (one extra path
 // segment, no redundant alias). Same Task-2 `raw()` discipline.
 pub use sdk::{
-    COP_DEADLINE, run_mruby_cop, run_mruby_cop_isolated, run_mruby_cop_isolated_with_deadline,
+    COP_DEADLINE, MrubyCopRunOptions, run_mruby_cop, run_mruby_cop_isolated,
+    run_mruby_cop_isolated_with_deadline, run_mruby_cop_isolated_with_options,
 };
 pub use state::{AstContext, MrubyState};

@@ -54,6 +54,7 @@ use mruby3_sys::{
     RClass, mrb_class_get, mrb_define_module_function, mrb_get_args, mrb_int, mrb_state, mrb_value,
 };
 
+use crate::mruby::build::MrubyStateOptions;
 use crate::mruby::{AstContext, MrubyState};
 use crate::offense::{Autocorrect, Edit};
 use crate::{Offense, Range, Severity};
@@ -121,6 +122,33 @@ pub(crate) struct CopRun {
     /// The cop-run-owned offense sink (ADR 0009 rule 2 — NOT a
     /// `thread_local!`). Drained back to the caller after the run.
     sink: UnsafeCell<Vec<Offense>>,
+}
+
+/// Runtime options for one mruby cop run.
+///
+/// This is intentionally additive for Phase 7+: callers can keep the current
+/// wall-clock default by using `Default::default()`, and add instruction budget
+/// in a dedicated caller path without changing existing function contracts.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MrubyCopRunOptions {
+    /// Optional wall-clock deadline override for the per-cop watchdog.
+    ///
+    /// `None` means use [`COP_DEADLINE`].
+    pub deadline: Option<Duration>,
+    /// Optional instruction-step budget for custom runtime backends.
+    pub instruction_budget: Option<u64>,
+}
+
+impl MrubyCopRunOptions {
+    fn to_state_options(self) -> MrubyStateOptions {
+        MrubyStateOptions {
+            instruction_budget: self.instruction_budget,
+        }
+    }
+
+    fn effective_deadline(self) -> Duration {
+        self.deadline.unwrap_or(COP_DEADLINE)
+    }
 }
 
 impl CopRun {
@@ -640,7 +668,7 @@ pub fn run_mruby_cop(
     // error-offense is `run_mruby_cop_isolated`'s job, NOT this primitive's
     // (Task-4 scope is unchanged: load+run a cop synchronously for its own
     // tests). `_raised` is discarded deliberately.
-    let _raised = cop_run_body(&cop_run, cop_source);
+    let _raised = cop_run_body(&cop_run, cop_source, MrubyStateOptions::default());
 
     // Drain the cop-run-owned sink. `cop_run` is solely owned here and the
     // `mrb_state` is closed, so no native callback can be running: taking the
@@ -669,8 +697,8 @@ pub fn run_mruby_cop(
 /// returns (the thread is stuck in `eval_checked`'s `mrb_load_string`), so
 /// `st` is never dropped and `mrb_close` is never called — exactly ADR 0003
 /// Mechanism A.
-fn cop_run_body(cop_run: &CopRun, cop_source: &str) -> bool {
-    let mut st = MrubyState::open();
+fn cop_run_body(cop_run: &CopRun, cop_source: &str, options: MrubyStateOptions) -> bool {
+    let mut st = MrubyState::open_with_options(options);
     st.set_cop_run(cop_run);
     // SAFETY: `st.raw()` is a valid non-null `mrb_state` living as long as
     // `st`; `ud` was set to `cop_run` (alive for this whole call — the caller
@@ -776,7 +804,13 @@ pub fn run_mruby_cop_isolated(
     cop_name: &str,
     file: &str,
 ) -> Vec<Offense> {
-    run_mruby_cop_isolated_with_deadline(ctx, cop_source, cop_name, file, COP_DEADLINE)
+    run_mruby_cop_isolated_with_options(
+        ctx,
+        cop_source,
+        cop_name,
+        file,
+        MrubyCopRunOptions::default(),
+    )
 }
 
 /// [`run_mruby_cop_isolated`] with an explicit wall-clock `deadline`.
@@ -795,6 +829,30 @@ pub fn run_mruby_cop_isolated_with_deadline(
     file: &str,
     deadline: Duration,
 ) -> Vec<Offense> {
+    run_mruby_cop_isolated_with_options(
+        ctx,
+        cop_source,
+        cop_name,
+        file,
+        MrubyCopRunOptions {
+            deadline: Some(deadline),
+            ..MrubyCopRunOptions::default()
+        },
+    )
+}
+
+/// [`run_mruby_cop_isolated`] with explicit runtime options.
+///
+/// This keeps the watchdog default (`COP_DEADLINE`) and existing offload model
+/// unchanged while allowing an optional instruction-step budget to be requested
+/// by caller (future custom runtime path).
+pub fn run_mruby_cop_isolated_with_options(
+    ctx: &Arc<AstContext>,
+    cop_source: &str,
+    cop_name: &str,
+    file: &str,
+    options: MrubyCopRunOptions,
+) -> Vec<Offense> {
     // Owned, `Send` move-ins for the child thread. The AST is shared by a
     // child-OWNED `Arc` clone (ADR 0009 rule 1: the `ud` raw pointer is NOT
     // the liveness guarantee — this clone, owned on the child thread's stack,
@@ -812,6 +870,8 @@ pub fn run_mruby_cop_isolated_with_deadline(
     let file = file.to_owned();
 
     let (tx, rx) = mpsc::channel::<CopOutcome>();
+    let state_options = options.to_state_options();
+    let deadline = options.effective_deadline();
 
     thread::spawn(move || {
         // THE ABANDON SEAM (I-2, the proven `composition_poc` shape):
@@ -831,7 +891,7 @@ pub fn run_mruby_cop_isolated_with_deadline(
         // for any late zombie native call — even after the caller
         // returns and drops ITS `Arc` (ADR 0009 rule 1).
         let cop_run = CopRun::new(child_ctx, &child_cop_name, &child_file);
-        let raised = cop_run_body(&cop_run, &child_cop_source);
+        let raised = cop_run_body(&cop_run, &child_cop_source, state_options);
         // Reached ONLY on the normal/exception path (a runaway cop never
         // gets here). `cop_run_body` has already run `mrb_close` (its `st`
         // dropped at its scope end) BEFORE we touch `cop_run` — Task-2
@@ -1356,5 +1416,31 @@ end
              proves every iteration actually hit the watchdog timeout and \
              exercised the late-finish/detached-Drop window (not vacuous)"
         );
+    }
+
+    #[test]
+    fn run_mruby_cop_isolated_with_options_preserves_base_semantics() {
+        let ctx = AstContext::new(b"puts 1\n".to_vec());
+        const GOOD_PUTS_RB: &str = "class Good < Murphy::Cop\n  def on_call_node(n)\n    add_offense(n.message_loc, message: 'x') if n.name == :puts && n.receiver_nil?\n  end\nend";
+
+        let base = run_mruby_cop_isolated_with_deadline(
+            &ctx,
+            GOOD_PUTS_RB,
+            "Murphy/Good",
+            "p.rb",
+            Duration::from_millis(100),
+        );
+        let with_budget = run_mruby_cop_isolated_with_options(
+            &ctx,
+            GOOD_PUTS_RB,
+            "Murphy/Good",
+            "p.rb",
+            MrubyCopRunOptions {
+                instruction_budget: Some(1_000),
+                ..MrubyCopRunOptions::default()
+            },
+        );
+
+        assert_eq!(base, with_budget);
     }
 }

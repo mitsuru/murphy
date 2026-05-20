@@ -40,7 +40,9 @@ use std::sync::Arc;
 
 use ruby_prism::{ParseResult, parse};
 
-use mruby3_sys::{mrb_close, mrb_load_string, mrb_open, mrb_state};
+use mruby3_sys::{mrb_close, mrb_load_string, mrb_state};
+
+use crate::mruby::build::{MrubyStateOptions, open_state};
 
 /// The shared, `Arc`-able AST context handed to each per-cop worker.
 ///
@@ -265,10 +267,15 @@ impl MrubyState {
     /// Panics if `mrb_open` returns null (allocation failure — unrecoverable
     /// for this cop run; the caller treats it as the cop×file error path).
     pub fn open() -> Self {
+        Self::open_with_options(MrubyStateOptions::default())
+    }
+
+    /// Open a fresh, independent `mrb_state` with pluggable build options.
+    pub(crate) fn open_with_options(options: MrubyStateOptions) -> Self {
         // SAFETY: `mrb_open` is the documented mruby constructor; it returns
         // either a valid owned `*mut mrb_state` or null. We null-check below
         // and own the handle until `mrb_close` in `Drop`.
-        let mrb = unsafe { mrb_open() };
+        let mrb = open_state(options);
         assert!(
             !mrb.is_null(),
             "mrb_open() returned null (mruby alloc failed)"
