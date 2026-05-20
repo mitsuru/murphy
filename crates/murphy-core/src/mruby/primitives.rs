@@ -298,49 +298,58 @@ unsafe extern "C" fn native_node_receiver_nil(mrb: *mut mrb_state, _self: mrb_va
     unsafe { eval_literal(mrb, lit) }
 }
 
-/// `Murphy.node_msg_range(handle) -> "start,end"` (BYTE offsets, ADR 0001).
+fn node_message_loc(ctx: &AstContext, handle: mrb_int) -> Option<Range> {
+    usize::try_from(handle).ok().and_then(|h| {
+        with_call_node(ctx, h, |n| {
+            n.message_loc().map(|loc| Range::from_prism_location(&loc))
+        })
+        .flatten()
+    })
+}
+
+/// `Murphy.node_msg_start(handle) -> Integer` (BYTE offset, ADR 0001).
 ///
 /// Reads the LIVE `node.message_loc()` through [`crate::Range`] (the single
-/// audited `usize -> u32` byte narrowing, ADR 0001 — never char). On success
-/// returns a small `"start,end"` string the `.rb` splits, exactly the proven
-/// spike shape (unchanged success encoding).
-///
-/// The absent/out-of-range sentinel is Ruby **`nil`** (not a data-shaped
-/// string): returned for BOTH an out-of-range handle (including negative — no
-/// `.max(0)` aliasing) AND a node with no `message_loc`. A cop never
-/// legitimately asks about a handle outside `node_count`, and cannot act on a
-/// missing `message_loc` differently from OOB, so a uniform `nil` is the right
-/// contract — matching `node_name`/`source_slice` (valid → value, else `nil`).
-/// A string sentinel like `"oob"` is misreadable as a value (`"oob".split(",")`
-/// does not raise).
-unsafe extern "C" fn native_node_msg_range(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+/// audited `usize -> u32` byte narrowing, ADR 0001 — never char). Missing,
+/// negative, or out-of-range handles return `-1`; Ruby glue converts any
+/// negative offset to `nil` for `Node#message_loc`.
+unsafe extern "C" fn native_node_msg_start(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
     // SAFETY: native callback; `mrb` valid & non-null; `ud` is the live ctx.
     let c = unsafe { ctx(mrb) };
     // SAFETY: native callback registered with one required `i` argument.
     let handle = unsafe { arg_handle(mrb) };
 
-    // `Some(Some("s,e"))` real range; `Some(None)` valid handle but no
-    // message_loc; `None` OOB (negative or too large). The latter two collapse
-    // to Ruby `nil` — uniform absent sentinel.
-    let s = usize::try_from(handle).ok().and_then(|h| {
-        with_call_node(c, h, |n| {
-            n.message_loc().map(|loc| {
-                let r: Range = Range::from_prism_location(&loc);
-                format!("{},{}", r.start_offset, r.end_offset)
-            })
-        })
-    });
+    let start = node_message_loc(c, handle)
+        .map(|r| mrb_int::from(r.start_offset))
+        .unwrap_or(-1);
+    let lit = CString::new(start.to_string()).expect("decimal digits, no NUL");
+    // SAFETY: `mrb` valid & non-null; `lit` is a NUL-terminated decimal
+    // integer literal.
+    unsafe { eval_literal(mrb, &lit) }
+}
 
-    match s.flatten() {
-        // SAFETY: `mrb` valid & non-null; ASCII bytes copied by mruby.
-        Some(range) => unsafe { ruby_string_from_bytes(mrb, range.as_bytes()) },
-        None => unsafe { eval_literal(mrb, c"nil") },
-    }
+/// `Murphy.node_msg_end(handle) -> Integer` (BYTE offset, ADR 0001).
+///
+/// Same contract as [`native_node_msg_start`], returning the exclusive end
+/// offset or `-1` when the message location is absent/out of range.
+unsafe extern "C" fn native_node_msg_end(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+    // SAFETY: native callback; `mrb` valid & non-null; `ud` is the live ctx.
+    let c = unsafe { ctx(mrb) };
+    // SAFETY: native callback registered with one required `i` argument.
+    let handle = unsafe { arg_handle(mrb) };
+
+    let end = node_message_loc(c, handle)
+        .map(|r| mrb_int::from(r.end_offset))
+        .unwrap_or(-1);
+    let lit = CString::new(end.to_string()).expect("decimal digits, no NUL");
+    // SAFETY: `mrb` valid & non-null; `lit` is a NUL-terminated decimal
+    // integer literal.
+    unsafe { eval_literal(mrb, &lit) }
 }
 
 /// `Murphy.source_slice(start, end) -> String`. The BYTE slice
 /// `source[start..end]` of the original parsed source (ADR 0001 byte offsets;
-/// pair with `node_msg_range`). Returns `nil` on an out-of-range or inverted
+/// pair with `node_msg_start`/`node_msg_end`). Returns `nil` on an out-of-range or inverted
 /// range rather than panicking — a user cop must not be able to crash the
 /// engine with a bad range.
 unsafe extern "C" fn native_source_slice(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
@@ -428,7 +437,8 @@ pub(crate) unsafe fn register(mrb: *mut mrb_state) {
         def(c"node_count", native_node_count, 0);
         def(c"node_name", native_node_name, 1);
         def(c"node_receiver_nil?", native_node_receiver_nil, 1);
-        def(c"node_msg_range", native_node_msg_range, 1);
+        def(c"node_msg_start", native_node_msg_start, 1);
+        def(c"node_msg_end", native_node_msg_end, 1);
         def(c"source_slice", native_source_slice, 2);
     }
 }
@@ -506,20 +516,19 @@ mod tests {
         }
     }
 
-    /// Drive every handle through name/receiver_nil?/msg_range/source_slice
+    /// Drive every handle through name/receiver_nil?/msg_start/msg_end/source_slice
     /// and report `"i|name|recv_nil|start,end|slice"` per node.
     const DRIVER: &str = r##"
         Murphy.node_count.times do |i|
           name  = Murphy.node_name(i)
           rnil  = Murphy.node_receiver_nil?(i)
-          rng   = Murphy.node_msg_range(i)
-          # `rng` is now Ruby nil (NOT the string "oob"/"nil") when absent/OOB.
-          # Every handle here is in range with a real message_loc, so `rng` is
-          # always a real "s,e" string; the nil branch is the absent contract.
-          if rng
-            a, b  = rng.split(",")
-            slice = Murphy.source_slice(a.to_i, b.to_i)
-            Murphy.__test_report("#{i}|#{name}|#{rnil}|#{rng}|#{slice}")
+          start = Murphy.node_msg_start(i)
+          stop  = Murphy.node_msg_end(i)
+          # Negative offsets are the missing/OOB sentinel. Every handle here is
+          # in range with a real message_loc, so this reports real byte offsets.
+          if start >= 0 && stop >= 0
+            slice = Murphy.source_slice(start, stop)
+            Murphy.__test_report("#{i}|#{name}|#{rnil}|#{start},#{stop}|#{slice}")
           else
             Murphy.__test_report("#{i}|#{name}|#{rnil}|nil|nil")
           end
@@ -683,7 +692,8 @@ mod tests {
                 r##"
                 Murphy.__test_report("count=#{Murphy.node_count}")
                 Murphy.__test_report("oob_name=#{Murphy.node_name(99).inspect}")
-                Murphy.__test_report("oob_rng=#{Murphy.node_msg_range(99).inspect}")
+                Murphy.__test_report("oob_msg_start=#{Murphy.node_msg_start(99)}")
+                Murphy.__test_report("oob_msg_end=#{Murphy.node_msg_end(99)}")
                 Murphy.__test_report("oob_recv=#{Murphy.node_receiver_nil?(99)}")
                 Murphy.__test_report("bad_slice=#{Murphy.source_slice(100, 200).inspect}")
                 Murphy.__test_report("inv_slice=#{Murphy.source_slice(5, 1).inspect}")
@@ -693,8 +703,10 @@ mod tests {
                 # "puts" / "true" / "0,4" instead of the nil/OOB sentinels.
                 Murphy.__test_report("neg1_name=#{Murphy.node_name(-1).inspect}")
                 Murphy.__test_report("neg5_name=#{Murphy.node_name(-5).inspect}")
-                Murphy.__test_report("neg1_rng=#{Murphy.node_msg_range(-1).inspect}")
-                Murphy.__test_report("neg5_rng=#{Murphy.node_msg_range(-5).inspect}")
+                Murphy.__test_report("neg1_msg_start=#{Murphy.node_msg_start(-1)}")
+                Murphy.__test_report("neg5_msg_start=#{Murphy.node_msg_start(-5)}")
+                Murphy.__test_report("neg1_msg_end=#{Murphy.node_msg_end(-1)}")
+                Murphy.__test_report("neg5_msg_end=#{Murphy.node_msg_end(-5)}")
                 Murphy.__test_report("neg1_recv=#{Murphy.node_receiver_nil?(-1)}")
                 Murphy.__test_report("neg5_recv=#{Murphy.node_receiver_nil?(-5)}")
             "##,
@@ -706,9 +718,8 @@ mod tests {
         let out = drain_sink();
         assert!(out.contains(&"count=1".to_string()), "{out:?}");
         assert!(out.contains(&"oob_name=nil".to_string()), "{out:?}");
-        // OOB msg_range is Ruby nil now (NOT the string "oob"): `.inspect` of
-        // nil is "nil"; `.inspect` of the old "oob" string would be "\"oob\"".
-        assert!(out.contains(&"oob_rng=nil".to_string()), "{out:?}");
+        assert!(out.contains(&"oob_msg_start=-1".to_string()), "{out:?}");
+        assert!(out.contains(&"oob_msg_end=-1".to_string()), "{out:?}");
         assert!(out.contains(&"oob_recv=true".to_string()), "{out:?}");
         assert!(out.contains(&"bad_slice=nil".to_string()), "{out:?}");
         assert!(out.contains(&"inv_slice=nil".to_string()), "{out:?}");
@@ -716,12 +727,14 @@ mod tests {
 
         // Negative handles behave EXACTLY like positive OOB — NOT aliased to
         // handle 0. If `.max(0)`-clamping regressed, `node_name(-1/-5)` would
-        // return `"puts"` (handle 0's real name), `node_msg_range` `"0,4"`,
+        // return `"puts"` (handle 0's real name), msg offsets `0`/`4`,
         // and `node_receiver_nil?` `true` for a REAL node — caught here.
         assert!(out.contains(&"neg1_name=nil".to_string()), "{out:?}");
         assert!(out.contains(&"neg5_name=nil".to_string()), "{out:?}");
-        assert!(out.contains(&"neg1_rng=nil".to_string()), "{out:?}");
-        assert!(out.contains(&"neg5_rng=nil".to_string()), "{out:?}");
+        assert!(out.contains(&"neg1_msg_start=-1".to_string()), "{out:?}");
+        assert!(out.contains(&"neg5_msg_start=-1".to_string()), "{out:?}");
+        assert!(out.contains(&"neg1_msg_end=-1".to_string()), "{out:?}");
+        assert!(out.contains(&"neg5_msg_end=-1".to_string()), "{out:?}");
         // receiver_nil? OOB (incl. negative) stays `true` — matches the
         // positive-OOB contract; only consistency with negatives is new.
         assert!(out.contains(&"neg1_recv=true".to_string()), "{out:?}");

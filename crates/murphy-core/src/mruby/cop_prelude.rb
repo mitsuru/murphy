@@ -88,10 +88,11 @@ class Murphy
     # The message/selector token span as a Murphy::Range (byte offsets), or
     # nil when the node has no message_loc.
     def message_loc
-      r = Murphy.node_msg_range(@handle)
-      return nil unless r
-      a, b = r.split(",")
-      Murphy::Range.new(a.to_i, b.to_i)
+      start_offset = Murphy.node_msg_start(@handle)
+      end_offset = Murphy.node_msg_end(@handle)
+      return nil if start_offset < 0 || end_offset < 0
+
+      Murphy::Range.new(start_offset, end_offset)
     end
   end
 
