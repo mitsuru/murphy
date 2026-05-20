@@ -211,6 +211,54 @@ fn deprecated_class_methods_autocorrects_idempotently() {
     assert!(deprecated_class_method_edits(&outcome.corrected).is_empty());
 }
 
+#[test]
+fn literal_style_cops_autocorrect_idempotently() {
+    fn cop_edits(source: &str, cop_name: &str) -> Vec<Edit> {
+        let ast = parse(source).unwrap();
+        let mut offenses = Vec::new();
+        let registry = CopRegistry::native_only();
+        run_cops(&ast, "test.rb", registry.native_cops(), &mut offenses);
+        offenses
+            .into_iter()
+            .filter(|offense| offense.cop_name == cop_name)
+            .filter_map(|offense| offense.autocorrect)
+            .flat_map(|autocorrect| autocorrect.edits)
+            .collect()
+    }
+
+    let cases = [
+        (
+            "Style/FrozenStringLiteralComment",
+            "puts 'x'\n",
+            "# frozen_string_literal: true\n\nputs 'x'\n",
+        ),
+        ("Style/StringLiterals", "x = \"abc\"\n", "x = 'abc'\n"),
+        (
+            "Style/SymbolArray",
+            "x = [:foo, :bar]\n",
+            "x = %i[foo bar]\n",
+        ),
+        (
+            "Style/WordArray",
+            "x = [\"foo\", \"bar\"]\n",
+            "x = %w[foo bar]\n",
+        ),
+    ];
+
+    for (cop_name, input, expected) in cases {
+        let outcome = run_to_fixpoint(input, |source| cop_edits(source, cop_name), 10);
+
+        assert_eq!(outcome.status, FixpointStatus::Converged, "{cop_name}");
+        assert_eq!(outcome.iterations, 1, "{cop_name}");
+        assert_eq!(outcome.corrected, expected, "{cop_name}");
+
+        let second = run_to_fixpoint(expected, |source| cop_edits(source, cop_name), 10);
+        assert_eq!(second.status, FixpointStatus::Converged, "{cop_name}");
+        assert_eq!(second.iterations, 0, "{cop_name}");
+        assert!(cop_edits(expected, cop_name).is_empty(), "{cop_name}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Conflict detection tests (murphy-hwe.4: apply_edits_logged)
 // ---------------------------------------------------------------------------
@@ -668,13 +716,14 @@ fn zero_width_same_point_not_conflict() {
     );
 }
 
-fn native_layout_edits(source: &str) -> Vec<Edit> {
+fn native_cop_edits(source: &str, cop_name: &str) -> Vec<Edit> {
     let ast = parse(source).expect("parse source");
     let registry = CopRegistry::native_only();
     let mut offenses = Vec::new();
     run_cops(&ast, "test.rb", registry.native_cops(), &mut offenses);
     offenses
         .into_iter()
+        .filter(|offense| offense.cop_name == cop_name)
         .filter_map(|offense| offense.autocorrect)
         .flat_map(|autocorrect| autocorrect.edits)
         .collect()
@@ -682,7 +731,11 @@ fn native_layout_edits(source: &str) -> Vec<Edit> {
 
 #[test]
 fn trailing_whitespace_native_cop_converges_to_fixpoint() {
-    let outcome = run_to_fixpoint("x = 1  \n", native_layout_edits, 10);
+    let outcome = run_to_fixpoint(
+        "x = 1  \n",
+        |source| native_cop_edits(source, "Layout/TrailingWhitespace"),
+        10,
+    );
 
     assert_eq!(outcome.status, FixpointStatus::Converged);
     assert_eq!(outcome.corrected, "x = 1\n");
@@ -692,7 +745,7 @@ fn trailing_whitespace_native_cop_converges_to_fixpoint() {
 fn empty_lines_native_cop_converges_to_fixpoint() {
     let outcome = run_to_fixpoint(
         "class A\n\n\n  def x\n  end\nend\n",
-        native_layout_edits,
+        |source| native_cop_edits(source, "Layout/EmptyLines"),
         10,
     );
 
@@ -702,7 +755,11 @@ fn empty_lines_native_cop_converges_to_fixpoint() {
 
 #[test]
 fn space_inside_parens_native_cop_converges_to_fixpoint() {
-    let outcome = run_to_fixpoint("foo( 1, 2 )\n", native_layout_edits, 10);
+    let outcome = run_to_fixpoint(
+        "foo( 1, 2 )\n",
+        |source| native_cop_edits(source, "Layout/SpaceInsideParens"),
+        10,
+    );
 
     assert_eq!(outcome.status, FixpointStatus::Converged);
     assert_eq!(outcome.corrected, "foo(1, 2)\n");
