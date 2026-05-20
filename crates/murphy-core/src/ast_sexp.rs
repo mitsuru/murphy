@@ -7,13 +7,18 @@ pub fn ast_to_sexp(ast: &Ast<'_>) -> String {
 
 fn render_node(node: Node<'_>) -> String {
     if let Some(program) = node.as_program_node() {
-        return program
+        let statements: Vec<String> = program
             .statements()
             .body()
             .iter()
-            .next()
             .map(render_node)
-            .unwrap_or_else(|| "s(:begin)".to_string());
+            .collect();
+
+        return match statements.len() {
+            0 => "s(:begin)".to_string(),
+            1 => statements.into_iter().next().unwrap(),
+            _ => format!("s(:begin, {})", statements.join(", ")),
+        };
     }
     if let Some(call) = node.as_call_node() {
         return render_call(&call);
@@ -107,5 +112,13 @@ mod tests {
     #[test]
     fn dumps_x_not_equal_nil() {
         assert_eq!(sexp("x != nil"), "s(:send, s(:lvar, :x), :!=, s(:nil))");
+    }
+
+    #[test]
+    fn dumps_multiple_statements_as_begin_node() {
+        assert_eq!(
+            sexp("x == nil; nil == x"),
+            "s(:begin, s(:send, s(:lvar, :x), :==, s(:nil)), s(:send, s(:nil), :==, s(:lvar, :x)))"
+        );
     }
 }
