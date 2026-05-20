@@ -179,6 +179,25 @@ fn apply_matches_expected() {
     }
 }
 
+#[test]
+fn deprecated_class_methods_autocorrects_idempotently() {
+    let source = "File.exists?(path)\nDir.exists?(path)\n";
+    let ast = parse(source).unwrap();
+    let mut offenses = Vec::new();
+    let registry = CopRegistry::native_only();
+    run_cops(&ast, "test.rb", registry.native_cops(), &mut offenses);
+    let edits = offenses
+        .iter()
+        .filter(|offense| offense.cop_name == "Lint/DeprecatedClassMethods")
+        .flat_map(|offense| offense.autocorrect.as_ref().unwrap().edits.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        apply_edits(source, &edits),
+        "File.exist?(path)\nDir.exist?(path)\n"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Conflict detection tests (murphy-hwe.4: apply_edits_logged)
 // ---------------------------------------------------------------------------
