@@ -1,5 +1,5 @@
 use crate::cop::{Cop, CopContext};
-use crate::cops::support::{offense_with_edit, replace_edit};
+use crate::cops::support::{offense_with_edit, replace_edit, simple_receiver_name};
 use crate::{Offense, Range};
 
 pub struct DeprecatedClassMethods;
@@ -22,7 +22,9 @@ impl Cop for DeprecatedClassMethods {
             return;
         };
         let receiver = receiver.location();
-        let receiver = receiver.as_slice();
+        let Some(receiver) = simple_receiver_name(receiver.as_slice()) else {
+            return;
+        };
         let name = node.name();
         let name = name.as_slice();
 
@@ -67,5 +69,34 @@ mod tests {
             })
             .collect();
         assert_eq!(replacements, vec!["exist?", "exist?"]);
+    }
+
+    #[test]
+    fn corrects_simple_wrapped_class_receivers() {
+        let offenses = run_single_cop(
+            Box::new(DeprecatedClassMethods),
+            "::File.exists?(path)\n::Dir.exists?(path)\n(File).exists?(path)\n(Dir).exists?(path)\n",
+        );
+        let ranges_and_replacements: Vec<_> = offenses
+            .iter()
+            .map(|o| {
+                let edit = &o.autocorrect.as_ref().unwrap().edits[0];
+                (
+                    edit.range.start_offset,
+                    edit.range.end_offset,
+                    edit.replacement.as_str(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            ranges_and_replacements,
+            vec![
+                (7, 14, "exist?"),
+                (27, 34, "exist?"),
+                (48, 55, "exist?"),
+                (68, 75, "exist?"),
+            ]
+        );
     }
 }
