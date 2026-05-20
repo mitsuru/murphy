@@ -36,7 +36,10 @@ fn render_node(node: Node<'_>) -> String {
         return format!("s(:int, {})", bytes_to_string(integer.location().as_slice()));
     }
     if let Some(string) = node.as_string_node() {
-        return format!("s(:str, {})", quote_string(&bytes_to_string(string.unescaped())));
+        return format!(
+            "s(:str, {})",
+            quote_string(&strip_string_delimiters(&bytes_to_string(string.location().as_slice())))
+        );
     }
     if let Some(symbol) = node.as_symbol_node() {
         return format!("s(:sym, {})", render_symbol(&bytes_to_string(symbol.unescaped())));
@@ -104,6 +107,52 @@ fn quote_string(value: &str) -> String {
     out
 }
 
+fn strip_string_delimiters(raw: &str) -> &str {
+    let bytes = raw.as_bytes();
+    if bytes.is_empty() {
+        return "";
+    }
+
+    if bytes.len() >= 2 && (bytes[0] == b'"' || bytes[0] == b'\'') && bytes[bytes.len() - 1] == bytes[0]
+    {
+        &raw[1..raw.len() - 1]
+    } else if bytes.len() >= 2 && bytes[0] == b'%' {
+        let (delimiter, body_start) = match bytes.get(1) {
+            Some(&b'Q') | Some(&b'q') | Some(&b'W') | Some(&b'w') | Some(&b'X') | Some(&b'x')
+            | Some(&b'I') | Some(&b'i') | Some(&b'R') | Some(&b'r') => {
+                if bytes.len() < 3 {
+                    return raw;
+                }
+                (bytes[2], 3)
+            }
+            Some(&delimiter) => (delimiter, 2),
+            None => return raw,
+        };
+
+        let close = match delimiter {
+            b'(' => b')',
+            b'[' => b']',
+            b'{' => b'}',
+            b'<' => b'>',
+            b'|' => b'|',
+            b'/' => b'/',
+            b'!' => b'!',
+            b'"' => b'"',
+            b'\'' => b'\'',
+            open @ _ => open,
+        };
+
+        let end = bytes.len().saturating_sub(1);
+        if bytes.len() > body_start && bytes[end] == close {
+            &raw[body_start..end]
+        } else {
+            raw
+        }
+    } else {
+        raw
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +200,18 @@ mod tests {
     #[test]
     fn escapes_string_literals() {
         assert_eq!(sexp("'a\\nb'"), "s(:str, \"a\\\\nb\")");
+    }
+
+    #[test]
+    fn escapes_double_quoted_strings_distinctly() {
+        assert_eq!(sexp("\"\\n\""), "s(:str, \"\\\\n\")");
+        assert_eq!(sexp("\"\n\""), "s(:str, \"\\n\")");
+    }
+
+    #[test]
+    fn percent_string_delimiters_are_stripped() {
+        assert_eq!(sexp("%q(foo)"), "s(:str, \"foo\")");
+        assert_eq!(sexp("%Q(\\n)"), "s(:str, \"\\\\n\")");
     }
 
     #[test]
