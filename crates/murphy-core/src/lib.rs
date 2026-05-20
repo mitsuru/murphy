@@ -1,6 +1,7 @@
 //! Murphy core: the native engine for the Murphy Ruby linter/formatter.
 
 mod aggregator;
+pub mod autocorrect;
 mod cop;
 mod cops;
 mod discovery;
@@ -10,6 +11,7 @@ mod parse;
 mod registry;
 
 pub use aggregator::aggregate;
+pub use autocorrect::apply_edits;
 pub use cop::{Cop, CopContext, run_cops};
 pub use cops::no_receiver_puts::NoReceiverPuts;
 pub use discovery::{ConfigError, discover};
@@ -22,7 +24,7 @@ pub use mruby::{
     AstContext, COP_DEADLINE, MrubyState, run_mruby_cop, run_mruby_cop_isolated,
     run_mruby_cop_isolated_with_deadline,
 };
-pub use offense::{Offense, Range, SYNTAX_COP_NAME, Severity};
+pub use offense::{Autocorrect, Edit, Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
 pub use registry::CopRegistry;
 
