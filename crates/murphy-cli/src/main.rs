@@ -52,7 +52,8 @@
 mod lsp;
 
 use murphy_core::{
-    AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
+    ast_to_sexp, AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense,
+    SYNTAX_COP_NAME, Severity,
     aggregate_with_config, discover_with_config, migrate_rubocop_yml_to_murphy_toml, parse,
     run_cops, run_mruby_cop_isolated, run_to_fixpoint,
 };
@@ -173,6 +174,17 @@ static PARSE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 /// exact same `AppError::setup` message shape, so the missing-file→exit-2
 /// contract (`lint_multi_file_with_one_missing_exits_2`) is unchanged.
 fn read_source(path: &str) -> Result<String, AppError> {
+    std::fs::read_to_string(Path::new(path))
+        .map_err(|e| AppError::setup(format!("cannot read {path:?}: {e}")))
+}
+
+fn read_ast_source(path: &str) -> Result<String, AppError> {
+    if path == "-" {
+        let mut source = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut source)
+            .map_err(|e| AppError::setup(format!("cannot read stdin: {e}")))?;
+        return Ok(source);
+    }
     std::fs::read_to_string(Path::new(path))
         .map_err(|e| AppError::setup(format!("cannot read {path:?}: {e}")))
 }
@@ -751,7 +763,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         [subcommand, rest @ ..] => (subcommand.as_str(), rest),
         [] => {
             return Err(AppError::setup(
-                "usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp",
+                "usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|->",
             ));
         }
     };
@@ -779,9 +791,34 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         return lsp::run(post_subcommand);
     }
 
+    if subcommand == "ast" {
+        let path = match post_subcommand {
+            [format, kind, path] if format == "--format" && kind == "sexp" => path,
+            _ => {
+                return Err(AppError::setup(
+                    "usage: murphy ast --format sexp <path|->",
+                ))
+            }
+        };
+        let source = read_ast_source(path)?;
+        let ast = parse(&source).map_err(|err| AppError {
+            code: EXIT_OFFENSES,
+            message: err.to_string(),
+        })?;
+        let sexp = ast_to_sexp(&ast);
+        let mut stdout = std::io::stdout().lock();
+        if let Err(e) = writeln!(stdout, "{sexp}") {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(EXIT_OK);
+            }
+            return Err(AppError::setup(format!("failed to write stdout: {e}")));
+        }
+        return Ok(EXIT_OK);
+    }
+
     if subcommand != "lint" {
         return Err(AppError::setup(format!(
-            "unknown subcommand {subcommand:?} (usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp)"
+            "unknown subcommand {subcommand:?} (usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|->)"
         )));
     }
 
