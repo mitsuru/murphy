@@ -49,6 +49,16 @@ pub struct MurphyPluginV1 {
     pub cops_len: usize,
 }
 
+// Safety: these are immutable ABI descriptors / pointer-length views used in
+// plugin static tables; pointed-to data thread-safety is part of the plugin ABI
+// contract.
+unsafe impl Sync for MurphySlice {}
+unsafe impl Sync for MurphyRange {}
+unsafe impl Sync for MurphyPluginOffense {}
+unsafe impl Sync for MurphyFileContext {}
+unsafe impl Sync for MurphyPluginCopV1 {}
+unsafe impl Sync for MurphyPluginV1 {}
+
 pub type MurphyEmitOffense = unsafe extern "C" fn(*mut c_void, *const MurphyPluginOffense);
 pub type MurphyRunFile =
     unsafe extern "C" fn(*const MurphyFileContext, MurphyEmitOffense, *mut c_void) -> i32;
