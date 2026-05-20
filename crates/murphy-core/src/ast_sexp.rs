@@ -36,9 +36,19 @@ fn render_node(node: Node<'_>) -> String {
         return format!("s(:int, {})", bytes_to_string(integer.location().as_slice()));
     }
     if let Some(string) = node.as_string_node() {
+        let source = bytes_to_string(string.location().as_slice());
+        let unescaped_or_body = if source.starts_with('"')
+            || source.starts_with('\'')
+            || source.starts_with('%')
+        {
+            strip_string_delimiters(&source).to_owned()
+        } else {
+            bytes_to_string(string.unescaped())
+        };
+
         return format!(
             "s(:str, {})",
-            quote_string(&strip_string_delimiters(&bytes_to_string(string.location().as_slice())))
+            quote_string(&unescaped_or_body)
         );
     }
     if let Some(symbol) = node.as_symbol_node() {
