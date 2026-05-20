@@ -40,7 +40,11 @@ pub use offense::{Autocorrect, Edit, Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
 #[cfg(not(target_os = "windows"))]
 pub use plugin::dynamic::{LoadedPluginPack, load_plugin_pack};
-pub use plugin::{MURPHY_PLUGIN_ABI_VERSION, PluginFileCop, validate_plugin_cop_ids};
+pub use plugin::{
+    MURPHY_PLUGIN_ABI_VERSION, MurphyEmitOffense, MurphyFileContext, MurphyPluginCopV1,
+    MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunFile, MurphySlice, PluginFileCop,
+    validate_plugin_cop_ids,
+};
 pub use registry::CopRegistry;
 
 /// Returns the Murphy core crate version.
