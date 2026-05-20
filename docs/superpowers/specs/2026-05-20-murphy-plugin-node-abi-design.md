@@ -27,17 +27,19 @@ Existing internal precedents:
 
 ## Goal
 
-Add native plugin ABI v2 with node handles and host query functions, then prove
-it by porting one existing Murphy standard cop into an external native plugin
-pack. The first target is `Style/NilComparison` because it exercises call nodes,
-receiver/argument relationships, ranges, and existing output comparison without
-requiring framework-specific state.
+Add native plugin ABI v2 with node handles, host query functions, and a
+core-evaluated matcher descriptor path, then prove it by porting one existing
+Murphy standard cop into an external native plugin pack. The first target is
+`Style/NilComparison` because it exercises call nodes, receiver/argument
+relationships, ranges, and existing output comparison without requiring
+framework-specific state.
 
 ## Non-Goals
 
 - No Rust trait objects, `ruby_prism` Rust types, or borrowed AST pointers across
   the plugin ABI.
-- No full RuboCop NodePattern DSL in this step.
+- No full RuboCop NodePattern DSL in this step. The initial matcher descriptor is
+  a small compiled subset designed to grow toward NodePattern compatibility.
 - No cross-file analysis, constant resolution, Rails/RSpec semantic model, or
   type information.
 - No pack distribution registry, checksum, or lockfile changes.
@@ -45,10 +47,16 @@ requiring framework-specific state.
 
 ## Architecture
 
-ABI v2 adds a host query table to the registered plugin descriptor. A v2 plugin
-still registers cops through `murphy_register_plugin`, but each cop may provide a
-node-aware file callback. Murphy passes a per-file `MurphyNodeHostV2` table and a
-file-scoped AST handle space.
+ABI v2 adds two related capabilities:
+
+- a host query table for advanced/plugin-controlled traversal
+- core-evaluated matcher descriptors for the common RuboCop-style path
+
+A v2 plugin still registers cops through `murphy_register_plugin`. Each cop may
+register zero or more matcher descriptors. Murphy evaluates those descriptors
+during its AST walk and calls the plugin only for matched nodes. A plugin may also
+provide a node-aware file callback and use the host query table directly when it
+needs custom traversal.
 
 ```text
 PluginFileCop::inspect_file
@@ -59,7 +67,64 @@ build per-file NodeTable from Ast
         v
 MurphyNodeHostV2 { query fns + userdata }
         |
-        v
+        +--> core evaluates registered matcher descriptors
+        |       |
+        |       v
+        |   plugin on_match_v2(ctx, host, matched_node, captures, emit, sink)
+        |
+        +--> optional plugin run_file_v2(ctx, host, emit, sink)
+                for custom traversal
+```
+
+The fast path is descriptor-driven: plugin code does not loop through every node
+and does not perform repeated FFI host queries just to find candidates. The low
+level query API remains available as a fallback and for logic after a match.
+
+## Matcher Descriptor Path
+
+The matcher descriptor is a C-compatible, versioned representation of a small
+NodePattern-like IR. It is registered by the plugin and evaluated by Murphy core.
+
+Initial descriptor scope:
+
+- root node kind
+- wildcard child `_`
+- positional child matching
+- method-name set for call nodes
+- literal kind matching for `nil`, `true`, `false`, strings, symbols, integers
+- OR by registering multiple descriptors, not by embedding a general alternation
+  engine in v2
+- optional captures as matched node handles, valid only for the callback
+
+For `Style/NilComparison`, the plugin should register two descriptors:
+
+```text
+CALL(method in ["==", "!="], receiver = ANY, arg0 = NIL)
+CALL(method in ["==", "!="], receiver = NIL, arg0 = ANY)
+```
+
+Murphy evaluates these during the AST walk and calls `on_match_v2` only for
+candidate comparisons. The plugin then uses host queries to compute the exact
+offense range and message.
+
+Descriptor registration is deliberately lower-level than RuboCop's
+`def_node_matcher`. The follow-up path is:
+
+1. hand-written `MatcherDescriptor` constants in the example plugin
+2. `murphy-plugin-sdk` helpers/builders for descriptors
+3. `murphy_node_pattern!` proc macro that parses a NodePattern subset at compile
+   time and emits descriptors
+4. optional mruby `def_node_matcher` frontend that compiles to the same IR
+
+The important constraint is that pattern parsing and broad candidate filtering do
+not happen across the plugin boundary at runtime.
+
+## Node Host Query Path
+
+The host query table is still part of v2. It is the escape hatch for complex cops
+and the data source used by `on_match_v2` callbacks.
+
+```text
 plugin run_file_v2(ctx, host, emit, sink)
         |
         v
@@ -147,7 +212,7 @@ For non-call handles, these return neutral sentinels. `call_receiver` returns
 
 `Style/NilComparison` needs this shape:
 
-- find `CALL` nodes named `==` or `!=`
+- receive matched `CALL` nodes named `==` or `!=` from core-side descriptors
 - inspect receiver and first argument
 - detect either side as `NIL`
 - emit offense at the operator/message range or full call range if message range
@@ -174,13 +239,17 @@ ABI v1 stays supported. ABI v2 is additive.
 Registration shape:
 
 - `murphy_plugin_abi_version()` returns `2` for node-aware packs.
-- `MurphyPluginCopV2` includes `run_file_v2`.
+- `MurphyPluginCopV2` includes optional `run_file_v2`, optional `on_match_v2`, and
+  a matcher descriptor slice.
 - v1 packs still load through the current file-level path.
 - v2 packs may still register file-level cops if `run_file_v2` is absent and
   `run_file` is present.
+- A cop with matcher descriptors must provide `on_match_v2`; otherwise Murphy
+  rejects the descriptor as a setup error.
 
 Murphy rejects malformed v2 descriptors as setup errors: bad sizes, null required
-callbacks, duplicate IDs, invalid UTF-8 names, invalid table lengths, or ABI
+callbacks, duplicate IDs, invalid UTF-8 names, invalid table lengths, unsupported
+matcher bytecode/descriptor versions, invalid descriptor references, or ABI
 version greater than supported.
 
 ## Error Handling
@@ -203,6 +272,8 @@ Plugin panics across FFI remain undefined by contract and are forbidden.
   source.
 - Unit-test call query behavior for receiver-less calls, explicit receivers,
   operator calls, arguments, and nil literals.
+- Unit-test matcher descriptor evaluation for call method sets, wildcard
+  receiver/argument, nil literal matching, and invalid descriptors.
 - Integration-test an external v2 plugin pack that ports `Style/NilComparison`.
 - Compare plugin `Style/NilComparison` output against the built-in cop by running
   fixtures with the built-in disabled and the plugin enabled.
@@ -212,7 +283,8 @@ Plugin panics across FFI remain undefined by contract and are forbidden.
 ## Success Criteria
 
 - `murphy-example-pack` or a new `murphy-example-node-pack` loads as ABI v2.
-- The example pack implements `Style/NilComparison` using only node host queries.
+- The example pack implements `Style/NilComparison` using core-evaluated matcher
+  descriptors for candidate selection and node host queries for offense details.
 - The plugin cop detects `x == nil`, `nil == x`, `x != nil`, and `nil != x` with
   byte ranges matching the built-in cop's contract.
 - Existing v1 plugin pack tests still pass.
@@ -223,5 +295,7 @@ Plugin panics across FFI remain undefined by contract and are forbidden.
 - Add pack-specific config once node ABI is proven.
 - Add helper/resource loading for richer plugin packs.
 - Add Rails/RSpec-specific query helpers after core AST shape is stable.
-- Consider a small NodePattern-like helper crate for plugin authors, built on top
-  of the C ABI rather than added to the ABI itself.
+- Add `murphy-plugin-sdk` descriptor builders.
+- Add `murphy_node_pattern!` proc macro that compile-time parses a RuboCop
+  NodePattern subset into matcher descriptors.
+- Add mruby `def_node_matcher` frontend that compiles to the same matcher IR.
