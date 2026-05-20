@@ -118,11 +118,7 @@ fn skip_quoted(source: &[u8], start: usize, quote: u8) -> usize {
 }
 
 fn skip_heredoc(source: &[u8], start: usize) -> Option<usize> {
-    let Some(end) = heredoc_delimiter(source, start) else {
-        return None;
-    };
-
-    let (delim, strip_indent, mut idx) = end;
+    let (delim, strip_indent, mut idx) = heredoc_delimiter(source, start)?;
     if idx >= source.len() {
         return None;
     }
@@ -233,11 +229,7 @@ fn heredoc_prefix_allows(source: &[u8], start: usize) -> bool {
     let Some(prev) = previous_significant_byte(source, start) else {
         return true;
     };
-    !prev.is_ascii_alphanumeric()
-        && prev != b'_'
-        && prev != b')'
-        && prev != b']'
-        && prev != b'}'
+    !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b')' && prev != b']' && prev != b'}'
 }
 
 fn is_heredoc_suffix_allowed(source: &[u8], idx: usize) -> bool {

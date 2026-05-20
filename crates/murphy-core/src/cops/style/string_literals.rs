@@ -60,7 +60,9 @@ fn simple_double_quoted_literals(source: &[u8]) -> Vec<Literal<'_>> {
                 }
             }
             b'/' => {
-                if is_regex_like(source, idx) && let Some(end) = slash_literal_end(source, idx) {
+                if is_regex_like(source, idx)
+                    && let Some(end) = slash_literal_end(source, idx)
+                {
                     idx = end;
                 } else {
                     idx += 1;
@@ -102,9 +104,7 @@ fn simple_double_quoted_literals(source: &[u8]) -> Vec<Literal<'_>> {
 }
 
 fn skip_heredoc(source: &[u8], start: usize) -> Option<usize> {
-    let Some((delimiter, strip_indent, mut idx)) = heredoc_delimiter(source, start) else {
-        return None;
-    };
+    let (delimiter, strip_indent, mut idx) = heredoc_delimiter(source, start)?;
 
     while idx < source.len() {
         let line_end = idx
@@ -205,11 +205,7 @@ fn heredoc_prefix_allows(source: &[u8], start: usize) -> bool {
     let Some(prev) = previous_significant_byte(source, start) else {
         return true;
     };
-    !prev.is_ascii_alphanumeric()
-        && prev != b'_'
-        && prev != b')'
-        && prev != b']'
-        && prev != b'}'
+    !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b')' && prev != b']' && prev != b'}'
 }
 
 fn is_heredoc_suffix_allowed(source: &[u8], idx: usize) -> bool {
@@ -320,7 +316,8 @@ fn is_regex_like(source: &[u8], idx: usize) -> bool {
     let Some(prev) = previous_significant_byte(source, idx) else {
         return true;
     };
-    if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b')' || prev == b']' || prev == b'}' {
+    if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b')' || prev == b']' || prev == b'}'
+    {
         return false;
     }
 

@@ -6,6 +6,7 @@ pub struct Debugger;
 
 const BARE_DEBUGGER_CALLS: [&[u8]; 3] = [b"debugger", b"byebug", b"pry"];
 const BINDING_DEBUGGER_CALLS: [&[u8]; 4] = [b"pry", b"irb", b"b", b"break"];
+const REQUIRE_DEBUG_PATH: [&[u8]; 2] = [b"'debug/start'", b"\"debug/start\""];
 
 impl Cop for Debugger {
     fn name(&self) -> &str {
@@ -21,11 +22,16 @@ impl Cop for Debugger {
         let name = node.name();
         let name = name.as_slice();
 
-        let flagged = match node.receiver() {
-            None => BARE_DEBUGGER_CALLS.contains(&name),
-            Some(receiver) => {
-                simple_receiver_name(receiver.location().as_slice()) == Some(b"binding".as_slice())
-                    && BINDING_DEBUGGER_CALLS.contains(&name)
+        let flagged = if is_require_debug_start(node) {
+            true
+        } else {
+            match node.receiver() {
+                None => BARE_DEBUGGER_CALLS.contains(&name),
+                Some(receiver) => {
+                    simple_receiver_name(receiver.location().as_slice())
+                        == Some(b"binding".as_slice())
+                        && BINDING_DEBUGGER_CALLS.contains(&name)
+                }
             }
         };
         if !flagged {
@@ -43,6 +49,31 @@ impl Cop for Debugger {
             "Remove debugger entry point.",
         ));
     }
+}
+
+fn is_require_debug_start(node: &ruby_prism::CallNode<'_>) -> bool {
+    if node.receiver().is_some() {
+        return false;
+    }
+
+    if node.name().as_slice() != b"require" {
+        return false;
+    }
+
+    let Some(arguments) = node.arguments() else {
+        return false;
+    };
+
+    let Some(argument) = arguments.arguments().first() else {
+        return false;
+    };
+
+    if arguments.arguments().len() != 1 {
+        return false;
+    }
+
+    let value = argument.location().as_slice();
+    REQUIRE_DEBUG_PATH.contains(&value)
 }
 
 #[cfg(test)]
@@ -79,5 +110,30 @@ mod tests {
         assert_eq!(offenses.len(), 1);
         assert_eq!(offenses[0].range.start_offset, 10);
         assert_eq!(offenses[0].range.end_offset, 13);
+    }
+
+    #[test]
+    fn flags_require_debug_start() {
+        let offenses = run_single_cop(
+            Box::new(Debugger),
+            "require 'debug/start'\nrequire \"debug/start\"\n",
+        );
+
+        assert_eq!(offenses.len(), 2);
+        assert!(
+            offenses
+                .iter()
+                .all(|offense| offense.cop_name == "Lint/Debugger")
+        );
+    }
+
+    #[test]
+    fn ignores_non_literal_require_call() {
+        let offenses = run_single_cop(
+            Box::new(Debugger),
+            "require path\nrequire_file('debug/start')\nrequire(\"debug/#{name}\")\n",
+        );
+
+        assert!(offenses.is_empty());
     }
 }

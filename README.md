@@ -6,7 +6,7 @@ eliminate RuboCop's slowness with a native Rust core.
 
 ## Status
 
-**Phase 5 — config + migrate (complete).** Working today:
+**Phase 6 — standard cop + perf gates (complete).** Working today:
 
 - `murphy lint <file>...` parses Ruby via prism (single parse) — unchanged
   Phase-1 behavior.
@@ -21,7 +21,8 @@ eliminate RuboCop's slowness with a native Rust core.
 - Within a single run, files with byte-identical content are parsed and
   linted once (**in-run memoization only — no persistent cache**); output is
   identical to the non-memoized result.
-- One native cop: `Murphy/NoReceiverPuts`.
+- Standard built-ins from ADR 0018 are enabled by default across `Murphy`, `Lint`,
+  `Style`, and limited `Layout` namespaces.
 - `murphy.toml` also supports `[cops]`: a configurable user-cop path, per-cop
   `enabled = false`, and per-cop `severity = "warning" | "error"` override.
   Directory discovery excludes the configured cops path so cop implementation
@@ -68,8 +69,10 @@ applies fix blocks to source with conflict-safe descending-offset apply, a
 reparse-rerun fixpoint loop, and idempotency guarantees (ADR 0013). There is
 **no** `murphy format` subcommand or formatter, **no** persistent cache (in-run
 memoization only), **no** LSP, and **no** node-pattern DSL. `.gitignore` is
-intentionally **not** consulted. Broader standard-cop coverage and perf gates
-are Phase 6; sandboxing remains later. See
+intentionally **not** consulted. Full RuboCop parity, formatter `murphy format`,
+and sandboxing remain later. Phase 6 adds local quality/perf scripts:
+`scripts/perf/phase6_hyperfine.sh` and `scripts/diff/phase6_rubocop_diff.sh`.
+See
 [`docs/plans/2026-05-19-murphy-design.md`](docs/plans/2026-05-19-murphy-design.md)
 for the full design,
 [`docs/plans/2026-05-19-murphy-implementation-plan.md`](docs/plans/2026-05-19-murphy-implementation-plan.md)
