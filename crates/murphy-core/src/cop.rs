@@ -61,6 +61,33 @@ pub trait Cop: Send + Sync {
         ctx: &CopContext<'_>,
         sink: &mut Vec<Offense>,
     );
+
+    /// Called once per if/unless node during the single AST traversal.
+    fn on_if_node(
+        &self,
+        _node: &ruby_prism::IfNode<'_>,
+        _ctx: &CopContext<'_>,
+        _sink: &mut Vec<Offense>,
+    ) {
+    }
+
+    /// Called once per return node during the single AST traversal.
+    fn on_return_node(
+        &self,
+        _node: &ruby_prism::ReturnNode<'_>,
+        _ctx: &CopContext<'_>,
+        _sink: &mut Vec<Offense>,
+    ) {
+    }
+
+    /// Called once per case node during the single AST traversal.
+    fn on_case_node(
+        &self,
+        _node: &ruby_prism::CaseNode<'_>,
+        _ctx: &CopContext<'_>,
+        _sink: &mut Vec<Offense>,
+    ) {
+    }
 }
 
 /// Internal visitor that performs the single AST pass and fans every visited
@@ -81,6 +108,27 @@ impl<'pr> Visit<'pr> for Dispatcher<'_> {
         // REQUIRED: descend into nested calls (e.g. `foo.bar(baz)`); without
         // this only top-level calls are visited (see spikes/prism_poc).
         ruby_prism::visit_call_node(self, node);
+    }
+
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+        for cop in self.cops {
+            cop.on_if_node(node, &self.ctx, self.sink);
+        }
+        ruby_prism::visit_if_node(self, node);
+    }
+
+    fn visit_return_node(&mut self, node: &ruby_prism::ReturnNode<'pr>) {
+        for cop in self.cops {
+            cop.on_return_node(node, &self.ctx, self.sink);
+        }
+        ruby_prism::visit_return_node(self, node);
+    }
+
+    fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
+        for cop in self.cops {
+            cop.on_case_node(node, &self.ctx, self.sink);
+        }
+        ruby_prism::visit_case_node(self, node);
     }
 }
 
@@ -323,5 +371,146 @@ mod tests {
         assert_eq!(sink.len(), 2);
         assert_eq!(sink[0].cop_name, "Test/FileHook");
         assert_eq!(sink[1].cop_name, "Murphy/CountingStub");
+    }
+
+    #[derive(Default)]
+    struct IfHookStubCop;
+
+    impl Cop for IfHookStubCop {
+        fn name(&self) -> &str {
+            "Test/IfHook"
+        }
+
+        fn on_call_node(
+            &self,
+            _node: &ruby_prism::CallNode<'_>,
+            _ctx: &CopContext<'_>,
+            _sink: &mut Vec<Offense>,
+        ) {
+        }
+
+        fn on_if_node(
+            &self,
+            _node: &ruby_prism::IfNode<'_>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
+        ) {
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Warning,
+                "if hook",
+            ));
+        }
+    }
+
+    #[test]
+    fn dispatch_invokes_if_hook_for_if_nodes() {
+        let ast = parse("if foo\nbar\nend\n").unwrap();
+        let mut sink = Vec::new();
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(IfHookStubCop)];
+
+        run_cops(&ast, "t.rb", &cops, &mut sink);
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].cop_name, "Test/IfHook");
+    }
+
+    #[derive(Default)]
+    struct ReturnHookStubCop;
+
+    impl Cop for ReturnHookStubCop {
+        fn name(&self) -> &str {
+            "Test/ReturnHook"
+        }
+
+        fn on_call_node(
+            &self,
+            _node: &ruby_prism::CallNode<'_>,
+            _ctx: &CopContext<'_>,
+            _sink: &mut Vec<Offense>,
+        ) {
+        }
+
+        fn on_return_node(
+            &self,
+            _node: &ruby_prism::ReturnNode<'_>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
+        ) {
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Warning,
+                "return hook",
+            ));
+        }
+    }
+
+    #[test]
+    fn dispatch_invokes_return_hook_for_return_nodes() {
+        let ast = parse("def m\nreturn foo\nend\n").unwrap();
+        let mut sink = Vec::new();
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(ReturnHookStubCop)];
+
+        run_cops(&ast, "t.rb", &cops, &mut sink);
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].cop_name, "Test/ReturnHook");
+    }
+
+    #[derive(Default)]
+    struct CaseHookStubCop;
+
+    impl Cop for CaseHookStubCop {
+        fn name(&self) -> &str {
+            "Test/CaseHook"
+        }
+
+        fn on_call_node(
+            &self,
+            _node: &ruby_prism::CallNode<'_>,
+            _ctx: &CopContext<'_>,
+            _sink: &mut Vec<Offense>,
+        ) {
+        }
+
+        fn on_case_node(
+            &self,
+            _node: &ruby_prism::CaseNode<'_>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
+        ) {
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Warning,
+                "case hook",
+            ));
+        }
+    }
+
+    #[test]
+    fn dispatch_invokes_case_hook_for_case_nodes() {
+        let ast = parse("case foo\nwhen 1\nbar\nend\n").unwrap();
+        let mut sink = Vec::new();
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(CaseHookStubCop)];
+
+        run_cops(&ast, "t.rb", &cops, &mut sink);
+
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].cop_name, "Test/CaseHook");
     }
 }
