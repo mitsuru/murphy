@@ -61,6 +61,58 @@ pub(crate) fn simple_receiver_name(mut receiver: &[u8]) -> Option<&[u8]> {
     Some(receiver)
 }
 
+pub(crate) fn percent_literal_end(source: &[u8], start: usize) -> Option<usize> {
+    if source.get(start) != Some(&b'%') {
+        return None;
+    }
+
+    let mut delimiter_idx = start + 1;
+    if source
+        .get(delimiter_idx)
+        .is_some_and(u8::is_ascii_alphabetic)
+    {
+        delimiter_idx += 1;
+    }
+    let delimiter = *source.get(delimiter_idx)?;
+    if delimiter.is_ascii_whitespace() || delimiter.is_ascii_alphanumeric() {
+        return None;
+    }
+
+    let closing = match delimiter {
+        b'(' => b')',
+        b'[' => b']',
+        b'{' => b'}',
+        b'<' => b'>',
+        other => other,
+    };
+    let mut idx = delimiter_idx + 1;
+    while idx < source.len() {
+        match source[idx] {
+            b'\\' => idx += 2,
+            byte if byte == closing => return Some(idx + 1),
+            _ => idx += 1,
+        }
+    }
+    None
+}
+
+pub(crate) fn slash_literal_end(source: &[u8], start: usize) -> Option<usize> {
+    if source.get(start) != Some(&b'/') {
+        return None;
+    }
+
+    let mut idx = start + 1;
+    while idx < source.len() {
+        match source[idx] {
+            b'\n' => return None,
+            b'\\' => idx += 2,
+            b'/' => return Some(idx + 1),
+            _ => idx += 1,
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 pub(crate) fn run_single_cop(cop: Box<dyn crate::Cop>, source: &str) -> Vec<crate::Offense> {
     let ast = crate::parse(source).expect("parse source");

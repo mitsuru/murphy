@@ -22,7 +22,7 @@ impl Cop for FrozenStringLiteralComment {
             return;
         }
 
-        let insert_at = shebang_end(ctx.source);
+        let insert_at = insertion_offset(ctx.source);
         let range = Range {
             start_offset: insert_at as u32,
             end_offset: insert_at as u32,
@@ -74,6 +74,34 @@ fn has_frozen_string_literal_comment(source: &[u8]) -> bool {
     false
 }
 
+fn insertion_offset(source: &[u8]) -> usize {
+    let mut pos = shebang_end(source);
+    while pos < source.len() {
+        let line_end = source[pos..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(source.len(), |idx| pos + idx);
+        let line = trim_ascii(&source[pos..line_end]);
+        if is_encoding_magic_comment(line) {
+            return (line_end + 1).min(source.len());
+        }
+        if line.is_empty() || line.starts_with(b"#") {
+            pos = (line_end + 1).min(source.len());
+            continue;
+        }
+        break;
+    }
+    shebang_end(source)
+}
+
+fn is_encoding_magic_comment(line: &[u8]) -> bool {
+    let Some(rest) = line.strip_prefix(b"#") else {
+        return false;
+    };
+    let rest = trim_ascii(rest);
+    rest.starts_with(b"encoding:") || rest.starts_with(b"coding:")
+}
+
 fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
     while bytes.first().is_some_and(u8::is_ascii_whitespace) {
         bytes = &bytes[1..];
@@ -116,6 +144,32 @@ mod tests {
         assert_eq!(edit.range.start_offset, 20);
         assert_eq!(edit.range.end_offset, 20);
         assert_eq!(edit.replacement, "# frozen_string_literal: true\n\n");
+    }
+
+    #[test]
+    fn inserts_after_encoding_magic_comment() {
+        let source = "# encoding: utf-8\nputs 'x'\n";
+        let offenses = run_single_cop(Box::new(FrozenStringLiteralComment), source);
+
+        assert_eq!(offenses.len(), 1);
+        let edit = &offenses[0].autocorrect.as_ref().unwrap().edits[0];
+        assert_eq!(edit.range.start_offset, 18);
+        assert_eq!(edit.range.end_offset, 18);
+        assert_eq!(
+            apply_edits(source, std::slice::from_ref(edit)),
+            "# encoding: utf-8\n# frozen_string_literal: true\n\nputs 'x'\n"
+        );
+    }
+
+    #[test]
+    fn inserts_after_shebang_and_encoding_magic_comment() {
+        let source = "#!/usr/bin/env ruby\n# coding: utf-8\nputs 'x'\n";
+        let offenses = run_single_cop(Box::new(FrozenStringLiteralComment), source);
+
+        assert_eq!(offenses.len(), 1);
+        let edit = &offenses[0].autocorrect.as_ref().unwrap().edits[0];
+        assert_eq!(edit.range.start_offset, 36);
+        assert_eq!(edit.range.end_offset, 36);
     }
 
     #[test]
