@@ -90,7 +90,12 @@ pub(crate) fn percent_literal_end(source: &[u8], start: usize) -> Option<usize> 
     let mut idx = delimiter_idx + 1;
     while idx < source.len() {
         match source[idx] {
-            b'\\' => idx += 2,
+            b'\\' => {
+                if idx + 1 >= source.len() {
+                    return None;
+                }
+                idx += 2;
+            }
             byte if paired && byte == delimiter => {
                 depth += 1;
                 idx += 1;
@@ -117,7 +122,12 @@ pub(crate) fn slash_literal_end(source: &[u8], start: usize) -> Option<usize> {
     while idx < source.len() {
         match source[idx] {
             b'\n' => return None,
-            b'\\' => idx += 2,
+            b'\\' => {
+                if idx + 1 >= source.len() {
+                    return None;
+                }
+                idx += 2;
+            }
             b'/' => return Some(idx + 1),
             _ => idx += 1,
         }
@@ -212,5 +222,15 @@ mod tests {
         assert_eq!(offenses.len(), 2);
         assert_eq!(offenses[0].range.start_offset, 0);
         assert_eq!(offenses[1].range.start_offset, 5);
+    }
+
+    #[test]
+    fn percent_literal_with_trailing_backslash_is_incomplete() {
+        assert_eq!(percent_literal_end(b"%Q[abc\\", 0), None);
+    }
+
+    #[test]
+    fn slash_literal_with_trailing_backslash_is_incomplete() {
+        assert_eq!(slash_literal_end(b"/abc\\", 0), None);
     }
 }

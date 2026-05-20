@@ -25,7 +25,9 @@ impl Cop for StringLiterals {
                 start_offset: literal.start as u32,
                 end_offset: literal.end as u32,
             };
-            let body = std::str::from_utf8(literal.body).expect("ASCII-only literal body is UTF-8");
+            let Ok(body) = std::str::from_utf8(literal.body) else {
+                continue;
+            };
             sink.push(offense_with_edit(
                 ctx.file,
                 self.name(),
@@ -196,6 +198,7 @@ fn skip_until_newline(source: &[u8], start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use crate::apply_edits;
+    use crate::cop::{Cop, CopContext};
     use crate::cops::style::StringLiterals;
     use crate::cops::support::run_single_cop;
 
@@ -232,5 +235,18 @@ mod tests {
             let offenses = run_single_cop(Box::new(StringLiterals), source);
             assert!(offenses.is_empty(), "{source:?}");
         }
+    }
+
+    #[test]
+    fn invalid_utf8_literal_body_is_skipped() {
+        let mut sink = Vec::new();
+        let ctx = CopContext {
+            file: "invalid.rb",
+            source: b"x = \"\xff\"\n",
+        };
+
+        StringLiterals.inspect_file(&ctx, &mut sink);
+
+        assert!(sink.is_empty());
     }
 }
