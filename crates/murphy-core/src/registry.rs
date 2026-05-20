@@ -40,6 +40,7 @@ use crate::MurphyConfig;
 use crate::NoReceiverPuts;
 use crate::cops::layout::{EmptyLines, SpaceInsideParens, TrailingWhitespace};
 use crate::cops::lint::{Debugger, DeprecatedClassMethods};
+use crate::cops::style::{FrozenStringLiteralComment, StringLiterals, SymbolArray, WordArray};
 use std::path::{Path, PathBuf};
 
 /// The cop set for a run: native cops (run on all cores) plus the discovered
@@ -73,6 +74,10 @@ impl CopRegistry {
             Box::new(SpaceInsideParens),
             Box::new(Debugger),
             Box::new(DeprecatedClassMethods),
+            Box::new(FrozenStringLiteralComment),
+            Box::new(StringLiterals),
+            Box::new(SymbolArray),
+            Box::new(WordArray),
         ]
     }
 
@@ -196,13 +201,17 @@ fn enumerate_cop_paths(root: &Path, cops_path: &Path) -> Result<Vec<PathBuf>, Co
 mod tests {
     use super::*;
 
-    const EXPECTED_NATIVE_COPS: [&str; 6] = [
+    const EXPECTED_NATIVE_COPS: [&str; 10] = [
         "Murphy/NoReceiverPuts",
         "Layout/TrailingWhitespace",
         "Layout/EmptyLines",
         "Layout/SpaceInsideParens",
         "Lint/Debugger",
         "Lint/DeprecatedClassMethods",
+        "Style/FrozenStringLiteralComment",
+        "Style/StringLiterals",
+        "Style/SymbolArray",
+        "Style/WordArray",
     ];
 
     /// The registry is `Send + Sync` — it crosses the rayon `par_iter`
