@@ -34,6 +34,7 @@ version = "0.1.0"
     assert!(stderr.contains("missing-pack"), "stderr was {stderr:?}");
 }
 
+#[cfg(not(target_os = "windows"))]
 fn workspace_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -44,6 +45,7 @@ fn workspace_root() -> std::path::PathBuf {
 }
 
 #[test]
+#[cfg(not(target_os = "windows"))]
 fn example_native_pack_loads_and_emits_offense() {
     let root = workspace_root();
     let status = std::process::Command::new("cargo")
