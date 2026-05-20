@@ -134,7 +134,7 @@ fn rails_native_pack_loads_expected_cops() {
     .expect("write config");
     fs::write(
         dir.path().join("rails_sample.rb"),
-        "has_and_belongs_to_many :groups\nitems = Item.find(:all).to_a\ntext = html_safe('x')\ndefault_scope { order(created_at: :desc) }\nhas_many :projects\nrequest.referer\nDate.today\nTime.now\nbefore_filter :authenticate_user\nUser.find_by_email('a@example.com')\nread_attribute(:name)\nwrite_attribute(:name, 'x')\nrender :text => 'outdated'\nrender :inline => 'abc'\nlink_to 'Open', '/x', target: \"_blank\"\n",
+        "has_and_belongs_to_many :groups\nitems = Item.find(:all).to_a\ntext = html_safe('x')\ndefault_scope { order(created_at: :desc) }\nhas_many :projects\nrequest.referer\nDate.today\nTime.now\nbefore_filter :authenticate_user\nUser.find_by_email('a@example.com')\nread_attribute(:name)\nwrite_attribute(:name, 'x')\nrender :text => 'outdated'\nrender :inline => 'abc'\nrender :json => { hello: 'world' }\nlink_to 'Open', '/x', target: \"_blank\"\npost.save()\nrecord.update_attributes(name: 'x')\nraw('<b>')\n",
     )
     .expect("write source");
 
@@ -167,8 +167,11 @@ fn rails_native_pack_loads_expected_cops() {
         "Rails/RequestReferer",
         "Rails/RenderInline",
         "Rails/RenderText",
+        "Rails/RenderJson",
         "Rails/ReadWriteAttribute",
+        "Rails/OutputSafety",
         "Rails/LinkToBlank",
+        "Rails/SaveBang",
     ];
     for required_name in required {
         assert!(

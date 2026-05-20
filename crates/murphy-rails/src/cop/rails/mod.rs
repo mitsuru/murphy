@@ -9,5 +9,8 @@ pub(crate) mod render_text;
 pub(crate) mod has_and_belongs_to_many;
 pub(crate) mod has_many_or_has_one_dependent;
 pub(crate) mod html_safe;
+pub(crate) mod output_safety;
+pub(crate) mod render_json;
 pub(crate) mod request_referer;
 pub(crate) mod read_write_attribute;
+pub(crate) mod save_bang;

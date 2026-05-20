@@ -4,7 +4,7 @@ use murphy_core::{
     MurphyPluginCopV1, MurphyPluginV1, MURPHY_PLUGIN_ABI_VERSION,
 };
 
-const COPS: [MurphyPluginCopV1; 13] = [
+const COPS: [MurphyPluginCopV1; 16] = [
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cop::rails::action_filter::NAME,
@@ -24,6 +24,11 @@ const COPS: [MurphyPluginCopV1; 13] = [
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cop::rails::html_safe::NAME,
         run_file: Some(cop::rails::html_safe::run),
+    },
+    MurphyPluginCopV1 {
+        size: std::mem::size_of::<MurphyPluginCopV1>(),
+        name: cop::rails::output_safety::NAME,
+        run_file: Some(cop::rails::output_safety::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
@@ -62,8 +67,18 @@ const COPS: [MurphyPluginCopV1; 13] = [
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
+        name: cop::rails::render_json::NAME,
+        run_file: Some(cop::rails::render_json::run),
+    },
+    MurphyPluginCopV1 {
+        size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cop::rails::read_write_attribute::NAME,
         run_file: Some(cop::rails::read_write_attribute::run),
+    },
+    MurphyPluginCopV1 {
+        size: std::mem::size_of::<MurphyPluginCopV1>(),
+        name: cop::rails::save_bang::NAME,
+        run_file: Some(cop::rails::save_bang::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
