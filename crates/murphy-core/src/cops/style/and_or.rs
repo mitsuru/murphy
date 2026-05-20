@@ -190,4 +190,11 @@ mod tests {
 
         assert!(offenses.is_empty());
     }
+
+    #[test]
+    fn string_literal_in_if_condition_remains_clean() {
+        let offenses = run_single_cop(Box::new(AndOr), "if \"a and b\"\nend\n");
+
+        assert!(offenses.is_empty());
+    }
 }
