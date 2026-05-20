@@ -44,6 +44,8 @@ use crate::cops::style::{
     AndOr, FrozenStringLiteralComment, IfUnlessModifier, NilComparison, RedundantReturn,
     StringLiterals, SymbolArray, WordArray,
 };
+#[cfg(not(target_os = "windows"))]
+use crate::{load_plugin_pack, validate_plugin_cop_ids};
 use std::path::{Path, PathBuf};
 
 /// The cop set for a run: native cops (run on all cores) plus the discovered
@@ -143,13 +145,40 @@ impl CopRegistry {
 
     pub fn discover_with_config(root: &Path, config: &MurphyConfig) -> Result<Self, ConfigError> {
         let mruby_cop_paths = enumerate_cop_paths(root, &config.cops.path)?;
-        let native = Self::native_cops_list()
+        let mut native = Self::native_cops_list();
+        let mut native_pack_names = vec!["builtin".to_string()];
+
+        #[cfg(not(target_os = "windows"))]
+        for pack in &config.cop_packs {
+            let path = root.join(&pack.path);
+            let loaded = load_plugin_pack(&pack.name, &path).map_err(|e| {
+                ConfigError::Io(format!("cannot load native cop pack {}: {e}", pack.name))
+            })?;
+            let plugin_names = loaded
+                .cops
+                .iter()
+                .map(|cop| cop.name().to_string())
+                .collect::<Vec<_>>();
+            validate_plugin_cop_ids(&native, &plugin_names).map_err(ConfigError::Io)?;
+            native_pack_names.push(loaded.name);
+            native.extend(loaded.cops);
+        }
+
+        #[cfg(target_os = "windows")]
+        if let Some(pack) = config.cop_packs.first() {
+            return Err(ConfigError::Io(format!(
+                "native cop packs are not supported on Windows in Phase 8: {}",
+                pack.name
+            )));
+        }
+
+        let native = native
             .into_iter()
             .filter(|cop| config.cop_enabled(cop.name()))
             .collect();
         Ok(CopRegistry {
             native,
-            native_pack_names: vec!["builtin".to_string()],
+            native_pack_names,
             mruby_cop_paths,
         })
     }
