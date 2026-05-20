@@ -26,6 +26,21 @@ fn render_node(node: Node<'_>) -> String {
     if node.as_nil_node().is_some() {
         return "s(:nil)".to_string();
     }
+    if node.as_true_node().is_some() {
+        return "s(:true)".to_string();
+    }
+    if node.as_false_node().is_some() {
+        return "s(:false)".to_string();
+    }
+    if let Some(integer) = node.as_integer_node() {
+        return format!("s(:int, {})", bytes_to_string(integer.location().as_slice()));
+    }
+    if let Some(string) = node.as_string_node() {
+        return format!("s(:str, {})", quote_string(&bytes_to_string(string.unescaped())));
+    }
+    if let Some(symbol) = node.as_symbol_node() {
+        return format!("s(:sym, {})", render_symbol(&bytes_to_string(symbol.unescaped())));
+    }
     render_unknown(node)
 }
 
@@ -112,6 +127,30 @@ mod tests {
     #[test]
     fn dumps_x_not_equal_nil() {
         assert_eq!(sexp("x != nil"), "s(:send, s(:lvar, :x), :!=, s(:nil))");
+    }
+
+    #[test]
+    fn dumps_receiver_and_argument_call() {
+        assert_eq!(sexp("obj.foo(1)"), "s(:send, s(:lvar, :obj), :foo, s(:int, 1))");
+    }
+
+    #[test]
+    fn dumps_receiverless_method_call() {
+        assert_eq!(sexp("foo(1)"), "s(:send, nil, :foo, s(:int, 1))");
+    }
+
+    #[test]
+    fn dumps_basic_literals() {
+        assert_eq!(sexp("true"), "s(:true)");
+        assert_eq!(sexp("false"), "s(:false)");
+        assert_eq!(sexp("1"), "s(:int, 1)");
+        assert_eq!(sexp("'x'"), "s(:str, \"x\")");
+        assert_eq!(sexp(":x"), "s(:sym, :x)");
+    }
+
+    #[test]
+    fn escapes_string_literals() {
+        assert_eq!(sexp("'a\\nb'"), "s(:str, \"a\\\\nb\")");
     }
 
     #[test]
