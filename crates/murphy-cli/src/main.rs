@@ -1129,9 +1129,12 @@ mod tests {
         let dup_a = dir.path().join("dup_a.rb");
         let dup_b = dir.path().join("dup_b.rb");
         let other = dir.path().join("other.rb");
-        std::fs::write(&dup_a, "puts \"x\"\n").expect("write dup_a.rb");
-        std::fs::write(&dup_b, "puts \"x\"\n").expect("write dup_b.rb");
-        std::fs::write(&other, "puts \"y\"\n").expect("write other.rb");
+        std::fs::write(&dup_a, "# frozen_string_literal: true\n\nputs 'x'\n")
+            .expect("write dup_a.rb");
+        std::fs::write(&dup_b, "# frozen_string_literal: true\n\nputs 'x'\n")
+            .expect("write dup_b.rb");
+        std::fs::write(&other, "# frozen_string_literal: true\n\nputs 'y'\n")
+            .expect("write other.rb");
 
         let files: Vec<String> = vec![
             dup_a.to_str().unwrap().to_owned(),
@@ -1207,8 +1210,8 @@ mod tests {
         let dir2 = tempfile::tempdir().expect("create tempdir");
         let nd_a = dir2.path().join("a.rb");
         let nd_b = dir2.path().join("b.rb");
-        std::fs::write(&nd_a, "x = 1\n").expect("write a.rb");
-        std::fs::write(&nd_b, "y = 2\n").expect("write b.rb");
+        std::fs::write(&nd_a, "# frozen_string_literal: true\n\nx = 1\n").expect("write a.rb");
+        std::fs::write(&nd_b, "# frozen_string_literal: true\n\ny = 2\n").expect("write b.rb");
 
         let files2: Vec<String> = vec![
             nd_a.to_str().unwrap().to_owned(),
