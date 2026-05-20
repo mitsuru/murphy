@@ -1,4 +1,4 @@
-# Murphy::Cop mruby SDK prelude (Phase 3 Task 4).
+# Murphy::Cop mruby SDK prelude (Phase 4 Task 2).
 #
 # This is the THIN Ruby glue ("fast core, scripted glue", design §2/§4) over
 # the Task-3 native primitives. The heavy AST work stays native; this file is
@@ -19,8 +19,32 @@
 # registered on the `Murphy` class by the time this runs.
 #
 # Cops are READ-ONLY: a `fix` only RECORDS suggested text edits (design §4 — no
-# AST mutation). In Phase 3 the recorded fix is captured-stored-only by the
-# host and never applied/serialized (Scope Fence 1, soft-(a)).
+# AST mutation). Phase 4 (ADR 0013): the recorded fix is marshalled to Rust as
+# a binary blob and attached to the Offense as autocorrect:{edits:[...]}.
+#
+# ## Edit blob wire format (Phase 4 Task 2 — kept in sync with native_emit_offense)
+#
+# `add_offense` passes fix.edits to the host as a single blob String built by
+# Murphy::Fix#to_blob; the host decodes it with the `s` (ptr+len) mrb_get_args
+# format. The length prefix makes the *transport* byte-exact so NUL / newline /
+# comma inside legitimate multi-byte source text survive intact — it does NOT
+# widen the contract to arbitrary binary. `Edit.replacement` is a Rust `String`
+# serialised as a JSON string, so a replacement MUST be valid UTF-8 (it is
+# replacement *source text*); the host drops any edit whose replacement bytes
+# are not valid UTF-8 rather than corrupting them.
+#
+# Blob = zero or more concatenated edit records:
+#   "<start_decimal> <end_decimal> <replen_decimal> " + exactly replen bytes
+# Fields are non-negative decimal ASCII integers followed by a single space.
+# Replacement is exactly replen bytes (UTF-8 source text) after that space.
+# Empty blob (no edits) → zero Edit records → no autocorrect attached.
+#
+# Example: fix.replace(Range.new(0,4), "hi") encodes as "0 4 2 hi"
+# Example: fix.remove(Range.new(5,9)) encodes as "5 9 0 " (0 bytes of replacement)
+# Example: two edits "0 4 2 hi" + "5 9 0 " back-to-back in one blob.
+#
+# MUST stay in sync with the decoder in native_emit_offense (sdk.rs). Both
+# files carry this format spec to prevent encoder/decoder drift.
 
 # `Murphy` is defined as a CLASS by the Task-3 native `primitives::register`
 # (`mrb_define_class(mrb, "Murphy", Object)`) before this prelude is eval'd.
@@ -71,14 +95,12 @@ class Murphy
     end
   end
 
-  # Captured-only fix recorder (Scope Fence 1, soft-(a)). A cop's `do |fix|`
-  # block calls `replace`/`insert`/`remove`; the edits are collected here and
-  # handed to the host, which in Phase 3 STORES them in-memory only and never
-  # applies or serializes them. Forward-compatible: cop authors write
-  # Phase-4-ready cops today.
+  # Fix recorder (Phase 4 Task 2, ADR 0013). A cop's `do |fix|` block calls
+  # `replace`/`insert`/`remove`; the edits are collected here and marshalled
+  # to the host as a binary blob (see blob format spec at top of this file).
+  # The host attaches the decoded Edit records to the Offense as autocorrect.
+  # Cop authors write the same API; the marshalling is invisible to them.
   class Fix
-    attr_reader :edits
-
     def initialize
       @edits = []
     end
@@ -93,6 +115,20 @@ class Murphy
 
     def remove(range)
       @edits << [range.start_offset, range.end_offset, ""]
+    end
+
+    # Encode all edits as a single blob (see format spec at top of file).
+    # Each edit: "<start> <end> <replen> " + exactly replen bytes of UTF-8
+    # replacement source text. String#<< concatenation is byte-exact (no pack
+    # available) so the length-prefixed transport stays lossless; the host
+    # drops any edit whose replacement is not valid UTF-8.
+    def to_blob
+      blob = ""
+      @edits.each do |(start, stop, rep)|
+        rep_bytes = rep.to_s
+        blob << start.to_s << " " << stop.to_s << " " << rep_bytes.bytesize.to_s << " " << rep_bytes
+      end
+      blob
     end
   end
 
@@ -119,10 +155,10 @@ class Murphy
 
     # Report an offense. `range` is a Murphy::Range (byte offsets). `severity`
     # defaults to :warning; an optional block receives a Murphy::Fix recorder
-    # whose edits are CAPTURED-ONLY (soft-(a) — never applied/serialized in
-    # Phase 3). Crosses to the host via the `Murphy.__emit_offense` native;
-    # the host builds the Rust `Offense` and the captured-fix is dropped after
-    # the run.
+    # whose edits are marshalled to the host as a binary blob (Phase 4, ADR 0013)
+    # and attached to the Offense as autocorrect:{edits:[...]}. See the blob
+    # format spec at the top of this file and in native_emit_offense (sdk.rs).
+    # Crosses to the host via the `Murphy.__emit_offense` native.
     def add_offense(range, message:, severity: :warning)
       fix = nil
       if block_given?
@@ -134,10 +170,10 @@ class Murphy
         range.end_offset,
         message.to_s,
         severity.to_s,
-        # Captured-only: serialized as a compact string purely so the host
-        # can prove "fix was recorded" internally. NOT the autocorrect
-        # contract (Phase 4 owns that); the host drops it after the run.
-        fix ? fix.edits.length : 0
+        # Phase 4 (ADR 0013): pass the edit blob (empty string when no fix block).
+        # The host decodes it into Vec<Edit> and attaches autocorrect if non-empty.
+        # Blob format: "<start> <end> <replen> " + replen bytes, per edit, concatenated.
+        fix ? fix.to_blob : ""
       )
     end
 
