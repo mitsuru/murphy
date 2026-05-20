@@ -11,6 +11,7 @@ mod offense;
 mod parse;
 mod plugin;
 mod registry;
+mod ast_sexp;
 
 pub use aggregator::{aggregate, aggregate_with_config};
 pub use autocorrect::{
@@ -38,6 +39,7 @@ pub use mruby::{
 };
 pub use offense::{Autocorrect, Edit, Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
+pub use ast_sexp::ast_to_sexp;
 #[cfg(not(target_os = "windows"))]
 pub use plugin::dynamic::{LoadedPluginPack, load_plugin_pack};
 pub use plugin::{
