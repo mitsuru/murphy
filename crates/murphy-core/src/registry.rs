@@ -39,7 +39,7 @@ use crate::Cop;
 use crate::MurphyConfig;
 use crate::NoReceiverPuts;
 use crate::cops::layout::{EmptyLines, SpaceInsideParens, TrailingWhitespace};
-use crate::cops::lint::{Debugger, DeprecatedClassMethods};
+use crate::cops::lint::{Debugger, DeprecatedClassMethods, EmptyWhen, UnreachableCode};
 use crate::cops::style::{
     AndOr, FrozenStringLiteralComment, IfUnlessModifier, NilComparison, RedundantReturn,
     StringLiterals, SymbolArray, WordArray,
@@ -77,6 +77,8 @@ impl CopRegistry {
             Box::new(SpaceInsideParens),
             Box::new(Debugger),
             Box::new(DeprecatedClassMethods),
+            Box::new(EmptyWhen),
+            Box::new(UnreachableCode),
             Box::new(AndOr),
             Box::new(FrozenStringLiteralComment),
             Box::new(IfUnlessModifier),
@@ -208,13 +210,15 @@ fn enumerate_cop_paths(root: &Path, cops_path: &Path) -> Result<Vec<PathBuf>, Co
 mod tests {
     use super::*;
 
-    const EXPECTED_NATIVE_COPS: [&str; 14] = [
+    const EXPECTED_NATIVE_COPS: [&str; 16] = [
         "Murphy/NoReceiverPuts",
         "Layout/TrailingWhitespace",
         "Layout/EmptyLines",
         "Layout/SpaceInsideParens",
         "Lint/Debugger",
         "Lint/DeprecatedClassMethods",
+        "Lint/EmptyWhen",
+        "Lint/UnreachableCode",
         "Style/AndOr",
         "Style/FrozenStringLiteralComment",
         "Style/IfUnlessModifier",
