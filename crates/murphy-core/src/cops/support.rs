@@ -41,6 +41,26 @@ pub(crate) fn offense_with_edit(
         .with_autocorrect(crate::Autocorrect { edits: vec![edit] })
 }
 
+pub(crate) fn simple_receiver_name(mut receiver: &[u8]) -> Option<&[u8]> {
+    while receiver.len() >= 2 && receiver[0] == b'(' && receiver[receiver.len() - 1] == b')' {
+        receiver = &receiver[1..receiver.len() - 1];
+    }
+
+    while receiver.starts_with(b"::") {
+        receiver = &receiver[2..];
+    }
+
+    if receiver.is_empty()
+        || !receiver
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        return None;
+    }
+
+    Some(receiver)
+}
+
 #[cfg(test)]
 pub(crate) fn run_single_cop(cop: Box<dyn crate::Cop>, source: &str) -> Vec<crate::Offense> {
     let ast = crate::parse(source).expect("parse source");

@@ -181,25 +181,34 @@ fn apply_matches_expected() {
 
 #[test]
 fn deprecated_class_methods_autocorrects_idempotently() {
+    fn deprecated_class_method_edits(source: &str) -> Vec<Edit> {
+        let ast = parse(source).unwrap();
+        let mut offenses = Vec::new();
+        let registry = CopRegistry::native_only();
+        run_cops(&ast, "test.rb", registry.native_cops(), &mut offenses);
+        offenses
+            .into_iter()
+            .filter(|offense| offense.cop_name == "Lint/DeprecatedClassMethods")
+            .filter_map(|offense| offense.autocorrect)
+            .flat_map(|autocorrect| autocorrect.edits)
+            .collect()
+    }
+
     let outcome = run_to_fixpoint(
         "File.exists?(path)\nDir.exists?(path)\n",
-        |source| {
-            let ast = parse(source).unwrap();
-            let mut offenses = Vec::new();
-            let registry = CopRegistry::native_only();
-            run_cops(&ast, "test.rb", registry.native_cops(), &mut offenses);
-            offenses
-                .into_iter()
-                .filter(|offense| offense.cop_name == "Lint/DeprecatedClassMethods")
-                .filter_map(|offense| offense.autocorrect)
-                .flat_map(|autocorrect| autocorrect.edits)
-                .collect::<Vec<_>>()
-        },
+        deprecated_class_method_edits,
         10,
     );
 
     assert_eq!(outcome.status, FixpointStatus::Converged);
+    assert_eq!(outcome.iterations, 1);
     assert_eq!(outcome.corrected, "File.exist?(path)\nDir.exist?(path)\n");
+
+    let second = run_to_fixpoint(&outcome.corrected, deprecated_class_method_edits, 10);
+
+    assert_eq!(second.status, FixpointStatus::Converged);
+    assert_eq!(second.iterations, 0);
+    assert!(deprecated_class_method_edits(&outcome.corrected).is_empty());
 }
 
 // ---------------------------------------------------------------------------

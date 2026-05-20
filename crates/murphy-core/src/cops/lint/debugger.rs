@@ -1,4 +1,5 @@
 use crate::cop::{Cop, CopContext};
+use crate::cops::support::simple_receiver_name;
 use crate::{Offense, Range, Severity};
 
 pub struct Debugger;
@@ -23,7 +24,7 @@ impl Cop for Debugger {
         let flagged = match node.receiver() {
             None => BARE_DEBUGGER_CALLS.contains(&name),
             Some(receiver) => {
-                receiver.location().as_slice() == b"binding"
+                simple_receiver_name(receiver.location().as_slice()) == Some(b"binding".as_slice())
                     && BINDING_DEBUGGER_CALLS.contains(&name)
             }
         };
@@ -69,5 +70,14 @@ mod tests {
         );
 
         assert_eq!(offenses.len(), 4);
+    }
+
+    #[test]
+    fn flags_parenthesized_binding_receiver() {
+        let offenses = run_single_cop(Box::new(Debugger), "(binding).pry\n");
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range.start_offset, 10);
+        assert_eq!(offenses[0].range.end_offset, 13);
     }
 }
