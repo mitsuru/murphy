@@ -91,6 +91,22 @@ const DIRTY_SRC: &str = "puts \"hello\"\nprint \"world\"\n";
 /// caller so the tempdir is not reaped mid-test).
 fn project(cops: &[(&str, &str)]) -> TempDir {
     let dir = tempdir().expect("create tempdir");
+    fs::write(
+        dir.path().join("murphy.toml"),
+        r#"[cops.rules."Style/FrozenStringLiteralComment"]
+enabled = false
+
+[cops.rules."Style/StringLiterals"]
+enabled = false
+
+[cops.rules."Style/SymbolArray"]
+enabled = false
+
+[cops.rules."Style/WordArray"]
+enabled = false
+"#,
+    )
+    .expect("write murphy.toml");
     fs::write(dir.path().join("app.rb"), DIRTY_SRC).expect("write app.rb");
     let cops_dir = dir.path().join("cops");
     fs::create_dir(&cops_dir).expect("mkdir cops");
