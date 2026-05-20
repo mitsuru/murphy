@@ -114,7 +114,7 @@ fn unknown_flag_exits_2() {
 /// `murphy lint --fix <clean file>` → exit 0, stdout `[]`, file unchanged.
 #[test]
 fn fix_clean_file_exits_0_no_write() {
-    let proj = project_with_cops("x = 1\n", &[]);
+    let proj = project_with_cops("# frozen_string_literal: true\n\nx = 1\n", &[]);
     let file = "app.rb";
     let original = fs::read(proj.path().join(file)).expect("read app.rb");
 
@@ -146,7 +146,7 @@ fn fix_clean_file_exits_0_no_write() {
 /// NO autocorrect → file unchanged, offense still reported, exit 1.
 #[test]
 fn fix_file_with_no_autocorrect_cop_exits_1_file_unchanged() {
-    let proj = project_with_cops("puts \"hi\"\n", &[]);
+    let proj = project_with_cops("# frozen_string_literal: true\n\nputs 'hi'\n", &[]);
     let file = "app.rb";
     let original = fs::read(proj.path().join(file)).expect("read app.rb");
 
@@ -175,7 +175,7 @@ fn fix_file_with_no_autocorrect_cop_exits_1_file_unchanged() {
 /// `-a` is an alias for `--fix`.
 #[test]
 fn short_flag_a_is_alias_for_fix() {
-    let proj = project_with_cops("x = 1\n", &[]);
+    let proj = project_with_cops("# frozen_string_literal: true\n\nx = 1\n", &[]);
     let file = "app.rb";
 
     let fix_out = run_murphy(&proj, &["--fix"], &[file]);
@@ -197,7 +197,7 @@ fn short_flag_a_is_alias_for_fix() {
 #[test]
 fn fix_always_emits_fixed_summary_on_stderr_not_stdout() {
     // Clean file: fixed 0 of 1.
-    let proj = project_with_cops("x = 1\n", &[]);
+    let proj = project_with_cops("# frozen_string_literal: true\n\nx = 1\n", &[]);
     let file = "app.rb";
 
     let out = run_murphy(&proj, &["--fix"], &[file]);
@@ -451,7 +451,11 @@ fn fix_is_idempotent_on_second_run() {
 fn fix_summary_counts_changed_files_accurately() {
     let proj = project_with_cops("puts \"hi\"\n", &[("puts_to_logger", PUTS_TO_LOGGER_COP)]);
     // Add a clean file to verify it doesn't count.
-    fs::write(proj.path().join("clean.rb"), "x = 1\n").expect("write clean.rb");
+    fs::write(
+        proj.path().join("clean.rb"),
+        "# frozen_string_literal: true\n\nx = 1\n",
+    )
+    .expect("write clean.rb");
 
     let out = run_murphy(&proj, &["--fix"], &["app.rb", "clean.rb"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -547,7 +551,11 @@ fn fix_follows_symlink_and_keeps_link_intact() {
 fn double_dash_allows_dash_prefixed_path() {
     let dir = tempdir().expect("tempdir");
     // A file literally named "-weird.rb".
-    fs::write(dir.path().join("-weird.rb"), "x = 1\n").expect("write -weird.rb");
+    fs::write(
+        dir.path().join("-weird.rb"),
+        "# frozen_string_literal: true\n\nx = 1\n",
+    )
+    .expect("write -weird.rb");
     let proj = TempDir::new().expect("proj");
     // Without `--`: unknown-flag → exit 2.
     let mut bad = Command::cargo_bin("murphy").expect("bin");
@@ -626,13 +634,19 @@ class OobFixCop < Murphy::Cop
   end
 end
 "#;
-    let proj = project_with_cops("puts \"hi\"\n", &[("oob", OOB_FIX_COP)]);
+    let proj = project_with_cops(
+        "# frozen_string_literal: true\n\nputs 'hi'\n",
+        &[("oob", OOB_FIX_COP)],
+    );
     let out = run_murphy(&proj, &["--fix", "--debug"], &["app.rb"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     // Source unchanged (only edit was OOB → dropped), offense remains → exit 1.
     let after = fs::read_to_string(proj.path().join("app.rb")).expect("read app.rb");
-    assert_eq!(after, "puts \"hi\"\n", "OOB edit must not change the file");
+    assert_eq!(
+        after, "# frozen_string_literal: true\n\nputs 'hi'\n",
+        "OOB edit must not change the file"
+    );
     assert_eq!(exit_code(&out), 1, "offense remains → exit 1");
     // The debug status is Converged (source IS a stable fixed point)…
     assert!(
