@@ -1,10 +1,10 @@
 use murphy_core::{MurphyEmitOffense, MurphyFileContext, MurphySlice};
 use std::ffi::c_void;
 
-use crate::cop::util;
+use crate::cops::util;
 
-pub(crate) const NAME_BYTES: &[u8] = b"Rails/HasManyOrHasOneDependent";
-pub(crate) const MESSAGE_BYTES: &[u8] = b"define dependent option for has_many/has_one";
+pub(crate) const NAME_BYTES: &[u8] = b"Rails/ActionFilter";
+pub(crate) const MESSAGE_BYTES: &[u8] = b"use *_action callback instead of *_filter";
 
 pub(crate) const NAME: MurphySlice = util::slice(NAME_BYTES);
 
@@ -16,16 +16,16 @@ pub(crate) unsafe extern "C" fn run(
     if ctx.is_null() {
         return 1;
     }
+
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 2] = [b"has_many", b"has_one"];
+    let patterns: [&[u8]; 3] = [b"before_filter", b"after_filter", b"around_filter"];
     for pattern in patterns {
-        if util::emit_match(
+        if util::emit_match_simple(
             source,
             pattern,
             NAME,
             util::slice(MESSAGE_BYTES),
-            Some(b"dependent:"),
             emit,
             sink,
         ) != 0

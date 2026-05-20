@@ -1,10 +1,11 @@
 use murphy_core::{MurphyEmitOffense, MurphyFileContext, MurphySlice};
 use std::ffi::c_void;
 
-use crate::cop::util;
+use crate::cops::util;
 
 pub(crate) const NAME_BYTES: &[u8] = b"Rails/RenderText";
-pub(crate) const MESSAGE_BYTES: &[u8] = b"use modern render template options instead of render text";
+pub(crate) const MESSAGE_BYTES: &[u8] =
+    b"use modern render template options instead of render text";
 pub(crate) const REPLACE_TEXT_SPACE: &[u8] = b"render plain:";
 pub(crate) const REPLACE_TEXT_PAREN: &[u8] = b"render(plain:";
 pub(crate) const FIND_TEXT_SPACE: &[u8] = b"render :text =>";

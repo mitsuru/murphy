@@ -42,15 +42,7 @@ pub(crate) fn emit_match_simple(
     emit: MurphyEmitOffense,
     sink: *mut c_void,
 ) -> i32 {
-    emit_match(
-        source,
-        pattern,
-        cop_name,
-        message,
-        None,
-        emit,
-        sink,
-    )
+    emit_match(source, pattern, cop_name, message, None, emit, sink)
 }
 
 #[inline]
@@ -109,8 +101,8 @@ fn emit_match_with_replacement_opt(
                     Err(_) => return 1,
                 };
 
-                let autocorrect: Option<(MurphyPluginEdit, MurphyPluginAutocorrect)> =
-                    replacement.map(|replacement| {
+                let autocorrect: Option<(MurphyPluginEdit, MurphyPluginAutocorrect)> = replacement
+                    .map(|replacement| {
                         let edit = MurphyPluginEdit {
                             range: MurphyRange {
                                 start_offset: start,
@@ -183,7 +175,9 @@ fn requires_line_without_match(
         let line_end = end + line_len;
         let line = &source[line_start..line_end];
 
-        !line.windows(bad_pattern.len()).any(|window| window == bad_pattern)
+        !line
+            .windows(bad_pattern.len())
+            .any(|window| window == bad_pattern)
     } else {
         true
     }

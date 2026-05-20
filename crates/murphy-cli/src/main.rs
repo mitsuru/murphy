@@ -53,10 +53,9 @@
 mod lsp;
 
 use murphy_core::{
-    ast_to_sexp, AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense,
-    SYNTAX_COP_NAME, Severity,
-    aggregate_with_config, discover_with_config, migrate_rubocop_yml_to_murphy_toml, parse,
-    run_cops, run_mruby_cop_isolated, run_to_fixpoint,
+    AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
+    aggregate_with_config, ast_to_sexp, discover_with_config, migrate_rubocop_yml_to_murphy_toml,
+    parse, run_cops, run_mruby_cop_isolated, run_to_fixpoint,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -916,11 +915,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     if subcommand == "ast" {
         let path = match post_subcommand {
             [format, kind, path] if format == "--format" && kind == "sexp" => path,
-            _ => {
-                return Err(AppError::setup(
-                    "usage: murphy ast --format sexp <path|->",
-                ))
-            }
+            _ => return Err(AppError::setup("usage: murphy ast --format sexp <path|->")),
         };
         let source = read_ast_source(path)?;
         let ast = parse(&source).map_err(|err| AppError {

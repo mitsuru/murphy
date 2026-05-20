@@ -1,6 +1,6 @@
 use murphy_core::{
-    MurphyEmitOffense, MurphyFileContext, MurphyPluginCopV1, MurphyPluginEdit,
-    MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunFile, MurphySlice,
+    MurphyEmitOffense, MurphyFileContext, MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense,
+    MurphyPluginV1, MurphyRange, MurphyRunFile, MurphySlice,
 };
 
 unsafe extern "C" fn noop_run_file(

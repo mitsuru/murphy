@@ -1,7 +1,7 @@
 use murphy_core::{MurphyEmitOffense, MurphyFileContext, MurphySlice};
 use std::ffi::c_void;
 
-use crate::cop::util;
+use crate::cops::util;
 
 pub(crate) const NAME_BYTES: &[u8] = b"Rails/SaveBang";
 pub(crate) const MESSAGE_BYTES: &[u8] = b"use bang methods when saving model records";

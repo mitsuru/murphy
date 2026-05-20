@@ -33,26 +33,27 @@ fn render_node(node: Node<'_>) -> String {
         return "s(:false)".to_string();
     }
     if let Some(integer) = node.as_integer_node() {
-        return format!("s(:int, {})", bytes_to_string(integer.location().as_slice()));
+        return format!(
+            "s(:int, {})",
+            bytes_to_string(integer.location().as_slice())
+        );
     }
     if let Some(string) = node.as_string_node() {
         let source = bytes_to_string(string.location().as_slice());
-        let unescaped_or_body = if source.starts_with('"')
-            || source.starts_with('\'')
-            || source.starts_with('%')
-        {
-            strip_string_delimiters(&source).to_owned()
-        } else {
-            bytes_to_string(string.unescaped())
-        };
+        let unescaped_or_body =
+            if source.starts_with('"') || source.starts_with('\'') || source.starts_with('%') {
+                strip_string_delimiters(&source).to_owned()
+            } else {
+                bytes_to_string(string.unescaped())
+            };
 
-        return format!(
-            "s(:str, {})",
-            quote_string(&unescaped_or_body)
-        );
+        return format!("s(:str, {})", quote_string(&unescaped_or_body));
     }
     if let Some(symbol) = node.as_symbol_node() {
-        return format!("s(:sym, {})", render_symbol(&bytes_to_string(symbol.unescaped())));
+        return format!(
+            "s(:sym, {})",
+            render_symbol(&bytes_to_string(symbol.unescaped()))
+        );
     }
     render_unknown(node)
 }
@@ -123,7 +124,9 @@ fn strip_string_delimiters(raw: &str) -> &str {
         return "";
     }
 
-    if bytes.len() >= 2 && (bytes[0] == b'"' || bytes[0] == b'\'') && bytes[bytes.len() - 1] == bytes[0]
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
     {
         &raw[1..raw.len() - 1]
     } else if bytes.len() >= 2 && bytes[0] == b'%' {
@@ -190,7 +193,10 @@ mod tests {
 
     #[test]
     fn dumps_receiver_and_argument_call() {
-        assert_eq!(sexp("obj.foo(1)"), "s(:send, s(:lvar, :obj), :foo, s(:int, 1))");
+        assert_eq!(
+            sexp("obj.foo(1)"),
+            "s(:send, s(:lvar, :obj), :foo, s(:int, 1))"
+        );
     }
 
     #[test]

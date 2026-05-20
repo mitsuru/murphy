@@ -259,31 +259,33 @@ fn plugin_autocorrect_from_raw(
         return None;
     }
 
-    let edits = unsafe { std::slice::from_raw_parts(plugin_autocorrect.edits_ptr, plugin_autocorrect.edits_len) }
-        .iter()
-        .filter_map(|edit| {
-            if edit.range.start_offset > edit.range.end_offset {
-                return None;
-            }
+    let edits = unsafe {
+        std::slice::from_raw_parts(plugin_autocorrect.edits_ptr, plugin_autocorrect.edits_len)
+    }
+    .iter()
+    .filter_map(|edit| {
+        if edit.range.start_offset > edit.range.end_offset {
+            return None;
+        }
 
-            let Some(replacement) = slice_to_str(&edit.replacement) else {
-                return None;
-            };
-            let start_offset = usize::try_from(edit.range.start_offset).ok()?;
-            let end_offset = usize::try_from(edit.range.end_offset).ok()?;
-            if end_offset > source_len || start_offset > source_len {
-                return None;
-            }
+        let Some(replacement) = slice_to_str(&edit.replacement) else {
+            return None;
+        };
+        let start_offset = usize::try_from(edit.range.start_offset).ok()?;
+        let end_offset = usize::try_from(edit.range.end_offset).ok()?;
+        if end_offset > source_len || start_offset > source_len {
+            return None;
+        }
 
-            Some(Edit {
-                range: Range {
-                    start_offset: edit.range.start_offset,
-                    end_offset: edit.range.end_offset,
-                },
-                replacement: replacement.to_string(),
-            })
+        Some(Edit {
+            range: Range {
+                start_offset: edit.range.start_offset,
+                end_offset: edit.range.end_offset,
+            },
+            replacement: replacement.to_string(),
         })
-        .collect::<Vec<_>>();
+    })
+    .collect::<Vec<_>>();
 
     if edits.is_empty() {
         return None;
@@ -529,7 +531,10 @@ mod tests {
 
         assert_eq!(offenses.len(), 1);
         let o = &offenses[0];
-        let autocorrect = o.autocorrect.as_ref().expect("autocorrect should be present");
+        let autocorrect = o
+            .autocorrect
+            .as_ref()
+            .expect("autocorrect should be present");
         assert_eq!(autocorrect.edits.len(), 1);
         assert_eq!(autocorrect.edits[0].replacement, "replacement");
         assert_eq!(autocorrect.edits[0].range.start_offset, 0);

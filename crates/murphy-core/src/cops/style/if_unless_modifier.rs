@@ -27,6 +27,9 @@ impl Cop for IfUnlessModifier {
             return;
         }
 
+        let Some(end_keyword_loc) = node.end_keyword_loc() else {
+            return;
+        };
         if node.subsequent().is_some() {
             return;
         }
@@ -44,6 +47,8 @@ impl Cop for IfUnlessModifier {
 
         detect_block_to_modifier(
             &node.location(),
+            end_keyword_loc.start_offset() as u32,
+            end_keyword_loc.end_offset() as u32,
             &node.predicate().location(),
             &statement,
             "if",
@@ -63,6 +68,9 @@ impl Cop for IfUnlessModifier {
             return;
         }
 
+        let Some(end_keyword_loc) = node.end_keyword_loc() else {
+            return;
+        };
         if node.else_clause().is_some() {
             return;
         }
@@ -80,6 +88,8 @@ impl Cop for IfUnlessModifier {
 
         detect_block_to_modifier(
             &node.location(),
+            end_keyword_loc.start_offset() as u32,
+            end_keyword_loc.end_offset() as u32,
             &node.predicate().location(),
             &statement,
             "unless",
@@ -92,9 +102,11 @@ impl Cop for IfUnlessModifier {
 
 fn detect_block_to_modifier(
     block: &ruby_prism::Location<'_>,
+    block_end_keyword_offset: u32,
+    block_end_keyword_end_offset: u32,
     condition: &ruby_prism::Location<'_>,
     statement: &ruby_prism::Node<'_>,
-    keyword: &str,
+    replacement_keyword: &str,
     message: &str,
     ctx: &CopContext<'_>,
     sink: &mut Vec<Offense>,
@@ -133,13 +145,47 @@ fn detect_block_to_modifier(
         return;
     }
 
-    let replacement = format!(
+    let Some(block_range) = range_from_location(ctx.source, block) else {
+        return;
+    };
+    let is_elsif = ctx
+        .source
+        .get(
+            block_range.start_offset as usize
+                ..std::cmp::min(block_range.start_offset as usize + 6, ctx.source.len()),
+        )
+        .is_some_and(|bytes| bytes.starts_with(b"elsif"));
+
+    let block_range = if is_elsif {
+        Range {
+            start_offset: block_range.start_offset,
+            end_offset: block_end_keyword_offset,
+        }
+    } else {
+        Range {
+            start_offset: block_range.start_offset,
+            end_offset: block_end_keyword_end_offset,
+        }
+    };
+
+    let mut replacement = format!(
         "{} {} {}",
         statement_text.trim(),
-        keyword,
+        replacement_keyword,
         condition_text.trim()
     );
-    let block_range = range_from_location(ctx.source, block).expect("block range already checked");
+    if is_elsif {
+        let replacement_range = ctx
+            .source
+            .get(block_range.start_offset as usize..block_range.end_offset as usize);
+        if replacement_range.is_some_and(|bytes| bytes.ends_with(b"\n")) {
+            replacement.push('\n');
+        }
+    }
+
+    if block_range.start_offset >= block_range.end_offset {
+        return;
+    };
 
     sink.push(offense_with_edit(
         ctx.file,
@@ -227,5 +273,18 @@ mod tests {
         let offenses = run_single_cop(Box::new(IfUnlessModifier), "if ok # comment\n  run\nend\n");
 
         assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn keeps_end_with_elsif_chain() {
+        let source = "if ok\n  run\nelsif cond\n  run2\nelsif cond2\n  run3\nend\n";
+        let offenses = run_single_cop(Box::new(IfUnlessModifier), source);
+
+        assert_eq!(offenses.len(), 1);
+        let edit = &offenses[0].autocorrect.as_ref().unwrap().edits[0];
+        assert_eq!(
+            apply_edits(source, std::slice::from_ref(edit)),
+            "if ok\n  run\nelsif cond\n  run2\nrun3 if cond2\nend\n"
+        );
     }
 }

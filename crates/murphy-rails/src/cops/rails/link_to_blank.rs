@@ -1,7 +1,7 @@
 use murphy_core::{MurphyEmitOffense, MurphyFileContext, MurphySlice};
 use std::ffi::c_void;
 
-use crate::cop::util;
+use crate::cops::util;
 
 pub(crate) const NAME_BYTES: &[u8] = b"Rails/LinkToBlank";
 pub(crate) const MESSAGE_BYTES: &[u8] = b"add rel=\"noopener\" when opening new windows";
@@ -27,7 +27,11 @@ pub(crate) unsafe extern "C" fn run(
             Some(b":rel =>".as_ref()),
             REPLACE_HASHROCKET_TARGET,
         ),
-        (b"target: \"_blank\"", Some(b"rel:".as_ref()), REPLACE_TARGET),
+        (
+            b"target: \"_blank\"",
+            Some(b"rel:".as_ref()),
+            REPLACE_TARGET,
+        ),
     ];
 
     for (pattern, rel_pattern, replacement) in matchers {

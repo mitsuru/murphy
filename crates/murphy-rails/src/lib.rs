@@ -1,89 +1,87 @@
-mod cop;
+mod cops;
 
-use murphy_core::{
-    MurphyPluginCopV1, MurphyPluginV1, MURPHY_PLUGIN_ABI_VERSION,
-};
+use murphy_core::{MURPHY_PLUGIN_ABI_VERSION, MurphyPluginCopV1, MurphyPluginV1};
 
 const COPS: [MurphyPluginCopV1; 16] = [
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::action_filter::NAME,
-        run_file: Some(cop::rails::action_filter::run),
+        name: cops::rails::action_filter::NAME,
+        run_file: Some(cops::rails::action_filter::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::has_and_belongs_to_many::NAME,
-        run_file: Some(cop::rails::has_and_belongs_to_many::run),
+        name: cops::rails::has_and_belongs_to_many::NAME,
+        run_file: Some(cops::rails::has_and_belongs_to_many::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::find_each::NAME,
-        run_file: Some(cop::rails::find_each::run),
+        name: cops::rails::find_each::NAME,
+        run_file: Some(cops::rails::find_each::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::html_safe::NAME,
-        run_file: Some(cop::rails::html_safe::run),
+        name: cops::rails::html_safe::NAME,
+        run_file: Some(cops::rails::html_safe::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::output_safety::NAME,
-        run_file: Some(cop::rails::output_safety::run),
+        name: cops::rails::output_safety::NAME,
+        run_file: Some(cops::rails::output_safety::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::date::NAME,
-        run_file: Some(cop::rails::date::run),
+        name: cops::rails::date::NAME,
+        run_file: Some(cops::rails::date::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::default_scope::NAME,
-        run_file: Some(cop::rails::default_scope::run),
+        name: cops::rails::default_scope::NAME,
+        run_file: Some(cops::rails::default_scope::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::dynamic_find_by::NAME,
-        run_file: Some(cop::rails::dynamic_find_by::run),
+        name: cops::rails::dynamic_find_by::NAME,
+        run_file: Some(cops::rails::dynamic_find_by::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::has_many_or_has_one_dependent::NAME,
-        run_file: Some(cop::rails::has_many_or_has_one_dependent::run),
+        name: cops::rails::has_many_or_has_one_dependent::NAME,
+        run_file: Some(cops::rails::has_many_or_has_one_dependent::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::request_referer::NAME,
-        run_file: Some(cop::rails::request_referer::run),
+        name: cops::rails::request_referer::NAME,
+        run_file: Some(cops::rails::request_referer::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::render_inline::NAME,
-        run_file: Some(cop::rails::render_inline::run),
+        name: cops::rails::render_inline::NAME,
+        run_file: Some(cops::rails::render_inline::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::render_text::NAME,
-        run_file: Some(cop::rails::render_text::run),
+        name: cops::rails::render_text::NAME,
+        run_file: Some(cops::rails::render_text::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::render_json::NAME,
-        run_file: Some(cop::rails::render_json::run),
+        name: cops::rails::render_json::NAME,
+        run_file: Some(cops::rails::render_json::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::read_write_attribute::NAME,
-        run_file: Some(cop::rails::read_write_attribute::run),
+        name: cops::rails::read_write_attribute::NAME,
+        run_file: Some(cops::rails::read_write_attribute::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::save_bang::NAME,
-        run_file: Some(cop::rails::save_bang::run),
+        name: cops::rails::save_bang::NAME,
+        run_file: Some(cops::rails::save_bang::run),
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cop::rails::link_to_blank::NAME,
-        run_file: Some(cop::rails::link_to_blank::run),
+        name: cops::rails::link_to_blank::NAME,
+        run_file: Some(cops::rails::link_to_blank::run),
     },
 ];
 

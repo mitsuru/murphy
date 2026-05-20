@@ -1,6 +1,7 @@
 //! Murphy core: the native engine for the Murphy Ruby linter/formatter.
 
 mod aggregator;
+mod ast_sexp;
 pub mod autocorrect;
 mod config;
 mod cop;
@@ -11,7 +12,6 @@ mod offense;
 mod parse;
 mod plugin;
 mod registry;
-mod ast_sexp;
 
 pub use aggregator::{aggregate, aggregate_with_config};
 pub use autocorrect::{
@@ -27,6 +27,7 @@ pub use discovery::{ConfigError, discover, discover_with_config};
 // in-crate only (`pub(crate)` in `mruby`), so it is deliberately NOT
 // re-exported here — Task 4/5/7 reach it via `crate::mruby::register_primitives`.
 // Nothing in the CLI pipeline calls it yet (Task 7 wires it).
+pub use ast_sexp::ast_to_sexp;
 pub use mruby::sandbox::{
     PackageCacheKey, PackageFingerprint, ResolvedRequire, ResolvedRequireKind,
     SANDBOX_POLICY_VERSION, STDLIB_ALLOWLIST_VERSION, SandboxBootError, SandboxPackage,
@@ -39,14 +40,12 @@ pub use mruby::{
 };
 pub use offense::{Autocorrect, Edit, Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
-pub use ast_sexp::ast_to_sexp;
 #[cfg(not(target_os = "windows"))]
 pub use plugin::dynamic::{LoadedPluginPack, load_plugin_pack};
 pub use plugin::{
-    MURPHY_PLUGIN_ABI_VERSION, MurphyEmitOffense, MurphyFileContext,
-    MurphyPluginAutocorrect, MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense,
-    MurphyPluginV1, MurphyRange, MurphyRunFile, MurphySlice, PluginFileCop,
-    validate_plugin_cop_ids,
+    MURPHY_PLUGIN_ABI_VERSION, MurphyEmitOffense, MurphyFileContext, MurphyPluginAutocorrect,
+    MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange,
+    MurphyRunFile, MurphySlice, PluginFileCop, validate_plugin_cop_ids,
 };
 pub use registry::CopRegistry;
 

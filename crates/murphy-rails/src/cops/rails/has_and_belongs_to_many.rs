@@ -1,7 +1,7 @@
 use murphy_core::{MurphyEmitOffense, MurphyFileContext, MurphySlice};
 use std::ffi::c_void;
 
-use crate::cop::util;
+use crate::cops::util;
 
 const NAME_BYTES: &[u8] = b"Rails/HasAndBelongsToMany";
 const MESSAGE_BYTES: &[u8] = b"prefer has_many :through instead";
