@@ -472,6 +472,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "murphy-example-pack"
+version = "0.1.0"
+dependencies = [
+ "murphy-core",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
