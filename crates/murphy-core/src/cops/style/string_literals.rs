@@ -48,6 +48,13 @@ fn simple_double_quoted_literals(source: &[u8]) -> Vec<Literal<'_>> {
         match source[idx] {
             b'#' => idx = skip_until_newline(source, idx),
             b'\'' => idx = skip_quoted(source, idx, b'\''),
+            b'[' => {
+                if let Some(end) = simple_word_array_end(source, idx) {
+                    idx = end;
+                } else {
+                    idx += 1;
+                }
+            }
             b'"' => {
                 let Some(end) = closing_quote(source, idx) else {
                     idx = skip_quoted(source, idx, b'"');
@@ -83,6 +90,72 @@ fn closing_quote(source: &[u8], start: usize) -> Option<usize> {
 
 fn is_simple_single_quote_body(body: &[u8]) -> bool {
     !body.contains(&b'\'') && !body.windows(2).any(|w| w == b"#{") && !body.contains(&b'\\')
+}
+
+fn simple_word_array_end(source: &[u8], start: usize) -> Option<usize> {
+    if is_receiver_like_bracket(source, start) {
+        return None;
+    }
+    let end = source[start + 1..]
+        .iter()
+        .position(|byte| *byte == b']')
+        .map(|offset| start + 1 + offset)?;
+    let body = &source[start + 1..end];
+    if body.contains(&b'\n')
+        || body.contains(&b'#')
+        || body.contains(&b'[')
+        || body.contains(&b']')
+        || parse_word_items(body).is_none()
+    {
+        return None;
+    }
+    Some(end + 1)
+}
+
+fn parse_word_items(body: &[u8]) -> Option<Vec<&[u8]>> {
+    let mut items = Vec::new();
+    for raw in body.split(|byte| *byte == b',') {
+        let item = trim_ascii(raw);
+        if item.len() < 2 || item[0] != b'"' || item[item.len() - 1] != b'"' {
+            return None;
+        }
+        let word = &item[1..item.len() - 1];
+        if word.is_empty()
+            || word.iter().any(|byte| byte.is_ascii_whitespace())
+            || word.contains(&b'\\')
+            || word.windows(2).any(|w| w == b"#{")
+            || !word.is_ascii()
+        {
+            return None;
+        }
+        items.push(word);
+    }
+    (items.len() >= 2).then_some(items)
+}
+
+fn is_receiver_like_bracket(source: &[u8], bracket: usize) -> bool {
+    let Some(prev) = previous_significant_byte(source, bracket) else {
+        return false;
+    };
+    prev.is_ascii_alphanumeric() || matches!(prev, b'_' | b')' | b']')
+}
+
+fn previous_significant_byte(source: &[u8], before: usize) -> Option<u8> {
+    source[..before]
+        .iter()
+        .rev()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+}
+
+fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
+    while bytes.first().is_some_and(u8::is_ascii_whitespace) {
+        bytes = &bytes[1..];
+    }
+    while bytes.last().is_some_and(u8::is_ascii_whitespace) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 fn skip_quoted(source: &[u8], start: usize, quote: u8) -> usize {

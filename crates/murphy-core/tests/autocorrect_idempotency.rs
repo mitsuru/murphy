@@ -259,6 +259,33 @@ fn literal_style_cops_autocorrect_idempotently() {
     }
 }
 
+#[test]
+fn all_native_cops_prefer_word_array_over_inner_string_literals() {
+    fn native_edits(source: &str) -> Vec<Edit> {
+        let ast = parse(source).unwrap();
+        let mut offenses = Vec::new();
+        let registry = CopRegistry::native_only();
+        run_cops(&ast, "test.rb", registry.native_cops(), &mut offenses);
+        offenses
+            .into_iter()
+            .filter_map(|offense| offense.autocorrect)
+            .flat_map(|autocorrect| autocorrect.edits)
+            .collect()
+    }
+
+    let source = "# frozen_string_literal: true\nx = [\"foo\", \"bar\"]\n";
+    let expected = "# frozen_string_literal: true\nx = %w[foo bar]\n";
+    let outcome = run_to_fixpoint(source, native_edits, 10);
+
+    assert_eq!(outcome.status, FixpointStatus::Converged);
+    assert_eq!(outcome.iterations, 1);
+    assert_eq!(outcome.corrected, expected);
+
+    let second = run_to_fixpoint(expected, native_edits, 10);
+    assert_eq!(second.status, FixpointStatus::Converged);
+    assert_eq!(second.iterations, 0);
+}
+
 // ---------------------------------------------------------------------------
 // Conflict detection tests (murphy-hwe.4: apply_edits_logged)
 // ---------------------------------------------------------------------------

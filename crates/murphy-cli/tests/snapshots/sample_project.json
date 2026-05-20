@@ -10,48 +10,6 @@
     "message": "expected a receiver for the method definition"
   },
   {
-    "file": "clean.rb",
-    "cop_name": "Style/FrozenStringLiteralComment",
-    "range": {
-      "start_offset": 0,
-      "end_offset": 0
-    },
-    "severity": "warning",
-    "message": "Missing frozen string literal comment.",
-    "autocorrect": {
-      "edits": [
-        {
-          "range": {
-            "start_offset": 0,
-            "end_offset": 0
-          },
-          "replacement": "# frozen_string_literal: true\n\n"
-        }
-      ]
-    }
-  },
-  {
-    "file": "dirty.rb",
-    "cop_name": "Style/FrozenStringLiteralComment",
-    "range": {
-      "start_offset": 0,
-      "end_offset": 0
-    },
-    "severity": "warning",
-    "message": "Missing frozen string literal comment.",
-    "autocorrect": {
-      "edits": [
-        {
-          "range": {
-            "start_offset": 0,
-            "end_offset": 0
-          },
-          "replacement": "# frozen_string_literal: true\n\n"
-        }
-      ]
-    }
-  },
-  {
     "file": "dirty.rb",
     "cop_name": "Murphy/NoReceiverPuts",
     "range": {
@@ -60,27 +18,6 @@
     },
     "severity": "warning",
     "message": "Use a logger instead of puts"
-  },
-  {
-    "file": "dirty.rb",
-    "cop_name": "Style/StringLiterals",
-    "range": {
-      "start_offset": 95,
-      "end_offset": 99
-    },
-    "severity": "warning",
-    "message": "Prefer single-quoted strings when interpolation is not needed.",
-    "autocorrect": {
-      "edits": [
-        {
-          "range": {
-            "start_offset": 95,
-            "end_offset": 99
-          },
-          "replacement": "'hi'"
-        }
-      ]
-    }
   },
   {
     "file": "dirty.rb",
@@ -93,48 +30,6 @@
     "message": "Use a logger instead of puts"
   },
   {
-    "file": "dirty.rb",
-    "cop_name": "Style/StringLiterals",
-    "range": {
-      "start_offset": 106,
-      "end_offset": 111
-    },
-    "severity": "warning",
-    "message": "Prefer single-quoted strings when interpolation is not needed.",
-    "autocorrect": {
-      "edits": [
-        {
-          "range": {
-            "start_offset": 106,
-            "end_offset": 111
-          },
-          "replacement": "'bye'"
-        }
-      ]
-    }
-  },
-  {
-    "file": "multibyte.rb",
-    "cop_name": "Style/FrozenStringLiteralComment",
-    "range": {
-      "start_offset": 0,
-      "end_offset": 0
-    },
-    "severity": "warning",
-    "message": "Missing frozen string literal comment.",
-    "autocorrect": {
-      "edits": [
-        {
-          "range": {
-            "start_offset": 0,
-            "end_offset": 0
-          },
-          "replacement": "# frozen_string_literal: true\n\n"
-        }
-      ]
-    }
-  },
-  {
     "file": "multibyte.rb",
     "cop_name": "Murphy/NoReceiverPuts",
     "range": {
@@ -143,26 +38,5 @@
     },
     "severity": "warning",
     "message": "Use a logger instead of puts"
-  },
-  {
-    "file": "multibyte.rb",
-    "cop_name": "Style/StringLiterals",
-    "range": {
-      "start_offset": 908,
-      "end_offset": 919
-    },
-    "severity": "warning",
-    "message": "Prefer single-quoted strings when interpolation is not needed.",
-    "autocorrect": {
-      "edits": [
-        {
-          "range": {
-            "start_offset": 908,
-            "end_offset": 919
-          },
-          "replacement": "'日本語'"
-        }
-      ]
-    }
   }
 ]

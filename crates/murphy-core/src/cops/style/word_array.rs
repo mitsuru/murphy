@@ -86,7 +86,8 @@ fn simple_array_bodies(source: &[u8]) -> Vec<(usize, usize, &[u8])> {
                 if let Some(end) = source[idx + 1..].iter().position(|byte| *byte == b']') {
                     let end = idx + 1 + end;
                     let body = &source[idx + 1..end];
-                    if !body.contains(&b'\n')
+                    if !is_receiver_like_bracket(source, idx)
+                        && !body.contains(&b'\n')
                         && !body.contains(&b'#')
                         && !body.contains(&b'[')
                         && !body.contains(&b']')
@@ -112,6 +113,21 @@ fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
         bytes = &bytes[..bytes.len() - 1];
     }
     bytes
+}
+
+fn is_receiver_like_bracket(source: &[u8], bracket: usize) -> bool {
+    let Some(prev) = previous_significant_byte(source, bracket) else {
+        return false;
+    };
+    prev.is_ascii_alphanumeric() || matches!(prev, b'_' | b')' | b']')
+}
+
+fn previous_significant_byte(source: &[u8], before: usize) -> Option<u8> {
+    source[..before]
+        .iter()
+        .rev()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
 }
 
 fn skip_quoted(source: &[u8], start: usize, quote: u8) -> usize {
@@ -159,6 +175,7 @@ mod tests {
             "x = [\"foo bar\", \"baz\"]\n",
             "x = [\"foo\", bar]\n",
             "x = [\"#{foo}\", \"bar\"]\n",
+            "obj[\"foo\", \"bar\"]\n",
         ] {
             let offenses = run_single_cop(Box::new(WordArray), source);
             assert!(offenses.is_empty(), "{source:?}");
