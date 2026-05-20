@@ -34,6 +34,9 @@ impl Cop for AndOr {
         if has_ambiguous_content(condition) {
             return;
         }
+        if has_trailing_comment(ctx.source, condition_range.end_offset as usize) {
+            return;
+        }
 
         for operator in and_or_tokens(condition) {
             let start = condition_range.start_offset + operator.start as u32;
@@ -115,6 +118,17 @@ fn has_ambiguous_content(condition: &[u8]) -> bool {
         .any(|byte| matches!(*byte, b'#' | b'\'' | b'"' | b'`' | b'%' | b'/'))
 }
 
+fn has_trailing_comment(source: &[u8], start: usize) -> bool {
+    let Some(rest) = source.get(start..) else {
+        return false;
+    };
+    let line_end = rest
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(rest.len());
+    rest[..line_end].contains(&b'#')
+}
+
 #[cfg(test)]
 mod tests {
     use crate::apply_edits;
@@ -157,6 +171,22 @@ mod tests {
     #[test]
     fn non_conditional_and_remains_clean() {
         let offenses = run_single_cop(Box::new(AndOr), "foo and return\n");
+
+        assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn identifiers_containing_operator_words_remain_clean() {
+        for source in ["if candy_andy\nend\n", "if order\nend\n"] {
+            let offenses = run_single_cop(Box::new(AndOr), source);
+
+            assert!(offenses.is_empty(), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn commented_if_condition_remains_clean() {
+        let offenses = run_single_cop(Box::new(AndOr), "if a and b # comment\nend\n");
 
         assert!(offenses.is_empty());
     }
