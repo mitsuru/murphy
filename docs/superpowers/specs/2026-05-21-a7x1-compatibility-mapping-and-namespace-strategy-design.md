@@ -55,6 +55,7 @@
 - `native_cop_names()` の ID を上記 ID の正規表記として扱う。
 - `cops.rules` のキーは将来変更しない（`[cops.rules."Lint/Debugger"]` のように完全ID）。
 - ドキュメント上、将来の `rubocop` 互換移行では `Murphy/NoReceiverPuts` を「非互換ではなく独自拡張名」と明記する。
+- `Murphy/NoReceiverPuts` は **コアインフラ cop**として維持し、`A7x` の今回の plugin 化対象（`A7x.2`〜`A7x.4`）から除外する。
 - 既存の `NoReceiverPuts` については、可能なら RuboCop 相当の `Style/`/`Lint/` 置換を別チケットで検討し、いきなりリネームは避ける（壊れやすいため）。
 
 ## 4. 名前空間戦略（rails / rspec パック前提）
