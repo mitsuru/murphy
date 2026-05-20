@@ -384,9 +384,19 @@ mod tests {
         fn on_call_node(
             &self,
             _node: &ruby_prism::CallNode<'_>,
-            _ctx: &CopContext<'_>,
-            _sink: &mut Vec<Offense>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
         ) {
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Warning,
+                "call hook",
+            ));
         }
 
         fn on_if_node(
@@ -416,8 +426,11 @@ mod tests {
 
         run_cops(&ast, "t.rb", &cops, &mut sink);
 
-        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.len(), 3);
         assert_eq!(sink[0].cop_name, "Test/IfHook");
+        assert_eq!(sink[0].message, "if hook");
+        assert_eq!(sink[1].message, "call hook");
+        assert_eq!(sink[2].message, "call hook");
     }
 
     #[derive(Default)]
@@ -431,9 +444,19 @@ mod tests {
         fn on_call_node(
             &self,
             _node: &ruby_prism::CallNode<'_>,
-            _ctx: &CopContext<'_>,
-            _sink: &mut Vec<Offense>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
         ) {
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Warning,
+                "call hook",
+            ));
         }
 
         fn on_return_node(
@@ -463,8 +486,10 @@ mod tests {
 
         run_cops(&ast, "t.rb", &cops, &mut sink);
 
-        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.len(), 2);
         assert_eq!(sink[0].cop_name, "Test/ReturnHook");
+        assert_eq!(sink[0].message, "return hook");
+        assert_eq!(sink[1].message, "call hook");
     }
 
     #[derive(Default)]
@@ -478,9 +503,19 @@ mod tests {
         fn on_call_node(
             &self,
             _node: &ruby_prism::CallNode<'_>,
-            _ctx: &CopContext<'_>,
-            _sink: &mut Vec<Offense>,
+            ctx: &CopContext<'_>,
+            sink: &mut Vec<Offense>,
         ) {
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Warning,
+                "call hook",
+            ));
         }
 
         fn on_case_node(
@@ -510,7 +545,10 @@ mod tests {
 
         run_cops(&ast, "t.rb", &cops, &mut sink);
 
-        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.len(), 3);
         assert_eq!(sink[0].cop_name, "Test/CaseHook");
+        assert_eq!(sink[0].message, "case hook");
+        assert_eq!(sink[1].message, "call hook");
+        assert_eq!(sink[2].message, "call hook");
     }
 }
