@@ -41,7 +41,8 @@ use crate::NoReceiverPuts;
 use crate::cops::layout::{EmptyLines, SpaceInsideParens, TrailingWhitespace};
 use crate::cops::lint::{Debugger, DeprecatedClassMethods};
 use crate::cops::style::{
-    AndOr, FrozenStringLiteralComment, NilComparison, StringLiterals, SymbolArray, WordArray,
+    AndOr, FrozenStringLiteralComment, NilComparison, RedundantReturn, StringLiterals, SymbolArray,
+    WordArray,
 };
 use std::path::{Path, PathBuf};
 
@@ -79,6 +80,7 @@ impl CopRegistry {
             Box::new(AndOr),
             Box::new(FrozenStringLiteralComment),
             Box::new(NilComparison),
+            Box::new(RedundantReturn),
             Box::new(StringLiterals),
             Box::new(SymbolArray),
             Box::new(WordArray),
@@ -205,7 +207,7 @@ fn enumerate_cop_paths(root: &Path, cops_path: &Path) -> Result<Vec<PathBuf>, Co
 mod tests {
     use super::*;
 
-    const EXPECTED_NATIVE_COPS: [&str; 12] = [
+    const EXPECTED_NATIVE_COPS: [&str; 13] = [
         "Murphy/NoReceiverPuts",
         "Layout/TrailingWhitespace",
         "Layout/EmptyLines",
@@ -215,6 +217,7 @@ mod tests {
         "Style/AndOr",
         "Style/FrozenStringLiteralComment",
         "Style/NilComparison",
+        "Style/RedundantReturn",
         "Style/StringLiterals",
         "Style/SymbolArray",
         "Style/WordArray",
