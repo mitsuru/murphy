@@ -51,6 +51,9 @@ pub trait Cop: Send + Sync {
     /// The cop's name (e.g. used for [`Offense::cop_name`]).
     fn name(&self) -> &str;
 
+    /// Called once per file before AST traversal.
+    fn inspect_file(&self, _ctx: &CopContext<'_>, _sink: &mut Vec<Offense>) {}
+
     /// Called once per call node during the single AST traversal.
     fn on_call_node(
         &self,
@@ -93,6 +96,9 @@ pub fn run_cops(ast: &Ast<'_>, file: &str, cops: &[Box<dyn Cop>], sink: &mut Vec
         },
         sink,
     };
+    for cop in cops {
+        cop.inspect_file(&dispatcher.ctx, dispatcher.sink);
+    }
     dispatcher.visit(&ast.root());
 }
 
@@ -274,5 +280,48 @@ mod tests {
         let cops: Vec<Box<dyn Cop>> = vec![Box::new(CountingStubCop)];
         run_cops(&ast, "t.rb", &cops, &mut sink);
         assert_eq!(sink.len(), 3);
+    }
+
+    #[derive(Default)]
+    struct FileHookStubCop;
+
+    impl Cop for FileHookStubCop {
+        fn name(&self) -> &str {
+            "Test/FileHook"
+        }
+
+        fn on_call_node(
+            &self,
+            _node: &ruby_prism::CallNode<'_>,
+            _ctx: &CopContext<'_>,
+            _sink: &mut Vec<Offense>,
+        ) {
+        }
+
+        fn inspect_file(&self, ctx: &CopContext<'_>, sink: &mut Vec<Offense>) {
+            sink.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: ctx.source.len() as u32,
+                },
+                Severity::Warning,
+                "file hook",
+            ));
+        }
+    }
+
+    #[test]
+    fn dispatch_invokes_file_hook_once_per_cop_before_ast_walk() {
+        let ast = parse("foo\n").unwrap();
+        let mut sink = Vec::new();
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(FileHookStubCop), Box::new(CountingStubCop)];
+
+        run_cops(&ast, "t.rb", &cops, &mut sink);
+
+        assert_eq!(sink.len(), 2);
+        assert_eq!(sink[0].cop_name, "Test/FileHook");
+        assert_eq!(sink[1].cop_name, "Murphy/CountingStub");
     }
 }
