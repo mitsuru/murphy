@@ -1,0 +1,294 @@
+use crate::{Cop, CopContext, Offense, Range, Severity};
+use std::ffi::c_void;
+
+pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MurphySlice {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MurphyRange {
+    pub start_offset: u32,
+    pub end_offset: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MurphyPluginOffense {
+    pub cop_name: MurphySlice,
+    pub message: MurphySlice,
+    pub range: MurphyRange,
+    pub severity: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MurphyFileContext {
+    pub file: MurphySlice,
+    pub source: MurphySlice,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MurphyPluginCopV1 {
+    pub size: usize,
+    pub name: MurphySlice,
+    pub run_file: MurphyRunFile,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MurphyPluginV1 {
+    pub size: usize,
+    pub cops_ptr: *const MurphyPluginCopV1,
+    pub cops_len: usize,
+}
+
+pub type MurphyEmitOffense = unsafe extern "C" fn(*mut c_void, *const MurphyPluginOffense);
+pub type MurphyRunFile =
+    unsafe extern "C" fn(*const MurphyFileContext, MurphyEmitOffense, *mut c_void) -> i32;
+
+pub fn validate_plugin_cop_ids(
+    existing: &[Box<dyn Cop>],
+    plugin_names: &[String],
+) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for cop in existing {
+        seen.insert(cop.name().to_string());
+    }
+
+    for name in plugin_names {
+        if name.is_empty() {
+            return Err("plugin cop ID must not be empty".to_string());
+        }
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate cop ID: {name}"));
+        }
+    }
+
+    Ok(())
+}
+
+pub struct PluginFileCop {
+    name: String,
+    run_file: MurphyRunFile,
+}
+
+// Safety: the adapter owns an immutable String and a function pointer; callbacks
+// are expected to be thread-safe by the native plugin ABI contract.
+unsafe impl Send for PluginFileCop {}
+
+// Safety: shared access only reads the owned String and immutable function pointer.
+unsafe impl Sync for PluginFileCop {}
+
+struct OffenseSink<'a> {
+    file: &'a str,
+    offenses: &'a mut Vec<Offense>,
+}
+
+impl PluginFileCop {
+    fn new(name: String, run_file: MurphyRunFile) -> Self {
+        Self { name, run_file }
+    }
+}
+
+impl Cop for PluginFileCop {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn inspect_file(&self, ctx: &CopContext<'_>, sink: &mut Vec<Offense>) {
+        let file = MurphySlice {
+            ptr: ctx.file.as_ptr(),
+            len: ctx.file.len(),
+        };
+        let source = MurphySlice {
+            ptr: ctx.source.as_ptr(),
+            len: ctx.source.len(),
+        };
+        let file_ctx = MurphyFileContext { file, source };
+        let mut offense_sink = OffenseSink {
+            file: ctx.file,
+            offenses: sink,
+        };
+        let status = unsafe {
+            (self.run_file)(
+                &file_ctx,
+                emit_offense,
+                (&mut offense_sink as *mut OffenseSink<'_>).cast(),
+            )
+        };
+        if status != 0 {
+            offense_sink.offenses.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Error,
+                "native plugin callback failed",
+            ));
+        }
+    }
+
+    fn on_call_node(
+        &self,
+        _node: &ruby_prism::CallNode<'_>,
+        _ctx: &CopContext<'_>,
+        _sink: &mut Vec<Offense>,
+    ) {
+    }
+}
+
+unsafe extern "C" fn emit_offense(sink: *mut c_void, offense: *const MurphyPluginOffense) {
+    if sink.is_null() || offense.is_null() {
+        return;
+    }
+
+    let sink = unsafe { &mut *sink.cast::<OffenseSink<'_>>() };
+    let offense = unsafe { &*offense };
+    let Some(cop_name) = slice_to_str(&offense.cop_name) else {
+        return;
+    };
+    let Some(message) = slice_to_str(&offense.message) else {
+        return;
+    };
+    if offense.range.start_offset > offense.range.end_offset {
+        return;
+    }
+
+    let severity = if offense.severity == 1 {
+        Severity::Error
+    } else {
+        Severity::Warning
+    };
+    sink.offenses.push(Offense::new(
+        sink.file,
+        cop_name,
+        Range {
+            start_offset: offense.range.start_offset,
+            end_offset: offense.range.end_offset,
+        },
+        severity,
+        message,
+    ));
+}
+
+fn slice_to_str(slice: &MurphySlice) -> Option<&str> {
+    if slice.len == 0 {
+        return Some("");
+    }
+    if slice.ptr.is_null() && slice.len != 0 {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(slice.ptr, slice.len) };
+    std::str::from_utf8(bytes).ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub mod dynamic {
+    use super::*;
+    use libloading::{Library, Symbol};
+    use std::path::Path;
+
+    type AbiVersionFn = unsafe extern "C" fn() -> u32;
+    type RegisterFn = unsafe extern "C" fn(*mut MurphyPluginV1) -> i32;
+
+    pub struct LoadedPluginPack {
+        pub name: String,
+        pub cops: Vec<Box<dyn Cop>>,
+        _library: Library,
+    }
+
+    pub fn load_plugin_pack(name: &str, path: &Path) -> Result<LoadedPluginPack, String> {
+        let library = unsafe { Library::new(path) }
+            .map_err(|e| format!("failed to load plugin pack {}: {e}", path.display()))?;
+
+        let abi_version: Symbol<'_, AbiVersionFn> = unsafe {
+            library
+                .get(b"murphy_plugin_abi_version")
+                .map_err(|e| format!("missing symbol murphy_plugin_abi_version: {e}"))?
+        };
+        let got = unsafe { abi_version() };
+        if got != MURPHY_PLUGIN_ABI_VERSION {
+            return Err(format!(
+                "plugin ABI version mismatch: got {got}, expected {MURPHY_PLUGIN_ABI_VERSION}"
+            ));
+        }
+
+        let register: Symbol<'_, RegisterFn> = unsafe {
+            library
+                .get(b"murphy_register_plugin")
+                .map_err(|e| format!("missing symbol murphy_register_plugin: {e}"))?
+        };
+
+        let mut plugin = MurphyPluginV1 {
+            size: std::mem::size_of::<MurphyPluginV1>(),
+            cops_ptr: std::ptr::null(),
+            cops_len: 0,
+        };
+        let status = unsafe { register(&mut plugin) };
+        if status != 0 {
+            return Err(format!("plugin registration failed with status {status}"));
+        }
+        if plugin.cops_len > 0 && plugin.cops_ptr.is_null() {
+            return Err("plugin registered cops_len > 0 with null cops_ptr".to_string());
+        }
+
+        let raw_cops = if plugin.cops_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(plugin.cops_ptr, plugin.cops_len) }
+        };
+        let mut plugin_names = Vec::with_capacity(raw_cops.len());
+        for cop in raw_cops {
+            if cop.size != std::mem::size_of::<MurphyPluginCopV1>() {
+                return Err(format!(
+                    "invalid plugin cop size: got {}, expected {}",
+                    cop.size,
+                    std::mem::size_of::<MurphyPluginCopV1>()
+                ));
+            }
+            let name = slice_to_str(&cop.name)
+                .ok_or_else(|| "plugin cop name must be valid UTF-8".to_string())?;
+            if name.is_empty() {
+                return Err("plugin cop ID must not be empty".to_string());
+            }
+            plugin_names.push(name.to_string());
+        }
+        validate_plugin_cop_ids(&[], &plugin_names)?;
+
+        let cops = raw_cops
+            .iter()
+            .zip(plugin_names)
+            .map(|(cop, name)| Box::new(PluginFileCop::new(name, cop.run_file)) as Box<dyn Cop>)
+            .collect();
+
+        Ok(LoadedPluginPack {
+            name: name.to_string(),
+            cops,
+            _library: library,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NoReceiverPuts;
+
+    #[test]
+    fn rejects_duplicate_plugin_cop_id() {
+        let existing: Vec<Box<dyn crate::Cop>> = vec![Box::new(NoReceiverPuts)];
+        let err = validate_plugin_cop_ids(&existing, &["Murphy/NoReceiverPuts".to_string()])
+            .expect_err("duplicate cop ID must be rejected");
+        assert!(err.contains("duplicate cop ID"));
+        assert!(err.contains("Murphy/NoReceiverPuts"));
+    }
+}
