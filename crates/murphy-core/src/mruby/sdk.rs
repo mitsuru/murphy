@@ -8,7 +8,8 @@
 //!     normal path, before the AST drops).
 //!   * Task 3 — [`crate::mruby::primitives`]: the read-only LIVE native IDL
 //!     (`Murphy.node_count` / `node_name` / `node_receiver_nil?` /
-//!     `node_msg_range` / `source_slice`). Reused, not reimplemented.
+//!     `node_msg_start` / `node_msg_end` / `source_slice`). Reused, not
+//!     reimplemented.
 //!
 //! What Task 4 (original P3 T4) adds:
 //!

@@ -145,6 +145,51 @@ fn fix_block_produces_real_edit_values_in_offense_autocorrect() {
     );
 }
 
+#[test]
+fn mruby_node_message_loc_is_typed_range() {
+    const COP: &str = r#"
+class Murphy
+  def self.node_msg_range(_handle)
+    raise "stringly node_msg_range must not be used"
+  end
+end
+
+class TypedRangeCop < Murphy::Cop
+  def on_call_node(node)
+    return unless node.name == :puts && node.receiver_nil?
+
+    loc = node.message_loc
+    return unless loc.is_a?(Murphy::Range)
+
+    add_offense(loc, message: "typed range") do |fix|
+      fix.replace(loc, "logger.info")
+    end
+  end
+end
+"#;
+
+    let source = "puts \"x\"\n";
+    let ctx: Arc<AstContext> = AstContext::new(source.as_bytes().to_vec());
+    let offenses = run_mruby_cop(&ctx, COP, "Murphy/TypedRange", "t.rb");
+
+    assert_eq!(offenses.len(), 1);
+    assert_eq!(
+        offenses[0].range,
+        Range {
+            start_offset: 0,
+            end_offset: 4
+        }
+    );
+    let edit = &offenses[0]
+        .autocorrect
+        .as_ref()
+        .expect("fix block should reuse the typed message_loc range")
+        .edits[0];
+    assert_eq!(edit.range.start_offset, 0);
+    assert_eq!(edit.range.end_offset, 4);
+    assert_eq!(edit.replacement, "logger.info");
+}
+
 /// PIN B: an invalid edit (inverted range) is silently dropped; the offense still emits.
 /// A cop that produces one valid edit AND one invalid edit → autocorrect present with 1 edit.
 #[test]
