@@ -50,7 +50,10 @@
 //! - Multi-region replace (two non-overlapping byte-range substitutions).
 //! - Delete (replacement is the empty string — shrinks source).
 
-use murphy_core::{ConflictReason, Edit, Range, apply_edits, apply_edits_logged};
+use murphy_core::{
+    ConflictReason, CopRegistry, Edit, FixpointStatus, Range, apply_edits, apply_edits_logged,
+    parse, run_cops, run_to_fixpoint,
+};
 
 /// One fixture row.
 struct Case {
@@ -631,4 +634,44 @@ fn zero_width_same_point_not_conflict() {
         "zero-width: both insertions must appear in corrected: {:?}",
         outcome.corrected
     );
+}
+
+fn native_layout_edits(source: &str) -> Vec<Edit> {
+    let ast = parse(source).expect("parse source");
+    let registry = CopRegistry::native_only();
+    let mut offenses = Vec::new();
+    run_cops(&ast, "test.rb", registry.native_cops(), &mut offenses);
+    offenses
+        .into_iter()
+        .filter_map(|offense| offense.autocorrect)
+        .flat_map(|autocorrect| autocorrect.edits)
+        .collect()
+}
+
+#[test]
+fn trailing_whitespace_native_cop_converges_to_fixpoint() {
+    let outcome = run_to_fixpoint("x = 1  \n", native_layout_edits, 10);
+
+    assert_eq!(outcome.status, FixpointStatus::Converged);
+    assert_eq!(outcome.corrected, "x = 1\n");
+}
+
+#[test]
+fn empty_lines_native_cop_converges_to_fixpoint() {
+    let outcome = run_to_fixpoint(
+        "class A\n\n\n  def x\n  end\nend\n",
+        native_layout_edits,
+        10,
+    );
+
+    assert_eq!(outcome.status, FixpointStatus::Converged);
+    assert_eq!(outcome.corrected, "class A\n\n  def x\n  end\nend\n");
+}
+
+#[test]
+fn space_inside_parens_native_cop_converges_to_fixpoint() {
+    let outcome = run_to_fixpoint("foo( 1, 2 )\n", native_layout_edits, 10);
+
+    assert_eq!(outcome.status, FixpointStatus::Converged);
+    assert_eq!(outcome.corrected, "foo(1, 2)\n");
 }

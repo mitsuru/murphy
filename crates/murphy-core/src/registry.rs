@@ -38,6 +38,7 @@ use crate::ConfigError;
 use crate::Cop;
 use crate::MurphyConfig;
 use crate::NoReceiverPuts;
+use crate::cops::layout::{EmptyLines, SpaceInsideParens, TrailingWhitespace};
 use std::path::{Path, PathBuf};
 
 /// The cop set for a run: native cops (run on all cores) plus the discovered
@@ -60,11 +61,16 @@ pub struct CopRegistry {
 }
 
 impl CopRegistry {
-    /// Returns the built-in native cops. Today: exactly
-    /// `[Murphy/NoReceiverPuts]`. Centralized here so adding a native cop is a
-    /// one-line change in one place instead of at every `run_cops` call site.
+    /// Returns the built-in native cops. Centralized here so adding a native
+    /// cop is a one-line change in one place instead of at every `run_cops`
+    /// call site.
     fn native_cops_list() -> Vec<Box<dyn Cop>> {
-        vec![Box::new(NoReceiverPuts)]
+        vec![
+            Box::new(NoReceiverPuts),
+            Box::new(TrailingWhitespace),
+            Box::new(EmptyLines),
+            Box::new(SpaceInsideParens),
+        ]
     }
 
     pub fn native_cop_names() -> Vec<String> {
@@ -189,6 +195,13 @@ fn enumerate_cop_paths(root: &Path, cops_path: &Path) -> Result<Vec<PathBuf>, Co
 mod tests {
     use super::*;
 
+    const EXPECTED_NATIVE_COPS: [&str; 4] = [
+        "Murphy/NoReceiverPuts",
+        "Layout/TrailingWhitespace",
+        "Layout/EmptyLines",
+        "Layout/SpaceInsideParens",
+    ];
+
     /// The registry is `Send + Sync` — it crosses the rayon `par_iter`
     /// boundary in the CLI's memoized lint phase. Compile-time assertion.
     #[test]
@@ -197,24 +210,21 @@ mod tests {
         assert_send_sync::<CopRegistry>();
     }
 
-    /// The registry yields the one native cop that runs today
-    /// (`Murphy/NoReceiverPuts`) — both via `native_only()` and `discover()`.
-    /// This pins "only the native cop runs" (frozen contract ADR 0006/0007).
+    /// The registry yields the native cop set in ADR order.
     #[test]
-    fn registry_exposes_the_one_native_cop() {
+    fn registry_exposes_native_cops_in_adr_order() {
         let reg = CopRegistry::native_only();
         let names: Vec<&str> = reg.native_cops().iter().map(|c| c.name()).collect();
         assert_eq!(
-            names,
-            vec!["Murphy/NoReceiverPuts"],
-            "Task 1: exactly the one native cop runs"
+            names, EXPECTED_NATIVE_COPS,
+            "native cops should run in registry order"
         );
 
         // Same native set when discovered against a root with no `cops/`.
         let dir = tempfile::tempdir().expect("create tempdir");
         let reg = CopRegistry::discover(dir.path()).expect("discover with no cops/ is Ok");
         let names: Vec<&str> = reg.native_cops().iter().map(|c| c.name()).collect();
-        assert_eq!(names, vec!["Murphy/NoReceiverPuts"]);
+        assert_eq!(names, EXPECTED_NATIVE_COPS);
     }
 
     #[test]
@@ -247,7 +257,7 @@ mod tests {
         let reg = CopRegistry::discover(dir.path()).expect("empty cops/ must not error");
         assert!(reg.mruby_cop_paths().is_empty());
         // Native cops still present.
-        assert_eq!(reg.native_cops().len(), 1);
+        assert_eq!(reg.native_cops().len(), EXPECTED_NATIVE_COPS.len());
     }
 
     /// `cops/*.rb` paths are enumerated **sorted**, non-`.rb` files and
@@ -278,7 +288,7 @@ mod tests {
         // Task 1 invariant: enumerating cops does not change what RUNS — the
         // native cop set is unaffected by the presence of `.rb` files.
         let names: Vec<&str> = reg.native_cops().iter().map(|c| c.name()).collect();
-        assert_eq!(names, vec!["Murphy/NoReceiverPuts"]);
+        assert_eq!(names, EXPECTED_NATIVE_COPS);
     }
 
     /// PINS THE `cops/` ROOT DECISION (ADR 0004 mitigation 2): discovery is
