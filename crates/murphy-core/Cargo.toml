@@ -32,3 +32,6 @@ tempfile = "3"
 [features]
 default = []
 mruby-custom-build = []
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libloading = "0.8"

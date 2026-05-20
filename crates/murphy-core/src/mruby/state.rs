@@ -40,9 +40,9 @@ use std::sync::Arc;
 
 use ruby_prism::{ParseResult, parse};
 
-use mruby3_sys::{mrb_close, mrb_load_string, mrb_state};
+use mruby3_sys::{mrb_load_string, mrb_state};
 
-use crate::mruby::build::{MrubyStateOptions, open_state};
+use crate::mruby::build::{MrubyStateOptions, close_state, open_state};
 
 /// The shared, `Arc`-able AST context handed to each per-cop worker.
 ///
@@ -425,9 +425,7 @@ impl Drop for MrubyState {
         // from `mrb_open` in `open` and not closed before now (this is the
         // unique owner; `MrubyState` is not `Clone`/`Copy`). `mrb_close` is the
         // documented destructor; the handle is never used after this.
-        unsafe {
-            mrb_close(self.mrb);
-        }
+        close_state(self.mrb);
     }
 }
 
