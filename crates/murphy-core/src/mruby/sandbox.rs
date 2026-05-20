@@ -349,47 +349,73 @@ pub fn run_mruby_cop_sandboxed(
     cop_name: &str,
     file: &str,
 ) -> Vec<Offense> {
-    if let Some(capability) = detect_denied_source_capability(cop_source) {
-        return vec![sandbox_error_offense(file, cop_name, capability)];
-    }
-
-    crate::mruby::run_mruby_cop_isolated(ctx, cop_source, cop_name, file)
+    let sandboxed_source = sandboxed_cop_source(cop_source);
+    let mut offenses = crate::mruby::run_mruby_cop_isolated(ctx, &sandboxed_source, cop_name, file);
+    rewrite_isolated_exception_as_sandbox_violation(&mut offenses);
+    offenses
 }
 
-fn detect_denied_source_capability(source: &str) -> Option<&'static str> {
-    let denied = [
-        ("File.", "File"),
-        ("Dir.", "Dir"),
-        ("IO.", "IO"),
-        ("ENV", "ENV"),
-        ("Process.", "Process"),
-        ("Socket", "Socket"),
-        ("Open3", "Open3"),
-        ("system", "Kernel#system"),
-        ("`", "Kernel#`"),
-        ("load ", "Kernel#load"),
-        ("require 'socket'", "require socket"),
-        ("require \"socket\"", "require socket"),
-        ("require 'open3'", "require open3"),
-        ("require \"open3\"", "require open3"),
-    ];
-
-    denied
-        .iter()
-        .find_map(|(needle, capability)| source.contains(needle).then_some(*capability))
-}
-
-fn sandbox_error_offense(file: &str, cop_name: &str, capability: &str) -> Offense {
-    Offense::new(
-        file,
-        cop_name,
-        Range {
-            start_offset: 0,
-            end_offset: 0,
-        },
-        Severity::Error,
-        &format!("Sandbox violation: {capability}"),
+fn sandboxed_cop_source(cop_source: &str) -> String {
+    format!(
+        r#"
+{SANDBOX_RUNTIME_PRELUDE}
+begin
+{cop_source}
+rescue Exception => e
+  raise "Sandbox violation: #{{e.message}}"
+end
+"#
     )
+}
+
+const SANDBOX_RUNTIME_PRELUDE: &str = r#"
+class Object
+  [:File, :Dir, :IO, :Socket, :Process, :ENV, :Open3].each do |name|
+    remove_const(name) if const_defined?(name)
+  end
+end
+
+module Kernel
+  [:system, :`, :exec, :spawn, :load].each do |name|
+    begin
+      undef_method(name) if Kernel.private_instance_methods.include?(name) || Kernel.instance_methods.include?(name)
+    rescue Exception
+    end
+  end
+
+  def require(name)
+    case name.to_s
+    when "json", "set"
+      true
+    else
+      raise "Sandbox violation: require #{name}"
+    end
+  end
+
+  def require_relative(name)
+    raise "Sandbox violation: require_relative #{name}"
+  end
+end
+
+[:File, :Dir, :IO, :Socket, :Process, :ENV, :Open3].each do |name|
+  raise "Sandbox violation: #{name}" if Object.const_defined?(name)
+end
+"#;
+
+fn rewrite_isolated_exception_as_sandbox_violation(offenses: &mut [Offense]) {
+    if let [offense] = offenses {
+        if offense.severity == Severity::Error
+            && offense
+                .message
+                .contains("raised an exception (isolated; design")
+        {
+            offense.message = "Sandbox violation: denied capability".to_owned();
+            offense.range = Range {
+                start_offset: 0,
+                end_offset: 0,
+            };
+        }
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +567,36 @@ mod tests {
         assert_eq!(offenses.len(), 1);
         assert_eq!(offenses[0].severity, crate::Severity::Error);
         assert_eq!(offenses[0].cop_name, "ThirdParty/Bad");
+        assert!(offenses[0].message.starts_with("Sandbox violation:"));
+    }
+
+    #[test]
+    fn sandbox_denial_dynamic_file_constant_bypass_becomes_one_error_offense() {
+        let ctx = crate::mruby::AstContext::new(b"puts 'hi'\n".to_vec());
+        let offenses = super::run_mruby_cop_sandboxed(
+            &ctx,
+            "Object.const_get(:File).read('/etc/passwd')\nclass Bad < Murphy::Cop; end\n",
+            "ThirdParty/Bad",
+            "sample.rb",
+        );
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].severity, crate::Severity::Error);
+        assert!(offenses[0].message.starts_with("Sandbox violation:"));
+    }
+
+    #[test]
+    fn sandbox_denial_dynamic_system_send_becomes_one_error_offense() {
+        let ctx = crate::mruby::AstContext::new(b"puts 'hi'\n".to_vec());
+        let offenses = super::run_mruby_cop_sandboxed(
+            &ctx,
+            "send(:system, 'true')\nclass Bad < Murphy::Cop; end\n",
+            "ThirdParty/System",
+            "sample.rb",
+        );
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].severity, crate::Severity::Error);
         assert!(offenses[0].message.starts_with("Sandbox violation:"));
     }
 
