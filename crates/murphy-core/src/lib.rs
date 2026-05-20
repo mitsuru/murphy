@@ -25,6 +25,12 @@ pub use discovery::{ConfigError, discover, discover_with_config};
 // in-crate only (`pub(crate)` in `mruby`), so it is deliberately NOT
 // re-exported here — Task 4/5/7 reach it via `crate::mruby::register_primitives`.
 // Nothing in the CLI pipeline calls it yet (Task 7 wires it).
+pub use mruby::sandbox::{
+    PackageCacheKey, PackageFingerprint, ResolvedRequire, ResolvedRequireKind,
+    SANDBOX_POLICY_VERSION, STDLIB_ALLOWLIST_VERSION, SandboxBootError, SandboxPackage,
+    SandboxViolation, boot_self_check, run_mruby_cop_sandboxed,
+    validate_denied_capabilities_absent,
+};
 pub use mruby::{
     AstContext, COP_DEADLINE, MrubyState, run_mruby_cop, run_mruby_cop_isolated,
     run_mruby_cop_isolated_with_deadline,
