@@ -121,7 +121,7 @@ pub(crate) struct CopRun {
     file: String,
     /// The cop-run-owned offense sink (ADR 0009 rule 2 — NOT a
     /// `thread_local!`). Drained back to the caller after the run.
-    sink: UnsafeCell<Vec<Offense>>,
+    pub(crate) sink: UnsafeCell<Vec<Offense>>,
 }
 
 /// Runtime options for one mruby cop run.
@@ -152,7 +152,7 @@ impl MrubyCopRunOptions {
 }
 
 impl CopRun {
-    fn new(ctx: Arc<AstContext>, cop_name: &str, file: &str) -> Self {
+    pub(crate) fn new(ctx: Arc<AstContext>, cop_name: &str, file: &str) -> Self {
         Self {
             ctx,
             cop_name: cop_name.to_owned(),
@@ -630,6 +630,9 @@ unsafe fn register_test_sleep(mrb: *mut mrb_state) {
 /// isolated `mrb_state` before the cop `.rb`.
 const PRELUDE: &str = include_str!("cop_prelude.rb");
 
+/// The embedded test prelude (the sibling `test_prelude.rb`).
+const TEST_PRELUDE: &str = include_str!("test_prelude.rb");
+
 /// The host bootstrap eval'd after the prelude + cop `.rb`: run every cop the
 /// `.rb` defined (each `Murphy::Cop` subclass registered itself via
 /// `inherited`). One `.rb` is normally one cop; if it defines several they all
@@ -950,6 +953,43 @@ pub fn run_mruby_cop_isolated_with_options(
             )]
         }
     }
+}
+
+/// Load and run cop files and spec files in a clean mruby VM, verifying all assertions.
+/// Returns `Ok(())` if all specs pass, or `Err(String)` if a spec fails or an exception is raised.
+pub fn run_mruby_test_specs(
+    cop_sources: &[(&str, &str)],
+    spec_sources: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut st = MrubyState::open();
+
+    unsafe {
+        crate::mruby::primitives::register(st.raw());
+        register_sdk(st.raw());
+    }
+
+    st.eval(PRELUDE);
+    st.eval(TEST_PRELUDE);
+
+    for (path, source) in cop_sources {
+        if st.eval_checked(source) {
+            return Err(format!(
+                "Failed to load cop file `{}` due to mruby exception",
+                path
+            ));
+        }
+    }
+
+    for (path, source) in spec_sources {
+        if st.eval_checked(source) {
+            return Err(format!(
+                "Spec `{}` failed (exception raised during test execution)",
+                path
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Build the single `error offense` for a timed-out / raising / dead cop×file.

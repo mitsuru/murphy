@@ -1040,6 +1040,130 @@ fn lint_files_memoized_debug(
     Ok(offenses)
 }
 
+fn to_snake_case(s: &str) -> String {
+    let mut res = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                res.push('_');
+            }
+            res.extend(c.to_lowercase());
+        } else {
+            res.push(c);
+        }
+    }
+    res.replace("__", "_")
+}
+
+fn new_cop_command(cop_arg: &str) -> Result<u8, AppError> {
+    let parts: Vec<&str> = cop_arg.split('/').collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err(AppError::setup(
+            "Invalid cop name format. Use Namespace/CopName (e.g. Foo/Bar)",
+        ));
+    }
+    let namespace = parts[0];
+    let cop_name = parts[1];
+
+    let combined = format!("{}{}", namespace, cop_name);
+    let snake_name = to_snake_case(&combined);
+    let cop_file_path = format!("cops/{}.rb", snake_name);
+    let spec_file_path = format!("spec/{}_spec.rb", snake_name);
+
+    std::fs::create_dir_all("cops")
+        .map_err(|e| AppError::setup(format!("failed to create cops directory: {e}")))?;
+    std::fs::create_dir_all("spec")
+        .map_err(|e| AppError::setup(format!("failed to create spec directory: {e}")))?;
+
+    if Path::new(&cop_file_path).exists() {
+        return Err(AppError::setup(format!(
+            "File {} already exists",
+            cop_file_path
+        )));
+    }
+    if Path::new(&spec_file_path).exists() {
+        return Err(AppError::setup(format!(
+            "File {} already exists",
+            spec_file_path
+        )));
+    }
+
+    let cop_template = format!(
+        "module {}\n  class {} < Murphy::Cop\n    def on_call_node(node)\n      if node.name == :puts && node.receiver_nil?\n        add_offense(node.message_loc, message: \"Use of puts is discouraged\")\n      end\n    end\n  end\nend\n",
+        namespace, cop_name
+    );
+
+    let spec_template = format!(
+        "describe_cop \"{}/{}\" do\n  it \"registers an offense when using puts\" do\n    expect_offense(<<~RUBY)\n      puts \"hello\"\n      ^^^^ Use of puts is discouraged\n    RUBY\n  end\nend\n",
+        namespace, cop_name
+    );
+
+    std::fs::write(&cop_file_path, cop_template)
+        .map_err(|e| AppError::setup(format!("failed to write {cop_file_path}: {e}")))?;
+    std::fs::write(&spec_file_path, spec_template)
+        .map_err(|e| AppError::setup(format!("failed to write {spec_file_path}: {e}")))?;
+
+    println!("Generated {} and {}", cop_file_path, spec_file_path);
+    Ok(EXIT_OK)
+}
+
+fn test_cop_command(spec_files: &[String]) -> Result<u8, AppError> {
+    let mut cop_sources = Vec::new();
+    if Path::new("cops").is_dir() {
+        let entries = std::fs::read_dir("cops")
+            .map_err(|e| AppError::setup(format!("cannot read cops directory: {e}")))?;
+        for entry in entries {
+            let entry = entry
+                .map_err(|e| AppError::setup(format!("cannot read cops directory entry: {e}")))?;
+            let path = entry.path();
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "rb") {
+                let path_str = path.to_string_lossy().into_owned();
+                let source = std::fs::read_to_string(&path).map_err(|e| {
+                    AppError::setup(format!("cannot read cop file {path_str}: {e}"))
+                })?;
+                cop_sources.push((path_str, source));
+            }
+        }
+    }
+
+    let mut spec_sources = Vec::new();
+    for spec_file in spec_files {
+        let path = Path::new(spec_file);
+        if !path.exists() {
+            return Err(AppError::setup(format!(
+                "Spec file not found: {}",
+                spec_file
+            )));
+        }
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| AppError::setup(format!("cannot read spec file {spec_file}: {e}")))?;
+        spec_sources.push((spec_file.clone(), source));
+    }
+
+    let cop_refs: Vec<(&str, &str)> = cop_sources
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
+    let spec_refs: Vec<(&str, &str)> = spec_sources
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
+
+    match murphy_core::run_mruby_test_specs(&cop_refs, &spec_refs) {
+        Ok(()) => {
+            println!("All specs passed!");
+            Ok(EXIT_OK)
+        }
+        Err(err) => {
+            eprintln!("Test execution failed: {err}");
+            Err(AppError {
+                code: EXIT_OFFENSES,
+                message: "Some specs failed".to_string(),
+            })
+        }
+    }
+}
+
 /// Parse args, run the pipeline, and return the exit code (or an [`AppError`]
 /// carrying a non-success code + stderr message).
 ///
@@ -1062,7 +1186,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         [subcommand, rest @ ..] => (subcommand.as_str(), rest),
         [] => {
             return Err(AppError::setup(
-                "usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|->",
+                "usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|-> | murphy new-cop <Namespace/CopName> | murphy test-cop <spec_file>...",
             ));
         }
     };
@@ -1111,9 +1235,25 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         return Ok(EXIT_OK);
     }
 
+    if subcommand == "new-cop" {
+        let cop_arg = match post_subcommand {
+            [cop_arg] => cop_arg,
+            _ => return Err(AppError::setup("usage: murphy new-cop <Namespace/CopName>")),
+        };
+        return new_cop_command(cop_arg);
+    }
+
+    if subcommand == "test-cop" {
+        if post_subcommand.is_empty() {
+            return Err(AppError::setup("usage: murphy test-cop <spec_file>..."));
+        }
+        let spec_files: Vec<String> = post_subcommand.iter().map(|s| s.to_string()).collect();
+        return test_cop_command(&spec_files);
+    }
+
     if subcommand != "lint" {
         return Err(AppError::setup(format!(
-            "unknown subcommand {subcommand:?} (usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|->)"
+            "unknown subcommand {subcommand:?} (usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|-> | murphy new-cop <Namespace/CopName> | murphy test-cop <spec_file>...)"
         )));
     }
 

@@ -152,6 +152,7 @@ pub extern "C" fn murphy_plugin_abi_version() -> u32 {
 /// `plugin` must be either null or a valid, writable pointer to a
 /// `MurphyPluginV1` owned by the Murphy host for the duration of this call.
 #[unsafe(no_mangle)]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn murphy_register_plugin(plugin: *mut MurphyPluginV1) -> i32 {
     if plugin.is_null() {
         return -1;

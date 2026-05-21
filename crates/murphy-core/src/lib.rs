@@ -36,7 +36,7 @@ pub use mruby::sandbox::{
 };
 pub use mruby::{
     AstContext, COP_DEADLINE, MrubyState, run_mruby_cop, run_mruby_cop_isolated,
-    run_mruby_cop_isolated_with_deadline,
+    run_mruby_cop_isolated_with_deadline, run_mruby_test_specs,
 };
 pub use offense::{Autocorrect, Edit, Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{Ast, ParseError, parse};
