@@ -353,9 +353,42 @@ murphy lint --fix -- <file>...      # -- separates files from flags
 
 Profiling commands:
 
+`murphy lint` can emit machine-readable profiling data instead of offense output:
+
 ```bash
-murphy lint --profile <file>...                   # prints profile summary JSON to stdout
-murphy lint --profile --profile-format speedscope <file>... # prints Speedscope-compatible trace JSON
+murphy lint --profile <file>...
+murphy lint --profile --profile-format speedscope <file>...
+```
+
+`--profile` enables profiling. The default output is `summary` format JSON.
+`--profile-format` is optional and independent from `--format`.
+
+- Summary output (`summary`): per-cop and per-file wall time totals (microseconds),
+  p95 microseconds, invocation counts, and a hot-file list.
+- Speedscope output (`speedscope`): a Speedscope-compatible `traceEvents` array.
+
+Example summary payload keys:
+
+```json
+{
+  "cop_wall_micros": { "Murphy/NoReceiverPuts": 1420 },
+  "cop_file_micros": { "Murphy/NoReceiverPuts": { "./app.rb": 1420 } },
+  "p95_micros": 1420,
+  "hot_files": [{ "file": "./app.rb", "wall_micros": 1420 }],
+  "invocation_count": { "Murphy/NoReceiverPuts": 1 }
+}
+```
+
+You can redirect profile output to a file and load it in your browser/trace tool:
+
+```bash
+murphy lint --profile --profile-format speedscope app.rb > /tmp/profile.json
+```
+
+`--profile-format` must be used with `--profile`:
+
+```bash
+murphy lint --profile-format speedscope app.rb  # exits 2
 ```
 
 See [`CLAUDE.md`](CLAUDE.md) for the contributor command reference.
