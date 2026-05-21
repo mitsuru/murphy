@@ -1,4 +1,4 @@
-use murphy_core::{MurphyEmitOffense, MurphyFileContext, MurphySlice};
+use murphy_core::{MurphyCallContext, MurphyEmitOffense, MurphyPluginOffense, MurphySlice};
 use std::ffi::c_void;
 
 use crate::cops::util;
@@ -9,8 +9,8 @@ pub(crate) const MESSAGE_BYTES: &[u8] =
 
 pub(crate) const NAME: MurphySlice = util::slice(NAME_BYTES);
 
-pub(crate) unsafe extern "C" fn run(
-    ctx: *const MurphyFileContext,
+pub(crate) unsafe extern "C" fn run_call(
+    ctx: *const MurphyCallContext,
     emit: MurphyEmitOffense,
     sink: *mut c_void,
 ) -> i32 {
@@ -18,36 +18,38 @@ pub(crate) unsafe extern "C" fn run(
         return 1;
     }
 
-    let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
+    let ctx = unsafe { &*ctx };
+    let Some(method_name) = slice_bytes(ctx.name) else {
+        return 1;
+    };
 
-    let patterns: [&[u8]; 13] = [
-        b"get '",
-        b"get \"",
-        b"post '",
-        b"post \"",
-        b"put '",
-        b"put \"",
-        b"patch '",
-        b"patch \"",
-        b"delete '",
-        b"delete \"",
-        b"head '",
-        b"head \"",
-        b"http_positional_arguments",
-    ];
-    for pattern in patterns {
-        if util::emit_match_simple(
-            source,
-            pattern,
-            NAME,
-            util::slice(MESSAGE_BYTES),
-            emit,
-            sink,
-        ) != 0
-        {
-            return 1;
-        }
+    if is_http_verb(method_name) {
+        let offense = MurphyPluginOffense {
+            cop_name: NAME,
+            message: util::slice(MESSAGE_BYTES),
+            range: ctx.message_range,
+            severity: 0,
+            autocorrect: std::ptr::null(),
+        };
+        unsafe { emit(sink, &offense) };
     }
 
     0
+}
+
+fn is_http_verb(method_name: &[u8]) -> bool {
+    matches!(
+        method_name,
+        b"get" | b"post" | b"put" | b"patch" | b"delete" | b"head"
+    )
+}
+
+fn slice_bytes(slice: murphy_core::MurphySlice) -> Option<&'static [u8]> {
+    if slice.len == 0 {
+        return Some(&[]);
+    }
+    if slice.ptr.is_null() {
+        return None;
+    }
+    Some(unsafe { std::slice::from_raw_parts(slice.ptr, slice.len) })
 }

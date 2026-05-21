@@ -516,6 +516,9 @@ fn rails_native_pack_loads_expected_cops() {
         .collect::<Vec<_>>()
         .join("");
     source.push_str("\n3.day\n");
+    source.push_str("\nassert_not true\n");
+    source.push_str("before_action :example\n");
+    source.push_str("get '/resource'\n");
     fs::write(dir.path().join("rails_sample.rb"), source).expect("write source");
 
     let assert = Command::cargo_bin("murphy")

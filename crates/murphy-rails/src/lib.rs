@@ -13,7 +13,7 @@ const fn slice(bytes: &'static [u8]) -> MurphySlice {
     }
 }
 
-static CALL_DISPATCH: [MurphyCallDispatchV1; 42] = [
+static CALL_DISPATCH: [MurphyCallDispatchV1; 89] = [
     output_dispatch(b"ap", OUTPUT_DISPATCH_ID),
     output_dispatch(b"p", OUTPUT_DISPATCH_ID),
     output_dispatch(b"pp", OUTPUT_DISPATCH_ID),
@@ -56,12 +56,104 @@ static CALL_DISPATCH: [MurphyCallDispatchV1; 42] = [
     pluralization_dispatch(b"petabytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
     pluralization_dispatch(b"exabytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
     pluralization_dispatch(b"zettabytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    refute_dispatch(b"refute", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_empty", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_equal", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_in_delta", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_in_epsilon", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_includes", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_instance_of", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_kind_of", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_nil", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_operator", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_predicate", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_respond_to", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_same", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"refute_match", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_empty", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_equal", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_in_delta", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_in_epsilon", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_includes", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_instance_of", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_kind_of", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_nil", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_operator", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_predicate", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_respond_to", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_not_same", REFUTE_METHODS_DISPATCH_ID),
+    refute_dispatch(b"assert_no_match", REFUTE_METHODS_DISPATCH_ID),
+    lexically_scoped_action_filter_dispatch(
+        b"after_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"append_after_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"append_around_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"append_before_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"around_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"before_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"prepend_after_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"prepend_around_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"prepend_before_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"skip_after_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"skip_around_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"skip_before_action",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    lexically_scoped_action_filter_dispatch(
+        b"skip_action_callback",
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID,
+    ),
+    http_positional_arguments_dispatch(b"get", HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID),
+    http_positional_arguments_dispatch(b"post", HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID),
+    http_positional_arguments_dispatch(b"put", HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID),
+    http_positional_arguments_dispatch(b"patch", HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID),
+    http_positional_arguments_dispatch(b"delete", HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID),
+    http_positional_arguments_dispatch(b"head", HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID),
 ];
 
 const OUTPUT_COP_INDEX: usize = 76;
 const OUTPUT_DISPATCH_ID: usize = 1;
 const PLURALIZATION_GRAMMAR_COP_INDEX: usize = 82;
 const PLURALIZATION_GRAMMAR_DISPATCH_ID: usize = 2;
+const REFUTE_METHODS_COP_INDEX: usize = 95;
+const REFUTE_METHODS_DISPATCH_ID: usize = 3;
+const LEXICALLY_SCOPED_ACTION_FILTER_COP_INDEX: usize = 66;
+const LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID: usize = 4;
+const HTTP_POSITIONAL_ARGUMENTS_COP_INDEX: usize = 54;
+const HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID: usize = 5;
 
 const fn output_dispatch(method_name: &'static [u8], dispatch_id: usize) -> MurphyCallDispatchV1 {
     MurphyCallDispatchV1 {
@@ -82,6 +174,36 @@ const fn pluralization_dispatch(
     }
 }
 
+const fn refute_dispatch(method_name: &'static [u8], dispatch_id: usize) -> MurphyCallDispatchV1 {
+    MurphyCallDispatchV1 {
+        method_name: slice(method_name),
+        cop_index: REFUTE_METHODS_COP_INDEX,
+        dispatch_id,
+    }
+}
+
+const fn lexically_scoped_action_filter_dispatch(
+    method_name: &'static [u8],
+    dispatch_id: usize,
+) -> MurphyCallDispatchV1 {
+    MurphyCallDispatchV1 {
+        method_name: slice(method_name),
+        cop_index: LEXICALLY_SCOPED_ACTION_FILTER_COP_INDEX,
+        dispatch_id,
+    }
+}
+
+const fn http_positional_arguments_dispatch(
+    method_name: &'static [u8],
+    dispatch_id: usize,
+) -> MurphyCallDispatchV1 {
+    MurphyCallDispatchV1 {
+        method_name: slice(method_name),
+        cop_index: HTTP_POSITIONAL_ARGUMENTS_COP_INDEX,
+        dispatch_id,
+    }
+}
+
 unsafe extern "C" fn run_call_dispatch(
     ctx: *const MurphyCallContext,
     emit: MurphyEmitOffense,
@@ -95,6 +217,15 @@ unsafe extern "C" fn run_call_dispatch(
         OUTPUT_DISPATCH_ID => unsafe { cops::rails::output::run_call(ctx, emit, sink) },
         PLURALIZATION_GRAMMAR_DISPATCH_ID => unsafe {
             cops::rails::pluralization_grammar::run_call(ctx, emit, sink)
+        },
+        REFUTE_METHODS_DISPATCH_ID => unsafe {
+            cops::rails::refute_methods::run_call(ctx, emit, sink)
+        },
+        LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID => unsafe {
+            cops::rails::lexically_scoped_action_filter::run_call(ctx, emit, sink)
+        },
+        HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID => unsafe {
+            cops::rails::http_positional_arguments::run_call(ctx, emit, sink)
         },
         _ => 0,
     }
@@ -374,7 +505,7 @@ const COPS: [MurphyPluginCopV1; 138] = [
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cops::rails::http_positional_arguments::NAME,
-        run_file: Some(cops::rails::http_positional_arguments::run),
+        run_file: None,
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
@@ -434,7 +565,7 @@ const COPS: [MurphyPluginCopV1; 138] = [
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cops::rails::lexically_scoped_action_filter::NAME,
-        run_file: Some(cops::rails::lexically_scoped_action_filter::run),
+        run_file: None,
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
@@ -579,7 +710,7 @@ const COPS: [MurphyPluginCopV1; 138] = [
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cops::rails::refute_methods::NAME,
-        run_file: Some(cops::rails::refute_methods::run),
+        run_file: None,
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
