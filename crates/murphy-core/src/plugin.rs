@@ -208,7 +208,11 @@ impl Cop for PluginFileCop {
         let Some(run_file) = self.run_file else {
             return;
         };
-        if !cop_file_is_enabled(ctx.file, self.include_globs.as_ref(), self.exclude_globs.as_ref()) {
+        if !cop_file_is_enabled(
+            ctx.file,
+            self.include_globs.as_ref(),
+            self.exclude_globs.as_ref(),
+        ) {
             return;
         }
         let file = MurphySlice {
@@ -297,7 +301,11 @@ impl PluginFileCop {
         let Some(run_call_dispatch) = self.run_call_dispatch else {
             return;
         };
-        if !cop_file_is_enabled(ctx.file, self.include_globs.as_ref(), self.exclude_globs.as_ref()) {
+        if !cop_file_is_enabled(
+            ctx.file,
+            self.include_globs.as_ref(),
+            self.exclude_globs.as_ref(),
+        ) {
             return;
         }
         let Some(message_loc) = node.message_loc() else {
@@ -404,15 +412,11 @@ fn cop_file_is_enabled(
         return false;
     };
 
-    if let Some(include_globs) = include_globs {
-        if !include_globs.is_match(&normalized_file) {
-            return false;
-        }
+    if include_globs.is_some_and(|g| !g.is_match(&normalized_file)) {
+        return false;
     }
-    if let Some(exclude_globs) = exclude_globs {
-        if exclude_globs.is_match(&normalized_file) {
-            return false;
-        }
+    if exclude_globs.is_some_and(|g| g.is_match(&normalized_file)) {
+        return false;
     }
     true
 }
@@ -807,7 +811,7 @@ mod tests {
             if _ctx.is_null() {
                 return 1;
             }
-            let ctx = unsafe { &* _ctx };
+            let ctx = unsafe { &*_ctx };
             let offense = MurphyPluginOffense {
                 cop_name: MurphySlice {
                     ptr: b"Plugin/Scoped".as_ptr(),
@@ -874,7 +878,7 @@ mod tests {
             if _ctx.is_null() {
                 return 1;
             }
-            let ctx = unsafe { &* _ctx };
+            let ctx = unsafe { &*_ctx };
             let offense = MurphyPluginOffense {
                 cop_name: MurphySlice {
                     ptr: b"Plugin/Scoped".as_ptr(),
