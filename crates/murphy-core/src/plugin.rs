@@ -14,6 +14,17 @@ pub const MURPHY_CALL_RECEIVER_INTEGER: u32 = 1;
 pub const MURPHY_CALL_RECEIVER_FLOAT: u32 = 2;
 pub const MURPHY_CALL_RECEIVER_OTHER: u32 = 3;
 
+// MurphyPluginCopV1.default_severity wire encoding. Pinned to Severity
+// declaration order; see the const assert below the struct definition.
+pub const MURPHY_SEVERITY_WARNING: u8 = 0;
+pub const MURPHY_SEVERITY_ERROR: u8 = 1;
+pub const MURPHY_SEVERITY_UNSET: u8 = 255;
+
+// MurphyPluginCopV1.default_enabled wire encoding (tri-state).
+pub const MURPHY_TRISTATE_FALSE: u8 = 0;
+pub const MURPHY_TRISTATE_TRUE: u8 = 1;
+pub const MURPHY_TRISTATE_UNSET: u8 = 255;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MurphySlice {
@@ -95,10 +106,68 @@ pub struct MurphyNodeContext {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct MurphyCopOptionV1 {
+    pub name: MurphySlice,
+    pub ty: MurphySlice,
+    pub default_json: MurphySlice,
+    pub description: MurphySlice,
+    pub enum_values_json: MurphySlice,
+    pub replacement: MurphySlice,
+    pub reason: MurphySlice,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct MurphyPluginCopV1 {
     pub size: usize,
     pub name: MurphySlice,
     pub run_file: Option<MurphyRunFile>,
+    pub description: MurphySlice,
+    pub default_severity: u8,
+    pub default_enabled: u8,
+    pub options_ptr: *const MurphyCopOptionV1,
+    pub options_len: usize,
+}
+
+// ABI v1 default_severity wire encoding is pinned to Severity declaration
+// order. ADR 0011 already forbids reordering Severity variants; this assert
+// guarantees that the discriminants used at the ABI boundary match the
+// MURPHY_SEVERITY_* constants above. Build fails (not runtime) on drift.
+const _: () = assert!(
+    (Severity::Warning as u8) == MURPHY_SEVERITY_WARNING
+        && (Severity::Error as u8) == MURPHY_SEVERITY_ERROR,
+    "ABI v1: default_severity wire discriminants are pinned to Severity declaration order"
+);
+
+/// Minimal `MurphyPluginCopV1` constructor for plugins that only expose
+/// `run_file` and have no cop-level metadata. New fields default to
+/// "unset"/"absent" sentinels. Proc-macro-driven construction
+/// (murphy-9cr.6) will subsume this once available; until then it keeps
+/// existing cop tables short.
+pub const fn cop_v1(name: MurphySlice, run_file: MurphyRunFile) -> MurphyPluginCopV1 {
+    cop_v1_inner(name, Some(run_file))
+}
+
+/// Same as [`cop_v1`] for cops that only register call/node dispatch and
+/// have no per-file scan implementation.
+pub const fn cop_v1_dispatch_only(name: MurphySlice) -> MurphyPluginCopV1 {
+    cop_v1_inner(name, None)
+}
+
+const fn cop_v1_inner(name: MurphySlice, run_file: Option<MurphyRunFile>) -> MurphyPluginCopV1 {
+    MurphyPluginCopV1 {
+        size: std::mem::size_of::<MurphyPluginCopV1>(),
+        name,
+        run_file,
+        description: MurphySlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+        default_severity: MURPHY_SEVERITY_UNSET,
+        default_enabled: MURPHY_TRISTATE_UNSET,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+    }
 }
 
 #[repr(C)]
@@ -143,6 +212,7 @@ unsafe impl Sync for MurphyFileContext {}
 unsafe impl Sync for MurphyPluginCallArgument {}
 unsafe impl Sync for MurphyCallContext {}
 unsafe impl Sync for MurphyNodeContext {}
+unsafe impl Sync for MurphyCopOptionV1 {}
 unsafe impl Sync for MurphyPluginCopV1 {}
 unsafe impl Sync for MurphyCallDispatchV1 {}
 unsafe impl Sync for MurphyNodeDispatchV1 {}
@@ -177,6 +247,22 @@ pub fn validate_plugin_cop_ids(
     Ok(())
 }
 
+/// Owned, ABI-decoded form of `MurphyCopOptionV1` retained by `PluginFileCop`.
+///
+/// Loader copies bytes out of plugin-static buffers so downstream consumers
+/// (notably the future validation gate, murphy-9cr.9) can hold references
+/// without coupling to the plugin's `'static` lifetime.
+#[derive(Debug, Clone)]
+pub struct CopOptionMetadata {
+    pub name: Vec<u8>,
+    pub ty: Vec<u8>,
+    pub default_json: Vec<u8>,
+    pub description: Vec<u8>,
+    pub enum_values_json: Vec<u8>,
+    pub replacement: Vec<u8>,
+    pub reason: Vec<u8>,
+}
+
 pub struct PluginFileCop {
     name: String,
     run_file: Option<MurphyRunFile>,
@@ -188,6 +274,10 @@ pub struct PluginFileCop {
     exclude_globs: Option<GlobSet>,
     config_json: Vec<u8>,
     call_config_json: Vec<u8>,
+    description: Vec<u8>,
+    default_severity: Option<Severity>,
+    default_enabled: Option<bool>,
+    options: Vec<CopOptionMetadata>,
     #[cfg(not(target_os = "windows"))]
     _library: Option<std::sync::Arc<libloading::Library>>,
 }
@@ -221,12 +311,40 @@ impl PluginFileCop {
             exclude_globs,
             config_json: b"{}".to_vec(),
             call_config_json: b"{}".to_vec(),
+            description: Vec::new(),
+            default_severity: None,
+            default_enabled: None,
+            options: Vec::new(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
         }
     }
 
+    /// Free-form cop description as declared via `MurphyPluginCopV1.description`.
+    /// Empty if the plugin did not set one.
+    pub fn description(&self) -> &[u8] {
+        &self.description
+    }
+
+    /// `Some(severity)` when the plugin declared a default severity; `None`
+    /// when the plugin used the `MURPHY_SEVERITY_UNSET` sentinel.
+    pub fn default_severity(&self) -> Option<Severity> {
+        self.default_severity
+    }
+
+    /// `Some(true|false)` when the plugin declared `default_enabled`; `None`
+    /// when the plugin used the `MURPHY_TRISTATE_UNSET` sentinel.
+    pub fn default_enabled(&self) -> Option<bool> {
+        self.default_enabled
+    }
+
+    /// Option schema entries declared by the cop. Empty when no options.
+    pub fn options(&self) -> &[CopOptionMetadata] {
+        &self.options
+    }
+
     #[cfg(not(target_os = "windows"))]
+    #[allow(clippy::too_many_arguments)]
     fn with_library_guard(
         name: String,
         run_file: Option<MurphyRunFile>,
@@ -236,6 +354,10 @@ impl PluginFileCop {
         restrict_on_node: Vec<NodeDispatchRestriction>,
         config_json: Vec<u8>,
         call_config_json: Vec<u8>,
+        description: Vec<u8>,
+        default_severity: Option<Severity>,
+        default_enabled: Option<bool>,
+        options: Vec<CopOptionMetadata>,
         library: std::sync::Arc<libloading::Library>,
     ) -> Self {
         let (include_globs, exclude_globs) = parse_file_scope_globs(&config_json);
@@ -250,6 +372,10 @@ impl PluginFileCop {
             exclude_globs,
             config_json,
             call_config_json,
+            description,
+            default_severity,
+            default_enabled,
+            options,
             _library: Some(library),
         }
     }
@@ -751,6 +877,82 @@ fn slice_to_str(slice: &MurphySlice) -> Option<&str> {
     std::str::from_utf8(bytes).ok()
 }
 
+fn slice_to_owned_bytes(slice: &MurphySlice, label: &'static str) -> Result<Vec<u8>, String> {
+    let s = slice_to_str(slice).ok_or_else(|| format!("plugin cop {label} must be valid UTF-8"))?;
+    Ok(s.as_bytes().to_vec())
+}
+
+type DecodedCopMetadata = (
+    Vec<u8>,
+    Option<Severity>,
+    Option<bool>,
+    Vec<CopOptionMetadata>,
+);
+
+fn decode_cop_metadata(cop: &MurphyPluginCopV1) -> Result<DecodedCopMetadata, String> {
+    let description = slice_to_owned_bytes(&cop.description, "description")?;
+
+    let default_severity = match cop.default_severity {
+        MURPHY_SEVERITY_WARNING => Some(Severity::Warning),
+        MURPHY_SEVERITY_ERROR => Some(Severity::Error),
+        MURPHY_SEVERITY_UNSET => None,
+        other => {
+            return Err(format!(
+                "plugin cop default_severity must be 0 (warning), 1 (error), \
+                 or 255 (unset); got {other}"
+            ));
+        }
+    };
+
+    let default_enabled = match cop.default_enabled {
+        MURPHY_TRISTATE_FALSE => Some(false),
+        MURPHY_TRISTATE_TRUE => Some(true),
+        MURPHY_TRISTATE_UNSET => None,
+        other => {
+            return Err(format!(
+                "plugin cop default_enabled must be 0 (false), 1 (true), \
+                 or 255 (unset); got {other}"
+            ));
+        }
+    };
+
+    if cop.options_len > 0 && cop.options_ptr.is_null() {
+        return Err("plugin cop options_len > 0 with null options_ptr".to_string());
+    }
+
+    let raw_options: &[MurphyCopOptionV1] = if cop.options_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(cop.options_ptr, cop.options_len) }
+    };
+
+    let mut options = Vec::with_capacity(raw_options.len());
+    for option in raw_options {
+        let name = slice_to_owned_bytes(&option.name, "option name")?;
+        if name.is_empty() {
+            return Err("plugin cop option name must not be empty".to_string());
+        }
+        let ty = slice_to_owned_bytes(&option.ty, "option ty")?;
+        if ty.is_empty() {
+            return Err("plugin cop option ty must not be empty".to_string());
+        }
+        options.push(CopOptionMetadata {
+            name,
+            ty,
+            default_json: slice_to_owned_bytes(&option.default_json, "option default_json")?,
+            description: slice_to_owned_bytes(&option.description, "option description")?,
+            enum_values_json: slice_to_owned_bytes(
+                &option.enum_values_json,
+                "option enum_values_json",
+            )?,
+            replacement: slice_to_owned_bytes(&option.replacement, "option replacement")?,
+            reason: slice_to_owned_bytes(&option.reason, "option reason")?,
+        });
+    }
+
+    Ok((description, default_severity, default_enabled, options))
+}
+
 fn cop_table_len_is_valid(cops_len: usize) -> Result<(), String> {
     let max_len = isize::MAX as usize / std::mem::size_of::<MurphyPluginCopV1>();
     if cops_len > max_len {
@@ -842,6 +1044,7 @@ pub mod dynamic {
             unsafe { std::slice::from_raw_parts(plugin.cops_ptr, plugin.cops_len) }
         };
         let mut plugin_names = Vec::with_capacity(raw_cops.len());
+        let mut cop_metadata: Vec<DecodedCopMetadata> = Vec::with_capacity(raw_cops.len());
         for cop in raw_cops {
             if cop.size != std::mem::size_of::<MurphyPluginCopV1>() {
                 return Err(format!(
@@ -856,6 +1059,7 @@ pub mod dynamic {
                 return Err("plugin cop ID must not be empty".to_string());
             }
             plugin_names.push(name.to_string());
+            cop_metadata.push(decode_cop_metadata(cop)?);
         }
         validate_plugin_cop_ids(&[], &plugin_names)?;
 
@@ -950,28 +1154,36 @@ pub mod dynamic {
             .zip(plugin_names)
             .zip(restrict_on_send)
             .zip(restrict_on_node)
-            .map(|(((cop, name), restrict_on_send), restrict_on_node)| {
-                let config_json = config.cop_options_json(&name);
-                Box::new(PluginFileCop::with_library_guard(
-                    name,
-                    cop.run_file,
-                    if restrict_on_send.is_empty() {
-                        None
-                    } else {
-                        plugin.run_call_dispatch
-                    },
-                    if restrict_on_node.is_empty() {
-                        None
-                    } else {
-                        plugin.run_node_dispatch
-                    },
-                    restrict_on_send,
-                    restrict_on_node,
-                    config_json,
-                    call_config_json.clone(),
-                    Arc::clone(&library),
-                )) as Box<dyn Cop>
-            })
+            .zip(cop_metadata)
+            .map(
+                |((((cop, name), restrict_on_send), restrict_on_node), metadata)| {
+                    let (description, default_severity, default_enabled, options) = metadata;
+                    let config_json = config.cop_options_json(&name);
+                    Box::new(PluginFileCop::with_library_guard(
+                        name,
+                        cop.run_file,
+                        if restrict_on_send.is_empty() {
+                            None
+                        } else {
+                            plugin.run_call_dispatch
+                        },
+                        if restrict_on_node.is_empty() {
+                            None
+                        } else {
+                            plugin.run_node_dispatch
+                        },
+                        restrict_on_send,
+                        restrict_on_node,
+                        config_json,
+                        call_config_json.clone(),
+                        description,
+                        default_severity,
+                        default_enabled,
+                        options,
+                        Arc::clone(&library),
+                    )) as Box<dyn Cop>
+                },
+            )
             .collect();
 
         Ok(LoadedPluginPack {
@@ -1116,6 +1328,14 @@ mod tests {
                 len: 0,
             },
             run_file: None,
+            description: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            default_severity: MURPHY_SEVERITY_UNSET,
+            default_enabled: MURPHY_TRISTATE_UNSET,
+            options_ptr: std::ptr::null(),
+            options_len: 0,
         };
 
         assert!(cop.run_file.is_none());
@@ -1134,6 +1354,10 @@ mod tests {
             exclude_globs: None,
             config_json: br#"{"message":"configured"}"#.to_vec(),
             call_config_json: b"{}".to_vec(),
+            description: Vec::new(),
+            default_severity: None,
+            default_enabled: None,
+            options: Vec::new(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
         };
@@ -1190,6 +1414,10 @@ mod tests {
             exclude_globs,
             config_json,
             call_config_json: b"{}".to_vec(),
+            description: Vec::new(),
+            default_severity: None,
+            default_enabled: None,
+            options: Vec::new(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
         };
@@ -1259,6 +1487,10 @@ mod tests {
             exclude_globs,
             config_json,
             call_config_json: b"{}".to_vec(),
+            description: Vec::new(),
+            default_severity: None,
+            default_enabled: None,
+            options: Vec::new(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
         };
@@ -1431,6 +1663,10 @@ mod tests {
             exclude_globs: None,
             config_json: b"{}".to_vec(),
             call_config_json: b"{}".to_vec(),
+            description: Vec::new(),
+            default_severity: None,
+            default_enabled: None,
+            options: Vec::new(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
         };
@@ -1460,6 +1696,10 @@ mod tests {
             exclude_globs: None,
             config_json: b"{}".to_vec(),
             call_config_json: b"{}".to_vec(),
+            description: Vec::new(),
+            default_severity: None,
+            default_enabled: None,
+            options: Vec::new(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
         };
@@ -1489,6 +1729,10 @@ mod tests {
             exclude_globs: None,
             config_json: b"{}".to_vec(),
             call_config_json: b"{}".to_vec(),
+            description: Vec::new(),
+            default_severity: None,
+            default_enabled: None,
+            options: Vec::new(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
         };
@@ -1504,5 +1748,260 @@ mod tests {
         assert_eq!(offenses[0].message, "class");
         assert_eq!(offenses[0].range.start_offset, 0);
         assert_eq!(offenses[0].range.end_offset, source.trim_end().len() as u32);
+    }
+
+    // --- murphy-9cr.2 ABI extension coverage ---
+
+    fn slice_from_static(bytes: &'static [u8]) -> MurphySlice {
+        MurphySlice {
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
+        }
+    }
+
+    const EMPTY_SLICE: MurphySlice = MurphySlice {
+        ptr: std::ptr::null(),
+        len: 0,
+    };
+
+    fn cop_metadata_template() -> MurphyPluginCopV1 {
+        MurphyPluginCopV1 {
+            size: std::mem::size_of::<MurphyPluginCopV1>(),
+            name: slice_from_static(b"Plugin/Meta"),
+            run_file: None,
+            description: EMPTY_SLICE,
+            default_severity: MURPHY_SEVERITY_UNSET,
+            default_enabled: MURPHY_TRISTATE_UNSET,
+            options_ptr: std::ptr::null(),
+            options_len: 0,
+        }
+    }
+
+    #[test]
+    fn decode_cop_metadata_accepts_unset_sentinels() {
+        let cop = cop_metadata_template();
+        let (description, severity, enabled, options) =
+            decode_cop_metadata(&cop).expect("unset sentinels accepted");
+        assert!(description.is_empty());
+        assert_eq!(severity, None);
+        assert_eq!(enabled, None);
+        assert!(options.is_empty());
+    }
+
+    #[test]
+    fn decode_cop_metadata_decodes_explicit_severity_warning() {
+        let cop = MurphyPluginCopV1 {
+            default_severity: MURPHY_SEVERITY_WARNING,
+            ..cop_metadata_template()
+        };
+        let (_, severity, _, _) = decode_cop_metadata(&cop).expect("warning severity accepted");
+        assert_eq!(severity, Some(Severity::Warning));
+    }
+
+    #[test]
+    fn decode_cop_metadata_decodes_explicit_severity_error() {
+        let cop = MurphyPluginCopV1 {
+            default_severity: MURPHY_SEVERITY_ERROR,
+            ..cop_metadata_template()
+        };
+        let (_, severity, _, _) = decode_cop_metadata(&cop).expect("error severity accepted");
+        assert_eq!(severity, Some(Severity::Error));
+    }
+
+    #[test]
+    fn decode_cop_metadata_rejects_out_of_range_severity() {
+        let cop = MurphyPluginCopV1 {
+            default_severity: 2,
+            ..cop_metadata_template()
+        };
+        let err = decode_cop_metadata(&cop).expect_err("severity 2 rejected");
+        assert!(err.contains("default_severity"), "{err}");
+        assert!(err.contains("2"), "{err}");
+    }
+
+    #[test]
+    fn decode_cop_metadata_decodes_tristate_true_and_false() {
+        let cop_true = MurphyPluginCopV1 {
+            default_enabled: MURPHY_TRISTATE_TRUE,
+            ..cop_metadata_template()
+        };
+        let cop_false = MurphyPluginCopV1 {
+            default_enabled: MURPHY_TRISTATE_FALSE,
+            ..cop_metadata_template()
+        };
+        assert_eq!(
+            decode_cop_metadata(&cop_true).expect("true accepted").2,
+            Some(true)
+        );
+        assert_eq!(
+            decode_cop_metadata(&cop_false).expect("false accepted").2,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn decode_cop_metadata_rejects_out_of_range_tristate() {
+        let cop = MurphyPluginCopV1 {
+            default_enabled: 99,
+            ..cop_metadata_template()
+        };
+        let err = decode_cop_metadata(&cop).expect_err("tristate 99 rejected");
+        assert!(err.contains("default_enabled"), "{err}");
+        assert!(err.contains("99"), "{err}");
+    }
+
+    #[test]
+    fn decode_cop_metadata_rejects_options_len_with_null_ptr() {
+        let cop = MurphyPluginCopV1 {
+            options_ptr: std::ptr::null(),
+            options_len: 3,
+            ..cop_metadata_template()
+        };
+        let err = decode_cop_metadata(&cop).expect_err("null options_ptr rejected");
+        assert!(err.contains("options_len > 0"), "{err}");
+        assert!(err.contains("null options_ptr"), "{err}");
+    }
+
+    #[test]
+    fn decode_cop_metadata_rejects_empty_option_name() {
+        static BAD: [MurphyCopOptionV1; 1] = [MurphyCopOptionV1 {
+            name: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            ty: MurphySlice {
+                ptr: b"bool".as_ptr(),
+                len: 4,
+            },
+            default_json: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            description: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            enum_values_json: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            replacement: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            reason: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+        }];
+        let cop = MurphyPluginCopV1 {
+            options_ptr: BAD.as_ptr(),
+            options_len: BAD.len(),
+            ..cop_metadata_template()
+        };
+        let err = decode_cop_metadata(&cop).expect_err("empty option name rejected");
+        assert!(err.contains("option name"), "{err}");
+        assert!(err.contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn decode_cop_metadata_rejects_empty_option_ty() {
+        static BAD: [MurphyCopOptionV1; 1] = [MurphyCopOptionV1 {
+            name: MurphySlice {
+                ptr: b"opt".as_ptr(),
+                len: 3,
+            },
+            ty: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            default_json: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            description: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            enum_values_json: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            replacement: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            reason: MurphySlice {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+        }];
+        let cop = MurphyPluginCopV1 {
+            options_ptr: BAD.as_ptr(),
+            options_len: BAD.len(),
+            ..cop_metadata_template()
+        };
+        let err = decode_cop_metadata(&cop).expect_err("empty option ty rejected");
+        assert!(err.contains("option ty"), "{err}");
+        assert!(err.contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn decode_cop_metadata_round_trips_option_fields() {
+        static OPT: [MurphyCopOptionV1; 1] = [MurphyCopOptionV1 {
+            name: MurphySlice {
+                ptr: b"max_count".as_ptr(),
+                len: 9,
+            },
+            ty: MurphySlice {
+                ptr: b"int".as_ptr(),
+                len: 3,
+            },
+            default_json: MurphySlice {
+                ptr: b"5".as_ptr(),
+                len: 1,
+            },
+            description: MurphySlice {
+                ptr: b"max calls".as_ptr(),
+                len: 9,
+            },
+            enum_values_json: MurphySlice {
+                ptr: b"[1,2,5,10]".as_ptr(),
+                len: 10,
+            },
+            replacement: MurphySlice {
+                ptr: b"max_items".as_ptr(),
+                len: 9,
+            },
+            reason: MurphySlice {
+                ptr: b"renamed".as_ptr(),
+                len: 7,
+            },
+        }];
+        let cop = MurphyPluginCopV1 {
+            options_ptr: OPT.as_ptr(),
+            options_len: OPT.len(),
+            description: MurphySlice {
+                ptr: b"cop summary".as_ptr(),
+                len: 11,
+            },
+            default_severity: MURPHY_SEVERITY_WARNING,
+            default_enabled: MURPHY_TRISTATE_FALSE,
+            ..cop_metadata_template()
+        };
+        let (description, severity, enabled, options) =
+            decode_cop_metadata(&cop).expect("happy path decode");
+        assert_eq!(description, b"cop summary");
+        assert_eq!(severity, Some(Severity::Warning));
+        assert_eq!(enabled, Some(false));
+        assert_eq!(options.len(), 1);
+        let o = &options[0];
+        assert_eq!(o.name, b"max_count");
+        assert_eq!(o.ty, b"int");
+        assert_eq!(o.default_json, b"5");
+        assert_eq!(o.description, b"max calls");
+        assert_eq!(o.enum_values_json, b"[1,2,5,10]");
+        assert_eq!(o.replacement, b"max_items");
+        assert_eq!(o.reason, b"renamed");
     }
 }

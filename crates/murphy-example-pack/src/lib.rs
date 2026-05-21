@@ -1,7 +1,7 @@
 use murphy_core::{
     MURPHY_PLUGIN_ABI_VERSION, MurphyCallContext, MurphyCallDispatchV1, MurphyEmitOffense,
     MurphyFileContext, MurphyPluginCopV1, MurphyPluginOffense, MurphyPluginV1, MurphyRange,
-    MurphySlice,
+    MurphySlice, cop_v1, cop_v1_dispatch_only,
 };
 use std::ffi::c_void;
 
@@ -118,21 +118,9 @@ unsafe extern "C" fn run_call_dispatch(
 }
 
 static COPS: [MurphyPluginCopV1; 3] = [
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: slice(COP_NAME),
-        run_file: Some(run_file),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: slice(CALL_COP_NAME),
-        run_file: None,
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: slice(PACK_DISPATCH_COP_NAME),
-        run_file: None,
-    },
+    cop_v1(slice(COP_NAME), run_file),
+    cop_v1_dispatch_only(slice(CALL_COP_NAME)),
+    cop_v1_dispatch_only(slice(PACK_DISPATCH_COP_NAME)),
 ];
 
 static CALL_DISPATCH: [MurphyCallDispatchV1; 1] = [MurphyCallDispatchV1 {

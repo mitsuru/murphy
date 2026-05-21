@@ -46,13 +46,15 @@ pub use parse::{Ast, ParseError, parse};
 #[cfg(not(target_os = "windows"))]
 pub use plugin::dynamic::{LoadedPluginPack, load_plugin_pack};
 pub use plugin::{
-    MURPHY_CALL_ARGUMENT_KIND_OTHER, MURPHY_CALL_ARGUMENT_KIND_STRING,
+    CopOptionMetadata, MURPHY_CALL_ARGUMENT_KIND_OTHER, MURPHY_CALL_ARGUMENT_KIND_STRING,
     MURPHY_CALL_ARGUMENT_KIND_SYMBOL, MURPHY_CALL_RECEIVER_FLOAT, MURPHY_CALL_RECEIVER_INTEGER,
     MURPHY_CALL_RECEIVER_NONE, MURPHY_CALL_RECEIVER_OTHER, MURPHY_PLUGIN_ABI_VERSION,
-    MurphyCallContext, MurphyCallDispatchV1, MurphyEmitOffense, MurphyFileContext,
-    MurphyNodeContext, MurphyNodeDispatchV1, MurphyPluginAutocorrect, MurphyPluginCallArgument,
-    MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange,
-    MurphyRunCallDispatch, MurphyRunFile, MurphyRunNodeDispatch, MurphySlice, PluginFileCop,
+    MURPHY_SEVERITY_ERROR, MURPHY_SEVERITY_UNSET, MURPHY_SEVERITY_WARNING, MURPHY_TRISTATE_FALSE,
+    MURPHY_TRISTATE_TRUE, MURPHY_TRISTATE_UNSET, MurphyCallContext, MurphyCallDispatchV1,
+    MurphyCopOptionV1, MurphyEmitOffense, MurphyFileContext, MurphyNodeContext,
+    MurphyNodeDispatchV1, MurphyPluginAutocorrect, MurphyPluginCallArgument, MurphyPluginCopV1,
+    MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunCallDispatch,
+    MurphyRunFile, MurphyRunNodeDispatch, MurphySlice, PluginFileCop, cop_v1, cop_v1_dispatch_only,
     validate_plugin_cop_ids,
 };
 pub use registry::CopRegistry;

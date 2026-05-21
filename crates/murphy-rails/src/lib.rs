@@ -2,7 +2,7 @@ mod cops;
 
 use murphy_core::{
     MURPHY_PLUGIN_ABI_VERSION, MurphyCallContext, MurphyCallDispatchV1, MurphyEmitOffense,
-    MurphyPluginCopV1, MurphyPluginV1, MurphySlice,
+    MurphyPluginCopV1, MurphyPluginV1, MurphySlice, cop_v1, cop_v1_dispatch_only,
 };
 use std::ffi::c_void;
 
@@ -279,696 +279,450 @@ unsafe extern "C" fn run_call_dispatch(
 }
 
 const COPS: [MurphyPluginCopV1; 138] = [
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::action_controller_flash_before_render::NAME,
-        run_file: Some(cops::rails::action_controller_flash_before_render::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::action_controller_test_case::NAME,
-        run_file: Some(cops::rails::action_controller_test_case::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::action_filter::NAME,
-        run_file: Some(cops::rails::action_filter::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::action_order::NAME,
-        run_file: Some(cops::rails::action_order::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::active_record_aliases::NAME,
-        run_file: Some(cops::rails::active_record_aliases::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::active_record_callbacks_order::NAME,
-        run_file: Some(cops::rails::active_record_callbacks_order::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::active_record_override::NAME,
-        run_file: Some(cops::rails::active_record_override::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::active_support_aliases::NAME,
-        run_file: Some(cops::rails::active_support_aliases::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::active_support_on_load::NAME,
-        run_file: Some(cops::rails::active_support_on_load::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::add_column_index::NAME,
-        run_file: Some(cops::rails::add_column_index::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::after_commit_override::NAME,
-        run_file: Some(cops::rails::after_commit_override::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::application_controller::NAME,
-        run_file: Some(cops::rails::application_controller::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::application_job::NAME,
-        run_file: Some(cops::rails::application_job::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::application_mailer::NAME,
-        run_file: Some(cops::rails::application_mailer::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::application_record::NAME,
-        run_file: Some(cops::rails::application_record::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::arel_star::NAME,
-        run_file: Some(cops::rails::arel_star::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::assert_not::NAME,
-        run_file: Some(cops::rails::assert_not::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::attribute_default_block_value::NAME,
-        run_file: Some(cops::rails::attribute_default_block_value::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::belongs_to::NAME,
-        run_file: Some(cops::rails::belongs_to::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::blank::NAME,
-        run_file: Some(cops::rails::blank::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::bulk_change_table::NAME,
-        run_file: Some(cops::rails::bulk_change_table::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::compact_blank::NAME,
-        run_file: Some(cops::rails::compact_blank::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::content_tag::NAME,
-        run_file: Some(cops::rails::content_tag::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::create_table_with_timestamps::NAME,
-        run_file: Some(cops::rails::create_table_with_timestamps::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::dangerous_column_names::NAME,
-        run_file: Some(cops::rails::dangerous_column_names::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::date::NAME,
-        run_file: Some(cops::rails::date::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::default_scope::NAME,
-        run_file: Some(cops::rails::default_scope::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::delegate::NAME,
-        run_file: Some(cops::rails::delegate::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::delegate_allow_blank::NAME,
-        run_file: Some(cops::rails::delegate_allow_blank::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::deprecated_active_model_errors_methods::NAME,
-        run_file: Some(cops::rails::deprecated_active_model_errors_methods::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::dot_separated_keys::NAME,
-        run_file: Some(cops::rails::dot_separated_keys::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::duplicate_association::NAME,
-        run_file: Some(cops::rails::duplicate_association::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::duplicate_scope::NAME,
-        run_file: Some(cops::rails::duplicate_scope::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::duration_arithmetic::NAME,
-        run_file: Some(cops::rails::duration_arithmetic::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::dynamic_find_by::NAME,
-        run_file: Some(cops::rails::dynamic_find_by::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::eager_evaluation_log_message::NAME,
-        run_file: Some(cops::rails::eager_evaluation_log_message::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::enum_hash::NAME,
-        run_file: Some(cops::rails::enum_hash::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::enum_syntax::NAME,
-        run_file: Some(cops::rails::enum_syntax::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::enum_uniqueness::NAME,
-        run_file: Some(cops::rails::enum_uniqueness::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::env::NAME,
-        run_file: Some(cops::rails::env::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::env_local::NAME,
-        run_file: Some(cops::rails::env_local::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::environment_comparison::NAME,
-        run_file: Some(cops::rails::environment_comparison::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::environment_variable_access::NAME,
-        run_file: Some(cops::rails::environment_variable_access::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::exit::NAME,
-        run_file: Some(cops::rails::exit::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::expanded_date_range::NAME,
-        run_file: Some(cops::rails::expanded_date_range::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::file_path::NAME,
-        run_file: Some(cops::rails::file_path::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::find_by::NAME,
-        run_file: Some(cops::rails::find_by::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::find_by_id::NAME,
-        run_file: Some(cops::rails::find_by_id::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::find_by_or_assignment_memoization::NAME,
-        run_file: Some(cops::rails::find_by_or_assignment_memoization::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::find_each::NAME,
-        run_file: Some(cops::rails::find_each::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::freeze_time::NAME,
-        run_file: Some(cops::rails::freeze_time::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::has_and_belongs_to_many::NAME,
-        run_file: Some(cops::rails::has_and_belongs_to_many::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::has_many_or_has_one_dependent::NAME,
-        run_file: Some(cops::rails::has_many_or_has_one_dependent::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::helper_instance_variable::NAME,
-        run_file: Some(cops::rails::helper_instance_variable::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::http_positional_arguments::NAME,
-        run_file: None,
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::http_status::NAME,
-        run_file: Some(cops::rails::http_status::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::http_status_name_consistency::NAME,
-        run_file: Some(cops::rails::http_status_name_consistency::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::i18n_lazy_lookup::NAME,
-        run_file: Some(cops::rails::i18n_lazy_lookup::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::i18n_locale_assignment::NAME,
-        run_file: Some(cops::rails::i18n_locale_assignment::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::i18n_locale_texts::NAME,
-        run_file: Some(cops::rails::i18n_locale_texts::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::ignored_columns_assignment::NAME,
-        run_file: Some(cops::rails::ignored_columns_assignment::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::ignored_skip_action_filter_option::NAME,
-        run_file: Some(cops::rails::ignored_skip_action_filter_option::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::index_by::NAME,
-        run_file: Some(cops::rails::index_by::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::index_with::NAME,
-        run_file: Some(cops::rails::index_with::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::inquiry::NAME,
-        run_file: Some(cops::rails::inquiry::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::inverse_of::NAME,
-        run_file: Some(cops::rails::inverse_of::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::lexically_scoped_action_filter::NAME,
-        run_file: None,
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::link_to_blank::NAME,
-        run_file: Some(cops::rails::link_to_blank::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::mailer_name::NAME,
-        run_file: Some(cops::rails::mailer_name::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::match_route::NAME,
-        run_file: Some(cops::rails::match_route::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::migration_class_name::NAME,
-        run_file: Some(cops::rails::migration_class_name::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::multiple_route_paths::NAME,
-        run_file: None,
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::negate_include::NAME,
-        run_file: Some(cops::rails::negate_include::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::not_null_column::NAME,
-        run_file: Some(cops::rails::not_null_column::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::order_arguments::NAME,
-        run_file: Some(cops::rails::order_arguments::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::order_by_id::NAME,
-        run_file: Some(cops::rails::order_by_id::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::output::NAME,
-        run_file: None,
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::output_safety::NAME,
-        run_file: Some(cops::rails::output_safety::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::pick::NAME,
-        run_file: Some(cops::rails::pick::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::pluck::NAME,
-        run_file: Some(cops::rails::pluck::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::pluck_id::NAME,
-        run_file: Some(cops::rails::pluck_id::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::pluck_in_where::NAME,
-        run_file: Some(cops::rails::pluck_in_where::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::pluralization_grammar::NAME,
-        run_file: None,
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::presence::NAME,
-        run_file: Some(cops::rails::presence::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::present::NAME,
-        run_file: Some(cops::rails::present::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::rake_environment::NAME,
-        run_file: Some(cops::rails::rake_environment::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::read_write_attribute::NAME,
-        run_file: Some(cops::rails::read_write_attribute::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::redirect_back_or_to::NAME,
-        run_file: Some(cops::rails::redirect_back_or_to::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::redundant_active_record_all_method::NAME,
-        run_file: Some(cops::rails::redundant_active_record_all_method::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::redundant_allow_nil::NAME,
-        run_file: Some(cops::rails::redundant_allow_nil::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::redundant_foreign_key::NAME,
-        run_file: Some(cops::rails::redundant_foreign_key::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::redundant_presence_validation_on_belongs_to::NAME,
-        run_file: Some(cops::rails::redundant_presence_validation_on_belongs_to::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::redundant_receiver_in_with_options::NAME,
-        run_file: Some(cops::rails::redundant_receiver_in_with_options::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::redundant_travel_back::NAME,
-        run_file: Some(cops::rails::redundant_travel_back::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::reflection_class_name::NAME,
-        run_file: Some(cops::rails::reflection_class_name::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::refute_methods::NAME,
-        run_file: None,
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::relative_date_constant::NAME,
-        run_file: Some(cops::rails::relative_date_constant::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::render_inline::NAME,
-        run_file: Some(cops::rails::render_inline::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::render_plain_text::NAME,
-        run_file: Some(cops::rails::render_plain_text::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::request_referer::NAME,
-        run_file: Some(cops::rails::request_referer::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::require_dependency::NAME,
-        run_file: Some(cops::rails::require_dependency::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::response_parsed_body::NAME,
-        run_file: Some(cops::rails::response_parsed_body::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::reversible_migration::NAME,
-        run_file: Some(cops::rails::reversible_migration::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::reversible_migration_method_definition::NAME,
-        run_file: Some(cops::rails::reversible_migration_method_definition::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::root_join_chain::NAME,
-        run_file: Some(cops::rails::root_join_chain::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::root_pathname_methods::NAME,
-        run_file: Some(cops::rails::root_pathname_methods::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::root_public_path::NAME,
-        run_file: Some(cops::rails::root_public_path::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::safe_navigation::NAME,
-        run_file: Some(cops::rails::safe_navigation::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::safe_navigation_with_blank::NAME,
-        run_file: Some(cops::rails::safe_navigation_with_blank::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::save_bang::NAME,
-        run_file: Some(cops::rails::save_bang::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::schema_comment::NAME,
-        run_file: Some(cops::rails::schema_comment::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::scope_args::NAME,
-        run_file: Some(cops::rails::scope_args::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::select_map::NAME,
-        run_file: Some(cops::rails::select_map::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::short_i18n::NAME,
-        run_file: Some(cops::rails::short_i18n::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::skips_model_validations::NAME,
-        run_file: Some(cops::rails::skips_model_validations::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::squished_sql_heredocs::NAME,
-        run_file: Some(cops::rails::squished_sql_heredocs::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::strip_heredoc::NAME,
-        run_file: Some(cops::rails::strip_heredoc::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::strong_parameters_expect::NAME,
-        run_file: Some(cops::rails::strong_parameters_expect::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::table_name_assignment::NAME,
-        run_file: Some(cops::rails::table_name_assignment::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::three_state_boolean_column::NAME,
-        run_file: Some(cops::rails::three_state_boolean_column::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::time_zone::NAME,
-        run_file: Some(cops::rails::time_zone::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::time_zone_assignment::NAME,
-        run_file: Some(cops::rails::time_zone_assignment::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::to_formatted_s::NAME,
-        run_file: Some(cops::rails::to_formatted_s::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::to_s_with_argument::NAME,
-        run_file: Some(cops::rails::to_s_with_argument::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::top_level_hash_with_indifferent_access::NAME,
-        run_file: Some(cops::rails::top_level_hash_with_indifferent_access::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::transaction_exit_statement::NAME,
-        run_file: Some(cops::rails::transaction_exit_statement::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::uniq_before_pluck::NAME,
-        run_file: Some(cops::rails::uniq_before_pluck::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::unique_validation_without_index::NAME,
-        run_file: Some(cops::rails::unique_validation_without_index::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::unknown_env::NAME,
-        run_file: Some(cops::rails::unknown_env::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::unused_ignored_columns::NAME,
-        run_file: Some(cops::rails::unused_ignored_columns::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::unused_render_content::NAME,
-        run_file: Some(cops::rails::unused_render_content::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::validation::NAME,
-        run_file: None,
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::where_equals::NAME,
-        run_file: Some(cops::rails::where_equals::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::where_exists::NAME,
-        run_file: Some(cops::rails::where_exists::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::where_missing::NAME,
-        run_file: Some(cops::rails::where_missing::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::where_not::NAME,
-        run_file: Some(cops::rails::where_not::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::where_not_with_multiple_conditions::NAME,
-        run_file: Some(cops::rails::where_not_with_multiple_conditions::run),
-    },
-    MurphyPluginCopV1 {
-        size: std::mem::size_of::<MurphyPluginCopV1>(),
-        name: cops::rails::where_range::NAME,
-        run_file: Some(cops::rails::where_range::run),
-    },
+    cop_v1(
+        cops::rails::action_controller_flash_before_render::NAME,
+        cops::rails::action_controller_flash_before_render::run,
+    ),
+    cop_v1(
+        cops::rails::action_controller_test_case::NAME,
+        cops::rails::action_controller_test_case::run,
+    ),
+    cop_v1(
+        cops::rails::action_filter::NAME,
+        cops::rails::action_filter::run,
+    ),
+    cop_v1(
+        cops::rails::action_order::NAME,
+        cops::rails::action_order::run,
+    ),
+    cop_v1(
+        cops::rails::active_record_aliases::NAME,
+        cops::rails::active_record_aliases::run,
+    ),
+    cop_v1(
+        cops::rails::active_record_callbacks_order::NAME,
+        cops::rails::active_record_callbacks_order::run,
+    ),
+    cop_v1(
+        cops::rails::active_record_override::NAME,
+        cops::rails::active_record_override::run,
+    ),
+    cop_v1(
+        cops::rails::active_support_aliases::NAME,
+        cops::rails::active_support_aliases::run,
+    ),
+    cop_v1(
+        cops::rails::active_support_on_load::NAME,
+        cops::rails::active_support_on_load::run,
+    ),
+    cop_v1(
+        cops::rails::add_column_index::NAME,
+        cops::rails::add_column_index::run,
+    ),
+    cop_v1(
+        cops::rails::after_commit_override::NAME,
+        cops::rails::after_commit_override::run,
+    ),
+    cop_v1(
+        cops::rails::application_controller::NAME,
+        cops::rails::application_controller::run,
+    ),
+    cop_v1(
+        cops::rails::application_job::NAME,
+        cops::rails::application_job::run,
+    ),
+    cop_v1(
+        cops::rails::application_mailer::NAME,
+        cops::rails::application_mailer::run,
+    ),
+    cop_v1(
+        cops::rails::application_record::NAME,
+        cops::rails::application_record::run,
+    ),
+    cop_v1(cops::rails::arel_star::NAME, cops::rails::arel_star::run),
+    cop_v1(cops::rails::assert_not::NAME, cops::rails::assert_not::run),
+    cop_v1(
+        cops::rails::attribute_default_block_value::NAME,
+        cops::rails::attribute_default_block_value::run,
+    ),
+    cop_v1(cops::rails::belongs_to::NAME, cops::rails::belongs_to::run),
+    cop_v1(cops::rails::blank::NAME, cops::rails::blank::run),
+    cop_v1(
+        cops::rails::bulk_change_table::NAME,
+        cops::rails::bulk_change_table::run,
+    ),
+    cop_v1(
+        cops::rails::compact_blank::NAME,
+        cops::rails::compact_blank::run,
+    ),
+    cop_v1(
+        cops::rails::content_tag::NAME,
+        cops::rails::content_tag::run,
+    ),
+    cop_v1(
+        cops::rails::create_table_with_timestamps::NAME,
+        cops::rails::create_table_with_timestamps::run,
+    ),
+    cop_v1(
+        cops::rails::dangerous_column_names::NAME,
+        cops::rails::dangerous_column_names::run,
+    ),
+    cop_v1(cops::rails::date::NAME, cops::rails::date::run),
+    cop_v1(
+        cops::rails::default_scope::NAME,
+        cops::rails::default_scope::run,
+    ),
+    cop_v1(cops::rails::delegate::NAME, cops::rails::delegate::run),
+    cop_v1(
+        cops::rails::delegate_allow_blank::NAME,
+        cops::rails::delegate_allow_blank::run,
+    ),
+    cop_v1(
+        cops::rails::deprecated_active_model_errors_methods::NAME,
+        cops::rails::deprecated_active_model_errors_methods::run,
+    ),
+    cop_v1(
+        cops::rails::dot_separated_keys::NAME,
+        cops::rails::dot_separated_keys::run,
+    ),
+    cop_v1(
+        cops::rails::duplicate_association::NAME,
+        cops::rails::duplicate_association::run,
+    ),
+    cop_v1(
+        cops::rails::duplicate_scope::NAME,
+        cops::rails::duplicate_scope::run,
+    ),
+    cop_v1(
+        cops::rails::duration_arithmetic::NAME,
+        cops::rails::duration_arithmetic::run,
+    ),
+    cop_v1(
+        cops::rails::dynamic_find_by::NAME,
+        cops::rails::dynamic_find_by::run,
+    ),
+    cop_v1(
+        cops::rails::eager_evaluation_log_message::NAME,
+        cops::rails::eager_evaluation_log_message::run,
+    ),
+    cop_v1(cops::rails::enum_hash::NAME, cops::rails::enum_hash::run),
+    cop_v1(
+        cops::rails::enum_syntax::NAME,
+        cops::rails::enum_syntax::run,
+    ),
+    cop_v1(
+        cops::rails::enum_uniqueness::NAME,
+        cops::rails::enum_uniqueness::run,
+    ),
+    cop_v1(cops::rails::env::NAME, cops::rails::env::run),
+    cop_v1(cops::rails::env_local::NAME, cops::rails::env_local::run),
+    cop_v1(
+        cops::rails::environment_comparison::NAME,
+        cops::rails::environment_comparison::run,
+    ),
+    cop_v1(
+        cops::rails::environment_variable_access::NAME,
+        cops::rails::environment_variable_access::run,
+    ),
+    cop_v1(cops::rails::exit::NAME, cops::rails::exit::run),
+    cop_v1(
+        cops::rails::expanded_date_range::NAME,
+        cops::rails::expanded_date_range::run,
+    ),
+    cop_v1(cops::rails::file_path::NAME, cops::rails::file_path::run),
+    cop_v1(cops::rails::find_by::NAME, cops::rails::find_by::run),
+    cop_v1(cops::rails::find_by_id::NAME, cops::rails::find_by_id::run),
+    cop_v1(
+        cops::rails::find_by_or_assignment_memoization::NAME,
+        cops::rails::find_by_or_assignment_memoization::run,
+    ),
+    cop_v1(cops::rails::find_each::NAME, cops::rails::find_each::run),
+    cop_v1(
+        cops::rails::freeze_time::NAME,
+        cops::rails::freeze_time::run,
+    ),
+    cop_v1(
+        cops::rails::has_and_belongs_to_many::NAME,
+        cops::rails::has_and_belongs_to_many::run,
+    ),
+    cop_v1(
+        cops::rails::has_many_or_has_one_dependent::NAME,
+        cops::rails::has_many_or_has_one_dependent::run,
+    ),
+    cop_v1(
+        cops::rails::helper_instance_variable::NAME,
+        cops::rails::helper_instance_variable::run,
+    ),
+    cop_v1_dispatch_only(cops::rails::http_positional_arguments::NAME),
+    cop_v1(
+        cops::rails::http_status::NAME,
+        cops::rails::http_status::run,
+    ),
+    cop_v1(
+        cops::rails::http_status_name_consistency::NAME,
+        cops::rails::http_status_name_consistency::run,
+    ),
+    cop_v1(
+        cops::rails::i18n_lazy_lookup::NAME,
+        cops::rails::i18n_lazy_lookup::run,
+    ),
+    cop_v1(
+        cops::rails::i18n_locale_assignment::NAME,
+        cops::rails::i18n_locale_assignment::run,
+    ),
+    cop_v1(
+        cops::rails::i18n_locale_texts::NAME,
+        cops::rails::i18n_locale_texts::run,
+    ),
+    cop_v1(
+        cops::rails::ignored_columns_assignment::NAME,
+        cops::rails::ignored_columns_assignment::run,
+    ),
+    cop_v1(
+        cops::rails::ignored_skip_action_filter_option::NAME,
+        cops::rails::ignored_skip_action_filter_option::run,
+    ),
+    cop_v1(cops::rails::index_by::NAME, cops::rails::index_by::run),
+    cop_v1(cops::rails::index_with::NAME, cops::rails::index_with::run),
+    cop_v1(cops::rails::inquiry::NAME, cops::rails::inquiry::run),
+    cop_v1(cops::rails::inverse_of::NAME, cops::rails::inverse_of::run),
+    cop_v1_dispatch_only(cops::rails::lexically_scoped_action_filter::NAME),
+    cop_v1(
+        cops::rails::link_to_blank::NAME,
+        cops::rails::link_to_blank::run,
+    ),
+    cop_v1(
+        cops::rails::mailer_name::NAME,
+        cops::rails::mailer_name::run,
+    ),
+    cop_v1(
+        cops::rails::match_route::NAME,
+        cops::rails::match_route::run,
+    ),
+    cop_v1(
+        cops::rails::migration_class_name::NAME,
+        cops::rails::migration_class_name::run,
+    ),
+    cop_v1_dispatch_only(cops::rails::multiple_route_paths::NAME),
+    cop_v1(
+        cops::rails::negate_include::NAME,
+        cops::rails::negate_include::run,
+    ),
+    cop_v1(
+        cops::rails::not_null_column::NAME,
+        cops::rails::not_null_column::run,
+    ),
+    cop_v1(
+        cops::rails::order_arguments::NAME,
+        cops::rails::order_arguments::run,
+    ),
+    cop_v1(
+        cops::rails::order_by_id::NAME,
+        cops::rails::order_by_id::run,
+    ),
+    cop_v1_dispatch_only(cops::rails::output::NAME),
+    cop_v1(
+        cops::rails::output_safety::NAME,
+        cops::rails::output_safety::run,
+    ),
+    cop_v1(cops::rails::pick::NAME, cops::rails::pick::run),
+    cop_v1(cops::rails::pluck::NAME, cops::rails::pluck::run),
+    cop_v1(cops::rails::pluck_id::NAME, cops::rails::pluck_id::run),
+    cop_v1(
+        cops::rails::pluck_in_where::NAME,
+        cops::rails::pluck_in_where::run,
+    ),
+    cop_v1_dispatch_only(cops::rails::pluralization_grammar::NAME),
+    cop_v1(cops::rails::presence::NAME, cops::rails::presence::run),
+    cop_v1(cops::rails::present::NAME, cops::rails::present::run),
+    cop_v1(
+        cops::rails::rake_environment::NAME,
+        cops::rails::rake_environment::run,
+    ),
+    cop_v1(
+        cops::rails::read_write_attribute::NAME,
+        cops::rails::read_write_attribute::run,
+    ),
+    cop_v1(
+        cops::rails::redirect_back_or_to::NAME,
+        cops::rails::redirect_back_or_to::run,
+    ),
+    cop_v1(
+        cops::rails::redundant_active_record_all_method::NAME,
+        cops::rails::redundant_active_record_all_method::run,
+    ),
+    cop_v1(
+        cops::rails::redundant_allow_nil::NAME,
+        cops::rails::redundant_allow_nil::run,
+    ),
+    cop_v1(
+        cops::rails::redundant_foreign_key::NAME,
+        cops::rails::redundant_foreign_key::run,
+    ),
+    cop_v1(
+        cops::rails::redundant_presence_validation_on_belongs_to::NAME,
+        cops::rails::redundant_presence_validation_on_belongs_to::run,
+    ),
+    cop_v1(
+        cops::rails::redundant_receiver_in_with_options::NAME,
+        cops::rails::redundant_receiver_in_with_options::run,
+    ),
+    cop_v1(
+        cops::rails::redundant_travel_back::NAME,
+        cops::rails::redundant_travel_back::run,
+    ),
+    cop_v1(
+        cops::rails::reflection_class_name::NAME,
+        cops::rails::reflection_class_name::run,
+    ),
+    cop_v1_dispatch_only(cops::rails::refute_methods::NAME),
+    cop_v1(
+        cops::rails::relative_date_constant::NAME,
+        cops::rails::relative_date_constant::run,
+    ),
+    cop_v1(
+        cops::rails::render_inline::NAME,
+        cops::rails::render_inline::run,
+    ),
+    cop_v1(
+        cops::rails::render_plain_text::NAME,
+        cops::rails::render_plain_text::run,
+    ),
+    cop_v1(
+        cops::rails::request_referer::NAME,
+        cops::rails::request_referer::run,
+    ),
+    cop_v1(
+        cops::rails::require_dependency::NAME,
+        cops::rails::require_dependency::run,
+    ),
+    cop_v1(
+        cops::rails::response_parsed_body::NAME,
+        cops::rails::response_parsed_body::run,
+    ),
+    cop_v1(
+        cops::rails::reversible_migration::NAME,
+        cops::rails::reversible_migration::run,
+    ),
+    cop_v1(
+        cops::rails::reversible_migration_method_definition::NAME,
+        cops::rails::reversible_migration_method_definition::run,
+    ),
+    cop_v1(
+        cops::rails::root_join_chain::NAME,
+        cops::rails::root_join_chain::run,
+    ),
+    cop_v1(
+        cops::rails::root_pathname_methods::NAME,
+        cops::rails::root_pathname_methods::run,
+    ),
+    cop_v1(
+        cops::rails::root_public_path::NAME,
+        cops::rails::root_public_path::run,
+    ),
+    cop_v1(
+        cops::rails::safe_navigation::NAME,
+        cops::rails::safe_navigation::run,
+    ),
+    cop_v1(
+        cops::rails::safe_navigation_with_blank::NAME,
+        cops::rails::safe_navigation_with_blank::run,
+    ),
+    cop_v1(cops::rails::save_bang::NAME, cops::rails::save_bang::run),
+    cop_v1(
+        cops::rails::schema_comment::NAME,
+        cops::rails::schema_comment::run,
+    ),
+    cop_v1(cops::rails::scope_args::NAME, cops::rails::scope_args::run),
+    cop_v1(cops::rails::select_map::NAME, cops::rails::select_map::run),
+    cop_v1(cops::rails::short_i18n::NAME, cops::rails::short_i18n::run),
+    cop_v1(
+        cops::rails::skips_model_validations::NAME,
+        cops::rails::skips_model_validations::run,
+    ),
+    cop_v1(
+        cops::rails::squished_sql_heredocs::NAME,
+        cops::rails::squished_sql_heredocs::run,
+    ),
+    cop_v1(
+        cops::rails::strip_heredoc::NAME,
+        cops::rails::strip_heredoc::run,
+    ),
+    cop_v1(
+        cops::rails::strong_parameters_expect::NAME,
+        cops::rails::strong_parameters_expect::run,
+    ),
+    cop_v1(
+        cops::rails::table_name_assignment::NAME,
+        cops::rails::table_name_assignment::run,
+    ),
+    cop_v1(
+        cops::rails::three_state_boolean_column::NAME,
+        cops::rails::three_state_boolean_column::run,
+    ),
+    cop_v1(cops::rails::time_zone::NAME, cops::rails::time_zone::run),
+    cop_v1(
+        cops::rails::time_zone_assignment::NAME,
+        cops::rails::time_zone_assignment::run,
+    ),
+    cop_v1(
+        cops::rails::to_formatted_s::NAME,
+        cops::rails::to_formatted_s::run,
+    ),
+    cop_v1(
+        cops::rails::to_s_with_argument::NAME,
+        cops::rails::to_s_with_argument::run,
+    ),
+    cop_v1(
+        cops::rails::top_level_hash_with_indifferent_access::NAME,
+        cops::rails::top_level_hash_with_indifferent_access::run,
+    ),
+    cop_v1(
+        cops::rails::transaction_exit_statement::NAME,
+        cops::rails::transaction_exit_statement::run,
+    ),
+    cop_v1(
+        cops::rails::uniq_before_pluck::NAME,
+        cops::rails::uniq_before_pluck::run,
+    ),
+    cop_v1(
+        cops::rails::unique_validation_without_index::NAME,
+        cops::rails::unique_validation_without_index::run,
+    ),
+    cop_v1(
+        cops::rails::unknown_env::NAME,
+        cops::rails::unknown_env::run,
+    ),
+    cop_v1(
+        cops::rails::unused_ignored_columns::NAME,
+        cops::rails::unused_ignored_columns::run,
+    ),
+    cop_v1(
+        cops::rails::unused_render_content::NAME,
+        cops::rails::unused_render_content::run,
+    ),
+    cop_v1_dispatch_only(cops::rails::validation::NAME),
+    cop_v1(
+        cops::rails::where_equals::NAME,
+        cops::rails::where_equals::run,
+    ),
+    cop_v1(
+        cops::rails::where_exists::NAME,
+        cops::rails::where_exists::run,
+    ),
+    cop_v1(
+        cops::rails::where_missing::NAME,
+        cops::rails::where_missing::run,
+    ),
+    cop_v1(cops::rails::where_not::NAME, cops::rails::where_not::run),
+    cop_v1(
+        cops::rails::where_not_with_multiple_conditions::NAME,
+        cops::rails::where_not_with_multiple_conditions::run,
+    ),
+    cop_v1(
+        cops::rails::where_range::NAME,
+        cops::rails::where_range::run,
+    ),
 ];
 
 #[unsafe(no_mangle)]

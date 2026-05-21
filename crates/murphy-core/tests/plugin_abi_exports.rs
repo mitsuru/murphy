@@ -1,10 +1,12 @@
 use murphy_core::{
     MURPHY_CALL_ARGUMENT_KIND_OTHER, MURPHY_CALL_ARGUMENT_KIND_STRING,
-    MURPHY_CALL_ARGUMENT_KIND_SYMBOL, MURPHY_PLUGIN_ABI_VERSION, MurphyCallContext,
-    MurphyCallDispatchV1, MurphyEmitOffense, MurphyFileContext, MurphyNodeContext,
-    MurphyNodeDispatchV1, MurphyPluginCallArgument, MurphyPluginCopV1, MurphyPluginEdit,
-    MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunCallDispatch, MurphyRunFile,
-    MurphyRunNodeDispatch, MurphySlice,
+    MURPHY_CALL_ARGUMENT_KIND_SYMBOL, MURPHY_PLUGIN_ABI_VERSION, MURPHY_SEVERITY_ERROR,
+    MURPHY_SEVERITY_UNSET, MURPHY_SEVERITY_WARNING, MURPHY_TRISTATE_FALSE, MURPHY_TRISTATE_TRUE,
+    MURPHY_TRISTATE_UNSET, MurphyCallContext, MurphyCallDispatchV1, MurphyCopOptionV1,
+    MurphyEmitOffense, MurphyFileContext, MurphyNodeContext, MurphyNodeDispatchV1,
+    MurphyPluginCallArgument, MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense,
+    MurphyPluginV1, MurphyRange, MurphyRunCallDispatch, MurphyRunFile, MurphyRunNodeDispatch,
+    MurphySlice,
 };
 
 unsafe extern "C" fn noop_run_file(
@@ -16,6 +18,38 @@ unsafe extern "C" fn noop_run_file(
 }
 
 static COP_NAME: &[u8] = b"Plugin/Test";
+static OPTION_NAME: &[u8] = b"sample_option";
+static OPTION_TY: &[u8] = b"bool";
+static OPTIONS: [MurphyCopOptionV1; 1] = [MurphyCopOptionV1 {
+    name: MurphySlice {
+        ptr: OPTION_NAME.as_ptr(),
+        len: OPTION_NAME.len(),
+    },
+    ty: MurphySlice {
+        ptr: OPTION_TY.as_ptr(),
+        len: OPTION_TY.len(),
+    },
+    default_json: MurphySlice {
+        ptr: std::ptr::null(),
+        len: 0,
+    },
+    description: MurphySlice {
+        ptr: std::ptr::null(),
+        len: 0,
+    },
+    enum_values_json: MurphySlice {
+        ptr: std::ptr::null(),
+        len: 0,
+    },
+    replacement: MurphySlice {
+        ptr: std::ptr::null(),
+        len: 0,
+    },
+    reason: MurphySlice {
+        ptr: std::ptr::null(),
+        len: 0,
+    },
+}];
 static COPS: [MurphyPluginCopV1; 1] = [MurphyPluginCopV1 {
     size: std::mem::size_of::<MurphyPluginCopV1>(),
     name: MurphySlice {
@@ -23,6 +57,14 @@ static COPS: [MurphyPluginCopV1; 1] = [MurphyPluginCopV1 {
         len: COP_NAME.len(),
     },
     run_file: Some(noop_run_file),
+    description: MurphySlice {
+        ptr: std::ptr::null(),
+        len: 0,
+    },
+    default_severity: MURPHY_SEVERITY_UNSET,
+    default_enabled: MURPHY_TRISTATE_UNSET,
+    options_ptr: OPTIONS.as_ptr(),
+    options_len: OPTIONS.len(),
 }];
 
 static CALL_DISPATCH: [MurphyCallDispatchV1; 1] = [MurphyCallDispatchV1 {
@@ -49,6 +91,12 @@ fn native_plugin_abi_types_are_public() {
     assert_eq!(MURPHY_CALL_ARGUMENT_KIND_OTHER, 0);
     assert_eq!(MURPHY_CALL_ARGUMENT_KIND_STRING, 1);
     assert_eq!(MURPHY_CALL_ARGUMENT_KIND_SYMBOL, 2);
+    assert_eq!(MURPHY_SEVERITY_WARNING, 0);
+    assert_eq!(MURPHY_SEVERITY_ERROR, 1);
+    assert_eq!(MURPHY_SEVERITY_UNSET, 255);
+    assert_eq!(MURPHY_TRISTATE_FALSE, 0);
+    assert_eq!(MURPHY_TRISTATE_TRUE, 1);
+    assert_eq!(MURPHY_TRISTATE_UNSET, 255);
     let _ = std::mem::size_of::<MurphySlice>();
     let _ = std::mem::size_of::<MurphyRange>();
     let _ = std::mem::size_of::<MurphyPluginOffense>();
@@ -57,6 +105,7 @@ fn native_plugin_abi_types_are_public() {
     let _ = std::mem::size_of::<MurphyNodeContext>();
     let _ = std::mem::size_of::<MurphyPluginCallArgument>();
     let _ = std::mem::size_of::<MurphyPluginCopV1>();
+    let _ = std::mem::size_of::<MurphyCopOptionV1>();
     let _ = std::mem::size_of::<MurphyCallDispatchV1>();
     let _ = std::mem::size_of::<MurphyNodeDispatchV1>();
     let _ = std::mem::size_of::<MurphyPluginV1>();
@@ -127,4 +176,11 @@ fn native_plugin_abi_types_are_public() {
 #[test]
 fn plugin_cops_can_be_declared_static() {
     assert_eq!(COPS.len(), 1);
+    assert_eq!(COPS[0].default_severity, MURPHY_SEVERITY_UNSET);
+    assert_eq!(COPS[0].default_enabled, MURPHY_TRISTATE_UNSET);
+    assert_eq!(COPS[0].options_len, OPTIONS.len());
+    assert_eq!(COPS[0].options_len, 1);
+    let opt = &OPTIONS[0];
+    assert_eq!(opt.name.len, OPTION_NAME.len());
+    assert_eq!(opt.ty.len, OPTION_TY.len());
 }

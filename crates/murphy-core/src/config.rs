@@ -179,21 +179,21 @@ impl MurphyConfig {
 }
 
 fn is_cop_disabled_by_default(name: &str) -> bool {
-    match name {
+    matches!(
+        name,
         "Rails/ActionFilter"
-        | "Rails/DefaultScope"
-        | "Rails/Env"
-        | "Rails/EnvironmentVariableAccess"
-        | "Rails/OrderById"
-        | "Rails/PluckId"
-        | "Rails/RequireDependency"
-        | "Rails/ReversibleMigrationMethodDefinition"
-        | "Rails/SaveBang"
-        | "Rails/SchemaComment"
-        | "Rails/TableNameAssignment"
-        | "Rails/UnusedIgnoredColumns" => true,
-        _ => false,
-    }
+            | "Rails/DefaultScope"
+            | "Rails/Env"
+            | "Rails/EnvironmentVariableAccess"
+            | "Rails/OrderById"
+            | "Rails/PluckId"
+            | "Rails/RequireDependency"
+            | "Rails/ReversibleMigrationMethodDefinition"
+            | "Rails/SaveBang"
+            | "Rails/SchemaComment"
+            | "Rails/TableNameAssignment"
+            | "Rails/UnusedIgnoredColumns"
+    )
 }
 
 fn quote_toml_string(value: &str) -> String {
