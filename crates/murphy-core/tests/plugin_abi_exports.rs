@@ -22,6 +22,14 @@ static COPS: [MurphyPluginCopV1; 1] = [MurphyPluginCopV1 {
     run_file: Some(noop_run_file),
 }];
 
+static CALL_DISPATCH: [MurphyCallDispatchV1; 1] = [MurphyCallDispatchV1 {
+    method_name: MurphySlice {
+        ptr: b"example_call".as_ptr(),
+        len: b"example_call".len(),
+    },
+    dispatch_id: 7,
+}];
+
 #[test]
 fn native_plugin_abi_types_are_public() {
     let _ = std::mem::size_of::<MurphySlice>();
@@ -36,6 +44,25 @@ fn native_plugin_abi_types_are_public() {
     let _: Option<MurphyEmitOffense> = None;
     let _: Option<MurphyRunFile> = None;
     let _: Option<MurphyRunCallDispatch> = None;
+    let _ = MurphyCallContext {
+        file: MurphySlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+        source: MurphySlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+        name: MurphySlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+        dispatch_id: CALL_DISPATCH[0].dispatch_id,
+        message_range: MurphyRange {
+            start_offset: 0,
+            end_offset: 0,
+        },
+    };
 }
 
 #[test]

@@ -30,6 +30,16 @@ pub struct CopContext<'a> {
     pub source: &'a [u8],
 }
 
+pub struct CallDispatchRestriction {
+    pub method_name: Vec<u8>,
+    pub dispatch_id: usize,
+}
+
+struct RestrictedCallCop<'a> {
+    cop: &'a dyn Cop,
+    dispatch_id: usize,
+}
+
 /// A read-only lint rule (design §4).
 ///
 /// A cop inspects nodes and pushes [`Offense`]s into `sink`. It is given an
@@ -62,9 +72,19 @@ pub trait Cop: Send + Sync {
         sink: &mut Vec<Offense>,
     );
 
+    fn on_restricted_call_node(
+        &self,
+        node: &ruby_prism::CallNode<'_>,
+        ctx: &CopContext<'_>,
+        sink: &mut Vec<Offense>,
+        _dispatch_id: usize,
+    ) {
+        self.on_call_node(node, ctx, sink);
+    }
+
     /// Optional RuboCop-style `RESTRICT_ON_SEND` method-name filter. Cops that
     /// return `Some` are dispatched only for matching call names.
-    fn restrict_on_send(&self) -> Option<&[Vec<u8>]> {
+    fn restrict_on_send(&self) -> Option<&[CallDispatchRestriction]> {
         None
     }
 
@@ -110,7 +130,7 @@ pub trait Cop: Send + Sync {
 struct Dispatcher<'a> {
     cops: &'a [Box<dyn Cop>],
     unrestricted_cops: Vec<&'a dyn Cop>,
-    restricted_call_cops: std::collections::BTreeMap<Vec<u8>, Vec<&'a dyn Cop>>,
+    restricted_call_cops: std::collections::BTreeMap<Vec<u8>, Vec<RestrictedCallCop<'a>>>,
     ctx: CopContext<'a>,
     sink: &'a mut Vec<Offense>,
 }
@@ -123,8 +143,10 @@ impl<'pr> Visit<'pr> for Dispatcher<'_> {
             cop.on_call_node(node, &self.ctx, self.sink);
         }
         if let Some(cops) = self.restricted_call_cops.get(node.name().as_slice()) {
-            for cop in cops {
-                cop.on_call_node(node, &self.ctx, self.sink);
+            for entry in cops {
+                entry
+                    .cop
+                    .on_restricted_call_node(node, &self.ctx, self.sink, entry.dispatch_id);
             }
         }
         // REQUIRED: descend into nested calls (e.g. `foo.bar(baz)`); without
@@ -166,15 +188,18 @@ impl<'pr> Visit<'pr> for Dispatcher<'_> {
 /// Read-only: cops only push [`Offense`]s into `sink` (design §4).
 pub fn run_cops(ast: &Ast<'_>, file: &str, cops: &[Box<dyn Cop>], sink: &mut Vec<Offense>) {
     let mut unrestricted_cops = Vec::new();
-    let mut restricted_call_cops: std::collections::BTreeMap<Vec<u8>, Vec<&dyn Cop>> =
+    let mut restricted_call_cops: std::collections::BTreeMap<Vec<u8>, Vec<RestrictedCallCop<'_>>> =
         std::collections::BTreeMap::new();
     for cop in cops {
-        if let Some(names) = cop.restrict_on_send() {
-            for name in names {
+        if let Some(dispatches) = cop.restrict_on_send() {
+            for dispatch in dispatches {
                 restricted_call_cops
-                    .entry(name.clone())
+                    .entry(dispatch.method_name.clone())
                     .or_default()
-                    .push(cop.as_ref());
+                    .push(RestrictedCallCop {
+                        cop: cop.as_ref(),
+                        dispatch_id: dispatch.dispatch_id,
+                    });
             }
         } else {
             unrestricted_cops.push(cop.as_ref());

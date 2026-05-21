@@ -12,6 +12,7 @@ const MESSAGE: &[u8] = b"example native plugin ran";
 const CALL_MESSAGE: &[u8] = b"example call dispatch ran";
 const PACK_DISPATCH_MESSAGE: &[u8] = b"example pack dispatch ran";
 const EXAMPLE_CALL: &[u8] = b"example_call";
+const EXAMPLE_CALL_DISPATCH_ID: usize = 7;
 
 const fn slice(bytes: &'static [u8]) -> MurphySlice {
     MurphySlice {
@@ -48,6 +49,9 @@ unsafe extern "C" fn run_call_dispatch(
         return 1;
     }
     let ctx = unsafe { &*ctx };
+    if ctx.dispatch_id != EXAMPLE_CALL_DISPATCH_ID {
+        return 0;
+    }
     let pack_offense = MurphyPluginOffense {
         cop_name: slice(PACK_DISPATCH_COP_NAME),
         message: slice(PACK_DISPATCH_MESSAGE),
@@ -88,6 +92,7 @@ static COPS: [MurphyPluginCopV1; 3] = [
 
 static CALL_DISPATCH: [MurphyCallDispatchV1; 1] = [MurphyCallDispatchV1 {
     method_name: slice(EXAMPLE_CALL),
+    dispatch_id: EXAMPLE_CALL_DISPATCH_ID,
 }];
 
 #[unsafe(no_mangle)]

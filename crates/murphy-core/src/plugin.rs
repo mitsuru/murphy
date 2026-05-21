@@ -1,3 +1,4 @@
+use crate::cop::CallDispatchRestriction;
 use crate::{Autocorrect, Cop, CopContext, Edit, Offense, Range, Severity};
 use std::ffi::c_void;
 
@@ -54,6 +55,7 @@ pub struct MurphyCallContext {
     pub file: MurphySlice,
     pub source: MurphySlice,
     pub name: MurphySlice,
+    pub dispatch_id: usize,
     pub message_range: MurphyRange,
 }
 
@@ -69,6 +71,7 @@ pub struct MurphyPluginCopV1 {
 #[derive(Clone, Copy)]
 pub struct MurphyCallDispatchV1 {
     pub method_name: MurphySlice,
+    pub dispatch_id: usize,
 }
 
 #[repr(C)]
@@ -127,7 +130,7 @@ pub struct PluginFileCop {
     name: String,
     run_file: Option<MurphyRunFile>,
     run_call_dispatch: Option<MurphyRunCallDispatch>,
-    restrict_on_send: Vec<Vec<u8>>,
+    restrict_on_send: Vec<CallDispatchRestriction>,
     #[cfg(not(target_os = "windows"))]
     _library: Option<std::sync::Arc<libloading::Library>>,
 }
@@ -164,7 +167,7 @@ impl PluginFileCop {
         name: String,
         run_file: Option<MurphyRunFile>,
         run_call_dispatch: Option<MurphyRunCallDispatch>,
-        restrict_on_send: Vec<Vec<u8>>,
+        restrict_on_send: Vec<CallDispatchRestriction>,
         library: std::sync::Arc<libloading::Library>,
     ) -> Self {
         Self {
@@ -227,6 +230,36 @@ impl Cop for PluginFileCop {
         ctx: &CopContext<'_>,
         sink: &mut Vec<Offense>,
     ) {
+        self.run_call_node(node, ctx, sink, 0);
+    }
+
+    fn on_restricted_call_node(
+        &self,
+        node: &ruby_prism::CallNode<'_>,
+        ctx: &CopContext<'_>,
+        sink: &mut Vec<Offense>,
+        dispatch_id: usize,
+    ) {
+        self.run_call_node(node, ctx, sink, dispatch_id);
+    }
+
+    fn restrict_on_send(&self) -> Option<&[CallDispatchRestriction]> {
+        if self.restrict_on_send.is_empty() {
+            None
+        } else {
+            Some(&self.restrict_on_send)
+        }
+    }
+}
+
+impl PluginFileCop {
+    fn run_call_node(
+        &self,
+        node: &ruby_prism::CallNode<'_>,
+        ctx: &CopContext<'_>,
+        sink: &mut Vec<Offense>,
+        dispatch_id: usize,
+    ) {
         let Some(run_call_dispatch) = self.run_call_dispatch else {
             return;
         };
@@ -250,6 +283,7 @@ impl Cop for PluginFileCop {
             file,
             source,
             name,
+            dispatch_id,
             message_range: Range::from_prism_location(&message_loc).into(),
         };
         let mut offense_sink = OffenseSink {
@@ -275,14 +309,6 @@ impl Cop for PluginFileCop {
                 Severity::Error,
                 "native plugin callback failed",
             ));
-        }
-    }
-
-    fn restrict_on_send(&self) -> Option<&[Vec<u8>]> {
-        if self.restrict_on_send.is_empty() {
-            None
-        } else {
-            Some(&self.restrict_on_send)
         }
     }
 }
@@ -507,7 +533,9 @@ pub mod dynamic {
                 std::slice::from_raw_parts(plugin.call_dispatch_ptr, plugin.call_dispatch_len)
             }
         };
-        let mut restrict_on_send = vec![Vec::<Vec<u8>>::new(); raw_cops.len()];
+        let mut restrict_on_send = (0..raw_cops.len())
+            .map(|_| Vec::<CallDispatchRestriction>::new())
+            .collect::<Vec<_>>();
         if !raw_call_dispatch.is_empty() && plugin.run_call_dispatch.is_none() {
             return Err(
                 "plugin registered call dispatch entries with null run_call_dispatch".to_string(),
@@ -523,7 +551,10 @@ pub mod dynamic {
             if raw_cops.is_empty() {
                 return Err("plugin registered call dispatch entries without any cops".to_string());
             }
-            restrict_on_send[0].push(method_name.as_bytes().to_vec());
+            restrict_on_send[0].push(CallDispatchRestriction {
+                method_name: method_name.as_bytes().to_vec(),
+                dispatch_id: entry.dispatch_id,
+            });
         }
 
         let cops = raw_cops

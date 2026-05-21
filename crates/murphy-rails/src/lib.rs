@@ -14,21 +14,24 @@ const fn slice(bytes: &'static [u8]) -> MurphySlice {
 }
 
 static CALL_DISPATCH: [MurphyCallDispatchV1; 10] = [
-    output_dispatch(b"ap"),
-    output_dispatch(b"p"),
-    output_dispatch(b"pp"),
-    output_dispatch(b"pretty_print"),
-    output_dispatch(b"print"),
-    output_dispatch(b"puts"),
-    output_dispatch(b"binwrite"),
-    output_dispatch(b"syswrite"),
-    output_dispatch(b"write"),
-    output_dispatch(b"write_nonblock"),
+    output_dispatch(b"ap", OUTPUT_DISPATCH_ID),
+    output_dispatch(b"p", OUTPUT_DISPATCH_ID),
+    output_dispatch(b"pp", OUTPUT_DISPATCH_ID),
+    output_dispatch(b"pretty_print", OUTPUT_DISPATCH_ID),
+    output_dispatch(b"print", OUTPUT_DISPATCH_ID),
+    output_dispatch(b"puts", OUTPUT_DISPATCH_ID),
+    output_dispatch(b"binwrite", OUTPUT_DISPATCH_ID),
+    output_dispatch(b"syswrite", OUTPUT_DISPATCH_ID),
+    output_dispatch(b"write", OUTPUT_DISPATCH_ID),
+    output_dispatch(b"write_nonblock", OUTPUT_DISPATCH_ID),
 ];
 
-const fn output_dispatch(method_name: &'static [u8]) -> MurphyCallDispatchV1 {
+const OUTPUT_DISPATCH_ID: usize = 1;
+
+const fn output_dispatch(method_name: &'static [u8], dispatch_id: usize) -> MurphyCallDispatchV1 {
     MurphyCallDispatchV1 {
         method_name: slice(method_name),
+        dispatch_id,
     }
 }
 
@@ -41,10 +44,8 @@ unsafe extern "C" fn run_call_dispatch(
         return 1;
     }
     let ctx_ref = unsafe { &*ctx };
-    let name = unsafe { std::slice::from_raw_parts(ctx_ref.name.ptr, ctx_ref.name.len) };
-    match name {
-        b"ap" | b"p" | b"pp" | b"pretty_print" | b"print" | b"puts" | b"binwrite" | b"syswrite"
-        | b"write" | b"write_nonblock" => unsafe { cops::rails::output::run_call(ctx, emit, sink) },
+    match ctx_ref.dispatch_id {
+        OUTPUT_DISPATCH_ID => unsafe { cops::rails::output::run_call(ctx, emit, sink) },
         _ => 0,
     }
 }
