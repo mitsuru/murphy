@@ -19,7 +19,7 @@ pub use autocorrect::{
     apply_edits_logged, run_to_fixpoint,
 };
 pub use config::{CopRule, MurphyConfig, migrate_rubocop_yml_to_murphy_toml};
-pub use cop::{Cop, CopContext, run_cops};
+pub use cop::{Cop, CopContext, run_cop, run_cops};
 pub use cops::NoReceiverPuts;
 pub use discovery::{ConfigError, discover, discover_with_config};
 // Phase 3 Task 2 keystone — the mruby lifecycle/ownership wrapper. Task 3's

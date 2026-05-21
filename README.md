@@ -73,9 +73,11 @@ eliminate RuboCop's slowness with a native Rust core.
   - `# murphy:enable Cop/Name` re-enables one cop from that line onward
   - `# murphy:enable` re-enables all cops
   - `# murphy:todo Cop/Name` suppresses only offenses on that line
-  - `# murphy:todo` suppresses all cop offenses only on that line
-  - Syntax offenses are never suppressed by inline directives.
+- `# murphy:todo` suppresses all cop offenses only on that line
+- Syntax offenses are never suppressed by inline directives.
 - JSON array of offenses printed to stdout; multi-file aggregation.
+- `murphy lint --profile` emits JSON profiling data, with optional
+  `--profile-format speedscope` output.
 - Exit codes 0/1/2/3. A malformed or unknown-key `murphy.toml` exits 2.
 
 Not yet production-ready. Murphy is described as a "linter/formatter", but
@@ -140,6 +142,13 @@ $ ./target/debug/murphy lint /tmp/mtest
 [{"file":"/tmp/mtest/a.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Use a logger instead of puts"},{"file":"/tmp/mtest/sub/deep.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":0,"end_offset":4},"severity":"warning","message":"Use a logger instead of puts"}]
 $ echo $?
 1
+```
+
+Generate a performance summary or a Speedscope trace while linting:
+
+```console
+$ ./target/debug/murphy lint --profile clean.rb > profile.json
+$ ./target/debug/murphy lint --profile --profile-format speedscope clean.rb > profile-trace.json
 ```
 
 Run with **no path args** to discover from the current directory:
@@ -340,6 +349,13 @@ murphy lint --fix <file>...         # apply fix blocks, write files back
 murphy lint -a <file>...            # alias for --fix
 murphy lint --fix --debug <file>... # also print per-file iteration/status/conflict line
 murphy lint --fix -- <file>...      # -- separates files from flags
+```
+
+Profiling commands:
+
+```bash
+murphy lint --profile <file>...                   # prints profile summary JSON to stdout
+murphy lint --profile --profile-format speedscope <file>... # prints Speedscope-compatible trace JSON
 ```
 
 See [`CLAUDE.md`](CLAUDE.md) for the contributor command reference.

@@ -139,6 +139,191 @@ fn lint_default_output_is_human_readable() {
 }
 
 #[test]
+fn lint_profile_outputs_profile_json() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("clean.rb");
+    fs::write(&path, CLEAN_SOURCE).expect("write clean.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--profile")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim_end()).expect("stdout must be a profile JSON object");
+
+    assert!(parsed.get("cop_wall_micros").is_some());
+    assert!(parsed.get("cop_file_micros").is_some());
+    assert!(
+        parsed
+            .get("p95_micros")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+    );
+    assert!(parsed.get("hot_files").is_some());
+    assert!(parsed.get("invocation_count").is_some());
+}
+
+#[test]
+fn lint_profile_outputs_speedscope_json() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("clean.rb");
+    fs::write(&path, CLEAN_SOURCE).expect("write clean.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--profile")
+        .arg("--profile-format")
+        .arg("speedscope")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim_end()).expect("stdout must be a profile JSON object");
+
+    assert_eq!(
+        parsed
+            .get("process_name")
+            .and_then(serde_json::Value::as_str),
+        Some("murphy-lint")
+    );
+    let events = parsed
+        .get("traceEvents")
+        .and_then(serde_json::Value::as_array)
+        .expect("traceEvents must be an array");
+    assert_eq!(
+        events.len(),
+        parsed
+            .get("event_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default() as usize
+    );
+
+    let mut previous_ts: Option<u64> = None;
+    let mut previous_thread: u64 = 0;
+    for event in events {
+        let start = event.get("ts").and_then(serde_json::Value::as_u64);
+        let name = event.get("name").and_then(serde_json::Value::as_str);
+        assert!(start.is_some() && name.is_some());
+        let start = start.unwrap();
+        let thread = event
+            .get("tid")
+            .and_then(serde_json::Value::as_u64)
+            .expect("tid");
+        if let Some(last) = previous_ts {
+            assert!(last <= start);
+        }
+        assert!(
+            event
+                .get("args")
+                .and_then(|args| args.get("thread_name"))
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
+        previous_ts = Some(start);
+        previous_thread = thread;
+    }
+
+    assert!(previous_thread >= 1);
+}
+
+#[test]
+fn lint_profile_speedscope_thread_ids_follow_file_order() {
+    let dir = tempdir().expect("create tempdir");
+    let first = dir.path().join("a.rb");
+    let second = dir.path().join("z.rb");
+    fs::write(&first, CLEAN_SOURCE).expect("write a.rb");
+    fs::write(&second, DIRTY_PUTS_SOURCE).expect("write z.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--profile")
+        .arg("--profile-format")
+        .arg("speedscope")
+        .arg(".")
+        .current_dir(&dir)
+        .assert()
+        .code(1);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim_end()).expect("stdout must be a profile JSON object");
+    let events = parsed
+        .get("traceEvents")
+        .and_then(serde_json::Value::as_array)
+        .expect("traceEvents must be an array");
+
+    let mut tid_files: Vec<(u64, String)> = events
+        .iter()
+        .filter_map(|event| {
+            let tid = event.get("tid").and_then(serde_json::Value::as_u64)?;
+            let args = event.get("args").unwrap_or(&serde_json::Value::Null);
+            let thread_name = args
+                .get("thread_name")
+                .and_then(serde_json::Value::as_str)?;
+            let file = thread_name.strip_prefix("file:").unwrap_or("").to_owned();
+            Some((tid, file))
+        })
+        .collect();
+
+    tid_files.sort_by_key(|(tid, _)| *tid);
+    tid_files.dedup_by_key(|(tid, _)| *tid);
+    assert!(!tid_files.is_empty());
+
+    let actual_files: Vec<String> = tid_files.iter().map(|(_, file)| file.clone()).collect();
+    let mut expected_files = actual_files.clone();
+    expected_files.sort_unstable();
+
+    assert_eq!(actual_files, expected_files);
+}
+
+#[test]
+fn lint_profile_format_requires_profile_flag() {
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--profile-format")
+        .arg("speedscope")
+        .assert()
+        .code(2);
+
+    assert!(
+        String::from_utf8_lossy(&assert.get_output().stderr)
+            .contains("--profile-format requires --profile")
+    );
+}
+
+#[test]
+fn lint_profile_unknown_profile_format_exits_2() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("clean.rb");
+    fs::write(&path, CLEAN_SOURCE).expect("write clean.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--profile")
+        .arg("--profile-format")
+        .arg("not-a-format")
+        .arg(&path)
+        .assert()
+        .code(2);
+
+    assert!(
+        String::from_utf8_lossy(&assert.get_output().stderr)
+            .contains("unknown --profile-format value")
+    );
+}
+
+#[test]
 fn lint_format_json_preserves_machine_readable_stdout() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("dirty.rb");

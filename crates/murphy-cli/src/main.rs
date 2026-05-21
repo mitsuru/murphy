@@ -51,13 +51,18 @@
 //!   here instead of aborting the process.
 
 mod lsp;
+mod profile;
 use murphy_core::{
     AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
     aggregate_with_config, ast_to_sexp, discover_with_config, migrate_rubocop_yml_to_murphy_toml,
-    parse, run_cops, run_mruby_cop_isolated, run_to_fixpoint,
+    parse, run_cop, run_cops, run_mruby_cop_isolated, run_to_fixpoint,
 };
 use murphy_reporting::{OutputFormat, format_lint_output};
+use profile::{
+    ProfileFormatter, ProfileOutputFormat, ProfileSummary, SpeedscopeFormatter, SummaryFormatter,
+};
 use rayon::prelude::*;
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -100,6 +105,8 @@ const EXIT_OFFENSES: u8 = 1;
 const EXIT_SETUP_ERROR: u8 = 2;
 /// Exit code: internal failure (a caught panic).
 const EXIT_INTERNAL: u8 = 3;
+
+const LINT_USAGE: &str = "murphy lint [--fix|-a] [--debug] [--format human|json|progress] [--profile] [--profile-format summary|speedscope] [--] [path]...";
 
 /// A run failure that maps to a specific non-success exit code, carrying a
 /// human-readable message destined for **stderr** (never stdout).
@@ -424,17 +431,23 @@ fn lint_source(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> Vec<Offense> 
     #[cfg(test)]
     PARSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    lint_source_impl(source, file, cops, false).offenses
+    lint_source_impl(source, file, cops, false, false).offenses
 }
 
 struct TimedNativeOffenses {
     offenses: Vec<Offense>,
     parse_micros: u128,
     cops_micros: u128,
+    cop_micros: Vec<(String, u64)>,
 }
 
-fn lint_source_timed(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> TimedNativeOffenses {
-    lint_source_impl(source, file, cops, true)
+fn lint_source_timed(
+    source: &str,
+    file: &str,
+    cops: &[Box<dyn Cop>],
+    profile: bool,
+) -> TimedNativeOffenses {
+    lint_source_impl(source, file, cops, true, profile)
 }
 
 fn write_lint_output(
@@ -453,11 +466,41 @@ fn write_lint_output(
     Ok(())
 }
 
+fn write_profile_output(
+    profile_summary: &Option<ProfileSummary>,
+    profile_format: ProfileOutputFormat,
+) -> Result<(), AppError> {
+    let profile_payload = match profile_summary.as_ref() {
+        Some(summary) => match profile_format {
+            ProfileOutputFormat::Summary => {
+                let formatter = SummaryFormatter;
+                formatter.format(summary)
+            }
+            ProfileOutputFormat::Speedscope => {
+                let formatter = SpeedscopeFormatter;
+                formatter.format(summary)
+            }
+        },
+        None => Value::Null,
+    };
+
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = writeln!(stdout, "{}", profile_payload) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            return Ok(());
+        }
+        return Err(AppError::setup(format!("failed to write stdout: {e}")));
+    }
+
+    Ok(())
+}
+
 fn lint_source_impl(
     source: &str,
     file: &str,
     cops: &[Box<dyn Cop>],
     measure: bool,
+    profile: bool,
 ) -> TimedNativeOffenses {
     let mut sink: Vec<Offense> = Vec::new();
     let parse_started = measure.then(Instant::now);
@@ -465,15 +508,31 @@ fn lint_source_impl(
     let parse_micros = parse_started
         .map(|started| started.elapsed().as_micros())
         .unwrap_or(0);
-    let mut cops_micros = 0;
+    let mut cops_micros: u128 = 0;
+    let mut cop_micros: Vec<(String, u64)> = Vec::new();
 
     match parsed {
         Ok(ast) => {
-            let cops_started = measure.then(Instant::now);
-            run_cops(&ast, file, cops, &mut sink);
-            cops_micros = cops_started
-                .map(|started| started.elapsed().as_micros())
-                .unwrap_or(0);
+            if profile {
+                for cop in cops {
+                    let cop_name = cop.name().to_string();
+                    let started = Instant::now();
+                    let mut cop_sink: Vec<Offense> = Vec::new();
+                    run_cop(&ast, file, cop.as_ref(), &mut cop_sink);
+                    sink.extend(cop_sink);
+                    let duration = started.elapsed().as_micros() as u64;
+                    cops_micros += u128::from(duration);
+                    if duration > 0 {
+                        cop_micros.push((cop_name, duration));
+                    }
+                }
+            } else {
+                let cops_started = measure.then(Instant::now);
+                run_cops(&ast, file, cops, &mut sink);
+                cops_micros = cops_started
+                    .map(|started| started.elapsed().as_micros())
+                    .unwrap_or(0);
+            }
         }
         Err(e) => {
             // Use `e.message` verbatim (prism's first-error text); the Display
@@ -492,6 +551,7 @@ fn lint_source_impl(
         offenses: apply_inline_directive_filter(sink, source),
         parse_micros,
         cops_micros,
+        cop_micros,
     }
 }
 
@@ -647,7 +707,12 @@ fn apply_inline_directive_filter(mut offenses: Vec<Offense>, source: &str) -> Ve
 /// cops are likewise skipped here — there is no usable tree to traverse and
 /// the syntax error is already reported once. (`AstContext::new` is only built
 /// when `parse` succeeded, so this is also strictly less work.)
-fn lint_source_mruby(source: &str, file: &str, mruby_cops: &[MrubyCop]) -> Vec<Offense> {
+fn lint_source_mruby(
+    source: &str,
+    file: &str,
+    mruby_cops: &[MrubyCop],
+    profile: bool,
+) -> (Vec<Offense>, Vec<(String, u64)>) {
     // I-2 (deferred to Phase 4, tracked): this `parse(source).is_err()` then
     // `AstContext::new` (which parses again) double-parses unique cop'd content.
     // It is NOT collapsed into a single `ctx.parse_result().errors()` check
@@ -656,19 +721,26 @@ fn lint_source_mruby(source: &str, file: &str, mruby_cops: &[MrubyCop]) -> Vec<O
     // subsume — collapsing would silently drop that guard, so it is not
     // provably byte-identical (murphy-cql hard gate: any doubt ⇒ defer).
     if mruby_cops.is_empty() || parse(source).is_err() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let ctx: Arc<AstContext> = AstContext::new(source.as_bytes().to_vec());
     let mut sink: Vec<Offense> = Vec::new();
+    let mut cop_micros: Vec<(String, u64)> = Vec::new();
     for cop in mruby_cops {
+        let started = Instant::now();
         sink.extend(run_mruby_cop_isolated(
             &ctx,
             &cop.source,
             &cop.cop_name,
             file,
         ));
+        let micros = started.elapsed().as_micros() as u64;
+        if profile && micros > 0 {
+            cop_micros.push((cop.cop_name.clone(), micros));
+        }
     }
-    apply_inline_directive_filter(sink, source)
+    let sink = apply_inline_directive_filter(sink, source);
+    (sink, if profile { cop_micros } else { Vec::new() })
 }
 
 /// Write `corrected` to `target` atomically using a sibling-temp + rename.
@@ -767,7 +839,8 @@ fn lint_closure_edits<'a>(
     config: &'a MurphyConfig,
 ) -> Vec<murphy_core::Edit> {
     let mut sink = lint_source(source, file, registry.native_cops());
-    sink.extend(lint_source_mruby(source, file, mruby_cops));
+    let (mruby_offenses, _) = lint_source_mruby(source, file, mruby_cops, false);
+    sink.extend(mruby_offenses);
     aggregate_with_config(sink, config)
         .into_iter()
         .filter_map(|o| o.autocorrect.map(|ac| ac.edits))
@@ -816,7 +889,15 @@ fn lint_files_memoized(
     mruby_cops: &[MrubyCop],
     config: &MurphyConfig,
 ) -> Result<Vec<Offense>, AppError> {
-    lint_files_memoized_debug(files, registry, mruby_cops, config, false)
+    let mut profile_summary = None;
+    lint_files_memoized_debug(
+        files,
+        registry,
+        mruby_cops,
+        config,
+        false,
+        &mut profile_summary,
+    )
 }
 
 fn lint_files_memoized_debug(
@@ -825,12 +906,15 @@ fn lint_files_memoized_debug(
     mruby_cops: &[MrubyCop],
     config: &MurphyConfig,
     debug: bool,
+    profile_summary: &mut Option<ProfileSummary>,
 ) -> Result<Vec<Offense>, AppError> {
     #[derive(Default)]
     struct ContentGroup {
         representative: String,
         paths: Vec<String>,
         base_offenses: Vec<Offense>,
+        native_cop_micros: Vec<(String, u64)>,
+        mruby_cop_micros: Vec<(String, u64)>,
     }
 
     const BATCH_SIZE: usize = 128;
@@ -882,6 +966,8 @@ fn lint_files_memoized_debug(
                         representative: path.clone(),
                         paths: vec![path],
                         base_offenses: Vec::new(),
+                        native_cop_micros: Vec::new(),
+                        mruby_cop_micros: Vec::new(),
                     });
                     newly_seen.push(content_key);
                 }
@@ -889,6 +975,8 @@ fn lint_files_memoized_debug(
         }
 
         // Parse/lint each newly introduced content exactly once, in parallel.
+        let should_record_profile = profile_summary.is_some();
+        let should_measure_timings = should_record_profile || debug;
         let parse_jobs: Vec<(String, String)> = newly_seen
             .iter()
             .map(|content| {
@@ -904,63 +992,98 @@ fn lint_files_memoized_debug(
         let parsed = parse_jobs
             .par_iter()
             .map(|(content, representative)| {
-                let (mut base, native_micros, parse_micros, cops_micros) = if debug {
-                    let native_start = Instant::now();
-                    let timed = lint_source_timed(content, representative, registry.native_cops());
-                    (
-                        timed.offenses,
-                        native_start.elapsed().as_micros(),
-                        timed.parse_micros,
-                        timed.cops_micros,
-                    )
+                let (mut base_offenses, parse_micros, cops_micros, native_cop_timings) =
+                    if should_measure_timings {
+                        let timed = lint_source_timed(
+                            content,
+                            representative,
+                            registry.native_cops(),
+                            should_record_profile,
+                        );
+                        (
+                            timed.offenses,
+                            timed.parse_micros,
+                            timed.cops_micros,
+                            timed.cop_micros,
+                        )
+                    } else {
+                        (
+                            lint_source(content, representative, registry.native_cops()),
+                            0,
+                            0,
+                            Vec::new(),
+                        )
+                    };
+
+                let native_micros = parse_micros + cops_micros;
+
+                let (mruby_offenses, mruby_cop_timings, mruby_micros) = if should_measure_timings {
+                    let mruby_start = Instant::now();
+                    let (offenses, timings) = lint_source_mruby(
+                        content,
+                        representative,
+                        mruby_cops,
+                        should_record_profile,
+                    );
+                    let elapsed = mruby_start.elapsed().as_micros();
+                    let _cop_micros: u128 =
+                        timings.iter().map(|(_, micros)| u128::from(*micros)).sum();
+                    (offenses, timings, elapsed)
                 } else {
                     (
-                        lint_source(content, representative, registry.native_cops()),
-                        0,
-                        0,
+                        lint_source_mruby(content, representative, mruby_cops, false).0,
+                        Vec::new(),
                         0,
                     )
                 };
-
-                let mruby_micros = if debug {
-                    let mruby_start = Instant::now();
-                    base.extend(lint_source_mruby(content, representative, mruby_cops));
-                    mruby_start.elapsed().as_micros()
+                base_offenses.extend(mruby_offenses);
+                let mruby_micros = if should_measure_timings {
+                    mruby_micros
                 } else {
-                    base.extend(lint_source_mruby(content, representative, mruby_cops));
                     0
                 };
 
                 (
                     content.clone(),
-                    base,
+                    base_offenses,
                     native_micros,
                     parse_micros,
                     cops_micros,
                     mruby_micros,
+                    native_cop_timings,
+                    mruby_cop_timings,
                 )
             })
-            .collect::<Vec<(String, Vec<Offense>, u128, u128, u128, u128)>>();
+            .collect::<Vec<(
+                String,
+                Vec<Offense>,
+                u128,
+                u128,
+                u128,
+                u128,
+                Vec<(String, u64)>,
+                Vec<(String, u64)>,
+            )>>();
         if debug {
             let offense_count: usize = parsed
                 .iter()
-                .map(|(_, offenses, _, _, _, _)| offenses.len())
+                .map(|(_, offenses, _, _, _, _, _, _)| offenses.len())
                 .sum();
             let native_micros: u128 = parsed
                 .iter()
-                .map(|(_, _, native_micros, _, _, _)| native_micros)
+                .map(|(_, _, native_micros, _, _, _, _, _)| native_micros)
                 .sum();
             let parse_micros: u128 = parsed
                 .iter()
-                .map(|(_, _, _, parse_micros, _, _)| parse_micros)
+                .map(|(_, _, _, parse_micros, _, _, _, _)| parse_micros)
                 .sum();
             let cops_micros: u128 = parsed
                 .iter()
-                .map(|(_, _, _, _, cops_micros, _)| cops_micros)
+                .map(|(_, _, _, _, cops_micros, _, _, _)| cops_micros)
                 .sum();
             let mruby_micros: u128 = parsed
                 .iter()
-                .map(|(_, _, _, _, _, mruby_micros)| mruby_micros)
+                .map(|(_, _, _, _, _, mruby_micros, _, _)| mruby_micros)
                 .sum();
             eprintln!(
                 "murphy: debug: batch {}/{} lint unique={} offenses={} native_ms={} parse_ms={} cops_ms={} mruby_ms={} elapsed_ms={}",
@@ -976,11 +1099,47 @@ fn lint_files_memoized_debug(
             );
         }
 
-        for (content, base_offenses, _, _, _, _) in parsed {
-            by_content
+        for (
+            content,
+            base_offenses,
+            parse_micros,
+            _,
+            _,
+            _,
+            native_cop_timings,
+            mruby_cop_timings,
+        ) in parsed
+        {
+            let group = by_content
                 .get_mut(&content)
-                .expect("parsed content must still exist")
-                .base_offenses = base_offenses;
+                .expect("parsed content must still exist");
+            group.base_offenses = base_offenses;
+
+            if should_record_profile {
+                let file = group.representative.clone();
+                if let Some(summary) = profile_summary.as_mut() {
+                    summary.record_parse(&file, parse_micros);
+                    for (cop_name, micros) in &native_cop_timings {
+                        summary.record_native(cop_name, &file, *micros);
+                        group
+                            .native_cop_micros
+                            .push((cop_name.to_string(), *micros));
+                    }
+                    for (cop_name, micros) in &mruby_cop_timings {
+                        summary.record_mruby(cop_name, &file, *micros);
+                        group.mruby_cop_micros.push((cop_name.to_string(), *micros));
+                    }
+                } else {
+                    for (cop_name, micros) in &native_cop_timings {
+                        group
+                            .native_cop_micros
+                            .push((cop_name.to_string(), *micros));
+                    }
+                    for (cop_name, micros) in &mruby_cop_timings {
+                        group.mruby_cop_micros.push((cop_name.to_string(), *micros));
+                    }
+                }
+            }
         }
     }
 
@@ -1062,7 +1221,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         [subcommand, rest @ ..] => (subcommand.as_str(), rest),
         [] => {
             return Err(AppError::setup(
-                "usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|->",
+                "usage: murphy lint [flags] [path]... | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|->",
             ));
         }
     };
@@ -1113,7 +1272,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
 
     if subcommand != "lint" {
         return Err(AppError::setup(format!(
-            "unknown subcommand {subcommand:?} (usage: murphy lint [path]... | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|->)"
+            "unknown subcommand {subcommand:?} (usage: {LINT_USAGE} | murphy migrate <.rubocop.yml> | murphy lsp | murphy ast --format sexp <path|->)"
         )));
     }
 
@@ -1131,14 +1290,28 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // would otherwise reject as an unknown flag (roborev low: regression).
     let mut fix = false;
     let mut debug = false;
+    let mut profile = false;
+    let mut profile_format = ProfileOutputFormat::Summary;
     let mut output_format = OutputFormat::Human;
     let mut path_args: Vec<&str> = Vec::new();
     let mut flags_done = false;
     let mut pending_format = false;
+    let mut pending_profile_format = false;
+    let mut profile_format_set = false;
 
     for token in post_subcommand {
         if flags_done {
             path_args.push(token.as_str());
+            continue;
+        }
+        if pending_profile_format {
+            profile_format = ProfileOutputFormat::parse(token).ok_or_else(|| {
+                AppError::setup(format!(
+                    "unknown --profile-format value {token:?} (supported: summary, speedscope)"
+                ))
+            })?;
+            pending_profile_format = false;
+            profile_format_set = true;
             continue;
         }
         if pending_format {
@@ -1159,19 +1332,31 @@ fn run(args: &[String]) -> Result<u8, AppError> {
             "--" => flags_done = true,
             "--fix" | "-a" => fix = true,
             "--debug" => debug = true,
+            "--profile" => profile = true,
+            "--profile-format" => pending_profile_format = true,
             "--format" => pending_format = true,
             flag if flag.starts_with('-') => {
                 return Err(AppError::setup(format!(
-                    "unknown flag {flag:?} (usage: murphy lint [--fix|-a] [--debug] [--format human|json|progress] \
-                     [--] [path]...; use `--` before a path that starts with `-`)"
+                    "unknown flag {flag:?} (usage: {LINT_USAGE}; use `--` before a path that starts with `-`)"
                 )));
             }
             path => path_args.push(path),
         }
     }
+
+    if pending_profile_format {
+        return Err(AppError::setup(
+            "missing value for --profile-format (supported: summary, speedscope)",
+        ));
+    }
     if pending_format {
         return Err(AppError::setup(
             "missing value for --format (supported: human, json, progress)",
+        ));
+    }
+    if !profile && profile_format_set {
+        return Err(AppError::setup(
+            "--profile-format requires --profile (use --profile --profile-format summary|speedscope)",
         ));
     }
 
@@ -1305,6 +1490,12 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         })
         .collect::<Result<_, AppError>>()?;
 
+    let mut profile_summary = if profile {
+        Some(ProfileSummary::default())
+    } else {
+        None
+    };
+
     // ── --fix pipeline (Phase 4 Task 6) ────────────────────────────────────
     if fix {
         // Per-file fixpoint: read → run_to_fixpoint → write-back if changed.
@@ -1423,9 +1614,20 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         // Implemented by re-running `lint_files_memoized` on the same paths —
         // this IS the same call as a plain lint, so the invariant holds by
         // construction.
-        let offenses = lint_files_memoized_debug(&files, &registry, &mruby_cops, &config, debug)?;
+        let offenses = lint_files_memoized_debug(
+            &files,
+            &registry,
+            &mruby_cops,
+            &config,
+            debug,
+            &mut profile_summary,
+        )?;
 
-        write_lint_output(&offenses, &files, output_format)?;
+        if profile {
+            write_profile_output(&profile_summary, profile_format)?;
+        } else {
+            write_lint_output(&offenses, &files, output_format)?;
+        }
 
         return Ok(if offenses.is_empty() {
             EXIT_OK
@@ -1450,9 +1652,20 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // determinism point are all preserved inside `lint_files_memoized`; the
     // no-duplicate case is a 1:1 no-op so the snapshot stays byte-identical.
     // `tests/parallel_determinism.rs` is the permanent byte-identity guard.
-    let offenses = lint_files_memoized_debug(&files, &registry, &mruby_cops, &config, debug)?;
+    let offenses = lint_files_memoized_debug(
+        &files,
+        &registry,
+        &mruby_cops,
+        &config,
+        debug,
+        &mut profile_summary,
+    )?;
 
-    write_lint_output(&offenses, &files, output_format)?;
+    if profile {
+        write_profile_output(&profile_summary, profile_format)?;
+    } else {
+        write_lint_output(&offenses, &files, output_format)?;
+    }
 
     Ok(if offenses.is_empty() {
         EXIT_OK

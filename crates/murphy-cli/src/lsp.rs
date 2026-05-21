@@ -294,7 +294,8 @@ fn run_offenses_for_source(
     mruby_cops: &[super::MrubyCop],
 ) -> Result<Vec<Offense>, super::AppError> {
     let mut sink = super::lint_source(source, file, registry.native_cops());
-    sink.extend(super::lint_source_mruby(source, file, mruby_cops));
+    let (mruby_offenses, _) = super::lint_source_mruby(source, file, mruby_cops, false);
+    sink.extend(mruby_offenses);
     Ok(aggregate_with_config(sink, config))
 }
 

@@ -383,7 +383,10 @@ fn example_native_pack_file_scope_include_exclude() {
         .code(0);
     let parsed: Vec<serde_json::Value> =
         serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
-    assert!(parsed.is_empty(), "excluded file should skip FileBanner offense");
+    assert!(
+        parsed.is_empty(),
+        "excluded file should skip FileBanner offense"
+    );
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -396,7 +399,10 @@ fn example_native_pack_file_scope_include_exclude() {
         .code(0);
     let parsed: Vec<serde_json::Value> =
         serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
-    assert!(parsed.is_empty(), "non-include file should skip FileBanner offense");
+    assert!(
+        parsed.is_empty(),
+        "non-include file should skip FileBanner offense"
+    );
 }
 
 #[test]
@@ -427,11 +433,7 @@ Include = ["**/*.rb"]
     .expect("write config");
 
     fs::create_dir_all(dir.path().join("project").join("app")).expect("create app dir");
-    fs::write(
-        dir.path().join("project/app/app.rb"),
-        "x = 1\n",
-    )
-    .expect("write app file");
+    fs::write(dir.path().join("project/app/app.rb"), "x = 1\n").expect("write app file");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")

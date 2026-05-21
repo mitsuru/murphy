@@ -132,7 +132,7 @@ pub trait Cop: Send + Sync {
 /// Internal visitor that performs the single AST pass and fans every visited
 /// node out to every cop.
 struct Dispatcher<'a> {
-    cops: &'a [Box<dyn Cop>],
+    cops: &'a [&'a dyn Cop],
     unrestricted_cops: Vec<&'a dyn Cop>,
     restricted_call_cops: std::collections::BTreeMap<Vec<u8>, Vec<RestrictedCallCop<'a>>>,
     ctx: CopContext<'a>,
@@ -191,22 +191,32 @@ impl<'pr> Visit<'pr> for Dispatcher<'_> {
 ///
 /// Read-only: cops only push [`Offense`]s into `sink` (design §4).
 pub fn run_cops(ast: &Ast<'_>, file: &str, cops: &[Box<dyn Cop>], sink: &mut Vec<Offense>) {
+    let cop_refs: Vec<&dyn Cop> = cops.iter().map(|cop| cop.as_ref()).collect();
+    run_cops_ref(ast, file, &cop_refs, sink);
+}
+
+/// Same dispatch as [`run_cops`], but for explicit cop references.
+pub fn run_cop(ast: &Ast<'_>, file: &str, cop: &dyn Cop, sink: &mut Vec<Offense>) {
+    run_cops_ref(ast, file, &[cop], sink);
+}
+
+fn run_cops_ref(ast: &Ast<'_>, file: &str, cops: &[&dyn Cop], sink: &mut Vec<Offense>) {
     let mut unrestricted_cops = Vec::new();
     let mut restricted_call_cops: std::collections::BTreeMap<Vec<u8>, Vec<RestrictedCallCop<'_>>> =
         std::collections::BTreeMap::new();
-    for cop in cops {
+    for &cop in cops {
         if let Some(dispatches) = cop.restrict_on_send() {
             for dispatch in dispatches {
                 restricted_call_cops
                     .entry(dispatch.method_name.clone())
                     .or_default()
                     .push(RestrictedCallCop {
-                        cop: cop.as_ref(),
+                        cop,
                         dispatch_id: dispatch.dispatch_id,
                     });
             }
         } else if cop.observes_call_nodes() {
-            unrestricted_cops.push(cop.as_ref());
+            unrestricted_cops.push(cop);
         }
     }
     let mut dispatcher = Dispatcher {
@@ -219,7 +229,7 @@ pub fn run_cops(ast: &Ast<'_>, file: &str, cops: &[Box<dyn Cop>], sink: &mut Vec
         },
         sink,
     };
-    for cop in cops {
+    for &cop in cops {
         cop.inspect_file(&dispatcher.ctx, dispatcher.sink);
     }
     dispatcher.visit(&ast.root());
