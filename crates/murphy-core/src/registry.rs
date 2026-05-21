@@ -151,7 +151,7 @@ impl CopRegistry {
         #[cfg(not(target_os = "windows"))]
         for pack in &config.cop_packs {
             let path = root.join(&pack.path);
-            let loaded = load_plugin_pack(&pack.name, &path).map_err(|e| {
+            let loaded = load_plugin_pack(&pack.name, &path, config).map_err(|e| {
                 ConfigError::Io(format!("cannot load native cop pack {}: {e}", pack.name))
             })?;
             let plugin_names = loaded

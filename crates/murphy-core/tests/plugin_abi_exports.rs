@@ -53,6 +53,10 @@ fn native_plugin_abi_types_are_public() {
             ptr: std::ptr::null(),
             len: 0,
         },
+        config: MurphySlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
         name: MurphySlice {
             ptr: std::ptr::null(),
             len: 0,

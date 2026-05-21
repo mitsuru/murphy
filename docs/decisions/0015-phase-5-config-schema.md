@@ -45,3 +45,10 @@ to grow its own schema deliberately through ADRs.
 - No RuboCop config compatibility in `murphy.toml`.
 - No recursive cop loading beyond the configured flat cops directory.
 - No per-cop arbitrary option schema beyond the Phase 5 enable/severity fields.
+
+## Follow-up
+
+`murphy-4n9.6` extends `cops.rules` after Phase 5 by preserving arbitrary
+per-cop option keys and passing them to native plugin packs through ABI v2. The
+Phase 5 decision still owns `enabled` and `severity`; plugin packs interpret the
+additional RuboCop-compatible option keys per cop.

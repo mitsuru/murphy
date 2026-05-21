@@ -477,6 +477,7 @@ name = "murphy-example-pack"
 version = "0.1.0"
 dependencies = [
  "murphy-core",
+ "serde_json",
 ]
 
 [[package]]

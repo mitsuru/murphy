@@ -100,6 +100,7 @@ impl Cop for IfUnlessModifier {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn detect_block_to_modifier(
     block: &ruby_prism::Location<'_>,
     block_end_keyword_offset: u32,

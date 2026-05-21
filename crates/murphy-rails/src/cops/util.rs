@@ -97,6 +97,7 @@ where
 
 #[inline]
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_match_with_replacement(
     source: &[u8],
     pattern: &[u8],
@@ -120,6 +121,7 @@ pub(crate) fn emit_match_with_replacement(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_match_with_replacement_opt(
     source: &[u8],
     pattern: &[u8],
@@ -194,11 +196,7 @@ fn emit_match_with_replacement_opt(
                 unsafe { emit(sink, &offense) };
             }
 
-            let next_index = match usize::try_from(end) {
-                Ok(v) => v,
-                Err(_) => return 1,
-            };
-            i = next_index;
+            i = end;
             continue;
         }
         break;

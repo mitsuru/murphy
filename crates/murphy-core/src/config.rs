@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ConfigError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MurphyConfig {
     pub files: FilesConfig,
     pub cops: CopsConfig,
@@ -18,7 +18,7 @@ pub struct FilesConfig {
     pub exclude: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CopsConfig {
     pub path: PathBuf,
     pub rules: BTreeMap<String, CopRule>,
@@ -32,13 +32,14 @@ pub struct CopPackConfig {
     pub version: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct CopRule {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
     pub severity: Option<Severity>,
+    #[serde(flatten)]
+    pub options: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +158,23 @@ impl MurphyConfig {
 
     pub fn severity_override(&self, name: &str) -> Option<Severity> {
         self.cops.rules.get(name).and_then(|rule| rule.severity)
+    }
+
+    pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
+        let Some(rule) = self.cops.rules.get(name) else {
+            return b"{}".to_vec();
+        };
+        serde_json::to_vec(&rule.options).unwrap_or_else(|_| b"{}".to_vec())
+    }
+
+    pub fn cop_options_map_json(&self, names: &[String]) -> Vec<u8> {
+        let mut options = BTreeMap::new();
+        for name in names {
+            if let Some(rule) = self.cops.rules.get(name) {
+                options.insert(name.clone(), &rule.options);
+            }
+        }
+        serde_json::to_vec(&options).unwrap_or_else(|_| b"{}".to_vec())
     }
 }
 
@@ -280,6 +298,38 @@ mod tests {
         assert_eq!(cfg.cops.path, PathBuf::from("custom_cops"));
         assert!(!cfg.cop_enabled("Murphy/Foo"));
         assert_eq!(cfg.severity_override("Murphy/Foo"), Some(Severity::Error));
+    }
+
+    #[test]
+    fn cop_rule_preserves_rubocop_compatible_options() {
+        let cfg = MurphyConfig::from_toml_str(
+            r#"
+[cops.rules."Style/StringLiterals"]
+enabled = true
+severity = "warning"
+EnforcedStyle = "single_quotes"
+Exclude = ["db/schema.rb"]
+"#,
+        )
+        .expect("config parses");
+
+        let rule = cfg
+            .cops
+            .rules
+            .get("Style/StringLiterals")
+            .expect("rule exists");
+        assert_eq!(rule.enabled, Some(true));
+        assert_eq!(rule.severity, Some(Severity::Warning));
+        assert_eq!(
+            rule.options.get("EnforcedStyle"),
+            Some(&toml::Value::String("single_quotes".to_string()))
+        );
+        assert_eq!(
+            rule.options.get("Exclude"),
+            Some(&toml::Value::Array(vec![toml::Value::String(
+                "db/schema.rb".to_string()
+            )]))
+        );
     }
 
     #[test]

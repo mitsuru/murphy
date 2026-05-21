@@ -8,3 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 murphy-core = { path = "../murphy-core" }
+serde_json = "1"

@@ -2,7 +2,7 @@ use crate::cop::CallDispatchRestriction;
 use crate::{Autocorrect, Cop, CopContext, Edit, Offense, Range, Severity};
 use std::ffi::c_void;
 
-pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 1;
+pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -47,6 +47,7 @@ pub struct MurphyPluginOffense {
 pub struct MurphyFileContext {
     pub file: MurphySlice,
     pub source: MurphySlice,
+    pub config: MurphySlice,
 }
 
 #[repr(C)]
@@ -54,6 +55,7 @@ pub struct MurphyFileContext {
 pub struct MurphyCallContext {
     pub file: MurphySlice,
     pub source: MurphySlice,
+    pub config: MurphySlice,
     pub name: MurphySlice,
     pub dispatch_id: usize,
     pub message_range: MurphyRange,
@@ -131,6 +133,8 @@ pub struct PluginFileCop {
     run_file: Option<MurphyRunFile>,
     run_call_dispatch: Option<MurphyRunCallDispatch>,
     restrict_on_send: Vec<CallDispatchRestriction>,
+    config_json: Vec<u8>,
+    call_config_json: Vec<u8>,
     #[cfg(not(target_os = "windows"))]
     _library: Option<std::sync::Arc<libloading::Library>>,
 }
@@ -157,6 +161,8 @@ impl PluginFileCop {
             run_file: Some(run_file),
             run_call_dispatch: None,
             restrict_on_send: Vec::new(),
+            config_json: b"{}".to_vec(),
+            call_config_json: b"{}".to_vec(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
         }
@@ -168,6 +174,8 @@ impl PluginFileCop {
         run_file: Option<MurphyRunFile>,
         run_call_dispatch: Option<MurphyRunCallDispatch>,
         restrict_on_send: Vec<CallDispatchRestriction>,
+        config_json: Vec<u8>,
+        call_config_json: Vec<u8>,
         library: std::sync::Arc<libloading::Library>,
     ) -> Self {
         Self {
@@ -175,6 +183,8 @@ impl PluginFileCop {
             run_file,
             run_call_dispatch,
             restrict_on_send,
+            config_json,
+            call_config_json,
             _library: Some(library),
         }
     }
@@ -197,7 +207,15 @@ impl Cop for PluginFileCop {
             ptr: ctx.source.as_ptr(),
             len: ctx.source.len(),
         };
-        let file_ctx = MurphyFileContext { file, source };
+        let config = MurphySlice {
+            ptr: self.config_json.as_ptr(),
+            len: self.config_json.len(),
+        };
+        let file_ctx = MurphyFileContext {
+            file,
+            source,
+            config,
+        };
         let mut offense_sink = OffenseSink {
             file: ctx.file,
             source_len: ctx.source.len(),
@@ -279,6 +297,10 @@ impl PluginFileCop {
             ptr: ctx.source.as_ptr(),
             len: ctx.source.len(),
         };
+        let config = MurphySlice {
+            ptr: self.call_config_json.as_ptr(),
+            len: self.call_config_json.len(),
+        };
         let name = MurphySlice {
             ptr: name.as_slice().as_ptr(),
             len: name.as_slice().len(),
@@ -286,6 +308,7 @@ impl PluginFileCop {
         let call_ctx = MurphyCallContext {
             file,
             source,
+            config,
             name,
             dispatch_id,
             message_range: Range::from_prism_location(&message_loc).into(),
@@ -397,9 +420,7 @@ fn plugin_autocorrect_from_raw(
             return None;
         }
 
-        let Some(replacement) = slice_to_str(&edit.replacement) else {
-            return None;
-        };
+        let replacement = slice_to_str(&edit.replacement)?;
         let start_offset = usize::try_from(edit.range.start_offset).ok()?;
         let end_offset = usize::try_from(edit.range.end_offset).ok()?;
         if end_offset > source_len || start_offset > source_len {
@@ -460,7 +481,11 @@ pub mod dynamic {
         _library: Arc<Library>,
     }
 
-    pub fn load_plugin_pack(name: &str, path: &Path) -> Result<LoadedPluginPack, String> {
+    pub fn load_plugin_pack(
+        name: &str,
+        path: &Path,
+        config: &crate::MurphyConfig,
+    ) -> Result<LoadedPluginPack, String> {
         let library = Arc::new(
             unsafe { Library::new(path) }
                 .map_err(|e| format!("failed to load plugin pack {}: {e}", path.display()))?,
@@ -561,11 +586,13 @@ pub mod dynamic {
             });
         }
 
+        let call_config_json = config.cop_options_map_json(&plugin_names);
         let cops = raw_cops
             .iter()
             .zip(plugin_names)
             .zip(restrict_on_send)
             .map(|((cop, name), restrict_on_send)| {
+                let config_json = config.cop_options_json(&name);
                 Box::new(PluginFileCop::with_library_guard(
                     name,
                     cop.run_file,
@@ -575,6 +602,8 @@ pub mod dynamic {
                         plugin.run_call_dispatch
                     },
                     restrict_on_send,
+                    config_json,
+                    call_config_json.clone(),
                     Arc::clone(&library),
                 )) as Box<dyn Cop>
             })
@@ -601,6 +630,32 @@ mod tests {
         0
     }
 
+    unsafe extern "C" fn echo_config_run_file(
+        ctx: *const MurphyFileContext,
+        emit: MurphyEmitOffense,
+        sink: *mut c_void,
+    ) -> i32 {
+        if ctx.is_null() {
+            return 1;
+        }
+        let ctx = unsafe { &*ctx };
+        let offense = MurphyPluginOffense {
+            cop_name: MurphySlice {
+                ptr: b"Plugin/Config".as_ptr(),
+                len: b"Plugin/Config".len(),
+            },
+            message: ctx.config,
+            range: MurphyRange {
+                start_offset: 0,
+                end_offset: 0,
+            },
+            severity: 0,
+            autocorrect: std::ptr::null(),
+        };
+        unsafe { emit(sink, &offense) };
+        0
+    }
+
     #[test]
     fn rejects_duplicate_plugin_cop_id() {
         let existing: Vec<Box<dyn crate::Cop>> = vec![Box::new(NoReceiverPuts)];
@@ -622,6 +677,30 @@ mod tests {
         };
 
         assert!(cop.run_file.is_none());
+    }
+
+    #[test]
+    fn run_file_receives_cop_config_json() {
+        let cop = PluginFileCop {
+            name: "Plugin/Config".to_string(),
+            run_file: Some(echo_config_run_file),
+            run_call_dispatch: None,
+            restrict_on_send: Vec::new(),
+            config_json: br#"{"message":"configured"}"#.to_vec(),
+            call_config_json: b"{}".to_vec(),
+            #[cfg(not(target_os = "windows"))]
+            _library: None,
+        };
+        let ctx = CopContext {
+            file: "configured.rb",
+            source: b"",
+        };
+        let mut offenses = Vec::new();
+
+        cop.inspect_file(&ctx, &mut offenses);
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].message, r#"{"message":"configured"}"#);
     }
 
     #[test]

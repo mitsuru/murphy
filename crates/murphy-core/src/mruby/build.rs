@@ -13,18 +13,10 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 /// Options for opening an mruby runtime in a single cop run.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct MrubyStateOptions {
     /// Optional instruction-step budget for custom runtime callbacks.
     pub instruction_budget: Option<u64>,
-}
-
-impl Default for MrubyStateOptions {
-    fn default() -> Self {
-        Self {
-            instruction_budget: None,
-        }
-    }
 }
 
 /// Default runtime constructor (current production behavior).

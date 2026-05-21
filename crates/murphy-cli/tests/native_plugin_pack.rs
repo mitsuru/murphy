@@ -173,6 +173,114 @@ fn example_native_pack_loads_and_emits_offense() {
 
 #[test]
 #[cfg(not(target_os = "windows"))]
+fn example_native_pack_receives_cop_config_options() {
+    let root = workspace_root();
+    let status = std::process::Command::new("cargo")
+        .current_dir(&root)
+        .args(["build", "-p", "murphy-example-pack"])
+        .status()
+        .expect("run cargo build for example pack");
+    assert!(status.success(), "example pack must build before e2e test");
+
+    let dir = tempdir().expect("create tempdir");
+    let target_dir = target_dir(&root);
+    let dylib_name = format!(
+        "{}murphy_example_pack{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let dylib = target_dir.join("debug").join(dylib_name);
+    fs::write(
+        dir.path().join("murphy.toml"),
+        format!(
+            "[[cop_packs]]\nname = \"murphy-example-pack\"\npath = {}\nversion = \"0.1.0\"\n\n[cops.rules.\"Example/FileBanner\"]\nmessage = \"configured native plugin message\"\n",
+            format_args!("{:?}", dylib.to_string_lossy())
+        ),
+    )
+    .expect("write config");
+    fs::write(
+        dir.path().join("clean.rb"),
+        "# frozen_string_literal: true\n\nx = 1\n",
+    )
+    .expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("clean.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    assert!(
+        parsed.iter().any(|offense| {
+            offense["cop_name"] == "Example/FileBanner"
+                && offense["message"] == "configured native plugin message"
+        }),
+        "expected configured example plugin message, got {parsed:?}"
+    );
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn example_native_pack_call_dispatch_receives_cop_config_options() {
+    let root = workspace_root();
+    let status = std::process::Command::new("cargo")
+        .current_dir(&root)
+        .args(["build", "-p", "murphy-example-pack"])
+        .status()
+        .expect("run cargo build for example pack");
+    assert!(status.success(), "example pack must build before e2e test");
+
+    let dir = tempdir().expect("create tempdir");
+    let target_dir = target_dir(&root);
+    let dylib_name = format!(
+        "{}murphy_example_pack{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let dylib = target_dir.join("debug").join(dylib_name);
+    fs::write(
+        dir.path().join("murphy.toml"),
+        format!(
+            "[[cop_packs]]\nname = \"murphy-example-pack\"\npath = {}\nversion = \"0.1.0\"\n\n[cops.rules.\"Example/CallDispatch\"]\nmessage = \"configured call dispatch message\"\n",
+            format_args!("{:?}", dylib.to_string_lossy())
+        ),
+    )
+    .expect("write config");
+    fs::write(
+        dir.path().join("app.rb"),
+        "# frozen_string_literal: true\n\nexample_call\n",
+    )
+    .expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("app.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    assert!(
+        parsed.iter().any(|offense| {
+            offense["cop_name"] == "Example/CallDispatch"
+                && offense["message"] == "configured call dispatch message"
+        }),
+        "expected configured call dispatch message, got {parsed:?}"
+    );
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
 fn example_native_pack_dispatches_call_cop_by_static_method_table() {
     let root = workspace_root();
     let status = std::process::Command::new("cargo")

@@ -152,7 +152,7 @@ fn strip_string_delimiters(raw: &str) -> &str {
             b'!' => b'!',
             b'"' => b'"',
             b'\'' => b'\'',
-            open @ _ => open,
+            open => open,
         };
 
         let end = bytes.len().saturating_sub(1);
