@@ -68,6 +68,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::thread;
+use std::time::Instant;
 
 // Convention inherited by Tasks 8/9: a closed stdout pipe (`murphy ... | head`)
 // is NOT a setup error — the consumer hung up. A `BrokenPipe` failure writing
@@ -726,10 +727,9 @@ fn lint_closure_edits<'a>(
 
 /// Per-file debug info collected during `--fix` (APIN4).
 ///
-/// **Scope boundary (APIN4)**: `.6 --debug` emits ONLY autocorrect
-/// observability (fixpoint iterations, status, conflicts).  Per-cop timing /
-/// deadline / exception observability is explicitly OUT of `.6` scope and will
-/// be added in a future issue.  This type is intentionally minimal.
+/// **Scope boundary (APIN4)**: this struct carries only autocorrect
+/// observability (fixpoint iterations, status, conflicts). Plain lint progress
+/// is emitted separately by `lint_files_memoized_debug`.
 struct FileDebugInfo {
     path: String,
     iterations: u32,
@@ -759,11 +759,22 @@ struct FileDebugInfo {
 /// The flattened per-path offenses go to `aggregate` UNCHANGED — it remains
 /// the single determinism point (the total-order sort/dedupe, Task 2), so
 /// neither read/lint parallelism nor the fan-out order can perturb output.
+#[cfg(test)]
 fn lint_files_memoized(
     files: &[String],
     registry: &CopRegistry,
     mruby_cops: &[MrubyCop],
     config: &MurphyConfig,
+) -> Result<Vec<Offense>, AppError> {
+    lint_files_memoized_debug(files, registry, mruby_cops, config, false)
+}
+
+fn lint_files_memoized_debug(
+    files: &[String],
+    registry: &CopRegistry,
+    mruby_cops: &[MrubyCop],
+    config: &MurphyConfig,
+    debug: bool,
 ) -> Result<Vec<Offense>, AppError> {
     #[derive(Default)]
     struct ContentGroup {
@@ -773,6 +784,15 @@ fn lint_files_memoized(
     }
 
     const BATCH_SIZE: usize = 128;
+    let started = Instant::now();
+    if debug {
+        eprintln!(
+            "murphy: debug: lint start files={} batch_size={} elapsed_ms={}",
+            files.len(),
+            BATCH_SIZE,
+            started.elapsed().as_millis()
+        );
+    }
 
     // Phase 1+2 (streaming): read in bounded batches, then lint each batch's
     // newly-seen content once. This keeps the read-source peak memory bounded,
@@ -786,8 +806,18 @@ fn lint_files_memoized(
         .unwrap_or(1);
 
     let mut by_content: BTreeMap<String, ContentGroup> = BTreeMap::new();
-    for chunk in files.chunks(BATCH_SIZE) {
+    let batch_count = files.len().div_ceil(BATCH_SIZE);
+    for (batch_index, chunk) in files.chunks(BATCH_SIZE).enumerate() {
         let read: Vec<(String, String)> = read_batch_sources(chunk, worker_count)?;
+        if debug {
+            eprintln!(
+                "murphy: debug: batch {}/{} read files={} elapsed_ms={}",
+                batch_index + 1,
+                batch_count,
+                read.len(),
+                started.elapsed().as_millis()
+            );
+        }
 
         // Track newly introduced content keys so we can parse each exactly once.
         let mut newly_seen: Vec<String> = Vec::new();
@@ -829,6 +859,17 @@ fn lint_files_memoized(
                 (content.clone(), base)
             })
             .collect::<Vec<(String, Vec<Offense>)>>();
+        if debug {
+            let offense_count: usize = parsed.iter().map(|(_, offenses)| offenses.len()).sum();
+            eprintln!(
+                "murphy: debug: batch {}/{} lint unique={} offenses={} elapsed_ms={}",
+                batch_index + 1,
+                batch_count,
+                parsed.len(),
+                offense_count,
+                started.elapsed().as_millis()
+            );
+        }
 
         for (content, base_offenses) in parsed {
             by_content
@@ -838,6 +879,7 @@ fn lint_files_memoized(
         }
     }
 
+    let by_content_len = by_content.len();
     let per_unique: Vec<Vec<Offense>> = by_content
         .into_values()
         .map(|group| {
@@ -856,10 +898,41 @@ fn lint_files_memoized(
         .collect();
 
     // `aggregate` is the single, unchanged determinism point (Task 2).
-    Ok(aggregate_with_config(
-        per_unique.into_iter().flatten().collect(),
-        config,
-    ))
+    let pre_aggregate: Vec<Offense> = per_unique.into_iter().flatten().collect();
+    if debug {
+        let mut by_cop: BTreeMap<&str, usize> = BTreeMap::new();
+        for offense in &pre_aggregate {
+            *by_cop.entry(offense.cop_name.as_str()).or_default() += 1;
+        }
+        let mut top_cops: Vec<(&str, usize)> = by_cop.into_iter().collect();
+        top_cops.sort_by(|(left_name, left_count), (right_name, right_count)| {
+            right_count
+                .cmp(left_count)
+                .then_with(|| left_name.cmp(right_name))
+        });
+        let top_cops = top_cops
+            .into_iter()
+            .take(10)
+            .map(|(cop_name, count)| format!("{cop_name}={count}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!("murphy: debug: top cops {top_cops}");
+        eprintln!(
+            "murphy: debug: aggregate input_offenses={} unique_contents={} elapsed_ms={}",
+            pre_aggregate.len(),
+            by_content_len,
+            started.elapsed().as_millis()
+        );
+    }
+    let offenses = aggregate_with_config(pre_aggregate, config);
+    if debug {
+        eprintln!(
+            "murphy: debug: aggregate done offenses={} elapsed_ms={}",
+            offenses.len(),
+            started.elapsed().as_millis()
+        );
+    }
+    Ok(offenses)
 }
 
 /// Parse args, run the pipeline, and return the exit code (or an [`AppError`]
@@ -1001,9 +1074,30 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // borrow of its native slice safely crosses the rayon `par_iter` boundary
     // inside `lint_files_memoized`. Behavior is byte-identical to Phase 2:
     // only the *source* of the cop vector moved (inline literal → registry).
+    let run_started = Instant::now();
+    if debug {
+        eprintln!("murphy: debug: config load start elapsed_ms=0");
+    }
     let config = MurphyConfig::load(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))?;
+    if debug {
+        eprintln!(
+            "murphy: debug: config load done elapsed_ms={}",
+            run_started.elapsed().as_millis()
+        );
+        eprintln!(
+            "murphy: debug: cop registry load start elapsed_ms={}",
+            run_started.elapsed().as_millis()
+        );
+    }
     let registry = CopRegistry::discover_with_config(Path::new("."), &config)
         .map_err(|e| AppError::setup(e.to_string()))?;
+    if debug {
+        eprintln!(
+            "murphy: debug: cop registry load done native_cops={} elapsed_ms={}",
+            registry.native_cops().len(),
+            run_started.elapsed().as_millis()
+        );
+    }
 
     // Load every enumerated `cops/*.rb` ONCE, up-front (P3 Task 7). Reading a
     // cop file the registry enumerated but cannot be read is a setup/config
@@ -1013,6 +1107,18 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // so the native-only path (e.g. `sample_project`) is byte-identical: the
     // mruby pass is a no-op when there are no user cops.
     let mruby_cops = load_mruby_cops(&registry, &config)?;
+    if debug {
+        eprintln!(
+            "murphy: debug: mruby cops load done cops={} elapsed_ms={}",
+            mruby_cops.len(),
+            run_started.elapsed().as_millis()
+        );
+        eprintln!(
+            "murphy: debug: discovery start args={} elapsed_ms={}",
+            path_args.len(),
+            run_started.elapsed().as_millis()
+        );
+    }
 
     // Classify each path arg (module doc precedence). Existing files go to the
     // explicit list (Phase 1 path, frozen-contract preserving). Directories
@@ -1050,6 +1156,13 @@ fn run(args: &[String]) -> Result<u8, AppError> {
                 targets.insert(path.to_path_buf());
             }
         }
+    }
+    if debug {
+        eprintln!(
+            "murphy: debug: discovery done files={} elapsed_ms={}",
+            targets.len(),
+            run_started.elapsed().as_millis()
+        );
     }
 
     // The memo pipeline takes `&[String]`. A non-UTF-8 path can't be
@@ -1183,7 +1296,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         // Implemented by re-running `lint_files_memoized` on the same paths —
         // this IS the same call as a plain lint, so the invariant holds by
         // construction.
-        let offenses = lint_files_memoized(&files, &registry, &mruby_cops, &config)?;
+        let offenses = lint_files_memoized_debug(&files, &registry, &mruby_cops, &config, debug)?;
 
         let json = serde_json::to_string(&offenses)
             .map_err(|e| AppError::setup(format!("failed to serialize offenses: {e}")))?;
@@ -1209,11 +1322,8 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // This preserves ADR 0006/0007 frozen contract (integration_snapshot /
     // parallel_determinism unchanged).
     //
-    // --debug without --fix: no fixpoint runs, no autocorrect-specific output.
-    // APIN4 scope: per-cop timing etc. is NOT emitted here (out of .6 scope).
-    // `debug` is used only in the --fix branch above.
-    let _ = debug; // suppress unused-variable warning when debug=true but fix=false
-
+    // --debug without --fix: no fixpoint runs, but lint progress/timing goes to
+    // stderr. stdout remains the JSON array.
     // Read + parse + lint + aggregate every file, with in-run content
     // memoization (Task 7): byte-identical content is parsed/linted ONCE and
     // fanned out per path. Parallelism (read and per-unique-content lint),
@@ -1221,7 +1331,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // determinism point are all preserved inside `lint_files_memoized`; the
     // no-duplicate case is a 1:1 no-op so the snapshot stays byte-identical.
     // `tests/parallel_determinism.rs` is the permanent byte-identity guard.
-    let offenses = lint_files_memoized(&files, &registry, &mruby_cops, &config)?;
+    let offenses = lint_files_memoized_debug(&files, &registry, &mruby_cops, &config, debug)?;
 
     // stdout is exclusively the JSON array (design §5). `serde_json` cannot
     // fail serializing `Vec<Offense>` (all fields are plain owned data), but

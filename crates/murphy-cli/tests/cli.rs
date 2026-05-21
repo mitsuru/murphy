@@ -97,6 +97,51 @@ fn lint_file_with_disable_comment_suppresses_offenses() {
 }
 
 #[test]
+fn lint_debug_emits_progress_to_stderr_without_touching_stdout_json() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dirty.rb");
+    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--debug")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("stdout must remain a JSON array in debug mode");
+    assert_eq!(parsed.len(), 1, "debug must not change offenses");
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("murphy: debug: lint start files=1"),
+        "debug stderr must include lint start progress, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("murphy: debug: batch 1/1 read files=1"),
+        "debug stderr must include batch read progress, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("murphy: debug: batch 1/1 lint unique="),
+        "debug stderr must include batch lint progress, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("murphy: debug: aggregate"),
+        "debug stderr must include aggregate progress, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("murphy: debug: top cops"),
+        "debug stderr must include top cop counts, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Murphy/NoReceiverPuts=1"),
+        "debug top cop counts must identify noisy cops, got: {stderr:?}"
+    );
+}
+
+#[test]
 fn lint_file_with_disable_then_enable_comment_only_reattaches() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("with_enable.rb");
