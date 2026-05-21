@@ -43,6 +43,12 @@ eliminate RuboCop's slowness with a native Rust core.
   - is **exception-isolated** — a cop that `raise`s degrades to exactly one
     `severity:"error"` offense for that cop×file; all other cops/files are
     unaffected and the run completes.
+- **Native plugin packs:** configure `[[cop_packs]]` in `murphy.toml` to load
+  `.so`/`.dylib` libraries as cop providers. Per-cop config is passed as JSON to
+  native callbacks. Native file-level cops can narrow files with
+  `Include` / `Exclude` globs (for example: `Include = ["app/**/*.rb"]`), while
+  parent-directory traversal in file strings (for example `../` or `a/../b.rb`) is
+  treated as out-of-scope for those matches.
 - Cop SDK (`Murphy::Cop` base): an `on_call_node(node)` visitor with
   `node.name` / `node.receiver_nil?` / `node.message_loc`,
   `add_offense(range, message:, severity:)`, and a `fix` block.

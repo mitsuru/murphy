@@ -1,5 +1,6 @@
 use crate::cop::CallDispatchRestriction;
 use crate::{Autocorrect, Cop, CopContext, Edit, Offense, Range, Severity};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::ffi::c_void;
 
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 2;
@@ -133,6 +134,8 @@ pub struct PluginFileCop {
     run_file: Option<MurphyRunFile>,
     run_call_dispatch: Option<MurphyRunCallDispatch>,
     restrict_on_send: Vec<CallDispatchRestriction>,
+    include_globs: Option<GlobSet>,
+    exclude_globs: Option<GlobSet>,
     config_json: Vec<u8>,
     call_config_json: Vec<u8>,
     #[cfg(not(target_os = "windows"))]
@@ -156,11 +159,14 @@ struct OffenseSink<'a> {
 
 impl PluginFileCop {
     pub fn new(name: String, run_file: MurphyRunFile) -> Self {
+        let (include_globs, exclude_globs) = parse_file_scope_globs(b"{}");
         Self {
             name,
             run_file: Some(run_file),
             run_call_dispatch: None,
             restrict_on_send: Vec::new(),
+            include_globs,
+            exclude_globs,
             config_json: b"{}".to_vec(),
             call_config_json: b"{}".to_vec(),
             #[cfg(not(target_os = "windows"))]
@@ -178,11 +184,14 @@ impl PluginFileCop {
         call_config_json: Vec<u8>,
         library: std::sync::Arc<libloading::Library>,
     ) -> Self {
+        let (include_globs, exclude_globs) = parse_file_scope_globs(&config_json);
         Self {
             name,
             run_file,
             run_call_dispatch,
             restrict_on_send,
+            include_globs,
+            exclude_globs,
             config_json,
             call_config_json,
             _library: Some(library),
@@ -199,6 +208,9 @@ impl Cop for PluginFileCop {
         let Some(run_file) = self.run_file else {
             return;
         };
+        if !cop_file_is_enabled(ctx.file, self.include_globs.as_ref(), self.exclude_globs.as_ref()) {
+            return;
+        }
         let file = MurphySlice {
             ptr: ctx.file.as_ptr(),
             len: ctx.file.len(),
@@ -285,6 +297,9 @@ impl PluginFileCop {
         let Some(run_call_dispatch) = self.run_call_dispatch else {
             return;
         };
+        if !cop_file_is_enabled(ctx.file, self.include_globs.as_ref(), self.exclude_globs.as_ref()) {
+            return;
+        }
         let Some(message_loc) = node.message_loc() else {
             return;
         };
@@ -338,6 +353,83 @@ impl PluginFileCop {
             ));
         }
     }
+}
+
+fn parse_file_scope_globs(json: &[u8]) -> (Option<GlobSet>, Option<GlobSet>) {
+    let Ok(config): Result<serde_json::Value, _> = serde_json::from_slice(json) else {
+        return (None, None);
+    };
+    let Some(config) = config.as_object() else {
+        return (None, None);
+    };
+
+    let include_patterns = config
+        .get("Include")
+        .and_then(parse_string_patterns)
+        .and_then(|patterns| build_globset(patterns).ok());
+    let exclude_patterns = config
+        .get("Exclude")
+        .and_then(parse_string_patterns)
+        .and_then(|patterns| build_globset(patterns).ok());
+
+    (include_patterns, exclude_patterns)
+}
+
+fn parse_string_patterns(value: &serde_json::Value) -> Option<Vec<String>> {
+    match value {
+        serde_json::Value::String(value) => Some(vec![value.clone()]),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| value.as_str().map(str::to_string))
+            .collect::<Option<Vec<String>>>(),
+        _ => None,
+    }
+}
+
+fn build_globset(patterns: Vec<String>) -> Result<GlobSet, String> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = Glob::new(&pattern).map_err(|e| e.to_string())?;
+        builder.add(glob);
+    }
+    builder.build().map_err(|e| e.to_string())
+}
+
+fn cop_file_is_enabled(
+    file: &str,
+    include_globs: Option<&GlobSet>,
+    exclude_globs: Option<&GlobSet>,
+) -> bool {
+    let Some(normalized_file) = normalize_file_for_scope_matching(file) else {
+        return false;
+    };
+
+    if let Some(include_globs) = include_globs {
+        if !include_globs.is_match(&normalized_file) {
+            return false;
+        }
+    }
+    if let Some(exclude_globs) = exclude_globs {
+        if exclude_globs.is_match(&normalized_file) {
+            return false;
+        }
+    }
+    true
+}
+
+fn normalize_file_for_scope_matching(file: &str) -> Option<String> {
+    let normalized = file.replace('\\', "/");
+    let mut segments: Vec<&str> = Vec::new();
+
+    for segment in normalized.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => return None,
+            _ => segments.push(segment),
+        }
+    }
+
+    Some(segments.join("/"))
 }
 
 impl From<Range> for MurphyRange {
@@ -686,6 +778,8 @@ mod tests {
             run_file: Some(echo_config_run_file),
             run_call_dispatch: None,
             restrict_on_send: Vec::new(),
+            include_globs: None,
+            exclude_globs: None,
             config_json: br#"{"message":"configured"}"#.to_vec(),
             call_config_json: b"{}".to_vec(),
             #[cfg(not(target_os = "windows"))]
@@ -701,6 +795,133 @@ mod tests {
 
         assert_eq!(offenses.len(), 1);
         assert_eq!(offenses[0].message, r#"{"message":"configured"}"#);
+    }
+
+    #[test]
+    fn plugin_cop_skips_files_not_matching_include() {
+        unsafe extern "C" fn run_file(
+            _ctx: *const MurphyFileContext,
+            emit: MurphyEmitOffense,
+            sink: *mut c_void,
+        ) -> i32 {
+            if _ctx.is_null() {
+                return 1;
+            }
+            let ctx = unsafe { &* _ctx };
+            let offense = MurphyPluginOffense {
+                cop_name: MurphySlice {
+                    ptr: b"Plugin/Scoped".as_ptr(),
+                    len: b"Plugin/Scoped".len(),
+                },
+                message: ctx.file,
+                range: MurphyRange {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                severity: 0,
+                autocorrect: std::ptr::null(),
+            };
+            unsafe { emit(sink, &offense) };
+            0
+        }
+
+        let config_json = br#"{"Include":["app/**/*.rb"],"Exclude":["app/**/skip.rb"]}"#.to_vec();
+        let (include_globs, exclude_globs) = parse_file_scope_globs(&config_json);
+        let cop = PluginFileCop {
+            name: "Plugin/Scoped".to_string(),
+            run_file: Some(run_file),
+            run_call_dispatch: None,
+            restrict_on_send: Vec::new(),
+            include_globs,
+            exclude_globs,
+            config_json,
+            call_config_json: b"{}".to_vec(),
+            #[cfg(not(target_os = "windows"))]
+            _library: None,
+        };
+        let mut offenses = Vec::new();
+
+        let ctx = CopContext {
+            file: "app/controllers/users.rb",
+            source: b"",
+        };
+        cop.inspect_file(&ctx, &mut offenses);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].message, "app/controllers/users.rb");
+
+        let ctx = CopContext {
+            file: "app/controllers/skip.rb",
+            source: b"",
+        };
+        cop.inspect_file(&ctx, &mut offenses);
+        assert_eq!(offenses.len(), 1);
+
+        let ctx = CopContext {
+            file: "lib/utils.rb",
+            source: b"",
+        };
+        cop.inspect_file(&ctx, &mut offenses);
+        assert_eq!(offenses.len(), 1);
+    }
+
+    #[test]
+    fn plugin_cop_skips_paths_with_parent_segments() {
+        unsafe extern "C" fn run_file(
+            _ctx: *const MurphyFileContext,
+            emit: MurphyEmitOffense,
+            sink: *mut c_void,
+        ) -> i32 {
+            if _ctx.is_null() {
+                return 1;
+            }
+            let ctx = unsafe { &* _ctx };
+            let offense = MurphyPluginOffense {
+                cop_name: MurphySlice {
+                    ptr: b"Plugin/Scoped".as_ptr(),
+                    len: b"Plugin/Scoped".len(),
+                },
+                message: ctx.file,
+                range: MurphyRange {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                severity: 0,
+                autocorrect: std::ptr::null(),
+            };
+            unsafe { emit(sink, &offense) };
+            0
+        }
+
+        let config_json = br#"{"Include":["**/*.rb"]}"#.to_vec();
+        let (include_globs, exclude_globs) = parse_file_scope_globs(&config_json);
+        let cop = PluginFileCop {
+            name: "Plugin/Scoped".to_string(),
+            run_file: Some(run_file),
+            run_call_dispatch: None,
+            restrict_on_send: Vec::new(),
+            include_globs,
+            exclude_globs,
+            config_json,
+            call_config_json: b"{}".to_vec(),
+            #[cfg(not(target_os = "windows"))]
+            _library: None,
+        };
+        let mut offenses = Vec::new();
+
+        let ctx = CopContext {
+            file: "../app/controllers/users.rb",
+            source: b"",
+        };
+        cop.inspect_file(&ctx, &mut offenses);
+        assert_eq!(offenses.len(), 0);
+
+        let ctx = CopContext {
+            file: "./app/controllers/users.rb",
+            source: b"",
+        };
+        cop.inspect_file(&ctx, &mut offenses);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].message, "./app/controllers/users.rb");
     }
 
     #[test]

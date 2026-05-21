@@ -20,9 +20,21 @@ as setup errors.
 
 ABI v2 passes RuboCop-compatible cop options to native callbacks as UTF-8 JSON
 bytes. `MurphyFileContext.config` contains only the current cop's option object
-from `[cops.rules."Cop/Name"]`, excluding Murphy-owned `enabled` and `severity`.
+from `[cops.rules."Cop/Name"]`, excluding Murphy-owned `enabled` and
+`severity`.
+
+Per-cop `Include` / `Exclude` keys are interpreted as file-scope globs for
+native file-level cops. `Include` limits cops to matching files; `Exclude` removes
+matching files from consideration when both are present. Patterns use
+`globset` semantics and normalized forward-slash paths.
+
 `MurphyCallContext.config` is a pack-level JSON object keyed by cop ID because a
 single pack dispatch callback may emit offenses for multiple cops.
+
+Path normalization in the scope matcher forbids parent-directory traversal
+(`"../"` or `"a/../b"`) at matching time; such paths are treated as outside
+scope for that cop and are skipped. This is a defensive contract decision to
+avoid ambiguous scope bypass when file strings carry traversal segments.
 
 Plugin callbacks may run concurrently on multiple OS threads because Murphy keeps
 file-level `rayon` parallelism. Pack authors must synchronize shared mutable

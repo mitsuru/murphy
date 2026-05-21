@@ -118,25 +118,35 @@ fn target_dir(root: &Path) -> PathBuf {
     }
 }
 
-#[test]
 #[cfg(not(target_os = "windows"))]
-fn example_native_pack_loads_and_emits_offense() {
-    let root = workspace_root();
+fn build_example_pack(root: &Path) {
     let status = std::process::Command::new("cargo")
-        .current_dir(&root)
+        .current_dir(root)
         .args(["build", "-p", "murphy-example-pack"])
         .status()
         .expect("run cargo build for example pack");
     assert!(status.success(), "example pack must build before e2e test");
+}
 
-    let dir = tempdir().expect("create tempdir");
-    let target_dir = target_dir(&root);
+#[cfg(not(target_os = "windows"))]
+fn example_pack_dylib_path(root: &Path) -> PathBuf {
+    let target_dir = target_dir(root);
     let dylib_name = format!(
         "{}murphy_example_pack{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     );
-    let dylib = target_dir.join("debug").join(dylib_name);
+    target_dir.join("debug").join(dylib_name)
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn example_native_pack_loads_and_emits_offense() {
+    let root = workspace_root();
+    build_example_pack(&root);
+
+    let dir = tempdir().expect("create tempdir");
+    let dylib = example_pack_dylib_path(&root);
     fs::write(
         dir.path().join("murphy.toml"),
         format!(
@@ -175,21 +185,10 @@ fn example_native_pack_loads_and_emits_offense() {
 #[cfg(not(target_os = "windows"))]
 fn example_native_pack_receives_cop_config_options() {
     let root = workspace_root();
-    let status = std::process::Command::new("cargo")
-        .current_dir(&root)
-        .args(["build", "-p", "murphy-example-pack"])
-        .status()
-        .expect("run cargo build for example pack");
-    assert!(status.success(), "example pack must build before e2e test");
+    build_example_pack(&root);
 
     let dir = tempdir().expect("create tempdir");
-    let target_dir = target_dir(&root);
-    let dylib_name = format!(
-        "{}murphy_example_pack{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    );
-    let dylib = target_dir.join("debug").join(dylib_name);
+    let dylib = example_pack_dylib_path(&root);
     fs::write(
         dir.path().join("murphy.toml"),
         format!(
@@ -229,21 +228,10 @@ fn example_native_pack_receives_cop_config_options() {
 #[cfg(not(target_os = "windows"))]
 fn example_native_pack_call_dispatch_receives_cop_config_options() {
     let root = workspace_root();
-    let status = std::process::Command::new("cargo")
-        .current_dir(&root)
-        .args(["build", "-p", "murphy-example-pack"])
-        .status()
-        .expect("run cargo build for example pack");
-    assert!(status.success(), "example pack must build before e2e test");
+    build_example_pack(&root);
 
     let dir = tempdir().expect("create tempdir");
-    let target_dir = target_dir(&root);
-    let dylib_name = format!(
-        "{}murphy_example_pack{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    );
-    let dylib = target_dir.join("debug").join(dylib_name);
+    let dylib = example_pack_dylib_path(&root);
     fs::write(
         dir.path().join("murphy.toml"),
         format!(
@@ -283,21 +271,10 @@ fn example_native_pack_call_dispatch_receives_cop_config_options() {
 #[cfg(not(target_os = "windows"))]
 fn example_native_pack_dispatches_call_cop_by_static_method_table() {
     let root = workspace_root();
-    let status = std::process::Command::new("cargo")
-        .current_dir(&root)
-        .args(["build", "-p", "murphy-example-pack"])
-        .status()
-        .expect("run cargo build for example pack");
-    assert!(status.success(), "example pack must build before e2e test");
+    build_example_pack(&root);
 
     let dir = tempdir().expect("create tempdir");
-    let target = target_dir(&root);
-    let dylib_name = format!(
-        "{}murphy_example_pack{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    );
-    let dylib = target.join("debug").join(dylib_name);
+    let dylib = example_pack_dylib_path(&root);
     fs::write(
         dir.path().join("murphy.toml"),
         format!(
@@ -342,6 +319,138 @@ fn example_native_pack_dispatches_call_cop_by_static_method_table() {
         pack_dispatch_offenses.len(),
         1,
         "core should call the plugin pack dispatcher once for example_call, got {parsed:?}"
+    );
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn example_native_pack_file_scope_include_exclude() {
+    let root = workspace_root();
+    build_example_pack(&root);
+
+    let dir = tempdir().expect("create tempdir");
+    let dylib = example_pack_dylib_path(&root);
+    fs::write(
+        dir.path().join("murphy.toml"),
+        format!(
+            "[[cop_packs]]\nname = \"murphy-example-pack\"\npath = {}\nversion = \"0.1.0\"\n\n[cops.rules.\"Example/FileBanner\"]\nInclude = [\"app/**/*.rb\"]\nExclude = [\"app/skip.rb\"]\n",
+            format_args!("{:?}", dylib.to_string_lossy())
+        ),
+    )
+    .expect("write config");
+
+    fs::create_dir_all(dir.path().join("app")).expect("create app dir");
+    fs::create_dir_all(dir.path().join("lib")).expect("create lib dir");
+    fs::write(dir.path().join("app/app.rb"), "x = 1\n").expect("write app file");
+    fs::write(
+        dir.path().join("app/skip.rb"),
+        "# frozen_string_literal: true\n\nx = 1\n",
+    )
+    .expect("write excluded file");
+    fs::write(
+        dir.path().join("lib/other.rb"),
+        "# frozen_string_literal: true\n\nx = 1\n",
+    )
+    .expect("write excluded file");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("app/app.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    assert!(
+        parsed
+            .iter()
+            .any(|offense| offense["cop_name"] == "Example/FileBanner"),
+        "expected include-matched file to be flagged, got {parsed:?}"
+    );
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("app/skip.rb")
+        .assert()
+        .code(0);
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    assert!(parsed.is_empty(), "excluded file should skip FileBanner offense");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("lib/other.rb")
+        .assert()
+        .code(0);
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    assert!(parsed.is_empty(), "non-include file should skip FileBanner offense");
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn example_native_pack_file_scope_rejects_parent_segments_in_file_arg() {
+    let root = workspace_root();
+    build_example_pack(&root);
+
+    let dir = tempdir().expect("create tempdir");
+    let dylib = example_pack_dylib_path(&root);
+    fs::write(
+        dir.path().join("murphy.toml"),
+        format!(
+            r#"[cops.rules."Style/FrozenStringLiteralComment"]
+enabled = false
+
+[[cop_packs]]
+name = "murphy-example-pack"
+path = {}
+version = "0.1.0"
+
+[cops.rules."Example/FileBanner"]
+Include = ["**/*.rb"]
+"#,
+            format_args!("{:?}", dylib.to_string_lossy())
+        ),
+    )
+    .expect("write config");
+
+    fs::create_dir_all(dir.path().join("project").join("app")).expect("create app dir");
+    fs::write(
+        dir.path().join("project/app/app.rb"),
+        "x = 1\n",
+    )
+    .expect("write app file");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("project/app/../app/app.rb")
+        .assert()
+        .code(0);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    let has_file_banner = parsed
+        .iter()
+        .any(|offense| offense["cop_name"].as_str() == Some("Example/FileBanner"));
+    assert!(
+        !has_file_banner,
+        "parent-segment path should skip native plugin file-scope matching"
     );
 }
 
