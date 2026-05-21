@@ -485,12 +485,16 @@ mod tests {
             .iter()
             .map(|cop| cop.name())
             .collect();
-        assert_eq!(names.len(), EXPECTED_NATIVE_COPS.len() + 2);
+        assert_eq!(names.len(), EXPECTED_NATIVE_COPS.len() + 3);
         assert_eq!(&names[..EXPECTED_NATIVE_COPS.len()], &EXPECTED_NATIVE_COPS);
         assert_eq!(names[EXPECTED_NATIVE_COPS.len()], "Example/FileBanner");
         assert_eq!(
             names[EXPECTED_NATIVE_COPS.len() + 1],
             "Example/CallDispatch"
+        );
+        assert_eq!(
+            names[EXPECTED_NATIVE_COPS.len() + 2],
+            "Example/PackDispatch"
         );
     }
 }

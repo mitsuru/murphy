@@ -214,11 +214,20 @@ fn example_native_pack_dispatches_call_cop_by_static_method_table() {
         .iter()
         .filter(|offense| offense["cop_name"] == "Example/CallDispatch")
         .collect::<Vec<_>>();
+    let pack_dispatch_offenses = parsed
+        .iter()
+        .filter(|offense| offense["cop_name"] == "Example/PackDispatch")
+        .collect::<Vec<_>>();
 
     assert_eq!(
         call_offenses.len(),
         1,
         "static call dispatch should invoke the call cop only for example_call, got {parsed:?}"
+    );
+    assert_eq!(
+        pack_dispatch_offenses.len(),
+        1,
+        "core should call the plugin pack dispatcher once for example_call, got {parsed:?}"
     );
 }
 

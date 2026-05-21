@@ -63,15 +63,12 @@ pub struct MurphyPluginCopV1 {
     pub size: usize,
     pub name: MurphySlice,
     pub run_file: Option<MurphyRunFile>,
-    pub run_call: Option<MurphyRunCall>,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MurphyCallDispatchV1 {
     pub method_name: MurphySlice,
-    pub cop_indices_ptr: *const usize,
-    pub cop_indices_len: usize,
 }
 
 #[repr(C)]
@@ -82,6 +79,7 @@ pub struct MurphyPluginV1 {
     pub cops_len: usize,
     pub call_dispatch_ptr: *const MurphyCallDispatchV1,
     pub call_dispatch_len: usize,
+    pub run_call_dispatch: Option<MurphyRunCallDispatch>,
 }
 
 // Safety: these are immutable ABI descriptors / pointer-length views used in
@@ -101,7 +99,7 @@ unsafe impl Sync for MurphyPluginV1 {}
 pub type MurphyEmitOffense = unsafe extern "C" fn(*mut c_void, *const MurphyPluginOffense);
 pub type MurphyRunFile =
     unsafe extern "C" fn(*const MurphyFileContext, MurphyEmitOffense, *mut c_void) -> i32;
-pub type MurphyRunCall =
+pub type MurphyRunCallDispatch =
     unsafe extern "C" fn(*const MurphyCallContext, MurphyEmitOffense, *mut c_void) -> i32;
 
 pub fn validate_plugin_cop_ids(
@@ -128,7 +126,7 @@ pub fn validate_plugin_cop_ids(
 pub struct PluginFileCop {
     name: String,
     run_file: Option<MurphyRunFile>,
-    run_call: Option<MurphyRunCall>,
+    run_call_dispatch: Option<MurphyRunCallDispatch>,
     restrict_on_send: Vec<Vec<u8>>,
     #[cfg(not(target_os = "windows"))]
     _library: Option<std::sync::Arc<libloading::Library>>,
@@ -154,7 +152,7 @@ impl PluginFileCop {
         Self {
             name,
             run_file: Some(run_file),
-            run_call: None,
+            run_call_dispatch: None,
             restrict_on_send: Vec::new(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
@@ -165,14 +163,14 @@ impl PluginFileCop {
     fn with_library_guard(
         name: String,
         run_file: Option<MurphyRunFile>,
-        run_call: Option<MurphyRunCall>,
+        run_call_dispatch: Option<MurphyRunCallDispatch>,
         restrict_on_send: Vec<Vec<u8>>,
         library: std::sync::Arc<libloading::Library>,
     ) -> Self {
         Self {
             name,
             run_file,
-            run_call,
+            run_call_dispatch,
             restrict_on_send,
             _library: Some(library),
         }
@@ -229,7 +227,7 @@ impl Cop for PluginFileCop {
         ctx: &CopContext<'_>,
         sink: &mut Vec<Offense>,
     ) {
-        let Some(run_call) = self.run_call else {
+        let Some(run_call_dispatch) = self.run_call_dispatch else {
             return;
         };
         let Some(message_loc) = node.message_loc() else {
@@ -260,7 +258,7 @@ impl Cop for PluginFileCop {
             offenses: sink,
         };
         let status = unsafe {
-            (run_call)(
+            (run_call_dispatch)(
                 &call_ctx,
                 emit_offense,
                 (&mut offense_sink as *mut OffenseSink<'_>).cast(),
@@ -444,6 +442,7 @@ pub mod dynamic {
             cops_len: 0,
             call_dispatch_ptr: std::ptr::null(),
             call_dispatch_len: 0,
+            run_call_dispatch: None,
         };
         {
             let abi_version: Symbol<'_, AbiVersionFn> = unsafe {
@@ -497,11 +496,6 @@ pub mod dynamic {
             if name.is_empty() {
                 return Err("plugin cop ID must not be empty".to_string());
             }
-            if cop.run_file.is_none() && cop.run_call.is_none() {
-                return Err(format!(
-                    "plugin cop {name} has neither run_file nor run_call callback"
-                ));
-            }
             plugin_names.push(name.to_string());
         }
         validate_plugin_cop_ids(&[], &plugin_names)?;
@@ -514,6 +508,11 @@ pub mod dynamic {
             }
         };
         let mut restrict_on_send = vec![Vec::<Vec<u8>>::new(); raw_cops.len()];
+        if !raw_call_dispatch.is_empty() && plugin.run_call_dispatch.is_none() {
+            return Err(
+                "plugin registered call dispatch entries with null run_call_dispatch".to_string(),
+            );
+        }
         for entry in raw_call_dispatch {
             let method_name = slice_to_str(&entry.method_name).ok_or_else(|| {
                 "plugin call dispatch method_name must be valid UTF-8".to_string()
@@ -521,32 +520,10 @@ pub mod dynamic {
             if method_name.is_empty() {
                 return Err("plugin call dispatch method_name must not be empty".to_string());
             }
-            if entry.cop_indices_len > 0 && entry.cop_indices_ptr.is_null() {
-                return Err(
-                    "plugin call dispatch registered cop_indices_len > 0 with null cop_indices_ptr"
-                        .to_string(),
-                );
+            if raw_cops.is_empty() {
+                return Err("plugin registered call dispatch entries without any cops".to_string());
             }
-            let indices = if entry.cop_indices_len == 0 {
-                &[]
-            } else {
-                unsafe { std::slice::from_raw_parts(entry.cop_indices_ptr, entry.cop_indices_len) }
-            };
-            for &index in indices {
-                let Some(cop) = raw_cops.get(index) else {
-                    return Err(format!(
-                        "plugin call dispatch index {index} out of bounds for {} cops",
-                        raw_cops.len()
-                    ));
-                };
-                if cop.run_call.is_none() {
-                    return Err(format!(
-                        "plugin call dispatch references cop {} without run_call callback",
-                        plugin_names[index]
-                    ));
-                }
-                restrict_on_send[index].push(method_name.as_bytes().to_vec());
-            }
+            restrict_on_send[0].push(method_name.as_bytes().to_vec());
         }
 
         let cops = raw_cops
@@ -557,7 +534,11 @@ pub mod dynamic {
                 Box::new(PluginFileCop::with_library_guard(
                     name,
                     cop.run_file,
-                    cop.run_call,
+                    if restrict_on_send.is_empty() {
+                        None
+                    } else {
+                        plugin.run_call_dispatch
+                    },
                     restrict_on_send,
                     Arc::clone(&library),
                 )) as Box<dyn Cop>
@@ -603,7 +584,6 @@ mod tests {
                 len: 0,
             },
             run_file: None,
-            run_call: None,
         };
 
         assert!(cop.run_file.is_none());
