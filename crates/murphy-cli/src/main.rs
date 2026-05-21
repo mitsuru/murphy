@@ -51,14 +51,12 @@
 //!   here instead of aborting the process.
 
 mod lsp;
-mod output;
-
 use murphy_core::{
     AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
     aggregate_with_config, ast_to_sexp, discover_with_config, migrate_rubocop_yml_to_murphy_toml,
     parse, run_cops, run_mruby_cop_isolated, run_to_fixpoint,
 };
-use output::{OutputFormat, write_lint_output};
+use murphy_reporting::{OutputFormat, format_lint_output};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -437,6 +435,22 @@ struct TimedNativeOffenses {
 
 fn lint_source_timed(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> TimedNativeOffenses {
     lint_source_impl(source, file, cops, true)
+}
+
+fn write_lint_output(
+    offenses: &[Offense],
+    files: &[String],
+    format: OutputFormat,
+) -> Result<(), AppError> {
+    let output = format_lint_output(offenses, files, format).map_err(AppError::setup)?;
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = writeln!(stdout, "{output}") {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            return Ok(());
+        }
+        return Err(AppError::setup(format!("failed to write stdout: {e}")));
+    }
+    Ok(())
 }
 
 fn lint_source_impl(
@@ -1411,7 +1425,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         // construction.
         let offenses = lint_files_memoized_debug(&files, &registry, &mruby_cops, &config, debug)?;
 
-        write_lint_output(&offenses, &files, output_format).map_err(AppError::setup)?;
+        write_lint_output(&offenses, &files, output_format)?;
 
         return Ok(if offenses.is_empty() {
             EXIT_OK
@@ -1438,7 +1452,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // `tests/parallel_determinism.rs` is the permanent byte-identity guard.
     let offenses = lint_files_memoized_debug(&files, &registry, &mruby_cops, &config, debug)?;
 
-    write_lint_output(&offenses, &files, output_format).map_err(AppError::setup)?;
+    write_lint_output(&offenses, &files, output_format)?;
 
     Ok(if offenses.is_empty() {
         EXIT_OK

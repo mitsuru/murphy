@@ -449,6 +449,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "murphy-core",
+ "murphy-reporting",
  "rayon",
  "serde_json",
  "tempfile",
@@ -483,6 +484,14 @@ name = "murphy-rails"
 version = "0.1.0"
 dependencies = [
  "murphy-core",
+]
+
+[[package]]
+name = "murphy-reporting"
+version = "0.1.0"
+dependencies = [
+ "murphy-core",
+ "serde_json",
 ]
 
 [[package]]

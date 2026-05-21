@@ -1,15 +1,11 @@
 use murphy_core::Offense;
 
-pub fn write(offenses: &[Offense], files: &[String]) -> Result<(), String> {
-    super::write_stdout_line(&render(offenses, files))
-}
-
-pub fn render(offenses: &[Offense], files: &[String]) -> String {
+pub fn format(offenses: &[Offense], files: &[String]) -> Result<String, String> {
     let mut out = String::new();
     let file_count = files.len();
     out.push_str(&format!(
         "Inspecting {file_count} file{}\n",
-        super::plural(file_count)
+        plural(file_count)
     ));
     for file in files {
         if offenses.iter().any(|offense| offense.file == *file) {
@@ -22,15 +18,19 @@ pub fn render(offenses: &[Offense], files: &[String]) -> String {
     if offenses.is_empty() {
         out.push_str(&format!(
             "{file_count} file{} inspected, no offenses detected",
-            super::plural(file_count)
+            plural(file_count)
         ));
     } else {
         out.push_str(&format!(
             "{file_count} file{} inspected, {} offense{} detected",
-            super::plural(file_count),
+            plural(file_count),
             offenses.len(),
-            super::plural(offenses.len())
+            plural(offenses.len())
         ));
     }
-    out
+    Ok(out)
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }

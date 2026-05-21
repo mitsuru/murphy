@@ -1,7 +1,7 @@
 use murphy_core::{Offense, Severity};
 
-pub fn write(offenses: &[Offense], files: &[String]) -> Result<(), String> {
-    let mut out = super::progress::render(offenses, files);
+pub fn format(offenses: &[Offense], files: &[String]) -> Result<String, String> {
+    let mut out = super::progress::format(offenses, files)?;
 
     if !offenses.is_empty() {
         out.push('\n');
@@ -19,7 +19,7 @@ pub fn write(offenses: &[Offense], files: &[String]) -> Result<(), String> {
         }
     }
 
-    super::write_stdout_line(&out)
+    Ok(out)
 }
 
 fn severity_label(severity: Severity) -> &'static str {
