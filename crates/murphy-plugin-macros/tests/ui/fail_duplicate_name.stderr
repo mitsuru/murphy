@@ -1,0 +1,16 @@
+error[E0080]: evaluation panicked: register_cops!: duplicate cop NAME
+  --> tests/ui/fail_duplicate_name.rs:16:1
+   |
+16 | murphy_plugin_macros::register_cops!(First, Second);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed inside this call
+   |
+note: inside `murphy_plugin_api::__internal::assert_unique_cop_names::<2>`
+  --> $RUST/core/src/panic.rs
+   |
+   |         $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+   |
+  ::: $WORKSPACE/crates/murphy-plugin-api/src/lib.rs
+   |
+   |                     panic!("register_cops!: duplicate cop NAME");
+   |                     -------------------------------------------- in this macro invocation

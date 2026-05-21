@@ -1,0 +1,19 @@
+[package]
+name = "murphy-plugin-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Proc macros for Murphy native plugins (register_cops! and friends)."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+# Default features off; we only need to parse a comma-separated list of
+# type paths. No syn::Type::full / no derive feature in this crate.
+syn = { version = "2", default-features = false, features = ["parsing", "proc-macro", "printing", "clone-impls", "derive"] }
+
+[dev-dependencies]
+trybuild = "1"
+murphy-plugin-api = { path = "../murphy-plugin-api" }
