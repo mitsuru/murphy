@@ -128,6 +128,22 @@ fn lint_debug_emits_progress_to_stderr_without_touching_stdout_json() {
         "debug stderr must include batch lint progress, got: {stderr:?}"
     );
     assert!(
+        stderr.contains("native_ms="),
+        "debug stderr must include native lint timing, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("parse_ms="),
+        "debug stderr must include parse timing, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("cops_ms="),
+        "debug stderr must include native cop timing, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("mruby_ms="),
+        "debug stderr must include mruby lint timing, got: {stderr:?}"
+    );
+    assert!(
         stderr.contains("murphy: debug: aggregate"),
         "debug stderr must include aggregate progress, got: {stderr:?}"
     );

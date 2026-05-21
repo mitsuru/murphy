@@ -424,10 +424,40 @@ fn lint_source(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> Vec<Offense> 
     #[cfg(test)]
     PARSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+    lint_source_impl(source, file, cops, false).offenses
+}
+
+struct TimedNativeOffenses {
+    offenses: Vec<Offense>,
+    parse_micros: u128,
+    cops_micros: u128,
+}
+
+fn lint_source_timed(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> TimedNativeOffenses {
+    lint_source_impl(source, file, cops, true)
+}
+
+fn lint_source_impl(
+    source: &str,
+    file: &str,
+    cops: &[Box<dyn Cop>],
+    measure: bool,
+) -> TimedNativeOffenses {
     let mut sink: Vec<Offense> = Vec::new();
-    match parse(source) {
+    let parse_started = measure.then(Instant::now);
+    let parsed = parse(source);
+    let parse_micros = parse_started
+        .map(|started| started.elapsed().as_micros())
+        .unwrap_or(0);
+    let mut cops_micros = 0;
+
+    match parsed {
         Ok(ast) => {
+            let cops_started = measure.then(Instant::now);
             run_cops(&ast, file, cops, &mut sink);
+            cops_micros = cops_started
+                .map(|started| started.elapsed().as_micros())
+                .unwrap_or(0);
         }
         Err(e) => {
             // Use `e.message` verbatim (prism's first-error text); the Display
@@ -442,7 +472,11 @@ fn lint_source(source: &str, file: &str, cops: &[Box<dyn Cop>]) -> Vec<Offense> 
             ));
         }
     }
-    apply_inline_directive_filter(sink, source)
+    TimedNativeOffenses {
+        offenses: apply_inline_directive_filter(sink, source),
+        parse_micros,
+        cops_micros,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -854,24 +888,79 @@ fn lint_files_memoized_debug(
         let parsed = parse_jobs
             .par_iter()
             .map(|(content, representative)| {
-                let mut base = lint_source(content, representative, registry.native_cops());
-                base.extend(lint_source_mruby(content, representative, mruby_cops));
-                (content.clone(), base)
+                let (mut base, native_micros, parse_micros, cops_micros) = if debug {
+                    let native_start = Instant::now();
+                    let timed = lint_source_timed(content, representative, registry.native_cops());
+                    (
+                        timed.offenses,
+                        native_start.elapsed().as_micros(),
+                        timed.parse_micros,
+                        timed.cops_micros,
+                    )
+                } else {
+                    (
+                        lint_source(content, representative, registry.native_cops()),
+                        0,
+                        0,
+                        0,
+                    )
+                };
+
+                let mruby_micros = if debug {
+                    let mruby_start = Instant::now();
+                    base.extend(lint_source_mruby(content, representative, mruby_cops));
+                    mruby_start.elapsed().as_micros()
+                } else {
+                    base.extend(lint_source_mruby(content, representative, mruby_cops));
+                    0
+                };
+
+                (
+                    content.clone(),
+                    base,
+                    native_micros,
+                    parse_micros,
+                    cops_micros,
+                    mruby_micros,
+                )
             })
-            .collect::<Vec<(String, Vec<Offense>)>>();
+            .collect::<Vec<(String, Vec<Offense>, u128, u128, u128, u128)>>();
         if debug {
-            let offense_count: usize = parsed.iter().map(|(_, offenses)| offenses.len()).sum();
+            let offense_count: usize = parsed
+                .iter()
+                .map(|(_, offenses, _, _, _, _)| offenses.len())
+                .sum();
+            let native_micros: u128 = parsed
+                .iter()
+                .map(|(_, _, native_micros, _, _, _)| native_micros)
+                .sum();
+            let parse_micros: u128 = parsed
+                .iter()
+                .map(|(_, _, _, parse_micros, _, _)| parse_micros)
+                .sum();
+            let cops_micros: u128 = parsed
+                .iter()
+                .map(|(_, _, _, _, cops_micros, _)| cops_micros)
+                .sum();
+            let mruby_micros: u128 = parsed
+                .iter()
+                .map(|(_, _, _, _, _, mruby_micros)| mruby_micros)
+                .sum();
             eprintln!(
-                "murphy: debug: batch {}/{} lint unique={} offenses={} elapsed_ms={}",
+                "murphy: debug: batch {}/{} lint unique={} offenses={} native_ms={} parse_ms={} cops_ms={} mruby_ms={} elapsed_ms={}",
                 batch_index + 1,
                 batch_count,
                 parsed.len(),
                 offense_count,
+                native_micros / 1_000,
+                parse_micros / 1_000,
+                cops_micros / 1_000,
+                mruby_micros / 1_000,
                 started.elapsed().as_millis()
             );
         }
 
-        for (content, base_offenses) in parsed {
+        for (content, base_offenses, _, _, _, _) in parsed {
             by_content
                 .get_mut(&content)
                 .expect("parsed content must still exist")

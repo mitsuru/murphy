@@ -233,6 +233,10 @@ impl Cop for PluginFileCop {
         self.run_call_node(node, ctx, sink, 0);
     }
 
+    fn observes_call_nodes(&self) -> bool {
+        self.run_call_dispatch.is_some()
+    }
+
     fn on_restricted_call_node(
         &self,
         node: &ruby_prism::CallNode<'_>,

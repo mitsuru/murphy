@@ -72,6 +72,10 @@ pub trait Cop: Send + Sync {
         sink: &mut Vec<Offense>,
     );
 
+    fn observes_call_nodes(&self) -> bool {
+        true
+    }
+
     fn on_restricted_call_node(
         &self,
         node: &ruby_prism::CallNode<'_>,
@@ -201,7 +205,7 @@ pub fn run_cops(ast: &Ast<'_>, file: &str, cops: &[Box<dyn Cop>], sink: &mut Vec
                         dispatch_id: dispatch.dispatch_id,
                     });
             }
-        } else {
+        } else if cop.observes_call_nodes() {
             unrestricted_cops.push(cop.as_ref());
         }
     }
@@ -277,6 +281,36 @@ mod tests {
         let cops: Vec<Box<dyn Cop>> = vec![Box::new(CountingStubCop), Box::new(CountingStubCop)];
         run_cops(&ast, "t.rb", &cops, &mut sink);
         assert_eq!(sink.len(), 4);
+    }
+
+    struct FileOnlyStubCop;
+
+    impl Cop for FileOnlyStubCop {
+        fn name(&self) -> &str {
+            "Test/FileOnly"
+        }
+
+        fn observes_call_nodes(&self) -> bool {
+            false
+        }
+
+        fn on_call_node(
+            &self,
+            _node: &ruby_prism::CallNode<'_>,
+            _ctx: &CopContext<'_>,
+            _sink: &mut Vec<Offense>,
+        ) {
+            panic!("file-only cops must not receive call nodes");
+        }
+    }
+
+    #[test]
+    fn dispatch_skips_cops_that_do_not_observe_call_nodes() {
+        let ast = parse("foo; bar\n").unwrap();
+        let mut sink = Vec::new();
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(FileOnlyStubCop)];
+        run_cops(&ast, "t.rb", &cops, &mut sink);
+        assert!(sink.is_empty());
     }
 
     /// Test-only stub cop "A": one offense per call node at the selector
