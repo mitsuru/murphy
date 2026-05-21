@@ -487,17 +487,19 @@ end
 "#;
 
 fn rewrite_isolated_exception_as_sandbox_violation(offenses: &mut [Offense]) {
-    if let [offense] = offenses
-        && offense.severity == Severity::Error
-        && offense
-            .message
-            .contains("raised an exception (isolated; design")
-    {
-        offense.message = "Sandbox violation: denied capability".to_owned();
-        offense.range = Range {
-            start_offset: 0,
-            end_offset: 0,
-        };
+    if offenses.len() == 1 {
+        let offense = &mut offenses[0];
+        if offense.severity == Severity::Error
+            && offense
+                .message
+                .contains("raised an exception (isolated; design")
+        {
+            offense.message = "Sandbox violation: denied capability".to_owned();
+            offense.range = Range {
+                start_offset: 0,
+                end_offset: 0,
+            };
+        }
     }
 }
 
