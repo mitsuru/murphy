@@ -65,6 +65,21 @@ fn parse_rails_cop_metadata(root: &Path) -> (Vec<String>, Vec<String>) {
     (names, patterns)
 }
 
+const RAILS_COPS_DISABLED_BY_DEFAULT: [&str; 12] = [
+    "Rails/ActionFilter",
+    "Rails/DefaultScope",
+    "Rails/Env",
+    "Rails/EnvironmentVariableAccess",
+    "Rails/OrderById",
+    "Rails/PluckId",
+    "Rails/RequireDependency",
+    "Rails/ReversibleMigrationMethodDefinition",
+    "Rails/SaveBang",
+    "Rails/SchemaComment",
+    "Rails/TableNameAssignment",
+    "Rails/UnusedIgnoredColumns",
+];
+
 #[test]
 fn configured_missing_native_pack_exits_2_with_empty_stdout() {
     let dir = tempdir().expect("create tempdir");
@@ -486,6 +501,10 @@ fn rails_native_pack_loads_expected_cops() {
 
     let (required, patterns) = parse_rails_cop_metadata(&root);
     assert_eq!(required.len(), 138, "expected 138 rails cops in repository");
+    let required_enabled_by_default: Vec<String> = required
+        .into_iter()
+        .filter(|name| !RAILS_COPS_DISABLED_BY_DEFAULT.contains(&name.as_str()))
+        .collect();
     assert!(
         !patterns.is_empty(),
         "expected non-empty patterns from rails cops"
@@ -519,19 +538,85 @@ fn rails_native_pack_loads_expected_cops() {
     names.sort_unstable();
     names.dedup();
 
-    let required = required.into_iter().collect::<Vec<_>>();
     assert_eq!(
         names.len(),
-        required.len(),
+        required_enabled_by_default.len(),
         "expected {} rails cops in sample output, got {names:?}",
-        required.len()
+        required_enabled_by_default.len()
     );
-    for required_name in required {
+    for required_name in required_enabled_by_default {
         assert!(
             names.contains(&required_name.as_str()),
             "expected rails pack offense for {required_name}, got {names:?}"
         );
     }
+
+    for disabled_name in RAILS_COPS_DISABLED_BY_DEFAULT {
+        assert!(
+            !names.contains(&disabled_name),
+            "default-disabled rails cop should not emit offense by default: {disabled_name}"
+        );
+    }
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn rails_native_pack_can_enable_default_disabled_cop() {
+    let root = workspace_root();
+    let status = std::process::Command::new("cargo")
+        .current_dir(&root)
+        .args(["build", "-p", "murphy-rails"])
+        .status()
+        .expect("run cargo build for rails pack");
+    assert!(status.success(), "rails pack must build before e2e test");
+
+    let dir = tempdir().expect("create tempdir");
+    let target = target_dir(&root);
+    let dylib_name = format!(
+        "{}murphy_rails{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let dylib = target.join("debug").join(dylib_name);
+    fs::write(
+        dir.path().join("murphy.toml"),
+        format!(
+            "[[cop_packs]]\nname = \"murphy-rails\"\npath = {}\nversion = \"0.1.0\"\n\n[cops.rules.\"Rails/ActionFilter\"]\nenabled = true\n",
+            format_args!("{:?}", dylib.to_string_lossy())
+        ),
+    )
+    .expect("write config");
+
+    let (_required, patterns) = parse_rails_cop_metadata(&root);
+    let source = patterns
+        .into_iter()
+        .map(|token| format!("# {token}\n"))
+        .collect::<Vec<_>>()
+        .join("");
+    fs::write(dir.path().join("rails_sample.rb"), source).expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("rails_sample.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    let names = parsed
+        .iter()
+        .filter_map(|offense| offense["cop_name"].as_str())
+        .filter(|name| name.starts_with("Rails/"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        names.contains(&"Rails/ActionFilter"),
+        "explicitly enabled ActionFilter should emit offense with a source token match"
+    );
 }
 
 #[test]

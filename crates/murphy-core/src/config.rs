@@ -153,7 +153,7 @@ impl MurphyConfig {
             .rules
             .get(name)
             .and_then(|rule| rule.enabled)
-            .unwrap_or(true)
+            .unwrap_or(!is_cop_disabled_by_default(name))
     }
 
     pub fn severity_override(&self, name: &str) -> Option<Severity> {
@@ -175,6 +175,24 @@ impl MurphyConfig {
             }
         }
         serde_json::to_vec(&options).unwrap_or_else(|_| b"{}".to_vec())
+    }
+}
+
+fn is_cop_disabled_by_default(name: &str) -> bool {
+    match name {
+        "Rails/ActionFilter"
+        | "Rails/DefaultScope"
+        | "Rails/Env"
+        | "Rails/EnvironmentVariableAccess"
+        | "Rails/OrderById"
+        | "Rails/PluckId"
+        | "Rails/RequireDependency"
+        | "Rails/ReversibleMigrationMethodDefinition"
+        | "Rails/SaveBang"
+        | "Rails/SchemaComment"
+        | "Rails/TableNameAssignment"
+        | "Rails/UnusedIgnoredColumns" => true,
+        _ => false,
     }
 }
 
@@ -330,6 +348,51 @@ Exclude = ["db/schema.rb"]
                 "db/schema.rb".to_string()
             )]))
         );
+    }
+
+    #[test]
+    fn cop_enabled_is_false_for_rails_cops_disabled_by_default() {
+        let cfg = MurphyConfig::from_toml_str("").expect("empty config parses");
+
+        const DISABLED_BY_DEFAULT: [&str; 12] = [
+            "Rails/ActionFilter",
+            "Rails/DefaultScope",
+            "Rails/Env",
+            "Rails/EnvironmentVariableAccess",
+            "Rails/OrderById",
+            "Rails/PluckId",
+            "Rails/RequireDependency",
+            "Rails/ReversibleMigrationMethodDefinition",
+            "Rails/SaveBang",
+            "Rails/SchemaComment",
+            "Rails/TableNameAssignment",
+            "Rails/UnusedIgnoredColumns",
+        ];
+
+        for name in DISABLED_BY_DEFAULT {
+            assert!(
+                !cfg.cop_enabled(name),
+                "{name} should be disabled by default"
+            );
+        }
+
+        assert!(cfg.cop_enabled("Rails/ActionControllerTestCase"));
+        assert!(cfg.cop_enabled("Rails/ActionControllerFlashBeforeRender"));
+        assert!(cfg.cop_enabled("Rails/AddColumnIndex"));
+        assert!(cfg.cop_enabled("Unknown/Foo"));
+    }
+
+    #[test]
+    fn cop_enabled_can_override_default_for_rails_cop() {
+        let cfg = MurphyConfig::from_toml_str(
+            r#"
+[cops.rules."Rails/ActionFilter"]
+enabled = true
+"#,
+        )
+        .expect("config parses");
+
+        assert!(cfg.cop_enabled("Rails/ActionFilter"));
     }
 
     #[test]
