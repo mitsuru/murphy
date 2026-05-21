@@ -12,7 +12,8 @@ struct ProfileInvocation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProfileKind {
     Parse,
-    NativeCop,
+    NativeCopFile,
+    NativeCopDispatch,
     MrubyCop,
 }
 
@@ -20,7 +21,8 @@ impl ProfileKind {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Parse => "parse",
-            Self::NativeCop => "native_cop",
+            Self::NativeCopFile => "native_cop_file",
+            Self::NativeCopDispatch => "native_cop_dispatch",
             Self::MrubyCop => "mruby_cop",
         }
     }
@@ -28,8 +30,9 @@ impl ProfileKind {
     fn order_key(self) -> u8 {
         match self {
             Self::Parse => 0,
-            Self::NativeCop => 1,
-            Self::MrubyCop => 2,
+            Self::NativeCopFile => 1,
+            Self::NativeCopDispatch => 2,
+            Self::MrubyCop => 3,
         }
     }
 }
@@ -39,14 +42,32 @@ pub struct ProfileSummary {
     /// Cop -> total wall time across all observed invocations (microseconds).
     cop_wall_micros: BTreeMap<String, u64>,
 
+    /// Cop -> wall time spent in inspect_file stage.
+    cop_file_wall_micros: BTreeMap<String, u64>,
+
+    /// Cop -> wall time spent in dispatch stage.
+    cop_dispatch_wall_micros: BTreeMap<String, u64>,
+
     /// Cop -> file -> wall time for that pair (microseconds).
     cop_file_micros: BTreeMap<String, BTreeMap<String, u64>>,
+
+    /// Cop -> file -> wall time spent in inspect_file stage.
+    cop_file_stage_file_micros: BTreeMap<String, BTreeMap<String, u64>>,
+
+    /// Cop -> file -> wall time spent in dispatch stage.
+    cop_dispatch_stage_file_micros: BTreeMap<String, BTreeMap<String, u64>>,
 
     /// File -> total wall time (native + mruby cop invocations on that file, microseconds).
     file_total_micros: BTreeMap<String, u64>,
 
     /// Number of cop-file invocations recorded for each cop.
     cop_invocation_count: BTreeMap<String, u64>,
+
+    /// Number of inspect_file invocations recorded for each cop.
+    cop_file_invocation_count: BTreeMap<String, u64>,
+
+    /// Number of dispatch invocations recorded for each cop.
+    cop_dispatch_invocation_count: BTreeMap<String, u64>,
 
     /// Raw per-invocation wall times for p95 calculation (microseconds).
     cop_invocation_samples: Vec<u64>,
@@ -89,12 +110,12 @@ impl ProfileSummary {
         self.timeline.push(invocation);
     }
 
-    fn record(&mut self, cop: &str, file: &str, micros: u64) {
+    fn record(&mut self, kind: ProfileKind, cop: &str, file: &str, micros: u64) {
         if micros == 0 {
             return;
         }
 
-        self.push_invocation(ProfileKind::NativeCop, Some(cop.to_string()), file, micros);
+        self.push_invocation(kind, Some(cop.to_string()), file, micros);
         *self.cop_wall_micros.entry(cop.to_string()).or_default() += micros;
         *self
             .cop_file_micros
@@ -107,11 +128,54 @@ impl ProfileSummary {
             .cop_invocation_count
             .entry(cop.to_string())
             .or_default() += 1;
+
+        match kind {
+            ProfileKind::NativeCopFile => {
+                *self
+                    .cop_file_wall_micros
+                    .entry(cop.to_string())
+                    .or_default() += micros;
+                *self
+                    .cop_file_stage_file_micros
+                    .entry(cop.to_string())
+                    .or_default()
+                    .entry(file.to_string())
+                    .or_default() += micros;
+                *self
+                    .cop_file_invocation_count
+                    .entry(cop.to_string())
+                    .or_default() += 1;
+            }
+            ProfileKind::NativeCopDispatch => {
+                *self
+                    .cop_dispatch_wall_micros
+                    .entry(cop.to_string())
+                    .or_default() += micros;
+                *self
+                    .cop_dispatch_stage_file_micros
+                    .entry(cop.to_string())
+                    .or_default()
+                    .entry(file.to_string())
+                    .or_default() += micros;
+                *self
+                    .cop_dispatch_invocation_count
+                    .entry(cop.to_string())
+                    .or_default() += 1;
+            }
+            ProfileKind::MrubyCop | ProfileKind::Parse => {
+                // parse and mruby are handled through dedicated code paths.
+            }
+        }
+
         self.cop_invocation_samples.push(micros);
     }
 
-    pub fn record_native(&mut self, cop: &str, file: &str, micros: u64) {
-        self.record(cop, file, micros);
+    pub fn record_native_file(&mut self, cop: &str, file: &str, micros: u64) {
+        self.record(ProfileKind::NativeCopFile, cop, file, micros);
+    }
+
+    pub fn record_native_dispatch(&mut self, cop: &str, file: &str, micros: u64) {
+        self.record(ProfileKind::NativeCopDispatch, cop, file, micros);
     }
 
     pub fn record_mruby(&mut self, cop: &str, file: &str, micros: u64) {
@@ -187,7 +251,13 @@ impl ProfileSummary {
 
         serde_json::json!({
             "cop_wall_micros": self.cop_wall_micros,
+            "cop_file_wall_micros": self.cop_file_wall_micros,
+            "cop_dispatch_wall_micros": self.cop_dispatch_wall_micros,
             "cop_file_micros": self.cop_file_micros,
+            "cop_file_stage_file_micros": self.cop_file_stage_file_micros,
+            "cop_dispatch_stage_file_micros": self.cop_dispatch_stage_file_micros,
+            "cop_file_invocation_count": self.cop_file_invocation_count,
+            "cop_dispatch_invocation_count": self.cop_dispatch_invocation_count,
             "p95_micros": self.p95_us(),
             "hot_files": hot_files,
             "invocation_count": self.cop_invocation_count,

@@ -55,7 +55,7 @@ mod profile;
 use murphy_core::{
     AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
     aggregate_with_config, ast_to_sexp, discover_with_config, migrate_rubocop_yml_to_murphy_toml,
-    parse, run_cop, run_cops, run_mruby_cop_isolated, run_to_fixpoint,
+    parse, run_cop_timed, run_cops, run_mruby_cop_isolated, run_to_fixpoint,
 };
 use murphy_reporting::{OutputFormat, format_lint_output};
 use profile::{
@@ -438,7 +438,8 @@ struct TimedNativeOffenses {
     offenses: Vec<Offense>,
     parse_micros: u128,
     cops_micros: u128,
-    cop_micros: Vec<(String, u64)>,
+    cop_file_micros: Vec<(String, u64)>,
+    cop_dispatch_micros: Vec<(String, u64)>,
 }
 
 fn lint_source_timed(
@@ -509,21 +510,24 @@ fn lint_source_impl(
         .map(|started| started.elapsed().as_micros())
         .unwrap_or(0);
     let mut cops_micros: u128 = 0;
-    let mut cop_micros: Vec<(String, u64)> = Vec::new();
+    let mut cop_file_micros: Vec<(String, u64)> = Vec::new();
+    let mut cop_dispatch_micros: Vec<(String, u64)> = Vec::new();
 
     match parsed {
         Ok(ast) => {
             if profile {
                 for cop in cops {
                     let cop_name = cop.name().to_string();
-                    let started = Instant::now();
                     let mut cop_sink: Vec<Offense> = Vec::new();
-                    run_cop(&ast, file, cop.as_ref(), &mut cop_sink);
+                    let timings = run_cop_timed(&ast, file, cop.as_ref(), &mut cop_sink);
                     sink.extend(cop_sink);
-                    let duration = started.elapsed().as_micros() as u64;
-                    cops_micros += u128::from(duration);
-                    if duration > 0 {
-                        cop_micros.push((cop_name, duration));
+                    cops_micros +=
+                        u128::from(timings.inspect_file_micros + timings.dispatch_micros);
+                    if timings.inspect_file_micros > 0 {
+                        cop_file_micros.push((cop_name.clone(), timings.inspect_file_micros));
+                    }
+                    if timings.dispatch_micros > 0 {
+                        cop_dispatch_micros.push((cop_name, timings.dispatch_micros));
                     }
                 }
             } else {
@@ -551,7 +555,8 @@ fn lint_source_impl(
         offenses: apply_inline_directive_filter(sink, source),
         parse_micros,
         cops_micros,
-        cop_micros,
+        cop_file_micros,
+        cop_dispatch_micros,
     }
 }
 
@@ -913,7 +918,8 @@ fn lint_files_memoized_debug(
         representative: String,
         paths: Vec<String>,
         base_offenses: Vec<Offense>,
-        native_cop_micros: Vec<(String, u64)>,
+        native_cop_file_micros: Vec<(String, u64)>,
+        native_cop_dispatch_micros: Vec<(String, u64)>,
         mruby_cop_micros: Vec<(String, u64)>,
     }
 
@@ -966,7 +972,8 @@ fn lint_files_memoized_debug(
                         representative: path.clone(),
                         paths: vec![path],
                         base_offenses: Vec::new(),
-                        native_cop_micros: Vec::new(),
+                        native_cop_file_micros: Vec::new(),
+                        native_cop_dispatch_micros: Vec::new(),
                         mruby_cop_micros: Vec::new(),
                     });
                     newly_seen.push(content_key);
@@ -992,28 +999,35 @@ fn lint_files_memoized_debug(
         let parsed = parse_jobs
             .par_iter()
             .map(|(content, representative)| {
-                let (mut base_offenses, parse_micros, cops_micros, native_cop_timings) =
-                    if should_measure_timings {
-                        let timed = lint_source_timed(
-                            content,
-                            representative,
-                            registry.native_cops(),
-                            should_record_profile,
-                        );
-                        (
-                            timed.offenses,
-                            timed.parse_micros,
-                            timed.cops_micros,
-                            timed.cop_micros,
-                        )
-                    } else {
-                        (
-                            lint_source(content, representative, registry.native_cops()),
-                            0,
-                            0,
-                            Vec::new(),
-                        )
-                    };
+                let (
+                    mut base_offenses,
+                    parse_micros,
+                    cops_micros,
+                    native_cop_file_micros,
+                    native_cop_dispatch_micros,
+                ) = if should_measure_timings {
+                    let timed = lint_source_timed(
+                        content,
+                        representative,
+                        registry.native_cops(),
+                        should_record_profile,
+                    );
+                    (
+                        timed.offenses,
+                        timed.parse_micros,
+                        timed.cops_micros,
+                        timed.cop_file_micros,
+                        timed.cop_dispatch_micros,
+                    )
+                } else {
+                    (
+                        lint_source(content, representative, registry.native_cops()),
+                        0,
+                        0,
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                };
 
                 let native_micros = parse_micros + cops_micros;
 
@@ -1050,7 +1064,8 @@ fn lint_files_memoized_debug(
                     parse_micros,
                     cops_micros,
                     mruby_micros,
-                    native_cop_timings,
+                    native_cop_file_micros,
+                    native_cop_dispatch_micros,
                     mruby_cop_timings,
                 )
             })
@@ -1063,27 +1078,28 @@ fn lint_files_memoized_debug(
                 u128,
                 Vec<(String, u64)>,
                 Vec<(String, u64)>,
+                Vec<(String, u64)>,
             )>>();
         if debug {
             let offense_count: usize = parsed
                 .iter()
-                .map(|(_, offenses, _, _, _, _, _, _)| offenses.len())
+                .map(|(_, offenses, _, _, _, _, _, _, _)| offenses.len())
                 .sum();
             let native_micros: u128 = parsed
                 .iter()
-                .map(|(_, _, native_micros, _, _, _, _, _)| native_micros)
+                .map(|(_, _, native_micros, _, _, _, _, _, _)| native_micros)
                 .sum();
             let parse_micros: u128 = parsed
                 .iter()
-                .map(|(_, _, _, parse_micros, _, _, _, _)| parse_micros)
+                .map(|(_, _, _, parse_micros, _, _, _, _, _)| parse_micros)
                 .sum();
             let cops_micros: u128 = parsed
                 .iter()
-                .map(|(_, _, _, _, cops_micros, _, _, _)| cops_micros)
+                .map(|(_, _, _, _, cops_micros, _, _, _, _)| cops_micros)
                 .sum();
             let mruby_micros: u128 = parsed
                 .iter()
-                .map(|(_, _, _, _, _, mruby_micros, _, _)| mruby_micros)
+                .map(|(_, _, _, _, _, mruby_micros, _, _, _)| mruby_micros)
                 .sum();
             eprintln!(
                 "murphy: debug: batch {}/{} lint unique={} offenses={} native_ms={} parse_ms={} cops_ms={} mruby_ms={} elapsed_ms={}",
@@ -1102,11 +1118,12 @@ fn lint_files_memoized_debug(
         for (
             content,
             base_offenses,
+            _native_micros,
             parse_micros,
-            _,
-            _,
-            _,
-            native_cop_timings,
+            _cops_micros,
+            _mruby_micros,
+            native_cop_file_timings,
+            native_cop_dispatch_timings,
             mruby_cop_timings,
         ) in parsed
         {
@@ -1119,10 +1136,16 @@ fn lint_files_memoized_debug(
                 let file = group.representative.clone();
                 if let Some(summary) = profile_summary.as_mut() {
                     summary.record_parse(&file, parse_micros);
-                    for (cop_name, micros) in &native_cop_timings {
-                        summary.record_native(cop_name, &file, *micros);
+                    for (cop_name, micros) in &native_cop_file_timings {
+                        summary.record_native_file(cop_name, &file, *micros);
                         group
-                            .native_cop_micros
+                            .native_cop_file_micros
+                            .push((cop_name.to_string(), *micros));
+                    }
+                    for (cop_name, micros) in &native_cop_dispatch_timings {
+                        summary.record_native_dispatch(cop_name, &file, *micros);
+                        group
+                            .native_cop_dispatch_micros
                             .push((cop_name.to_string(), *micros));
                     }
                     for (cop_name, micros) in &mruby_cop_timings {
@@ -1130,9 +1153,14 @@ fn lint_files_memoized_debug(
                         group.mruby_cop_micros.push((cop_name.to_string(), *micros));
                     }
                 } else {
-                    for (cop_name, micros) in &native_cop_timings {
+                    for (cop_name, micros) in &native_cop_file_timings {
                         group
-                            .native_cop_micros
+                            .native_cop_file_micros
+                            .push((cop_name.to_string(), *micros));
+                    }
+                    for (cop_name, micros) in &native_cop_dispatch_timings {
+                        group
+                            .native_cop_dispatch_micros
                             .push((cop_name.to_string(), *micros));
                     }
                     for (cop_name, micros) in &mruby_cop_timings {

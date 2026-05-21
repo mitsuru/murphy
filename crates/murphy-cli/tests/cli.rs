@@ -157,7 +157,13 @@ fn lint_profile_outputs_profile_json() {
         serde_json::from_str(stdout.trim_end()).expect("stdout must be a profile JSON object");
 
     assert!(parsed.get("cop_wall_micros").is_some());
+    assert!(parsed.get("cop_file_wall_micros").is_some());
+    assert!(parsed.get("cop_dispatch_wall_micros").is_some());
     assert!(parsed.get("cop_file_micros").is_some());
+    assert!(parsed.get("cop_file_stage_file_micros").is_some());
+    assert!(parsed.get("cop_dispatch_stage_file_micros").is_some());
+    assert!(parsed.get("cop_file_invocation_count").is_some());
+    assert!(parsed.get("cop_dispatch_invocation_count").is_some());
     assert!(
         parsed
             .get("p95_micros")

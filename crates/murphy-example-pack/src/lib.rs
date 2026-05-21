@@ -137,6 +137,7 @@ static COPS: [MurphyPluginCopV1; 3] = [
 
 static CALL_DISPATCH: [MurphyCallDispatchV1; 1] = [MurphyCallDispatchV1 {
     method_name: slice(EXAMPLE_CALL),
+    cop_index: 1,
     dispatch_id: EXAMPLE_CALL_DISPATCH_ID,
 }];
 

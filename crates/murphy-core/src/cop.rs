@@ -16,6 +16,7 @@
 use crate::Offense;
 use crate::parse::Ast;
 use ruby_prism::Visit;
+use std::time::Instant;
 
 /// Per-file context handed to a cop on each visit.
 ///
@@ -198,6 +199,74 @@ pub fn run_cops(ast: &Ast<'_>, file: &str, cops: &[Box<dyn Cop>], sink: &mut Vec
 /// Same dispatch as [`run_cops`], but for explicit cop references.
 pub fn run_cop(ast: &Ast<'_>, file: &str, cop: &dyn Cop, sink: &mut Vec<Offense>) {
     run_cops_ref(ast, file, &[cop], sink);
+}
+
+/// Timing data for a single cop execution split by phase.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CopRunTimings {
+    /// `cop.inspect_file` wall time in microseconds.
+    pub inspect_file_micros: u64,
+    /// AST dispatch (call/if/return/case/unless) wall time in microseconds.
+    pub dispatch_micros: u64,
+}
+
+/// Same dispatch as [`run_cop`], but split by phase.
+///
+/// `inspect_file_micros` measures only `inspect_file` execution.
+/// `dispatch_micros` measures the AST walk and any dispatch callbacks.
+pub fn run_cop_timed(
+    ast: &Ast<'_>,
+    file: &str,
+    cop: &dyn Cop,
+    sink: &mut Vec<Offense>,
+) -> CopRunTimings {
+    let mut unrestricted_cops = Vec::new();
+    let mut restricted_call_cops: std::collections::BTreeMap<Vec<u8>, Vec<RestrictedCallCop<'_>>> =
+        std::collections::BTreeMap::new();
+
+    if let Some(dispatches) = cop.restrict_on_send() {
+        for dispatch in dispatches {
+            restricted_call_cops
+                .entry(dispatch.method_name.clone())
+                .or_default()
+                .push(RestrictedCallCop {
+                    cop,
+                    dispatch_id: dispatch.dispatch_id,
+                });
+        }
+    } else if cop.observes_call_nodes() {
+        unrestricted_cops.push(cop);
+    }
+
+    let mut dispatcher = Dispatcher {
+        cops: &[cop],
+        unrestricted_cops,
+        restricted_call_cops,
+        ctx: CopContext {
+            file,
+            source: ast.source(),
+        },
+        sink,
+    };
+
+    let inspect_file_started = Instant::now();
+    for &cop in dispatcher.cops {
+        cop.inspect_file(&dispatcher.ctx, dispatcher.sink);
+    }
+    let inspect_file_micros = duration_micros(inspect_file_started.elapsed());
+
+    let dispatch_started = Instant::now();
+    dispatcher.visit(&ast.root());
+    let dispatch_micros = duration_micros(dispatch_started.elapsed());
+
+    CopRunTimings {
+        inspect_file_micros,
+        dispatch_micros,
+    }
+}
+
+fn duration_micros(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 fn run_cops_ref(ast: &Ast<'_>, file: &str, cops: &[&dyn Cop], sink: &mut Vec<Offense>) {

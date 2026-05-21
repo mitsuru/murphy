@@ -19,7 +19,7 @@ pub use autocorrect::{
     apply_edits_logged, run_to_fixpoint,
 };
 pub use config::{CopRule, MurphyConfig, migrate_rubocop_yml_to_murphy_toml};
-pub use cop::{Cop, CopContext, run_cop, run_cops};
+pub use cop::{Cop, CopContext, CopRunTimings, run_cop, run_cop_timed, run_cops};
 pub use cops::NoReceiverPuts;
 pub use discovery::{ConfigError, discover, discover_with_config};
 // Phase 3 Task 2 keystone — the mruby lifecycle/ownership wrapper. Task 3's
@@ -43,10 +43,11 @@ pub use parse::{Ast, ParseError, parse};
 #[cfg(not(target_os = "windows"))]
 pub use plugin::dynamic::{LoadedPluginPack, load_plugin_pack};
 pub use plugin::{
-    MURPHY_PLUGIN_ABI_VERSION, MurphyCallContext, MurphyCallDispatchV1, MurphyEmitOffense,
-    MurphyFileContext, MurphyPluginAutocorrect, MurphyPluginCopV1, MurphyPluginEdit,
-    MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunCallDispatch, MurphyRunFile,
-    MurphySlice, PluginFileCop, validate_plugin_cop_ids,
+    MURPHY_CALL_RECEIVER_FLOAT, MURPHY_CALL_RECEIVER_INTEGER, MURPHY_CALL_RECEIVER_NONE,
+    MURPHY_CALL_RECEIVER_OTHER, MURPHY_PLUGIN_ABI_VERSION, MurphyCallContext, MurphyCallDispatchV1,
+    MurphyEmitOffense, MurphyFileContext, MurphyPluginAutocorrect, MurphyPluginCopV1,
+    MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunCallDispatch,
+    MurphyRunFile, MurphySlice, PluginFileCop, validate_plugin_cop_ids,
 };
 pub use registry::CopRegistry;
 

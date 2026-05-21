@@ -3,7 +3,12 @@ use crate::{Autocorrect, Cop, CopContext, Edit, Offense, Range, Severity};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::ffi::c_void;
 
-pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 2;
+pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 3;
+
+pub const MURPHY_CALL_RECEIVER_NONE: u32 = 0;
+pub const MURPHY_CALL_RECEIVER_INTEGER: u32 = 1;
+pub const MURPHY_CALL_RECEIVER_FLOAT: u32 = 2;
+pub const MURPHY_CALL_RECEIVER_OTHER: u32 = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -60,6 +65,8 @@ pub struct MurphyCallContext {
     pub name: MurphySlice,
     pub dispatch_id: usize,
     pub message_range: MurphyRange,
+    pub receiver_kind: u32,
+    pub receiver_range: MurphyRange,
 }
 
 #[repr(C)]
@@ -74,6 +81,7 @@ pub struct MurphyPluginCopV1 {
 #[derive(Clone, Copy)]
 pub struct MurphyCallDispatchV1 {
     pub method_name: MurphySlice,
+    pub cop_index: usize,
     pub dispatch_id: usize,
 }
 
@@ -328,6 +336,7 @@ impl PluginFileCop {
             ptr: name.as_slice().as_ptr(),
             len: name.as_slice().len(),
         };
+        let (receiver_kind, receiver_range) = call_receiver_info(node);
         let call_ctx = MurphyCallContext {
             file,
             source,
@@ -335,6 +344,8 @@ impl PluginFileCop {
             name,
             dispatch_id,
             message_range: Range::from_prism_location(&message_loc).into(),
+            receiver_kind,
+            receiver_range,
         };
         let mut offense_sink = OffenseSink {
             file: ctx.file,
@@ -361,6 +372,27 @@ impl PluginFileCop {
             ));
         }
     }
+}
+
+fn call_receiver_info(node: &ruby_prism::CallNode<'_>) -> (u32, MurphyRange) {
+    let Some(receiver) = node.receiver() else {
+        return (
+            MURPHY_CALL_RECEIVER_NONE,
+            MurphyRange {
+                start_offset: 0,
+                end_offset: 0,
+            },
+        );
+    };
+    let receiver_kind = match receiver {
+        ruby_prism::Node::IntegerNode { .. } => MURPHY_CALL_RECEIVER_INTEGER,
+        ruby_prism::Node::FloatNode { .. } => MURPHY_CALL_RECEIVER_FLOAT,
+        _ => MURPHY_CALL_RECEIVER_OTHER,
+    };
+    (
+        receiver_kind,
+        Range::from_prism_location(&receiver.location()).into(),
+    )
 }
 
 fn parse_file_scope_globs(json: &[u8]) -> (Option<GlobSet>, Option<GlobSet>) {
@@ -680,7 +712,14 @@ pub mod dynamic {
             if raw_cops.is_empty() {
                 return Err("plugin registered call dispatch entries without any cops".to_string());
             }
-            restrict_on_send[0].push(CallDispatchRestriction {
+            if entry.cop_index >= raw_cops.len() {
+                return Err(format!(
+                    "plugin call dispatch cop_index {} out of range for {} cops",
+                    entry.cop_index,
+                    raw_cops.len()
+                ));
+            }
+            restrict_on_send[entry.cop_index].push(CallDispatchRestriction {
                 method_name: method_name.as_bytes().to_vec(),
                 dispatch_id: entry.dispatch_id,
             });

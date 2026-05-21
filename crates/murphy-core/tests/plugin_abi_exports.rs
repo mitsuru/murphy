@@ -27,6 +27,7 @@ static CALL_DISPATCH: [MurphyCallDispatchV1; 1] = [MurphyCallDispatchV1 {
         ptr: b"example_call".as_ptr(),
         len: b"example_call".len(),
     },
+    cop_index: 0,
     dispatch_id: 7,
 }];
 
@@ -63,6 +64,11 @@ fn native_plugin_abi_types_are_public() {
         },
         dispatch_id: CALL_DISPATCH[0].dispatch_id,
         message_range: MurphyRange {
+            start_offset: 0,
+            end_offset: 0,
+        },
+        receiver_kind: murphy_core::MURPHY_CALL_RECEIVER_NONE,
+        receiver_range: MurphyRange {
             start_offset: 0,
             end_offset: 0,
         },

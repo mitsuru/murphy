@@ -13,7 +13,7 @@ const fn slice(bytes: &'static [u8]) -> MurphySlice {
     }
 }
 
-static CALL_DISPATCH: [MurphyCallDispatchV1; 10] = [
+static CALL_DISPATCH: [MurphyCallDispatchV1; 42] = [
     output_dispatch(b"ap", OUTPUT_DISPATCH_ID),
     output_dispatch(b"p", OUTPUT_DISPATCH_ID),
     output_dispatch(b"pp", OUTPUT_DISPATCH_ID),
@@ -24,13 +24,60 @@ static CALL_DISPATCH: [MurphyCallDispatchV1; 10] = [
     output_dispatch(b"syswrite", OUTPUT_DISPATCH_ID),
     output_dispatch(b"write", OUTPUT_DISPATCH_ID),
     output_dispatch(b"write_nonblock", OUTPUT_DISPATCH_ID),
+    pluralization_dispatch(b"second", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"minute", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"hour", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"day", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"week", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"fortnight", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"month", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"year", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"byte", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"kilobyte", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"megabyte", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"gigabyte", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"terabyte", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"petabyte", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"exabyte", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"zettabyte", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"seconds", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"minutes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"hours", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"days", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"weeks", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"fortnights", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"months", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"years", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"bytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"kilobytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"megabytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"gigabytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"terabytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"petabytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"exabytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
+    pluralization_dispatch(b"zettabytes", PLURALIZATION_GRAMMAR_DISPATCH_ID),
 ];
 
+const OUTPUT_COP_INDEX: usize = 76;
 const OUTPUT_DISPATCH_ID: usize = 1;
+const PLURALIZATION_GRAMMAR_COP_INDEX: usize = 82;
+const PLURALIZATION_GRAMMAR_DISPATCH_ID: usize = 2;
 
 const fn output_dispatch(method_name: &'static [u8], dispatch_id: usize) -> MurphyCallDispatchV1 {
     MurphyCallDispatchV1 {
         method_name: slice(method_name),
+        cop_index: OUTPUT_COP_INDEX,
+        dispatch_id,
+    }
+}
+
+const fn pluralization_dispatch(
+    method_name: &'static [u8],
+    dispatch_id: usize,
+) -> MurphyCallDispatchV1 {
+    MurphyCallDispatchV1 {
+        method_name: slice(method_name),
+        cop_index: PLURALIZATION_GRAMMAR_COP_INDEX,
         dispatch_id,
     }
 }
@@ -46,6 +93,9 @@ unsafe extern "C" fn run_call_dispatch(
     let ctx_ref = unsafe { &*ctx };
     match ctx_ref.dispatch_id {
         OUTPUT_DISPATCH_ID => unsafe { cops::rails::output::run_call(ctx, emit, sink) },
+        PLURALIZATION_GRAMMAR_DISPATCH_ID => unsafe {
+            cops::rails::pluralization_grammar::run_call(ctx, emit, sink)
+        },
         _ => 0,
     }
 }
@@ -464,7 +514,7 @@ const COPS: [MurphyPluginCopV1; 138] = [
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cops::rails::pluralization_grammar::NAME,
-        run_file: Some(cops::rails::pluralization_grammar::run),
+        run_file: None,
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
