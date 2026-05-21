@@ -481,6 +481,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "murphy-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "murphy-core",
+ "ruby-prism",
+]
+
+[[package]]
 name = "murphy-rails"
 version = "0.1.0"
 dependencies = [

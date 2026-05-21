@@ -1,0 +1,13 @@
+[package]
+name = "murphy-plugin-api"
+version = "0.1.0"
+edition = "2024"
+description = "Safe, plugin-author-facing surface over the Murphy native plugin ABI."
+
+[dependencies]
+murphy-core = { path = "../murphy-core" }
+
+[dev-dependencies]
+# Used in unit tests that walk every ruby-prism Node variant to verify kinds::*
+# completeness.
+ruby-prism = "=1.9.0"
