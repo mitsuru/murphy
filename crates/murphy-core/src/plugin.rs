@@ -3,7 +3,11 @@ use crate::{Autocorrect, Cop, CopContext, Edit, Offense, Range, Severity};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::ffi::c_void;
 
-pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 3;
+pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 1;
+
+pub const MURPHY_CALL_ARGUMENT_KIND_OTHER: u32 = 0;
+pub const MURPHY_CALL_ARGUMENT_KIND_STRING: u32 = 1;
+pub const MURPHY_CALL_ARGUMENT_KIND_SYMBOL: u32 = 2;
 
 pub const MURPHY_CALL_RECEIVER_NONE: u32 = 0;
 pub const MURPHY_CALL_RECEIVER_INTEGER: u32 = 1;
@@ -18,7 +22,7 @@ pub struct MurphySlice {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MurphyRange {
     pub start_offset: u32,
     pub end_offset: u32,
@@ -58,6 +62,13 @@ pub struct MurphyFileContext {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct MurphyPluginCallArgument {
+    pub kind: u32,
+    pub range: MurphyRange,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct MurphyCallContext {
     pub file: MurphySlice,
     pub source: MurphySlice,
@@ -67,6 +78,8 @@ pub struct MurphyCallContext {
     pub message_range: MurphyRange,
     pub receiver_kind: u32,
     pub receiver_range: MurphyRange,
+    pub arguments_ptr: *const MurphyPluginCallArgument,
+    pub arguments_len: usize,
 }
 
 #[repr(C)]
@@ -105,6 +118,7 @@ unsafe impl Sync for MurphyPluginEdit {}
 unsafe impl Sync for MurphyPluginAutocorrect {}
 unsafe impl Sync for MurphyPluginOffense {}
 unsafe impl Sync for MurphyFileContext {}
+unsafe impl Sync for MurphyPluginCallArgument {}
 unsafe impl Sync for MurphyCallContext {}
 unsafe impl Sync for MurphyPluginCopV1 {}
 unsafe impl Sync for MurphyCallDispatchV1 {}
@@ -337,6 +351,7 @@ impl PluginFileCop {
             len: name.as_slice().len(),
         };
         let (receiver_kind, receiver_range) = call_receiver_info(node);
+        let arguments = call_argument_info(node);
         let call_ctx = MurphyCallContext {
             file,
             source,
@@ -346,6 +361,12 @@ impl PluginFileCop {
             message_range: Range::from_prism_location(&message_loc).into(),
             receiver_kind,
             receiver_range,
+            arguments_ptr: if arguments.is_empty() {
+                std::ptr::null()
+            } else {
+                arguments.as_ptr()
+            },
+            arguments_len: arguments.len(),
         };
         let mut offense_sink = OffenseSink {
             file: ctx.file,
@@ -371,6 +392,28 @@ impl PluginFileCop {
                 "native plugin callback failed",
             ));
         }
+    }
+}
+
+fn call_argument_info(node: &ruby_prism::CallNode<'_>) -> Vec<MurphyPluginCallArgument> {
+    let Some(arguments) = node.arguments() else {
+        return Vec::new();
+    };
+    arguments
+        .arguments()
+        .iter()
+        .map(|argument| MurphyPluginCallArgument {
+            kind: call_argument_kind(&argument),
+            range: Range::from_prism_location(&argument.location()).into(),
+        })
+        .collect()
+}
+
+fn call_argument_kind(argument: &ruby_prism::Node<'_>) -> u32 {
+    match argument {
+        ruby_prism::Node::StringNode { .. } => MURPHY_CALL_ARGUMENT_KIND_STRING,
+        ruby_prism::Node::SymbolNode { .. } => MURPHY_CALL_ARGUMENT_KIND_SYMBOL,
+        _ => MURPHY_CALL_ARGUMENT_KIND_OTHER,
     }
 }
 
@@ -795,6 +838,60 @@ mod tests {
         0
     }
 
+    unsafe extern "C" fn reject_empty_arguments_with_non_null_ptr(
+        ctx: *const MurphyCallContext,
+        _emit: MurphyEmitOffense,
+        _sink: *mut c_void,
+    ) -> i32 {
+        if ctx.is_null() {
+            return 1;
+        }
+        let ctx = unsafe { &*ctx };
+        if ctx.arguments_len == 0 && !ctx.arguments_ptr.is_null() {
+            return 1;
+        }
+        0
+    }
+
+    unsafe extern "C" fn reject_unexpected_argument_metadata(
+        ctx: *const MurphyCallContext,
+        _emit: MurphyEmitOffense,
+        _sink: *mut c_void,
+    ) -> i32 {
+        if ctx.is_null() {
+            return 1;
+        }
+        let ctx = unsafe { &*ctx };
+        if ctx.arguments_len != 2 || ctx.arguments_ptr.is_null() {
+            return 1;
+        }
+        let arguments = unsafe { std::slice::from_raw_parts(ctx.arguments_ptr, ctx.arguments_len) };
+        let expected = [
+            (
+                MURPHY_CALL_ARGUMENT_KIND_SYMBOL,
+                MurphyRange {
+                    start_offset: 7,
+                    end_offset: 12,
+                },
+            ),
+            (
+                MURPHY_CALL_ARGUMENT_KIND_STRING,
+                MurphyRange {
+                    start_offset: 14,
+                    end_offset: 20,
+                },
+            ),
+        ];
+        if arguments
+            .iter()
+            .zip(expected)
+            .any(|(actual, expected)| actual.kind != expected.0 || actual.range != expected.1)
+        {
+            return 1;
+        }
+        0
+    }
+
     #[test]
     fn rejects_duplicate_plugin_cop_id() {
         let existing: Vec<Box<dyn crate::Cop>> = vec![Box::new(NoReceiverPuts)];
@@ -1104,5 +1201,59 @@ mod tests {
         let cop = PluginFileCop::new("Plugin/Test".to_string(), noop_run_file);
 
         assert_eq!(cop.name(), "Plugin/Test");
+    }
+
+    #[test]
+    fn run_call_receives_null_argument_pointer_for_empty_arguments() {
+        let cop = PluginFileCop {
+            name: "Plugin/Arguments".to_string(),
+            run_file: None,
+            run_call_dispatch: Some(reject_empty_arguments_with_non_null_ptr),
+            restrict_on_send: vec![CallDispatchRestriction {
+                method_name: b"target".to_vec(),
+                dispatch_id: 1,
+            }],
+            include_globs: None,
+            exclude_globs: None,
+            config_json: b"{}".to_vec(),
+            call_config_json: b"{}".to_vec(),
+            #[cfg(not(target_os = "windows"))]
+            _library: None,
+        };
+        let source = "target\n";
+        let ast = crate::parse(source).expect("test source parses");
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(cop)];
+        let mut offenses = Vec::new();
+
+        crate::run_cops(&ast, "t.rb", &cops, &mut offenses);
+
+        assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn run_call_receives_argument_kinds_and_ranges() {
+        let cop = PluginFileCop {
+            name: "Plugin/Arguments".to_string(),
+            run_file: None,
+            run_call_dispatch: Some(reject_unexpected_argument_metadata),
+            restrict_on_send: vec![CallDispatchRestriction {
+                method_name: b"target".to_vec(),
+                dispatch_id: 1,
+            }],
+            include_globs: None,
+            exclude_globs: None,
+            config_json: b"{}".to_vec(),
+            call_config_json: b"{}".to_vec(),
+            #[cfg(not(target_os = "windows"))]
+            _library: None,
+        };
+        let source = "target :show, \"path\"\n";
+        let ast = crate::parse(source).expect("test source parses");
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(cop)];
+        let mut offenses = Vec::new();
+
+        crate::run_cops(&ast, "t.rb", &cops, &mut offenses);
+
+        assert!(offenses.is_empty());
     }
 }

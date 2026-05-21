@@ -36,6 +36,10 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Native Plugin ABI
+
+- Do NOT bump `MURPHY_PLUGIN_ABI_VERSION` without explicit user approval. The native plugin ABI is still evolving under version `1`; changing structs or behavior does not by itself justify increasing the numeric version.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ccf33ec3 -->
 ## Beads Issue Tracker
 

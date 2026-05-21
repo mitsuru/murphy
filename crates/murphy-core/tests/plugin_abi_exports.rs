@@ -1,5 +1,7 @@
 use murphy_core::{
-    MurphyCallContext, MurphyCallDispatchV1, MurphyEmitOffense, MurphyFileContext,
+    MURPHY_CALL_ARGUMENT_KIND_OTHER, MURPHY_CALL_ARGUMENT_KIND_STRING,
+    MURPHY_CALL_ARGUMENT_KIND_SYMBOL, MURPHY_PLUGIN_ABI_VERSION, MurphyCallContext,
+    MurphyCallDispatchV1, MurphyEmitOffense, MurphyFileContext, MurphyPluginCallArgument,
     MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange,
     MurphyRunCallDispatch, MurphyRunFile, MurphySlice,
 };
@@ -33,11 +35,16 @@ static CALL_DISPATCH: [MurphyCallDispatchV1; 1] = [MurphyCallDispatchV1 {
 
 #[test]
 fn native_plugin_abi_types_are_public() {
+    assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 1);
+    assert_eq!(MURPHY_CALL_ARGUMENT_KIND_OTHER, 0);
+    assert_eq!(MURPHY_CALL_ARGUMENT_KIND_STRING, 1);
+    assert_eq!(MURPHY_CALL_ARGUMENT_KIND_SYMBOL, 2);
     let _ = std::mem::size_of::<MurphySlice>();
     let _ = std::mem::size_of::<MurphyRange>();
     let _ = std::mem::size_of::<MurphyPluginOffense>();
     let _ = std::mem::size_of::<MurphyFileContext>();
     let _ = std::mem::size_of::<MurphyCallContext>();
+    let _ = std::mem::size_of::<MurphyPluginCallArgument>();
     let _ = std::mem::size_of::<MurphyPluginCopV1>();
     let _ = std::mem::size_of::<MurphyCallDispatchV1>();
     let _ = std::mem::size_of::<MurphyPluginV1>();
@@ -45,6 +52,13 @@ fn native_plugin_abi_types_are_public() {
     let _: Option<MurphyEmitOffense> = None;
     let _: Option<MurphyRunFile> = None;
     let _: Option<MurphyRunCallDispatch> = None;
+    let argument = MurphyPluginCallArgument {
+        kind: MURPHY_CALL_ARGUMENT_KIND_OTHER,
+        range: MurphyRange {
+            start_offset: 0,
+            end_offset: 0,
+        },
+    };
     let _ = MurphyCallContext {
         file: MurphySlice {
             ptr: std::ptr::null(),
@@ -72,6 +86,8 @@ fn native_plugin_abi_types_are_public() {
             start_offset: 0,
             end_offset: 0,
         },
+        arguments_ptr: &argument,
+        arguments_len: 1,
     };
 }
 

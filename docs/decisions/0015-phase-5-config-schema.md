@@ -49,6 +49,6 @@ to grow its own schema deliberately through ADRs.
 ## Follow-up
 
 `murphy-4n9.6` extends `cops.rules` after Phase 5 by preserving arbitrary
-per-cop option keys and passing them to native plugin packs through ABI v2. The
+per-cop option keys and passing them to native plugin packs through ABI v1. The
 Phase 5 decision still owns `enabled` and `severity`; plugin packs interpret the
 additional RuboCop-compatible option keys per cop.

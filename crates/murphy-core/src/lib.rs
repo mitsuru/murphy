@@ -43,11 +43,13 @@ pub use parse::{Ast, ParseError, parse};
 #[cfg(not(target_os = "windows"))]
 pub use plugin::dynamic::{LoadedPluginPack, load_plugin_pack};
 pub use plugin::{
-    MURPHY_CALL_RECEIVER_FLOAT, MURPHY_CALL_RECEIVER_INTEGER, MURPHY_CALL_RECEIVER_NONE,
-    MURPHY_CALL_RECEIVER_OTHER, MURPHY_PLUGIN_ABI_VERSION, MurphyCallContext, MurphyCallDispatchV1,
-    MurphyEmitOffense, MurphyFileContext, MurphyPluginAutocorrect, MurphyPluginCopV1,
-    MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunCallDispatch,
-    MurphyRunFile, MurphySlice, PluginFileCop, validate_plugin_cop_ids,
+    MURPHY_CALL_ARGUMENT_KIND_OTHER, MURPHY_CALL_ARGUMENT_KIND_STRING,
+    MURPHY_CALL_ARGUMENT_KIND_SYMBOL, MURPHY_CALL_RECEIVER_FLOAT, MURPHY_CALL_RECEIVER_INTEGER,
+    MURPHY_CALL_RECEIVER_NONE, MURPHY_CALL_RECEIVER_OTHER, MURPHY_PLUGIN_ABI_VERSION,
+    MurphyCallContext, MurphyCallDispatchV1, MurphyEmitOffense, MurphyFileContext,
+    MurphyPluginAutocorrect, MurphyPluginCallArgument, MurphyPluginCopV1, MurphyPluginEdit,
+    MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunCallDispatch, MurphyRunFile,
+    MurphySlice, PluginFileCop, validate_plugin_cop_ids,
 };
 pub use registry::CopRegistry;
 

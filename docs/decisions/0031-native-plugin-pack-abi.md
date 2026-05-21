@@ -13,12 +13,12 @@ turns ABI shape, cop identity, and versioning into public contracts.
 ## Decision
 
 Native packs are loaded as `cdylib` libraries through a C-compatible ABI. The
-current provisional ABI version is `2`. A pack must export `murphy_plugin_abi_version` and
+current provisional ABI version is `1`. A pack must export `murphy_plugin_abi_version` and
 `murphy_register_plugin`. Murphy rejects missing symbols, ABI mismatches,
 registration failures, duplicate cop IDs, invalid UTF-8 names, and invalid ranges
 as setup errors.
 
-ABI v2 passes RuboCop-compatible cop options to native callbacks as UTF-8 JSON
+ABI v1 passes RuboCop-compatible cop options to native callbacks as UTF-8 JSON
 bytes. `MurphyFileContext.config` contains only the current cop's option object
 from `[cops.rules."Cop/Name"]`, excluding Murphy-owned `enabled` and
 `severity`.
@@ -29,7 +29,10 @@ matching files from consideration when both are present. Patterns use
 `globset` semantics and normalized forward-slash paths.
 
 `MurphyCallContext.config` is a pack-level JSON object keyed by cop ID because a
-single pack dispatch callback may emit offenses for multiple cops.
+single pack dispatch callback may emit offenses for multiple cops. The call
+context also carries call argument metadata as pointer-length pairs over
+callback-scoped `MurphyPluginCallArgument` values; pack authors must not retain
+those pointers after the callback returns.
 
 Path normalization in the scope matcher forbids parent-directory traversal
 (`"../"` or `"a/../b"`) at matching time; such paths are treated as outside

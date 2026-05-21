@@ -35,7 +35,7 @@ Run: `cargo test -p murphy-core config::tests::cop_rule_preserves_rubocop_compat
 
 Expected: PASS.
 
-### Task 2: Pass Config Through Plugin ABI v2
+### Task 2: Pass Config Through Plugin ABI v1
 
 **Files:**
 - Modify: `crates/murphy-core/src/plugin.rs`
@@ -52,9 +52,9 @@ Run: `cargo test -p murphy-core plugin::tests::run_file_receives_cop_config_json
 
 Expected: compile failure because ABI contexts have no `config` field.
 
-- [ ] **Step 3: Implement ABI v2 context fields**
+- [ ] **Step 3: Implement ABI v1 context fields**
 
-Bump `MURPHY_PLUGIN_ABI_VERSION` to `2`. Add `config: MurphySlice` to `MurphyFileContext` and `MurphyCallContext`. Store config JSON in `PluginFileCop`, pass it from `registry` using the matching cop rule options.
+Keep `MURPHY_PLUGIN_ABI_VERSION` at `1`. Add `config: MurphySlice` to `MurphyFileContext` and `MurphyCallContext`. Store config JSON in `PluginFileCop`, pass it from `registry` using the matching cop rule options.
 
 - [ ] **Step 4: Run test and verify GREEN**
 
@@ -97,4 +97,4 @@ Expected: all PASS.
 
 - Covers parser option retention, ABI transport, plugin behavior, and docs.
 - Leaves full RuboCop option semantics to individual cops, which matches the approved scope.
-- Uses ABI v2 because plugin ABI is explicitly still provisional.
+- Uses ABI v1 because plugin ABI is explicitly still provisional and should not be renumbered without explicit approval.
