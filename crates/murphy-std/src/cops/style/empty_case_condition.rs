@@ -166,7 +166,7 @@ mod tests {
             // Offense range: the `case` keyword token at the node start.
             // `CaseMatch` is not in `keyword_bearing`, so we find the token
             // by searching from the node's expression start.
-            use murphy_plugin_api::{Range, SourceTokenKind};
+            use murphy_plugin_api::SourceTokenKind;
             let node_start = cx.range(node).start;
             let kw_range = cx
                 .token_after(node_start)
