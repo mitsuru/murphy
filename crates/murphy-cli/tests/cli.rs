@@ -35,6 +35,8 @@ fn lint_clean_file_exits_0_with_empty_json_array() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(0);
@@ -58,6 +60,8 @@ fn lint_dirty_file_exits_1_with_one_offense() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(1);
@@ -77,6 +81,85 @@ fn lint_dirty_file_exits_1_with_one_offense() {
 }
 
 #[test]
+fn lint_format_progress_omits_offense_details() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dirty.rb");
+    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("progress")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("Inspecting 1 file"),
+        "progress output should include header, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("1 offense detected"),
+        "progress output should include summary, got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Murphy/NoReceiverPuts"),
+        "progress output should omit offense details, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn lint_default_output_is_human_readable() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dirty.rb");
+    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("Inspecting 1 file"),
+        "default output should include human progress header, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("C"),
+        "default output should include progress markers, got: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Murphy/NoReceiverPuts"),
+        "default output should include offense details, got: {stdout:?}"
+    );
+}
+
+#[test]
+fn lint_format_json_preserves_machine_readable_stdout() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dirty.rb");
+    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> = serde_json::from_slice(&assert.get_output().stdout)
+        .expect("--format json stdout must be a JSON array");
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+}
+
+#[test]
 fn lint_file_with_disable_comment_suppresses_offenses() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("with_disable.rb");
@@ -89,6 +172,8 @@ fn lint_file_with_disable_comment_suppresses_offenses() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(0);
@@ -105,6 +190,8 @@ fn lint_debug_emits_progress_to_stderr_without_touching_stdout_json() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("--debug")
         .arg(&path)
         .assert()
@@ -170,6 +257,8 @@ fn lint_file_with_disable_then_enable_comment_only_reattaches() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(1);
@@ -197,6 +286,8 @@ fn lint_file_with_todo_comment_skips_current_line_only() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(1);
@@ -224,6 +315,8 @@ fn lint_file_with_todo_without_cop_suppresses_all_offenses_on_line() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(1);
@@ -251,6 +344,8 @@ fn lint_file_with_disable_comment_does_not_hide_syntax_offenses() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(1);
@@ -274,6 +369,8 @@ fn lint_missing_file_exits_2() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(2);
@@ -304,6 +401,8 @@ fn lint_syntax_error_file_exits_1_with_one_syntax_offense() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(1);
@@ -379,6 +478,8 @@ fn lint_multi_file_with_one_missing_exits_2() {
         .expect("murphy binary builds")
         .current_dir(dir.path())
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("good.rb")
         .arg("does_not_exist.rb")
         .assert()
@@ -408,6 +509,8 @@ fn lint_clean_only_stdout_is_exactly_empty_array() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(0);
@@ -436,6 +539,8 @@ fn lint_offense_run_stderr_is_empty() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&path)
         .assert()
         .code(1);
@@ -507,6 +612,8 @@ fn lint_directory_discovers_and_applies_murphy_toml_exclude() {
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(".")
         .assert()
         .code(1);
@@ -542,6 +649,8 @@ fn lint_zero_paths_discovers_cwd() {
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .assert()
         .code(0);
 
@@ -566,6 +675,8 @@ fn lint_directory_with_malformed_murphy_toml_exits_2() {
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(".")
         .assert()
         .code(2);
@@ -592,6 +703,8 @@ fn cops_config_can_disable_native_cop() {
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .assert()
         .code(0);
 
@@ -613,6 +726,8 @@ fn cops_config_can_override_native_cop_severity() {
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .assert()
         .code(1);
 
@@ -637,6 +752,8 @@ fn syntax_error_severity_cannot_be_downgraded_by_config() {
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .assert()
         .code(1);
 
@@ -660,6 +777,8 @@ fn directory_discovery_excludes_configured_cops_path() {
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .assert()
         .code(1);
 
@@ -689,6 +808,8 @@ fn explicit_cop_file_path_is_still_linted_as_a_target() {
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("cops/target.rb")
         .assert()
         .code(1);
@@ -719,6 +840,8 @@ fn lint_two_identical_content_files_emits_offense_per_path() {
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg(&dup_a)
         .arg(&dup_b)
         .assert()

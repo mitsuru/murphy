@@ -94,6 +94,8 @@ fn lint_stdout_matches_committed_snapshot() {
         .expect("murphy binary builds")
         .current_dir(&dir)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .args(FIXTURE_FILES)
         .assert()
         // Offenses present (mixed.rb has unfixable print + fixable puts,
@@ -314,7 +316,11 @@ fn copy_fixture_to(dest: &std::path::Path) {
 /// start; non-zero exit codes are expected and not treated as errors.
 fn run_fix(dir: &std::path::Path, files: &[&str]) -> std::process::Output {
     let mut cmd = Command::cargo_bin("murphy").expect("murphy binary builds");
-    cmd.current_dir(dir).arg("lint").arg("--fix");
+    cmd.current_dir(dir)
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("--fix");
     for f in files {
         cmd.arg(f);
     }
@@ -324,7 +330,7 @@ fn run_fix(dir: &std::path::Path, files: &[&str]) -> std::process::Output {
 /// Run `murphy lint <files>` (no --fix) from `dir`.
 fn run_lint(dir: &std::path::Path, files: &[&str]) -> std::process::Output {
     let mut cmd = Command::cargo_bin("murphy").expect("murphy binary builds");
-    cmd.current_dir(dir).arg("lint");
+    cmd.current_dir(dir).arg("lint").arg("--format").arg("json");
     for f in files {
         cmd.arg(f);
     }

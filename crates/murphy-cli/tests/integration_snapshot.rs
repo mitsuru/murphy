@@ -61,6 +61,8 @@ fn multi_file_lint_matches_committed_snapshot() {
         .expect("murphy binary builds")
         .current_dir(&dir)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("dirty.rb")
         .arg("multibyte.rb")
         .arg("clean.rb")

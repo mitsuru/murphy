@@ -2,10 +2,10 @@
 //! Phase 2 Task 6; --fix / -a / --debug Phase 4 Task 6).
 //!
 //! `murphy lint <path>...` runs the single-parse pipeline over a set of `.rb`
-//! files, aggregates the offenses *across all files*, and prints them as one
-//! JSON array on stdout. Argument parsing is hand-rolled (one subcommand,
-//! zero-or-more path args — no `clap`; YAGNI until the CLI actually grows,
-//! design/plan).
+//! files, aggregates the offenses *across all files*, and prints human-readable
+//! output by default. `--format json` preserves the machine-readable JSON array
+//! contract. Argument parsing is hand-rolled (one subcommand, zero-or-more path
+//! args — no `clap`; YAGNI until the CLI actually grows, design/plan).
 //!
 //! ## Path-arg precedence (Phase 2 Task 6, exact)
 //!
@@ -34,7 +34,7 @@
 //!
 //! ## stdout / stderr split
 //!
-//! The lint path prints a JSON array of offenses to stdout on success. The
+//! The lint path prints the selected report format to stdout on success. The
 //! `ast --format sexp` path prints sexp text to stdout on success.
 //! Diagnostics (bad usage, unreadable file, parse error) always go to
 //! **stderr** for both paths, so error exits print nothing to stdout.
@@ -51,12 +51,14 @@
 //!   here instead of aborting the process.
 
 mod lsp;
+mod output;
 
 use murphy_core::{
     AstContext, Cop, CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
     aggregate_with_config, ast_to_sexp, discover_with_config, migrate_rubocop_yml_to_murphy_toml,
     parse, run_cops, run_mruby_cop_isolated, run_to_fixpoint,
 };
+use output::{OutputFormat, write_lint_output};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -1115,26 +1117,48 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // would otherwise reject as an unknown flag (roborev low: regression).
     let mut fix = false;
     let mut debug = false;
+    let mut output_format = OutputFormat::Human;
     let mut path_args: Vec<&str> = Vec::new();
     let mut flags_done = false;
+    let mut pending_format = false;
 
     for token in post_subcommand {
         if flags_done {
             path_args.push(token.as_str());
             continue;
         }
+        if pending_format {
+            output_format = match token.as_str() {
+                "human" => OutputFormat::Human,
+                "json" => OutputFormat::Json,
+                "progress" => OutputFormat::Progress,
+                value => {
+                    return Err(AppError::setup(format!(
+                        "unknown format {value:?} (supported: human, json, progress)"
+                    )));
+                }
+            };
+            pending_format = false;
+            continue;
+        }
         match token.as_str() {
             "--" => flags_done = true,
             "--fix" | "-a" => fix = true,
             "--debug" => debug = true,
+            "--format" => pending_format = true,
             flag if flag.starts_with('-') => {
                 return Err(AppError::setup(format!(
-                    "unknown flag {flag:?} (usage: murphy lint [--fix|-a] [--debug] \
+                    "unknown flag {flag:?} (usage: murphy lint [--fix|-a] [--debug] [--format human|json|progress] \
                      [--] [path]...; use `--` before a path that starts with `-`)"
                 )));
             }
             path => path_args.push(path),
         }
+    }
+    if pending_format {
+        return Err(AppError::setup(
+            "missing value for --format (supported: human, json, progress)",
+        ));
     }
 
     // Build the cop registry ONCE per run (P3 Task 1) and share it: the
@@ -1387,15 +1411,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         // construction.
         let offenses = lint_files_memoized_debug(&files, &registry, &mruby_cops, &config, debug)?;
 
-        let json = serde_json::to_string(&offenses)
-            .map_err(|e| AppError::setup(format!("failed to serialize offenses: {e}")))?;
-        let mut stdout = std::io::stdout().lock();
-        if let Err(e) = writeln!(stdout, "{json}") {
-            if e.kind() == std::io::ErrorKind::BrokenPipe {
-                return Ok(EXIT_OK);
-            }
-            return Err(AppError::setup(format!("failed to write stdout: {e}")));
-        }
+        write_lint_output(&offenses, &files, output_format).map_err(AppError::setup)?;
 
         return Ok(if offenses.is_empty() {
             EXIT_OK
@@ -1422,21 +1438,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // `tests/parallel_determinism.rs` is the permanent byte-identity guard.
     let offenses = lint_files_memoized_debug(&files, &registry, &mruby_cops, &config, debug)?;
 
-    // stdout is exclusively the JSON array (design §5). `serde_json` cannot
-    // fail serializing `Vec<Offense>` (all fields are plain owned data), but
-    // map a hypothetical failure to a setup error rather than unwrap-panic.
-    let json = serde_json::to_string(&offenses)
-        .map_err(|e| AppError::setup(format!("failed to serialize offenses: {e}")))?;
-    let mut stdout = std::io::stdout().lock();
-    if let Err(e) = writeln!(stdout, "{json}") {
-        // A closed pipe (`murphy lint x.rb | head`) is the consumer hanging
-        // up, not a failure: exit `0` (conventional). Any other stdout write
-        // error is a genuinely broken stdout → setup error (exit 2).
-        if e.kind() == std::io::ErrorKind::BrokenPipe {
-            return Ok(EXIT_OK);
-        }
-        return Err(AppError::setup(format!("failed to write stdout: {e}")));
-    }
+    write_lint_output(&offenses, &files, output_format).map_err(AppError::setup)?;
 
     Ok(if offenses.is_empty() {
         EXIT_OK

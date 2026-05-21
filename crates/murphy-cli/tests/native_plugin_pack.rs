@@ -88,6 +88,8 @@ version = "0.1.0"
         .expect("murphy binary builds")
         .current_dir(dir.path())
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("clean.rb")
         .assert()
         .code(2);
@@ -153,6 +155,8 @@ fn example_native_pack_loads_and_emits_offense() {
         .expect("murphy binary builds")
         .current_dir(dir.path())
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("clean.rb")
         .assert()
         .code(1);
@@ -204,6 +208,8 @@ fn example_native_pack_dispatches_call_cop_by_static_method_table() {
         .expect("murphy binary builds")
         .current_dir(dir.path())
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("app.rb")
         .assert()
         .code(1);
@@ -277,6 +283,8 @@ fn rails_native_pack_loads_expected_cops() {
         .expect("murphy binary builds")
         .current_dir(dir.path())
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("rails_sample.rb")
         .assert()
         .code(1);
@@ -345,6 +353,8 @@ fn rails_native_pack_does_not_flag_short_tokens_as_plain_text() {
         .expect("murphy binary builds")
         .current_dir(dir.path())
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("app.rb")
         .assert()
         .code(1);

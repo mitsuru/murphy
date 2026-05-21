@@ -52,7 +52,10 @@ fn snapshot_path() -> PathBuf {
 /// (the fixture set is dirty/broken → offenses present).
 fn run_lint(files: &[&str]) -> Vec<u8> {
     let mut cmd = Command::cargo_bin("murphy").expect("murphy binary builds");
-    cmd.current_dir(fixtures_dir()).arg("lint");
+    cmd.current_dir(fixtures_dir())
+        .arg("lint")
+        .arg("--format")
+        .arg("json");
     for f in files {
         cmd.arg(f);
     }

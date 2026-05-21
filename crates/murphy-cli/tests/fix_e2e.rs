@@ -62,7 +62,10 @@ fn project_with_cops(src: &str, cops: &[(&str, &str)]) -> TempDir {
 /// Returns the full `std::process::Output`.
 fn run_murphy(proj: &TempDir, extra: &[&str], files: &[&str]) -> std::process::Output {
     let mut cmd = Command::cargo_bin("murphy").expect("murphy binary builds");
-    cmd.current_dir(proj.path()).arg("lint");
+    cmd.current_dir(proj.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json");
     for e in extra {
         cmd.arg(e);
     }
@@ -570,6 +573,8 @@ fn double_dash_allows_dash_prefixed_path() {
     let mut ok = Command::cargo_bin("murphy").expect("bin");
     ok.current_dir(dir.path())
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .arg("--")
         .arg("-weird.rb");
     let ok_out = ok.assert().get_output().clone();

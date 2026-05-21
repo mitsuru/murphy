@@ -121,7 +121,10 @@ enabled = false
 /// `Offense.file` is the bare arg). Returns (stdout bytes, exit code).
 fn run_lint(proj: &TempDir, args: &[&str]) -> (Vec<u8>, i32) {
     let mut cmd = Command::cargo_bin("murphy").expect("murphy binary builds");
-    cmd.current_dir(proj.path()).arg("lint");
+    cmd.current_dir(proj.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json");
     for a in args {
         cmd.arg(a);
     }

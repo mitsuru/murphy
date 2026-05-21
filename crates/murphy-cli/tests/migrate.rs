@@ -74,6 +74,8 @@ fn migrated_output_roundtrips_to_lint_behavior() {
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
+        .arg("--format")
+        .arg("json")
         .assert()
         .code(0);
     assert_eq!(lint.get_output().stdout, b"[]\n");
