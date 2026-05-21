@@ -20,7 +20,19 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 5] = [b"get", b"post", b"put", b"patch", b"delete"];
+    let patterns: [&[u8]; 11] = [
+        b"get '",
+        b"get \"",
+        b"post '",
+        b"post \"",
+        b"put '",
+        b"put \"",
+        b"patch '",
+        b"patch \"",
+        b"delete '",
+        b"delete \"",
+        b"multiple_route_paths",
+    ];
     for pattern in patterns {
         if util::emit_match_simple(
             source,

@@ -19,12 +19,10 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 5] = [
+    let patterns: [&[u8]; 3] = [
         b"table_name_assignment",
         b"TableNameAssignment",
-        b"table",
-        b"name",
-        b"assignment",
+        b"self.table_name",
     ];
     for pattern in patterns {
         if util::emit_match_simple(

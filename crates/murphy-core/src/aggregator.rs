@@ -8,6 +8,7 @@
 
 use crate::config::MurphyConfig;
 use crate::offense::{Offense, SYNTAX_COP_NAME};
+use std::collections::HashSet;
 
 /// Aggregate a flat list of offenses into the canonical output order.
 ///
@@ -57,23 +58,20 @@ pub fn aggregate(mut offenses: Vec<Offense>) -> Vec<Offense> {
     });
 
     // Order-preserving dedupe on the 4-tuple (file, cop_name, range, message).
-    // The stable sort groups by (file, start_offset); two 4-tuple-equal
-    // offenses are only adjacent if they also share start_offset, so an
-    // explicit seen-list (not just `dedup_by` on neighbours) makes the dedupe
-    // robust regardless of adjacency while preserving first-occurrence order.
-    // A `Vec` seen-list (`Range` is `Eq` but not `Hash`, and Task 6 must not
-    // touch the offense contract type) keeps this minimal. The dedupe logic is
-    // UNCHANGED by ADR 0011 — collision resolution is done entirely by the DESC
-    // severity sort term above, so keep-first now yields the max severity.
+    // The DESC severity sort term above already makes the first duplicate the
+    // survivor ADR 0011 wants, so the seen set only tracks offense identity.
     let mut kept: Vec<Offense> = Vec::with_capacity(offenses.len());
+    let mut seen: HashSet<(String, String, u32, u32, String)> =
+        HashSet::with_capacity(offenses.len());
     for o in offenses {
-        let is_dup = kept.iter().any(|k| {
-            k.file == o.file
-                && k.cop_name == o.cop_name
-                && k.range == o.range
-                && k.message == o.message
-        });
-        if !is_dup {
+        let key = (
+            o.file.clone(),
+            o.cop_name.clone(),
+            o.range.start_offset,
+            o.range.end_offset,
+            o.message.clone(),
+        );
+        if seen.insert(key) {
             kept.push(o);
         }
     }
@@ -296,6 +294,22 @@ mod tests {
     fn aggregate_single_element_unchanged() {
         let one = off("a.rb", "CopA", 0, 3, Severity::Warning, "only");
         assert_eq!(aggregate(vec![one.clone()]), vec![one]);
+    }
+
+    #[test]
+    fn aggregate_many_distinct_offenses_dedupes_without_quadratic_scan() {
+        let input = (0..20_000)
+            .map(|index| off("a.rb", "Cop", index, index + 1, Severity::Warning, "x"))
+            .collect::<Vec<_>>();
+
+        let started = std::time::Instant::now();
+        let got = aggregate(input);
+
+        assert_eq!(got.len(), 20_000);
+        assert!(
+            started.elapsed().as_millis() < 1_000,
+            "aggregate must avoid O(n^2) duplicate scanning for large offense sets"
+        );
     }
 
     #[test]

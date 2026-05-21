@@ -30,6 +30,7 @@ pub(crate) fn emit_match(
         None,
         emit,
         sink,
+        |_, _, _| true,
     )
 }
 
@@ -43,6 +44,55 @@ pub(crate) fn emit_match_simple(
     sink: *mut c_void,
 ) -> i32 {
     emit_match(source, pattern, cop_name, message, None, emit, sink)
+}
+
+#[inline]
+pub(crate) fn emit_identifier_match(
+    source: &[u8],
+    pattern: &[u8],
+    cop_name: MurphySlice,
+    message: MurphySlice,
+    emit: MurphyEmitOffense,
+    sink: *mut c_void,
+) -> i32 {
+    emit_match_filtered(
+        source,
+        pattern,
+        cop_name,
+        message,
+        emit,
+        sink,
+        |source, start, end| {
+            !is_ident_byte(source.get(start.wrapping_sub(1)).copied().unwrap_or(b'\0'))
+                && !is_ident_byte(source.get(end).copied().unwrap_or(b'\0'))
+        },
+    )
+}
+
+#[inline]
+pub(crate) fn emit_match_filtered<F>(
+    source: &[u8],
+    pattern: &[u8],
+    cop_name: MurphySlice,
+    message: MurphySlice,
+    emit: MurphyEmitOffense,
+    sink: *mut c_void,
+    mut keep: F,
+) -> i32
+where
+    F: FnMut(&[u8], usize, usize) -> bool,
+{
+    emit_match_with_replacement_opt(
+        source,
+        pattern,
+        cop_name,
+        message,
+        None,
+        None,
+        emit,
+        sink,
+        |source, start, end| keep(source, start, end),
+    )
 }
 
 #[inline]
@@ -66,6 +116,7 @@ pub(crate) fn emit_match_with_replacement(
         Some(replacement),
         emit,
         sink,
+        |_, _, _| true,
     )
 }
 
@@ -78,6 +129,7 @@ fn emit_match_with_replacement_opt(
     replacement: Option<&'static [u8]>,
     emit: MurphyEmitOffense,
     sink: *mut c_void,
+    mut keep: impl FnMut(&[u8], usize, usize) -> bool,
 ) -> i32 {
     if pattern.is_empty() || source.is_empty() {
         return 0;
@@ -92,7 +144,9 @@ fn emit_match_with_replacement_opt(
             let start = i + offset;
             let end = start + pattern.len();
 
-            if requires_line_without_match(source, start, end, require_line_without) {
+            if keep(source, start, end)
+                && requires_line_without_match(source, start, end, require_line_without)
+            {
                 let start = match u32::try_from(start) {
                     Ok(v) => v,
                     Err(_) => return 1,
@@ -151,6 +205,11 @@ fn emit_match_with_replacement_opt(
     }
 
     0
+}
+
+#[inline]
+fn is_ident_byte(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
 }
 
 #[inline]

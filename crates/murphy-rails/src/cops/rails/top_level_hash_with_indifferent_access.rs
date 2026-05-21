@@ -19,15 +19,10 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 8] = [
+    let patterns: [&[u8]; 3] = [
         b"top_level_hash_with_indifferent_access",
         b"TopLevelHashWithIndifferentAccess",
-        b"top",
-        b"level",
-        b"hash",
-        b"with",
-        b"indifferent",
-        b"access",
+        b"HashWithIndifferentAccess",
     ];
     for pattern in patterns {
         if util::emit_match_simple(

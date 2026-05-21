@@ -33,7 +33,7 @@ pub(crate) unsafe extern "C" fn run(
         b"write_nonblock",
     ];
     for pattern in patterns {
-        if util::emit_match_simple(
+        if util::emit_identifier_match(
             source,
             pattern,
             NAME,

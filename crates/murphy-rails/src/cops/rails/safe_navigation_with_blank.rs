@@ -20,13 +20,10 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 6] = [
+    let patterns: [&[u8]; 3] = [
         b"safe_navigation_with_blank",
         b"SafeNavigationWithBlank",
-        b"safe",
-        b"navigation",
-        b"with",
-        b"blank",
+        b"&.blank?",
     ];
     for pattern in patterns {
         if util::emit_match_simple(

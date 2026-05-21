@@ -19,7 +19,13 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 5] = [b"each_with_object", b"to_h", b"map", b"collect", b"[]"];
+    let patterns: [&[u8]; 5] = [
+        b".each_with_object",
+        b".to_h",
+        b".map",
+        b".collect",
+        b"index_by",
+    ];
     for pattern in patterns {
         if util::emit_match_simple(
             source,

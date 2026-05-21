@@ -19,15 +19,16 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 1] = [b"!"];
+    let patterns: [&[u8]; 2] = [b"!", b".include?"];
     for pattern in patterns {
-        if util::emit_match_simple(
+        if util::emit_match_filtered(
             source,
             pattern,
             NAME,
             util::slice(MESSAGE_BYTES),
             emit,
             sink,
+            |source, start, _| pattern != b"!" || source[start..].starts_with(b"!.include?"),
         ) != 0
         {
             return 1;

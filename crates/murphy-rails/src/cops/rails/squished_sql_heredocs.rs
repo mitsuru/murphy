@@ -19,13 +19,10 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 7] = [
+    let patterns: [&[u8]; 4] = [
         b"squished_sql_heredocs",
         b"SquishedSQLHeredocs",
         b"squished",
-        b"s",
-        b"q",
-        b"l",
         b"heredocs",
     ];
     for pattern in patterns {

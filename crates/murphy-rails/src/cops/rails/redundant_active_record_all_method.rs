@@ -19,7 +19,7 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 1] = [b"all"];
+    let patterns: [&[u8]; 3] = [b".all.", b".all(", b"redundant_active_record_all_method"];
     for pattern in patterns {
         if util::emit_match_simple(
             source,

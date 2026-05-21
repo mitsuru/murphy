@@ -19,25 +19,7 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 17] = [
-        b"add_column",
-        b"rename",
-        b"rename_column",
-        b"bigint",
-        b"binary",
-        b"blob",
-        b"boolean",
-        b"date",
-        b"datetime",
-        b"decimal",
-        b"float",
-        b"integer",
-        b"numeric",
-        b"primary_key",
-        b"string",
-        b"text",
-        b"time",
-    ];
+    let patterns: [&[u8]; 3] = [b"add_column", b"rename_column", b"dangerous_column_names"];
     for pattern in patterns {
         if util::emit_match_simple(
             source,

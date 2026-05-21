@@ -19,14 +19,10 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 7] = [
+    let patterns: [&[u8]; 3] = [
         b"redundant_receiver_in_with_options",
         b"RedundantReceiverInWithOptions",
-        b"redundant",
-        b"receiver",
-        b"in",
-        b"with",
-        b"options",
+        b"with_options",
     ];
     for pattern in patterns {
         if util::emit_match_simple(

@@ -20,7 +20,7 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let patterns: [&[u8]; 1] = [b"not"];
+    let patterns: [&[u8]; 2] = [b"where.not(", b"where_not_with_multiple_conditions"];
     for pattern in patterns {
         if util::emit_match_simple(
             source,

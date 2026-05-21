@@ -242,3 +242,111 @@ fn rails_native_pack_loads_expected_cops() {
         );
     }
 }
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn rails_native_pack_does_not_flag_short_tokens_as_plain_text() {
+    let root = workspace_root();
+    let status = std::process::Command::new("cargo")
+        .current_dir(&root)
+        .args(["build", "-p", "murphy-rails"])
+        .status()
+        .expect("run cargo build for rails pack");
+    assert!(status.success(), "rails pack must build before e2e test");
+
+    let dir = tempdir().expect("create tempdir");
+    let target = target_dir(&root);
+    let dylib_name = format!(
+        "{}murphy_rails{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let dylib = target.join("debug").join(dylib_name);
+    fs::write(
+        dir.path().join("murphy.toml"),
+        format!(
+            "[[cop_packs]]\nname = \"murphy-rails\"\npath = {}\nversion = \"0.1.0\"\n",
+            format_args!("{:?}", dylib.to_string_lossy())
+        ),
+    )
+    .expect("write config");
+
+    fs::write(
+        dir.path().join("app.rb"),
+        "# frozen_string_literal: true\n\nclass App\n  def perform\n    title = 'plain text with p q s l t ap pp where not get post create save update table name blank access'\n    puts 'real output'\n  end\nend\n",
+    )
+    .expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("app.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    let rails_names = parsed
+        .iter()
+        .filter_map(|offense| offense["cop_name"].as_str())
+        .filter(|name| name.starts_with("Rails/"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        rails_names.contains(&"Rails/Output"),
+        "real puts call should still be reported, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/I18nLazyLookup"),
+        "plain letter t must not trigger I18nLazyLookup, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/SquishedSQLHeredocs"),
+        "plain letters s/q/l must not trigger SquishedSQLHeredocs, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/RedundantReceiverInWithOptions"),
+        "plain words in/with/options must not trigger RedundantReceiverInWithOptions, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/DangerousColumnNames"),
+        "plain type words must not trigger DangerousColumnNames, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/RootPathnameMethods"),
+        "plain pathname method words must not trigger RootPathnameMethods, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/WhereEquals"),
+        "plain where/not words must not trigger WhereEquals, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/WhereRange"),
+        "plain where/not words must not trigger WhereRange, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/WhereNotWithMultipleConditions"),
+        "plain not word must not trigger WhereNotWithMultipleConditions, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/MultipleRoutePaths"),
+        "plain route verb words must not trigger MultipleRoutePaths, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/SaveBang"),
+        "plain persistence method words must not trigger SaveBang, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/TableNameAssignment"),
+        "plain table/name words must not trigger TableNameAssignment, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/TopLevelHashWithIndifferentAccess"),
+        "plain with/access words must not trigger TopLevelHashWithIndifferentAccess, got {rails_names:?}"
+    );
+    assert!(
+        !rails_names.contains(&"Rails/SafeNavigationWithBlank"),
+        "plain with/blank words must not trigger SafeNavigationWithBlank, got {rails_names:?}"
+    );
+}
