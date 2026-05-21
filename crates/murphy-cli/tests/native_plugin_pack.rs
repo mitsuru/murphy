@@ -518,7 +518,7 @@ fn rails_native_pack_loads_expected_cops() {
     source.push_str("\n3.day\n");
     source.push_str("\nassert_not true\n");
     source.push_str("before_action :example\n");
-    source.push_str("get '/resource'\n");
+    source.push_str("get '/resource', '/other_resource'\n");
     source.push_str("puts 'output'\n");
     source.push_str("validates_presence_of :name\n");
     fs::write(dir.path().join("rails_sample.rb"), source).expect("write source");
@@ -877,5 +877,63 @@ fn rails_output_and_validation_use_call_dispatch_only() {
     assert_eq!(
         validation_count, 1,
         "only the real validates_* call should trigger Validation, got {rails_names:?}"
+    );
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn rails_multiple_route_paths_uses_call_arguments_only() {
+    let root = workspace_root();
+    let status = std::process::Command::new("cargo")
+        .current_dir(&root)
+        .args(["build", "-p", "murphy-rails"])
+        .status()
+        .expect("run cargo build for rails pack");
+    assert!(status.success(), "rails pack must build before e2e test");
+
+    let dir = tempdir().expect("create tempdir");
+    let target = target_dir(&root);
+    let dylib_name = format!(
+        "{}murphy_rails{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let dylib = target.join("debug").join(dylib_name);
+    fs::write(
+        dir.path().join("murphy.toml"),
+        format!(
+            "[[cop_packs]]\nname = \"murphy-rails\"\npath = {}\nversion = \"0.1.0\"\n",
+            format_args!("{:?}", dylib.to_string_lossy())
+        ),
+    )
+    .expect("write config");
+
+    fs::write(
+        dir.path().join("routes.rb"),
+        "# get '/commented', '/ignored' must not be reported\n\nROUTE_TEXT = \"get '/string', '/ignored'\"\n\nRails.application.routes.draw do\n  get '/users', to: 'users#index'\n  get '/admins', '/staff', to: 'admins#index'\nend\n",
+    )
+    .expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("routes.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    let route_path_offenses = parsed
+        .iter()
+        .filter(|offense| offense["cop_name"] == "Rails/MultipleRoutePaths")
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        route_path_offenses.len(),
+        1,
+        "only the route call with multiple path arguments should trigger MultipleRoutePaths, got {parsed:?}"
     );
 }
