@@ -519,6 +519,8 @@ fn rails_native_pack_loads_expected_cops() {
     source.push_str("\nassert_not true\n");
     source.push_str("before_action :example\n");
     source.push_str("get '/resource'\n");
+    source.push_str("puts 'output'\n");
+    source.push_str("validates_presence_of :name\n");
     fs::write(dir.path().join("rails_sample.rb"), source).expect("write source");
 
     let assert = Command::cargo_bin("murphy")
@@ -805,4 +807,75 @@ fn rails_pluralization_grammar_uses_numeric_receiver_calls_only() {
         .collect::<Vec<_>>();
 
     assert_eq!(reported, vec!["days", "day"]);
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn rails_output_and_validation_use_call_dispatch_only() {
+    let root = workspace_root();
+    let status = std::process::Command::new("cargo")
+        .current_dir(&root)
+        .args(["build", "-p", "murphy-rails"])
+        .status()
+        .expect("run cargo build for rails pack");
+    assert!(status.success(), "rails pack must build before e2e test");
+
+    let dir = tempdir().expect("create tempdir");
+    let target = target_dir(&root);
+    let dylib_name = format!(
+        "{}murphy_rails{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let dylib = target.join("debug").join(dylib_name);
+    fs::write(
+        dir.path().join("murphy.toml"),
+        format!(
+            "[[cop_packs]]\nname = \"murphy-rails\"\npath = {}\nversion = \"0.1.0\"\n",
+            format_args!("{:?}", dylib.to_string_lossy())
+        ),
+    )
+    .expect("write config");
+
+    fs::write(
+        dir.path().join("app.rb"),
+        "# frozen_string_literal: true\n\nclass User < ApplicationRecord\n  IGNORED = 'puts validates_presence_of'\n\n  validates_presence_of :name\n\n  def log\n    puts 'real output'\n  end\nend\n",
+    )
+    .expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("app.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    let rails_names = parsed
+        .iter()
+        .filter_map(|offense| offense["cop_name"].as_str())
+        .filter(|name| name.starts_with("Rails/"))
+        .collect::<Vec<_>>();
+
+    let output_count = rails_names
+        .iter()
+        .filter(|name| **name == "Rails/Output")
+        .count();
+    let validation_count = rails_names
+        .iter()
+        .filter(|name| **name == "Rails/Validation")
+        .count();
+
+    assert_eq!(
+        output_count, 1,
+        "only the real puts call should trigger Output, got {rails_names:?}"
+    );
+    assert_eq!(
+        validation_count, 1,
+        "only the real validates_* call should trigger Validation, got {rails_names:?}"
+    );
 }

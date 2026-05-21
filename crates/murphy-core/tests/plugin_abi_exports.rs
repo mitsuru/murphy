@@ -1,9 +1,10 @@
 use murphy_core::{
     MURPHY_CALL_ARGUMENT_KIND_OTHER, MURPHY_CALL_ARGUMENT_KIND_STRING,
     MURPHY_CALL_ARGUMENT_KIND_SYMBOL, MURPHY_PLUGIN_ABI_VERSION, MurphyCallContext,
-    MurphyCallDispatchV1, MurphyEmitOffense, MurphyFileContext, MurphyPluginCallArgument,
-    MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange,
-    MurphyRunCallDispatch, MurphyRunFile, MurphySlice,
+    MurphyCallDispatchV1, MurphyEmitOffense, MurphyFileContext, MurphyNodeContext,
+    MurphyNodeDispatchV1, MurphyPluginCallArgument, MurphyPluginCopV1, MurphyPluginEdit,
+    MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunCallDispatch, MurphyRunFile,
+    MurphyRunNodeDispatch, MurphySlice,
 };
 
 unsafe extern "C" fn noop_run_file(
@@ -33,6 +34,15 @@ static CALL_DISPATCH: [MurphyCallDispatchV1; 1] = [MurphyCallDispatchV1 {
     dispatch_id: 7,
 }];
 
+static NODE_DISPATCH: [MurphyNodeDispatchV1; 1] = [MurphyNodeDispatchV1 {
+    node_kind: MurphySlice {
+        ptr: b"class".as_ptr(),
+        len: b"class".len(),
+    },
+    cop_index: 0,
+    dispatch_id: 11,
+}];
+
 #[test]
 fn native_plugin_abi_types_are_public() {
     assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 1);
@@ -44,14 +54,17 @@ fn native_plugin_abi_types_are_public() {
     let _ = std::mem::size_of::<MurphyPluginOffense>();
     let _ = std::mem::size_of::<MurphyFileContext>();
     let _ = std::mem::size_of::<MurphyCallContext>();
+    let _ = std::mem::size_of::<MurphyNodeContext>();
     let _ = std::mem::size_of::<MurphyPluginCallArgument>();
     let _ = std::mem::size_of::<MurphyPluginCopV1>();
     let _ = std::mem::size_of::<MurphyCallDispatchV1>();
+    let _ = std::mem::size_of::<MurphyNodeDispatchV1>();
     let _ = std::mem::size_of::<MurphyPluginV1>();
     let _ = std::mem::size_of::<MurphyPluginEdit>();
     let _: Option<MurphyEmitOffense> = None;
     let _: Option<MurphyRunFile> = None;
     let _: Option<MurphyRunCallDispatch> = None;
+    let _: Option<MurphyRunNodeDispatch> = None;
     let argument = MurphyPluginCallArgument {
         kind: MURPHY_CALL_ARGUMENT_KIND_OTHER,
         range: MurphyRange {
@@ -88,6 +101,26 @@ fn native_plugin_abi_types_are_public() {
         },
         arguments_ptr: &argument,
         arguments_len: 1,
+    };
+    let _ = MurphyNodeContext {
+        file: MurphySlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+        source: MurphySlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+        config: MurphySlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+        node_kind: NODE_DISPATCH[0].node_kind,
+        dispatch_id: NODE_DISPATCH[0].dispatch_id,
+        range: MurphyRange {
+            start_offset: 0,
+            end_offset: 0,
+        },
     };
 }
 

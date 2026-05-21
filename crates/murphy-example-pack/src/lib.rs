@@ -166,6 +166,9 @@ pub unsafe extern "C" fn murphy_register_plugin(plugin: *mut MurphyPluginV1) -> 
             call_dispatch_ptr: CALL_DISPATCH.as_ptr(),
             call_dispatch_len: CALL_DISPATCH.len(),
             run_call_dispatch: Some(run_call_dispatch),
+            node_dispatch_ptr: std::ptr::null(),
+            node_dispatch_len: 0,
+            run_node_dispatch: None,
         };
     }
 

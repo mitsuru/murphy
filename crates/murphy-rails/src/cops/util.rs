@@ -47,29 +47,6 @@ pub(crate) fn emit_match_simple(
 }
 
 #[inline]
-pub(crate) fn emit_identifier_match(
-    source: &[u8],
-    pattern: &[u8],
-    cop_name: MurphySlice,
-    message: MurphySlice,
-    emit: MurphyEmitOffense,
-    sink: *mut c_void,
-) -> i32 {
-    emit_match_filtered(
-        source,
-        pattern,
-        cop_name,
-        message,
-        emit,
-        sink,
-        |source, start, end| {
-            !is_ident_byte(source.get(start.wrapping_sub(1)).copied().unwrap_or(b'\0'))
-                && !is_ident_byte(source.get(end).copied().unwrap_or(b'\0'))
-        },
-    )
-}
-
-#[inline]
 pub(crate) fn emit_match_filtered<F>(
     source: &[u8],
     pattern: &[u8],
@@ -203,11 +180,6 @@ fn emit_match_with_replacement_opt(
     }
 
     0
-}
-
-#[inline]
-fn is_ident_byte(byte: u8) -> bool {
-    byte == b'_' || byte.is_ascii_alphanumeric()
 }
 
 #[inline]

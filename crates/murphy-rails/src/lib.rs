@@ -13,7 +13,7 @@ const fn slice(bytes: &'static [u8]) -> MurphySlice {
     }
 }
 
-static CALL_DISPATCH: [MurphyCallDispatchV1; 89] = [
+static CALL_DISPATCH: [MurphyCallDispatchV1; 101] = [
     output_dispatch(b"ap", OUTPUT_DISPATCH_ID),
     output_dispatch(b"p", OUTPUT_DISPATCH_ID),
     output_dispatch(b"pp", OUTPUT_DISPATCH_ID),
@@ -142,6 +142,18 @@ static CALL_DISPATCH: [MurphyCallDispatchV1; 89] = [
     http_positional_arguments_dispatch(b"patch", HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID),
     http_positional_arguments_dispatch(b"delete", HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID),
     http_positional_arguments_dispatch(b"head", HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID),
+    validation_dispatch(b"validates_acceptance_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_comparison_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_confirmation_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_exclusion_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_format_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_inclusion_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_length_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_numericality_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_presence_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_absence_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_size_of", VALIDATION_DISPATCH_ID),
+    validation_dispatch(b"validates_uniqueness_of", VALIDATION_DISPATCH_ID),
 ];
 
 const OUTPUT_COP_INDEX: usize = 76;
@@ -154,6 +166,8 @@ const LEXICALLY_SCOPED_ACTION_FILTER_COP_INDEX: usize = 66;
 const LEXICALLY_SCOPED_ACTION_FILTER_DISPATCH_ID: usize = 4;
 const HTTP_POSITIONAL_ARGUMENTS_COP_INDEX: usize = 54;
 const HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID: usize = 5;
+const VALIDATION_COP_INDEX: usize = 131;
+const VALIDATION_DISPATCH_ID: usize = 6;
 
 const fn output_dispatch(method_name: &'static [u8], dispatch_id: usize) -> MurphyCallDispatchV1 {
     MurphyCallDispatchV1 {
@@ -204,6 +218,17 @@ const fn http_positional_arguments_dispatch(
     }
 }
 
+const fn validation_dispatch(
+    method_name: &'static [u8],
+    dispatch_id: usize,
+) -> MurphyCallDispatchV1 {
+    MurphyCallDispatchV1 {
+        method_name: slice(method_name),
+        cop_index: VALIDATION_COP_INDEX,
+        dispatch_id,
+    }
+}
+
 unsafe extern "C" fn run_call_dispatch(
     ctx: *const MurphyCallContext,
     emit: MurphyEmitOffense,
@@ -227,6 +252,7 @@ unsafe extern "C" fn run_call_dispatch(
         HTTP_POSITIONAL_ARGUMENTS_DISPATCH_ID => unsafe {
             cops::rails::http_positional_arguments::run_call(ctx, emit, sink)
         },
+        VALIDATION_DISPATCH_ID => unsafe { cops::rails::validation::run_call(ctx, emit, sink) },
         _ => 0,
     }
 }
@@ -615,7 +641,7 @@ const COPS: [MurphyPluginCopV1; 138] = [
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cops::rails::output::NAME,
-        run_file: Some(cops::rails::output::run),
+        run_file: None,
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
@@ -890,7 +916,7 @@ const COPS: [MurphyPluginCopV1; 138] = [
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
         name: cops::rails::validation::NAME,
-        run_file: Some(cops::rails::validation::run),
+        run_file: None,
     },
     MurphyPluginCopV1 {
         size: std::mem::size_of::<MurphyPluginCopV1>(),
@@ -949,6 +975,9 @@ pub unsafe extern "C" fn murphy_register_plugin(plugin: *mut MurphyPluginV1) -> 
             call_dispatch_ptr: CALL_DISPATCH.as_ptr(),
             call_dispatch_len: CALL_DISPATCH.len(),
             run_call_dispatch: Some(run_call_dispatch),
+            node_dispatch_ptr: std::ptr::null(),
+            node_dispatch_len: 0,
+            run_node_dispatch: None,
         };
     }
 

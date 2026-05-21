@@ -1,4 +1,4 @@
-use crate::cop::CallDispatchRestriction;
+use crate::cop::{CallDispatchRestriction, NodeDispatchRestriction};
 use crate::{Autocorrect, Cop, CopContext, Edit, Offense, Range, Severity};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::ffi::c_void;
@@ -84,6 +84,17 @@ pub struct MurphyCallContext {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct MurphyNodeContext {
+    pub file: MurphySlice,
+    pub source: MurphySlice,
+    pub config: MurphySlice,
+    pub node_kind: MurphySlice,
+    pub dispatch_id: usize,
+    pub range: MurphyRange,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct MurphyPluginCopV1 {
     pub size: usize,
     pub name: MurphySlice,
@@ -100,6 +111,14 @@ pub struct MurphyCallDispatchV1 {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct MurphyNodeDispatchV1 {
+    pub node_kind: MurphySlice,
+    pub cop_index: usize,
+    pub dispatch_id: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct MurphyPluginV1 {
     pub size: usize,
     pub cops_ptr: *const MurphyPluginCopV1,
@@ -107,6 +126,9 @@ pub struct MurphyPluginV1 {
     pub call_dispatch_ptr: *const MurphyCallDispatchV1,
     pub call_dispatch_len: usize,
     pub run_call_dispatch: Option<MurphyRunCallDispatch>,
+    pub node_dispatch_ptr: *const MurphyNodeDispatchV1,
+    pub node_dispatch_len: usize,
+    pub run_node_dispatch: Option<MurphyRunNodeDispatch>,
 }
 
 // Safety: these are immutable ABI descriptors / pointer-length views used in
@@ -120,8 +142,10 @@ unsafe impl Sync for MurphyPluginOffense {}
 unsafe impl Sync for MurphyFileContext {}
 unsafe impl Sync for MurphyPluginCallArgument {}
 unsafe impl Sync for MurphyCallContext {}
+unsafe impl Sync for MurphyNodeContext {}
 unsafe impl Sync for MurphyPluginCopV1 {}
 unsafe impl Sync for MurphyCallDispatchV1 {}
+unsafe impl Sync for MurphyNodeDispatchV1 {}
 unsafe impl Sync for MurphyPluginV1 {}
 
 pub type MurphyEmitOffense = unsafe extern "C" fn(*mut c_void, *const MurphyPluginOffense);
@@ -129,6 +153,8 @@ pub type MurphyRunFile =
     unsafe extern "C" fn(*const MurphyFileContext, MurphyEmitOffense, *mut c_void) -> i32;
 pub type MurphyRunCallDispatch =
     unsafe extern "C" fn(*const MurphyCallContext, MurphyEmitOffense, *mut c_void) -> i32;
+pub type MurphyRunNodeDispatch =
+    unsafe extern "C" fn(*const MurphyNodeContext, MurphyEmitOffense, *mut c_void) -> i32;
 
 pub fn validate_plugin_cop_ids(
     existing: &[Box<dyn Cop>],
@@ -155,7 +181,9 @@ pub struct PluginFileCop {
     name: String,
     run_file: Option<MurphyRunFile>,
     run_call_dispatch: Option<MurphyRunCallDispatch>,
+    run_node_dispatch: Option<MurphyRunNodeDispatch>,
     restrict_on_send: Vec<CallDispatchRestriction>,
+    restrict_on_node: Vec<NodeDispatchRestriction>,
     include_globs: Option<GlobSet>,
     exclude_globs: Option<GlobSet>,
     config_json: Vec<u8>,
@@ -186,7 +214,9 @@ impl PluginFileCop {
             name,
             run_file: Some(run_file),
             run_call_dispatch: None,
+            run_node_dispatch: None,
             restrict_on_send: Vec::new(),
+            restrict_on_node: Vec::new(),
             include_globs,
             exclude_globs,
             config_json: b"{}".to_vec(),
@@ -201,7 +231,9 @@ impl PluginFileCop {
         name: String,
         run_file: Option<MurphyRunFile>,
         run_call_dispatch: Option<MurphyRunCallDispatch>,
+        run_node_dispatch: Option<MurphyRunNodeDispatch>,
         restrict_on_send: Vec<CallDispatchRestriction>,
+        restrict_on_node: Vec<NodeDispatchRestriction>,
         config_json: Vec<u8>,
         call_config_json: Vec<u8>,
         library: std::sync::Arc<libloading::Library>,
@@ -211,7 +243,9 @@ impl PluginFileCop {
             name,
             run_file,
             run_call_dispatch,
+            run_node_dispatch,
             restrict_on_send,
+            restrict_on_node,
             include_globs,
             exclude_globs,
             config_json,
@@ -293,6 +327,17 @@ impl Cop for PluginFileCop {
         self.run_call_dispatch.is_some()
     }
 
+    fn on_restricted_node(
+        &self,
+        node: &ruby_prism::Node<'_>,
+        node_kind: &[u8],
+        ctx: &CopContext<'_>,
+        sink: &mut Vec<Offense>,
+        dispatch_id: usize,
+    ) {
+        self.run_node(node, node_kind, ctx, sink, dispatch_id);
+    }
+
     fn on_restricted_call_node(
         &self,
         node: &ruby_prism::CallNode<'_>,
@@ -308,6 +353,14 @@ impl Cop for PluginFileCop {
             None
         } else {
             Some(&self.restrict_on_send)
+        }
+    }
+
+    fn restrict_on_node(&self) -> Option<&[NodeDispatchRestriction]> {
+        if self.restrict_on_node.is_empty() {
+            None
+        } else {
+            Some(&self.restrict_on_node)
         }
     }
 }
@@ -376,6 +429,74 @@ impl PluginFileCop {
         let status = unsafe {
             (run_call_dispatch)(
                 &call_ctx,
+                emit_offense,
+                (&mut offense_sink as *mut OffenseSink<'_>).cast(),
+            )
+        };
+        if status != 0 {
+            offense_sink.offenses.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Error,
+                "native plugin callback failed",
+            ));
+        }
+    }
+
+    fn run_node(
+        &self,
+        node: &ruby_prism::Node<'_>,
+        node_kind: &[u8],
+        ctx: &CopContext<'_>,
+        sink: &mut Vec<Offense>,
+        dispatch_id: usize,
+    ) {
+        let Some(run_node_dispatch) = self.run_node_dispatch else {
+            return;
+        };
+        if !cop_file_is_enabled(
+            ctx.file,
+            self.include_globs.as_ref(),
+            self.exclude_globs.as_ref(),
+        ) {
+            return;
+        }
+        let file = MurphySlice {
+            ptr: ctx.file.as_ptr(),
+            len: ctx.file.len(),
+        };
+        let source = MurphySlice {
+            ptr: ctx.source.as_ptr(),
+            len: ctx.source.len(),
+        };
+        let config = MurphySlice {
+            ptr: self.call_config_json.as_ptr(),
+            len: self.call_config_json.len(),
+        };
+        let node_kind = MurphySlice {
+            ptr: node_kind.as_ptr(),
+            len: node_kind.len(),
+        };
+        let node_ctx = MurphyNodeContext {
+            file,
+            source,
+            config,
+            node_kind,
+            dispatch_id,
+            range: Range::from_prism_location(&node.location()).into(),
+        };
+        let mut offense_sink = OffenseSink {
+            file: ctx.file,
+            source_len: ctx.source.len(),
+            offenses: sink,
+        };
+        let status = unsafe {
+            (run_node_dispatch)(
+                &node_ctx,
                 emit_offense,
                 (&mut offense_sink as *mut OffenseSink<'_>).cast(),
             )
@@ -673,6 +794,9 @@ pub mod dynamic {
             call_dispatch_ptr: std::ptr::null(),
             call_dispatch_len: 0,
             run_call_dispatch: None,
+            node_dispatch_ptr: std::ptr::null(),
+            node_dispatch_len: 0,
+            run_node_dispatch: None,
         };
         {
             let abi_version: Symbol<'_, AbiVersionFn> = unsafe {
@@ -703,6 +827,11 @@ pub mod dynamic {
         if plugin.call_dispatch_len > 0 && plugin.call_dispatch_ptr.is_null() {
             return Err(
                 "plugin registered call_dispatch_len > 0 with null call_dispatch_ptr".to_string(),
+            );
+        }
+        if plugin.node_dispatch_len > 0 && plugin.node_dispatch_ptr.is_null() {
+            return Err(
+                "plugin registered node_dispatch_len > 0 with null node_dispatch_ptr".to_string(),
             );
         }
         cop_table_len_is_valid(plugin.cops_len)?;
@@ -768,12 +897,50 @@ pub mod dynamic {
             });
         }
 
+        let raw_node_dispatch = if plugin.node_dispatch_len == 0 {
+            &[]
+        } else {
+            unsafe {
+                std::slice::from_raw_parts(plugin.node_dispatch_ptr, plugin.node_dispatch_len)
+            }
+        };
+        let mut restrict_on_node = (0..raw_cops.len())
+            .map(|_| Vec::<NodeDispatchRestriction>::new())
+            .collect::<Vec<_>>();
+        if !raw_node_dispatch.is_empty() && plugin.run_node_dispatch.is_none() {
+            return Err(
+                "plugin registered node dispatch entries with null run_node_dispatch".to_string(),
+            );
+        }
+        for entry in raw_node_dispatch {
+            let node_kind = slice_to_str(&entry.node_kind)
+                .ok_or_else(|| "plugin node dispatch node_kind must be valid UTF-8".to_string())?;
+            if node_kind.is_empty() {
+                return Err("plugin node dispatch node_kind must not be empty".to_string());
+            }
+            if raw_cops.is_empty() {
+                return Err("plugin registered node dispatch entries without any cops".to_string());
+            }
+            if entry.cop_index >= raw_cops.len() {
+                return Err(format!(
+                    "plugin node dispatch cop_index {} out of range for {} cops",
+                    entry.cop_index,
+                    raw_cops.len()
+                ));
+            }
+            restrict_on_node[entry.cop_index].push(NodeDispatchRestriction {
+                node_kind: node_kind.as_bytes().to_vec(),
+                dispatch_id: entry.dispatch_id,
+            });
+        }
+
         let call_config_json = config.cop_options_map_json(&plugin_names);
         let cops = raw_cops
             .iter()
             .zip(plugin_names)
             .zip(restrict_on_send)
-            .map(|((cop, name), restrict_on_send)| {
+            .zip(restrict_on_node)
+            .map(|(((cop, name), restrict_on_send), restrict_on_node)| {
                 let config_json = config.cop_options_json(&name);
                 Box::new(PluginFileCop::with_library_guard(
                     name,
@@ -783,7 +950,13 @@ pub mod dynamic {
                     } else {
                         plugin.run_call_dispatch
                     },
+                    if restrict_on_node.is_empty() {
+                        None
+                    } else {
+                        plugin.run_node_dispatch
+                    },
                     restrict_on_send,
+                    restrict_on_node,
                     config_json,
                     call_config_json.clone(),
                     Arc::clone(&library),
@@ -892,6 +1065,29 @@ mod tests {
         0
     }
 
+    unsafe extern "C" fn emit_node_kind_and_range(
+        ctx: *const MurphyNodeContext,
+        emit: MurphyEmitOffense,
+        sink: *mut c_void,
+    ) -> i32 {
+        if ctx.is_null() {
+            return 1;
+        }
+        let ctx = unsafe { &*ctx };
+        let offense = MurphyPluginOffense {
+            cop_name: MurphySlice {
+                ptr: b"Plugin/Node".as_ptr(),
+                len: b"Plugin/Node".len(),
+            },
+            message: ctx.node_kind,
+            range: ctx.range,
+            severity: 0,
+            autocorrect: std::ptr::null(),
+        };
+        unsafe { emit(sink, &offense) };
+        0
+    }
+
     #[test]
     fn rejects_duplicate_plugin_cop_id() {
         let existing: Vec<Box<dyn crate::Cop>> = vec![Box::new(NoReceiverPuts)];
@@ -921,7 +1117,9 @@ mod tests {
             name: "Plugin/Config".to_string(),
             run_file: Some(echo_config_run_file),
             run_call_dispatch: None,
+            run_node_dispatch: None,
             restrict_on_send: Vec::new(),
+            restrict_on_node: Vec::new(),
             include_globs: None,
             exclude_globs: None,
             config_json: br#"{"message":"configured"}"#.to_vec(),
@@ -975,7 +1173,9 @@ mod tests {
             name: "Plugin/Scoped".to_string(),
             run_file: Some(run_file),
             run_call_dispatch: None,
+            run_node_dispatch: None,
             restrict_on_send: Vec::new(),
+            restrict_on_node: Vec::new(),
             include_globs,
             exclude_globs,
             config_json,
@@ -1042,7 +1242,9 @@ mod tests {
             name: "Plugin/Scoped".to_string(),
             run_file: Some(run_file),
             run_call_dispatch: None,
+            run_node_dispatch: None,
             restrict_on_send: Vec::new(),
+            restrict_on_node: Vec::new(),
             include_globs,
             exclude_globs,
             config_json,
@@ -1209,10 +1411,12 @@ mod tests {
             name: "Plugin/Arguments".to_string(),
             run_file: None,
             run_call_dispatch: Some(reject_empty_arguments_with_non_null_ptr),
+            run_node_dispatch: None,
             restrict_on_send: vec![CallDispatchRestriction {
                 method_name: b"target".to_vec(),
                 dispatch_id: 1,
             }],
+            restrict_on_node: Vec::new(),
             include_globs: None,
             exclude_globs: None,
             config_json: b"{}".to_vec(),
@@ -1236,10 +1440,12 @@ mod tests {
             name: "Plugin/Arguments".to_string(),
             run_file: None,
             run_call_dispatch: Some(reject_unexpected_argument_metadata),
+            run_node_dispatch: None,
             restrict_on_send: vec![CallDispatchRestriction {
                 method_name: b"target".to_vec(),
                 dispatch_id: 1,
             }],
+            restrict_on_node: Vec::new(),
             include_globs: None,
             exclude_globs: None,
             config_json: b"{}".to_vec(),
@@ -1255,5 +1461,38 @@ mod tests {
         crate::run_cops(&ast, "t.rb", &cops, &mut offenses);
 
         assert!(offenses.is_empty());
+    }
+
+    #[test]
+    fn run_node_receives_restricted_node_kind_and_range() {
+        let cop = PluginFileCop {
+            name: "Plugin/Node".to_string(),
+            run_file: None,
+            run_call_dispatch: None,
+            run_node_dispatch: Some(emit_node_kind_and_range),
+            restrict_on_send: Vec::new(),
+            restrict_on_node: vec![NodeDispatchRestriction {
+                node_kind: b"class".to_vec(),
+                dispatch_id: 1,
+            }],
+            include_globs: None,
+            exclude_globs: None,
+            config_json: b"{}".to_vec(),
+            call_config_json: b"{}".to_vec(),
+            #[cfg(not(target_os = "windows"))]
+            _library: None,
+        };
+        let source = "class User\nend\n";
+        let ast = crate::parse(source).expect("test source parses");
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(cop)];
+        let mut offenses = Vec::new();
+
+        crate::run_cops(&ast, "t.rb", &cops, &mut offenses);
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].cop_name, "Plugin/Node");
+        assert_eq!(offenses[0].message, "class");
+        assert_eq!(offenses[0].range.start_offset, 0);
+        assert_eq!(offenses[0].range.end_offset, source.trim_end().len() as u32);
     }
 }
