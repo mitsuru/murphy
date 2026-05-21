@@ -20,8 +20,8 @@ pub use autocorrect::{
 };
 pub use config::{CopRule, MurphyConfig, migrate_rubocop_yml_to_murphy_toml};
 pub use cop::{
-    Cop, CopContext, CopRunTimings, NodeDispatchRestriction, prism_node_kind, run_cop,
-    run_cop_timed, run_cops,
+    Cop, CopContext, CopRunTimings, NodeDispatchRestriction, prism_node_kind,
+    rubocop_hook_node_kinds, run_cop, run_cop_timed, run_cops,
 };
 pub use cops::NoReceiverPuts;
 pub use discovery::{ConfigError, discover, discover_with_config};

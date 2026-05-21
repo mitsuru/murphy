@@ -41,6 +41,15 @@ converting CamelCase to snake_case. Examples include `constant_read`,
 `local_variable_write`, `keyword_hash`, `regular_expression`, `rescue`,
 `while`, `until`, and `yield`.
 
+RuboCop hook names are accepted as aliases. For example, `on_str` maps to
+`string`, `on_sym` maps to `symbol`, `on_send` and `on_csend` map to `call`,
+and assignment hooks such as `on_and_asgn`/`on_or_asgn` expand to the matching
+Prism `*_and_write` / `*_or_write` node kinds. Derived hooks whose exact parser
+semantics depend on AST attributes, such as `on_if_guard`, `on_until_post`, and
+`on_empty_else`, currently dispatch on their closest Prism structural node kind;
+cop implementations should inspect the node details if they need to distinguish
+the derived case.
+
 ## Plugin ABI
 
 Native packs can register `MurphyNodeDispatchV1` entries. Murphy calls

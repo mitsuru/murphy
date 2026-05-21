@@ -1,4 +1,4 @@
-use crate::cop::{CallDispatchRestriction, NodeDispatchRestriction};
+use crate::cop::{CallDispatchRestriction, NodeDispatchRestriction, rubocop_hook_node_kinds};
 use crate::{Autocorrect, Cop, CopContext, Edit, Offense, Range, Severity};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::ffi::c_void;
@@ -928,10 +928,20 @@ pub mod dynamic {
                     raw_cops.len()
                 ));
             }
-            restrict_on_node[entry.cop_index].push(NodeDispatchRestriction {
-                node_kind: node_kind.as_bytes().to_vec(),
-                dispatch_id: entry.dispatch_id,
-            });
+            let aliases = rubocop_hook_node_kinds(node_kind);
+            if aliases.is_empty() {
+                restrict_on_node[entry.cop_index].push(NodeDispatchRestriction {
+                    node_kind: node_kind.as_bytes().to_vec(),
+                    dispatch_id: entry.dispatch_id,
+                });
+            } else {
+                for alias in aliases {
+                    restrict_on_node[entry.cop_index].push(NodeDispatchRestriction {
+                        node_kind: alias.to_vec(),
+                        dispatch_id: entry.dispatch_id,
+                    });
+                }
+            }
         }
 
         let call_config_json = config.cop_options_map_json(&plugin_names);

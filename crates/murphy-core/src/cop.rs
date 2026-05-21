@@ -406,6 +406,177 @@ pub fn prism_node_kind(node: &ruby_prism::Node<'_>) -> &'static [u8] {
     }
 }
 
+pub fn rubocop_hook_node_kinds(hook: &str) -> &'static [&'static [u8]] {
+    match hook {
+        "on_" => &[b"program"],
+        "on___ENCODING__" => &[b"source_encoding"],
+        "on___FILE__" => &[b"source_file"],
+        "on___LINE__" => &[b"source_line"],
+        "on_alias" => &[b"alias_method", b"alias_global_variable"],
+        "on_and" => &[b"and"],
+        "on_and_asgn" => &[
+            b"class_variable_and_write",
+            b"constant_and_write",
+            b"global_variable_and_write",
+            b"instance_variable_and_write",
+            b"local_variable_and_write",
+        ],
+        "on_arg" => &[b"required_parameter"],
+        "on_arg_expr" => &[b"arguments"],
+        "on_args" => &[b"parameters"],
+        "on_array" => &[b"array"],
+        "on_array_pattern" => &[b"array_pattern"],
+        "on_array_pattern_with_tail" => &[b"array_pattern"],
+        "on_back_ref" => &[b"back_reference_read"],
+        "on_begin" => &[b"begin"],
+        "on_block" => &[b"block"],
+        "on_block_pass" => &[b"block_argument"],
+        "on_blockarg" => &[b"block_parameter"],
+        "on_break" => &[b"break"],
+        "on_case" => &[b"case"],
+        "on_case_match" => &[b"case_match"],
+        "on_casgn" => &[b"constant_write", b"constant_path_write"],
+        "on_cbase" => &[b"constant_path"],
+        "on_class" => &[b"class"],
+        "on_complex" => &[b"imaginary"],
+        "on_const" => &[b"constant_read", b"constant_path"],
+        "on_const_pattern" => &[b"constant_path", b"constant_read"],
+        "on_csend" => &[b"call"],
+        "on_cvar" => &[b"class_variable_read"],
+        "on_cvasgn" => &[b"class_variable_write"],
+        "on_def" => &[b"def"],
+        "on_defined?" => &[b"defined"],
+        "on_defs" => &[b"def"],
+        "on_dstr" => &[b"interpolated_string"],
+        "on_dsym" => &[b"interpolated_symbol"],
+        "on_eflipflop" => &[b"flip_flop"],
+        "on_empty_else" => &[b"else"],
+        "on_ensure" => &[b"ensure"],
+        "on_erange" => &[b"range"],
+        "on_false" => &[b"false"],
+        "on_find_pattern" => &[b"find_pattern"],
+        "on_float" => &[b"float"],
+        "on_for" => &[b"for"],
+        "on_forward_arg" => &[b"forwarding_parameter"],
+        "on_forward_args" => &[b"forwarding_arguments"],
+        "on_forwarded_args" => &[b"forwarding_arguments"],
+        "on_forwarded_kwrestarg" => &[b"forwarding_parameter"],
+        "on_forwarded_restarg" => &[b"forwarding_parameter"],
+        "on_gvar" => &[b"global_variable_read"],
+        "on_gvasgn" => &[b"global_variable_write"],
+        "on_hash" => &[b"hash", b"keyword_hash"],
+        "on_hash_pattern" => &[b"hash_pattern"],
+        "on_if" => &[b"if"],
+        "on_if_guard" => &[b"if"],
+        "on_iflipflop" => &[b"flip_flop"],
+        "on_in_match" => &[b"in"],
+        "on_in_pattern" => &[b"in"],
+        "on_index" => &[b"call"],
+        "on_indexasgn" => &[
+            b"index_and_write",
+            b"index_operator_write",
+            b"index_or_write",
+        ],
+        "on_int" => &[b"integer"],
+        "on_irange" => &[b"range"],
+        "on_itblock" => &[b"block"],
+        "on_ivar" => &[b"instance_variable_read"],
+        "on_ivasgn" => &[b"instance_variable_write"],
+        "on_kwarg" => &[b"required_keyword_parameter"],
+        "on_kwargs" => &[b"keyword_hash"],
+        "on_kwbegin" => &[b"begin"],
+        "on_kwnilarg" => &[b"no_keywords_parameter"],
+        "on_kwoptarg" => &[b"optional_keyword_parameter"],
+        "on_kwrestarg" => &[b"keyword_rest_parameter"],
+        "on_kwsplat" => &[b"assoc_splat"],
+        "on_lambda" => &[b"lambda"],
+        "on_lvar" => &[b"local_variable_read"],
+        "on_lvasgn" => &[b"local_variable_write"],
+        "on_masgn" => &[b"multi_write"],
+        "on_match_alt" => &[b"alternation_pattern"],
+        "on_match_as" => &[b"capture_pattern"],
+        "on_match_current_line" => &[b"match_last_line", b"interpolated_match_last_line"],
+        "on_match_nil_pattern" => &[b"match_required"],
+        "on_match_pattern" => &[b"match_required"],
+        "on_match_pattern_p" => &[b"match_predicate"],
+        "on_match_rest" => &[b"implicit_rest"],
+        "on_match_var" => &[b"local_variable_target"],
+        "on_match_with_lvasgn" => &[b"match_write"],
+        "on_match_with_trailing_comma" => &[b"match_required"],
+        "on_mlhs" => &[b"multi_target"],
+        "on_module" => &[b"module"],
+        "on_mrasgn" => &[b"match_write"],
+        "on_next" => &[b"next"],
+        "on_nil" => &[b"nil"],
+        "on_not" => &[b"call"],
+        "on_nth_ref" => &[b"numbered_reference_read"],
+        "on_numblock" => &[b"block"],
+        "on_op_asgn" => &[
+            b"call_operator_write",
+            b"class_variable_operator_write",
+            b"constant_operator_write",
+            b"global_variable_operator_write",
+            b"index_operator_write",
+            b"instance_variable_operator_write",
+            b"local_variable_operator_write",
+        ],
+        "on_optarg" => &[b"optional_parameter"],
+        "on_or" => &[b"or"],
+        "on_or_asgn" => &[
+            b"class_variable_or_write",
+            b"constant_or_write",
+            b"global_variable_or_write",
+            b"instance_variable_or_write",
+            b"local_variable_or_write",
+        ],
+        "on_pair" => &[b"assoc"],
+        "on_pin" => &[b"pinned_expression", b"pinned_variable"],
+        "on_postexe" => &[b"post_execution"],
+        "on_preexe" => &[b"pre_execution"],
+        "on_procarg0" => &[b"block_parameter"],
+        "on_rasgn" => &[b"match_write"],
+        "on_rational" => &[b"rational"],
+        "on_redo" => &[b"redo"],
+        "on_regexp" => &[b"regular_expression", b"interpolated_regular_expression"],
+        "on_regopt" => &[b"regular_expression", b"interpolated_regular_expression"],
+        "on_resbody" => &[b"rescue"],
+        "on_rescue" => &[b"rescue", b"rescue_modifier"],
+        "on_restarg" => &[b"rest_parameter"],
+        "on_retry" => &[b"retry"],
+        "on_return" => &[b"return"],
+        "on_sclass" => &[b"singleton_class"],
+        "on_self" => &[b"self"],
+        "on_send" => &[b"call"],
+        "on_shadowarg" => &[b"block_local_variable"],
+        "on_splat" => &[b"splat"],
+        "on_str" => &[b"string"],
+        "on_super" => &[b"super", b"forwarding_super"],
+        "on_sym" => &[b"symbol"],
+        "on_true" => &[b"true"],
+        "on_undef" => &[b"undef"],
+        "on_unless_guard" => &[b"unless"],
+        "on_until" => &[b"until"],
+        "on_until_post" => &[b"until"],
+        "on_when" => &[b"when"],
+        "on_while" => &[b"while"],
+        "on_while_post" => &[b"while"],
+        "on_xstr" => &[b"xstring", b"interpolated_xstring"],
+        "on_yield" => &[b"yield"],
+        "on_zsuper" => &[b"super", b"forwarding_super"],
+        _ => &[],
+    }
+}
+
+fn expand_node_dispatch_kind(kind: &[u8]) -> Vec<Vec<u8>> {
+    if let Ok(kind) = std::str::from_utf8(kind) {
+        let aliases = rubocop_hook_node_kinds(kind);
+        if !aliases.is_empty() {
+            return aliases.iter().map(|alias| alias.to_vec()).collect();
+        }
+    }
+    vec![kind.to_vec()]
+}
+
 /// Walk `ast` **once** and dispatch every call node to every cop.
 ///
 /// Read-only: cops only push [`Offense`]s into `sink` (design §4).
@@ -459,13 +630,15 @@ pub fn run_cop_timed(
     }
     if let Some(dispatches) = cop.restrict_on_node() {
         for dispatch in dispatches {
-            restricted_node_cops
-                .entry(dispatch.node_kind.clone())
-                .or_default()
-                .push(RestrictedNodeCop {
-                    cop,
-                    dispatch_id: dispatch.dispatch_id,
-                });
+            for node_kind in expand_node_dispatch_kind(&dispatch.node_kind) {
+                restricted_node_cops
+                    .entry(node_kind)
+                    .or_default()
+                    .push(RestrictedNodeCop {
+                        cop,
+                        dispatch_id: dispatch.dispatch_id,
+                    });
+            }
         }
     }
 
@@ -526,13 +699,15 @@ fn run_cops_ref(ast: &Ast<'_>, file: &str, cops: &[&dyn Cop], sink: &mut Vec<Off
         }
         if let Some(dispatches) = cop.restrict_on_node() {
             for dispatch in dispatches {
-                restricted_node_cops
-                    .entry(dispatch.node_kind.clone())
-                    .or_default()
-                    .push(RestrictedNodeCop {
-                        cop,
-                        dispatch_id: dispatch.dispatch_id,
-                    });
+                for node_kind in expand_node_dispatch_kind(&dispatch.node_kind) {
+                    restricted_node_cops
+                        .entry(node_kind)
+                        .or_default()
+                        .push(RestrictedNodeCop {
+                            cop,
+                            dispatch_id: dispatch.dispatch_id,
+                        });
+                }
             }
         }
     }
@@ -842,6 +1017,180 @@ mod tests {
             .map(|offense| offense.message.as_str())
             .collect::<Vec<_>>();
         assert_eq!(messages, ["class:1", "def:2", "hash:3", "string:4"]);
+    }
+
+    #[test]
+    fn rubocop_traversal_hooks_have_murphy_dispatch_mappings() {
+        let hooks = [
+            "on_",
+            "on___ENCODING__",
+            "on___FILE__",
+            "on___LINE__",
+            "on_alias",
+            "on_and",
+            "on_and_asgn",
+            "on_arg",
+            "on_arg_expr",
+            "on_args",
+            "on_array",
+            "on_array_pattern",
+            "on_array_pattern_with_tail",
+            "on_back_ref",
+            "on_begin",
+            "on_block",
+            "on_block_pass",
+            "on_blockarg",
+            "on_break",
+            "on_case",
+            "on_case_match",
+            "on_casgn",
+            "on_cbase",
+            "on_class",
+            "on_complex",
+            "on_const",
+            "on_const_pattern",
+            "on_csend",
+            "on_cvar",
+            "on_cvasgn",
+            "on_def",
+            "on_defined?",
+            "on_defs",
+            "on_dstr",
+            "on_dsym",
+            "on_eflipflop",
+            "on_empty_else",
+            "on_ensure",
+            "on_erange",
+            "on_false",
+            "on_find_pattern",
+            "on_float",
+            "on_for",
+            "on_forward_arg",
+            "on_forward_args",
+            "on_forwarded_args",
+            "on_forwarded_kwrestarg",
+            "on_forwarded_restarg",
+            "on_gvar",
+            "on_gvasgn",
+            "on_hash",
+            "on_hash_pattern",
+            "on_if",
+            "on_if_guard",
+            "on_iflipflop",
+            "on_in_match",
+            "on_in_pattern",
+            "on_index",
+            "on_indexasgn",
+            "on_int",
+            "on_irange",
+            "on_itblock",
+            "on_ivar",
+            "on_ivasgn",
+            "on_kwarg",
+            "on_kwargs",
+            "on_kwbegin",
+            "on_kwnilarg",
+            "on_kwoptarg",
+            "on_kwrestarg",
+            "on_kwsplat",
+            "on_lambda",
+            "on_lvar",
+            "on_lvasgn",
+            "on_masgn",
+            "on_match_alt",
+            "on_match_as",
+            "on_match_current_line",
+            "on_match_nil_pattern",
+            "on_match_pattern",
+            "on_match_pattern_p",
+            "on_match_rest",
+            "on_match_var",
+            "on_match_with_lvasgn",
+            "on_match_with_trailing_comma",
+            "on_mlhs",
+            "on_module",
+            "on_mrasgn",
+            "on_next",
+            "on_nil",
+            "on_not",
+            "on_nth_ref",
+            "on_numblock",
+            "on_op_asgn",
+            "on_optarg",
+            "on_or",
+            "on_or_asgn",
+            "on_pair",
+            "on_pin",
+            "on_postexe",
+            "on_preexe",
+            "on_procarg0",
+            "on_rasgn",
+            "on_rational",
+            "on_redo",
+            "on_regexp",
+            "on_regopt",
+            "on_resbody",
+            "on_rescue",
+            "on_restarg",
+            "on_retry",
+            "on_return",
+            "on_sclass",
+            "on_self",
+            "on_send",
+            "on_shadowarg",
+            "on_splat",
+            "on_str",
+            "on_super",
+            "on_sym",
+            "on_true",
+            "on_undef",
+            "on_unless_guard",
+            "on_until",
+            "on_until_post",
+            "on_when",
+            "on_while",
+            "on_while_post",
+            "on_xstr",
+            "on_yield",
+            "on_zsuper",
+        ];
+
+        for hook in hooks {
+            assert!(
+                !rubocop_hook_node_kinds(hook).is_empty(),
+                "missing RuboCop hook mapping for {hook}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_accepts_rubocop_hook_aliases() {
+        let ast = parse("class User\n  def name\n    \"x\"\n  end\nend\n").unwrap();
+        let mut sink = Vec::new();
+        let cops: Vec<Box<dyn Cop>> = vec![Box::new(NodeKindStubCop {
+            dispatches: vec![
+                NodeDispatchRestriction {
+                    node_kind: b"on_class".to_vec(),
+                    dispatch_id: 1,
+                },
+                NodeDispatchRestriction {
+                    node_kind: b"on_def".to_vec(),
+                    dispatch_id: 2,
+                },
+                NodeDispatchRestriction {
+                    node_kind: b"on_str".to_vec(),
+                    dispatch_id: 3,
+                },
+            ],
+        })];
+
+        run_cops(&ast, "t.rb", &cops, &mut sink);
+
+        let messages = sink
+            .iter()
+            .map(|offense| offense.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(messages, ["class:1", "def:2", "string:3"]);
     }
 
     #[derive(Default)]
