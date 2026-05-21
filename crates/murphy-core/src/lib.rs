@@ -43,9 +43,10 @@ pub use parse::{Ast, ParseError, parse};
 #[cfg(not(target_os = "windows"))]
 pub use plugin::dynamic::{LoadedPluginPack, load_plugin_pack};
 pub use plugin::{
-    MURPHY_PLUGIN_ABI_VERSION, MurphyEmitOffense, MurphyFileContext, MurphyPluginAutocorrect,
-    MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange,
-    MurphyRunFile, MurphySlice, PluginFileCop, validate_plugin_cop_ids,
+    MURPHY_PLUGIN_ABI_VERSION, MurphyCallContext, MurphyCallDispatchV1, MurphyEmitOffense,
+    MurphyFileContext, MurphyPluginAutocorrect, MurphyPluginCopV1, MurphyPluginEdit,
+    MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunCall, MurphyRunFile, MurphySlice,
+    PluginFileCop, validate_plugin_cop_ids,
 };
 pub use registry::CopRegistry;
 

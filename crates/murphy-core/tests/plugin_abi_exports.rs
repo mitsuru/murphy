@@ -1,6 +1,7 @@
 use murphy_core::{
-    MurphyEmitOffense, MurphyFileContext, MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense,
-    MurphyPluginV1, MurphyRange, MurphyRunFile, MurphySlice,
+    MurphyCallContext, MurphyCallDispatchV1, MurphyEmitOffense, MurphyFileContext,
+    MurphyPluginCopV1, MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange,
+    MurphyRunCall, MurphyRunFile, MurphySlice,
 };
 
 unsafe extern "C" fn noop_run_file(
@@ -19,6 +20,7 @@ static COPS: [MurphyPluginCopV1; 1] = [MurphyPluginCopV1 {
         len: COP_NAME.len(),
     },
     run_file: Some(noop_run_file),
+    run_call: None,
 }];
 
 #[test]
@@ -27,11 +29,14 @@ fn native_plugin_abi_types_are_public() {
     let _ = std::mem::size_of::<MurphyRange>();
     let _ = std::mem::size_of::<MurphyPluginOffense>();
     let _ = std::mem::size_of::<MurphyFileContext>();
+    let _ = std::mem::size_of::<MurphyCallContext>();
     let _ = std::mem::size_of::<MurphyPluginCopV1>();
+    let _ = std::mem::size_of::<MurphyCallDispatchV1>();
     let _ = std::mem::size_of::<MurphyPluginV1>();
     let _ = std::mem::size_of::<MurphyPluginEdit>();
     let _: Option<MurphyEmitOffense> = None;
     let _: Option<MurphyRunFile> = None;
+    let _: Option<MurphyRunCall> = None;
 }
 
 #[test]

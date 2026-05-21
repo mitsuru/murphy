@@ -1,4 +1,6 @@
-use murphy_core::{MurphyEmitOffense, MurphyFileContext, MurphySlice};
+use murphy_core::{
+    MurphyCallContext, MurphyEmitOffense, MurphyFileContext, MurphyPluginOffense, MurphySlice,
+};
 use std::ffi::c_void;
 
 use crate::cops::util;
@@ -45,6 +47,28 @@ pub(crate) unsafe extern "C" fn run(
             return 1;
         }
     }
+
+    0
+}
+
+pub(crate) unsafe extern "C" fn run_call(
+    ctx: *const MurphyCallContext,
+    emit: MurphyEmitOffense,
+    sink: *mut c_void,
+) -> i32 {
+    if ctx.is_null() {
+        return 1;
+    }
+
+    let ctx = unsafe { &*ctx };
+    let offense = MurphyPluginOffense {
+        cop_name: NAME,
+        message: util::slice(MESSAGE_BYTES),
+        range: ctx.message_range,
+        severity: 0,
+        autocorrect: std::ptr::null(),
+    };
+    unsafe { emit(sink, &offense) };
 
     0
 }

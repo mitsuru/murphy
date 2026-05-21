@@ -62,6 +62,12 @@ pub trait Cop: Send + Sync {
         sink: &mut Vec<Offense>,
     );
 
+    /// Optional RuboCop-style `RESTRICT_ON_SEND` method-name filter. Cops that
+    /// return `Some` are dispatched only for matching call names.
+    fn restrict_on_send(&self) -> Option<&[Vec<u8>]> {
+        None
+    }
+
     /// Called once per if/unless node during the single AST traversal.
     fn on_if_node(
         &self,
@@ -103,6 +109,8 @@ pub trait Cop: Send + Sync {
 /// node out to every cop.
 struct Dispatcher<'a> {
     cops: &'a [Box<dyn Cop>],
+    unrestricted_cops: Vec<&'a dyn Cop>,
+    restricted_call_cops: std::collections::BTreeMap<Vec<u8>, Vec<&'a dyn Cop>>,
     ctx: CopContext<'a>,
     sink: &'a mut Vec<Offense>,
 }
@@ -111,8 +119,13 @@ impl<'pr> Visit<'pr> for Dispatcher<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // Single pass, all cops per node: every cop sees this node before we
         // move on (no re-walking the tree per cop).
-        for cop in self.cops {
+        for cop in &self.unrestricted_cops {
             cop.on_call_node(node, &self.ctx, self.sink);
+        }
+        if let Some(cops) = self.restricted_call_cops.get(node.name().as_slice()) {
+            for cop in cops {
+                cop.on_call_node(node, &self.ctx, self.sink);
+            }
         }
         // REQUIRED: descend into nested calls (e.g. `foo.bar(baz)`); without
         // this only top-level calls are visited (see spikes/prism_poc).
@@ -152,8 +165,25 @@ impl<'pr> Visit<'pr> for Dispatcher<'_> {
 ///
 /// Read-only: cops only push [`Offense`]s into `sink` (design §4).
 pub fn run_cops(ast: &Ast<'_>, file: &str, cops: &[Box<dyn Cop>], sink: &mut Vec<Offense>) {
+    let mut unrestricted_cops = Vec::new();
+    let mut restricted_call_cops: std::collections::BTreeMap<Vec<u8>, Vec<&dyn Cop>> =
+        std::collections::BTreeMap::new();
+    for cop in cops {
+        if let Some(names) = cop.restrict_on_send() {
+            for name in names {
+                restricted_call_cops
+                    .entry(name.clone())
+                    .or_default()
+                    .push(cop.as_ref());
+            }
+        } else {
+            unrestricted_cops.push(cop.as_ref());
+        }
+    }
     let mut dispatcher = Dispatcher {
         cops,
+        unrestricted_cops,
+        restricted_call_cops,
         ctx: CopContext {
             file,
             source: ast.source(),

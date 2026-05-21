@@ -169,6 +169,61 @@ fn example_native_pack_loads_and_emits_offense() {
 
 #[test]
 #[cfg(not(target_os = "windows"))]
+fn example_native_pack_dispatches_call_cop_by_static_method_table() {
+    let root = workspace_root();
+    let status = std::process::Command::new("cargo")
+        .current_dir(&root)
+        .args(["build", "-p", "murphy-example-pack"])
+        .status()
+        .expect("run cargo build for example pack");
+    assert!(status.success(), "example pack must build before e2e test");
+
+    let dir = tempdir().expect("create tempdir");
+    let target = target_dir(&root);
+    let dylib_name = format!(
+        "{}murphy_example_pack{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let dylib = target.join("debug").join(dylib_name);
+    fs::write(
+        dir.path().join("murphy.toml"),
+        format!(
+            "[[cop_packs]]\nname = \"murphy-example-pack\"\npath = {}\nversion = \"0.1.0\"\n",
+            format_args!("{:?}", dylib.to_string_lossy())
+        ),
+    )
+    .expect("write config");
+    fs::write(
+        dir.path().join("app.rb"),
+        "# frozen_string_literal: true\n\nignored_call\nexample_call\n",
+    )
+    .expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("app.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON");
+    let call_offenses = parsed
+        .iter()
+        .filter(|offense| offense["cop_name"] == "Example/CallDispatch")
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        call_offenses.len(),
+        1,
+        "static call dispatch should invoke the call cop only for example_call, got {parsed:?}"
+    );
+}
+
+#[test]
+#[cfg(not(target_os = "windows"))]
 fn rails_native_pack_loads_expected_cops() {
     let root = workspace_root();
     let status = std::process::Command::new("cargo")

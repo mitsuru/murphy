@@ -50,10 +50,28 @@ pub struct MurphyFileContext {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct MurphyCallContext {
+    pub file: MurphySlice,
+    pub source: MurphySlice,
+    pub name: MurphySlice,
+    pub message_range: MurphyRange,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct MurphyPluginCopV1 {
     pub size: usize,
     pub name: MurphySlice,
     pub run_file: Option<MurphyRunFile>,
+    pub run_call: Option<MurphyRunCall>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MurphyCallDispatchV1 {
+    pub method_name: MurphySlice,
+    pub cop_indices_ptr: *const usize,
+    pub cop_indices_len: usize,
 }
 
 #[repr(C)]
@@ -62,6 +80,8 @@ pub struct MurphyPluginV1 {
     pub size: usize,
     pub cops_ptr: *const MurphyPluginCopV1,
     pub cops_len: usize,
+    pub call_dispatch_ptr: *const MurphyCallDispatchV1,
+    pub call_dispatch_len: usize,
 }
 
 // Safety: these are immutable ABI descriptors / pointer-length views used in
@@ -73,12 +93,16 @@ unsafe impl Sync for MurphyPluginEdit {}
 unsafe impl Sync for MurphyPluginAutocorrect {}
 unsafe impl Sync for MurphyPluginOffense {}
 unsafe impl Sync for MurphyFileContext {}
+unsafe impl Sync for MurphyCallContext {}
 unsafe impl Sync for MurphyPluginCopV1 {}
+unsafe impl Sync for MurphyCallDispatchV1 {}
 unsafe impl Sync for MurphyPluginV1 {}
 
 pub type MurphyEmitOffense = unsafe extern "C" fn(*mut c_void, *const MurphyPluginOffense);
 pub type MurphyRunFile =
     unsafe extern "C" fn(*const MurphyFileContext, MurphyEmitOffense, *mut c_void) -> i32;
+pub type MurphyRunCall =
+    unsafe extern "C" fn(*const MurphyCallContext, MurphyEmitOffense, *mut c_void) -> i32;
 
 pub fn validate_plugin_cop_ids(
     existing: &[Box<dyn Cop>],
@@ -103,7 +127,9 @@ pub fn validate_plugin_cop_ids(
 
 pub struct PluginFileCop {
     name: String,
-    run_file: MurphyRunFile,
+    run_file: Option<MurphyRunFile>,
+    run_call: Option<MurphyRunCall>,
+    restrict_on_send: Vec<Vec<u8>>,
     #[cfg(not(target_os = "windows"))]
     _library: Option<std::sync::Arc<libloading::Library>>,
 }
@@ -127,7 +153,9 @@ impl PluginFileCop {
     pub fn new(name: String, run_file: MurphyRunFile) -> Self {
         Self {
             name,
-            run_file,
+            run_file: Some(run_file),
+            run_call: None,
+            restrict_on_send: Vec::new(),
             #[cfg(not(target_os = "windows"))]
             _library: None,
         }
@@ -136,12 +164,16 @@ impl PluginFileCop {
     #[cfg(not(target_os = "windows"))]
     fn with_library_guard(
         name: String,
-        run_file: MurphyRunFile,
+        run_file: Option<MurphyRunFile>,
+        run_call: Option<MurphyRunCall>,
+        restrict_on_send: Vec<Vec<u8>>,
         library: std::sync::Arc<libloading::Library>,
     ) -> Self {
         Self {
             name,
             run_file,
+            run_call,
+            restrict_on_send,
             _library: Some(library),
         }
     }
@@ -153,6 +185,9 @@ impl Cop for PluginFileCop {
     }
 
     fn inspect_file(&self, ctx: &CopContext<'_>, sink: &mut Vec<Offense>) {
+        let Some(run_file) = self.run_file else {
+            return;
+        };
         let file = MurphySlice {
             ptr: ctx.file.as_ptr(),
             len: ctx.file.len(),
@@ -168,7 +203,7 @@ impl Cop for PluginFileCop {
             offenses: sink,
         };
         let status = unsafe {
-            (self.run_file)(
+            (run_file)(
                 &file_ctx,
                 emit_offense,
                 (&mut offense_sink as *mut OffenseSink<'_>).cast(),
@@ -190,10 +225,76 @@ impl Cop for PluginFileCop {
 
     fn on_call_node(
         &self,
-        _node: &ruby_prism::CallNode<'_>,
-        _ctx: &CopContext<'_>,
-        _sink: &mut Vec<Offense>,
+        node: &ruby_prism::CallNode<'_>,
+        ctx: &CopContext<'_>,
+        sink: &mut Vec<Offense>,
     ) {
+        let Some(run_call) = self.run_call else {
+            return;
+        };
+        let Some(message_loc) = node.message_loc() else {
+            return;
+        };
+        let name = node.name();
+        let file = MurphySlice {
+            ptr: ctx.file.as_ptr(),
+            len: ctx.file.len(),
+        };
+        let source = MurphySlice {
+            ptr: ctx.source.as_ptr(),
+            len: ctx.source.len(),
+        };
+        let name = MurphySlice {
+            ptr: name.as_slice().as_ptr(),
+            len: name.as_slice().len(),
+        };
+        let call_ctx = MurphyCallContext {
+            file,
+            source,
+            name,
+            message_range: Range::from_prism_location(&message_loc).into(),
+        };
+        let mut offense_sink = OffenseSink {
+            file: ctx.file,
+            source_len: ctx.source.len(),
+            offenses: sink,
+        };
+        let status = unsafe {
+            (run_call)(
+                &call_ctx,
+                emit_offense,
+                (&mut offense_sink as *mut OffenseSink<'_>).cast(),
+            )
+        };
+        if status != 0 {
+            offense_sink.offenses.push(Offense::new(
+                ctx.file,
+                self.name(),
+                Range {
+                    start_offset: 0,
+                    end_offset: 0,
+                },
+                Severity::Error,
+                "native plugin callback failed",
+            ));
+        }
+    }
+
+    fn restrict_on_send(&self) -> Option<&[Vec<u8>]> {
+        if self.restrict_on_send.is_empty() {
+            None
+        } else {
+            Some(&self.restrict_on_send)
+        }
+    }
+}
+
+impl From<Range> for MurphyRange {
+    fn from(range: Range) -> Self {
+        MurphyRange {
+            start_offset: range.start_offset,
+            end_offset: range.end_offset,
+        }
     }
 }
 
@@ -341,6 +442,8 @@ pub mod dynamic {
             size: std::mem::size_of::<MurphyPluginV1>(),
             cops_ptr: std::ptr::null(),
             cops_len: 0,
+            call_dispatch_ptr: std::ptr::null(),
+            call_dispatch_len: 0,
         };
         {
             let abi_version: Symbol<'_, AbiVersionFn> = unsafe {
@@ -368,6 +471,11 @@ pub mod dynamic {
         if plugin.cops_len > 0 && plugin.cops_ptr.is_null() {
             return Err("plugin registered cops_len > 0 with null cops_ptr".to_string());
         }
+        if plugin.call_dispatch_len > 0 && plugin.call_dispatch_ptr.is_null() {
+            return Err(
+                "plugin registered call_dispatch_len > 0 with null call_dispatch_ptr".to_string(),
+            );
+        }
         cop_table_len_is_valid(plugin.cops_len)?;
 
         let raw_cops = if plugin.cops_len == 0 {
@@ -389,20 +497,68 @@ pub mod dynamic {
             if name.is_empty() {
                 return Err("plugin cop ID must not be empty".to_string());
             }
-            if cop.run_file.is_none() {
-                return Err(format!("plugin cop {name} has null run_file callback"));
+            if cop.run_file.is_none() && cop.run_call.is_none() {
+                return Err(format!(
+                    "plugin cop {name} has neither run_file nor run_call callback"
+                ));
             }
             plugin_names.push(name.to_string());
         }
         validate_plugin_cop_ids(&[], &plugin_names)?;
 
+        let raw_call_dispatch = if plugin.call_dispatch_len == 0 {
+            &[]
+        } else {
+            unsafe {
+                std::slice::from_raw_parts(plugin.call_dispatch_ptr, plugin.call_dispatch_len)
+            }
+        };
+        let mut restrict_on_send = vec![Vec::<Vec<u8>>::new(); raw_cops.len()];
+        for entry in raw_call_dispatch {
+            let method_name = slice_to_str(&entry.method_name).ok_or_else(|| {
+                "plugin call dispatch method_name must be valid UTF-8".to_string()
+            })?;
+            if method_name.is_empty() {
+                return Err("plugin call dispatch method_name must not be empty".to_string());
+            }
+            if entry.cop_indices_len > 0 && entry.cop_indices_ptr.is_null() {
+                return Err(
+                    "plugin call dispatch registered cop_indices_len > 0 with null cop_indices_ptr"
+                        .to_string(),
+                );
+            }
+            let indices = if entry.cop_indices_len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(entry.cop_indices_ptr, entry.cop_indices_len) }
+            };
+            for &index in indices {
+                let Some(cop) = raw_cops.get(index) else {
+                    return Err(format!(
+                        "plugin call dispatch index {index} out of bounds for {} cops",
+                        raw_cops.len()
+                    ));
+                };
+                if cop.run_call.is_none() {
+                    return Err(format!(
+                        "plugin call dispatch references cop {} without run_call callback",
+                        plugin_names[index]
+                    ));
+                }
+                restrict_on_send[index].push(method_name.as_bytes().to_vec());
+            }
+        }
+
         let cops = raw_cops
             .iter()
             .zip(plugin_names)
-            .map(|(cop, name)| {
+            .zip(restrict_on_send)
+            .map(|((cop, name), restrict_on_send)| {
                 Box::new(PluginFileCop::with_library_guard(
                     name,
-                    cop.run_file.expect("run_file checked above"),
+                    cop.run_file,
+                    cop.run_call,
+                    restrict_on_send,
                     Arc::clone(&library),
                 )) as Box<dyn Cop>
             })
@@ -447,6 +603,7 @@ mod tests {
                 len: 0,
             },
             run_file: None,
+            run_call: None,
         };
 
         assert!(cop.run_file.is_none());
