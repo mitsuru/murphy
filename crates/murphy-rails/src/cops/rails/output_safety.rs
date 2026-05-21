@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use crate::cops::util;
 
 pub(crate) const NAME_BYTES: &[u8] = b"Rails/OutputSafety";
-pub(crate) const MESSAGE_BYTES: &[u8] = b"avoid calling raw directly in views";
+pub(crate) const MESSAGE_BYTES: &[u8] = b"Tagging a string as html safe may be a security risk.";
 
 pub(crate) const NAME: MurphySlice = util::slice(NAME_BYTES);
 
@@ -19,12 +19,20 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    util::emit_match_simple(
-        source,
-        b"raw(",
-        NAME,
-        util::slice(MESSAGE_BYTES),
-        emit,
-        sink,
-    )
+    let patterns: [&[u8]; 3] = [b"html_safe", b"raw", b"safe_concat"];
+    for pattern in patterns {
+        if util::emit_match_simple(
+            source,
+            pattern,
+            NAME,
+            util::slice(MESSAGE_BYTES),
+            emit,
+            sink,
+        ) != 0
+        {
+            return 1;
+        }
+    }
+
+    0
 }

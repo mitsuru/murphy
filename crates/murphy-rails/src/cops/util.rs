@@ -46,6 +46,7 @@ pub(crate) fn emit_match_simple(
 }
 
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn emit_match_with_replacement(
     source: &[u8],
     pattern: &[u8],

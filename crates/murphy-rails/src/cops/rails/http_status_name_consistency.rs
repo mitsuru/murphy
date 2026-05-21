@@ -3,12 +3,8 @@ use std::ffi::c_void;
 
 use crate::cops::util;
 
-pub(crate) const NAME_BYTES: &[u8] = b"Rails/RenderJson";
-pub(crate) const MESSAGE_BYTES: &[u8] = b"prefer template or object rendering style";
-pub(crate) const FIND_JSON_SPACE: &[u8] = b"render :json =>";
-pub(crate) const FIND_JSON_PAREN: &[u8] = b"render(:json =>";
-pub(crate) const REPLACE_JSON_SPACE: &[u8] = b"render json:";
-pub(crate) const REPLACE_JSON_PAREN: &[u8] = b"render(json:";
+pub(crate) const NAME_BYTES: &[u8] = b"Rails/HttpStatusNameConsistency";
+pub(crate) const MESSAGE_BYTES: &[u8] = b"Prefer `:%<preferred>s` over `:%<current>s`.";
 
 pub(crate) const NAME: MurphySlice = util::slice(NAME_BYTES);
 
@@ -23,19 +19,19 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    let replacements: [(&[u8], &[u8]); 2] = [
-        (FIND_JSON_SPACE, REPLACE_JSON_SPACE),
-        (FIND_JSON_PAREN, REPLACE_JSON_PAREN),
+    let patterns: [&[u8]; 5] = [
+        b"render",
+        b"redirect_to",
+        b"head",
+        b"assert_response",
+        b"assert_redirected_to",
     ];
-
-    for (pattern, replacement) in replacements {
-        if util::emit_match_with_replacement(
+    for pattern in patterns {
+        if util::emit_match_simple(
             source,
             pattern,
             NAME,
             util::slice(MESSAGE_BYTES),
-            None,
-            replacement,
             emit,
             sink,
         ) != 0

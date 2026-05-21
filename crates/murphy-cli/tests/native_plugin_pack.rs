@@ -3,6 +3,68 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
+fn parse_rails_cop_metadata(root: &Path) -> (Vec<String>, Vec<String>) {
+    let dir = root.join("crates").join("murphy-rails/src/cops/rails");
+    let mut names = Vec::new();
+    let mut patterns = Vec::new();
+
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("rails cops directory exists")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .filter(|path| {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            file_name != "mod.rs" && file_name != "util.rs"
+        })
+        .collect();
+
+    entries.sort_unstable();
+
+    for path in entries {
+        let source = fs::read_to_string(&path).expect("read rails cop source");
+
+        if let Some(start) = source.find("pub(crate) const NAME_BYTES: &[u8] = b\"") {
+            let rest = &source[start + "pub(crate) const NAME_BYTES: &[u8] = b\"".len()..];
+            if let Some(end) = rest.find('"') {
+                names.push(rest[..end].to_string());
+            }
+        }
+
+        if let Some(start) = source.find("let patterns: [&[u8]") {
+            let mut cursor = &source[start..];
+            if let Some(assign_pos) = cursor.find(" = [") {
+                cursor = &cursor[assign_pos + 3..];
+                if let Some(right_bracket) = cursor.find("];") {
+                    let pattern_block = &cursor[..right_bracket];
+                    let mut remaining = pattern_block;
+                    while let Some(pos) = remaining.find("b\"") {
+                        remaining = &remaining[pos + 2..];
+                        if let Some(end) = remaining.find('"') {
+                            let p = &remaining[..end];
+                            if !p.is_empty() {
+                                patterns.push(p.to_string());
+                            }
+                            remaining = &remaining[end + 1..];
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    patterns.sort_unstable();
+    patterns.dedup();
+    names.sort_unstable();
+    names.dedup();
+    (names, patterns)
+}
+
 #[test]
 fn configured_missing_native_pack_exits_2_with_empty_stdout() {
     let dir = tempdir().expect("create tempdir");
@@ -132,11 +194,20 @@ fn rails_native_pack_loads_expected_cops() {
         ),
     )
     .expect("write config");
-    fs::write(
-        dir.path().join("rails_sample.rb"),
-        "has_and_belongs_to_many :groups\nitems = Item.find(:all).to_a\ntext = html_safe('x')\ndefault_scope { order(created_at: :desc) }\nhas_many :projects\nrequest.referer\nDate.today\nTime.now\nbefore_filter :authenticate_user\nUser.find_by_email('a@example.com')\nread_attribute(:name)\nwrite_attribute(:name, 'x')\nrender :text => 'outdated'\nrender :inline => 'abc'\nrender :json => { hello: 'world' }\nlink_to 'Open', '/x', target: \"_blank\"\npost.save()\nrecord.update_attributes(name: 'x')\nraw('<b>')\n",
-    )
-    .expect("write source");
+
+    let (required, patterns) = parse_rails_cop_metadata(&root);
+    assert_eq!(required.len(), 138, "expected 138 rails cops in repository");
+    assert!(
+        !patterns.is_empty(),
+        "expected non-empty patterns from rails cops"
+    );
+
+    let source = patterns
+        .into_iter()
+        .map(|token| format!("# {token}\n"))
+        .collect::<Vec<_>>()
+        .join("");
+    fs::write(dir.path().join("rails_sample.rb"), source).expect("write source");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -152,30 +223,21 @@ fn rails_native_pack_loads_expected_cops() {
     let mut names: Vec<&str> = parsed
         .iter()
         .map(|offense| offense["cop_name"].as_str().unwrap_or(""))
+        .filter(|name| name.starts_with("Rails/"))
         .collect();
     names.sort_unstable();
+    names.dedup();
 
-    let required = [
-        "Rails/HasAndBelongsToMany",
-        "Rails/FindEach",
-        "Rails/ActionFilter",
-        "Rails/HtmlSafe",
-        "Rails/Date",
-        "Rails/DefaultScope",
-        "Rails/DynamicFindBy",
-        "Rails/HasManyOrHasOneDependent",
-        "Rails/RequestReferer",
-        "Rails/RenderInline",
-        "Rails/RenderText",
-        "Rails/RenderJson",
-        "Rails/ReadWriteAttribute",
-        "Rails/OutputSafety",
-        "Rails/LinkToBlank",
-        "Rails/SaveBang",
-    ];
+    let required = required.into_iter().collect::<Vec<_>>();
+    assert_eq!(
+        names.len(),
+        required.len(),
+        "expected {} rails cops in sample output, got {names:?}",
+        required.len()
+    );
     for required_name in required {
         assert!(
-            names.contains(&required_name),
+            names.contains(&required_name.as_str()),
             "expected rails pack offense for {required_name}, got {names:?}"
         );
     }

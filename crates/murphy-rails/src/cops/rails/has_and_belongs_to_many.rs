@@ -3,8 +3,8 @@ use std::ffi::c_void;
 
 use crate::cops::util;
 
-const NAME_BYTES: &[u8] = b"Rails/HasAndBelongsToMany";
-const MESSAGE_BYTES: &[u8] = b"prefer has_many :through instead";
+pub(crate) const NAME_BYTES: &[u8] = b"Rails/HasAndBelongsToMany";
+pub(crate) const MESSAGE_BYTES: &[u8] = b"Prefer `has_many :through` to `has_and_belongs_to_many`.";
 
 pub(crate) const NAME: MurphySlice = util::slice(NAME_BYTES);
 
@@ -16,13 +16,23 @@ pub(crate) unsafe extern "C" fn run(
     if ctx.is_null() {
         return 1;
     }
+
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
-    util::emit_match_simple(
-        source,
-        b"has_and_belongs_to_many",
-        NAME,
-        util::slice(MESSAGE_BYTES),
-        emit,
-        sink,
-    )
+
+    let patterns: [&[u8]; 1] = [b"has_and_belongs_to_many"];
+    for pattern in patterns {
+        if util::emit_match_simple(
+            source,
+            pattern,
+            NAME,
+            util::slice(MESSAGE_BYTES),
+            emit,
+            sink,
+        ) != 0
+        {
+            return 1;
+        }
+    }
+
+    0
 }

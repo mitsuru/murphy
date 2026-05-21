@@ -4,7 +4,8 @@ use std::ffi::c_void;
 use crate::cops::util;
 
 pub(crate) const NAME_BYTES: &[u8] = b"Rails/DefaultScope";
-pub(crate) const MESSAGE_BYTES: &[u8] = b"avoid default_scope";
+pub(crate) const MESSAGE_BYTES: &[u8] =
+    b"Avoid use of `default_scope`. It is better to use explicitly named scopes.";
 
 pub(crate) const NAME: MurphySlice = util::slice(NAME_BYTES);
 
@@ -16,13 +17,23 @@ pub(crate) unsafe extern "C" fn run(
     if ctx.is_null() {
         return 1;
     }
+
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
-    util::emit_match_simple(
-        source,
-        b"default_scope",
-        NAME,
-        util::slice(MESSAGE_BYTES),
-        emit,
-        sink,
-    )
+
+    let patterns: [&[u8]; 1] = [b"default_scope"];
+    for pattern in patterns {
+        if util::emit_match_simple(
+            source,
+            pattern,
+            NAME,
+            util::slice(MESSAGE_BYTES),
+            emit,
+            sink,
+        ) != 0
+        {
+            return 1;
+        }
+    }
+
+    0
 }

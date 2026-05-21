@@ -4,7 +4,8 @@ use std::ffi::c_void;
 use crate::cops::util;
 
 pub(crate) const NAME_BYTES: &[u8] = b"Rails/SaveBang";
-pub(crate) const MESSAGE_BYTES: &[u8] = b"use bang methods when saving model records";
+pub(crate) const MESSAGE_BYTES: &[u8] =
+    b"Use `%<prefer>s` instead of `%<current>s` if the return value is not checked.";
 
 pub(crate) const NAME: MurphySlice = util::slice(NAME_BYTES);
 
@@ -19,24 +20,29 @@ pub(crate) unsafe extern "C" fn run(
 
     let source = unsafe { std::slice::from_raw_parts((*ctx).source.ptr, (*ctx).source.len) };
 
-    if util::emit_match_simple(
-        source,
-        b".save(",
-        NAME,
-        util::slice(MESSAGE_BYTES),
-        emit,
-        sink,
-    ) != 0
-    {
-        return 1;
+    let patterns: [&[u8]; 8] = [
+        b"create",
+        b"create_or_find_by",
+        b"first_or_create",
+        b"find_or_create_by",
+        b"save",
+        b"update",
+        b"update_attributes",
+        b"destroy",
+    ];
+    for pattern in patterns {
+        if util::emit_match_simple(
+            source,
+            pattern,
+            NAME,
+            util::slice(MESSAGE_BYTES),
+            emit,
+            sink,
+        ) != 0
+        {
+            return 1;
+        }
     }
 
-    util::emit_match_simple(
-        source,
-        b"update_attributes(",
-        NAME,
-        util::slice(MESSAGE_BYTES),
-        emit,
-        sink,
-    )
+    0
 }
