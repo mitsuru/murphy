@@ -736,8 +736,90 @@ impl Translator {
             return self.translate_begin(&b, range);
         }
 
-        // Task 14 以降、ここに各ノード種の arm を足していく。
+        // --- string interpolation / regexp / xstring ---
+        if let Some(s) = node.as_interpolated_string_node() {
+            let ids = self.translate_interp_parts(s.parts());
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Dstr(list), range);
+        }
+        if let Some(s) = node.as_interpolated_symbol_node() {
+            let ids = self.translate_interp_parts(s.parts());
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Dsym(list), range);
+        }
+        if let Some(x) = node.as_x_string_node() {
+            // 補間なし xstring `` `cmd` ``。content を `Str` 1 部品に畳む。
+            let text = String::from_utf8_lossy(x.unescaped());
+            let sid = self.builder.intern_string(&text);
+            let str_id = self.builder.push(NodeKind::Str(sid), range);
+            let list = self.builder.push_list(&[str_id]);
+            return self.builder.push(NodeKind::Xstr(list), range);
+        }
+        if let Some(x) = node.as_interpolated_x_string_node() {
+            let ids = self.translate_interp_parts(x.parts());
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Xstr(list), range);
+        }
+        if let Some(re) = node.as_regular_expression_node() {
+            // 補間なし正規表現。content を `Str` 1 部品に畳む。
+            let text = String::from_utf8_lossy(re.unescaped());
+            let sid = self.builder.intern_string(&text);
+            let str_id = self.builder.push(NodeKind::Str(sid), range);
+            let parts = self.builder.push_list(&[str_id]);
+            let opts = self.regexp_opts(re.is_ignore_case(), re.is_extended(), re.is_multi_line());
+            return self.builder.push(NodeKind::Regexp { parts, opts }, range);
+        }
+        if let Some(re) = node.as_interpolated_regular_expression_node() {
+            let ids = self.translate_interp_parts(re.parts());
+            let parts = self.builder.push_list(&ids);
+            let opts = self.regexp_opts(re.is_ignore_case(), re.is_extended(), re.is_multi_line());
+            return self.builder.push(NodeKind::Regexp { parts, opts }, range);
+        }
+
+        // Task 16 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
+    }
+
+    /// 補間部品の並びを翻訳して `NodeId` の `Vec` を返す。部品は
+    /// `StringNode` / `EmbeddedStatementsNode` / `EmbeddedVariableNode` の
+    /// いずれか。`EmbeddedStatementsNode`（`#{...}`）は内側 statements を
+    /// `Begin` に畳む。`EmbeddedVariableNode`（`#@x` 等）は中の変数ノードを
+    /// 翻訳する。
+    fn translate_interp_parts(&mut self, parts: prism::NodeList<'_>) -> Vec<NodeId> {
+        let mut ids = Vec::new();
+        for p in parts.iter() {
+            if let Some(emb) = p.as_embedded_statements_node() {
+                let emb_range = Self::range(&emb.location());
+                let inner: Vec<NodeId> = match emb.statements() {
+                    Some(s) => s.body().iter().map(|n| self.translate_node(&n)).collect(),
+                    None => Vec::new(),
+                };
+                let list = self.builder.push_list(&inner);
+                ids.push(self.builder.push(NodeKind::Begin(list), emb_range));
+            } else if let Some(ev) = p.as_embedded_variable_node() {
+                ids.push(self.translate_node(&ev.variable()));
+            } else {
+                // `StringNode` 等はそのまま翻訳。
+                ids.push(self.translate_node(&p));
+            }
+        }
+        ids
+    }
+
+    /// 正規表現フラグから `"imx"` 形式のフラグ文字列を組み立てて intern する。
+    /// フラグ無しなら空文字列を interned した `Symbol`。
+    fn regexp_opts(&mut self, ignore: bool, ext: bool, multi: bool) -> murphy_ast::Symbol {
+        let mut s = String::new();
+        if ignore {
+            s.push('i');
+        }
+        if multi {
+            s.push('m');
+        }
+        if ext {
+            s.push('x');
+        }
+        self.builder.intern_symbol(&s)
     }
 
     /// prism `BeginNode` → arena ノード。
@@ -2104,5 +2186,83 @@ mod tests {
                 "expected Unknown for `{src}`"
             );
         }
+    }
+
+    // --- Task 15: string interpolation / regexp / xstring ---
+
+    #[test]
+    fn translates_interpolated_string() {
+        let ast = translate("\"a#{b}c\"", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Dstr(parts) => assert!(parts.len >= 2),
+            other => panic!("expected Dstr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_interpolated_string_embedded_stmt_is_begin() {
+        // `#{...}` 部品は内側 statements を `Begin` に畳む。
+        let ast = translate("\"a#{b}c\"", "t.rb");
+        let parts: Vec<_> = ast.children(ast.root()).collect();
+        // 部品のどれかが Begin（補間部）であること。
+        assert!(
+            parts
+                .iter()
+                .any(|&p| matches!(ast.kind(p), NodeKind::Begin(_))),
+            "expected an embedded `#{{...}}` part folded into Begin"
+        );
+    }
+
+    #[test]
+    fn translates_interpolated_symbol() {
+        let ast = translate(":\"a#{b}\"", "t.rb");
+        assert!(matches!(ast.kind(ast.root()), NodeKind::Dsym(_)));
+    }
+
+    #[test]
+    fn translates_regexp_with_opts() {
+        let ast = translate("/ab/im", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Regexp { opts, .. } => {
+                let s = ast.interner().resolve(opts.0);
+                assert!(s.contains('i') && s.contains('m'));
+            }
+            other => panic!("expected Regexp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_regexp_without_opts() {
+        // フラグ無し `/ab/` は `opts` が空文字列に interned される。
+        let ast = translate("/ab/", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Regexp { opts, .. } => {
+                assert_eq!(ast.interner().resolve(opts.0), "");
+            }
+            other => panic!("expected Regexp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_interpolated_regexp() {
+        let ast = translate("/a#{b}/x", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Regexp { opts, .. } => {
+                assert!(ast.interner().resolve(opts.0).contains('x'));
+            }
+            other => panic!("expected Regexp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_xstring() {
+        let ast = translate("`ls`", "t.rb");
+        assert!(matches!(ast.kind(ast.root()), NodeKind::Xstr(_)));
+    }
+
+    #[test]
+    fn translates_interpolated_xstring() {
+        let ast = translate("`ls #{dir}`", "t.rb");
+        assert!(matches!(ast.kind(ast.root()), NodeKind::Xstr(_)));
     }
 }

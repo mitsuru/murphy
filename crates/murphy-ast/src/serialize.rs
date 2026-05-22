@@ -377,6 +377,23 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, target.0);
             put_u32(out, value.0);
         }
+        NodeKind::Dstr(l) => {
+            put_u8(out, 63);
+            write_node_list(l, out);
+        }
+        NodeKind::Dsym(l) => {
+            put_u8(out, 64);
+            write_node_list(l, out);
+        }
+        NodeKind::Xstr(l) => {
+            put_u8(out, 65);
+            write_node_list(l, out);
+        }
+        NodeKind::Regexp { parts, opts } => {
+            put_u8(out, 66);
+            write_node_list(parts, out);
+            put_u32(out, opts.0);
+        }
     }
 }
 
@@ -550,6 +567,13 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         62 => NodeKind::AndAsgn {
             target: NodeId(get_u32(cur)?),
             value: NodeId(get_u32(cur)?),
+        },
+        63 => NodeKind::Dstr(read_node_list(cur)?),
+        64 => NodeKind::Dsym(read_node_list(cur)?),
+        65 => NodeKind::Xstr(read_node_list(cur)?),
+        66 => NodeKind::Regexp {
+            parts: read_node_list(cur)?,
+            opts: Symbol(get_u32(cur)?),
         },
         _ => return Err(SerError::BadDiscriminant),
     })
@@ -1150,6 +1174,56 @@ mod tests {
         assert_eq!(
             ast, restored,
             "op-assign variant round-trip must be bit-equal"
+        );
+    }
+
+    #[test]
+    fn round_trip_interp_string_variants() {
+        // The four interpolation variants appended after `AndAsgn`
+        // (discriminants 63..=66) must survive the byte round-trip. Covers
+        // the `NodeList` payloads (`Dstr`/`Dsym`/`Xstr`), populated and
+        // empty, and the `Regexp` struct with both empty and non-empty
+        // `opts`.
+        let mut b = AstBuilder::new("\"a#{b}\"; :\"s\"; `ls`; /re/im", "t.rb");
+        // `Dstr` — two parts.
+        let part_a = b.push(NodeKind::Nil, r(1, 2));
+        let part_b = b.push(NodeKind::Nil, r(2, 6));
+        let dstr_list = b.push_list(&[part_a, part_b]);
+        let dstr = b.push(NodeKind::Dstr(dstr_list), r(0, 7));
+        // `Dsym` — single part.
+        let sym_part = b.push(NodeKind::Nil, r(10, 11));
+        let dsym_list = b.push_list(&[sym_part]);
+        let dsym = b.push(NodeKind::Dsym(dsym_list), r(9, 13));
+        // `Xstr` — empty parts list.
+        let xstr = b.push(NodeKind::Xstr(NodeList::EMPTY), r(15, 19));
+        // `Regexp` — non-empty opts.
+        let re_part = b.push(NodeKind::Nil, r(22, 24));
+        let re_list = b.push_list(&[re_part]);
+        let opts_im = b.intern_symbol("im");
+        let regexp = b.push(
+            NodeKind::Regexp {
+                parts: re_list,
+                opts: opts_im,
+            },
+            r(21, 27),
+        );
+        // `Regexp` — empty opts (no flags).
+        let opts_empty = b.intern_symbol("");
+        let regexp_no_opts = b.push(
+            NodeKind::Regexp {
+                parts: NodeList::EMPTY,
+                opts: opts_empty,
+            },
+            r(0, 0),
+        );
+        let list = b.push_list(&[dstr, dsym, xstr, regexp, regexp_no_opts]);
+        let root = b.push(NodeKind::Begin(list), r(0, 27));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "interpolation variant round-trip must be bit-equal"
         );
     }
 

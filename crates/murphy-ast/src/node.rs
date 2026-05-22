@@ -360,6 +360,25 @@ pub enum NodeKind {
         target: NodeId,
         value: NodeId,
     },
+
+    // --- string interpolation / regexp / xstring (appended post-`AndAsgn`
+    // per ADR 0037: variants are append-only; declaration order is the
+    // frozen discriminant) ---
+    /// 補間文字列 `"a#{b}"` / 隣接文字列連結（`InterpolatedStringNode`）。
+    /// 部品の並び。
+    Dstr(NodeList),
+    /// 補間シンボル `:"a#{b}"`（`InterpolatedSymbolNode`）。
+    Dsym(NodeList),
+    /// バッククォート文字列 `` `cmd` ``（`XStringNode` /
+    /// `InterpolatedXStringNode`、補間あり/なし両方）。部品の並び。
+    Xstr(NodeList),
+    /// 正規表現 `/re/imx`（`RegularExpressionNode` /
+    /// `InterpolatedRegularExpressionNode`、補間あり/なし両方）。`opts` は
+    /// フラグ文字列（`"imx"` 等）を interned した `Symbol`。
+    Regexp {
+        parts: NodeList,
+        opts: Symbol,
+    },
 }
 
 /// A source comment, stored outside the node tree.
