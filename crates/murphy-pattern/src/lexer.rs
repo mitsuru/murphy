@@ -157,7 +157,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Scan `#name` where `name` is `[A-Za-z_][A-Za-z0-9_]*[?!]?`.
+    /// Scan `#name` where `name` is `[A-Za-z_][A-Za-z0-9_]*[?!=]?`.
     fn scan_predicate(&mut self) -> Result<Token, ParseError> {
         let hash = self.pos;
         self.pos += 1; // consume `#`
@@ -168,8 +168,8 @@ impl<'a> Lexer<'a> {
     }
 
     /// Scan `:name` — either an identifier-style name
-    /// (`[A-Za-z_][A-Za-z0-9_]*[?!]?`) or a Ruby operator-method name
-    /// (`+`, `[]`, `<=>`, ...).
+    /// (`[A-Za-z_][A-Za-z0-9_]*[?!=]?`, including setter names like `foo=`) or
+    /// a Ruby operator-method name (`+`, `[]`, `<=>`, ...).
     fn scan_symbol(&mut self) -> Result<Token, ParseError> {
         let colon = self.pos;
         self.pos += 1; // consume `:`
@@ -306,8 +306,11 @@ impl<'a> Lexer<'a> {
         Ok(Token::Ident(text.to_string()))
     }
 
-    /// Read a Ruby-method-ish name `[A-Za-z_][A-Za-z0-9_]*[?!]?` at the cursor.
+    /// Read a Ruby-method-ish name `[A-Za-z_][A-Za-z0-9_]*[?!=]?` at the cursor.
     /// Returns `None` (leaving the cursor unmoved) when no name is present.
+    ///
+    /// The optional trailing suffix is one of `?` (predicate), `!` (bang), or
+    /// `=` (setter method name, e.g. `foo=`).
     fn take_method_name(&mut self) -> Option<String> {
         match self.peek() {
             Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {}
@@ -321,7 +324,7 @@ impl<'a> Lexer<'a> {
         ) {
             self.pos += 1;
         }
-        if matches!(self.peek(), Some(b'?' | b'!')) {
+        if matches!(self.peek(), Some(b'?' | b'!' | b'=')) {
             self.pos += 1;
         }
         Some(self.slice_str(start, self.pos).to_string())
@@ -627,5 +630,48 @@ mod tests {
         // `take_method_name` is shared with `#name`; allowing uppercase there
         // is harmless — Ruby permits uppercase method names.
         assert_eq!(toks("#Foo"), vec![Token::Predicate("Foo".into())]);
+    }
+
+    // --- symbol grammar: setter names (murphy-m7q) -------------------------
+
+    #[test]
+    fn lexes_setter_symbols() {
+        // An identifier-style name with a trailing `=` is a Ruby setter
+        // method name (`foo=`); patterns match it as `(send _ :foo= _)`.
+        assert_eq!(toks(":foo="), vec![Token::Sym("foo=".into())]);
+        assert_eq!(toks(":bar="), vec![Token::Sym("bar=".into())]);
+        assert_eq!(toks(":Foo="), vec![Token::Sym("Foo=".into())]);
+    }
+
+    #[test]
+    fn setter_symbol_in_node_match() {
+        assert_eq!(
+            toks("(send _ :foo= _)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Underscore,
+                Token::Sym("foo=".into()),
+                Token::Underscore,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn setter_symbol_takes_exactly_one_equals() {
+        // The `=` suffix is consumed once; a following character is its own
+        // token, so `:foo=1` is a setter symbol then an integer.
+        assert_eq!(
+            toks(":foo=1"),
+            vec![Token::Sym("foo=".into()), Token::Int(1)]
+        );
+    }
+
+    #[test]
+    fn predicate_setter_name_is_accepted() {
+        // `take_method_name` is shared with `#name`; allowing a trailing `=`
+        // there is harmless — Ruby permits setter method names.
+        assert_eq!(toks("#foo="), vec![Token::Predicate("foo=".into())]);
     }
 }
