@@ -299,7 +299,79 @@ impl Translator {
             return self.builder.push(NodeKind::Kwsplat(inner), range);
         }
 
-        // Task 8 以降、ここに各ノード種の arm を足していく。
+        // --- conditionals ---
+        if let Some(iff) = node.as_if_node() {
+            let cond = self.translate_node(&iff.predicate());
+            let then_ = self.translate_stmts_opt(iff.statements());
+            // `subsequent()` は `ElseNode`（`else`）か別の `IfNode`（`elsif`）。
+            // `elsif` は入れ子の `If` として else_ に置く（parser-gem 準拠）。
+            let else_ = match iff.subsequent() {
+                Some(sub) => match sub.as_else_node() {
+                    Some(els) => self.translate_stmts_opt(els.statements()),
+                    None => OptNodeId::some(self.translate_node(&sub)),
+                },
+                None => OptNodeId::NONE,
+            };
+            return self
+                .builder
+                .push(NodeKind::If { cond, then_, else_ }, range);
+        }
+        if let Some(unl) = node.as_unless_node() {
+            // parser-gem 準拠: `unless` は then/else を入れ替える。prism の
+            // `statements()`（unless 本体）が murphy の `else_` に、prism の
+            // `else_clause()` が murphy の `then_` に入る。
+            let cond = self.translate_node(&unl.predicate());
+            let body = self.translate_stmts_opt(unl.statements());
+            let else_branch = match unl.else_clause() {
+                Some(els) => self.translate_stmts_opt(els.statements()),
+                None => OptNodeId::NONE,
+            };
+            return self.builder.push(
+                NodeKind::If {
+                    cond,
+                    then_: else_branch,
+                    else_: body,
+                },
+                range,
+            );
+        }
+        if let Some(c) = node.as_case_node() {
+            // `predicate()` は `Option<Node>`（`case` 式無しの `case/when` は None）。
+            let subject = c
+                .predicate()
+                .map(|p| OptNodeId::some(self.translate_node(&p)))
+                .unwrap_or(OptNodeId::NONE);
+            let when_ids: Vec<NodeId> = c
+                .conditions()
+                .iter()
+                .map(|w| self.translate_node(&w))
+                .collect();
+            let whens = self.builder.push_list(&when_ids);
+            let else_ = match c.else_clause() {
+                Some(els) => self.translate_stmts_opt(els.statements()),
+                None => OptNodeId::NONE,
+            };
+            return self.builder.push(
+                NodeKind::Case {
+                    subject,
+                    whens,
+                    else_,
+                },
+                range,
+            );
+        }
+        if let Some(w) = node.as_when_node() {
+            let cond_ids: Vec<NodeId> = w
+                .conditions()
+                .iter()
+                .map(|c| self.translate_node(&c))
+                .collect();
+            let conds = self.builder.push_list(&cond_ids);
+            let body = self.translate_stmts_opt(w.statements());
+            return self.builder.push(NodeKind::When { conds, body }, range);
+        }
+
+        // Task 9 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
 
@@ -894,6 +966,111 @@ mod tests {
         match ast.kind(ast.root()) {
             NodeKind::Array(l) => assert_eq!(l.len, 0),
             other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_if() {
+        // `if c ... else ... end` → If { cond, then_: Some, else_: Some }。
+        let ast = translate("if c\n  a\nelse\n  b\nend", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::If { then_, else_, .. } => {
+                assert!(then_.get().is_some());
+                assert!(else_.get().is_some());
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_if_without_else() {
+        // else 無しの if → else_ は None。
+        let ast = translate("if c\n  a\nend", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::If { then_, else_, .. } => {
+                assert!(then_.get().is_some());
+                assert!(else_.is_none());
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_if_elsif_nests() {
+        // `elsif` は subsequent が IfNode → else_ に入れ子の If。
+        let ast = translate("if a\n  1\nelsif b\n  2\nend", "t.rb");
+        let else_id = match ast.kind(ast.root()) {
+            NodeKind::If { else_, .. } => else_.get().expect("elsif → else_ に If"),
+            other => panic!("expected If, got {other:?}"),
+        };
+        assert!(matches!(ast.kind(else_id), NodeKind::If { .. }));
+    }
+
+    #[test]
+    fn translates_unless_swaps_branches() {
+        // parser-gem 準拠: `unless c\n  a\nend` → If { cond: c, then_: None,
+        // else_: a }（unless 本体は else_ 側へ）。
+        let ast = translate("unless c\n  a\nend", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::If { then_, else_, .. } => {
+                assert!(then_.is_none(), "unless: then_ は None");
+                assert!(else_.get().is_some(), "unless: else_ に本体");
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_unless_with_else_swaps_branches() {
+        // `unless c\n  a\nelse\n  b\nend` → If { then_: b, else_: a }。
+        // else 節（b）が then_ 側、unless 本体（a）が else_ 側。
+        let ast = translate("unless c\n  a\nelse\n  b\nend", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::If { then_, else_, .. } => {
+                assert!(then_.get().is_some(), "unless+else: then_ に else 節");
+                assert!(else_.get().is_some(), "unless+else: else_ に本体");
+            }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_case_when() {
+        // `case x\nwhen 1\n  a\nelse\n  b\nend` → Case { subject, whens, else_ }。
+        let ast = translate("case x\nwhen 1\n  a\nelse\n  b\nend", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Case {
+                subject,
+                whens,
+                else_,
+            } => {
+                assert!(subject.get().is_some());
+                assert_eq!(whens.len, 1);
+                assert!(else_.get().is_some());
+            }
+            other => panic!("expected Case, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_when_node() {
+        // when 子は When { conds, body }。`when 1, 2` は 2 条件。
+        let ast = translate("case x\nwhen 1, 2\n  a\nend", "t.rb");
+        let when_id = match ast.kind(ast.root()) {
+            NodeKind::Case { whens, .. } => {
+                assert_eq!(whens.len, 1);
+                ast.children(ast.root())
+                    .find(|&c| matches!(ast.kind(c), NodeKind::When { .. }))
+                    .expect("Case に When 子")
+            }
+            other => panic!("expected Case, got {other:?}"),
+        };
+        match ast.kind(when_id) {
+            NodeKind::When { conds, body } => {
+                assert_eq!(conds.len, 2);
+                assert!(body.get().is_some());
+            }
+            other => panic!("expected When, got {other:?}"),
         }
     }
 
