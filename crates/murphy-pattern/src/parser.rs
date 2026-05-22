@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn rejects_empty_union() {
         let e = parse("{}").expect_err("empty union");
-        assert!(e.message.to_lowercase().contains("union") || e.message.contains("{}"));
+        assert!(e.message.to_lowercase().contains("union"));
     }
 
     // --- additional Task 7 coverage --------------------------------------
@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn parses_nested_union() {
-        // `{{a b} c}` — the first alternative is itself a union.
+        // `{{send csend} array}` — the first alternative is itself a union.
         let p = parse("{{send csend} array}").expect("ok");
         match p.root.kind {
             PatKind::Union(alts) => {
