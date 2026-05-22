@@ -245,8 +245,80 @@ impl Translator {
                 .push(NodeKind::Casgn { scope, name, value }, range);
         }
 
-        // Task 5 以降、ここに各ノード種の arm を足していく。
+        // --- calls / splat ---
+        if let Some(call) = node.as_call_node() {
+            return self.translate_call(&call, range);
+        }
+        if let Some(s) = node.as_splat_node() {
+            // 注: prism `SplatNode` の内容アクセサは `expression()`（appendix の
+            // `value()` ではない — bindings.rs で確認済み）。
+            let inner = s
+                .expression()
+                .map(|e| OptNodeId::some(self.translate_node(&e)))
+                .unwrap_or(OptNodeId::NONE);
+            return self.builder.push(NodeKind::Splat(inner), range);
+        }
+
+        // Task 6 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
+    }
+
+    /// `CallNode` を `Send`/`Csend` へ。`block` が `BlockArgumentNode`（`&blk`）の
+    /// 場合のみ args 末尾に `BlockPass` を付ける。`{ }`/`do end` の `BlockNode` は
+    /// Task 6 で呼び出し側が `Block` ラップする（本ヘルパは素の Send/Csend を返す）。
+    fn translate_call(&mut self, call: &prism::CallNode<'_>, range: Range) -> NodeId {
+        let method = self.sym(&call.name());
+        let receiver = call.receiver();
+
+        // 引数リスト。
+        let mut arg_ids: Vec<NodeId> = Vec::new();
+        if let Some(args) = call.arguments() {
+            for a in args.arguments().iter() {
+                arg_ids.push(self.translate_node(&a));
+            }
+        }
+        // `&blk` → `BlockPass` を args 末尾へ。`BlockNode` のケースは無視
+        // （Task 6 で `translate_call` の呼び出し側が処理する）。
+        if let Some(blk) = call.block()
+            && let Some(ba) = blk.as_block_argument_node()
+        {
+            let expr = ba
+                .expression()
+                .map(|e| OptNodeId::some(self.translate_node(&e)))
+                .unwrap_or(OptNodeId::NONE);
+            let bp = self
+                .builder
+                .push(NodeKind::BlockPass(expr), Self::range(&ba.location()));
+            arg_ids.push(bp);
+        }
+        let args = self.builder.push_list(&arg_ids);
+
+        match (receiver, call.is_safe_navigation()) {
+            (Some(r), true) => {
+                let recv = self.translate_node(&r);
+                self.builder.push(
+                    NodeKind::Csend {
+                        receiver: recv,
+                        method,
+                        args,
+                    },
+                    range,
+                )
+            }
+            (recv_opt, _) => {
+                let receiver = recv_opt
+                    .map(|r| OptNodeId::some(self.translate_node(&r)))
+                    .unwrap_or(OptNodeId::NONE);
+                self.builder.push(
+                    NodeKind::Send {
+                        receiver,
+                        method,
+                        args,
+                    },
+                    range,
+                )
+            }
+        }
     }
 
     /// `ConstantPathNode`（`A::B` / `::B`）→ `Const { scope, name }`。
@@ -466,6 +538,76 @@ mod tests {
                 assert!(value.get().is_some());
             }
             other => panic!("expected Cvasgn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_call_no_receiver() {
+        // `puts 1` → Send { receiver: None, method: puts, args: [Int 1] }。
+        let ast = translate("puts 1", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Send {
+                receiver,
+                method,
+                args,
+            } => {
+                assert!(receiver.is_none());
+                assert_eq!(ast.interner().resolve(method.0), "puts");
+                assert_eq!(args.len, 1);
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_call_with_receiver() {
+        // `a.foo(b)` → Send { receiver: Some, method: foo, args: [..] }。
+        let ast = translate("a.foo(b)", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Send {
+                receiver, method, ..
+            } => {
+                assert!(receiver.get().is_some());
+                assert_eq!(ast.interner().resolve(method.0), "foo");
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_safe_navigation_to_csend() {
+        let ast = translate("a&.foo", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Csend { method, .. } => {
+                assert_eq!(ast.interner().resolve(method.0), "foo");
+            }
+            other => panic!("expected Csend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_block_pass_arg() {
+        // `foo(&blk)` → Send の args 末尾が BlockPass。
+        let ast = translate("foo(&blk)", "t.rb");
+        if let NodeKind::Send { args, .. } = *ast.kind(ast.root()) {
+            assert!(args.len >= 1);
+            let last = ast.children(ast.root()).last().unwrap();
+            assert!(matches!(ast.kind(last), NodeKind::BlockPass(_)));
+        } else {
+            panic!("expected Send");
+        }
+    }
+
+    #[test]
+    fn translates_splat_arg() {
+        // `foo(*arr)` → Send の args に Splat。
+        let ast = translate("foo(*arr)", "t.rb");
+        if let NodeKind::Send { args, .. } = *ast.kind(ast.root()) {
+            assert_eq!(args.len, 1);
+            let first = ast.children(ast.root()).next().unwrap();
+            assert!(matches!(ast.kind(first), NodeKind::Splat(_)));
+        } else {
+            panic!("expected Send");
         }
     }
 
