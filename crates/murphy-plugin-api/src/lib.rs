@@ -8,7 +8,7 @@ mod cop;
 mod options;
 mod severity;
 
-pub use abi::{OptionSpec, RawSlice};
+pub use abi::{CxRaw, FnTable, OptionSpec, RawEdit, RawOffense, RawSlice};
 pub use config_error::{ConfigError, ConfigErrorKind};
 pub use cop::Cop;
 pub use options::{CopOptions, NoOptions};
