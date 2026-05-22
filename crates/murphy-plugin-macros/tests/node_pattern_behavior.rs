@@ -421,3 +421,47 @@ fn union_and_negation() {
     // No receiver at all: `!nil?` requires the receiver present, so reject.
     assert!(!send_nonnil_recv(snd, &cx));
 }
+
+// `#is_big` is a bare predicate applied directly to `node`. (`int` has no
+// schema entry, so `(int #is_big)` would be an unsupported-kind error —
+// the predicate is a child position, not a head.)
+node_pattern!(is_big_int, "#is_big");
+node_pattern!(big_or_nil, "{#is_big nil}");
+
+/// User-provided predicate: a free fn in scope at the matcher call site.
+/// Both `is_big_int` and `big_or_nil` resolve `#is_big` to this fn.
+fn is_big(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(*cx.kind(node), NodeKind::Int(v) if v >= 100)
+}
+
+#[test]
+fn predicate_calls_a_free_function() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let big = b.push(NodeKind::Int(500), r());
+    let small = b.push(NodeKind::Int(3), r());
+    let list = b.push_list(&[big, small]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_big_int(big, &cx));
+    assert!(!is_big_int(small, &cx));
+}
+
+#[test]
+fn predicate_inside_union() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let big = b.push(NodeKind::Int(500), r());
+    let niln = b.push(NodeKind::Nil, r());
+    let small = b.push(NodeKind::Int(1), r());
+    let list = b.push_list(&[big, niln, small]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert!(big_or_nil(big, &cx) && big_or_nil(niln, &cx));
+    assert!(!big_or_nil(small, &cx));
+}

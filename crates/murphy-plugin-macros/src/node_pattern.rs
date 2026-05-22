@@ -599,6 +599,25 @@ fn schema_for(tag: u8) -> Option<&'static KindSchema> {
     SCHEMA_TABLE.iter().find(|(t, _)| *t == tag).map(|(_, s)| s)
 }
 
+/// Parse a `#predicate` name into a callable Rust identifier.
+///
+/// A `#name` resolves to a free function `name(node, cx) -> bool` that must be
+/// in scope at the `node_pattern!` call site. The murphy-pattern lexer permits
+/// a trailing `?` / `!` in predicate names (e.g. `odd?`, `foo!`), but those
+/// are not valid Rust identifiers — `syn::parse_str` rejects them, and that is
+/// the intended `compile_error` path for v1.
+fn predicate_ident(name: &str) -> syn::Result<Ident> {
+    syn::parse_str::<Ident>(name).map_err(|_| {
+        syn::Error::new(
+            Span::call_site(),
+            format!(
+                "node_pattern!: predicate name `{name}` is not a valid Rust \
+                 identifier; `?`/`!` are not allowed in v1"
+            ),
+        )
+    })
+}
+
 /// Lower one `Pat` against `subject` (a `NodeId`-typed expression) into a
 /// block of guard statements that `return ctx.fail` on mismatch.
 fn lower_pat(
@@ -751,6 +770,17 @@ fn lower_pat(
             let body_guards = lower_pat(body, subject, ctx)?;
             let cap = cap_ident(*slot as usize);
             Ok(quote!(#body_guards #cap = #subject;))
+        }
+        PatKind::Predicate(name) => {
+            // `#name` calls a free fn `name(node, cx) -> bool` in scope at the
+            // call site. Fail the guard when the predicate returns `false`.
+            let ident = predicate_ident(name)?;
+            let fail = fail_stmt(ctx);
+            Ok(quote! {
+                if !#ident(#subject, cx) {
+                    #fail
+                }
+            })
         }
         other => Err(syn::Error::new(
             Span::call_site(),
@@ -1176,10 +1206,12 @@ fn lower_bool(
             let inner_bool = lower_bool(inner, subject, ctx)?;
             Ok(quote!( ( !#inner_bool ) ))
         }
-        PatKind::Predicate(_) => Err(syn::Error::new(
-            Span::call_site(),
-            "node_pattern!: predicate inside `{}` / `!` / `` ` `` not yet supported",
-        )),
+        PatKind::Predicate(name) => {
+            // `#name` calls a free fn `name(node, cx) -> bool` in scope at the
+            // call site; in value form it is simply that bool expression.
+            let ident = predicate_ident(name)?;
+            Ok(quote!( ( #ident(#subject, cx) ) ))
+        }
         PatKind::Parent(inner) => {
             let p = gensym(ctx, "__p");
             let inner_bool = lower_bool(inner, &quote!(#p), ctx)?;
