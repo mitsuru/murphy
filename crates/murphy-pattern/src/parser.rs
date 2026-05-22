@@ -7,7 +7,7 @@
 //! currently produce a "not yet supported" error.
 
 use crate::lexer::{Spanned, Token, tokenize};
-use crate::{Head, Lit, ParseError, Pat, PatKind, PatSpan, PatternAst};
+use crate::{CaptureKind, Head, Lit, ParseError, Pat, PatKind, PatSpan, PatternAst};
 use murphy_ast::NodeKindTag;
 
 /// Parse a pattern source string into a [`PatternAst`].
@@ -23,7 +23,7 @@ pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
     }
     Ok(PatternAst {
         root,
-        captures: Vec::new(),
+        captures: parser.captures,
     })
 }
 
@@ -31,11 +31,22 @@ pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
 struct Parser<'a> {
     tokens: &'a [Spanned],
     pos: usize,
+    /// One entry per `$` capture, indexed by slot. A slot is reserved (with a
+    /// placeholder `CaptureKind::Node`) the instant its `$` token is consumed,
+    /// so slots are assigned in source order — left-to-right, outer-before-inner.
+    captures: Vec<CaptureKind>,
+    /// Names of `$ident` captures seen so far, used to reject duplicates.
+    capture_names: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
     fn new(tokens: &'a [Spanned]) -> Parser<'a> {
-        Parser { tokens, pos: 0 }
+        Parser {
+            tokens,
+            pos: 0,
+            captures: Vec::new(),
+            capture_names: Vec::new(),
+        }
     }
 
     /// The token at the cursor, if any.
@@ -52,9 +63,11 @@ impl<'a> Parser<'a> {
         tok
     }
 
-    /// `prefixed := '!' prefixed | '^' prefixed | '`' prefixed | primary`.
+    /// `prefixed := '!' prefixed | '^' prefixed | '`' prefixed
+    /// | '$' capture-tail | primary`.
     ///
-    /// `$` capture-tail belongs here too but is deferred to Task 8.
+    /// `$` is a prefix dispatched here (see [`Parser::capture`]), not in
+    /// [`Parser::primary`].
     fn prefixed(&mut self) -> Result<Pat, ParseError> {
         let Some(head) = self.peek() else {
             // No source byte to point at for an empty stream.
@@ -65,6 +78,7 @@ impl<'a> Parser<'a> {
             Token::Bang => PatKind::Not,
             Token::Caret => PatKind::Parent,
             Token::Backtick => PatKind::Descend,
+            Token::Dollar => return self.capture(prefix_span),
             _ => return self.primary(),
         };
         self.pos += 1; // consume the prefix sigil
@@ -79,12 +93,88 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parse a `$` capture tail. `dollar_span` is the span of the `$` token,
+    /// still at the cursor.
+    ///
+    /// The capture's `slot` is reserved — appended to `self.captures` with a
+    /// placeholder [`CaptureKind::Node`] — the instant the `$` is consumed,
+    /// *before* the body is parsed, so slots follow source order
+    /// (left-to-right, outer-before-inner) even for nested captures.
+    ///
+    /// - `$ident` → a named capture; `name` is `Some`, `body` is an implicit
+    ///   [`PatKind::Wildcard`] spanning the `$`. Duplicate names are rejected.
+    /// - `$...` → an anonymous seq capture; `body` is [`PatKind::Rest`] and the
+    ///   slot's kind is upgraded to [`CaptureKind::Seq`].
+    /// - `$<anything else>` → an anonymous capture whose `body` is a full
+    ///   [`prefixed`](Self::prefixed) pattern parsed recursively.
+    /// - `$` at end of input → a span-carrying error.
+    fn capture(&mut self, dollar_span: PatSpan) -> Result<Pat, ParseError> {
+        self.pos += 1; // consume `$`
+        // Reserve the slot now — before the body — so source order holds.
+        let slot = self.captures.len() as u16;
+        self.captures.push(CaptureKind::Node);
+
+        let Some(next) = self.peek() else {
+            return Err(ParseError::new(
+                "dangling `$`: nothing to capture",
+                dollar_span,
+            ));
+        };
+
+        let (name, body) = match &next.tok {
+            Token::Ident(ident) => {
+                let name = ident.clone();
+                self.pos += 1; // consume the ident
+                if self.capture_names.contains(&name) {
+                    return Err(ParseError::new(
+                        format!("duplicate capture name `{name}`"),
+                        next.span,
+                    ));
+                }
+                self.capture_names.push(name.clone());
+                let body = Pat {
+                    kind: PatKind::Wildcard,
+                    span: dollar_span,
+                };
+                (Some(name), body)
+            }
+            Token::Ellipsis => {
+                let ell_span = next.span;
+                self.pos += 1; // consume `...`
+                self.captures[slot as usize] = CaptureKind::Seq;
+                let body = Pat {
+                    kind: PatKind::Rest,
+                    span: ell_span,
+                };
+                (None, body)
+            }
+            _ => {
+                let body = self.prefixed()?;
+                (None, body)
+            }
+        };
+
+        let span = PatSpan {
+            start: dollar_span.start,
+            end: body.span.end,
+        };
+        Ok(Pat {
+            kind: PatKind::Capture {
+                slot,
+                name,
+                body: Box::new(body),
+            },
+            span,
+        })
+    }
+
     /// `primary := '_' | 'nil?' | literal | '#' name | IDENT | node-match
     /// | union`.
     ///
     /// `(` parses a node match (see [`node_match`]); `{` parses a union (see
-    /// [`union`]). `$` and a top-level `...` are deferred / invalid and
-    /// produce a descriptive error here.
+    /// [`union`]). A top-level `...` is invalid and produces a descriptive
+    /// error here. Prefix sigils (`!`/`^`/`` ` ``/`$`) never reach `primary`:
+    /// [`prefixed`](Self::prefixed) consumes them first.
     fn primary(&mut self) -> Result<Pat, ParseError> {
         let Some(spanned) = self.next() else {
             return Err(ParseError::new("empty pattern", PatSpan::new(0, 0)));
@@ -101,9 +191,6 @@ impl<'a> Parser<'a> {
             Token::Ident(name) => return self.ident_pat(name, span),
             Token::LParen => return self.node_match(span),
             Token::LBrace => return self.union(span),
-            Token::Dollar => {
-                return Err(ParseError::new("capture `$` is not yet supported", span));
-            }
             Token::Ellipsis => {
                 return Err(ParseError::new(
                     "`...` is only valid inside a node child list",
@@ -112,7 +199,7 @@ impl<'a> Parser<'a> {
             }
             Token::RParen => return Err(ParseError::new("unexpected `)`", span)),
             Token::RBrace => return Err(ParseError::new("unexpected `}`", span)),
-            Token::Bang | Token::Caret | Token::Backtick => {
+            Token::Bang | Token::Caret | Token::Backtick | Token::Dollar => {
                 // `prefixed` dispatches these; `primary` never sees them.
                 unreachable!("prefix sigils are handled by `prefixed`");
             }
@@ -289,7 +376,7 @@ fn resolve_kind(name: &str, span: PatSpan) -> Result<NodeKindTag, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Head, Lit, PatKind};
+    use crate::{CaptureKind, Head, Lit, PatKind};
 
     fn k(src: &str) -> PatKind {
         parse(src).expect("parse ok").root.kind
@@ -704,5 +791,187 @@ mod tests {
         // `{send csend}` — `{` at 0, `}` at 11; the Union span must cover 0..12.
         let p = parse("{send csend}").expect("ok");
         assert_eq!((p.root.span.start, p.root.span.end), (0, 12));
+    }
+
+    // --- Task 8: `$` captures --------------------------------------------
+
+    #[test]
+    fn parses_anonymous_capture() {
+        let p = parse("(send $_ :puts)").expect("ok");
+        assert_eq!(p.n_captures(), 1);
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Node]);
+    }
+
+    #[test]
+    fn parses_seq_capture() {
+        let p = parse("(send nil :puts $...)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Seq]);
+    }
+
+    #[test]
+    fn parses_named_capture_body_is_wildcard() {
+        let p = parse("(send $receiver :puts)").expect("ok");
+        assert_eq!(p.n_captures(), 1);
+        match &p.root.kind {
+            PatKind::Node { children, .. } => match &children[0].kind {
+                PatKind::Capture { slot, name, body } => {
+                    assert_eq!(*slot, 0);
+                    assert_eq!(name.as_deref(), Some("receiver"));
+                    assert_eq!(body.kind, PatKind::Wildcard);
+                }
+                other => panic!("expected Capture, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn capture_of_subpattern_uses_parens() {
+        // `:foo` (not `:Foo`): the lexer's symbol grammar is lowercase-only,
+        // a pre-existing constraint outside Task 8's parser-only scope. The
+        // test asserts only that the capture body is a `Node`, so the symbol
+        // payload is incidental.
+        let p = parse("$(const _ :foo)").expect("ok");
+        match p.root.kind {
+            PatKind::Capture { slot, name, body } => {
+                assert_eq!(slot, 0);
+                assert!(name.is_none());
+                assert!(matches!(body.kind, PatKind::Node { .. }));
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_slots_are_left_to_right() {
+        let p = parse("(send $_ $...)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Node, CaptureKind::Seq]);
+    }
+
+    #[test]
+    fn nested_captures_are_source_order() {
+        // outer `$(...)` = slot 0, inner `$inner` = slot 1 — source order,
+        // NOT post-order. Guards the nested-capture slot-numbering bug.
+        let p = parse("$(send $inner _)").expect("ok");
+        assert_eq!(p.n_captures(), 2);
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Node, CaptureKind::Node]);
+        match &p.root.kind {
+            PatKind::Capture { slot, body, .. } => {
+                assert_eq!(*slot, 0, "outer capture is slot 0");
+                match &body.kind {
+                    PatKind::Node { children, .. } => match &children[0].kind {
+                        PatKind::Capture { slot, name, .. } => {
+                            assert_eq!(*slot, 1, "inner capture is slot 1");
+                            assert_eq!(name.as_deref(), Some("inner"));
+                        }
+                        other => panic!("expected inner Capture, got {other:?}"),
+                    },
+                    _ => unreachable!(),
+                }
+            }
+            other => panic!("expected outer Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_capture_name() {
+        let e = parse("(send $x $x)").expect_err("dup name");
+        assert!(e.message.contains('x'));
+    }
+
+    // --- additional Task 8 coverage --------------------------------------
+
+    #[test]
+    fn dollar_at_end_of_input_is_error() {
+        // A `$` with nothing to capture.
+        let e = parse("$").expect_err("dangling `$`");
+        assert!(
+            !e.message.contains("empty pattern"),
+            "message was: {}",
+            e.message
+        );
+        // The error span points at the `$` token (byte 0..1).
+        assert_eq!((e.span.start, e.span.end), (0, 1));
+    }
+
+    #[test]
+    fn double_capture_nests() {
+        // `$$_` — the outer `$` is anonymous and its body is recursively
+        // parsed via `prefixed`, which sees the inner `$_`. Two captures,
+        // outer is slot 0, inner is slot 1.
+        let p = parse("$$_").expect("ok");
+        assert_eq!(p.n_captures(), 2);
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Node, CaptureKind::Node]);
+        match p.root.kind {
+            PatKind::Capture { slot, name, body } => {
+                assert_eq!(slot, 0);
+                assert!(name.is_none());
+                match body.kind {
+                    PatKind::Capture {
+                        slot: inner_slot,
+                        body: inner_body,
+                        ..
+                    } => {
+                        assert_eq!(inner_slot, 1);
+                        assert_eq!(inner_body.kind, PatKind::Wildcard);
+                    }
+                    other => panic!("expected inner Capture, got {other:?}"),
+                }
+            }
+            other => panic!("expected outer Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_span_covers_dollar_through_body() {
+        // `$_` — `$` at 0, `_` at 1; the Capture span must cover 0..2.
+        let p = parse("$_").expect("ok");
+        assert_eq!((p.root.span.start, p.root.span.end), (0, 2));
+    }
+
+    #[test]
+    fn named_capture_span_covers_dollar_token() {
+        // `$x` — the named-capture body is an implicit Wildcard whose span is
+        // the `$` token's span, so the Capture span ends at the `$`'s end (1).
+        let p = parse("$x").expect("ok");
+        assert_eq!((p.root.span.start, p.root.span.end), (0, 1));
+        match p.root.kind {
+            PatKind::Capture { body, .. } => {
+                assert_eq!((body.span.start, body.span.end), (0, 1));
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_of_prefixed_pattern() {
+        // `$!_` — the outer `$`'s body is recursively parsed via `prefixed`,
+        // so a prefix like `!` is allowed in the body.
+        let p = parse("$!_").expect("ok");
+        match p.root.kind {
+            PatKind::Capture { slot, name, body } => {
+                assert_eq!(slot, 0);
+                assert!(name.is_none());
+                assert!(matches!(body.kind, PatKind::Not(_)));
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distinct_capture_names_are_allowed() {
+        // Sibling captures with different names are fine.
+        let p = parse("(send $recv $arg)").expect("ok");
+        assert_eq!(p.n_captures(), 2);
+    }
+
+    #[test]
+    fn duplicate_name_message_names_the_duplicate() {
+        let e = parse("(send $dup $dup)").expect_err("dup name");
+        assert!(
+            e.message.contains("dup"),
+            "message should name the duplicate, was: {}",
+            e.message
+        );
     }
 }
