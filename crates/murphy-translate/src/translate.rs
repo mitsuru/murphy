@@ -512,6 +512,20 @@ impl Translator {
             let list = self.builder.push_list(&ids);
             return self.builder.push(NodeKind::Hash(list), range);
         }
+        if let Some(kh) = node.as_keyword_hash_node() {
+            // 呼び出し側キーワード引数 `foo(key: value)`。prism は末尾の
+            // `key: value` 群を 1 個の `KeywordHashNode` に包む（`ArgumentsNode`
+            // の最後の要素）。parser-gem は同じものを trailing hash 引数として
+            // 表すため `Hash` に翻訳する（`HashNode` arm と同形：要素は
+            // 既存の `AssocNode → Pair` / `AssocSplatNode → Kwsplat` arm が処理）。
+            let ids: Vec<NodeId> = kh
+                .elements()
+                .iter()
+                .map(|e| self.translate_node(&e))
+                .collect();
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Hash(list), range);
+        }
         if let Some(assoc) = node.as_assoc_node() {
             // `a: 1` / `:a => 1` 等の連想ペア。key/value はともに非 Option。
             let key = self.translate_node(&assoc.key());
@@ -1484,6 +1498,29 @@ mod tests {
         } else {
             panic!("expected Send");
         }
+    }
+
+    #[test]
+    fn translates_call_site_keyword_args() {
+        // `foo(a: 1, b: 2)` → Send。末尾引数は prism の `KeywordHashNode`
+        // ＝ parser-gem の trailing hash 相当 → `Hash` に翻訳され、
+        // 中身は `Pair`（NOT `Unknown`）。
+        let ast = translate("foo(a: 1, b: 2)", "t.rb");
+        let last = ast
+            .children(ast.root())
+            .last()
+            .expect("Send should have at least one argument child");
+        match ast.kind(last) {
+            NodeKind::Hash(l) => assert_eq!(l.len, 2),
+            other => panic!("expected Hash for trailing kwargs, got {other:?}"),
+        }
+        let pairs: Vec<_> = ast.children(last).collect();
+        assert_eq!(pairs.len(), 2);
+        assert!(
+            pairs
+                .iter()
+                .all(|&p| matches!(ast.kind(p), NodeKind::Pair { .. }))
+        );
     }
 
     #[test]
