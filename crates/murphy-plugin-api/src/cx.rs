@@ -76,6 +76,19 @@ impl<'a> Cx<'a> {
         self.nodes()[id.0 as usize].parent
     }
 
+    /// Resolve a [`NodeList`] to its backing slice of child ids.
+    ///
+    /// Zero-copy: returns a borrow directly into the arena's `node_lists`
+    /// side table. This is the allocation-free counterpart to
+    /// [`Self::children`] for the variable-length child field of a single
+    /// `NodeKind` variant (e.g. `Send.args`, `Array`'s elements). The
+    /// generated code of `node_pattern!` (murphy-9cr.18) uses it to bind
+    /// `$...` seq captures and to match fixed-length argument lists.
+    pub fn list(&self, l: murphy_ast::NodeList) -> &'a [NodeId] {
+        let start = l.start as usize;
+        &self.lists()[start..start + l.len as usize]
+    }
+
     /// Direct children of `id`, in source order. Allocates one `Vec` per
     /// call because `collect_children` writes into a `Vec`; an
     /// allocation-free iterator variant could be added later if profiling
@@ -264,6 +277,42 @@ mod tests {
             cx.raw_source(cx.range(root)),
             ast.raw_source(ast.range(root))
         );
+    }
+
+    #[test]
+    fn list_resolves_node_list_to_a_borrowed_slice() {
+        use murphy_ast::{AstBuilder, NodeKind, NodeList, OptNodeId, Range};
+
+        // `foo(1, 2)` — a Send whose `args` NodeList holds two Int nodes.
+        let mut b = AstBuilder::new("foo(1, 2)", "t.rb".to_string());
+        let one = b.push(NodeKind::Int(1), Range { start: 4, end: 5 });
+        let two = b.push(NodeKind::Int(2), Range { start: 7, end: 8 });
+        let args = b.push_list(&[one, two]);
+        let method = b.intern_symbol("foo");
+        let root = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method,
+                args,
+            },
+            Range { start: 0, end: 9 },
+        );
+        let ast = b.finish(root);
+
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        // Pull the `args` NodeList back out of the Send and resolve it.
+        let NodeKind::Send { args, .. } = *cx.kind(root) else {
+            panic!("expected Send");
+        };
+        assert_eq!(cx.list(args), &[one, two]);
+        // An empty NodeList resolves to an empty slice.
+        assert_eq!(cx.list(NodeList::EMPTY), &[] as &[murphy_ast::NodeId]);
     }
 
     use std::cell::RefCell;
