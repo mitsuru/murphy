@@ -96,6 +96,15 @@ mod tests {
         assert!(!some.is_none());
         assert_eq!(OptNodeId::from(Some(NodeId(3))).get(), Some(NodeId(3)));
         assert_eq!(OptNodeId::from(None).get(), None);
+        // NodeId(0) is the typical first-pushed arena node — it must not be
+        // confused with the `None` sentinel. Also exercise the value just
+        // below the sentinel.
+        assert_eq!(OptNodeId::some(NodeId(0)).get(), Some(NodeId(0)));
+        assert!(!OptNodeId::some(NodeId(0)).is_none());
+        assert_eq!(
+            OptNodeId::some(NodeId(u32::MAX - 1)).get(),
+            Some(NodeId(u32::MAX - 1))
+        );
     }
 
     #[test]
