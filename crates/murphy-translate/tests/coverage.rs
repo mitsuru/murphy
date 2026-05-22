@@ -9,6 +9,9 @@ fn unknown_ratio_under_5_percent() {
     let src = include_str!("fixtures/realistic.rb");
     let ast = murphy_translate::translate(src, "realistic.rb");
     let total = ast.len();
+    // 空 AST だと unknown=0 / ratio=0 で素通りし、realistic.rb が翻訳されない
+    // 回帰を見逃す。ノードが 0 個なら明示的に失敗させる。
+    assert!(total > 0, "translated AST is empty for realistic.rb");
     let unknown = (0..total)
         .filter(|&i| matches!(ast.kind(murphy_ast::NodeId(i as u32)), NodeKind::Unknown))
         .count();
