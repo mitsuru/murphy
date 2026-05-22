@@ -14,6 +14,20 @@ pub fn translate(source: &str, path: impl Into<PathBuf>) -> Ast {
         builder: AstBuilder::new(source, path),
     };
     let root = t.translate_program(&result.node());
+    // prism のコメントを arena の comment list へ移送する。
+    for c in result.comments() {
+        let loc = c.location();
+        let range = Translator::range(&loc);
+        // `CommentType` は `InlineComment`（`#`）/ `EmbDocComment`
+        // （`=begin`/`=end`）の 2 variant のみ（ruby-prism 1.9.0 src/lib.rs
+        // 430〜435 行で確認済み）。ワイルドカード arm は prism に 3 つ目の
+        // variant が増えてもコンパイルを壊さず Block 扱いにフォールバックする。
+        let kind = match c.type_() {
+            prism::CommentType::InlineComment => murphy_ast::CommentKind::Inline,
+            _ => murphy_ast::CommentKind::Block,
+        };
+        t.builder.add_comment(range, kind);
+    }
     t.builder.finish(root)
 }
 
@@ -2465,5 +2479,21 @@ mod tests {
             }
             other => panic!("expected value-less Lvasgn, got {other:?}"),
         }
+    }
+
+    // --- Task 17: comments ---
+
+    #[test]
+    fn translates_comments() {
+        let ast = translate("# a line comment\nx = 1\n", "t.rb");
+        assert_eq!(ast.comments().len(), 1);
+        assert_eq!(ast.comments()[0].kind, murphy_ast::CommentKind::Inline);
+    }
+
+    #[test]
+    fn translates_block_comment() {
+        let ast = translate("=begin\nblock\n=end\nx = 1\n", "t.rb");
+        assert_eq!(ast.comments().len(), 1);
+        assert_eq!(ast.comments()[0].kind, murphy_ast::CommentKind::Block);
     }
 }
