@@ -418,6 +418,53 @@ pub struct SourceBuffer {
     pub path: std::path::PathBuf,
 }
 
+impl NodeKind {
+    /// This variant's `u8` discriminant (declaration order, frozen — ADR
+    /// 0037). Exhaustive `match`: a new variant breaks compilation here.
+    pub fn tag(&self) -> crate::NodeKindTag {
+        let t: u8 = match self {
+            NodeKind::Error => 0,
+            NodeKind::Nil => 1,
+            NodeKind::True_ => 2,
+            NodeKind::False_ => 3,
+            NodeKind::SelfExpr => 4,
+            NodeKind::Int(_) => 5,
+            NodeKind::Float(_) => 6,
+            NodeKind::Str(_) => 7,
+            NodeKind::Sym(_) => 8,
+            NodeKind::Lvar(_) => 9,
+            NodeKind::Ivar(_) => 10,
+            NodeKind::Cvar(_) => 11,
+            NodeKind::Gvar(_) => 12,
+            NodeKind::Const { .. } => 13,
+            NodeKind::Lvasgn { .. } => 14,
+            NodeKind::Ivasgn { .. } => 15,
+            NodeKind::Casgn { .. } => 16,
+            NodeKind::Send { .. } => 17,
+            NodeKind::Csend { .. } => 18,
+            NodeKind::Block { .. } => 19,
+            NodeKind::BlockPass(_) => 20,
+            NodeKind::Splat(_) => 21,
+            NodeKind::Array(_) => 22,
+            NodeKind::Hash(_) => 23,
+            NodeKind::Pair { .. } => 24,
+            NodeKind::If { .. } => 25,
+            NodeKind::Case { .. } => 26,
+            NodeKind::When { .. } => 27,
+            NodeKind::Begin(_) => 28,
+            NodeKind::Return(_) => 29,
+            NodeKind::And { .. } => 30,
+            NodeKind::Or { .. } => 31,
+            NodeKind::Def { .. } => 32,
+            NodeKind::Class { .. } => 33,
+            NodeKind::Module { .. } => 34,
+            NodeKind::Args(_) => 35,
+            NodeKind::Arg(_) => 36,
+        };
+        crate::NodeKindTag(t)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

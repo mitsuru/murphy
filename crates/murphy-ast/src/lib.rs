@@ -9,12 +9,14 @@
 mod ast;
 mod builder;
 mod interner;
+mod kinds;
 mod node;
 mod serialize;
 
 pub use ast::{Ancestors, Ast};
 pub use builder::AstBuilder;
 pub use interner::Interner;
+pub use kinds::{KIND_PATTERN_NAMES, NodeKindTag, pattern_name, tag_from_pattern_name};
 pub use node::{
     AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
     StringId, Symbol,

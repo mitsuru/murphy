@@ -66,7 +66,7 @@ fn get_f64(cur: &mut &[u8]) -> Result<f64, SerError> {
 /// Serialize one [`NodeKind`]: a `u8` discriminant (declaration order) then
 /// the payload fields in declaration order. The `match` is exhaustive on
 /// purpose — a new variant will not compile until it is handled here.
-fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
+pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
     match *k {
         NodeKind::Error => put_u8(out, 0),
         NodeKind::Nil => put_u8(out, 1),
