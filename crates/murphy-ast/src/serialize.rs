@@ -241,6 +241,7 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u8(out, 36);
             put_u32(out, s.0);
         }
+        NodeKind::Unknown => put_u8(out, 37),
     }
 }
 
@@ -340,6 +341,7 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         },
         35 => NodeKind::Args(read_node_list(cur)?),
         36 => NodeKind::Arg(Symbol(get_u32(cur)?)),
+        37 => NodeKind::Unknown,
         _ => return Err(SerError::BadDiscriminant),
     })
 }

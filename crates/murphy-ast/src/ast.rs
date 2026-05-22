@@ -37,7 +37,8 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         | NodeKind::Ivar(_)
         | NodeKind::Cvar(_)
         | NodeKind::Gvar(_)
-        | NodeKind::Arg(_) => {}
+        | NodeKind::Arg(_)
+        | NodeKind::Unknown => {}
 
         NodeKind::Const { scope, .. } => push_opt(out, scope),
 

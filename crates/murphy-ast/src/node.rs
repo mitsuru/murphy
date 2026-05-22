@@ -219,6 +219,12 @@ pub enum NodeKind {
     // --- arguments ---
     Args(NodeList),
     Arg(Symbol),
+
+    // --- fallback ---
+    /// A valid prism node with no `NodeKind` mapping yet. Dispatch may
+    /// treat it as opaque; `murphy-translate` never panics on unknown
+    /// input. Distinct from `Error` (a prism *parse* error).
+    Unknown,
 }
 
 /// A source comment, stored outside the node tree.
