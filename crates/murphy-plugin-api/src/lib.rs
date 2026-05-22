@@ -10,7 +10,10 @@ mod node_cop;
 mod options;
 mod severity;
 
-pub use abi::{CxRaw, FnTable, OptionSpec, RawEdit, RawOffense, RawSlice};
+pub use abi::{
+    CxRaw, DispatchFn, FnTable, MURPHY_PLUGIN_ABI_VERSION, MurphyPluginRegister, OptionSpec,
+    PluginCopV1, PluginRegistration, RawEdit, RawOffense, RawSlice,
+};
 pub use config_error::{ConfigError, ConfigErrorKind};
 pub use cop::Cop;
 pub use cx::Cx;
