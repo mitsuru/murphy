@@ -35,6 +35,12 @@ impl Translator {
         Self::range(&node.location())
     }
 
+    /// `ConstantId` → interned `Symbol`。非 UTF-8 は lossy 変換。
+    fn sym(&mut self, cid: &prism::ConstantId<'_>) -> murphy_ast::Symbol {
+        let text = String::from_utf8_lossy(cid.as_slice());
+        self.builder.intern_symbol(&text)
+    }
+
     /// ルート ProgramNode → arena ルート NodeId。
     fn translate_program(&mut self, node: &prism::Node<'_>) -> NodeId {
         let prog = match node.as_program_node() {
@@ -157,8 +163,58 @@ impl Translator {
             return self.builder.push(NodeKind::Sym(id), range);
         }
 
-        // Task 3 以降、ここに各ノード種の arm を足していく。
+        // --- variable reads ---
+        if let Some(v) = node.as_local_variable_read_node() {
+            let name = self.sym(&v.name());
+            return self.builder.push(NodeKind::Lvar(name), range);
+        }
+        if let Some(v) = node.as_instance_variable_read_node() {
+            let name = self.sym(&v.name());
+            return self.builder.push(NodeKind::Ivar(name), range);
+        }
+        if let Some(v) = node.as_class_variable_read_node() {
+            let name = self.sym(&v.name());
+            return self.builder.push(NodeKind::Cvar(name), range);
+        }
+        if let Some(v) = node.as_global_variable_read_node() {
+            let name = self.sym(&v.name());
+            return self.builder.push(NodeKind::Gvar(name), range);
+        }
+        if let Some(c) = node.as_constant_read_node() {
+            let name = self.sym(&c.name());
+            return self.builder.push(
+                NodeKind::Const {
+                    scope: OptNodeId::NONE,
+                    name,
+                },
+                range,
+            );
+        }
+        if let Some(cp) = node.as_constant_path_node() {
+            return self.translate_constant_path(&cp, range);
+        }
+
+        // Task 4 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
+    }
+
+    /// `ConstantPathNode`（`A::B` / `::B`）→ `Const { scope, name }`。
+    /// `parent` が `Some` なら `A::B`、`None` なら `::B`（トップレベル）。
+    fn translate_constant_path(
+        &mut self,
+        cp: &prism::ConstantPathNode<'_>,
+        range: Range,
+    ) -> NodeId {
+        let scope = match cp.parent() {
+            Some(p) => OptNodeId::some(self.translate_node(&p)),
+            None => OptNodeId::NONE,
+        };
+        // `name` は `Option<ConstantId>`。`None`（壊れた path）なら Unknown。
+        let name = match cp.name() {
+            Some(cid) => self.sym(&cid),
+            None => return self.builder.push(NodeKind::Unknown, range),
+        };
+        self.builder.push(NodeKind::Const { scope, name }, range)
     }
 }
 
@@ -245,6 +301,79 @@ mod tests {
         match sym.kind(sym.root()) {
             NodeKind::Sym(s) => assert_eq!(sym.interner().resolve(s.0), "sym"),
             other => panic!("expected Sym, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_variable_reads() {
+        // `@x` → Ivar、`$g` → Gvar、`@@c` → Cvar。`x` だけだと
+        // LocalVariableRead ではなく CallNode（variable_call）になるため、
+        // lvar は代入後にのみ出る — Task 4 の代入テストで間接的に通る。
+        let ivar = translate("@x", "t.rb");
+        match ivar.kind(ivar.root()) {
+            NodeKind::Ivar(s) => assert_eq!(ivar.interner().resolve(s.0), "@x"),
+            other => panic!("expected Ivar, got {other:?}"),
+        }
+        let gvar = translate("$g", "t.rb");
+        match gvar.kind(gvar.root()) {
+            NodeKind::Gvar(s) => assert_eq!(gvar.interner().resolve(s.0), "$g"),
+            other => panic!("expected Gvar, got {other:?}"),
+        }
+        let cvar = translate("@@c", "t.rb");
+        match cvar.kind(cvar.root()) {
+            NodeKind::Cvar(s) => assert_eq!(cvar.interner().resolve(s.0), "@@c"),
+            other => panic!("expected Cvar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_lvar_read_after_assignment() {
+        // 代入後に参照すると LocalVariableReadNode が出る。
+        let ast = translate("x = 1\nx\n", "t.rb");
+        // ルートは Begin [ Lvasgn(unknown until Task 4), Lvar(x) ]。
+        let kids: Vec<_> = ast.children(ast.root()).collect();
+        let last = *kids.last().unwrap();
+        match ast.kind(last) {
+            NodeKind::Lvar(s) => assert_eq!(ast.interner().resolve(s.0), "x"),
+            other => panic!("expected Lvar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_plain_constant() {
+        let ast = translate("FOO", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Const { scope, name } => {
+                assert!(scope.is_none());
+                assert_eq!(ast.interner().resolve(name.0), "FOO");
+            }
+            other => panic!("expected Const, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_constant_path() {
+        // `A::B` → Const { scope: Some(Const A), name: B }。
+        let ast = translate("A::B", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Const { scope, name } => {
+                assert!(scope.get().is_some());
+                assert_eq!(ast.interner().resolve(name.0), "B");
+            }
+            other => panic!("expected Const, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_toplevel_constant_path() {
+        // `::B` → Const { scope: None, name: B }（トップレベル参照）。
+        let ast = translate("::B", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Const { scope, name } => {
+                assert!(scope.is_none());
+                assert_eq!(ast.interner().resolve(name.0), "B");
+            }
+            other => panic!("expected Const, got {other:?}"),
         }
     }
 }
