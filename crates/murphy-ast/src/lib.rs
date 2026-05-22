@@ -12,8 +12,8 @@ mod interner;
 mod node;
 mod serialize;
 
-// pub use ast::{Ancestors, Ast};
-// pub use builder::AstBuilder;
+pub use ast::Ast;
+pub use builder::AstBuilder;
 pub use interner::Interner;
 pub use node::{
     AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,

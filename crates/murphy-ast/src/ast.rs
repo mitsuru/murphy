@@ -1,6 +1,7 @@
 //! The [`Ast`] arena and its traversal API.
 
-use crate::node::{NodeId, NodeKind, NodeList, OptNodeId};
+use crate::interner::Interner;
+use crate::node::{AstNode, Comment, NodeId, NodeKind, NodeList, OptNodeId, SourceBuffer};
 
 #[inline]
 fn push_opt(out: &mut Vec<NodeId>, o: OptNodeId) {
@@ -21,8 +22,6 @@ fn push_list(out: &mut Vec<NodeId>, lists: &[NodeId], l: NodeList) {
 /// ([`AstBuilder::finish`](crate::AstBuilder::finish)) and the
 /// [`Ast::children`] iterator. The `match` is exhaustive on purpose: a new
 /// `NodeKind` variant will not compile until it is handled here.
-// `#[allow(dead_code)]`: used by AstBuilder::finish (Task 6) and Ast::children (Task 7).
-#[allow(dead_code)]
 pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>) {
     match *kind {
         NodeKind::Error
@@ -121,6 +120,39 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
             out.push(name);
             push_opt(out, body);
         }
+    }
+}
+
+/// An owned, flat, parser-shaped, typed AST for one file. See ADR 0037.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ast {
+    pub(crate) nodes: Vec<AstNode>,
+    pub(crate) node_lists: Vec<NodeId>,
+    pub(crate) interner: Interner,
+    pub(crate) comments: Vec<Comment>,
+    pub(crate) source: SourceBuffer,
+    pub(crate) root: NodeId,
+}
+
+impl Ast {
+    /// The root node.
+    pub fn root(&self) -> NodeId {
+        self.root
+    }
+
+    /// The parent of `id`. `OptNodeId::NONE` for the root.
+    pub fn parent(&self, id: NodeId) -> OptNodeId {
+        self.nodes[id.0 as usize].parent
+    }
+
+    /// The full source text.
+    pub fn source(&self) -> &str {
+        &self.source.text
+    }
+
+    /// The file path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.source.path
     }
 }
 

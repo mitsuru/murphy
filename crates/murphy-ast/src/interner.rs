@@ -36,16 +36,12 @@ impl Interner {
 
 /// Build-time interner with deduplication. The `dedup` map is dropped by
 /// [`InternBuilder::finish`]; only the flat [`Interner`] survives.
-// Used by `builder.rs` (Task 6); `#[cfg(test)]` tests exercise it but do
-// not count toward dead_code analysis on the lib build.
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct InternBuilder {
     interner: Interner,
     dedup: HashMap<String, u32>,
 }
 
-#[allow(dead_code)]
 impl InternBuilder {
     /// Intern a string, returning its entry index. Repeated strings return
     /// the same index.

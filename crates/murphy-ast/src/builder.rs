@@ -1,1 +1,141 @@
-//! Arena builder.
+//! [`AstBuilder`] — the construction API consumed by `murphy-translate`.
+
+use std::path::PathBuf;
+
+use crate::ast::{Ast, collect_children};
+use crate::interner::InternBuilder;
+use crate::node::{
+    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
+    StringId, Symbol,
+};
+
+/// Builds an [`Ast`]. Push nodes and lists; `finish` computes parent links
+/// from the node structure in one pass.
+pub struct AstBuilder {
+    nodes: Vec<AstNode>,
+    node_lists: Vec<NodeId>,
+    interner: InternBuilder,
+    comments: Vec<Comment>,
+    source: SourceBuffer,
+}
+
+impl AstBuilder {
+    /// Start building an AST for one file.
+    pub fn new(source_text: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        AstBuilder {
+            nodes: Vec::new(),
+            node_lists: Vec::new(),
+            interner: InternBuilder::default(),
+            comments: Vec::new(),
+            source: SourceBuffer {
+                text: source_text.into(),
+                path: path.into(),
+            },
+        }
+    }
+
+    /// Intern an identifier.
+    pub fn intern_symbol(&mut self, s: &str) -> Symbol {
+        Symbol(self.interner.intern(s))
+    }
+
+    /// Intern string-literal contents.
+    pub fn intern_string(&mut self, s: &str) -> StringId {
+        StringId(self.interner.intern(s))
+    }
+
+    /// Append a node. `parent` is left as `NONE` until [`AstBuilder::finish`].
+    pub fn push(&mut self, kind: NodeKind, range: Range) -> NodeId {
+        let id = NodeId(self.nodes.len() as u32);
+        debug_assert!(id.0 != u32::MAX, "arena exceeded u32 node capacity");
+        self.nodes.push(AstNode {
+            kind,
+            parent: OptNodeId::NONE,
+            range,
+        });
+        id
+    }
+
+    /// Append a child list, returning a [`NodeList`] handle.
+    pub fn push_list(&mut self, ids: &[NodeId]) -> NodeList {
+        let start = self.node_lists.len() as u32;
+        self.node_lists.extend_from_slice(ids);
+        NodeList {
+            start,
+            len: ids.len() as u32,
+        }
+    }
+
+    /// Record a source comment.
+    pub fn add_comment(&mut self, range: Range, kind: CommentKind) {
+        self.comments.push(Comment { range, kind });
+    }
+
+    /// Finish building. Computes every node's `parent` from the structure
+    /// in one pass, then returns the immutable [`Ast`]. `root` keeps
+    /// `parent == NONE`.
+    pub fn finish(mut self, root: NodeId) -> Ast {
+        let mut buf: Vec<NodeId> = Vec::new();
+        for i in 0..self.nodes.len() {
+            buf.clear();
+            collect_children(&self.nodes[i].kind, &self.node_lists, &mut buf);
+            let parent = OptNodeId::some(NodeId(i as u32));
+            for &child in &buf {
+                self.nodes[child.0 as usize].parent = parent;
+            }
+        }
+        Ast {
+            nodes: self.nodes,
+            node_lists: self.node_lists,
+            interner: self.interner.finish(),
+            comments: self.comments,
+            source: self.source,
+            root,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::{NodeKind, OptNodeId, Range};
+
+    fn r() -> Range {
+        Range { start: 0, end: 1 }
+    }
+
+    #[test]
+    fn finish_computes_parents_from_structure() {
+        // Tree:  Begin [ lvasgn x = int(1) ]
+        let mut b = AstBuilder::new("x = 1", "test.rb");
+        let int = b.push(NodeKind::Int(1), r());
+        let x = b.intern_symbol("x");
+        let asgn = b.push(
+            NodeKind::Lvasgn {
+                name: x,
+                value: OptNodeId::some(int),
+            },
+            r(),
+        );
+        let list = b.push_list(&[asgn]);
+        let root = b.push(NodeKind::Begin(list), r());
+        let ast = b.finish(root);
+
+        assert_eq!(ast.parent(root), OptNodeId::NONE, "root has no parent");
+        assert_eq!(ast.parent(asgn).get(), Some(root));
+        assert_eq!(ast.parent(int).get(), Some(asgn));
+        assert_eq!(ast.root(), root);
+    }
+
+    #[test]
+    fn builder_interns_and_stores_source() {
+        let mut b = AstBuilder::new("source", "f.rb");
+        let s1 = b.intern_symbol("dup");
+        let s2 = b.intern_symbol("dup");
+        assert_eq!(s1, s2);
+        let root = b.push(NodeKind::Nil, r());
+        let ast = b.finish(root);
+        assert_eq!(ast.source(), "source");
+        assert_eq!(ast.path().to_str(), Some("f.rb"));
+    }
+}
