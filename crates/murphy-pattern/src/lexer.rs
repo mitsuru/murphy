@@ -107,16 +107,35 @@ impl<'a> Lexer<'a> {
             b'-' => self.scan_number(),
             b'0'..=b'9' => self.scan_number(),
             b'a'..=b'z' | b'_' => self.scan_ident(),
-            b'%' | b'[' | b'<' => Err(self.err_at(
-                self.pos,
-                self.pos + 1,
-                format!("`{}` is not supported in v1", b as char),
-            )),
-            _ => Err(self.err_at(
-                self.pos,
-                self.pos + 1,
-                format!("unexpected character `{}`", b as char),
-            )),
+            b'%' | b'[' | b'<' => {
+                let (ch, len) = self.char_at_cursor();
+                Err(self.err_at(
+                    self.pos,
+                    self.pos + len,
+                    format!("`{ch}` is not supported in v1"),
+                ))
+            }
+            _ => {
+                let (ch, len) = self.char_at_cursor();
+                Err(self.err_at(
+                    self.pos,
+                    self.pos + len,
+                    format!("unexpected character `{ch}`"),
+                ))
+            }
+        }
+    }
+
+    /// The full `char` at the cursor and its UTF-8 byte length.
+    ///
+    /// `scan_token` dispatches on a single byte, but a byte `>= 0x80` is the
+    /// lead of a multi-byte `char`; recovering it from the source string keeps
+    /// error messages correct for non-ASCII (malformed) input.
+    fn char_at_cursor(&self) -> (char, usize) {
+        let rest = std::str::from_utf8(&self.src[self.pos..]).expect("source is valid UTF-8");
+        match rest.chars().next() {
+            Some(ch) => (ch, ch.len_utf8()),
+            None => ('\u{FFFD}', 1),
         }
     }
 
@@ -392,15 +411,36 @@ mod tests {
 
     #[test]
     fn lex_error_on_unsupported_sigil() {
-        let e = tokenize("(send %1)").expect_err("must reject %");
-        assert!(e.message.contains('%'));
-        // span points at the `%`
-        assert_eq!(e.span.start, 6);
+        // `%`, `[`, `<` are one error class: not supported in v1.
+        for sigil in ['%', '[', '<'] {
+            let src = format!("(send {sigil}1)");
+            let e = tokenize(&src).expect_err("must reject unsupported sigil");
+            assert!(
+                e.message.contains(sigil) && e.message.contains("not supported in v1"),
+                "message for `{sigil}` was: {}",
+                e.message
+            );
+            // span points at the sigil
+            assert_eq!(e.span.start, 6);
+        }
+    }
+
+    #[test]
+    fn lex_error_on_non_ascii_char() {
+        // A non-ASCII char is malformed input; the message must render the
+        // real char, not a Latin-1 mojibake of its UTF-8 lead byte.
+        let e = tokenize("café").expect_err("must reject non-ASCII char");
+        assert!(
+            e.message.contains('é'),
+            "message should name the real char, was: {}",
+            e.message
+        );
     }
 
     #[test]
     fn lex_error_on_bare_predicate_name() {
-        assert!(tokenize("even?").is_err());
+        let e = tokenize("even?").expect_err("must reject bare predicate name");
+        assert!(e.message.contains("expected '#'"));
     }
 
     // --- additional coverage ----------------------------------------------
@@ -452,7 +492,8 @@ mod tests {
     #[test]
     fn bang_identifier_is_error() {
         // a bare identifier ending in `!` (not `nil?`) is rejected
-        assert!(tokenize("save!").is_err());
+        let e = tokenize("save!").expect_err("must reject bare identifier ending in `!`");
+        assert!(e.message.contains("expected '#'"));
     }
 
     #[test]
