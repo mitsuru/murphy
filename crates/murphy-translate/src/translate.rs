@@ -371,7 +371,34 @@ impl Translator {
             return self.builder.push(NodeKind::When { conds, body }, range);
         }
 
-        // Task 9 以降、ここに各ノード種の arm を足していく。
+        // --- loops ---
+        if let Some(w) = node.as_while_node() {
+            // `is_begin_modifier` を `post` に畳む（`while`/`while_post`）。
+            let cond = self.translate_node(&w.predicate());
+            let body = self.translate_stmts_opt(w.statements());
+            return self.builder.push(
+                NodeKind::While {
+                    cond,
+                    body,
+                    post: w.is_begin_modifier(),
+                },
+                range,
+            );
+        }
+        if let Some(u) = node.as_until_node() {
+            let cond = self.translate_node(&u.predicate());
+            let body = self.translate_stmts_opt(u.statements());
+            return self.builder.push(
+                NodeKind::Until {
+                    cond,
+                    body,
+                    post: u.is_begin_modifier(),
+                },
+                range,
+            );
+        }
+
+        // Task 10 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
 
@@ -1071,6 +1098,29 @@ mod tests {
                 assert!(body.get().is_some());
             }
             other => panic!("expected When, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_while_and_until() {
+        // `while c ... end` → While { post: false }。
+        let w = translate("while c\n  x\nend", "t.rb");
+        match w.kind(w.root()) {
+            NodeKind::While { post, .. } => assert!(!post),
+            other => panic!("expected While, got {other:?}"),
+        }
+        // `until c ... end` → Until。
+        let u = translate("until c\n  x\nend", "t.rb");
+        assert!(matches!(u.kind(u.root()), NodeKind::Until { .. }));
+    }
+
+    #[test]
+    fn translates_do_while_post_flag() {
+        // `begin ... end while c` は do-while → post=true。
+        let w = translate("begin\n  x\nend while c", "t.rb");
+        match w.kind(w.root()) {
+            NodeKind::While { post, .. } => assert!(post, "do-while は post=true"),
+            other => panic!("expected While, got {other:?}"),
         }
     }
 

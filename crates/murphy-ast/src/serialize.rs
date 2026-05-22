@@ -282,6 +282,18 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u8(out, 46);
             put_u32(out, o.0);
         }
+        NodeKind::While { cond, body, post } => {
+            put_u8(out, 47);
+            put_u32(out, cond.0);
+            put_u32(out, body.0);
+            put_u8(out, post as u8);
+        }
+        NodeKind::Until { cond, body, post } => {
+            put_u8(out, 48);
+            put_u32(out, cond.0);
+            put_u32(out, body.0);
+            put_u8(out, post as u8);
+        }
     }
 }
 
@@ -403,6 +415,16 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         44 => NodeKind::Kwrestarg(Symbol(get_u32(cur)?)),
         45 => NodeKind::Blockarg(Symbol(get_u32(cur)?)),
         46 => NodeKind::Kwsplat(OptNodeId(get_u32(cur)?)),
+        47 => NodeKind::While {
+            cond: NodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+            post: get_u8(cur)? != 0,
+        },
+        48 => NodeKind::Until {
+            cond: NodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+            post: get_u8(cur)? != 0,
+        },
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -702,6 +724,40 @@ mod tests {
 
         let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
         assert_eq!(ast, restored, "Kwsplat round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_while_until() {
+        // The `While`/`Until` variants appended after `Kwsplat`
+        // (discriminants 47/48) must survive the byte round-trip. Covers
+        // both `post` values and present/`None` `body`.
+        let mut b = AstBuilder::new("while c\n  x\nend until d", "t.rb");
+        let cond_w = b.push(NodeKind::Nil, r(6, 7));
+        let body_w = b.push(NodeKind::Nil, r(10, 11));
+        let while_node = b.push(
+            NodeKind::While {
+                cond: cond_w,
+                body: OptNodeId::some(body_w),
+                post: false,
+            },
+            r(0, 15),
+        );
+        let cond_u = b.push(NodeKind::Nil, r(20, 21));
+        // body `None`, `post = true` (do-while shape).
+        let until_node = b.push(
+            NodeKind::Until {
+                cond: cond_u,
+                body: OptNodeId::NONE,
+                post: true,
+            },
+            r(16, 23),
+        );
+        let list = b.push_list(&[while_node, until_node]);
+        let root = b.push(NodeKind::Begin(list), r(0, 23));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "While/Until round-trip must be bit-equal");
     }
 
     #[test]

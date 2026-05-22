@@ -265,6 +265,23 @@ pub enum NodeKind {
     /// `**h` — ハッシュ内のキーワード splat（`AssocSplatNode`）。匿名 `**` は
     /// 内側が `None`。
     Kwsplat(OptNodeId),
+
+    // --- control flow (appended post-`Kwsplat` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `while cond ... end`。`is_begin_modifier` を `post` に畳む
+    /// （`while`/`while_post` の collapse）。
+    While {
+        cond: NodeId,
+        body: OptNodeId,
+        /// `true` なら do-while（`begin..end while c`）。
+        post: bool,
+    },
+    /// `until cond ... end`。`post` は [`NodeKind::While`] と同じ意味。
+    Until {
+        cond: NodeId,
+        body: OptNodeId,
+        post: bool,
+    },
 }
 
 /// A source comment, stored outside the node tree.

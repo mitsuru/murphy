@@ -133,6 +133,11 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         }
 
         NodeKind::Optarg { default, .. } | NodeKind::Kwoptarg { default, .. } => out.push(default),
+
+        NodeKind::While { cond, body, .. } | NodeKind::Until { cond, body, .. } => {
+            out.push(cond);
+            push_opt(out, body);
+        }
     }
 }
 
