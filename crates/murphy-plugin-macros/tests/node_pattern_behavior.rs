@@ -104,3 +104,66 @@ fn literal_and_kind_matching() {
     assert!(is_nil_test(niln, &cx));
     assert!(!is_nil_test(i42, &cx));
 }
+
+node_pattern!(is_nilrecv_foo, "(send nil :foo)");
+node_pattern!(is_nested, "(send (send nil :a) :b)");
+
+/// Build `nil.foo` and return (ast-owning) root id.
+fn build_nil_dot_foo() -> Ast {
+    let mut b = AstBuilder::new("nil.foo", "t.rb");
+    let recv = b.push(NodeKind::Nil, r());
+    let m = b.intern_symbol("foo");
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv),
+            method: m,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    b.finish(send)
+}
+
+#[test]
+fn node_match_head_exact() {
+    let ast = build_nil_dot_foo();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert!(is_nilrecv_foo(ast.root(), &cx));
+
+    // `(nil.a).b` — nested send.
+    let mut b = AstBuilder::new("nil.a.b", "t.rb");
+    let recv = b.push(NodeKind::Nil, r());
+    let a = b.intern_symbol("a");
+    let inner = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv),
+            method: a,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    let bb = b.intern_symbol("b");
+    let outer = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(inner),
+            method: bb,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    let ast2 = b.finish(outer);
+    let raw2 = cx_raw_for(&ast2, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    assert!(is_nested(ast2.root(), &cx2));
+    assert!(!is_nested(inner_of(&ast2), &cx2)); // inner is (send nil :a), not nested
+}
+
+/// The inner `(send nil :a)` of the `nil.a.b` fixture.
+fn inner_of(ast: &Ast) -> NodeId {
+    let NodeKind::Send { receiver, .. } = *ast.kind(ast.root()) else {
+        panic!()
+    };
+    receiver.get().unwrap()
+}
