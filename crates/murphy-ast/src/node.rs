@@ -282,6 +282,14 @@ pub enum NodeKind {
         body: OptNodeId,
         post: bool,
     },
+    /// `a..b` / `a...b`（`RangeNode`）。beginless/endless は端が `None`。
+    /// 型名 `RangeExpr` は既存のソース範囲 struct [`Range`] との衝突回避。
+    RangeExpr {
+        begin_: OptNodeId,
+        end_: OptNodeId,
+        /// `true` なら `...`（終端排他）。
+        exclusive: bool,
+    },
 }
 
 /// A source comment, stored outside the node tree.

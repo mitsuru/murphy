@@ -398,7 +398,42 @@ impl Translator {
             );
         }
 
-        // Task 10 以降、ここに各ノード種の arm を足していく。
+        // --- logical operators ---
+        if let Some(a) = node.as_and_node() {
+            // `AndNode::left`/`right` は非 Option の `Node`。
+            let lhs = self.translate_node(&a.left());
+            let rhs = self.translate_node(&a.right());
+            return self.builder.push(NodeKind::And { lhs, rhs }, range);
+        }
+        if let Some(o) = node.as_or_node() {
+            let lhs = self.translate_node(&o.left());
+            let rhs = self.translate_node(&o.right());
+            return self.builder.push(NodeKind::Or { lhs, rhs }, range);
+        }
+
+        // --- range ---
+        if let Some(r) = node.as_range_node() {
+            // `left`/`right` は `Option<Node>`（beginless/endless は `None`）。
+            // `is_exclude_end` で `..`/`...` を `exclusive` に畳む。
+            let begin_ = r
+                .left()
+                .map(|n| OptNodeId::some(self.translate_node(&n)))
+                .unwrap_or(OptNodeId::NONE);
+            let end_ = r
+                .right()
+                .map(|n| OptNodeId::some(self.translate_node(&n)))
+                .unwrap_or(OptNodeId::NONE);
+            return self.builder.push(
+                NodeKind::RangeExpr {
+                    begin_,
+                    end_,
+                    exclusive: r.is_exclude_end(),
+                },
+                range,
+            );
+        }
+
+        // Task 11 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
 
@@ -1121,6 +1156,55 @@ mod tests {
         match w.kind(w.root()) {
             NodeKind::While { post, .. } => assert!(post, "do-while は post=true"),
             other => panic!("expected While, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_and_or() {
+        let and = translate("a && b", "t.rb");
+        assert!(matches!(and.kind(and.root()), NodeKind::And { .. }));
+        let or = translate("a || b", "t.rb");
+        assert!(matches!(or.kind(or.root()), NodeKind::Or { .. }));
+    }
+
+    #[test]
+    fn translates_range() {
+        // `1..5` → RangeExpr { exclusive: false, 両端 Some }。
+        let inc = translate("1..5", "t.rb");
+        match inc.kind(inc.root()) {
+            NodeKind::RangeExpr {
+                exclusive,
+                begin_,
+                end_,
+            } => {
+                assert!(!exclusive);
+                assert!(begin_.get().is_some() && end_.get().is_some());
+            }
+            other => panic!("expected RangeExpr, got {other:?}"),
+        }
+        // `1...5` → exclusive: true。
+        let excl = translate("1...5", "t.rb");
+        match excl.kind(excl.root()) {
+            NodeKind::RangeExpr { exclusive, .. } => assert!(exclusive),
+            other => panic!("expected RangeExpr, got {other:?}"),
+        }
+        // endless range `1..` → end_ は None。
+        let endless = translate("1..", "t.rb");
+        match endless.kind(endless.root()) {
+            NodeKind::RangeExpr { begin_, end_, .. } => {
+                assert!(begin_.get().is_some());
+                assert!(end_.is_none());
+            }
+            other => panic!("expected RangeExpr, got {other:?}"),
+        }
+        // beginless range `..5` → begin_ は None。
+        let beginless = translate("..5", "t.rb");
+        match beginless.kind(beginless.root()) {
+            NodeKind::RangeExpr { begin_, end_, .. } => {
+                assert!(begin_.is_none());
+                assert!(end_.get().is_some());
+            }
+            other => panic!("expected RangeExpr, got {other:?}"),
         }
     }
 

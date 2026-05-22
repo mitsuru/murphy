@@ -294,6 +294,16 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, body.0);
             put_u8(out, post as u8);
         }
+        NodeKind::RangeExpr {
+            begin_,
+            end_,
+            exclusive,
+        } => {
+            put_u8(out, 49);
+            put_u32(out, begin_.0);
+            put_u32(out, end_.0);
+            put_u8(out, exclusive as u8);
+        }
     }
 }
 
@@ -424,6 +434,11 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             cond: NodeId(get_u32(cur)?),
             body: OptNodeId(get_u32(cur)?),
             post: get_u8(cur)? != 0,
+        },
+        49 => NodeKind::RangeExpr {
+            begin_: OptNodeId(get_u32(cur)?),
+            end_: OptNodeId(get_u32(cur)?),
+            exclusive: get_u8(cur)? != 0,
         },
         _ => return Err(SerError::BadDiscriminant),
     })
@@ -758,6 +773,51 @@ mod tests {
 
         let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
         assert_eq!(ast, restored, "While/Until round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_range_expr() {
+        // The `RangeExpr` variant appended after `Until` (discriminant 49)
+        // must survive the byte round-trip. Covers `exclusive` both ways and
+        // a beginless (`begin_` None) plus endless (`end_` None) end.
+        let mut b = AstBuilder::new("1...5; 1..; ..5", "t.rb");
+        let one = b.push(NodeKind::Int(1), r(0, 1));
+        let five = b.push(NodeKind::Int(5), r(4, 5));
+        // `1...5` — both ends present, exclusive.
+        let inclusive_excl = b.push(
+            NodeKind::RangeExpr {
+                begin_: OptNodeId::some(one),
+                end_: OptNodeId::some(five),
+                exclusive: true,
+            },
+            r(0, 5),
+        );
+        // `1..` — endless, inclusive.
+        let one2 = b.push(NodeKind::Int(1), r(7, 8));
+        let endless = b.push(
+            NodeKind::RangeExpr {
+                begin_: OptNodeId::some(one2),
+                end_: OptNodeId::NONE,
+                exclusive: false,
+            },
+            r(7, 11),
+        );
+        // `..5` — beginless, inclusive.
+        let five2 = b.push(NodeKind::Int(5), r(15, 16));
+        let beginless = b.push(
+            NodeKind::RangeExpr {
+                begin_: OptNodeId::NONE,
+                end_: OptNodeId::some(five2),
+                exclusive: false,
+            },
+            r(13, 16),
+        );
+        let list = b.push_list(&[inclusive_excl, endless, beginless]);
+        let root = b.push(NodeKind::Begin(list), r(0, 16));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "RangeExpr round-trip must be bit-equal");
     }
 
     #[test]

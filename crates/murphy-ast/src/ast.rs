@@ -138,6 +138,11 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
             out.push(cond);
             push_opt(out, body);
         }
+
+        NodeKind::RangeExpr { begin_, end_, .. } => {
+            push_opt(out, begin_);
+            push_opt(out, end_);
+        }
     }
 }
 
