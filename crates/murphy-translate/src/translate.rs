@@ -194,7 +194,58 @@ impl Translator {
             return self.translate_constant_path(&cp, range);
         }
 
-        // Task 4 以降、ここに各ノード種の arm を足していく。
+        // --- assignments ---
+        if let Some(w) = node.as_local_variable_write_node() {
+            let name = self.sym(&w.name());
+            let value = OptNodeId::some(self.translate_node(&w.value()));
+            return self.builder.push(NodeKind::Lvasgn { name, value }, range);
+        }
+        if let Some(w) = node.as_instance_variable_write_node() {
+            let name = self.sym(&w.name());
+            let value = OptNodeId::some(self.translate_node(&w.value()));
+            return self.builder.push(NodeKind::Ivasgn { name, value }, range);
+        }
+        if let Some(w) = node.as_global_variable_write_node() {
+            let name = self.sym(&w.name());
+            let value = OptNodeId::some(self.translate_node(&w.value()));
+            return self.builder.push(NodeKind::Gvasgn { name, value }, range);
+        }
+        if let Some(w) = node.as_class_variable_write_node() {
+            let name = self.sym(&w.name());
+            let value = OptNodeId::some(self.translate_node(&w.value()));
+            return self.builder.push(NodeKind::Cvasgn { name, value }, range);
+        }
+        if let Some(w) = node.as_constant_write_node() {
+            let name = self.sym(&w.name());
+            let value = OptNodeId::some(self.translate_node(&w.value()));
+            return self.builder.push(
+                NodeKind::Casgn {
+                    scope: OptNodeId::NONE,
+                    name,
+                    value,
+                },
+                range,
+            );
+        }
+        if let Some(w) = node.as_constant_path_write_node() {
+            // `target()` は `ConstantPathNode`。その `parent` を scope、
+            // `name` を name に畳む（`A::B = 1` / `::B = 1` を collapse）。
+            let target = w.target();
+            let scope = match target.parent() {
+                Some(p) => OptNodeId::some(self.translate_node(&p)),
+                None => OptNodeId::NONE,
+            };
+            let name = match target.name() {
+                Some(cid) => self.sym(&cid),
+                None => return self.builder.push(NodeKind::Unknown, range),
+            };
+            let value = OptNodeId::some(self.translate_node(&w.value()));
+            return self
+                .builder
+                .push(NodeKind::Casgn { scope, name, value }, range);
+        }
+
+        // Task 5 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
 
@@ -374,6 +425,79 @@ mod tests {
                 assert_eq!(ast.interner().resolve(name.0), "B");
             }
             other => panic!("expected Const, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_local_assignment() {
+        let ast = translate("x = 1", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Lvasgn { name, value } => {
+                assert_eq!(ast.interner().resolve(name.0), "x");
+                assert!(value.get().is_some());
+            }
+            other => panic!("expected Lvasgn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_variable_assignments() {
+        // `@x = 1` → Ivasgn、`$g = 1` → Gvasgn、`@@c = 1` → Cvasgn。
+        let iv = translate("@x = 1", "t.rb");
+        match iv.kind(iv.root()) {
+            NodeKind::Ivasgn { name, value } => {
+                assert_eq!(iv.interner().resolve(name.0), "@x");
+                assert!(value.get().is_some());
+            }
+            other => panic!("expected Ivasgn, got {other:?}"),
+        }
+        let gv = translate("$g = 1", "t.rb");
+        match gv.kind(gv.root()) {
+            NodeKind::Gvasgn { name, value } => {
+                assert_eq!(gv.interner().resolve(name.0), "$g");
+                assert!(value.get().is_some());
+            }
+            other => panic!("expected Gvasgn, got {other:?}"),
+        }
+        let cv = translate("@@c = 1", "t.rb");
+        match cv.kind(cv.root()) {
+            NodeKind::Cvasgn { name, value } => {
+                assert_eq!(cv.interner().resolve(name.0), "@@c");
+                assert!(value.get().is_some());
+            }
+            other => panic!("expected Cvasgn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_constant_assignment_plain_and_path() {
+        let plain = translate("FOO = 1", "t.rb");
+        match plain.kind(plain.root()) {
+            NodeKind::Casgn { scope, name, value } => {
+                assert!(scope.is_none());
+                assert_eq!(plain.interner().resolve(name.0), "FOO");
+                assert!(value.get().is_some());
+            }
+            other => panic!("expected Casgn, got {other:?}"),
+        }
+        // `A::B = 1` も Casgn（scope = Some）。
+        let p = translate("A::B = 1", "t.rb");
+        match p.kind(p.root()) {
+            NodeKind::Casgn { scope, name, value } => {
+                assert!(scope.get().is_some());
+                assert_eq!(p.interner().resolve(name.0), "B");
+                assert!(value.get().is_some());
+            }
+            other => panic!("expected Casgn, got {other:?}"),
+        }
+        // `::B = 1` はトップレベル代入（scope = None）。
+        let top = translate("::B = 1", "t.rb");
+        match top.kind(top.root()) {
+            NodeKind::Casgn { scope, name, .. } => {
+                assert!(scope.is_none());
+                assert_eq!(top.interner().resolve(name.0), "B");
+            }
+            other => panic!("expected Casgn, got {other:?}"),
         }
     }
 }

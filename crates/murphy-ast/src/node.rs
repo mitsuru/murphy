@@ -225,6 +225,19 @@ pub enum NodeKind {
     /// treat it as opaque; `murphy-translate` never panics on unknown
     /// input. Distinct from `Error` (a prism *parse* error).
     Unknown,
+
+    // --- assignments (appended post-`Unknown` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `$g = expr` — global-variable assignment.
+    Gvasgn {
+        name: Symbol,
+        value: OptNodeId,
+    },
+    /// `@@c = expr` — class-variable assignment.
+    Cvasgn {
+        name: Symbol,
+        value: OptNodeId,
+    },
 }
 
 /// A source comment, stored outside the node tree.

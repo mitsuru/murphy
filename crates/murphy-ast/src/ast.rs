@@ -42,7 +42,10 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
 
         NodeKind::Const { scope, .. } => push_opt(out, scope),
 
-        NodeKind::Lvasgn { value, .. } | NodeKind::Ivasgn { value, .. } => push_opt(out, value),
+        NodeKind::Lvasgn { value, .. }
+        | NodeKind::Ivasgn { value, .. }
+        | NodeKind::Gvasgn { value, .. }
+        | NodeKind::Cvasgn { value, .. } => push_opt(out, value),
 
         NodeKind::Casgn { scope, value, .. } => {
             push_opt(out, scope);

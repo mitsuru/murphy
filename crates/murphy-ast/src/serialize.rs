@@ -242,6 +242,16 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, s.0);
         }
         NodeKind::Unknown => put_u8(out, 37),
+        NodeKind::Gvasgn { name, value } => {
+            put_u8(out, 38);
+            put_u32(out, name.0);
+            put_u32(out, value.0);
+        }
+        NodeKind::Cvasgn { name, value } => {
+            put_u8(out, 39);
+            put_u32(out, name.0);
+            put_u32(out, value.0);
+        }
     }
 }
 
@@ -342,6 +352,14 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         35 => NodeKind::Args(read_node_list(cur)?),
         36 => NodeKind::Arg(Symbol(get_u32(cur)?)),
         37 => NodeKind::Unknown,
+        38 => NodeKind::Gvasgn {
+            name: Symbol(get_u32(cur)?),
+            value: OptNodeId(get_u32(cur)?),
+        },
+        39 => NodeKind::Cvasgn {
+            name: Symbol(get_u32(cur)?),
+            value: OptNodeId(get_u32(cur)?),
+        },
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -549,6 +567,37 @@ mod tests {
         let bytes = ast.to_bytes();
         let restored = crate::Ast::from_bytes(&bytes).expect("round-trip");
         assert_eq!(ast, restored, "round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_gvasgn_cvasgn() {
+        // The two variants appended after `Unknown` (discriminants 38/39)
+        // must survive the byte round-trip.
+        let mut b = AstBuilder::new("$g = 1; @@c = 2", "t.rb");
+        let one = b.push(NodeKind::Int(1), r(5, 6));
+        let g_name = b.intern_symbol("$g");
+        let gv = b.push(
+            NodeKind::Gvasgn {
+                name: g_name,
+                value: OptNodeId::some(one),
+            },
+            r(0, 6),
+        );
+        let two = b.push(NodeKind::Int(2), r(13, 14));
+        let c_name = b.intern_symbol("@@c");
+        let cv = b.push(
+            NodeKind::Cvasgn {
+                name: c_name,
+                value: OptNodeId::some(two),
+            },
+            r(8, 14),
+        );
+        let list = b.push_list(&[gv, cv]);
+        let root = b.push(NodeKind::Begin(list), r(0, 14));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "Gvasgn/Cvasgn round-trip must be bit-equal");
     }
 
     #[test]
