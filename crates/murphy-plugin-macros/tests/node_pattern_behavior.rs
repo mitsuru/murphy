@@ -251,3 +251,111 @@ fn node_captures_return_tuple() {
     // a non-match returns None.
     assert_eq!(cap_receiver(recv, &cx), None);
 }
+
+node_pattern!(cap_args, "(send nil? :foo $...)");
+node_pattern!(rest_then_cap, "(array ... $_)");
+node_pattern!(cap_then_rest, "(array $_ ...)");
+
+#[test]
+fn seq_capture_and_rest() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    // foo(1, 2, 3) with no receiver
+    let a1 = b.push(NodeKind::Int(1), r());
+    let a2 = b.push(NodeKind::Int(2), r());
+    let a3 = b.push(NodeKind::Int(3), r());
+    let args = b.push_list(&[a1, a2, a3]);
+    let foo = b.intern_symbol("foo");
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: foo,
+            args,
+        },
+        r(),
+    );
+    // Distinct nodes for the array — reusing a1/a2/a3 across two parents
+    // would make `finish` overwrite their parent links.
+    let e1 = b.push(NodeKind::Int(1), r());
+    let e2 = b.push(NodeKind::Int(2), r());
+    let e3 = b.push(NodeKind::Int(3), r());
+    let earr = b.push_list(&[e1, e2, e3]);
+    let arr = b.push(NodeKind::Array(earr), r());
+    let list = b.push_list(&[send, arr]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // $... binds the whole args slice.
+    assert_eq!(cap_args(send, &cx), Some((&[a1, a2, a3][..],)));
+    // trailing capture after a leading rest.
+    assert_eq!(rest_then_cap(arr, &cx), Some((e3,)));
+    // leading capture before a trailing rest.
+    assert_eq!(cap_then_rest(arr, &cx), Some((e1,)));
+}
+
+node_pattern!(mid_bare, "(array $_ ... $_)");
+node_pattern!(mid_cap, "(array $_ $... $_)");
+
+#[test]
+fn mid_position_rest() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    // [e1, e2, e3, e4] — a four-element array.
+    let e1 = b.push(NodeKind::Int(1), r());
+    let e2 = b.push(NodeKind::Int(2), r());
+    let e3 = b.push(NodeKind::Int(3), r());
+    let e4 = b.push(NodeKind::Int(4), r());
+    let earr = b.push_list(&[e1, e2, e3, e4]);
+    let arr = b.push(NodeKind::Array(earr), r());
+    // [f1, f2] — a two-element array (empty middle).
+    let f1 = b.push(NodeKind::Int(5), r());
+    let f2 = b.push(NodeKind::Int(6), r());
+    let farr = b.push_list(&[f1, f2]);
+    let arr2 = b.push(NodeKind::Array(farr), r());
+    // [g1] — a one-element array (too short for a prefix + suffix).
+    let g1 = b.push(NodeKind::Int(7), r());
+    let garr = b.push_list(&[g1]);
+    let arr3 = b.push(NodeKind::Array(garr), r());
+    let list = b.push_list(&[arr, arr2, arr3]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // Mid-position rest with non-empty prefix and suffix: leading/trailing
+    // `$_` bind the edges, the `...`/`$...` covers everything between.
+    assert_eq!(mid_bare(arr, &cx), Some((e1, e4)));
+    assert_eq!(mid_cap(arr, &cx), Some((e1, &[e2, e3][..], e4)));
+    // Empty middle: the seq capture binds an empty slice.
+    assert_eq!(mid_cap(arr2, &cx), Some((f1, &[][..], f2)));
+    // Too short: a single element cannot fill both a prefix and a suffix.
+    assert_eq!(mid_cap(arr3, &cx), None);
+    assert_eq!(mid_bare(arr3, &cx), None);
+}
+
+node_pattern!(rest_only, "(array ...)");
+
+#[test]
+fn bare_rest_only_list() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    // [e1, e2] — a two-element array.
+    let e1 = b.push(NodeKind::Int(1), r());
+    let e2 = b.push(NodeKind::Int(2), r());
+    let earr = b.push_list(&[e1, e2]);
+    let arr = b.push(NodeKind::Array(earr), r());
+    // [] — an empty array.
+    let empty = b.push_list(&[]);
+    let empty_arr = b.push(NodeKind::Array(empty), r());
+    let list = b.push_list(&[arr, empty_arr]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // A bare `...` as the only child matches any length, including zero.
+    assert!(rest_only(arr, &cx));
+    assert!(rest_only(empty_arr, &cx));
+}

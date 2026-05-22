@@ -717,11 +717,15 @@ fn lower_pat(
                 ));
             }
             // A `$...` seq capture (`Capture` whose `body` is `Rest`) is
-            // handled by the `List` slot, not here — see Task 7.
+            // only valid inside a node's variable-length child list, where
+            // `lower_trailing_list` intercepts it. Reaching this arm means
+            // `$...` appeared at a fixed slot position — a position error.
             if matches!(body.kind, PatKind::Rest) {
                 return Err(syn::Error::new(
                     Span::call_site(),
-                    "node_pattern!: seq capture (`$...`) not yet supported",
+                    "node_pattern!: `$...` seq capture is only allowed in a \
+                     node's variable-length child list (e.g. `send`/`csend` \
+                     args, `array`/`hash`/`begin` elements)",
                 ));
             }
             // Node capture: lower the body's guards first (so a mismatch
@@ -806,8 +810,6 @@ fn lower_exact_node(
     subject: &TokenStream,
     ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
-    use murphy_pattern::PatKind;
-
     // 1. Look up the per-NodeKind structural schema.
     let schema = schema_for(tag.0).ok_or_else(|| {
         let name = murphy_ast::pattern_name(tag).unwrap_or("?");
@@ -820,14 +822,6 @@ fn lower_exact_node(
         )
     })?;
 
-    // 2. Reject `...` rest children (Task 7 territory).
-    if children.iter().any(|c| matches!(c.kind, PatKind::Rest)) {
-        return Err(syn::Error::new(
-            Span::call_site(),
-            "node_pattern!: `...` not yet supported",
-        ));
-    }
-
     // Split the schema into fixed slots and an optional trailing `List`.
     let has_list = schema
         .slots
@@ -835,7 +829,13 @@ fn lower_exact_node(
         .is_some_and(|s| matches!(s.ty, SlotTy::List));
     let fixed_count = schema.slots.len() - usize::from(has_list);
 
-    // 3. Child-count checks.
+    // 2. Child-count checks. A rest-like element among the `List`-slot
+    //    children stands for zero-or-more nodes, so when a `List` slot is
+    //    present the exact-count check is relaxed (it is re-derived inside
+    //    `lower_trailing_list`). Rest-like elements at *fixed* slot positions
+    //    are not special-cased here: they flow into `lower_fixed_slot`, which
+    //    rejects them. `...` reaching a `List`-less node also reaches a fixed
+    //    slot and is rejected the same way.
     if children.len() < fixed_count {
         return Err(syn::Error::new(
             Span::call_site(),
@@ -849,11 +849,11 @@ fn lower_exact_node(
         ));
     }
 
-    // 4. Allocate a fresh binding ident per slot and build the destructuring.
+    // 3. Allocate a fresh binding ident per slot and build the destructuring.
     let bindings: Vec<Ident> = schema.slots.iter().map(|_| gensym(ctx, "__b")).collect();
     let mut guards: Vec<TokenStream> = vec![build_destructure(schema, &bindings, subject, ctx)];
 
-    // 5. Match each fixed slot against its pattern child.
+    // 4. Match each fixed slot against its pattern child.
     for (slot, (bind, child)) in schema
         .slots
         .iter()
@@ -863,8 +863,8 @@ fn lower_exact_node(
         guards.push(lower_fixed_slot(slot.ty, bind, child, ctx)?);
     }
 
-    // 6. A trailing `List` slot consumes the remaining (explicit-only)
-    //    children. `...` rest is rejected above; Task 7 adds it.
+    // 5. A trailing `List` slot consumes the remaining children, including a
+    //    `...` / `$...` rest-like element among them.
     if has_list {
         let list_bind = &bindings[bindings.len() - 1];
         let list_children = &children[fixed_count..];
@@ -985,9 +985,39 @@ fn lower_fixed_slot(
     }
 }
 
-/// Lower a trailing `List` slot: resolve the bound `NodeList` and match each
-/// explicit pattern child against the corresponding list element. `...` rest
-/// is rejected by the caller; Task 7 adds it.
+/// A rest-like `List`-slot pattern child: a bare `...` ([`PatKind::Rest`]) or
+/// a `$...` seq capture (a [`PatKind::Capture`] whose body is `Rest`).
+enum RestKind {
+    /// Bare `...` — matches zero-or-more nodes, binds nothing.
+    Bare,
+    /// `$...` — matches zero-or-more nodes, binds the slice to capture `slot`.
+    Capture(u16),
+}
+
+/// Classify a `List`-slot pattern child as rest-like, if it is. The
+/// murphy-pattern parser guarantees at most one rest-like element per node
+/// child list, so the caller stops at the first hit.
+fn rest_kind(pat: &murphy_pattern::Pat) -> Option<RestKind> {
+    use murphy_pattern::PatKind;
+    match &pat.kind {
+        PatKind::Rest => Some(RestKind::Bare),
+        PatKind::Capture { slot, body, .. } if matches!(body.kind, PatKind::Rest) => {
+            Some(RestKind::Capture(*slot))
+        }
+        _ => None,
+    }
+}
+
+/// Lower a trailing `List` slot: resolve the bound `NodeList` and match the
+/// `List`-slot pattern children against its elements.
+///
+/// With no rest-like child the list length must match exactly and each
+/// pattern child matches the element at its index (Task 5 behaviour). With a
+/// rest-like child at index `r` (a `...` or `$...`, at most one — guaranteed
+/// by the parser), the `k - 1` non-rest children split into an `r`-element
+/// prefix and a `k - 1 - r`-element suffix: the prefix matches the leading
+/// elements, the suffix matches the *trailing* elements, and the span between
+/// them is the rest. A `$...` binds that span; a bare `...` binds nothing.
 fn lower_trailing_list(
     list_bind: &Ident,
     list_children: &[murphy_pattern::Pat],
@@ -995,16 +1025,93 @@ fn lower_trailing_list(
 ) -> syn::Result<TokenStream> {
     let fail = fail_stmt(ctx);
     let list_val = gensym(ctx, "__list");
-    let len = list_children.len();
+
+    // Locate the (at most one) rest-like child.
+    let rest_at = list_children.iter().position(|c| rest_kind(c).is_some());
+
+    let Some(r) = rest_at else {
+        // No rest: exact length, indexed matches (Task 5 behaviour).
+        let len = list_children.len();
+        let mut guards: Vec<TokenStream> = vec![quote! {
+            let #list_val = cx.list(#list_bind);
+            if #list_val.len() != #len {
+                #fail
+            }
+        }];
+        for (i, child) in list_children.iter().enumerate() {
+            guards.push(lower_pat(child, &quote!(#list_val[#i]), ctx)?);
+        }
+        return Ok(quote!(#(#guards)*));
+    };
+
+    // A rest-like child at index `r`. `k` is the total child count; `k - 1`
+    // are non-rest (`r` prefix + `suffix_count` suffix). `r < k`, so
+    // `k - 1 - r` does not underflow.
+    let k = list_children.len();
+    let non_rest = k - 1;
+    let suffix_count = non_rest - r;
+    // `RestKind` was already shown to be `Some` by `position` above.
+    let rest = rest_kind(&list_children[r]).expect("rest_at points at a rest-like child");
+
     let mut guards: Vec<TokenStream> = vec![quote! {
         let #list_val = cx.list(#list_bind);
-        if #list_val.len() != #len {
-            #fail
-        }
     }];
-    for (i, child) in list_children.iter().enumerate() {
+
+    // Length guard: there are `non_rest` non-rest children to place. When
+    // `non_rest == 0` the guard would be `len < 0` (always false) — skip it.
+    if non_rest > 0 {
+        guards.push(quote! {
+            if #list_val.len() < #non_rest {
+                #fail
+            }
+        });
+    }
+
+    // Bind the length once: the suffix index and a suffix-bounded rest span
+    // are computed against it. With no suffix the length is never needed —
+    // the suffix loop is empty and the rest span runs to the end (`..`) — so
+    // the `__len` ident is only gensym'd and bound when `suffix_count > 0`.
+    let len_val = if suffix_count > 0 {
+        let len_val = gensym(ctx, "__len");
+        guards.push(quote! {
+            let #len_val = #list_val.len();
+        });
+        Some(len_val)
+    } else {
+        None
+    };
+
+    // Prefix: `lp[i]` matches `list[i]` for `i in 0..r`.
+    for (i, child) in list_children.iter().take(r).enumerate() {
         guards.push(lower_pat(child, &quote!(#list_val[#i]), ctx)?);
     }
+
+    // Suffix: the `suffix_count` children after the rest match the *last*
+    // `suffix_count` elements. `lp[r + 1 + j]` matches `list[len - back]`
+    // where `back = suffix_count - j` runs from `suffix_count` down to `1`
+    // (never `0`, so no `len - 0` identity-op lint). This loop only runs
+    // when `suffix_count > 0`, so `len_val` is `Some` here.
+    for (j, child) in list_children.iter().skip(r + 1).enumerate() {
+        let back = suffix_count - j;
+        guards.push(lower_pat(child, &quote!(#list_val[#len_val - #back]), ctx)?);
+    }
+
+    // Middle: the rest span `list[r .. len - suffix_count]`. Only a `$...`
+    // capture needs it bound; a bare `...` matches nothing here.
+    if let RestKind::Capture(slot) = rest {
+        let cap = cap_ident(slot as usize);
+        // Shape the slice expression to avoid `len - 0` / `[0..]` lints.
+        // The `_, _` arms only fire when `suffix_count > 0`, so `len_val`
+        // is `Some` whenever it is interpolated.
+        let span = match (r, suffix_count) {
+            (0, 0) => quote!(&#list_val[..]),
+            (0, _) => quote!(&#list_val[..#len_val - #suffix_count]),
+            (_, 0) => quote!(&#list_val[#r..]),
+            (_, _) => quote!(&#list_val[#r..#len_val - #suffix_count]),
+        };
+        guards.push(quote!(#cap = #span;));
+    }
+
     Ok(quote!(#(#guards)*))
 }
 
