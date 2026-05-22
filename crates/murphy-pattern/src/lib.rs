@@ -15,3 +15,7 @@ mod lexer;
 mod parser;
 
 pub use parser::parse;
+
+mod ir;
+
+pub use ir::{CaptureMeta, IrHead, IrNode, IrNodeId, IrSlice, PatternIr, StrRef};
