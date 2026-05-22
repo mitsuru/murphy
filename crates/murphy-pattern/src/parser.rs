@@ -3,8 +3,8 @@
 //! Task 5 (murphy-9cr.17) implements the atom/prefix skeleton: `_`,
 //! literals, `nil?`, bare kind names, `#predicate`, and the `!`/`^`/backtick
 //! prefixes. Task 6 adds node match `(head child*)` with `Exact`/`Any`/`OneOf`
-//! heads. Union `{}` and `$` captures land in Tasks 7-8 and currently produce
-//! a "not yet supported" error.
+//! heads. Task 7 adds union `{a b ...}`. `$` captures land in Task 8 and
+//! currently produce a "not yet supported" error.
 
 use crate::lexer::{Spanned, Token, tokenize};
 use crate::{Head, Lit, ParseError, Pat, PatKind, PatSpan, PatternAst};
@@ -79,10 +79,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `primary := '_' | 'nil?' | literal | '#' name | IDENT | node-match`.
+    /// `primary := '_' | 'nil?' | literal | '#' name | IDENT | node-match
+    /// | union`.
     ///
-    /// `{`, `$`, and a top-level `...` are deferred to later tasks and produce
-    /// a descriptive error here; `(` parses a node match (see [`node_match`]).
+    /// `(` parses a node match (see [`node_match`]); `{` parses a union (see
+    /// [`union`]). `$` and a top-level `...` are deferred / invalid and
+    /// produce a descriptive error here.
     fn primary(&mut self) -> Result<Pat, ParseError> {
         let Some(spanned) = self.next() else {
             return Err(ParseError::new("empty pattern", PatSpan::new(0, 0)));
@@ -98,9 +100,7 @@ impl<'a> Parser<'a> {
             Token::Predicate(name) => PatKind::Predicate(name.clone()),
             Token::Ident(name) => return self.ident_pat(name, span),
             Token::LParen => return self.node_match(span),
-            Token::LBrace => {
-                return Err(ParseError::new("union `{...}` is not yet supported", span));
-            }
+            Token::LBrace => return self.union(span),
             Token::Dollar => {
                 return Err(ParseError::new("capture `$` is not yet supported", span));
             }
@@ -165,6 +165,46 @@ impl<'a> Parser<'a> {
                     });
                 }
                 _ => children.push(self.prefixed()?),
+            }
+        }
+    }
+
+    /// `union := '{' prefixed+ '}'`.
+    ///
+    /// `open_span` is the span of the already-consumed `{`. Each alternative is
+    /// a full [`prefixed`] pattern — arbitrary patterns are allowed, unlike the
+    /// node-type-only `{...}` head handled by [`oneof_head`]. The resulting
+    /// `Pat`'s span covers `{` through the closing `}`. An empty `{}` or a
+    /// stream that ends before `}` is a span-carrying error.
+    fn union(&mut self, open_span: PatSpan) -> Result<Pat, ParseError> {
+        let mut alts: Vec<Pat> = Vec::new();
+        loop {
+            // Peek (not `next`) so we can dispatch on the token — a closing `}`
+            // or an alternative — before deciding whether to consume it.
+            let Some(tok) = self.peek() else {
+                // Ran out of input before the closing `}`.
+                return Err(ParseError::new("unclosed `{`: expected `}`", open_span));
+            };
+            match tok.tok {
+                Token::RBrace => {
+                    let close_span = tok.span;
+                    self.pos += 1; // consume `}`
+                    let span = PatSpan {
+                        start: open_span.start,
+                        end: close_span.end,
+                    };
+                    if alts.is_empty() {
+                        return Err(ParseError::new(
+                            "empty union `{}` needs at least one alternative",
+                            span,
+                        ));
+                    }
+                    return Ok(Pat {
+                        kind: PatKind::Union(alts),
+                        span,
+                    });
+                }
+                _ => alts.push(self.prefixed()?),
             }
         }
     }
@@ -571,5 +611,98 @@ mod tests {
             "message was: {}",
             e.message
         );
+    }
+
+    // --- Task 7: union `{}` ----------------------------------------------
+
+    #[test]
+    fn parses_union() {
+        let p = parse("{send csend}").expect("ok");
+        match p.root.kind {
+            PatKind::Union(alts) => assert_eq!(alts.len(), 2),
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_union_of_subpatterns() {
+        let p = parse("{(send _ :a) (send _ :b)}").expect("ok");
+        assert!(matches!(p.root.kind, PatKind::Union(alts) if alts.len() == 2));
+    }
+
+    #[test]
+    fn rejects_empty_union() {
+        let e = parse("{}").expect_err("empty union");
+        assert!(e.message.to_lowercase().contains("union") || e.message.contains("{}"));
+    }
+
+    // --- additional Task 7 coverage --------------------------------------
+
+    #[test]
+    fn parses_single_alternative_union() {
+        // A `{...}` with one alternative is still a union.
+        let p = parse("{send}").expect("ok");
+        match p.root.kind {
+            PatKind::Union(alts) => assert_eq!(alts.len(), 1),
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_nested_union() {
+        // `{{a b} c}` — the first alternative is itself a union.
+        let p = parse("{{send csend} array}").expect("ok");
+        match p.root.kind {
+            PatKind::Union(alts) => {
+                assert_eq!(alts.len(), 2);
+                assert!(matches!(alts[0].kind, PatKind::Union(ref inner) if inner.len() == 2));
+                assert!(matches!(alts[1].kind, PatKind::Kind(_)));
+            }
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_union_with_prefixed_alternative() {
+        // Alternatives are full `prefixed` patterns, so `!_` is allowed.
+        let p = parse("{!send _}").expect("ok");
+        match p.root.kind {
+            PatKind::Union(alts) => {
+                assert_eq!(alts.len(), 2);
+                assert!(matches!(alts[0].kind, PatKind::Not(_)));
+                assert_eq!(alts[1].kind, PatKind::Wildcard);
+            }
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unclosed_union() {
+        // `{send` runs out of input before the closing `}`.
+        let e = parse("{send").expect_err("unclosed");
+        // An unclosed `{` must not surface as the generic empty-pattern error.
+        assert!(
+            !e.message.contains("empty pattern"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn rejects_unclosed_empty_union() {
+        // `{` alone runs out of input immediately.
+        let e = parse("{").expect_err("unclosed");
+        assert!(
+            !e.message.contains("empty pattern"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn union_span_covers_open_through_close() {
+        // `{send csend}` — `{` at 0, `}` at 11; the Union span must cover 0..12.
+        let p = parse("{send csend}").expect("ok");
+        assert_eq!((p.root.span.start, p.root.span.end), (0, 12));
     }
 }
