@@ -26,7 +26,10 @@ pub use murphy_core::{
     MurphyRunFile, MurphyRunNodeDispatch, MurphySlice, Severity,
 };
 
+mod config_error;
 pub mod kinds;
+
+pub use config_error::{ConfigError, ConfigErrorKind};
 
 /// A cop, as authored against the plugin API.
 ///
@@ -145,6 +148,17 @@ pub trait CopOptions: Default + Sized + 'static {
     /// Static schema describing each option. The validation gate
     /// (murphy-9cr.9) reads this to diff against the user's config.
     const SCHEMA: &'static [MurphyCopOptionV1] = &[];
+
+    /// Decode an `Options` value from a cop's `[cops.rules."Name"]`
+    /// config table, serialised as a JSON object.
+    ///
+    /// The default implementation ignores the input and returns
+    /// [`Default::default`], which is correct for [`NoOptions`] and any
+    /// cop that takes no configuration. `#[derive(CopOptions)]`
+    /// (murphy-9cr.7) overrides it with field-by-field decoding.
+    fn from_config_json(_bytes: &[u8]) -> Result<Self, ConfigError> {
+        Ok(Self::default())
+    }
 }
 
 /// Marker type for cops that declare no options.
@@ -499,6 +513,36 @@ mod tests {
     #[test]
     fn no_options_has_empty_schema() {
         assert!(<NoOptions as CopOptions>::SCHEMA.is_empty());
+    }
+
+    #[test]
+    fn no_options_from_config_json_ignores_input() {
+        // The default `from_config_json` returns Default regardless of
+        // input, even malformed JSON.
+        let ok = <NoOptions as CopOptions>::from_config_json(b"not json at all");
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn config_error_kinds_round_trip() {
+        assert!(matches!(
+            ConfigError::not_an_object().kind(),
+            ConfigErrorKind::NotAnObject
+        ));
+        assert!(matches!(
+            ConfigError::type_mismatch("f", "int").kind(),
+            ConfigErrorKind::TypeMismatch { field, expected }
+                if field == "f" && *expected == "int"
+        ));
+        assert!(matches!(
+            ConfigError::enum_violation("f", "v").kind(),
+            ConfigErrorKind::EnumViolation { field, value }
+                if field == "f" && value == "v"
+        ));
+        assert!(matches!(
+            ConfigError::missing_required("f").kind(),
+            ConfigErrorKind::MissingRequired { field } if field == "f"
+        ));
     }
 
     #[test]

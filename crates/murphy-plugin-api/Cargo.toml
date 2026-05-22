@@ -6,6 +6,10 @@ description = "Safe, plugin-author-facing surface over the Murphy native plugin 
 
 [dependencies]
 murphy-core = { path = "../murphy-core" }
+# JSON decoding for `CopOptions::from_config_json` (ADR 0036). Native
+# plugins already pull serde-shaped crates routinely; mruby user cops
+# never touch this crate, so their lightweight runtime is unaffected.
+serde_json = "1"
 
 [dev-dependencies]
 # Used in unit tests that walk every ruby-prism Node variant to verify kinds::*

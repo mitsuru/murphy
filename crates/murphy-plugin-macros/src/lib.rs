@@ -7,9 +7,11 @@
 //! `#[derive(CopOptions)]` (murphy-9cr.7) and `#[murphy::cop]` /
 //! `#[on_node]` (murphy-9cr.8) will land here alongside it.
 
+mod cop_options;
+
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Path, Token, parse_macro_input, punctuated::Punctuated};
+use syn::{DeriveInput, Path, Token, parse_macro_input, punctuated::Punctuated};
 
 /// Register a comma-separated list of [`Cop`](murphy_plugin_api::Cop)
 /// implementations as a Murphy native plugin.
@@ -92,6 +94,44 @@ pub fn register_cops(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+/// Derive [`CopOptions`](murphy_plugin_api::CopOptions) for an options
+/// struct.
+///
+/// Generates `impl Default` (honouring `#[option(default = …)]`) and
+/// `impl CopOptions` (the `SCHEMA` const plus a `from_config_json`
+/// JSON decoder).
+///
+/// # Supported field types
+///
+/// `bool`, `i64`, `String`, `Vec<String>`, and `Option<bool|i64|String>`.
+///
+/// # `#[option(...)]` keys
+///
+/// - `default = <literal>` — bool / integer / string / string list.
+/// - `description = "..."`.
+/// - `enum_values = ["a", "b"]` — `String` fields only.
+/// - `deprecated` or `deprecated = "replacement_key"`.
+/// - `reason = "..."`.
+///
+/// # Example
+///
+/// ```ignore
+/// use murphy_plugin_macros::CopOptions;
+///
+/// #[derive(CopOptions)]
+/// struct LineLengthOptions {
+///     #[option(default = 80, description = "Maximum line width")]
+///     max: i64,
+/// }
+/// ```
+#[proc_macro_derive(CopOptions, attributes(option))]
+pub fn derive_cop_options(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    cop_options::derive(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 /// Parsed form of `register_cops!(Cop1, Cop2, …);`.

@@ -10,9 +10,13 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
-# Default features off; we only need to parse a comma-separated list of
-# type paths. No syn::Type::full / no derive feature in this crate.
-syn = { version = "2", default-features = false, features = ["parsing", "proc-macro", "printing", "clone-impls", "derive"] }
+# `full` is needed to parse `#[option(default = [...])]` array-literal
+# expressions; `derive` covers the DeriveInput / struct surface.
+syn = { version = "2", default-features = false, features = ["parsing", "proc-macro", "printing", "clone-impls", "derive", "full"] }
+# Build-time only: encodes #[option(default = ...)] / enum_values into the
+# JSON strings embedded in the generated SCHEMA. Proc-macro crates run at
+# compile time, so this never reaches a plugin binary.
+serde_json = "1"
 
 [dev-dependencies]
 trybuild = "1"

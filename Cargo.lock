@@ -486,6 +486,7 @@ version = "0.1.0"
 dependencies = [
  "murphy-core",
  "ruby-prism",
+ "serde_json",
 ]
 
 [[package]]
@@ -495,6 +496,7 @@ dependencies = [
  "murphy-plugin-api",
  "proc-macro2",
  "quote",
+ "serde_json",
  "syn",
  "trybuild",
 ]

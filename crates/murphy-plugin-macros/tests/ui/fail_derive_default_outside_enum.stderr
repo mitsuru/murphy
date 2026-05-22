@@ -1,0 +1,6 @@
+error: #[option(default = "nope")] is not one of enum_values
+ --> tests/ui/fail_derive_default_outside_enum.rs:6:5
+  |
+6 | /     #[option(default = "nope", enum_values = ["yes", "maybe"])]
+7 | |     choice: String,
+  | |__________________^
