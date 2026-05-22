@@ -1,0 +1,8 @@
+[package]
+name = "murphy-pattern"
+version = "0.1.0"
+edition = "2024"
+description = "S-expression pattern grammar, parser, and runtime IR for Murphy cops (murphy-9cr.17)."
+
+[dependencies]
+murphy-ast = { path = "../murphy-ast" }
