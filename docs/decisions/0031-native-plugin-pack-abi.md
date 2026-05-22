@@ -1,7 +1,7 @@
 # ADR 0031 - Native plugin pack ABI and distribution contract
 
 - Date: 2026-05-20
-- Status: Accepted
+- Status: Superseded by ADR 0038 (single-surface arena plugin ABI) — the file-level native plugin pack ABI is replaced; it was pre-v1 provisional and carries no migration shim per the plugin-reboot design doc §0.
 - Issues: `murphy-fmw.1.3`, `murphy-fmw.1.2`, `murphy-fmw.1.5`
 
 ## Context

@@ -2,6 +2,8 @@
 
 **Status**: 設計合意 2026-05-22。`2026-05-22-ast-representation-strategy.md`
 を実装可能な設計へ具体化したもの。murphy-9cr epic を全面再構成する。
+§9 step 1 の形式 ADR は ADR 0037(arena parser-shaped typed AST)・
+ADR 0038(単一表面プラグイン ABI)として起票済み(murphy-9cr.13)。
 
 この設計は AST 戦略メモの方向(arena・parser-shaped・typed AST、Route B)を
 引き継ぎつつ、次の点を確定・修正する:
