@@ -170,12 +170,41 @@ macro that lowers a pattern to a `match`.
 - **`run_file` removal** becomes reachable: every cop can be expressed
   on the arena AST.
 
+## Cop authoring needs a node-pattern DSL too
+
+The arena AST is only half of what a cop author uses. RuboCop cops are
+written against **two** things: the Parser AST *and* NodePattern
+(`def_node_matcher "(send nil? :foo)"`). The body of a typical
+`on_send` is mostly S-expression pattern matching. An arena AST with no
+pattern-matching DSL leaves cop authors hand-writing nested `match`
+arms for every rule.
+
+So a **node-pattern matching DSL is a first-class, required component**
+alongside the arena AST — not an "open question". Sketch:
+
+- A cop writes `node_pattern!("(send nil? :puts $...)")` (or an
+  attribute form).
+- A proc macro parses the S-expression pattern **at compile time** and
+  lowers it to a `match` over the arena AST's `NodeKind`, plus the
+  condition checks and capture extraction.
+- Captures (`$`) come back typed — a `NodeId`, a literal, a slice of
+  `NodeId`s — so the "type-safe S-expression" idea holds for *both*
+  the AST representation and pattern matching.
+- The DSL needs an S-expression parser/compiler. This is the Rust
+  analogue of RuboCop's NodePattern compiler.
+
+RuboCop's NodePattern features: `_` (any), `...` (rest), `{a b}`
+(union), `[a b]` (all), `$` (capture), `#predicate` (method call),
+`^` (parent), `nil?`/literals. How much of that to port — and whether
+to start with a subset — is the one open scoping question here; the
+*existence* of the DSL is not optional.
+
 ## Open questions
 
 - prism → arena parser-AST conversion cost (measure against Murphy's
   speed targets; the whole point of Murphy is being fast).
-- Node-pattern-matching DSL — proc macro lowering `(send _ :foo)` to a
-  `match`, scope and syntax.
+- node-pattern DSL scope — how much of RuboCop's NodePattern grammar
+  to support in v1 (subset vs full).
 - Exact shape of the comment / raw-source / file-path surfaces
   (audit categories B/C) and how autocorrect range computation uses
   them.
@@ -190,8 +219,9 @@ macro that lowers a pattern to a `match`.
 
 1. Write a formal ADR for "arena parser-shaped typed AST as Murphy's
    core AST representation".
-2. Create an implementation epic/issue for the arena AST + prism
-   translation layer.
+2. Create an implementation epic covering three coupled pieces: the
+   arena AST, the prism→arena translation layer, and the node-pattern
+   matching DSL. Cops cannot be written without all three.
 3. Re-scope murphy-9cr.5 and murphy-9cr.8 against the arena AST (or
    close and re-file them).
 4. Prototype the prism→arena conversion and measure the cost before
