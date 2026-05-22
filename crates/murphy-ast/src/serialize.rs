@@ -336,6 +336,31 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u8(out, 56);
             put_u32(out, n.0);
         }
+        NodeKind::Rescue {
+            body,
+            resbodies,
+            else_,
+        } => {
+            put_u8(out, 57);
+            put_u32(out, body.0);
+            write_node_list(resbodies, out);
+            put_u32(out, else_.0);
+        }
+        NodeKind::Resbody {
+            exceptions,
+            var,
+            body,
+        } => {
+            put_u8(out, 58);
+            write_node_list(exceptions, out);
+            put_u32(out, var.0);
+            put_u32(out, body.0);
+        }
+        NodeKind::Ensure { body, ensure_ } => {
+            put_u8(out, 59);
+            put_u32(out, body.0);
+            put_u32(out, ensure_.0);
+        }
     }
 }
 
@@ -483,6 +508,20 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         54 => NodeKind::Super(read_node_list(cur)?),
         55 => NodeKind::Zsuper,
         56 => NodeKind::Defined(NodeId(get_u32(cur)?)),
+        57 => NodeKind::Rescue {
+            body: OptNodeId(get_u32(cur)?),
+            resbodies: read_node_list(cur)?,
+            else_: OptNodeId(get_u32(cur)?),
+        },
+        58 => NodeKind::Resbody {
+            exceptions: read_node_list(cur)?,
+            var: OptNodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+        },
+        59 => NodeKind::Ensure {
+            body: OptNodeId(get_u32(cur)?),
+            ensure_: OptNodeId(get_u32(cur)?),
+        },
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -954,6 +993,64 @@ mod tests {
 
         let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
         assert_eq!(ast, restored, "jump variant round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_exception_variants() {
+        // The three exception variants appended after `Defined`
+        // (discriminants 57..=59) must survive the byte round-trip. Covers
+        // the `NodeList` payloads (`Rescue.resbodies`, `Resbody.exceptions`)
+        // both populated and empty, and the `OptNodeId` fields both ways.
+        let mut b = AstBuilder::new("begin\n  x\nrescue E => e\n  y\nensure\n  z\nend", "t.rb");
+        let exc = b.push(NodeKind::Nil, r(18, 19));
+        let exc_list = b.push_list(&[exc]);
+        let var = b.push(NodeKind::Nil, r(23, 24));
+        let resbody_body = b.push(NodeKind::Nil, r(28, 29));
+        // `Resbody` with exceptions present and a bound var.
+        let resbody = b.push(
+            NodeKind::Resbody {
+                exceptions: exc_list,
+                var: OptNodeId::some(var),
+                body: OptNodeId::some(resbody_body),
+            },
+            r(10, 29),
+        );
+        // bare `Resbody` — empty exceptions list, no var, no body.
+        let bare_resbody = b.push(
+            NodeKind::Resbody {
+                exceptions: NodeList::EMPTY,
+                var: OptNodeId::NONE,
+                body: OptNodeId::NONE,
+            },
+            r(10, 12),
+        );
+        let resbodies = b.push_list(&[resbody, bare_resbody]);
+        let protected = b.push(NodeKind::Nil, r(8, 9));
+        let rescue = b.push(
+            NodeKind::Rescue {
+                body: OptNodeId::some(protected),
+                resbodies,
+                else_: OptNodeId::NONE,
+            },
+            r(0, 40),
+        );
+        let ensure_body = b.push(NodeKind::Nil, r(37, 38));
+        let ensure = b.push(
+            NodeKind::Ensure {
+                body: OptNodeId::some(rescue),
+                ensure_: OptNodeId::some(ensure_body),
+            },
+            r(0, 40),
+        );
+        let list = b.push_list(&[ensure]);
+        let root = b.push(NodeKind::Begin(list), r(0, 40));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "exception variant round-trip must be bit-equal"
+        );
     }
 
     #[test]

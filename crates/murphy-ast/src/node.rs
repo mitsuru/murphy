@@ -315,6 +315,31 @@ pub enum NodeKind {
     Zsuper,
     /// `defined?(expr)`。
     Defined(NodeId),
+
+    // --- exceptions (appended post-`Defined` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `begin..rescue..else..end` の rescue 構造。
+    Rescue {
+        /// 保護対象本体。
+        body: OptNodeId,
+        /// `Resbody` の並び。
+        resbodies: NodeList,
+        /// `else` 節。
+        else_: OptNodeId,
+    },
+    /// 単一の `rescue Exc => e; ...` 節。
+    Resbody {
+        /// 捕捉する例外クラスの並び（無指定なら空）。
+        exceptions: NodeList,
+        /// `=> e` の束縛先（無ければ `None`）。
+        var: OptNodeId,
+        body: OptNodeId,
+    },
+    /// `ensure` 構造。`body` は保護本体（rescue 節 or 素の本体）。
+    Ensure {
+        body: OptNodeId,
+        ensure_: OptNodeId,
+    },
 }
 
 /// A source comment, stored outside the node tree.

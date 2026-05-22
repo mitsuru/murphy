@@ -162,6 +162,31 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         }
 
         NodeKind::Defined(n) => out.push(n),
+
+        NodeKind::Rescue {
+            body,
+            resbodies,
+            else_,
+        } => {
+            push_opt(out, body);
+            push_list(out, lists, resbodies);
+            push_opt(out, else_);
+        }
+
+        NodeKind::Resbody {
+            exceptions,
+            var,
+            body,
+        } => {
+            push_list(out, lists, exceptions);
+            push_opt(out, var);
+            push_opt(out, body);
+        }
+
+        NodeKind::Ensure { body, ensure_ } => {
+            push_opt(out, body);
+            push_opt(out, ensure_);
+        }
     }
 }
 

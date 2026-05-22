@@ -517,8 +517,93 @@ impl Translator {
             return self.builder.push(NodeKind::Defined(inner), range);
         }
 
-        // Task 13 以降、ここに各ノード種の arm を足していく。
+        // --- exceptions ---
+        if let Some(b) = node.as_begin_node() {
+            return self.translate_begin(&b, range);
+        }
+
+        // Task 14 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
+    }
+
+    /// prism `BeginNode` → arena ノード。
+    /// 構造: `Begin([ Ensure?( Rescue?( body, resbodies, else ) ) ])`。
+    /// rescue も ensure も無ければ素の `Begin([statements])`（`kwbegin` 準拠）。
+    fn translate_begin(&mut self, b: &prism::BeginNode<'_>, range: Range) -> NodeId {
+        let body = self.translate_stmts_opt(b.statements());
+
+        // rescue 節（`subsequent()` でリンクした `RescueNode` 列）。
+        let inner = if let Some(first) = b.rescue_clause() {
+            let mut resbody_ids: Vec<NodeId> = Vec::new();
+            let mut cur = Some(first);
+            while let Some(rn) = cur {
+                resbody_ids.push(self.translate_resbody(&rn));
+                cur = rn.subsequent();
+            }
+            let resbodies = self.builder.push_list(&resbody_ids);
+            let else_ = match b.else_clause() {
+                Some(els) => self.translate_stmts_opt(els.statements()),
+                None => OptNodeId::NONE,
+            };
+            OptNodeId::some(self.builder.push(
+                NodeKind::Rescue {
+                    body,
+                    resbodies,
+                    else_,
+                },
+                range,
+            ))
+        } else {
+            body
+        };
+
+        // ensure 節。
+        let protected = if let Some(ens) = b.ensure_clause() {
+            let ensure_ = self.translate_stmts_opt(ens.statements());
+            OptNodeId::some(self.builder.push(
+                NodeKind::Ensure {
+                    body: inner,
+                    ensure_,
+                },
+                range,
+            ))
+        } else {
+            inner
+        };
+
+        // `begin..end`（`kwbegin`）は `Begin` で包む。
+        let child: Vec<NodeId> = match protected.get() {
+            Some(id) => vec![id],
+            None => Vec::new(),
+        };
+        let list = self.builder.push_list(&child);
+        self.builder.push(NodeKind::Begin(list), range)
+    }
+
+    /// prism `RescueNode` 1 個 → `Resbody`。
+    fn translate_resbody(&mut self, rn: &prism::RescueNode<'_>) -> NodeId {
+        let range = Self::range(&rn.location());
+        let exc_ids: Vec<NodeId> = rn
+            .exceptions()
+            .iter()
+            .map(|e| self.translate_node(&e))
+            .collect();
+        let exceptions = self.builder.push_list(&exc_ids);
+        // `reference()` は `=> e` の束縛先（`*TargetNode`）。Task 13 では対応する
+        // arm が無いため `Unknown` に落ちるが、Some/None の区別は保たれる。
+        let var = rn
+            .reference()
+            .map(|r| OptNodeId::some(self.translate_node(&r)))
+            .unwrap_or(OptNodeId::NONE);
+        let body = self.translate_stmts_opt(rn.statements());
+        self.builder.push(
+            NodeKind::Resbody {
+                exceptions,
+                var,
+                body,
+            },
+            range,
+        )
     }
 
     /// `break`/`next`/`return` の引数を単一 `OptNodeId` に畳む。
@@ -1571,6 +1656,92 @@ mod tests {
                 assert_eq!(top.interner().resolve(name.0), "B");
             }
             other => panic!("expected Casgn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_begin_rescue() {
+        // `begin..rescue..end` → ルートは Begin、子孫に Rescue と Resbody。
+        let ast = translate("begin\n  x\nrescue => e\n  y\nend", "t.rb");
+        assert!(matches!(ast.kind(ast.root()), NodeKind::Begin(_)));
+        assert!(
+            ast.descendants(ast.root())
+                .chain([ast.root()])
+                .any(|n| matches!(ast.kind(n), NodeKind::Rescue { .. }))
+        );
+        assert!(
+            ast.descendants(ast.root())
+                .any(|n| matches!(ast.kind(n), NodeKind::Resbody { .. }))
+        );
+    }
+
+    #[test]
+    fn translates_begin_ensure() {
+        // `begin..ensure..end` → 子孫に Ensure。
+        let ast = translate("begin\n  x\nensure\n  z\nend", "t.rb");
+        let ensure = ast
+            .descendants(ast.root())
+            .chain([ast.root()])
+            .find(|&n| matches!(ast.kind(n), NodeKind::Ensure { .. }))
+            .expect("expected an Ensure node");
+        match ast.kind(ensure) {
+            NodeKind::Ensure { body, ensure_ } => {
+                assert!(body.get().is_some(), "ensure: 保護本体 Some");
+                assert!(ensure_.get().is_some(), "ensure: ensure 節 Some");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_rescue_with_exception_class() {
+        // `rescue StandardError => e` → Resbody { exceptions: [..], var: Some }。
+        let ast = translate("begin\nx\nrescue StandardError => e\ny\nend", "t.rb");
+        let resbody = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Resbody { .. }))
+            .expect("expected a Resbody node");
+        match ast.kind(resbody) {
+            NodeKind::Resbody {
+                exceptions, var, ..
+            } => {
+                assert_eq!(exceptions.len, 1);
+                assert!(var.get().is_some());
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_begin_rescue_else_ensure_nesting() {
+        // 全部入り `begin..rescue..else..ensure..end` →
+        // Begin([ Ensure( Rescue( body, [Resbody], else ) ) ])。
+        let ast = translate(
+            "begin\n  a\nrescue\n  b\nelse\n  c\nensure\n  d\nend",
+            "t.rb",
+        );
+        let ensure = match ast.kind(ast.root()) {
+            NodeKind::Begin(_) => ast.children(ast.root()).next().expect("Begin に子が 1 つ"),
+            other => panic!("expected Begin, got {other:?}"),
+        };
+        let rescue = match ast.kind(ensure) {
+            NodeKind::Ensure { body, ensure_ } => {
+                assert!(ensure_.get().is_some(), "ensure 節");
+                body.get().expect("Ensure.body は Rescue")
+            }
+            other => panic!("expected Ensure, got {other:?}"),
+        };
+        match ast.kind(rescue) {
+            NodeKind::Rescue {
+                body,
+                resbodies,
+                else_,
+            } => {
+                assert!(body.get().is_some(), "Rescue.body");
+                assert_eq!(resbodies.len, 1, "1 個の Resbody");
+                assert!(else_.get().is_some(), "else 節");
+            }
+            other => panic!("expected Rescue, got {other:?}"),
         }
     }
 }
