@@ -66,3 +66,41 @@ fn wildcard_matches_any_node() {
     // Zero captures -> the matcher returns `bool`.
     assert!(any_node(root, &cx));
 }
+
+node_pattern!(is_int_42, "42");
+node_pattern!(is_any_int, "int");
+node_pattern!(is_sym_foo, ":foo");
+node_pattern!(is_true_lit, "true");
+node_pattern!(is_nil_node, "nil");
+node_pattern!(is_nil_test, "nil?");
+
+#[test]
+fn literal_and_kind_matching() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let i42 = b.push(NodeKind::Int(42), r());
+    let i7 = b.push(NodeKind::Int(7), r());
+    let sym_foo = {
+        let s = b.intern_symbol("foo");
+        b.push(NodeKind::Sym(s), r())
+    };
+    let tru = b.push(NodeKind::True_, r());
+    let niln = b.push(NodeKind::Nil, r());
+    // Root just needs to own the others; a Begin list keeps them reachable.
+    let list = b.push_list(&[i42, i7, sym_foo, tru, niln]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_int_42(i42, &cx));
+    assert!(!is_int_42(i7, &cx));
+    assert!(is_any_int(i42, &cx) && is_any_int(i7, &cx));
+    assert!(!is_any_int(tru, &cx));
+    assert!(is_sym_foo(sym_foo, &cx));
+    assert!(is_true_lit(tru, &cx));
+    assert!(!is_true_lit(niln, &cx));
+    assert!(is_nil_node(niln, &cx));
+    assert!(is_nil_test(niln, &cx));
+    assert!(!is_nil_test(i42, &cx));
+}
