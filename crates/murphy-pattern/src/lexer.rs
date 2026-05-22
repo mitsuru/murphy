@@ -157,7 +157,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Scan `#name` where `name` is `[a-z_][a-z0-9_]*[?!]?`.
+    /// Scan `#name` where `name` is `[A-Za-z_][A-Za-z0-9_]*[?!]?`.
     fn scan_predicate(&mut self) -> Result<Token, ParseError> {
         let hash = self.pos;
         self.pos += 1; // consume `#`
@@ -167,12 +167,15 @@ impl<'a> Lexer<'a> {
         Ok(Token::Predicate(name))
     }
 
-    /// Scan `:name` where `name` is `[a-z_][a-z0-9_]*[?!]?`.
+    /// Scan `:name` — either an identifier-style name
+    /// (`[A-Za-z_][A-Za-z0-9_]*[?!]?`) or a Ruby operator-method name
+    /// (`+`, `[]`, `<=>`, ...).
     fn scan_symbol(&mut self) -> Result<Token, ParseError> {
         let colon = self.pos;
         self.pos += 1; // consume `:`
         let name = self
             .take_method_name()
+            .or_else(|| self.take_operator_name())
             .ok_or_else(|| self.err_at(colon, colon + 1, "expected a symbol name after `:`"))?;
         Ok(Token::Sym(name))
     }
@@ -303,22 +306,49 @@ impl<'a> Lexer<'a> {
         Ok(Token::Ident(text.to_string()))
     }
 
-    /// Read a Ruby-method-ish name `[a-z_][a-z0-9_]*[?!]?` at the cursor.
+    /// Read a Ruby-method-ish name `[A-Za-z_][A-Za-z0-9_]*[?!]?` at the cursor.
     /// Returns `None` (leaving the cursor unmoved) when no name is present.
     fn take_method_name(&mut self) -> Option<String> {
         match self.peek() {
-            Some(b'a'..=b'z' | b'_') => {}
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {}
             _ => return None,
         }
         let start = self.pos;
         self.pos += 1;
-        while matches!(self.peek(), Some(b'a'..=b'z' | b'0'..=b'9' | b'_')) {
+        while matches!(
+            self.peek(),
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+        ) {
             self.pos += 1;
         }
         if matches!(self.peek(), Some(b'?' | b'!')) {
             self.pos += 1;
         }
         Some(self.slice_str(start, self.pos).to_string())
+    }
+
+    /// Ruby operator-method names, ordered longest-first so a shorter operator
+    /// never shadows a longer one sharing its prefix (`<` vs `<=` vs `<=>`).
+    const OPERATOR_NAMES: &'static [&'static str] = &[
+        // 3-byte
+        "[]=", "<=>", "===", //
+        // 2-byte
+        "[]", "==", "!=", "<=", ">=", "<<", ">>", "**", "=~", "!~", "+@", "-@", //
+        // 1-byte
+        "+", "-", "*", "/", "%", "<", ">", "&", "|", "^", "~", "!",
+    ];
+
+    /// Read a Ruby operator-method name (`+`, `[]=`, `<=>`, ...) at the cursor.
+    /// Returns `None` (leaving the cursor unmoved) when none matches.
+    fn take_operator_name(&mut self) -> Option<String> {
+        let rest = &self.src[self.pos..];
+        for &op in Self::OPERATOR_NAMES {
+            if rest.starts_with(op.as_bytes()) {
+                self.pos += op.len();
+                return Some(op.to_string());
+            }
+        }
+        None
     }
 
     /// Advance past any ASCII whitespace.
@@ -518,5 +548,84 @@ mod tests {
         // `1.` — the trailing `.` is not part of a float and is not `...`.
         let e = tokenize("1.").expect_err("must reject trailing dot");
         assert!(e.message.contains("..."));
+    }
+
+    // --- symbol grammar: operators and uppercase (murphy-ke0) --------------
+
+    #[test]
+    fn lexes_operator_symbols() {
+        for op in [
+            "+", "-", "*", "/", "%", "<", ">", "&", "|", "^", "~", "!", "[]", "==", "!=", "<=",
+            ">=", "<<", ">>", "**", "=~", "!~", "+@", "-@", "[]=", "<=>", "===",
+        ] {
+            assert_eq!(
+                toks(&format!(":{op}")),
+                vec![Token::Sym(op.into())],
+                "`:{op}` should lex as an operator symbol",
+            );
+        }
+    }
+
+    #[test]
+    fn operator_symbol_takes_longest_match() {
+        // A shorter operator must never shadow a longer one at the cursor.
+        assert_eq!(toks(":<=>"), vec![Token::Sym("<=>".into())]);
+        assert_eq!(toks(":<="), vec![Token::Sym("<=".into())]);
+        assert_eq!(toks(":<"), vec![Token::Sym("<".into())]);
+        assert_eq!(toks(":[]="), vec![Token::Sym("[]=".into())]);
+        assert_eq!(toks(":[]"), vec![Token::Sym("[]".into())]);
+        assert_eq!(toks(":+@"), vec![Token::Sym("+@".into())]);
+        assert_eq!(toks(":**"), vec![Token::Sym("**".into())]);
+    }
+
+    #[test]
+    fn operator_symbol_in_node_match() {
+        assert_eq!(
+            toks("(send _ :<=> _)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Underscore,
+                Token::Sym("<=>".into()),
+                Token::Underscore,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn operator_symbol_does_not_absorb_trailing_digit() {
+        // `:+`/`:-` are operator symbols; the digit is a separate token, and
+        // `:-1` does not become a negative-number literal.
+        assert_eq!(toks(":+1"), vec![Token::Sym("+".into()), Token::Int(1)]);
+        assert_eq!(toks(":-1"), vec![Token::Sym("-".into()), Token::Int(1)]);
+    }
+
+    #[test]
+    fn colon_bang_is_a_symbol_not_bang_token() {
+        // After `:`, `!` is the operator-method symbol, distinct from the
+        // standalone `Token::Bang` sigil.
+        assert_eq!(toks(":!"), vec![Token::Sym("!".into())]);
+    }
+
+    #[test]
+    fn bare_equals_symbol_is_error() {
+        // `=` alone is not a Ruby operator-method name.
+        let e = tokenize(":=").expect_err("must reject `:=`");
+        assert!(e.message.contains("expected a symbol name"));
+    }
+
+    #[test]
+    fn lexes_uppercase_symbols() {
+        assert_eq!(toks(":Foo"), vec![Token::Sym("Foo".into())]);
+        assert_eq!(toks(":CONST"), vec![Token::Sym("CONST".into())]);
+        assert_eq!(toks(":fooBar"), vec![Token::Sym("fooBar".into())]);
+    }
+
+    #[test]
+    fn uppercase_predicate_name_is_accepted() {
+        // `take_method_name` is shared with `#name`; allowing uppercase there
+        // is harmless — Ruby permits uppercase method names.
+        assert_eq!(toks("#Foo"), vec![Token::Predicate("Foo".into())]);
     }
 }

@@ -474,6 +474,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_operator_and_uppercase_symbols() {
+        // murphy-ke0: operator-method and uppercase symbols flow through to
+        // `Lit::Sym` unchanged.
+        assert_eq!(k(":+"), PatKind::Lit(Lit::Sym("+".into())));
+        assert_eq!(k(":[]="), PatKind::Lit(Lit::Sym("[]=".into())));
+        assert_eq!(k(":<=>"), PatKind::Lit(Lit::Sym("<=>".into())));
+        assert_eq!(k(":Foo"), PatKind::Lit(Lit::Sym("Foo".into())));
+    }
+
+    #[test]
     fn parses_nil_test_distinct_from_nil_literal() {
         assert_eq!(k("nil?"), PatKind::NilTest);
         assert_eq!(k("nil"), PatKind::Lit(Lit::Nil));
@@ -901,11 +911,10 @@ mod tests {
 
     #[test]
     fn capture_of_subpattern_uses_parens() {
-        // `:foo` (not `:Foo`): the lexer's symbol grammar is lowercase-only,
-        // a pre-existing constraint outside Task 8's parser-only scope. The
-        // test asserts only that the capture body is a `Node`, so the symbol
-        // payload is incidental.
-        let p = parse("$(const _ :foo)").expect("ok");
+        // `:Foo` exercises the uppercase symbol grammar (murphy-ke0); the test
+        // asserts only that the capture body is a `Node`, so the symbol payload
+        // is incidental.
+        let p = parse("$(const _ :Foo)").expect("ok");
         match p.root.kind {
             PatKind::Capture { slot, name, body } => {
                 assert_eq!(slot, 0);
