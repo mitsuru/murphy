@@ -52,9 +52,9 @@ use syn::{DeriveInput, Path, Token, parse_macro_input, punctuated::Punctuated};
 /// here; `#[on_node]` / `#[murphy::cop]` (murphy-9cr.8) will generate
 /// them.
 ///
-/// Each cop's `NAME` must be pairwise distinct; this is enforced at
-/// compile time by a const panic in
-/// `murphy_plugin_api::__internal::assert_unique_cop_names`.
+/// Each cop's `NAME` must be pairwise distinct; `register_cops!`
+/// enforces this at compile time with an inline const-eval `panic!`
+/// guarded by `murphy_plugin_api::__internal::cop_names_unique`.
 #[proc_macro]
 pub fn register_cops(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as RegisterCopsInput);
@@ -73,11 +73,18 @@ pub fn register_cops(input: TokenStream) -> TokenStream {
         const _: () = {
             use ::murphy_plugin_api as __api;
 
-            // Compile-time uniqueness check; surfaces duplicates as
-            // const-eval panics pointing at this block.
-            const _: () = __api::__internal::assert_unique_cop_names::<#n>(
+            // Compile-time uniqueness check. The duplicate-`NAME`
+            // `panic!` is emitted inline here (not inside the helper)
+            // so the const-eval error stays a clean `error[E0080]`
+            // with no `core::panic` frame, keeping the trybuild
+            // snapshot stable across `rust-src` presence (murphy-8np).
+            const _: () = if !__api::__internal::cop_names_unique::<#n>(
                 [ #(#name_exprs),* ]
-            );
+            ) {
+                ::core::panic!(
+                    "register_cops!: two registered cops share the same NAME"
+                );
+            };
 
             static COPS: [__api::PluginCopV1; #n] = [
                 #(#cop_entries),*

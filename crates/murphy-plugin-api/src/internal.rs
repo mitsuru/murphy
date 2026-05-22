@@ -71,22 +71,28 @@ pub unsafe extern "C" fn dispatch_thunk<C: NodeCop + Default>(
     }
 }
 
-/// Const-panic if any two of `names` are equal.
+/// Return `true` if every name in `names` is pairwise distinct.
 ///
-/// `register_cops!` wraps a call in a `const _: () = …;` block so a
-/// duplicate cop `NAME` surfaces as a compile error.
-pub const fn assert_unique_cop_names<const N: usize>(names: [&str; N]) {
+/// `register_cops!` calls this inside a `const _: () = …;` block and
+/// emits the duplicate-`NAME` `panic!` *inline at the macro call site*
+/// rather than panicking in here. Keeping the panic out of a called
+/// function makes the const-eval failure a clean `error[E0080]` with no
+/// `note: inside …` / `core/src/panic.rs` frame — so the `trybuild`
+/// snapshot stays stable whether or not the active toolchain has the
+/// `rust-src` component (murphy-8np).
+pub const fn cop_names_unique<const N: usize>(names: [&str; N]) -> bool {
     let mut i = 0;
     while i < N {
         let mut j = i + 1;
         while j < N {
             if str_eq(names[i], names[j]) {
-                panic!("register_cops!: two registered cops share the same NAME");
+                return false;
             }
             j += 1;
         }
         i += 1;
     }
+    true
 }
 
 /// `const`-evaluable string equality (`str::eq` is not `const`).
@@ -135,7 +141,7 @@ mod tests {
     const _: PluginCopV1 = build_cop::<StubCop>();
 
     /// Distinct names must pass at const-eval time.
-    const _: () = assert_unique_cop_names(["Plugin/A", "Plugin/B"]);
+    const _: () = assert!(cop_names_unique(["Plugin/A", "Plugin/B"]));
 
     #[test]
     fn build_cop_packs_cop_and_node_cop_metadata() {
@@ -153,14 +159,21 @@ mod tests {
     }
 
     #[test]
-    fn assert_unique_cop_names_accepts_distinct_names() {
-        assert_unique_cop_names(["Plugin/One", "Plugin/Two", "Plugin/Three"]);
+    fn cop_names_unique_accepts_distinct_names() {
+        assert!(cop_names_unique([
+            "Plugin/One",
+            "Plugin/Two",
+            "Plugin/Three"
+        ]));
     }
 
     #[test]
-    #[should_panic(expected = "same NAME")]
-    fn assert_unique_cop_names_panics_on_a_duplicate() {
-        assert_unique_cop_names(["Plugin/Dup", "Plugin/Other", "Plugin/Dup"]);
+    fn cop_names_unique_rejects_a_duplicate() {
+        assert!(!cop_names_unique([
+            "Plugin/Dup",
+            "Plugin/Other",
+            "Plugin/Dup"
+        ]));
     }
 
     // --- dispatch_thunk -----------------------------------------------

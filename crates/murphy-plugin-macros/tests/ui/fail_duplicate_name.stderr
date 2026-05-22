@@ -2,14 +2,4 @@ error[E0080]: evaluation panicked: register_cops!: two registered cops share the
   --> tests/ui/fail_duplicate_name.rs:29:1
    |
 29 | murphy_plugin_macros::register_cops!(First, Second);
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed inside this call
-   |
-note: inside `murphy_plugin_api::__internal::assert_unique_cop_names::<2>`
-  --> $RUST/core/src/panic.rs
-   |
-   = note: the failure occurred here
-   |
-  ::: $WORKSPACE/crates/murphy-plugin-api/src/internal.rs
-   |
-   |                 panic!("register_cops!: two registered cops share the same NAME");
-   |                 ----------------------------------------------------------------- in this macro invocation
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed here
