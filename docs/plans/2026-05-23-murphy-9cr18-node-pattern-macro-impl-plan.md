@@ -840,7 +840,12 @@ fn seq_capture_and_rest() {
         NodeKind::Send { receiver: OptNodeId::NONE, method: foo, args },
         r(),
     );
-    let earr = b.push_list(&[a1, a2, a3]);
+    // Distinct nodes for the array — reusing a1/a2/a3 across two parents
+    // would make `finish` overwrite their parent links.
+    let e1 = b.push(NodeKind::Int(1), r());
+    let e2 = b.push(NodeKind::Int(2), r());
+    let e3 = b.push(NodeKind::Int(3), r());
+    let earr = b.push_list(&[e1, e2, e3]);
     let arr = b.push(NodeKind::Array(earr), r());
     let list = b.push_list(&[send, arr]);
     let root = b.push(NodeKind::Begin(list), r());
@@ -852,9 +857,9 @@ fn seq_capture_and_rest() {
     // $... binds the whole args slice.
     assert_eq!(cap_args(send, &cx), Some((&[a1, a2, a3][..],)));
     // trailing capture after a leading rest.
-    assert_eq!(rest_then_cap(arr, &cx), Some((a3,)));
+    assert_eq!(rest_then_cap(arr, &cx), Some((e3,)));
     // leading capture before a trailing rest.
-    assert_eq!(cap_then_rest(arr, &cx), Some((a1,)));
+    assert_eq!(cap_then_rest(arr, &cx), Some((e1,)));
 }
 ```
 
@@ -871,25 +876,20 @@ fn seq_capture_and_rest() {
 - Modify: `crates/murphy-plugin-macros/src/node_pattern.rs`
 - Modify: `crates/murphy-plugin-macros/tests/node_pattern_behavior.rs`
 
-**実装方針:** union/not の内側は bool 式へ落とす。ヘルパ `fn lower_as_bool(pat, subject, ctx) -> syn::Result<TokenStream>` を作る:
+**実装方針:** union/not の内側は **`return` を出さない bool 式** へ落とす。`lower_pat`(ガード列を出し `return #fail` で抜ける)とは別ルートの `fn lower_bool(pat, subject, ctx) -> syn::Result<TokenStream>` を実装する。`lower_bool` は `matches!` / `&&` / `||` / メソッド呼び出しのみで構成された bool 式を返す。
 
-```rust
-// returns an expression of type bool
-fn lower_as_bool(pat, subject, parent_ctx) -> syn::Result<TokenStream> {
-    let mut inner = Lower { fail: quote!(false), capture_allowed: false, /* gensym 引継ぎ */ };
-    let guards = lower_pat(pat, subject, &mut inner)?;
-    Ok(quote!({ #guards true }))   // クロージャ不要、ブロック式で十分
-}
-```
-
-- `PatKind::Union(alts)`: `let __ok = #( #alt_bools )||* ; if !__ok { return #fail; }`。各 `alt_bool` は `lower_as_bool(alt, subject, ctx)`。
-- `PatKind::Not(inner)`: `if #inner_bool { return #fail; }`。`inner_bool = lower_as_bool(inner, subject, ctx)`。
-
-> `lower_as_bool` のブロック式は `{ guards...; true }` 形。guards 内の `return false` はこのブロックではなく **囲む関数** から return してしまう。これは誤り。union/not の bool 化には guards の `return` を「ブロック値 false」へ変える必要がある。
+> **v1 の制限(advisor レビューで確定)**: `lower_bool` の Node 腕で `List` スロットまでフル実装すると、`lower_pat` の Node 処理(スキーマ dispatch・destructure・固定スロット・rest 付き List 照合)をほぼ全部 bool 式版で二重実装することになり Task 8/10 が大きく膨らむ。よって **`Union` / `Not` / `Descend` の内側に来る Node パターンは `List` スロットを使えない** という v1 制限を設ける。`lower_bool` の Node 腕は次のみ:
 >
-> 正しい実装: union/not 内は `return` を使わず、各サブパターンを **`&&` 連結の bool 式** に落とす別ルートにする。`lower_pat` とは別に `fn lower_bool(pat, subject, ctx) -> syn::Result<TokenStream>`(bool 式を返す。`matches!` / `&&` / `||` のみ、`return` を出さない)を実装する。capture 不可なので分岐は単純: `Wildcard`→`true`、`Lit`→`matches!`、`Kind`→tag 比較、`Node`→ネストした `matches!` + スロット bool、`Union`→`||`、`Not`→`!`、`NilTest`→`matches!`、`Predicate`→関数呼び出し、`Parent`/`Descend`→式、`Capture`→`compile_error`、`Rest`→`compile_error`(bool 文脈に rest は来ない)。
+> - `Head::Exact` で **固定スロット(`Node`/`OptNode`/`Sym`)のみ** の NodeKind → ネストした `matches!` + スロット bool 式の `&&` 連結。
+> - `Head::Any` / `Head::OneOf` → kind 判定のみ(子は空 or `...` のみ)。
+> - 対象 NodeKind が `List` スロットを持ち、かつパターンがその List 子を伴う → `compile_error`("a node pattern with a variable-length child list is not supported inside `{}` / `!` / `` ` `` in v1")。
 >
-> gensym カウンタは `Lower` 共有で良い(`lower_bool` も `&mut Lower` を取る)。
+> この制限は design doc の follow-up リストに追記する(Task 12)。
+
+`lower_bool` の分岐: `Wildcard`→`true`、`Lit`→`matches!`、`Kind`→tag 比較、`NilTest`→`matches!`、`Node`→上記(固定スロットのみ)、`Union`→`||`、`Not`→`!`、`Predicate`→関数呼び出し、`Parent`→`cx.parent(s).get().map_or(false, |p| <inner_bool(p)>)`、`Descend`→`cx.descendants(s).into_iter().any(|d| <inner_bool(d)>)`、`Capture`→`compile_error`、`Rest`→`compile_error`(bool 文脈に rest は来ない)。gensym カウンタは `Lower` 共有でよい(`lower_bool` も `&mut Lower` を取る)。
+
+- `PatKind::Union(alts)`: `let __ok = ( #(#alt_bools)||* ); if !__ok { return #fail; }`。各 `alt_bool` は `lower_bool(alt, subject, ctx)`。
+- `PatKind::Not(inner)`: `if #inner_bool { return #fail; }`。`inner_bool = lower_bool(inner, subject, ctx)`。
 
 **Step 1: failing test**
 
@@ -946,7 +946,10 @@ fn union_and_negation() {
 **Step 1: failing test**
 
 ```rust
-node_pattern!(is_big_int, "(int #is_big)");
+// `#is_big` is a bare predicate applied directly to `node`. (`int` has no
+// schema entry, so `(int #is_big)` would be an unsupported-kind error —
+// the predicate is a child position, not a head.)
+node_pattern!(is_big_int, "#is_big");
 
 /// User-provided predicate: a free fn in scope at the matcher call site.
 fn is_big(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -969,8 +972,6 @@ fn predicate_calls_a_free_function() {
     assert!(!is_big_int(small, &cx));
 }
 ```
-
-> 注: `(int #is_big)` は atom `int` のノードマッチに見えるが、schema 表に `int` は無い。**`#predicate` は head ではなく子位置**。`(int #is_big)` は head=`int`(Task 5 で `int` を schema 無し kind と判定 → `compile_error`)。よってテストは `int` をノードマッチに使わない形にする。正しいテストパターンは bare predicate を直接使う `node_pattern!(is_big_int, "#is_big")`(トップレベルで `#is_big` を `node` に適用)。上記テストの `"(int #is_big)"` を **`"#is_big"`** に修正して書くこと。
 
 **Step 2–5:** fail 確認 → 実装 → PASS → commit
 `feat(murphy-plugin-macros): lower #predicate to a free function call`。
