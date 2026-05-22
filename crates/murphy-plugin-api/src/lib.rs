@@ -5,12 +5,14 @@
 mod abi;
 mod config_error;
 mod cop;
+mod cx;
 mod options;
 mod severity;
 
 pub use abi::{CxRaw, FnTable, OptionSpec, RawEdit, RawOffense, RawSlice};
 pub use config_error::{ConfigError, ConfigErrorKind};
 pub use cop::Cop;
+pub use cx::Cx;
 pub use options::{CopOptions, NoOptions};
 pub use severity::{
     SEVERITY_UNSET, Severity, TRISTATE_UNSET, tristate_from_wire, tristate_to_wire,

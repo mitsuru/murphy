@@ -12,7 +12,7 @@ mod interner;
 mod node;
 mod serialize;
 
-pub use ast::{Ancestors, Ast, collect_children};
+pub use ast::{Ancestors, Ast, AstRawParts, collect_children};
 pub use builder::AstBuilder;
 pub use interner::Interner;
 pub use node::{
