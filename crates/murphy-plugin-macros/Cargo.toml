@@ -17,11 +17,14 @@ syn = { version = "2", default-features = false, features = ["parsing", "proc-ma
 # JSON strings embedded in the generated SCHEMA. Proc-macro crates run at
 # compile time, so this never reaches a plugin binary.
 serde_json = "1"
+# node_pattern! parses pattern strings at macro-expansion time.
+murphy-pattern = { path = "../murphy-pattern" }
+# NodeKindTag / pattern-name resolution for the schema table.
+murphy-ast = { path = "../murphy-ast" }
 
 [dev-dependencies]
 trybuild = "1"
+# Behaviour tests and trybuild fixtures impl `NodeCop` / build a `Cx`,
+# exactly as a real plugin author would. (`murphy-ast` is a normal
+# dependency above, named at macro-expansion time.)
 murphy-plugin-api = { path = "../murphy-plugin-api" }
-# A cop's `NodeCop::check` names `murphy_ast::NodeId`; the trybuild
-# fixtures and behaviour tests impl `NodeCop`, exactly as a real plugin
-# author would (a plugin depends on both murphy-plugin-api and murphy-ast).
-murphy-ast = { path = "../murphy-ast" }

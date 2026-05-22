@@ -11,6 +11,7 @@
 //! alongside them.
 
 mod cop_options;
+mod node_pattern;
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -147,6 +148,26 @@ pub fn derive_cop_options(input: TokenStream) -> TokenStream {
     cop_options::derive(input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+/// Define a compile-time AST pattern matcher (B backend, murphy-9cr.18).
+///
+/// `node_pattern!(name, "pattern")` expands to a module-level
+/// `fn name(node, cx)` that tests whether `node` matches the
+/// S-expression `pattern`. With zero `$` captures the matcher returns
+/// `bool`; with one or more it returns `Option<(captures…)>` in slot
+/// order (`$_` → `NodeId`, `$...` → `&[NodeId]`).
+///
+/// # Example
+///
+/// ```ignore
+/// use murphy_plugin_macros::node_pattern;
+///
+/// node_pattern!(is_puts_call, "(send nil? :puts $...)");
+/// ```
+#[proc_macro]
+pub fn node_pattern(input: TokenStream) -> TokenStream {
+    node_pattern::node_pattern(input.into()).into()
 }
 
 /// Parsed form of `register_cops!(Cop1, Cop2, …);`.
