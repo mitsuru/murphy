@@ -21,3 +21,7 @@ serde_json = "1"
 [dev-dependencies]
 trybuild = "1"
 murphy-plugin-api = { path = "../murphy-plugin-api" }
+# A cop's `NodeCop::check` names `murphy_ast::NodeId`; the trybuild
+# fixtures and behaviour tests impl `NodeCop`, exactly as a real plugin
+# author would (a plugin depends on both murphy-plugin-api and murphy-ast).
+murphy-ast = { path = "../murphy-ast" }

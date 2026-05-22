@@ -1,5 +1,6 @@
-// A type that does not implement Cop must be rejected by the trait
-// bound that `register_cops!` plants on the static table.
+// A type that does not implement `NodeCop` must be rejected by
+// `register_cops!` — `build_cop::<C>()` requires `C: NodeCop + Default`,
+// and the uniqueness check reads `<C as Cop>::NAME`.
 
 struct NotACop;
 

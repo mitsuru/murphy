@@ -335,7 +335,7 @@ fn generate_copoptions(name: &Ident, fields: &[ParsedField]) -> TokenStream {
 
     quote! {
         impl ::murphy_plugin_api::CopOptions for #name {
-            const SCHEMA: &'static [::murphy_plugin_api::MurphyCopOptionV1] = &[
+            const SCHEMA: &'static [::murphy_plugin_api::OptionSpec] = &[
                 #(#schema_entries),*
             ];
 
@@ -357,11 +357,11 @@ fn generate_copoptions(name: &Ident, fields: &[ParsedField]) -> TokenStream {
 
 fn schema_entry(field: &ParsedField) -> TokenStream {
     let name = field.ident.to_string();
-    let ty = if field.enum_values.is_some() {
-        "enum"
-    } else {
-        field.ty.wire()
-    };
+    // `ty` is always the base wire type. Enum-ness is carried by a
+    // non-empty `enum_values_json`, not by a distinct `ty` string — the
+    // single-surface `OptionSpec.ty` is `bool|int|string|string_list`
+    // (the pre-reboot ABI used `ty = "enum"`).
+    let ty = field.ty.wire();
     let default_json = match &field.default {
         Some(DefaultValue::Bool(b)) => serde_json::to_string(b).unwrap(),
         Some(DefaultValue::Int(i)) => serde_json::to_string(i).unwrap(),
@@ -378,14 +378,14 @@ fn schema_entry(field: &ParsedField) -> TokenStream {
     let reason = field.reason.clone().unwrap_or_default();
 
     quote! {
-        ::murphy_plugin_api::MurphyCopOptionV1 {
-            name: ::murphy_plugin_api::__internal::str_to_slice(#name),
-            ty: ::murphy_plugin_api::__internal::str_to_slice(#ty),
-            default_json: ::murphy_plugin_api::__internal::str_to_slice(#default_json),
-            description: ::murphy_plugin_api::__internal::str_to_slice(#description),
-            enum_values_json: ::murphy_plugin_api::__internal::str_to_slice(#enum_values_json),
-            replacement: ::murphy_plugin_api::__internal::str_to_slice(#replacement),
-            reason: ::murphy_plugin_api::__internal::str_to_slice(#reason),
+        ::murphy_plugin_api::OptionSpec {
+            name: ::murphy_plugin_api::RawSlice::from_str(#name),
+            ty: ::murphy_plugin_api::RawSlice::from_str(#ty),
+            default_json: ::murphy_plugin_api::RawSlice::from_str(#default_json),
+            description: ::murphy_plugin_api::RawSlice::from_str(#description),
+            enum_values_json: ::murphy_plugin_api::RawSlice::from_str(#enum_values_json),
+            replacement: ::murphy_plugin_api::RawSlice::from_str(#replacement),
+            reason: ::murphy_plugin_api::RawSlice::from_str(#reason),
         }
     }
 }

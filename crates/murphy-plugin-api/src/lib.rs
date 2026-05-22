@@ -12,6 +12,9 @@
 //! `register_cops!` / `#[derive(CopOptions)]` / `#[on_node]` live in
 //! `murphy-plugin-macros` (murphy-9cr.21 / .8) and consume this surface.
 
+#[doc(hidden)]
+#[path = "internal.rs"]
+pub mod __internal;
 mod abi;
 mod config_error;
 mod cop;
