@@ -129,8 +129,10 @@ impl<'a> Parser<'a> {
     fn node_match(&mut self, open_span: PatSpan) -> Result<Pat, ParseError> {
         let head = self.node_head(open_span)?;
         let mut children: Vec<Pat> = Vec::new();
-        let mut rest_span: Option<PatSpan> = None;
+        let mut has_rest = false;
         loop {
+            // Peek (not `next`) so we can dispatch on the token — closing `)`,
+            // a `...`, or a child — before deciding whether to consume it.
             let Some(tok) = self.peek() else {
                 // Ran out of input before the closing `)`.
                 return Err(ParseError::new("unclosed `(`: expected `)`", open_span));
@@ -150,13 +152,13 @@ impl<'a> Parser<'a> {
                 Token::Ellipsis => {
                     let ell_span = tok.span;
                     self.pos += 1; // consume `...`
-                    if rest_span.is_some() {
+                    if has_rest {
                         return Err(ParseError::new(
                             "`...` may appear at most once in a node child list",
                             ell_span,
                         ));
                     }
-                    rest_span = Some(ell_span);
+                    has_rest = true;
                     children.push(Pat {
                         kind: PatKind::Rest,
                         span: ell_span,
@@ -247,7 +249,7 @@ fn resolve_kind(name: &str, span: PatSpan) -> Result<NodeKindTag, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Lit, PatKind};
+    use crate::{Head, Lit, PatKind};
 
     fn k(src: &str) -> PatKind {
         parse(src).expect("parse ok").root.kind
@@ -373,7 +375,7 @@ mod tests {
         let p = parse("(send nil :puts)").expect("ok");
         match p.root.kind {
             PatKind::Node { head, children } => {
-                assert_eq!(head, crate::Head::Exact(murphy_ast::NodeKindTag(17)));
+                assert_eq!(head, Head::Exact(murphy_ast::NodeKindTag(17)));
                 assert_eq!(children.len(), 2);
             }
             other => panic!("expected Node, got {other:?}"),
@@ -386,7 +388,7 @@ mod tests {
         assert!(matches!(
             p.root.kind,
             PatKind::Node {
-                head: crate::Head::Any,
+                head: Head::Any,
                 ..
             }
         ));
@@ -397,7 +399,7 @@ mod tests {
         let p = parse("({send csend} _)").expect("ok");
         match p.root.kind {
             PatKind::Node {
-                head: crate::Head::OneOf(tags),
+                head: Head::OneOf(tags),
                 ..
             } => {
                 assert_eq!(
@@ -474,7 +476,7 @@ mod tests {
         let p = parse("(send (send nil :a) :b)").expect("ok");
         match p.root.kind {
             PatKind::Node { head, children } => {
-                assert_eq!(head, crate::Head::Exact(murphy_ast::NodeKindTag(17)));
+                assert_eq!(head, Head::Exact(murphy_ast::NodeKindTag(17)));
                 assert_eq!(children.len(), 2);
                 assert!(matches!(children[0].kind, PatKind::Node { .. }));
                 assert_eq!(children[1].kind, PatKind::Lit(Lit::Sym("b".into())));
@@ -502,7 +504,7 @@ mod tests {
         let p = parse("(send)").expect("ok");
         match p.root.kind {
             PatKind::Node { head, children } => {
-                assert_eq!(head, crate::Head::Exact(murphy_ast::NodeKindTag(17)));
+                assert_eq!(head, Head::Exact(murphy_ast::NodeKindTag(17)));
                 assert!(children.is_empty());
             }
             other => panic!("expected Node, got {other:?}"),
@@ -533,6 +535,24 @@ mod tests {
     fn rejects_empty_oneof_head() {
         // `{}` as a head has no alternatives.
         assert!(parse("({} _)").is_err());
+    }
+
+    #[test]
+    fn rejects_non_ident_in_oneof_head() {
+        // A `{...}` head may only contain node-type names, not literals or `_`.
+        // Exercises the "may only contain node types" arm of `oneof_head`.
+        let e = parse("({send :sym} _)").expect_err("symbol in OneOf head");
+        assert!(
+            e.message.contains("may only contain node types"),
+            "message was: {}",
+            e.message
+        );
+        let e = parse("({send _} _)").expect_err("wildcard in OneOf head");
+        assert!(
+            e.message.contains("may only contain node types"),
+            "message was: {}",
+            e.message
+        );
     }
 
     #[test]
