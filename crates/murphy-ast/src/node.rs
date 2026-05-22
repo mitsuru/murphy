@@ -379,6 +379,16 @@ pub enum NodeKind {
         parts: NodeList,
         opts: Symbol,
     },
+
+    // --- multiple assignment (appended post-`Regexp` per ADR 0037: variants
+    // are append-only; declaration order is the frozen discriminant) ---
+    /// 多重代入 `a, b = 1, 2`（`MultiWriteNode`）。`lhs` は `Mlhs`。
+    Masgn {
+        lhs: NodeId,
+        rhs: NodeId,
+    },
+    /// 多重代入の左辺ターゲット並び（`MultiWriteNode` / `MultiTargetNode`）。
+    Mlhs(NodeList),
 }
 
 /// A source comment, stored outside the node tree.

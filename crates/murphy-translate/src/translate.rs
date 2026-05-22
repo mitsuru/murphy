@@ -776,8 +776,105 @@ impl Translator {
             return self.builder.push(NodeKind::Regexp { parts, opts }, range);
         }
 
-        // Task 16 以降、ここに各ノード種の arm を足していく。
+        // --- multiple assignment ---
+        if let Some(mw) = node.as_multi_write_node() {
+            let lhs =
+                self.translate_mlhs(mw.lefts(), mw.rest(), mw.rights(), Self::node_range(node));
+            let rhs = self.translate_node(&mw.value());
+            return self.builder.push(NodeKind::Masgn { lhs, rhs }, range);
+        }
+
+        // Task 17 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
+    }
+
+    /// 多重代入左辺（lefts + rest + rights）→ `Mlhs` ノード。
+    /// `rest` は prism の `MultiWriteNode`/`MultiTargetNode` では `SplatNode`
+    /// として渡る（`*rest`）。その `expression()` を `translate_target` で
+    /// 翻訳し、`Splat` で 1 重だけ包む。
+    fn translate_mlhs(
+        &mut self,
+        lefts: prism::NodeList<'_>,
+        rest: Option<prism::Node<'_>>,
+        rights: prism::NodeList<'_>,
+        range: Range,
+    ) -> NodeId {
+        let mut ids: Vec<NodeId> = Vec::new();
+        for n in lefts.iter() {
+            ids.push(self.translate_target(&n));
+        }
+        if let Some(r) = rest {
+            let sr = Self::node_range(&r);
+            // prism は `*rest` を `SplatNode` で渡す。中の `expression()` を
+            // ターゲットとして翻訳し、`Splat` 1 重で包む（二重 `Splat` 回避）。
+            let inner = match r.as_splat_node() {
+                Some(s) => s
+                    .expression()
+                    .map(|e| OptNodeId::some(self.translate_target(&e)))
+                    .unwrap_or(OptNodeId::NONE),
+                // 防御的: `SplatNode` 以外が来たらそのまま target 翻訳。
+                None => OptNodeId::some(self.translate_target(&r)),
+            };
+            ids.push(self.builder.push(NodeKind::Splat(inner), sr));
+        }
+        for n in rights.iter() {
+            ids.push(self.translate_target(&n));
+        }
+        let list = self.builder.push_list(&ids);
+        self.builder.push(NodeKind::Mlhs(list), range)
+    }
+
+    /// 代入ターゲット（`LocalVariableTargetNode` 等、または入れ子の
+    /// `MultiTargetNode`）を翻訳する。target 系は値なし write ノードへ。
+    /// 対応 arm を持たないターゲット（constant/call/index target 等）は
+    /// `translate_node` に委譲する（多くは `Unknown` に落ちる、v1 許容）。
+    fn translate_target(&mut self, node: &prism::Node<'_>) -> NodeId {
+        let range = Self::node_range(node);
+        if let Some(t) = node.as_local_variable_target_node() {
+            let name = self.sym(&t.name());
+            return self.builder.push(
+                NodeKind::Lvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                range,
+            );
+        }
+        if let Some(t) = node.as_instance_variable_target_node() {
+            let name = self.sym(&t.name());
+            return self.builder.push(
+                NodeKind::Ivasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                range,
+            );
+        }
+        if let Some(t) = node.as_class_variable_target_node() {
+            let name = self.sym(&t.name());
+            return self.builder.push(
+                NodeKind::Cvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                range,
+            );
+        }
+        if let Some(t) = node.as_global_variable_target_node() {
+            let name = self.sym(&t.name());
+            return self.builder.push(
+                NodeKind::Gvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                range,
+            );
+        }
+        if let Some(mt) = node.as_multi_target_node() {
+            return self.translate_mlhs(mt.lefts(), mt.rest(), mt.rights(), range);
+        }
+        // constant/call/index target 等は v1 では `translate_node` に委譲。
+        self.translate_node(node)
     }
 
     /// 補間部品の並びを翻訳して `NodeId` の `Vec` を返す。部品は
@@ -885,11 +982,11 @@ impl Translator {
             .map(|e| self.translate_node(&e))
             .collect();
         let exceptions = self.builder.push_list(&exc_ids);
-        // `reference()` は `=> e` の束縛先（`*TargetNode`）。Task 13 では対応する
-        // arm が無いため `Unknown` に落ちるが、Some/None の区別は保たれる。
+        // `reference()` は `=> e` の束縛先（`*TargetNode`）。`translate_target`
+        // 経由で値なし write ノード（`Lvasgn` 等）へ翻訳する。
         let var = rn
             .reference()
-            .map(|r| OptNodeId::some(self.translate_node(&r)))
+            .map(|r| OptNodeId::some(self.translate_target(&r)))
             .unwrap_or(OptNodeId::NONE);
         let body = self.translate_stmts_opt(rn.statements());
         self.builder.push(
@@ -2264,5 +2361,109 @@ mod tests {
     fn translates_interpolated_xstring() {
         let ast = translate("`ls #{dir}`", "t.rb");
         assert!(matches!(ast.kind(ast.root()), NodeKind::Xstr(_)));
+    }
+
+    // --- Task 16: multiple assignment ---
+
+    #[test]
+    fn translates_multiple_assignment() {
+        let ast = translate("a, b = 1, 2", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Masgn { lhs, .. } => {
+                assert!(matches!(ast.kind(*lhs), NodeKind::Mlhs(_)));
+            }
+            other => panic!("expected Masgn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_multiple_assignment_targets_are_value_less_lvasgn() {
+        // `Mlhs` の各ターゲットは値なし write ノード（`translate_target`）。
+        let ast = translate("a, b = 1, 2", "t.rb");
+        let lhs = match ast.kind(ast.root()) {
+            NodeKind::Masgn { lhs, .. } => *lhs,
+            other => panic!("expected Masgn, got {other:?}"),
+        };
+        let targets: Vec<_> = ast.children(lhs).collect();
+        assert_eq!(targets.len(), 2);
+        for t in targets {
+            match ast.kind(t) {
+                NodeKind::Lvasgn { value, .. } => assert!(value.is_none()),
+                other => panic!("expected value-less Lvasgn target, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn translates_multiple_assignment_with_splat_rest_not_double_wrapped() {
+        // `a, *b = 1, 2` — rest ターゲットは `Splat` 1 重で包まれる
+        // （prism の `MultiWriteNode.rest()` は `SplatNode` を返すため、
+        // 二重 `Splat` にならないこと）。
+        let ast = translate("a, *b = 1, 2", "t.rb");
+        let lhs = match ast.kind(ast.root()) {
+            NodeKind::Masgn { lhs, .. } => *lhs,
+            other => panic!("expected Masgn, got {other:?}"),
+        };
+        let targets: Vec<_> = ast.children(lhs).collect();
+        assert_eq!(targets.len(), 2, "a + *b");
+        // 2 番目は `Splat`、その子は値なし `Lvasgn`（二重 Splat でないこと）。
+        match ast.kind(targets[1]) {
+            NodeKind::Splat(inner) => {
+                let inner = inner.get().expect("splat has inner");
+                match ast.kind(inner) {
+                    NodeKind::Lvasgn { value, .. } => assert!(value.is_none()),
+                    other => {
+                        panic!("expected value-less Lvasgn inside Splat, got {other:?}")
+                    }
+                }
+            }
+            other => panic!("expected Splat for `*b`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_nested_multiple_assignment() {
+        // `a, (b, c) = 1, [2, 3]` — 入れ子 `MultiTargetNode` は `Mlhs` になる。
+        let ast = translate("a, (b, c) = 1, [2, 3]", "t.rb");
+        let lhs = match ast.kind(ast.root()) {
+            NodeKind::Masgn { lhs, .. } => *lhs,
+            other => panic!("expected Masgn, got {other:?}"),
+        };
+        let targets: Vec<_> = ast.children(lhs).collect();
+        assert_eq!(targets.len(), 2);
+        assert!(
+            matches!(ast.kind(targets[1]), NodeKind::Mlhs(_)),
+            "nested `(b, c)` must be an Mlhs"
+        );
+    }
+
+    // --- Task 16 follow-up: rescue binding goes through translate_target ---
+
+    #[test]
+    fn rescue_binding_var_is_value_less_lvasgn_not_unknown() {
+        // `begin; rescue => e; end` — `Resbody.var` は値なし `Lvasgn`
+        // （`translate_target` 経由）。以前は `Unknown` に落ちていた。
+        let ast = translate("begin\nrescue => e\nend", "t.rb");
+        // Begin -> Rescue -> 最初の Resbody。
+        let begin_kids: Vec<_> = ast.children(ast.root()).collect();
+        let rescue = begin_kids[0];
+        let resbodies: Vec<_> = match ast.kind(rescue) {
+            NodeKind::Rescue { .. } => ast
+                .children(rescue)
+                .filter(|&c| matches!(ast.kind(c), NodeKind::Resbody { .. }))
+                .collect(),
+            other => panic!("expected Rescue, got {other:?}"),
+        };
+        let var = match ast.kind(resbodies[0]) {
+            NodeKind::Resbody { var, .. } => var.get().expect("rescue binding present"),
+            other => panic!("expected Resbody, got {other:?}"),
+        };
+        match ast.kind(var) {
+            NodeKind::Lvasgn { name, value } => {
+                assert!(value.is_none(), "rescue binding is value-less");
+                assert_eq!(ast.interner().resolve(name.0), "e");
+            }
+            other => panic!("expected value-less Lvasgn, got {other:?}"),
+        }
     }
 }

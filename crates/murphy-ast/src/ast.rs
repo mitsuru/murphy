@@ -88,7 +88,8 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         | NodeKind::Super(l)
         | NodeKind::Dstr(l)
         | NodeKind::Dsym(l)
-        | NodeKind::Xstr(l) => push_list(out, lists, l),
+        | NodeKind::Xstr(l)
+        | NodeKind::Mlhs(l) => push_list(out, lists, l),
 
         NodeKind::Pair { key, value } => {
             out.push(key);
@@ -202,6 +203,11 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         }
 
         NodeKind::Regexp { parts, .. } => push_list(out, lists, parts),
+
+        NodeKind::Masgn { lhs, rhs } => {
+            out.push(lhs);
+            out.push(rhs);
+        }
     }
 }
 

@@ -394,6 +394,15 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             write_node_list(parts, out);
             put_u32(out, opts.0);
         }
+        NodeKind::Masgn { lhs, rhs } => {
+            put_u8(out, 67);
+            put_u32(out, lhs.0);
+            put_u32(out, rhs.0);
+        }
+        NodeKind::Mlhs(l) => {
+            put_u8(out, 68);
+            write_node_list(l, out);
+        }
     }
 }
 
@@ -575,6 +584,11 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             parts: read_node_list(cur)?,
             opts: Symbol(get_u32(cur)?),
         },
+        67 => NodeKind::Masgn {
+            lhs: NodeId(get_u32(cur)?),
+            rhs: NodeId(get_u32(cur)?),
+        },
+        68 => NodeKind::Mlhs(read_node_list(cur)?),
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -1225,6 +1239,43 @@ mod tests {
             ast, restored,
             "interpolation variant round-trip must be bit-equal"
         );
+    }
+
+    #[test]
+    fn round_trip_masgn_mlhs() {
+        // The `Masgn`/`Mlhs` variants appended after `Regexp`
+        // (discriminants 67/68) must survive the byte round-trip. Covers a
+        // populated `Mlhs` and the `Masgn` lhs/rhs `NodeId` pair.
+        let mut b = AstBuilder::new("a, b = 1, 2", "t.rb");
+        let a_name = b.intern_symbol("a");
+        let target_a = b.push(
+            NodeKind::Lvasgn {
+                name: a_name,
+                value: OptNodeId::NONE,
+            },
+            r(0, 1),
+        );
+        let b_name = b.intern_symbol("b");
+        let target_b = b.push(
+            NodeKind::Lvasgn {
+                name: b_name,
+                value: OptNodeId::NONE,
+            },
+            r(3, 4),
+        );
+        let lhs_list = b.push_list(&[target_a, target_b]);
+        let lhs = b.push(NodeKind::Mlhs(lhs_list), r(0, 4));
+        let one = b.push(NodeKind::Int(1), r(7, 8));
+        let two = b.push(NodeKind::Int(2), r(10, 11));
+        let rhs_list = b.push_list(&[one, two]);
+        let rhs = b.push(NodeKind::Array(rhs_list), r(7, 11));
+        let masgn = b.push(NodeKind::Masgn { lhs, rhs }, r(0, 11));
+        let list = b.push_list(&[masgn]);
+        let root = b.push(NodeKind::Begin(list), r(0, 11));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "Masgn/Mlhs round-trip must be bit-equal");
     }
 
     #[test]
