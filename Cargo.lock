@@ -444,6 +444,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "murphy-ast"
+version = "0.1.0"
+
+[[package]]
 name = "murphy-cli"
 version = "0.1.0"
 dependencies = [
