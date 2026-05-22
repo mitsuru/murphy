@@ -13,7 +13,7 @@ mod kinds;
 mod node;
 mod serialize;
 
-pub use ast::{Ancestors, Ast};
+pub use ast::{Ancestors, Ast, AstRawParts, collect_children};
 pub use builder::AstBuilder;
 pub use interner::Interner;
 pub use kinds::{KIND_PATTERN_NAMES, NodeKindTag, pattern_name, tag_from_pattern_name};

@@ -495,8 +495,7 @@ dependencies = [
 name = "murphy-plugin-api"
 version = "0.1.0"
 dependencies = [
- "murphy-core",
- "ruby-prism",
+ "murphy-ast",
  "serde_json",
 ]
 

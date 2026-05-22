@@ -19,10 +19,11 @@ fn push_list(out: &mut Vec<NodeId>, lists: &[NodeId], l: NodeList) {
 /// Append every child `NodeId` of `kind`, in source order, to `out`.
 ///
 /// Single source of truth for parent computation
-/// ([`AstBuilder::finish`](crate::AstBuilder::finish)) and the
-/// [`Ast::children`] iterator. The `match` is exhaustive on purpose: a new
-/// `NodeKind` variant will not compile until it is handled here.
-pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>) {
+/// ([`AstBuilder::finish`](crate::AstBuilder::finish)), the
+/// [`Ast::children`] iterator, and `murphy-plugin-api`'s `Cx::children`.
+/// The `match` is exhaustive on purpose: a new `NodeKind` variant will not
+/// compile until it is handled here.
+pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>) {
     match *kind {
         NodeKind::Error
         | NodeKind::Nil
@@ -310,6 +311,45 @@ impl Ast {
     pub fn interner(&self) -> &Interner {
         &self.interner
     }
+
+    /// The arena's backing slices as a borrowed, flat view.
+    ///
+    /// Exposes the otherwise-`pub(crate)` storage (`nodes`, `node_lists`,
+    /// the interner blob/offsets, `comments`, `source`) so a consumer can
+    /// build a `#[repr(C)]` pointer/length bundle over it — notably
+    /// `murphy-plugin-api`'s `CxRaw` (ADR 0038). Strictly a view: the
+    /// returned slices borrow `self` and own nothing.
+    pub fn raw_parts(&self) -> AstRawParts<'_> {
+        AstRawParts {
+            nodes: &self.nodes,
+            node_lists: &self.node_lists,
+            interner_blob: &self.interner.blob,
+            interner_offsets: &self.interner.offsets,
+            comments: &self.comments,
+            source: &self.source.text,
+            root: self.root,
+        }
+    }
+}
+
+/// A borrowed, flat view of an [`Ast`]'s backing storage. See
+/// [`Ast::raw_parts`]. Owns nothing; every field borrows the source `Ast`.
+#[derive(Debug, Clone, Copy)]
+pub struct AstRawParts<'a> {
+    /// The arena node array.
+    pub nodes: &'a [AstNode],
+    /// The `node_lists` side table (variable-length children).
+    pub node_lists: &'a [NodeId],
+    /// The interner's flat byte blob.
+    pub interner_blob: &'a [u8],
+    /// The interner's per-entry offsets, indexed by `Symbol`/`StringId`.
+    pub interner_offsets: &'a [Range],
+    /// The source comments, in source order.
+    pub comments: &'a [Comment],
+    /// The full source text (UTF-8).
+    pub source: &'a str,
+    /// The arena root node.
+    pub root: NodeId,
 }
 
 /// Iterator over a node's ancestors, nearest first. See [`Ast::ancestors`].
@@ -404,5 +444,35 @@ mod tests {
             ast.descendants(root).collect::<Vec<_>>(),
             vec![iff, cond, then_]
         );
+    }
+
+    #[test]
+    fn raw_parts_borrows_the_arena_storage() {
+        use crate::builder::AstBuilder;
+
+        // `x = 1` interns the symbol `x`; an inline comment exercises the
+        // `comments` slice.
+        let mut b = AstBuilder::new("x = 1 # c", "t.rb");
+        let int = b.push(NodeKind::Int(1), Range { start: 4, end: 5 });
+        let x = b.intern_symbol("x");
+        let asgn = b.push(
+            NodeKind::Lvasgn {
+                name: x,
+                value: OptNodeId::some(int),
+            },
+            Range { start: 0, end: 5 },
+        );
+        b.add_comment(Range { start: 6, end: 9 }, crate::node::CommentKind::Inline);
+        let ast = b.finish(asgn);
+
+        let p = ast.raw_parts();
+        assert_eq!(p.nodes.len(), ast.len());
+        assert_eq!(p.source, ast.source());
+        assert_eq!(p.root, ast.root());
+        assert_eq!(p.comments, ast.comments());
+        // The interner view resolves the same string as `Interner::resolve`.
+        assert_eq!(p.interner_offsets.len(), ast.interner().len());
+        let r = p.interner_offsets[x.0 as usize];
+        assert_eq!(&p.interner_blob[r.start as usize..r.end as usize], b"x");
     }
 }

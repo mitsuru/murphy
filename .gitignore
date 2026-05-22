@@ -5,6 +5,8 @@
 target/
 *.gem
 .DS_Store
+# Stray artifact emitted in CWD by `cargo test`'s merged doctest compilation.
+librust_out.rlib
 
 # Beads / Dolt files (added by bd init)
 .dolt/
