@@ -19,10 +19,11 @@ fn push_list(out: &mut Vec<NodeId>, lists: &[NodeId], l: NodeList) {
 /// Append every child `NodeId` of `kind`, in source order, to `out`.
 ///
 /// Single source of truth for parent computation
-/// ([`AstBuilder::finish`](crate::AstBuilder::finish)) and the
-/// [`Ast::children`] iterator. The `match` is exhaustive on purpose: a new
-/// `NodeKind` variant will not compile until it is handled here.
-pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>) {
+/// ([`AstBuilder::finish`](crate::AstBuilder::finish)), the
+/// [`Ast::children`] iterator, and `murphy-plugin-api`'s `Cx::children`.
+/// The `match` is exhaustive on purpose: a new `NodeKind` variant will not
+/// compile until it is handled here.
+pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>) {
     match *kind {
         NodeKind::Error
         | NodeKind::Nil
