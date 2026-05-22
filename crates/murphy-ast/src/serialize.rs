@@ -252,6 +252,32 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, name.0);
             put_u32(out, value.0);
         }
+        NodeKind::Optarg { name, default } => {
+            put_u8(out, 40);
+            put_u32(out, name.0);
+            put_u32(out, default.0);
+        }
+        NodeKind::Restarg(s) => {
+            put_u8(out, 41);
+            put_u32(out, s.0);
+        }
+        NodeKind::Kwarg(s) => {
+            put_u8(out, 42);
+            put_u32(out, s.0);
+        }
+        NodeKind::Kwoptarg { name, default } => {
+            put_u8(out, 43);
+            put_u32(out, name.0);
+            put_u32(out, default.0);
+        }
+        NodeKind::Kwrestarg(s) => {
+            put_u8(out, 44);
+            put_u32(out, s.0);
+        }
+        NodeKind::Blockarg(s) => {
+            put_u8(out, 45);
+            put_u32(out, s.0);
+        }
     }
 }
 
@@ -360,6 +386,18 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             name: Symbol(get_u32(cur)?),
             value: OptNodeId(get_u32(cur)?),
         },
+        40 => NodeKind::Optarg {
+            name: Symbol(get_u32(cur)?),
+            default: NodeId(get_u32(cur)?),
+        },
+        41 => NodeKind::Restarg(Symbol(get_u32(cur)?)),
+        42 => NodeKind::Kwarg(Symbol(get_u32(cur)?)),
+        43 => NodeKind::Kwoptarg {
+            name: Symbol(get_u32(cur)?),
+            default: NodeId(get_u32(cur)?),
+        },
+        44 => NodeKind::Kwrestarg(Symbol(get_u32(cur)?)),
+        45 => NodeKind::Blockarg(Symbol(get_u32(cur)?)),
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -598,6 +636,50 @@ mod tests {
 
         let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
         assert_eq!(ast, restored, "Gvasgn/Cvasgn round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_param_variants() {
+        // The six parameter variants appended after `Cvasgn`
+        // (discriminants 40..=45) must survive the byte round-trip.
+        // Covers both shapes: struct-with-`default` (Optarg/Kwoptarg) and
+        // tuple-leaf (Restarg/Kwarg/Kwrestarg/Blockarg).
+        let mut b = AstBuilder::new("def f(a = 1, *r, k:, m: 2, **o, &blk); end", "t.rb");
+        let one = b.push(NodeKind::Int(1), r(11, 12));
+        let a_name = b.intern_symbol("a");
+        let optarg = b.push(
+            NodeKind::Optarg {
+                name: a_name,
+                default: one,
+            },
+            r(6, 12),
+        );
+        let r_name = b.intern_symbol("r");
+        let restarg = b.push(NodeKind::Restarg(r_name), r(14, 16));
+        let k_name = b.intern_symbol("k");
+        let kwarg = b.push(NodeKind::Kwarg(k_name), r(18, 20));
+        let two = b.push(NodeKind::Int(2), r(25, 26));
+        let m_name = b.intern_symbol("m");
+        let kwoptarg = b.push(
+            NodeKind::Kwoptarg {
+                name: m_name,
+                default: two,
+            },
+            r(22, 26),
+        );
+        let o_name = b.intern_symbol("o");
+        let kwrestarg = b.push(NodeKind::Kwrestarg(o_name), r(28, 31));
+        let blk_name = b.intern_symbol("blk");
+        let blockarg = b.push(NodeKind::Blockarg(blk_name), r(33, 37));
+        let list = b.push_list(&[optarg, restarg, kwarg, kwoptarg, kwrestarg, blockarg]);
+        let root = b.push(NodeKind::Args(list), r(5, 38));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "parameter variant round-trip must be bit-equal"
+        );
     }
 
     #[test]

@@ -90,7 +90,6 @@ impl Translator {
     /// def/class/module/block/sclass の `body`（`Option<Node>`）→ `OptNodeId`。
     /// 中身が `StatementsNode` なら `translate_stmts_opt` で parser-gem 準拠に
     /// 畳む。これも **foundational helper**（Task 6/11 で再利用、新規定義しない）。
-    #[allow(dead_code)]
     fn translate_body(&mut self, body: Option<prism::Node<'_>>) -> OptNodeId {
         match body {
             None => OptNodeId::NONE,
@@ -247,7 +246,14 @@ impl Translator {
 
         // --- calls / splat ---
         if let Some(call) = node.as_call_node() {
-            return self.translate_call(&call, range);
+            let send = self.translate_call(&call, range);
+            // `{ }`/`do end` ブロック付き呼び出しは `Block` で包む。
+            if let Some(blk) = call.block()
+                && let Some(block_node) = blk.as_block_node()
+            {
+                return self.translate_block(&block_node, send, range);
+            }
+            return send;
         }
         if let Some(s) = node.as_splat_node() {
             // 注: prism `SplatNode` の内容アクセサは `expression()`（appendix の
@@ -318,6 +324,113 @@ impl Translator {
                     range,
                 )
             }
+        }
+    }
+
+    /// `BlockNode`（`{ }`/`do end`）+ 既に翻訳済みの call `NodeId` → `Block` ノード。
+    fn translate_block(
+        &mut self,
+        block: &prism::BlockNode<'_>,
+        call: NodeId,
+        range: Range,
+    ) -> NodeId {
+        // `parameters()` は `Option<Node>`。`BlockParametersNode`（`|...|` 構文）
+        // か、numbered（`_1`）/`it` パラメータノードのことがある。後者は v1 では
+        // params 空 Args として扱う（Unknown を避ける）。
+        let params_node = block.parameters().and_then(|p| {
+            p.as_block_parameters_node()
+                .and_then(|bp| bp.parameters())
+                .or_else(|| p.as_parameters_node())
+        });
+        let block_loc = Self::range(&block.location());
+        let args = self.translate_parameters(params_node, block_loc);
+        // body は foundational helper `translate_body`（`StatementsNode` を畳む）。
+        let body = self.translate_body(block.body());
+        self.builder
+            .push(NodeKind::Block { call, args, body }, range)
+    }
+
+    /// `ParametersNode` → `Args` ノードの `NodeId`。requireds → optionals → rest
+    /// → posts → keywords → keyword_rest → block の順（parser-gem 準拠）。
+    /// `params` が `None`（パラメータ無し / numbered・it）なら空 `Args`。
+    fn translate_parameters(
+        &mut self,
+        params: Option<prism::ParametersNode<'_>>,
+        args_range: Range,
+    ) -> NodeId {
+        let mut ids: Vec<NodeId> = Vec::new();
+        if let Some(p) = &params {
+            for n in p.requireds().iter() {
+                ids.push(self.translate_param(&n));
+            }
+            for n in p.optionals().iter() {
+                ids.push(self.translate_param(&n));
+            }
+            if let Some(rest) = p.rest() {
+                ids.push(self.translate_param(&rest));
+            }
+            for n in p.posts().iter() {
+                ids.push(self.translate_param(&n));
+            }
+            for n in p.keywords().iter() {
+                ids.push(self.translate_param(&n));
+            }
+            if let Some(kwrest) = p.keyword_rest() {
+                ids.push(self.translate_param(&kwrest));
+            }
+            if let Some(block) = p.block() {
+                ids.push(self.translate_param(&block.as_node()));
+            }
+        }
+        let list = self.builder.push_list(&ids);
+        self.builder.push(NodeKind::Args(list), args_range)
+    }
+
+    /// 単一パラメータ prism ノード → arg 系 `NodeKind`。未対応は `Unknown`。
+    fn translate_param(&mut self, node: &prism::Node<'_>) -> NodeId {
+        let range = Self::node_range(node);
+        if let Some(p) = node.as_required_parameter_node() {
+            let name = self.sym(&p.name());
+            return self.builder.push(NodeKind::Arg(name), range);
+        }
+        if let Some(p) = node.as_optional_parameter_node() {
+            let name = self.sym(&p.name());
+            let default = self.translate_node(&p.value());
+            return self.builder.push(NodeKind::Optarg { name, default }, range);
+        }
+        if let Some(p) = node.as_rest_parameter_node() {
+            let name = self.opt_sym(p.name());
+            return self.builder.push(NodeKind::Restarg(name), range);
+        }
+        if let Some(p) = node.as_required_keyword_parameter_node() {
+            let name = self.sym(&p.name());
+            return self.builder.push(NodeKind::Kwarg(name), range);
+        }
+        if let Some(p) = node.as_optional_keyword_parameter_node() {
+            let name = self.sym(&p.name());
+            let default = self.translate_node(&p.value());
+            return self
+                .builder
+                .push(NodeKind::Kwoptarg { name, default }, range);
+        }
+        if let Some(p) = node.as_keyword_rest_parameter_node() {
+            let name = self.opt_sym(p.name());
+            return self.builder.push(NodeKind::Kwrestarg(name), range);
+        }
+        if let Some(p) = node.as_block_parameter_node() {
+            let name = self.opt_sym(p.name());
+            return self.builder.push(NodeKind::Blockarg(name), range);
+        }
+        // `MultiTargetNode`（分割代入パラメータ）等は Task 16 / Unknown。
+        self.builder.push(NodeKind::Unknown, range)
+    }
+
+    /// `Option<ConstantId>` → `Symbol`。`None`（匿名 `*`/`**`/`&`）は空文字
+    /// （Ruby の有効な識別子になり得ない）を interned した `Symbol`（v1 簡略化）。
+    fn opt_sym(&mut self, cid: Option<prism::ConstantId<'_>>) -> murphy_ast::Symbol {
+        match cid {
+            Some(c) => self.sym(&c),
+            None => self.builder.intern_symbol(""),
         }
     }
 
@@ -595,6 +708,106 @@ mod tests {
             assert!(matches!(ast.kind(last), NodeKind::BlockPass(_)));
         } else {
             panic!("expected Send");
+        }
+    }
+
+    #[test]
+    fn translates_block() {
+        // `[1].each { |x| x }` → ルートは Block（call を包む）。
+        let ast = translate("[1].each { |x| x }", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Block { call, args, body } => {
+                // call は Send（[1].each）。
+                assert!(matches!(ast.kind(*call), NodeKind::Send { .. }));
+                // args は Args ノード（`|x|` → 1 パラメータ）。
+                match ast.kind(*args) {
+                    NodeKind::Args(l) => assert_eq!(l.len, 1),
+                    other => panic!("expected Args, got {other:?}"),
+                }
+                assert!(body.get().is_some());
+            }
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_block_without_params() {
+        // パラメータ無しブロック → Args は空。
+        let ast = translate("foo { 1 }", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Block { args, .. } => match ast.kind(*args) {
+                NodeKind::Args(l) => assert_eq!(l.len, 0),
+                other => panic!("expected Args, got {other:?}"),
+            },
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_numbered_param_block_to_empty_args() {
+        // `_1` 数値パラメータブロック → Args 空（Unknown を避ける）。
+        let ast = translate("foo { _1 }", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Block { args, .. } => match ast.kind(*args) {
+                NodeKind::Args(l) => assert_eq!(l.len, 0),
+                other => panic!("expected Args, got {other:?}"),
+            },
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_block_parameters() {
+        // `foo { |a, b = 1, *r, &blk| a }` のブロックパラメータが順に並ぶ。
+        let ast = translate("foo { |a, b = 1, *r, &blk| a }", "t.rb");
+        let args_id = match ast.kind(ast.root()) {
+            NodeKind::Block { args, .. } => *args,
+            other => panic!("expected Block, got {other:?}"),
+        };
+        let params: Vec<_> = ast.children(args_id).collect();
+        assert_eq!(params.len(), 4);
+        assert!(matches!(ast.kind(params[0]), NodeKind::Arg(_)));
+        assert!(matches!(ast.kind(params[1]), NodeKind::Optarg { .. }));
+        assert!(matches!(ast.kind(params[2]), NodeKind::Restarg(_)));
+        assert!(matches!(ast.kind(params[3]), NodeKind::Blockarg(_)));
+    }
+
+    #[test]
+    fn translates_keyword_block_parameters() {
+        // `foo { |k:, m: 2, **o| k }` のキーワードパラメータ。
+        let ast = translate("foo { |k:, m: 2, **o| k }", "t.rb");
+        let args_id = match ast.kind(ast.root()) {
+            NodeKind::Block { args, .. } => *args,
+            other => panic!("expected Block, got {other:?}"),
+        };
+        let params: Vec<_> = ast.children(args_id).collect();
+        assert_eq!(params.len(), 3);
+        assert!(matches!(ast.kind(params[0]), NodeKind::Kwarg(_)));
+        assert!(matches!(ast.kind(params[1]), NodeKind::Kwoptarg { .. }));
+        assert!(matches!(ast.kind(params[2]), NodeKind::Kwrestarg(_)));
+    }
+
+    #[test]
+    fn translates_anonymous_block_param_to_empty_symbol() {
+        // 匿名 `*` / `**` / `&` は名前が空文字 interned。
+        let ast = translate("foo { |*, **, &| 1 }", "t.rb");
+        let args_id = match ast.kind(ast.root()) {
+            NodeKind::Block { args, .. } => *args,
+            other => panic!("expected Block, got {other:?}"),
+        };
+        let params: Vec<_> = ast.children(args_id).collect();
+        assert_eq!(params.len(), 3);
+        match ast.kind(params[0]) {
+            NodeKind::Restarg(s) => assert_eq!(ast.interner().resolve(s.0), ""),
+            other => panic!("expected Restarg, got {other:?}"),
+        }
+        match ast.kind(params[1]) {
+            NodeKind::Kwrestarg(s) => assert_eq!(ast.interner().resolve(s.0), ""),
+            other => panic!("expected Kwrestarg, got {other:?}"),
+        }
+        match ast.kind(params[2]) {
+            NodeKind::Blockarg(s) => assert_eq!(ast.interner().resolve(s.0), ""),
+            other => panic!("expected Blockarg, got {other:?}"),
         }
     }
 

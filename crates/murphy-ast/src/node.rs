@@ -238,6 +238,27 @@ pub enum NodeKind {
         name: Symbol,
         value: OptNodeId,
     },
+
+    // --- arguments (appended post-`Cvasgn` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `def f(a = 1)` の `a = 1` — optional positional parameter.
+    Optarg {
+        name: Symbol,
+        default: NodeId,
+    },
+    /// `*rest` — splat parameter. 匿名 `*` は `name` が空文字 interned。
+    Restarg(Symbol),
+    /// `def f(k:)` — required keyword parameter.
+    Kwarg(Symbol),
+    /// `def f(k: 1)` — optional keyword parameter.
+    Kwoptarg {
+        name: Symbol,
+        default: NodeId,
+    },
+    /// `**opts` — keyword splat parameter. 匿名 `**` は `name` が空文字 interned。
+    Kwrestarg(Symbol),
+    /// `&blk` — block parameter. 匿名 `&` は `name` が空文字 interned。
+    Blockarg(Symbol),
 }
 
 /// A source comment, stored outside the node tree.

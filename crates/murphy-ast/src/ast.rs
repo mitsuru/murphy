@@ -38,7 +38,11 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         | NodeKind::Cvar(_)
         | NodeKind::Gvar(_)
         | NodeKind::Arg(_)
-        | NodeKind::Unknown => {}
+        | NodeKind::Unknown
+        | NodeKind::Restarg(_)
+        | NodeKind::Kwarg(_)
+        | NodeKind::Kwrestarg(_)
+        | NodeKind::Blockarg(_) => {}
 
         NodeKind::Const { scope, .. } => push_opt(out, scope),
 
@@ -124,6 +128,8 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
             out.push(name);
             push_opt(out, body);
         }
+
+        NodeKind::Optarg { default, .. } | NodeKind::Kwoptarg { default, .. } => out.push(default),
     }
 }
 
