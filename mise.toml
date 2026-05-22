@@ -1,7 +1,15 @@
 # Toolchain for Murphy. Managed by mise (https://mise.jdx.dev).
 # Rust: native core, CLI, native cops. prism Rust binding spike (Spike 0.1).
+# Ruby: build-time only. The `mruby3-sys` crate's build script runs
+# `make -C mruby` -> `rake` to compile the vendored mruby C interpreter.
+# Without ruby/rake on PATH that build fails silently (the crate's build
+# script ignores `make`'s exit status), producing a `mruby3-sys` rlib with
+# no backing `libmruby.a` and a confusing `unable to find library -lmruby`
+# link error downstream. Pinning ruby here makes the requirement explicit
+# and reproducible (murphy-1h8).
 [tools]
 rust = "1.95.0"
+ruby = "3.3.5"
 
 [env]
 # Keep cargo artifacts inside the repo (already gitignored: /target).
