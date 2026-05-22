@@ -5,3 +5,7 @@
 mod error;
 
 pub use error::{ParseError, PatSpan};
+
+mod ast;
+
+pub use ast::{CaptureKind, Head, Lit, Pat, PatKind, PatternAst};
