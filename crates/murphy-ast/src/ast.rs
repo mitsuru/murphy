@@ -72,7 +72,10 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
             push_opt(out, body);
         }
 
-        NodeKind::BlockPass(o) | NodeKind::Splat(o) | NodeKind::Return(o) => push_opt(out, o),
+        NodeKind::BlockPass(o)
+        | NodeKind::Splat(o)
+        | NodeKind::Return(o)
+        | NodeKind::Kwsplat(o) => push_opt(out, o),
 
         NodeKind::Array(l) | NodeKind::Hash(l) | NodeKind::Begin(l) | NodeKind::Args(l) => {
             push_list(out, lists, l)

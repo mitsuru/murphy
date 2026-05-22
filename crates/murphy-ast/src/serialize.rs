@@ -278,6 +278,10 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u8(out, 45);
             put_u32(out, s.0);
         }
+        NodeKind::Kwsplat(o) => {
+            put_u8(out, 46);
+            put_u32(out, o.0);
+        }
     }
 }
 
@@ -398,6 +402,7 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         },
         44 => NodeKind::Kwrestarg(Symbol(get_u32(cur)?)),
         45 => NodeKind::Blockarg(Symbol(get_u32(cur)?)),
+        46 => NodeKind::Kwsplat(OptNodeId(get_u32(cur)?)),
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -680,6 +685,23 @@ mod tests {
             ast, restored,
             "parameter variant round-trip must be bit-equal"
         );
+    }
+
+    #[test]
+    fn round_trip_kwsplat() {
+        // The `Kwsplat` variant appended after `Blockarg` (discriminant 46)
+        // must survive the byte round-trip. Covers both a present inner and
+        // the `None` (anonymous `**`) inner.
+        let mut b = AstBuilder::new("{ **rest }", "t.rb");
+        let rest = b.push(NodeKind::Nil, r(4, 8));
+        let kwsplat = b.push(NodeKind::Kwsplat(OptNodeId::some(rest)), r(2, 8));
+        let anon = b.push(NodeKind::Kwsplat(OptNodeId::NONE), r(2, 4));
+        let list = b.push_list(&[kwsplat, anon]);
+        let root = b.push(NodeKind::Hash(list), r(0, 10));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "Kwsplat round-trip must be bit-equal");
     }
 
     #[test]

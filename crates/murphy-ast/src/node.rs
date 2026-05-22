@@ -259,6 +259,12 @@ pub enum NodeKind {
     Kwrestarg(Symbol),
     /// `&blk` — block parameter. 匿名 `&` は `name` が空文字 interned。
     Blockarg(Symbol),
+
+    // --- collections (appended post-`Blockarg` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `**h` — ハッシュ内のキーワード splat（`AssocSplatNode`）。匿名 `**` は
+    /// 内側が `None`。
+    Kwsplat(OptNodeId),
 }
 
 /// A source comment, stored outside the node tree.

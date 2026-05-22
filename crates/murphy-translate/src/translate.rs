@@ -265,7 +265,41 @@ impl Translator {
             return self.builder.push(NodeKind::Splat(inner), range);
         }
 
-        // Task 6 以降、ここに各ノード種の arm を足していく。
+        // --- collections ---
+        if let Some(a) = node.as_array_node() {
+            let ids: Vec<NodeId> = a
+                .elements()
+                .iter()
+                .map(|e| self.translate_node(&e))
+                .collect();
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Array(list), range);
+        }
+        if let Some(h) = node.as_hash_node() {
+            let ids: Vec<NodeId> = h
+                .elements()
+                .iter()
+                .map(|e| self.translate_node(&e))
+                .collect();
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Hash(list), range);
+        }
+        if let Some(assoc) = node.as_assoc_node() {
+            // `a: 1` / `:a => 1` 等の連想ペア。key/value はともに非 Option。
+            let key = self.translate_node(&assoc.key());
+            let value = self.translate_node(&assoc.value());
+            return self.builder.push(NodeKind::Pair { key, value }, range);
+        }
+        if let Some(splat) = node.as_assoc_splat_node() {
+            // `**h`。`value()` は `Option<Node>`（匿名 `**` は `None`）。
+            let inner = splat
+                .value()
+                .map(|v| OptNodeId::some(self.translate_node(&v)))
+                .unwrap_or(OptNodeId::NONE);
+            return self.builder.push(NodeKind::Kwsplat(inner), range);
+        }
+
+        // Task 8 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
 
@@ -821,6 +855,45 @@ mod tests {
             assert!(matches!(ast.kind(first), NodeKind::Splat(_)));
         } else {
             panic!("expected Send");
+        }
+    }
+
+    #[test]
+    fn translates_array_and_hash() {
+        // `[1, 2, 3]` → Array（3 要素）。
+        let arr = translate("[1, 2, 3]", "t.rb");
+        match arr.kind(arr.root()) {
+            NodeKind::Array(l) => assert_eq!(l.len, 3),
+            other => panic!("expected Array, got {other:?}"),
+        }
+        // `{ a: 1, **rest }` → Hash（Pair + Kwsplat の 2 要素）。
+        let h = translate("{ a: 1, **rest }", "t.rb");
+        match h.kind(h.root()) {
+            NodeKind::Hash(l) => assert_eq!(l.len, 2),
+            other => panic!("expected Hash, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_pair_and_kwsplat() {
+        // ハッシュ要素は Pair（`a: 1`）と Kwsplat（`**rest`）に翻訳される。
+        let h = translate("{ a: 1, **rest }", "t.rb");
+        let kids: Vec<_> = h.children(h.root()).collect();
+        assert_eq!(kids.len(), 2);
+        assert!(matches!(h.kind(kids[0]), NodeKind::Pair { .. }));
+        match h.kind(kids[1]) {
+            NodeKind::Kwsplat(inner) => assert!(inner.get().is_some()),
+            other => panic!("expected Kwsplat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_empty_array() {
+        // 空配列 → 空 NodeList。
+        let ast = translate("[]", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Array(l) => assert_eq!(l.len, 0),
+            other => panic!("expected Array, got {other:?}"),
         }
     }
 
