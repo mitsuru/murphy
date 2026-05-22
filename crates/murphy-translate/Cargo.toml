@@ -9,3 +9,16 @@ description = "prism AST → murphy-ast arena AST translation layer (murphy-9cr.
 # ride in silently on the translation mapping (ADR 0001 discipline).
 ruby-prism = "=1.9.0"
 murphy-ast = { path = "../murphy-ast" }
+
+[dev-dependencies]
+# Benchmark-only. default-features off drops plotters/rayon (HTML reports and
+# gnuplot are not needed for the murphy-9cr.16 cost gate; cargo_bench_support
+# is the single feature required to run under `cargo bench`).
+criterion = { version = "0.8", default-features = false, features = [
+    "cargo_bench_support",
+] }
+
+# murphy-9cr.16: prism→arena translation cost gate (design §3/§8).
+[[bench]]
+name = "translate_cost"
+harness = false
