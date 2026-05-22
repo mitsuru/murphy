@@ -3,5 +3,9 @@
 //! and the types added by later tasks of murphy-9cr.20.
 
 mod config_error;
+mod severity;
 
 pub use config_error::{ConfigError, ConfigErrorKind};
+pub use severity::{
+    SEVERITY_UNSET, Severity, TRISTATE_UNSET, tristate_from_wire, tristate_to_wire,
+};
