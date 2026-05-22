@@ -1,43 +1,16 @@
-use murphy_plugin_api::{Cop, CopOptions, MurphyCopOptionV1, MurphySlice};
+use murphy_ast::NodeId;
+use murphy_plugin_api::{Cop, Cx, NodeCop, NodeKindTag};
+use murphy_plugin_macros::{CopOptions, register_cops};
 
-#[derive(Default)]
-struct MaxDepthOptions;
-
-static SCHEMA: [MurphyCopOptionV1; 1] = [MurphyCopOptionV1 {
-    name: MurphySlice {
-        ptr: b"max_depth".as_ptr(),
-        len: 9,
-    },
-    ty: MurphySlice {
-        ptr: b"int".as_ptr(),
-        len: 3,
-    },
-    default_json: MurphySlice {
-        ptr: b"3".as_ptr(),
-        len: 1,
-    },
-    description: MurphySlice {
-        ptr: std::ptr::null(),
-        len: 0,
-    },
-    enum_values_json: MurphySlice {
-        ptr: std::ptr::null(),
-        len: 0,
-    },
-    replacement: MurphySlice {
-        ptr: std::ptr::null(),
-        len: 0,
-    },
-    reason: MurphySlice {
-        ptr: std::ptr::null(),
-        len: 0,
-    },
-}];
-
-impl CopOptions for MaxDepthOptions {
-    const SCHEMA: &'static [MurphyCopOptionV1] = &SCHEMA;
+// `#[derive(CopOptions)]` generates the `impl Default`, so the struct is
+// not separately `#[derive(Default)]`.
+#[derive(CopOptions)]
+struct MaxDepthOptions {
+    #[option(default = 3, description = "Maximum nesting depth")]
+    max_depth: i64,
 }
 
+#[derive(Default)]
 struct DeepNest;
 
 impl Cop for DeepNest {
@@ -45,6 +18,11 @@ impl Cop for DeepNest {
     const NAME: &'static str = "Plugin/DeepNest";
 }
 
-murphy_plugin_macros::register_cops!(DeepNest);
+impl NodeCop for DeepNest {
+    const KINDS: &'static [NodeKindTag] = &[NodeKindTag(1)];
+    fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
+}
+
+register_cops!(DeepNest);
 
 fn main() {}

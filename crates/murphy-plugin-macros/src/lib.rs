@@ -1,11 +1,14 @@
-//! Proc macros for Murphy native plugins.
+//! Proc macros for Murphy native plugins, targeting the single-surface
+//! plugin ABI (ADR 0038).
 //!
-//! This crate ships [`register_cops!`], the macro plugin authors invoke to
-//! turn their `Cop` implementations into the static `MurphyPluginV1` table
-//! Murphy's loader expects.
+//! This crate ships [`register_cops!`], the macro plugin authors invoke
+//! to turn their cop implementations into the static
+//! `murphy_plugin_api::PluginRegistration` table Murphy's loader expects,
+//! and [`derive@CopOptions`], which generates a cop's option schema and
+//! JSON decoder.
 //!
-//! `#[derive(CopOptions)]` (murphy-9cr.7) and `#[murphy::cop]` /
-//! `#[on_node]` (murphy-9cr.8) will land here alongside it.
+//! `#[murphy::cop]` / `#[on_node]` (murphy-9cr.8) will land here
+//! alongside them.
 
 mod cop_options;
 
@@ -13,33 +16,45 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, Path, Token, parse_macro_input, punctuated::Punctuated};
 
-/// Register a comma-separated list of [`Cop`](murphy_plugin_api::Cop)
-/// implementations as a Murphy native plugin.
+/// Register a comma-separated list of cop types as a Murphy native
+/// plugin (ADR 0038 single-surface ABI).
 ///
-/// Expands to a `const _: () = { … };` block that defines the static cop
-/// table and exports an `extern "C" fn murphy_plugin_register` matching
-/// Murphy's ABI (see ADR 0031, ADR 0033).
+/// Expands to a `const _: () = { … };` block that defines the static
+/// `[PluginCopV1; N]` cop table and exports a `#[no_mangle]`
+/// `extern "C" fn murphy_plugin_register` that fills a
+/// `murphy_plugin_api::PluginRegistration`.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use murphy_plugin_api::{Cop, NoOptions};
+/// use murphy_ast::NodeId;
+/// use murphy_plugin_api::{Cop, Cx, NoOptions, NodeCop, NodeKindTag};
 ///
+/// #[derive(Default)]
 /// struct NoTabs;
+///
 /// impl Cop for NoTabs {
 ///     type Options = NoOptions;
 ///     const NAME: &'static str = "Plugin/NoTabs";
 /// }
 ///
+/// impl NodeCop for NoTabs {
+///     const KINDS: &'static [NodeKindTag] = &[];
+///     fn check(&self, node: NodeId, cx: &Cx<'_>) {}
+/// }
+///
 /// murphy_plugin_macros::register_cops!(NoTabs);
 /// ```
 ///
-/// All listed types must implement
-/// [`Cop`](murphy_plugin_api::Cop); their `NAME` constants must be
-/// pairwise distinct. Both invariants are enforced at compile time —
-/// the first by a trait bound on the generated table, the second by a
-/// const panic in
-/// [`__internal::assert_unique_cop_names`](murphy_plugin_api::__internal::assert_unique_cop_names).
+/// Every listed type must implement `murphy_plugin_api::NodeCop` (hence
+/// `Cop`) and [`Default`] — the dispatch thunk constructs a fresh,
+/// stateless cop per matched node. `KINDS` / `check` are hand-written
+/// here; `#[on_node]` / `#[murphy::cop]` (murphy-9cr.8) will generate
+/// them.
+///
+/// Each cop's `NAME` must be pairwise distinct; this is enforced at
+/// compile time by a const panic in
+/// `murphy_plugin_api::__internal::assert_unique_cop_names`.
 #[proc_macro]
 pub fn register_cops(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as RegisterCopsInput);
@@ -64,28 +79,22 @@ pub fn register_cops(input: TokenStream) -> TokenStream {
                 [ #(#name_exprs),* ]
             );
 
-            static COPS: [__api::MurphyPluginCopV1; #n] = [
+            static COPS: [__api::PluginCopV1; #n] = [
                 #(#cop_entries),*
             ];
 
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn murphy_plugin_register(
-                out: *mut __api::MurphyPluginV1,
+                out: *mut __api::PluginRegistration,
             ) -> i32 {
                 if out.is_null() {
                     return 1;
                 }
                 unsafe {
-                    *out = __api::MurphyPluginV1 {
-                        size: ::core::mem::size_of::<__api::MurphyPluginV1>(),
+                    *out = __api::PluginRegistration {
+                        abi_version: __api::MURPHY_PLUGIN_ABI_VERSION,
                         cops_ptr: COPS.as_ptr(),
                         cops_len: COPS.len(),
-                        call_dispatch_ptr: ::core::ptr::null(),
-                        call_dispatch_len: 0,
-                        run_call_dispatch: ::core::option::Option::None,
-                        node_dispatch_ptr: ::core::ptr::null(),
-                        node_dispatch_len: 0,
-                        run_node_dispatch: ::core::option::Option::None,
                     };
                 }
                 0
@@ -96,8 +105,7 @@ pub fn register_cops(input: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// Derive [`CopOptions`](murphy_plugin_api::CopOptions) for an options
-/// struct.
+/// Derive `murphy_plugin_api::CopOptions` for an options struct.
 ///
 /// Generates `impl Default` (honouring `#[option(default = …)]`) and
 /// `impl CopOptions` (the `SCHEMA` const plus a `from_config_json`
