@@ -95,10 +95,69 @@ impl Translator {
         }
     }
 
+    /// prism `Integer` → `i64`。i64 を超えたら `None`（呼び出し側で Unknown に
+    /// 落とす）。
+    ///
+    /// `Integer` は `Copy` ではなく `TryInto<i32>` は `self` を消費するため、
+    /// `to_u32_digits()`（`&self`、`(negative, &[u32])` を LSB 先頭で返す）だけで
+    /// 全ケースを再構成する。
+    fn integer_to_i64(int: &prism::Integer<'_>) -> Option<i64> {
+        let (negative, digits) = int.to_u32_digits();
+        let mut acc: u128 = 0;
+        for &d in digits.iter().rev() {
+            acc = acc.checked_mul(1u128 << 32)?.checked_add(d as u128)?;
+        }
+        if negative {
+            // 最小値 i64::MIN の絶対値 = i64::MAX as u128 + 1 まで許容。
+            if acc <= i64::MAX as u128 + 1 {
+                Some((acc as i128).wrapping_neg() as i64)
+            } else {
+                None
+            }
+        } else {
+            i64::try_from(acc).ok()
+        }
+    }
+
     /// 任意の prism ノードを翻訳して NodeId を返す。未対応は Unknown。
     fn translate_node(&mut self, node: &prism::Node<'_>) -> NodeId {
         let range = Self::node_range(node);
-        // Task 2 以降、ここに各ノード種の arm を足していく。
+
+        // --- atoms / literals ---
+        if node.as_nil_node().is_some() {
+            return self.builder.push(NodeKind::Nil, range);
+        }
+        if node.as_true_node().is_some() {
+            return self.builder.push(NodeKind::True_, range);
+        }
+        if node.as_false_node().is_some() {
+            return self.builder.push(NodeKind::False_, range);
+        }
+        if node.as_self_node().is_some() {
+            return self.builder.push(NodeKind::SelfExpr, range);
+        }
+        if let Some(int) = node.as_integer_node() {
+            return match Self::integer_to_i64(&int.value()) {
+                Some(v) => self.builder.push(NodeKind::Int(v), range),
+                None => self.builder.push(NodeKind::Unknown, range),
+            };
+        }
+        if let Some(f) = node.as_float_node() {
+            return self.builder.push(NodeKind::Float(f.value()), range);
+        }
+        if let Some(s) = node.as_string_node() {
+            let text = String::from_utf8_lossy(s.unescaped());
+            let id = self.builder.intern_string(&text);
+            return self.builder.push(NodeKind::Str(id), range);
+        }
+        if let Some(sym) = node.as_symbol_node() {
+            // 補間なしシンボル :foo。`unescaped()` がデコード済みの内容を返す。
+            let text = String::from_utf8_lossy(sym.unescaped());
+            let id = self.builder.intern_symbol(&text);
+            return self.builder.push(NodeKind::Sym(id), range);
+        }
+
+        // Task 3 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
 }
@@ -117,12 +176,10 @@ mod tests {
     #[test]
     fn single_statement_root_is_that_statement() {
         // Single statement → root IS that statement (no Begin wrapping).
-        // NilNode→Nil mapping lands in Task 2; for now NilNode falls to
-        // Unknown, which is still sufficient to verify the no-Begin-wrap
-        // semantic. The `children().count() == 0` clause is what
-        // discriminates this from the multi-statement (Begin) case.
+        // `nil` translates to `NodeKind::Nil`; the `children().count() == 0`
+        // clause discriminates this from the multi-statement (Begin) case.
         let ast = translate("nil", "t.rb");
-        assert!(matches!(ast.kind(ast.root()), NodeKind::Unknown));
+        assert!(matches!(ast.kind(ast.root()), NodeKind::Nil));
         assert_eq!(ast.children(ast.root()).count(), 0);
     }
 
@@ -136,8 +193,58 @@ mod tests {
 
     #[test]
     fn untranslated_node_falls_to_unknown() {
-        // Task 1 時点で IntegerNode は未対応。
-        let ast = translate("1", "t.rb");
+        // Begin はまだ未対応のためルートでは確認できないが、`__FILE__`
+        // のような未対応ノードは Unknown に落ちる。
+        let ast = translate("__FILE__", "t.rb");
         assert!(matches!(ast.kind(ast.root()), NodeKind::Unknown));
+    }
+
+    #[test]
+    fn translates_atoms() {
+        let nil = translate("nil", "t.rb");
+        assert!(matches!(nil.kind(nil.root()), NodeKind::Nil));
+        let t = translate("true", "t.rb");
+        assert!(matches!(t.kind(t.root()), NodeKind::True_));
+        let f = translate("false", "t.rb");
+        assert!(matches!(f.kind(f.root()), NodeKind::False_));
+        let s = translate("self", "t.rb");
+        assert!(matches!(s.kind(s.root()), NodeKind::SelfExpr));
+    }
+
+    #[test]
+    fn translates_integer() {
+        let ast = translate("42", "t.rb");
+        assert!(matches!(ast.kind(ast.root()), NodeKind::Int(42)));
+    }
+
+    #[test]
+    fn translates_negative_and_large_integer() {
+        let neg = translate("-7", "t.rb");
+        assert!(matches!(neg.kind(neg.root()), NodeKind::Int(-7)));
+        // i64::MIN もちょうど収まる。
+        let min = translate("-9223372036854775808", "t.rb");
+        assert!(matches!(min.kind(min.root()), NodeKind::Int(i64::MIN)));
+        // i64 を超える巨大整数は Unknown に落ちること（panic しない）。
+        let huge = translate("999999999999999999999999999999", "t.rb");
+        assert!(matches!(huge.kind(huge.root()), NodeKind::Unknown));
+    }
+
+    #[test]
+    fn translates_float_string_symbol() {
+        let f = translate("3.5", "t.rb");
+        match f.kind(f.root()) {
+            NodeKind::Float(v) => assert_eq!(*v, 3.5),
+            other => panic!("expected Float, got {other:?}"),
+        }
+        let ast = translate("\"hi\"", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Str(s) => assert_eq!(ast.interner().resolve(s.0), "hi"),
+            other => panic!("expected Str, got {other:?}"),
+        }
+        let sym = translate(":sym", "t.rb");
+        match sym.kind(sym.root()) {
+            NodeKind::Sym(s) => assert_eq!(sym.interner().resolve(s.0), "sym"),
+            other => panic!("expected Sym, got {other:?}"),
+        }
     }
 }
