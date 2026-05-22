@@ -437,7 +437,10 @@ pub struct Comment {
 }
 
 /// Whether a comment is a `#` line comment or a `=begin`/`=end` block.
-#[repr(C, u8)]
+// `#[repr(u8)]`, not `#[repr(C, u8)]`: the compiler rejects the combined
+// hint (E0566) on a fieldless C-like enum. `#[repr(u8)]` alone pins the
+// stable `u8` discriminant.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommentKind {
     Inline,
