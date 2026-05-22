@@ -21,10 +21,81 @@ pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
     if let Some(extra) = parser.peek() {
         return Err(ParseError::new("unexpected trailing input", extra.span));
     }
+    // The root is not a node child, so a rest-like root is correctly rejected.
+    validate_rest_placement(&root, false)?;
     Ok(PatternAst {
         root,
         captures: parser.captures,
     })
+}
+
+/// Whether `pat` is a "rest-like" element — one that matches zero-or-more
+/// sibling nodes. There are two forms: a bare `...` ([`PatKind::Rest`]) and an
+/// anonymous seq capture `$...` (a [`PatKind::Capture`] whose `body` is
+/// [`PatKind::Rest`]).
+fn is_rest_like(pat: &Pat) -> bool {
+    match &pat.kind {
+        PatKind::Rest => true,
+        PatKind::Capture { body, .. } => matches!(body.kind, PatKind::Rest),
+        _ => false,
+    }
+}
+
+/// Post-parse walk enforcing the v1 grammar rule for rest-like elements
+/// (`...` and `$...`): each is valid *only* as a direct child of a node match
+/// `(...)`, and *at most one* per node child list.
+///
+/// This is the single source of truth for both invariants — `node_match`
+/// parses `...` into [`PatKind::Rest`] but does not itself reject duplicates.
+///
+/// `is_node_child` is `true` only when `pat` is being visited as a direct
+/// child of a [`PatKind::Node`]. The root, union alternatives, and the bodies
+/// of `!`/`^`/`` ` ``/`$` are all *not* node children.
+fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseError> {
+    if is_rest_like(pat) && !is_node_child {
+        return Err(ParseError::new(
+            "`...` / `$...` is only valid as a direct child of a node match",
+            pat.span,
+        ));
+    }
+    match &pat.kind {
+        PatKind::Node { children, .. } => {
+            // At most one rest-like element per child list. Point the error at
+            // the SECOND such child.
+            if let Some(second) = children.iter().filter(|c| is_rest_like(c)).nth(1) {
+                return Err(ParseError::new(
+                    "at most one `...` / `$...` per node child list",
+                    second.span,
+                ));
+            }
+            for child in children {
+                validate_rest_placement(child, true)?;
+            }
+        }
+        PatKind::Union(alts) => {
+            for alt in alts {
+                validate_rest_placement(alt, false)?;
+            }
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            validate_rest_placement(b, false)?;
+        }
+        PatKind::Capture { body, .. } => {
+            // A `$...` seq capture is one rest-like unit: the inner `Rest` is
+            // not an independently-validated element, so do not recurse into
+            // it. Any other capture (`$_`, `$(...)`, `$name`, …) recurses.
+            if !is_rest_like(pat) {
+                validate_rest_placement(body, false)?;
+            }
+        }
+        PatKind::Rest
+        | PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate(_)
+        | PatKind::Kind(_) => {}
+    }
+    Ok(())
 }
 
 /// A cursor over a token slice for recursive-descent parsing.
@@ -220,12 +291,13 @@ impl<'a> Parser<'a> {
     ///
     /// `open_span` is the span of the already-consumed `(`. The resulting
     /// `Pat`'s span covers `(` through the closing `)`. Children are parsed
-    /// with [`prefixed`], except a `...` in a child slot becomes [`PatKind::Rest`]
-    /// (at most one per child list).
+    /// with [`prefixed`], except a `...` in a child slot becomes [`PatKind::Rest`].
+    /// `node_match` only *builds* the child list — the "at most one rest-like
+    /// element per child list" and placement rules are enforced afterward by
+    /// the [`validate_rest_placement`] walk, the single source of truth.
     fn node_match(&mut self, open_span: PatSpan) -> Result<Pat, ParseError> {
         let head = self.node_head(open_span)?;
         let mut children: Vec<Pat> = Vec::new();
-        let mut has_rest = false;
         loop {
             // Peek (not `next`) so we can dispatch on the token — closing `)`,
             // a `...`, or a child — before deciding whether to consume it.
@@ -248,13 +320,6 @@ impl<'a> Parser<'a> {
                 Token::Ellipsis => {
                     let ell_span = tok.span;
                     self.pos += 1; // consume `...`
-                    if has_rest {
-                        return Err(ParseError::new(
-                            "`...` may appear at most once in a node child list",
-                            ell_span,
-                        ));
-                    }
-                    has_rest = true;
                     children.push(Pat {
                         kind: PatKind::Rest,
                         span: ell_span,
@@ -983,5 +1048,35 @@ mod tests {
             "message should name the duplicate, was: {}",
             e.message
         );
+    }
+
+    // --- rest / seq-capture placement validation -------------------------
+
+    #[test]
+    fn rejects_two_seq_captures_in_child_list() {
+        assert!(parse("(send $... $...)").is_err());
+    }
+
+    #[test]
+    fn rejects_bare_rest_and_seq_capture_mixed() {
+        assert!(parse("(send ... $...)").is_err());
+        assert!(parse("(send $... ...)").is_err());
+    }
+
+    #[test]
+    fn rejects_seq_capture_at_top_level() {
+        assert!(parse("$...").is_err());
+    }
+
+    #[test]
+    fn rejects_seq_capture_in_union() {
+        assert!(parse("{$... _}").is_err());
+    }
+
+    #[test]
+    fn allows_single_seq_capture_in_child_list() {
+        assert!(parse("(send $receiver $...)").is_ok());
+        assert!(parse("(array ... _)").is_ok());
+        assert!(parse("(array _ $...)").is_ok());
     }
 }

@@ -54,6 +54,11 @@ pub struct CaptureMeta {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IrNode {
     Wildcard,
+    /// `...` / `$...` — matches zero or more sibling nodes. The "rest-like
+    /// element is valid only as a direct node child, and at most one per
+    /// node child list" invariant is enforced by the parser
+    /// (`validate_rest_placement`), NOT by this IR type — the `IrNode` enum
+    /// does not structurally guarantee it, so consumers must not assume it.
     Rest,
     NilTest,
     LitInt(i64),
@@ -65,10 +70,16 @@ pub enum IrNode {
     LitNil,
     Predicate(StrRef),
     Kind(NodeKindTag),
-    Node { head: IrHead, children: IrSlice },
+    Node {
+        head: IrHead,
+        children: IrSlice,
+    },
     Union(IrSlice),
     Not(IrNodeId),
-    Capture { slot: u16, body: IrNodeId },
+    Capture {
+        slot: u16,
+        body: IrNodeId,
+    },
     Parent(IrNodeId),
     Descend(IrNodeId),
 }
