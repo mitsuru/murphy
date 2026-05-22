@@ -120,6 +120,9 @@ pub fn lower(ast: &PatternAst) -> PatternIr {
 /// need it and avoiding it keeps lowering allocation-free beyond the pool's
 /// own growth.
 fn intern(ir: &mut PatternIr, s: &str) -> StrRef {
+    // v1 pattern sizes are tiny; the `as u32` casts below are sound only while
+    // the pool stays under `u32::MAX` bytes. Document that invariant here.
+    debug_assert!(ir.str_pool.len() <= u32::MAX as usize);
     let start = ir.str_pool.len() as u32;
     ir.str_pool.push_str(s);
     StrRef {
@@ -130,6 +133,9 @@ fn intern(ir: &mut PatternIr, s: &str) -> StrRef {
 
 /// Push `node` into `ir.nodes` and return the [`IrNodeId`] it now occupies.
 fn push_node(ir: &mut PatternIr, node: IrNode) -> IrNodeId {
+    // `IrNodeId` is a `u32`; the cast below is sound only while the node array
+    // stays under `u32::MAX` entries. v1 patterns never approach that.
+    debug_assert!(ir.nodes.len() <= u32::MAX as usize);
     let id = IrNodeId(ir.nodes.len() as u32);
     ir.nodes.push(node);
     id
@@ -217,6 +223,13 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
         PatKind::Capture { slot, name, body } => {
             let body_id = lower_pat(body, ast, ir);
             // Trust the parser-assigned slot — do NOT renumber by traversal.
+            // Every parser-assigned slot is `< ast.n_captures()`, so both
+            // `ir.captures` (pre-sized to `n_captures()`) and `ast.captures`
+            // index safely.
+            debug_assert!(
+                (*slot as usize) < ast.captures.len(),
+                "capture slot out of range"
+            );
             let name_ref = name.as_deref().map(|n| intern(ir, n));
             ir.captures[*slot as usize] = CaptureMeta {
                 kind: ast.captures[*slot as usize],
@@ -245,6 +258,12 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
 mod tests {
     use super::*;
     use crate::parse;
+
+    /// `NodeKindTag` for `send` in the current tag table. Localized here so a
+    /// future tag-table reorder breaks in one obvious place.
+    const SEND_TAG: murphy_ast::NodeKindTag = murphy_ast::NodeKindTag(17);
+    /// `NodeKindTag` for `csend` in the current tag table.
+    const CSEND_TAG: murphy_ast::NodeKindTag = murphy_ast::NodeKindTag(18);
 
     #[test]
     fn ir_construction_smoke() {
@@ -279,7 +298,7 @@ mod tests {
         let root = &ir.nodes[ir.root.0 as usize];
         match root {
             IrNode::Node { head, children } => {
-                assert_eq!(*head, IrHead::Exact(murphy_ast::NodeKindTag(17)));
+                assert_eq!(*head, IrHead::Exact(SEND_TAG));
                 assert_eq!(children.len, 2);
                 // The side-table ids must point at the lowered children:
                 // a `nil` literal and a `:puts` symbol literal.
@@ -332,10 +351,7 @@ mod tests {
                 ..
             } => {
                 let tags = &ir.tags[s.start as usize..(s.start + s.len) as usize];
-                assert_eq!(
-                    tags,
-                    &[murphy_ast::NodeKindTag(17), murphy_ast::NodeKindTag(18)]
-                );
+                assert_eq!(tags, &[SEND_TAG, CSEND_TAG]);
             }
             ref other => panic!("expected OneOf, got {other:?}"),
         }
@@ -400,10 +416,7 @@ mod tests {
     #[test]
     fn lowers_kind() {
         let ir = lower(&parse("send").unwrap());
-        assert_eq!(
-            ir.nodes[ir.root.0 as usize],
-            IrNode::Kind(murphy_ast::NodeKindTag(17))
-        );
+        assert_eq!(ir.nodes[ir.root.0 as usize], IrNode::Kind(SEND_TAG));
     }
 
     #[test]
@@ -413,14 +426,8 @@ mod tests {
             IrNode::Union(s) => {
                 assert_eq!(s.len, 2);
                 let arms = &ir.children[s.start as usize..(s.start + s.len) as usize];
-                assert_eq!(
-                    ir.nodes[arms[0].0 as usize],
-                    IrNode::Kind(murphy_ast::NodeKindTag(17))
-                );
-                assert_eq!(
-                    ir.nodes[arms[1].0 as usize],
-                    IrNode::Kind(murphy_ast::NodeKindTag(18))
-                );
+                assert_eq!(ir.nodes[arms[0].0 as usize], IrNode::Kind(SEND_TAG));
+                assert_eq!(ir.nodes[arms[1].0 as usize], IrNode::Kind(CSEND_TAG));
             }
             ref other => panic!("expected Union, got {other:?}"),
         }
@@ -558,5 +565,18 @@ mod tests {
             IrNode::Node { children, .. } => assert_eq!(children.len, 0),
             ref other => panic!("expected Node, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lowers_rest_to_ir_rest_node() {
+        // `...` in a node child list lowers to `IrNode::Rest`. (A bare `...`
+        // at top level is a parse error, so it must be tested inside a node.)
+        let ir = lower(&parse("(send ... _)").unwrap());
+        let root = &ir.nodes[ir.root.0 as usize];
+        let IrNode::Node { children, .. } = root else {
+            panic!("expected Node, got {root:?}");
+        };
+        let first_child = ir.children[children.start as usize];
+        assert_eq!(ir.nodes[first_child.0 as usize], IrNode::Rest);
     }
 }
