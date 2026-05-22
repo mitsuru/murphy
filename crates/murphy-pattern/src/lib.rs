@@ -19,3 +19,10 @@ pub use parser::parse;
 mod ir;
 
 pub use ir::{CaptureMeta, IrHead, IrNode, IrNodeId, IrSlice, PatternIr, StrRef, lower};
+
+/// Parse and lower a pattern source string to `PatternIr` in one step.
+/// For the C backend (murphy-9cr.19). All errors are parse errors —
+/// lowering itself is infallible.
+pub fn compile(src: &str) -> Result<PatternIr, ParseError> {
+    Ok(lower(&parse(src)?))
+}
