@@ -340,6 +340,26 @@ pub enum NodeKind {
         body: OptNodeId,
         ensure_: OptNodeId,
     },
+
+    // --- op-assign (appended post-`Ensure` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `target op= value`（`+=` `-=` 等）。`target` は値なし write ノード
+    /// （`Lvasgn`/`Ivasgn`/`Cvasgn`/`Gvasgn`/`Casgn` の `value` が `None`）。
+    OpAsgn {
+        target: NodeId,
+        op: Symbol,
+        value: NodeId,
+    },
+    /// `target ||= value`。`target` は値なし write ノード。
+    OrAsgn {
+        target: NodeId,
+        value: NodeId,
+    },
+    /// `target &&= value`。`target` は値なし write ノード。
+    AndAsgn {
+        target: NodeId,
+        value: NodeId,
+    },
 }
 
 /// A source comment, stored outside the node tree.

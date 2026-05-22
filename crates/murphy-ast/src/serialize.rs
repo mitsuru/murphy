@@ -361,6 +361,22 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, body.0);
             put_u32(out, ensure_.0);
         }
+        NodeKind::OpAsgn { target, op, value } => {
+            put_u8(out, 60);
+            put_u32(out, target.0);
+            put_u32(out, op.0);
+            put_u32(out, value.0);
+        }
+        NodeKind::OrAsgn { target, value } => {
+            put_u8(out, 61);
+            put_u32(out, target.0);
+            put_u32(out, value.0);
+        }
+        NodeKind::AndAsgn { target, value } => {
+            put_u8(out, 62);
+            put_u32(out, target.0);
+            put_u32(out, value.0);
+        }
     }
 }
 
@@ -521,6 +537,19 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         59 => NodeKind::Ensure {
             body: OptNodeId(get_u32(cur)?),
             ensure_: OptNodeId(get_u32(cur)?),
+        },
+        60 => NodeKind::OpAsgn {
+            target: NodeId(get_u32(cur)?),
+            op: Symbol(get_u32(cur)?),
+            value: NodeId(get_u32(cur)?),
+        },
+        61 => NodeKind::OrAsgn {
+            target: NodeId(get_u32(cur)?),
+            value: NodeId(get_u32(cur)?),
+        },
+        62 => NodeKind::AndAsgn {
+            target: NodeId(get_u32(cur)?),
+            value: NodeId(get_u32(cur)?),
         },
         _ => return Err(SerError::BadDiscriminant),
     })
@@ -1050,6 +1079,77 @@ mod tests {
         assert_eq!(
             ast, restored,
             "exception variant round-trip must be bit-equal"
+        );
+    }
+
+    #[test]
+    fn round_trip_op_assign_variants() {
+        // The three op-assign variants appended after `Ensure`
+        // (discriminants 60..=62) must survive the byte round-trip. Covers
+        // the struct-with-`op` shape (`OpAsgn`) and the two-`NodeId` shape
+        // (`OrAsgn`/`AndAsgn`).
+        let mut b = AstBuilder::new("x += 1; @y ||= 2; @@z &&= 3", "t.rb");
+        // `x += 1` — target is a value-less `Lvasgn`.
+        let x_name = b.intern_symbol("x");
+        let x_target = b.push(
+            NodeKind::Lvasgn {
+                name: x_name,
+                value: OptNodeId::NONE,
+            },
+            r(0, 1),
+        );
+        let plus = b.intern_symbol("+");
+        let one = b.push(NodeKind::Int(1), r(5, 6));
+        let op_asgn = b.push(
+            NodeKind::OpAsgn {
+                target: x_target,
+                op: plus,
+                value: one,
+            },
+            r(0, 6),
+        );
+        // `@y ||= 2` — target is a value-less `Ivasgn`.
+        let y_name = b.intern_symbol("@y");
+        let y_target = b.push(
+            NodeKind::Ivasgn {
+                name: y_name,
+                value: OptNodeId::NONE,
+            },
+            r(8, 10),
+        );
+        let two = b.push(NodeKind::Int(2), r(15, 16));
+        let or_asgn = b.push(
+            NodeKind::OrAsgn {
+                target: y_target,
+                value: two,
+            },
+            r(8, 16),
+        );
+        // `@@z &&= 3` — target is a value-less `Cvasgn`.
+        let z_name = b.intern_symbol("@@z");
+        let z_target = b.push(
+            NodeKind::Cvasgn {
+                name: z_name,
+                value: OptNodeId::NONE,
+            },
+            r(18, 21),
+        );
+        let three = b.push(NodeKind::Int(3), r(26, 27));
+        let and_asgn = b.push(
+            NodeKind::AndAsgn {
+                target: z_target,
+                value: three,
+            },
+            r(18, 27),
+        );
+        let list = b.push_list(&[op_asgn, or_asgn, and_asgn]);
+        let root = b.push(NodeKind::Begin(list), r(0, 27));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "op-assign variant round-trip must be bit-equal"
         );
     }
 

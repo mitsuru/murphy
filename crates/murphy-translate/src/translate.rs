@@ -244,6 +244,220 @@ impl Translator {
                 .push(NodeKind::Casgn { scope, name, value }, range);
         }
 
+        // --- op-assign (`+=` / `||=` / `&&=`) ---
+        // lvar/ivar/cvar/gvar/const の 5 ファミリ × operator/or/and の 3 種を
+        // 翻訳する。`target` は値なし write ノード（`*asgn` の `value` が `None`）。
+        // call/index/constant-path ターゲット系は arm を持たず `Unknown` に落ちる
+        // （設計どおり）。
+        if let Some(w) = node.as_local_variable_operator_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Lvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let op = self.sym(&w.binary_operator());
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::OpAsgn { target, op, value }, range);
+        }
+        if let Some(w) = node.as_local_variable_or_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Lvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self.builder.push(NodeKind::OrAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_local_variable_and_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Lvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::AndAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_instance_variable_operator_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Ivasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let op = self.sym(&w.binary_operator());
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::OpAsgn { target, op, value }, range);
+        }
+        if let Some(w) = node.as_instance_variable_or_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Ivasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self.builder.push(NodeKind::OrAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_instance_variable_and_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Ivasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::AndAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_class_variable_operator_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Cvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let op = self.sym(&w.binary_operator());
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::OpAsgn { target, op, value }, range);
+        }
+        if let Some(w) = node.as_class_variable_or_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Cvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self.builder.push(NodeKind::OrAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_class_variable_and_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Cvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::AndAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_global_variable_operator_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Gvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let op = self.sym(&w.binary_operator());
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::OpAsgn { target, op, value }, range);
+        }
+        if let Some(w) = node.as_global_variable_or_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Gvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self.builder.push(NodeKind::OrAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_global_variable_and_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Gvasgn {
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::AndAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_constant_operator_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Casgn {
+                    scope: OptNodeId::NONE,
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let op = self.sym(&w.binary_operator());
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::OpAsgn { target, op, value }, range);
+        }
+        if let Some(w) = node.as_constant_or_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Casgn {
+                    scope: OptNodeId::NONE,
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self.builder.push(NodeKind::OrAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_constant_and_write_node() {
+            let name = self.sym(&w.name());
+            let target = self.builder.push(
+                NodeKind::Casgn {
+                    scope: OptNodeId::NONE,
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                Self::range(&w.name_loc()),
+            );
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::AndAsgn { target, value }, range);
+        }
+
         // --- calls / splat ---
         if let Some(call) = node.as_call_node() {
             let send = self.translate_call(&call, range);
@@ -1742,6 +1956,153 @@ mod tests {
                 assert!(else_.get().is_some(), "else 節");
             }
             other => panic!("expected Rescue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_op_assign() {
+        // `x += 1` → OpAsgn { target: Lvasgn(x, None), op: "+", value }。
+        let ast = translate("x = 0; x += 1", "t.rb");
+        let op = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::OpAsgn { .. }))
+            .expect("expected an OpAsgn node");
+        match ast.kind(op) {
+            NodeKind::OpAsgn { target, op, .. } => {
+                assert_eq!(ast.interner().resolve(op.0), "+");
+                // target は値なし Lvasgn。
+                match ast.kind(*target) {
+                    NodeKind::Lvasgn { name, value } => {
+                        assert_eq!(ast.interner().resolve(name.0), "x");
+                        assert!(value.is_none(), "op-assign の target は値なし");
+                    }
+                    other => panic!("expected Lvasgn target, got {other:?}"),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_or_and_assign() {
+        // `@x ||= 1` → OrAsgn、`@x &&= 1` → AndAsgn。target は値なし Ivasgn。
+        let or = translate("@x ||= 1", "t.rb");
+        match or.kind(or.root()) {
+            NodeKind::OrAsgn { target, .. } => {
+                assert!(matches!(or.kind(*target), NodeKind::Ivasgn { .. }));
+            }
+            other => panic!("expected OrAsgn, got {other:?}"),
+        }
+        let and = translate("@x &&= 1", "t.rb");
+        match and.kind(and.root()) {
+            NodeKind::AndAsgn { target, .. } => {
+                assert!(matches!(and.kind(*target), NodeKind::Ivasgn { .. }));
+            }
+            other => panic!("expected AndAsgn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_op_assign_all_name_families() {
+        // lvar/ivar/cvar/gvar/const の 5 ファミリすべてが OpAsgn になり、
+        // target は対応する値なし write ノード。期待 target は variant 名で照合。
+        fn target_variant_name(k: &NodeKind) -> &'static str {
+            match k {
+                NodeKind::Lvasgn { .. } => "Lvasgn",
+                NodeKind::Ivasgn { .. } => "Ivasgn",
+                NodeKind::Cvasgn { .. } => "Cvasgn",
+                NodeKind::Gvasgn { .. } => "Gvasgn",
+                NodeKind::Casgn { .. } => "Casgn",
+                _ => "other",
+            }
+        }
+        let cases = [
+            ("x = 0; x += 1", "Lvasgn"),
+            ("@i += 1", "Ivasgn"),
+            ("@@c += 1", "Cvasgn"),
+            ("$g += 1", "Gvasgn"),
+            ("K += 1", "Casgn"),
+        ];
+        for (src, expected) in cases {
+            let ast = translate(src, "t.rb");
+            let op = ast
+                .descendants(ast.root())
+                .chain([ast.root()])
+                .find(|&n| matches!(ast.kind(n), NodeKind::OpAsgn { .. }))
+                .unwrap_or_else(|| panic!("expected OpAsgn for `{src}`"));
+            match ast.kind(op) {
+                NodeKind::OpAsgn { target, .. } => {
+                    assert_eq!(
+                        target_variant_name(ast.kind(*target)),
+                        expected,
+                        "wrong target for `{src}`"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn translates_const_op_assign_target_scope_is_none() {
+        // 定数 op-assign の target は `Casgn { scope: None, value: None }`。
+        let ast = translate("K += 1", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::OpAsgn { target, .. } => match ast.kind(*target) {
+                NodeKind::Casgn { scope, name, value } => {
+                    assert!(scope.is_none(), "const op-assign target は scope None");
+                    assert_eq!(ast.interner().resolve(name.0), "K");
+                    assert!(value.is_none(), "const op-assign target は値なし");
+                }
+                other => panic!("expected Casgn target, got {other:?}"),
+            },
+            other => panic!("expected OpAsgn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_or_and_assign_const_and_global_families() {
+        // const / gvar ファミリの ||= / &&= も対応。
+        let or = translate("K ||= 1", "t.rb");
+        match or.kind(or.root()) {
+            NodeKind::OrAsgn { target, .. } => {
+                assert!(matches!(or.kind(*target), NodeKind::Casgn { .. }));
+            }
+            other => panic!("expected OrAsgn, got {other:?}"),
+        }
+        let and = translate("$g &&= 1", "t.rb");
+        match and.kind(and.root()) {
+            NodeKind::AndAsgn { target, .. } => {
+                assert!(matches!(and.kind(*target), NodeKind::Gvasgn { .. }));
+            }
+            other => panic!("expected AndAsgn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn call_target_op_assign_is_unknown_not_panic() {
+        // `a.b += 1`（CallOperatorWriteNode）は v1 では Unknown 許容（panic しない）。
+        let ast = translate("a.b += 1", "t.rb");
+        assert!(matches!(ast.kind(ast.root()), NodeKind::Unknown));
+    }
+
+    #[test]
+    fn index_target_op_assign_is_unknown_not_panic() {
+        // `a[0] += 1`（IndexOperatorWriteNode）も Unknown 許容。
+        let ast = translate("a[0] += 1", "t.rb");
+        assert!(matches!(ast.kind(ast.root()), NodeKind::Unknown));
+    }
+
+    #[test]
+    fn constant_path_target_op_assign_is_unknown_not_panic() {
+        // `A::B += 1`（ConstantPathOperatorWriteNode）も v1 では Unknown 許容。
+        // `A::B ||= 1` / `A::B &&= 1`（ConstantPath{Or,And}WriteNode）も同様。
+        for src in ["A::B += 1", "A::B ||= 1", "A::B &&= 1"] {
+            let ast = translate(src, "t.rb");
+            assert!(
+                matches!(ast.kind(ast.root()), NodeKind::Unknown),
+                "expected Unknown for `{src}`"
+            );
         }
     }
 }

@@ -187,6 +187,16 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
             push_opt(out, body);
             push_opt(out, ensure_);
         }
+
+        NodeKind::OpAsgn { target, value, .. } => {
+            out.push(target);
+            out.push(value);
+        }
+
+        NodeKind::OrAsgn { target, value } | NodeKind::AndAsgn { target, value } => {
+            out.push(target);
+            out.push(value);
+        }
     }
 }
 
