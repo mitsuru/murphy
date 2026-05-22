@@ -3,11 +3,6 @@
 //! Spans are byte offsets into the source string; `span.end` is exclusive.
 //! The parser (`parser.rs`) consumes the token stream produced here.
 
-// The parser (murphy-9cr.17 Task 5) is the in-crate consumer of these items;
-// until it lands, the lib target sees them as unused. Matches the staging
-// pattern in `murphy-core::mruby::state`.
-#![allow(dead_code)]
-
 use crate::{ParseError, PatSpan};
 
 /// A lexical token of the S-expression pattern grammar (v1 subset).

@@ -11,3 +11,7 @@ mod ast;
 pub use ast::{CaptureKind, Head, Lit, Pat, PatKind, PatternAst};
 
 mod lexer;
+
+mod parser;
+
+pub use parser::parse;
