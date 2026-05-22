@@ -227,3 +227,27 @@ fn schema_table_and_flexible_heads() {
     assert!(!is_send_or_csend(iff, &cx));
     assert!(is_any_paren(iff, &cx) && is_any_paren(arr, &cx));
 }
+
+node_pattern!(cap_receiver, "(send $_ :foo)");
+node_pattern!(cap_subpat, "$(send nil :foo)");
+node_pattern!(cap_two, "(if $_ $_ _)");
+
+#[test]
+fn node_captures_return_tuple() {
+    let ast = build_nil_dot_foo(); // (send nil :foo), receiver = Nil node
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let send = ast.root();
+    let NodeKind::Send { receiver, .. } = *ast.kind(send) else {
+        panic!()
+    };
+    let recv = receiver.get().unwrap();
+
+    // $_ at the receiver slot binds the Nil node id.
+    assert_eq!(cap_receiver(send, &cx), Some((recv,)));
+    // anonymous $(...) capturing the whole send.
+    assert_eq!(cap_subpat(send, &cx), Some((send,)));
+    // a non-match returns None.
+    assert_eq!(cap_receiver(recv, &cx), None);
+}

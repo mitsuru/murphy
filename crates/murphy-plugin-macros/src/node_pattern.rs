@@ -86,6 +86,11 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
     let body = lower_pat(&ast.root, &quote!(node), &mut ctx)?;
 
     Ok(quote! {
+        // A capture matcher's `OptNode`-slot lowering emits `let Some(n) =
+        // slot.get() else { return None; }`, which clippy wants rewritten
+        // with `?`. The rewrite is not uniformly valid — a zero-capture
+        // matcher returns `bool`, not `Option` — so silence the lint here.
+        #[allow(clippy::question_mark)]
         fn #name<'a>(
             node: ::murphy_ast::NodeId,
             cx: &::murphy_plugin_api::Cx<'a>,
@@ -108,11 +113,6 @@ struct Lower {
     fail: TokenStream,
     /// Whether a `$` capture is legal at the current position. Set false
     /// inside `{}` union, `!` negation and `` ` `` descend.
-    ///
-    /// Genuinely unread until Task 8 (`$` captures); the field-level
-    /// `#[allow(dead_code)]` keeps it warning-free under `-D warnings`
-    /// until that arm lands.
-    #[allow(dead_code)]
     capture_allowed: bool,
     /// Monotonic counter feeding [`gensym`]; guarantees unique binding
     /// identifiers across recursion depth so nested `(send (send ...) ...)`
@@ -705,6 +705,32 @@ fn lower_pat(
             })
         }
         PatKind::Node { head, children } => lower_node(head, children, subject, ctx),
+        PatKind::Capture {
+            slot,
+            name: _,
+            body,
+        } => {
+            if !ctx.capture_allowed {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    "node_pattern!: `$` capture is not allowed inside `{}` / `!` / `` ` ``",
+                ));
+            }
+            // A `$...` seq capture (`Capture` whose `body` is `Rest`) is
+            // handled by the `List` slot, not here — see Task 7.
+            if matches!(body.kind, PatKind::Rest) {
+                return Err(syn::Error::new(
+                    Span::call_site(),
+                    "node_pattern!: seq capture (`$...`) not yet supported",
+                ));
+            }
+            // Node capture: lower the body's guards first (so a mismatch
+            // returns `ctx.fail` before the slot is written), then assign
+            // the captured node id into the deferred-init capture variable.
+            let body_guards = lower_pat(body, subject, ctx)?;
+            let cap = cap_ident(*slot as usize);
+            Ok(quote!(#body_guards #cap = #subject;))
+        }
         other => Err(syn::Error::new(
             Span::call_site(),
             format!("node_pattern!: pattern feature not yet supported: {other:?}"),
