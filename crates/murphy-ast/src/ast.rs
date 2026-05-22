@@ -37,11 +37,20 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         | NodeKind::Ivar(_)
         | NodeKind::Cvar(_)
         | NodeKind::Gvar(_)
-        | NodeKind::Arg(_) => {}
+        | NodeKind::Arg(_)
+        | NodeKind::Unknown
+        | NodeKind::Restarg(_)
+        | NodeKind::Kwarg(_)
+        | NodeKind::Kwrestarg(_)
+        | NodeKind::Blockarg(_)
+        | NodeKind::Zsuper => {}
 
         NodeKind::Const { scope, .. } => push_opt(out, scope),
 
-        NodeKind::Lvasgn { value, .. } | NodeKind::Ivasgn { value, .. } => push_opt(out, value),
+        NodeKind::Lvasgn { value, .. }
+        | NodeKind::Ivasgn { value, .. }
+        | NodeKind::Gvasgn { value, .. }
+        | NodeKind::Cvasgn { value, .. } => push_opt(out, value),
 
         NodeKind::Casgn { scope, value, .. } => {
             push_opt(out, scope);
@@ -64,11 +73,23 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
             push_opt(out, body);
         }
 
-        NodeKind::BlockPass(o) | NodeKind::Splat(o) | NodeKind::Return(o) => push_opt(out, o),
+        NodeKind::BlockPass(o)
+        | NodeKind::Splat(o)
+        | NodeKind::Return(o)
+        | NodeKind::Kwsplat(o)
+        | NodeKind::Break(o)
+        | NodeKind::Next(o) => push_opt(out, o),
 
-        NodeKind::Array(l) | NodeKind::Hash(l) | NodeKind::Begin(l) | NodeKind::Args(l) => {
-            push_list(out, lists, l)
-        }
+        NodeKind::Array(l)
+        | NodeKind::Hash(l)
+        | NodeKind::Begin(l)
+        | NodeKind::Args(l)
+        | NodeKind::Yield(l)
+        | NodeKind::Super(l)
+        | NodeKind::Dstr(l)
+        | NodeKind::Dsym(l)
+        | NodeKind::Xstr(l)
+        | NodeKind::Mlhs(l) => push_list(out, lists, l),
 
         NodeKind::Pair { key, value } => {
             out.push(key);
@@ -101,7 +122,13 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
             out.push(rhs);
         }
 
-        NodeKind::Def { args, body, .. } => {
+        NodeKind::Def {
+            receiver,
+            args,
+            body,
+            ..
+        } => {
+            push_opt(out, receiver);
             out.push(args);
             push_opt(out, body);
         }
@@ -119,6 +146,67 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         NodeKind::Module { name, body } => {
             out.push(name);
             push_opt(out, body);
+        }
+
+        NodeKind::Optarg { default, .. } | NodeKind::Kwoptarg { default, .. } => out.push(default),
+
+        NodeKind::While { cond, body, .. } | NodeKind::Until { cond, body, .. } => {
+            out.push(cond);
+            push_opt(out, body);
+        }
+
+        NodeKind::RangeExpr { begin_, end_, .. } => {
+            push_opt(out, begin_);
+            push_opt(out, end_);
+        }
+
+        NodeKind::Sclass { expr, body } => {
+            out.push(expr);
+            push_opt(out, body);
+        }
+
+        NodeKind::Defined(n) => out.push(n),
+
+        NodeKind::Rescue {
+            body,
+            resbodies,
+            else_,
+        } => {
+            push_opt(out, body);
+            push_list(out, lists, resbodies);
+            push_opt(out, else_);
+        }
+
+        NodeKind::Resbody {
+            exceptions,
+            var,
+            body,
+        } => {
+            push_list(out, lists, exceptions);
+            push_opt(out, var);
+            push_opt(out, body);
+        }
+
+        NodeKind::Ensure { body, ensure_ } => {
+            push_opt(out, body);
+            push_opt(out, ensure_);
+        }
+
+        NodeKind::OpAsgn { target, value, .. } => {
+            out.push(target);
+            out.push(value);
+        }
+
+        NodeKind::OrAsgn { target, value } | NodeKind::AndAsgn { target, value } => {
+            out.push(target);
+            out.push(value);
+        }
+
+        NodeKind::Regexp { parts, .. } => push_list(out, lists, parts),
+
+        NodeKind::Masgn { lhs, rhs } => {
+            out.push(lhs);
+            out.push(rhs);
         }
     }
 }

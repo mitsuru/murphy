@@ -212,8 +212,14 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, lhs.0);
             put_u32(out, rhs.0);
         }
-        NodeKind::Def { name, args, body } => {
+        NodeKind::Def {
+            receiver,
+            name,
+            args,
+            body,
+        } => {
             put_u8(out, 32);
+            put_u32(out, receiver.0);
             put_u32(out, name.0);
             put_u32(out, args.0);
             put_u32(out, body.0);
@@ -240,6 +246,162 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
         NodeKind::Arg(s) => {
             put_u8(out, 36);
             put_u32(out, s.0);
+        }
+        NodeKind::Unknown => put_u8(out, 37),
+        NodeKind::Gvasgn { name, value } => {
+            put_u8(out, 38);
+            put_u32(out, name.0);
+            put_u32(out, value.0);
+        }
+        NodeKind::Cvasgn { name, value } => {
+            put_u8(out, 39);
+            put_u32(out, name.0);
+            put_u32(out, value.0);
+        }
+        NodeKind::Optarg { name, default } => {
+            put_u8(out, 40);
+            put_u32(out, name.0);
+            put_u32(out, default.0);
+        }
+        NodeKind::Restarg(s) => {
+            put_u8(out, 41);
+            put_u32(out, s.0);
+        }
+        NodeKind::Kwarg(s) => {
+            put_u8(out, 42);
+            put_u32(out, s.0);
+        }
+        NodeKind::Kwoptarg { name, default } => {
+            put_u8(out, 43);
+            put_u32(out, name.0);
+            put_u32(out, default.0);
+        }
+        NodeKind::Kwrestarg(s) => {
+            put_u8(out, 44);
+            put_u32(out, s.0);
+        }
+        NodeKind::Blockarg(s) => {
+            put_u8(out, 45);
+            put_u32(out, s.0);
+        }
+        NodeKind::Kwsplat(o) => {
+            put_u8(out, 46);
+            put_u32(out, o.0);
+        }
+        NodeKind::While { cond, body, post } => {
+            put_u8(out, 47);
+            put_u32(out, cond.0);
+            put_u32(out, body.0);
+            put_u8(out, post as u8);
+        }
+        NodeKind::Until { cond, body, post } => {
+            put_u8(out, 48);
+            put_u32(out, cond.0);
+            put_u32(out, body.0);
+            put_u8(out, post as u8);
+        }
+        NodeKind::RangeExpr {
+            begin_,
+            end_,
+            exclusive,
+        } => {
+            put_u8(out, 49);
+            put_u32(out, begin_.0);
+            put_u32(out, end_.0);
+            put_u8(out, exclusive as u8);
+        }
+        NodeKind::Sclass { expr, body } => {
+            put_u8(out, 50);
+            put_u32(out, expr.0);
+            put_u32(out, body.0);
+        }
+        NodeKind::Break(o) => {
+            put_u8(out, 51);
+            put_u32(out, o.0);
+        }
+        NodeKind::Next(o) => {
+            put_u8(out, 52);
+            put_u32(out, o.0);
+        }
+        NodeKind::Yield(l) => {
+            put_u8(out, 53);
+            write_node_list(l, out);
+        }
+        NodeKind::Super(l) => {
+            put_u8(out, 54);
+            write_node_list(l, out);
+        }
+        NodeKind::Zsuper => put_u8(out, 55),
+        NodeKind::Defined(n) => {
+            put_u8(out, 56);
+            put_u32(out, n.0);
+        }
+        NodeKind::Rescue {
+            body,
+            resbodies,
+            else_,
+        } => {
+            put_u8(out, 57);
+            put_u32(out, body.0);
+            write_node_list(resbodies, out);
+            put_u32(out, else_.0);
+        }
+        NodeKind::Resbody {
+            exceptions,
+            var,
+            body,
+        } => {
+            put_u8(out, 58);
+            write_node_list(exceptions, out);
+            put_u32(out, var.0);
+            put_u32(out, body.0);
+        }
+        NodeKind::Ensure { body, ensure_ } => {
+            put_u8(out, 59);
+            put_u32(out, body.0);
+            put_u32(out, ensure_.0);
+        }
+        NodeKind::OpAsgn { target, op, value } => {
+            put_u8(out, 60);
+            put_u32(out, target.0);
+            put_u32(out, op.0);
+            put_u32(out, value.0);
+        }
+        NodeKind::OrAsgn { target, value } => {
+            put_u8(out, 61);
+            put_u32(out, target.0);
+            put_u32(out, value.0);
+        }
+        NodeKind::AndAsgn { target, value } => {
+            put_u8(out, 62);
+            put_u32(out, target.0);
+            put_u32(out, value.0);
+        }
+        NodeKind::Dstr(l) => {
+            put_u8(out, 63);
+            write_node_list(l, out);
+        }
+        NodeKind::Dsym(l) => {
+            put_u8(out, 64);
+            write_node_list(l, out);
+        }
+        NodeKind::Xstr(l) => {
+            put_u8(out, 65);
+            write_node_list(l, out);
+        }
+        NodeKind::Regexp { parts, opts } => {
+            put_u8(out, 66);
+            write_node_list(parts, out);
+            put_u32(out, opts.0);
+        }
+        NodeKind::Masgn { lhs, rhs } => {
+            put_u8(out, 67);
+            put_u32(out, lhs.0);
+            put_u32(out, rhs.0);
+        }
+        NodeKind::Mlhs(l) => {
+            put_u8(out, 68);
+            write_node_list(l, out);
         }
     }
 }
@@ -325,6 +487,7 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             rhs: NodeId(get_u32(cur)?),
         },
         32 => NodeKind::Def {
+            receiver: OptNodeId(get_u32(cur)?),
             name: Symbol(get_u32(cur)?),
             args: NodeId(get_u32(cur)?),
             body: OptNodeId(get_u32(cur)?),
@@ -340,6 +503,92 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         },
         35 => NodeKind::Args(read_node_list(cur)?),
         36 => NodeKind::Arg(Symbol(get_u32(cur)?)),
+        37 => NodeKind::Unknown,
+        38 => NodeKind::Gvasgn {
+            name: Symbol(get_u32(cur)?),
+            value: OptNodeId(get_u32(cur)?),
+        },
+        39 => NodeKind::Cvasgn {
+            name: Symbol(get_u32(cur)?),
+            value: OptNodeId(get_u32(cur)?),
+        },
+        40 => NodeKind::Optarg {
+            name: Symbol(get_u32(cur)?),
+            default: NodeId(get_u32(cur)?),
+        },
+        41 => NodeKind::Restarg(Symbol(get_u32(cur)?)),
+        42 => NodeKind::Kwarg(Symbol(get_u32(cur)?)),
+        43 => NodeKind::Kwoptarg {
+            name: Symbol(get_u32(cur)?),
+            default: NodeId(get_u32(cur)?),
+        },
+        44 => NodeKind::Kwrestarg(Symbol(get_u32(cur)?)),
+        45 => NodeKind::Blockarg(Symbol(get_u32(cur)?)),
+        46 => NodeKind::Kwsplat(OptNodeId(get_u32(cur)?)),
+        47 => NodeKind::While {
+            cond: NodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+            post: get_u8(cur)? != 0,
+        },
+        48 => NodeKind::Until {
+            cond: NodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+            post: get_u8(cur)? != 0,
+        },
+        49 => NodeKind::RangeExpr {
+            begin_: OptNodeId(get_u32(cur)?),
+            end_: OptNodeId(get_u32(cur)?),
+            exclusive: get_u8(cur)? != 0,
+        },
+        50 => NodeKind::Sclass {
+            expr: NodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+        },
+        51 => NodeKind::Break(OptNodeId(get_u32(cur)?)),
+        52 => NodeKind::Next(OptNodeId(get_u32(cur)?)),
+        53 => NodeKind::Yield(read_node_list(cur)?),
+        54 => NodeKind::Super(read_node_list(cur)?),
+        55 => NodeKind::Zsuper,
+        56 => NodeKind::Defined(NodeId(get_u32(cur)?)),
+        57 => NodeKind::Rescue {
+            body: OptNodeId(get_u32(cur)?),
+            resbodies: read_node_list(cur)?,
+            else_: OptNodeId(get_u32(cur)?),
+        },
+        58 => NodeKind::Resbody {
+            exceptions: read_node_list(cur)?,
+            var: OptNodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+        },
+        59 => NodeKind::Ensure {
+            body: OptNodeId(get_u32(cur)?),
+            ensure_: OptNodeId(get_u32(cur)?),
+        },
+        60 => NodeKind::OpAsgn {
+            target: NodeId(get_u32(cur)?),
+            op: Symbol(get_u32(cur)?),
+            value: NodeId(get_u32(cur)?),
+        },
+        61 => NodeKind::OrAsgn {
+            target: NodeId(get_u32(cur)?),
+            value: NodeId(get_u32(cur)?),
+        },
+        62 => NodeKind::AndAsgn {
+            target: NodeId(get_u32(cur)?),
+            value: NodeId(get_u32(cur)?),
+        },
+        63 => NodeKind::Dstr(read_node_list(cur)?),
+        64 => NodeKind::Dsym(read_node_list(cur)?),
+        65 => NodeKind::Xstr(read_node_list(cur)?),
+        66 => NodeKind::Regexp {
+            parts: read_node_list(cur)?,
+            opts: Symbol(get_u32(cur)?),
+        },
+        67 => NodeKind::Masgn {
+            lhs: NodeId(get_u32(cur)?),
+            rhs: NodeId(get_u32(cur)?),
+        },
+        68 => NodeKind::Mlhs(read_node_list(cur)?),
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -521,7 +770,7 @@ impl Ast {
 #[cfg(test)]
 mod tests {
     use crate::builder::AstBuilder;
-    use crate::node::{CommentKind, NodeKind, OptNodeId, Range};
+    use crate::node::{CommentKind, NodeKind, NodeList, OptNodeId, Range};
 
     fn r(a: u32, b: u32) -> Range {
         Range { start: a, end: b }
@@ -547,6 +796,486 @@ mod tests {
         let bytes = ast.to_bytes();
         let restored = crate::Ast::from_bytes(&bytes).expect("round-trip");
         assert_eq!(ast, restored, "round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_gvasgn_cvasgn() {
+        // The two variants appended after `Unknown` (discriminants 38/39)
+        // must survive the byte round-trip.
+        let mut b = AstBuilder::new("$g = 1; @@c = 2", "t.rb");
+        let one = b.push(NodeKind::Int(1), r(5, 6));
+        let g_name = b.intern_symbol("$g");
+        let gv = b.push(
+            NodeKind::Gvasgn {
+                name: g_name,
+                value: OptNodeId::some(one),
+            },
+            r(0, 6),
+        );
+        let two = b.push(NodeKind::Int(2), r(13, 14));
+        let c_name = b.intern_symbol("@@c");
+        let cv = b.push(
+            NodeKind::Cvasgn {
+                name: c_name,
+                value: OptNodeId::some(two),
+            },
+            r(8, 14),
+        );
+        let list = b.push_list(&[gv, cv]);
+        let root = b.push(NodeKind::Begin(list), r(0, 14));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "Gvasgn/Cvasgn round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_param_variants() {
+        // The six parameter variants appended after `Cvasgn`
+        // (discriminants 40..=45) must survive the byte round-trip.
+        // Covers both shapes: struct-with-`default` (Optarg/Kwoptarg) and
+        // tuple-leaf (Restarg/Kwarg/Kwrestarg/Blockarg).
+        let mut b = AstBuilder::new("def f(a = 1, *r, k:, m: 2, **o, &blk); end", "t.rb");
+        let one = b.push(NodeKind::Int(1), r(11, 12));
+        let a_name = b.intern_symbol("a");
+        let optarg = b.push(
+            NodeKind::Optarg {
+                name: a_name,
+                default: one,
+            },
+            r(6, 12),
+        );
+        let r_name = b.intern_symbol("r");
+        let restarg = b.push(NodeKind::Restarg(r_name), r(14, 16));
+        let k_name = b.intern_symbol("k");
+        let kwarg = b.push(NodeKind::Kwarg(k_name), r(18, 20));
+        let two = b.push(NodeKind::Int(2), r(25, 26));
+        let m_name = b.intern_symbol("m");
+        let kwoptarg = b.push(
+            NodeKind::Kwoptarg {
+                name: m_name,
+                default: two,
+            },
+            r(22, 26),
+        );
+        let o_name = b.intern_symbol("o");
+        let kwrestarg = b.push(NodeKind::Kwrestarg(o_name), r(28, 31));
+        let blk_name = b.intern_symbol("blk");
+        let blockarg = b.push(NodeKind::Blockarg(blk_name), r(33, 37));
+        let list = b.push_list(&[optarg, restarg, kwarg, kwoptarg, kwrestarg, blockarg]);
+        let root = b.push(NodeKind::Args(list), r(5, 38));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "parameter variant round-trip must be bit-equal"
+        );
+    }
+
+    #[test]
+    fn round_trip_kwsplat() {
+        // The `Kwsplat` variant appended after `Blockarg` (discriminant 46)
+        // must survive the byte round-trip. Covers both a present inner and
+        // the `None` (anonymous `**`) inner.
+        let mut b = AstBuilder::new("{ **rest }", "t.rb");
+        let rest = b.push(NodeKind::Nil, r(4, 8));
+        let kwsplat = b.push(NodeKind::Kwsplat(OptNodeId::some(rest)), r(2, 8));
+        let anon = b.push(NodeKind::Kwsplat(OptNodeId::NONE), r(2, 4));
+        let list = b.push_list(&[kwsplat, anon]);
+        let root = b.push(NodeKind::Hash(list), r(0, 10));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "Kwsplat round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_while_until() {
+        // The `While`/`Until` variants appended after `Kwsplat`
+        // (discriminants 47/48) must survive the byte round-trip. Covers
+        // both `post` values and present/`None` `body`.
+        let mut b = AstBuilder::new("while c\n  x\nend until d", "t.rb");
+        let cond_w = b.push(NodeKind::Nil, r(6, 7));
+        let body_w = b.push(NodeKind::Nil, r(10, 11));
+        let while_node = b.push(
+            NodeKind::While {
+                cond: cond_w,
+                body: OptNodeId::some(body_w),
+                post: false,
+            },
+            r(0, 15),
+        );
+        let cond_u = b.push(NodeKind::Nil, r(20, 21));
+        // body `None`, `post = true` (do-while shape).
+        let until_node = b.push(
+            NodeKind::Until {
+                cond: cond_u,
+                body: OptNodeId::NONE,
+                post: true,
+            },
+            r(16, 23),
+        );
+        let list = b.push_list(&[while_node, until_node]);
+        let root = b.push(NodeKind::Begin(list), r(0, 23));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "While/Until round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_range_expr() {
+        // The `RangeExpr` variant appended after `Until` (discriminant 49)
+        // must survive the byte round-trip. Covers `exclusive` both ways and
+        // a beginless (`begin_` None) plus endless (`end_` None) end.
+        let mut b = AstBuilder::new("1...5; 1..; ..5", "t.rb");
+        let one = b.push(NodeKind::Int(1), r(0, 1));
+        let five = b.push(NodeKind::Int(5), r(4, 5));
+        // `1...5` — both ends present, exclusive.
+        let inclusive_excl = b.push(
+            NodeKind::RangeExpr {
+                begin_: OptNodeId::some(one),
+                end_: OptNodeId::some(five),
+                exclusive: true,
+            },
+            r(0, 5),
+        );
+        // `1..` — endless, inclusive.
+        let one2 = b.push(NodeKind::Int(1), r(7, 8));
+        let endless = b.push(
+            NodeKind::RangeExpr {
+                begin_: OptNodeId::some(one2),
+                end_: OptNodeId::NONE,
+                exclusive: false,
+            },
+            r(7, 11),
+        );
+        // `..5` — beginless, inclusive.
+        let five2 = b.push(NodeKind::Int(5), r(15, 16));
+        let beginless = b.push(
+            NodeKind::RangeExpr {
+                begin_: OptNodeId::NONE,
+                end_: OptNodeId::some(five2),
+                exclusive: false,
+            },
+            r(13, 16),
+        );
+        let list = b.push_list(&[inclusive_excl, endless, beginless]);
+        let root = b.push(NodeKind::Begin(list), r(0, 16));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "RangeExpr round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_def_with_receiver_and_sclass() {
+        // `Def` 改修（discriminant 32、`receiver` フィールド追加）と `Sclass`
+        // （discriminant 50、`RangeExpr` の次）が byte round-trip で保存される。
+        // singleton `def self.foo` の `receiver` Some と素の `def` の None
+        // 両方を、`Sclass` の present/`None` body とともに確認する。
+        let mut b = AstBuilder::new("class << self\n  def self.f; end\nend", "t.rb");
+        let empty_args1 = b.push(NodeKind::Args(NodeList::EMPTY), r(20, 20));
+        let self_recv = b.push(NodeKind::SelfExpr, r(18, 22));
+        let f_name = b.intern_symbol("f");
+        // singleton def: receiver Some, body None.
+        let singleton_def = b.push(
+            NodeKind::Def {
+                receiver: OptNodeId::some(self_recv),
+                name: f_name,
+                args: empty_args1,
+                body: OptNodeId::NONE,
+            },
+            r(16, 30),
+        );
+        // plain def: receiver None, body Some.
+        let empty_args2 = b.push(NodeKind::Args(NodeList::EMPTY), r(0, 0));
+        let g_name = b.intern_symbol("g");
+        let body = b.push(NodeKind::Nil, r(0, 3));
+        let plain_def = b.push(
+            NodeKind::Def {
+                receiver: OptNodeId::NONE,
+                name: g_name,
+                args: empty_args2,
+                body: OptNodeId::some(body),
+            },
+            r(0, 10),
+        );
+        let def_list = b.push_list(&[singleton_def, plain_def]);
+        let sclass_body = b.push(NodeKind::Begin(def_list), r(16, 30));
+        let expr = b.push(NodeKind::SelfExpr, r(8, 12));
+        let root = b.push(
+            NodeKind::Sclass {
+                expr,
+                body: OptNodeId::some(sclass_body),
+            },
+            r(0, 34),
+        );
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "Def-with-receiver / Sclass round-trip must be bit-equal"
+        );
+    }
+
+    #[test]
+    fn round_trip_jump_variants() {
+        // The six jump variants appended after `Sclass`
+        // (discriminants 51..=56) must survive the byte round-trip. Covers
+        // the `OptNodeId` payloads (`Break`/`Next`) both ways, the
+        // `NodeList` payloads (`Yield`/`Super`), the fieldless `Zsuper`, and
+        // the `NodeId` payload (`Defined`).
+        let mut b = AstBuilder::new(
+            "break 1; next; yield 2; super(3); super; defined?(x)",
+            "t.rb",
+        );
+        let one = b.push(NodeKind::Int(1), r(6, 7));
+        let break_some = b.push(NodeKind::Break(OptNodeId::some(one)), r(0, 7));
+        let next_none = b.push(NodeKind::Next(OptNodeId::NONE), r(9, 13));
+        let two = b.push(NodeKind::Int(2), r(21, 22));
+        let yield_list = b.push_list(&[two]);
+        let yield_node = b.push(NodeKind::Yield(yield_list), r(15, 22));
+        let three = b.push(NodeKind::Int(3), r(30, 31));
+        let super_list = b.push_list(&[three]);
+        let super_node = b.push(NodeKind::Super(super_list), r(24, 32));
+        // empty-list `Yield` to exercise the empty `NodeList` path too.
+        let yield_empty = b.push(NodeKind::Yield(NodeList::EMPTY), r(34, 39));
+        let zsuper = b.push(NodeKind::Zsuper, r(34, 39));
+        let x = b.push(NodeKind::Nil, r(50, 51));
+        let defined = b.push(NodeKind::Defined(x), r(41, 52));
+        let list = b.push_list(&[
+            break_some,
+            next_none,
+            yield_node,
+            super_node,
+            yield_empty,
+            zsuper,
+            defined,
+        ]);
+        let root = b.push(NodeKind::Begin(list), r(0, 52));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "jump variant round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_exception_variants() {
+        // The three exception variants appended after `Defined`
+        // (discriminants 57..=59) must survive the byte round-trip. Covers
+        // the `NodeList` payloads (`Rescue.resbodies`, `Resbody.exceptions`)
+        // both populated and empty, and the `OptNodeId` fields both ways.
+        let mut b = AstBuilder::new("begin\n  x\nrescue E => e\n  y\nensure\n  z\nend", "t.rb");
+        let exc = b.push(NodeKind::Nil, r(18, 19));
+        let exc_list = b.push_list(&[exc]);
+        let var = b.push(NodeKind::Nil, r(23, 24));
+        let resbody_body = b.push(NodeKind::Nil, r(28, 29));
+        // `Resbody` with exceptions present and a bound var.
+        let resbody = b.push(
+            NodeKind::Resbody {
+                exceptions: exc_list,
+                var: OptNodeId::some(var),
+                body: OptNodeId::some(resbody_body),
+            },
+            r(10, 29),
+        );
+        // bare `Resbody` — empty exceptions list, no var, no body.
+        let bare_resbody = b.push(
+            NodeKind::Resbody {
+                exceptions: NodeList::EMPTY,
+                var: OptNodeId::NONE,
+                body: OptNodeId::NONE,
+            },
+            r(10, 12),
+        );
+        let resbodies = b.push_list(&[resbody, bare_resbody]);
+        let protected = b.push(NodeKind::Nil, r(8, 9));
+        let rescue = b.push(
+            NodeKind::Rescue {
+                body: OptNodeId::some(protected),
+                resbodies,
+                else_: OptNodeId::NONE,
+            },
+            r(0, 40),
+        );
+        let ensure_body = b.push(NodeKind::Nil, r(37, 38));
+        let ensure = b.push(
+            NodeKind::Ensure {
+                body: OptNodeId::some(rescue),
+                ensure_: OptNodeId::some(ensure_body),
+            },
+            r(0, 40),
+        );
+        let list = b.push_list(&[ensure]);
+        let root = b.push(NodeKind::Begin(list), r(0, 40));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "exception variant round-trip must be bit-equal"
+        );
+    }
+
+    #[test]
+    fn round_trip_op_assign_variants() {
+        // The three op-assign variants appended after `Ensure`
+        // (discriminants 60..=62) must survive the byte round-trip. Covers
+        // the struct-with-`op` shape (`OpAsgn`) and the two-`NodeId` shape
+        // (`OrAsgn`/`AndAsgn`).
+        let mut b = AstBuilder::new("x += 1; @y ||= 2; @@z &&= 3", "t.rb");
+        // `x += 1` — target is a value-less `Lvasgn`.
+        let x_name = b.intern_symbol("x");
+        let x_target = b.push(
+            NodeKind::Lvasgn {
+                name: x_name,
+                value: OptNodeId::NONE,
+            },
+            r(0, 1),
+        );
+        let plus = b.intern_symbol("+");
+        let one = b.push(NodeKind::Int(1), r(5, 6));
+        let op_asgn = b.push(
+            NodeKind::OpAsgn {
+                target: x_target,
+                op: plus,
+                value: one,
+            },
+            r(0, 6),
+        );
+        // `@y ||= 2` — target is a value-less `Ivasgn`.
+        let y_name = b.intern_symbol("@y");
+        let y_target = b.push(
+            NodeKind::Ivasgn {
+                name: y_name,
+                value: OptNodeId::NONE,
+            },
+            r(8, 10),
+        );
+        let two = b.push(NodeKind::Int(2), r(15, 16));
+        let or_asgn = b.push(
+            NodeKind::OrAsgn {
+                target: y_target,
+                value: two,
+            },
+            r(8, 16),
+        );
+        // `@@z &&= 3` — target is a value-less `Cvasgn`.
+        let z_name = b.intern_symbol("@@z");
+        let z_target = b.push(
+            NodeKind::Cvasgn {
+                name: z_name,
+                value: OptNodeId::NONE,
+            },
+            r(18, 21),
+        );
+        let three = b.push(NodeKind::Int(3), r(26, 27));
+        let and_asgn = b.push(
+            NodeKind::AndAsgn {
+                target: z_target,
+                value: three,
+            },
+            r(18, 27),
+        );
+        let list = b.push_list(&[op_asgn, or_asgn, and_asgn]);
+        let root = b.push(NodeKind::Begin(list), r(0, 27));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "op-assign variant round-trip must be bit-equal"
+        );
+    }
+
+    #[test]
+    fn round_trip_interp_string_variants() {
+        // The four interpolation variants appended after `AndAsgn`
+        // (discriminants 63..=66) must survive the byte round-trip. Covers
+        // the `NodeList` payloads (`Dstr`/`Dsym`/`Xstr`), populated and
+        // empty, and the `Regexp` struct with both empty and non-empty
+        // `opts`.
+        let mut b = AstBuilder::new("\"a#{b}\"; :\"s\"; `ls`; /re/im", "t.rb");
+        // `Dstr` — two parts.
+        let part_a = b.push(NodeKind::Nil, r(1, 2));
+        let part_b = b.push(NodeKind::Nil, r(2, 6));
+        let dstr_list = b.push_list(&[part_a, part_b]);
+        let dstr = b.push(NodeKind::Dstr(dstr_list), r(0, 7));
+        // `Dsym` — single part.
+        let sym_part = b.push(NodeKind::Nil, r(10, 11));
+        let dsym_list = b.push_list(&[sym_part]);
+        let dsym = b.push(NodeKind::Dsym(dsym_list), r(9, 13));
+        // `Xstr` — empty parts list.
+        let xstr = b.push(NodeKind::Xstr(NodeList::EMPTY), r(15, 19));
+        // `Regexp` — non-empty opts.
+        let re_part = b.push(NodeKind::Nil, r(22, 24));
+        let re_list = b.push_list(&[re_part]);
+        let opts_im = b.intern_symbol("im");
+        let regexp = b.push(
+            NodeKind::Regexp {
+                parts: re_list,
+                opts: opts_im,
+            },
+            r(21, 27),
+        );
+        // `Regexp` — empty opts (no flags).
+        let opts_empty = b.intern_symbol("");
+        let regexp_no_opts = b.push(
+            NodeKind::Regexp {
+                parts: NodeList::EMPTY,
+                opts: opts_empty,
+            },
+            r(0, 0),
+        );
+        let list = b.push_list(&[dstr, dsym, xstr, regexp, regexp_no_opts]);
+        let root = b.push(NodeKind::Begin(list), r(0, 27));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "interpolation variant round-trip must be bit-equal"
+        );
+    }
+
+    #[test]
+    fn round_trip_masgn_mlhs() {
+        // The `Masgn`/`Mlhs` variants appended after `Regexp`
+        // (discriminants 67/68) must survive the byte round-trip. Covers a
+        // populated `Mlhs` and the `Masgn` lhs/rhs `NodeId` pair.
+        let mut b = AstBuilder::new("a, b = 1, 2", "t.rb");
+        let a_name = b.intern_symbol("a");
+        let target_a = b.push(
+            NodeKind::Lvasgn {
+                name: a_name,
+                value: OptNodeId::NONE,
+            },
+            r(0, 1),
+        );
+        let b_name = b.intern_symbol("b");
+        let target_b = b.push(
+            NodeKind::Lvasgn {
+                name: b_name,
+                value: OptNodeId::NONE,
+            },
+            r(3, 4),
+        );
+        let lhs_list = b.push_list(&[target_a, target_b]);
+        let lhs = b.push(NodeKind::Mlhs(lhs_list), r(0, 4));
+        let one = b.push(NodeKind::Int(1), r(7, 8));
+        let two = b.push(NodeKind::Int(2), r(10, 11));
+        let rhs_list = b.push_list(&[one, two]);
+        let rhs = b.push(NodeKind::Array(rhs_list), r(7, 11));
+        let masgn = b.push(NodeKind::Masgn { lhs, rhs }, r(0, 11));
+        let list = b.push_list(&[masgn]);
+        let root = b.push(NodeKind::Begin(list), r(0, 11));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "Masgn/Mlhs round-trip must be bit-equal");
     }
 
     #[test]

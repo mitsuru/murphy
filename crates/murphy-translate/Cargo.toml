@@ -1,0 +1,11 @@
+[package]
+name = "murphy-translate"
+version = "0.1.0"
+edition = "2024"
+description = "prism AST → murphy-ast arena AST translation layer (murphy-9cr.15)."
+
+[dependencies]
+# Exact pin: identical to murphy-core. A prism node-schema change must not
+# ride in silently on the translation mapping (ADR 0001 discipline).
+ruby-prism = "=1.9.0"
+murphy-ast = { path = "../murphy-ast" }

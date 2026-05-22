@@ -202,6 +202,8 @@ pub enum NodeKind {
 
     // --- definitions ---
     Def {
+        /// singleton method（`def self.foo`）なら `receiver` が `Some`。
+        receiver: OptNodeId,
         name: Symbol,
         args: NodeId,
         body: OptNodeId,
@@ -219,6 +221,174 @@ pub enum NodeKind {
     // --- arguments ---
     Args(NodeList),
     Arg(Symbol),
+
+    // --- fallback ---
+    /// A valid prism node with no `NodeKind` mapping yet. Dispatch may
+    /// treat it as opaque; `murphy-translate` never panics on unknown
+    /// input. Distinct from `Error` (a prism *parse* error).
+    Unknown,
+
+    // --- assignments (appended post-`Unknown` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `$g = expr` — global-variable assignment.
+    Gvasgn {
+        name: Symbol,
+        value: OptNodeId,
+    },
+    /// `@@c = expr` — class-variable assignment.
+    Cvasgn {
+        name: Symbol,
+        value: OptNodeId,
+    },
+
+    // --- arguments (appended post-`Cvasgn` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `def f(a = 1)` の `a = 1` — optional positional parameter.
+    Optarg {
+        name: Symbol,
+        default: NodeId,
+    },
+    /// `*rest` — splat parameter. 匿名 `*` は `name` が空文字 interned。
+    Restarg(Symbol),
+    /// `def f(k:)` — required keyword parameter.
+    Kwarg(Symbol),
+    /// `def f(k: 1)` — optional keyword parameter.
+    Kwoptarg {
+        name: Symbol,
+        default: NodeId,
+    },
+    /// `**opts` — keyword splat parameter. 匿名 `**` は `name` が空文字 interned。
+    Kwrestarg(Symbol),
+    /// `&blk` — block parameter. 匿名 `&` は `name` が空文字 interned。
+    Blockarg(Symbol),
+
+    // --- collections (appended post-`Blockarg` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `**h` — ハッシュ内のキーワード splat（`AssocSplatNode`）。匿名 `**` は
+    /// 内側が `None`。
+    Kwsplat(OptNodeId),
+
+    // --- control flow (appended post-`Kwsplat` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `while cond ... end`。`is_begin_modifier` を `post` に畳む
+    /// （`while`/`while_post` の collapse）。
+    While {
+        cond: NodeId,
+        body: OptNodeId,
+        /// `true` なら do-while（`begin..end while c`）。
+        post: bool,
+    },
+    /// `until cond ... end`。`post` は [`NodeKind::While`] と同じ意味。
+    Until {
+        cond: NodeId,
+        body: OptNodeId,
+        post: bool,
+    },
+    /// `a..b` / `a...b`（`RangeNode`）。beginless/endless は端が `None`。
+    /// 型名 `RangeExpr` は既存のソース範囲 struct [`Range`] との衝突回避。
+    RangeExpr {
+        begin_: OptNodeId,
+        end_: OptNodeId,
+        /// `true` なら `...`（終端排他）。
+        exclusive: bool,
+    },
+
+    // --- definitions (appended post-`RangeExpr` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `class << expr ... end`（`SingletonClassNode`）— singleton class body。
+    Sclass {
+        expr: NodeId,
+        body: OptNodeId,
+    },
+
+    // --- control flow / jumps (appended post-`Sclass` per ADR 0037: variants
+    // are append-only; declaration order is the frozen discriminant) ---
+    /// `break`（引数 0→`None`、1→その式、複数→`Array`）。
+    Break(OptNodeId),
+    /// `next`（`Break` と同じ引数畳み込み）。
+    Next(OptNodeId),
+    /// `yield`（引数リスト）。
+    Yield(NodeList),
+    /// `super(args)`（明示引数あり、`SuperNode`）。
+    Super(NodeList),
+    /// `super`（引数も括弧も無いゼロ引数 super、`ForwardingSuperNode`）。
+    Zsuper,
+    /// `defined?(expr)`。
+    Defined(NodeId),
+
+    // --- exceptions (appended post-`Defined` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `begin..rescue..else..end` の rescue 構造。
+    Rescue {
+        /// 保護対象本体。
+        body: OptNodeId,
+        /// `Resbody` の並び。
+        resbodies: NodeList,
+        /// `else` 節。
+        else_: OptNodeId,
+    },
+    /// 単一の `rescue Exc => e; ...` 節。
+    Resbody {
+        /// 捕捉する例外クラスの並び（無指定なら空）。
+        exceptions: NodeList,
+        /// `=> e` の束縛先（無ければ `None`）。
+        var: OptNodeId,
+        body: OptNodeId,
+    },
+    /// `ensure` 構造。`body` は保護本体（rescue 節 or 素の本体）。
+    Ensure {
+        body: OptNodeId,
+        ensure_: OptNodeId,
+    },
+
+    // --- op-assign (appended post-`Ensure` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `target op= value`（`+=` `-=` 等）。`target` は値なし write ノード
+    /// （`Lvasgn`/`Ivasgn`/`Cvasgn`/`Gvasgn`/`Casgn` の `value` が `None`）。
+    OpAsgn {
+        target: NodeId,
+        op: Symbol,
+        value: NodeId,
+    },
+    /// `target ||= value`。`target` は値なし write ノード。
+    OrAsgn {
+        target: NodeId,
+        value: NodeId,
+    },
+    /// `target &&= value`。`target` は値なし write ノード。
+    AndAsgn {
+        target: NodeId,
+        value: NodeId,
+    },
+
+    // --- string interpolation / regexp / xstring (appended post-`AndAsgn`
+    // per ADR 0037: variants are append-only; declaration order is the
+    // frozen discriminant) ---
+    /// 補間文字列 `"a#{b}"` / 隣接文字列連結（`InterpolatedStringNode`）。
+    /// 部品の並び。
+    Dstr(NodeList),
+    /// 補間シンボル `:"a#{b}"`（`InterpolatedSymbolNode`）。
+    Dsym(NodeList),
+    /// バッククォート文字列 `` `cmd` ``（`XStringNode` /
+    /// `InterpolatedXStringNode`、補間あり/なし両方）。部品の並び。
+    Xstr(NodeList),
+    /// 正規表現 `/re/imx`（`RegularExpressionNode` /
+    /// `InterpolatedRegularExpressionNode`、補間あり/なし両方）。`opts` は
+    /// フラグ文字列（`"imx"` 等）を interned した `Symbol`。
+    Regexp {
+        parts: NodeList,
+        opts: Symbol,
+    },
+
+    // --- multiple assignment (appended post-`Regexp` per ADR 0037: variants
+    // are append-only; declaration order is the frozen discriminant) ---
+    /// 多重代入 `a, b = 1, 2`（`MultiWriteNode`）。`lhs` は `Mlhs`。
+    Masgn {
+        lhs: NodeId,
+        rhs: NodeId,
+    },
+    /// 多重代入の左辺ターゲット並び（`MultiWriteNode` / `MultiTargetNode`）。
+    Mlhs(NodeList),
 }
 
 /// A source comment, stored outside the node tree.
