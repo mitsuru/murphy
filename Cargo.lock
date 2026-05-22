@@ -633,6 +633,7 @@ name = "murphy-plugin-macros"
 version = "0.1.0"
 dependencies = [
  "murphy-ast",
+ "murphy-pattern",
  "murphy-plugin-api",
  "proc-macro2",
  "quote",
