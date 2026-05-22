@@ -184,9 +184,14 @@ C は補助」の本質。
 | カテゴリ | v1 採用 | v1 見送り |
 |---|---|---|
 | 構造 | ノードマッチ・`_`・`...`・`{}` union・`!` 否定・リテラル・`nil?` | `[]` all・`<>` any-order |
-| capture | `$`(位置 capture) | 名前付き capture |
+| capture | `$`(位置 capture)・`$name`(名前付き位置 capture) | 名前付き capture の back-reference |
 | 走査 | `^` 親・`` ` `` 子孫探索 | ― |
 | 述語 | `#predicate` | `%param`・regexp |
+
+**名前付き位置 capture(`$name`)** は murphy-9cr.17 で v1 採用(当初の見送り判断を改訂)。
+`$name` は body が暗黙の `_` の位置 capture で、`.so`/B バックエンドの型付き capture を
+名前付きフィールドとして生成できる。back-reference(同名 = 等価制約)は引き続き見送り。
+詳細は murphy-9cr.17 の design 参照。
 
 **「ネストした node 探索」= `` ` `` 子孫探索オペレータ** として文法に入れる。
 B では `node.descendants().find(...)` ループへ lowering、C では interpreter が
