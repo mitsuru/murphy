@@ -67,7 +67,10 @@ impl<'a> Parser<'a> {
         };
         self.pos += 1; // consume the prefix sigil
         let inner = self.prefixed()?;
-        let span = PatSpan::new(prefix_span.start as usize, inner.span.end as usize);
+        let span = PatSpan {
+            start: prefix_span.start,
+            end: inner.span.end,
+        };
         Ok(Pat {
             kind: wrap(Box::new(inner)),
             span,
@@ -248,6 +251,16 @@ mod tests {
     fn dangling_prefix_is_error() {
         // A prefix with nothing to apply to.
         assert!(parse("!").is_err());
+    }
+
+    #[test]
+    fn no_captures_before_task8() {
+        // Captures (`$`) are not implemented until Task 8; `parse` hardcodes
+        // `captures: Vec::new()`, so every pattern parsed so far must report
+        // zero captures. This pins the contract until Task 8 changes it.
+        assert_eq!(parse("_").unwrap().n_captures(), 0);
+        assert_eq!(parse("!send").unwrap().n_captures(), 0);
+        assert_eq!(parse(":sym").unwrap().n_captures(), 0);
     }
 
     #[test]
