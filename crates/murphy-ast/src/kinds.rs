@@ -194,6 +194,60 @@ mod tests {
         }
     }
 
+    /// The expected pattern name for each variant — an independent,
+    /// exhaustive cross-check of `KIND_PATTERN_NAMES`. The `match` is
+    /// exhaustive so a new `NodeKind` variant forces an update here too.
+    fn expected_pattern_name(k: &NodeKind) -> Option<&'static str> {
+        Some(match k {
+            NodeKind::Error => return None,
+            NodeKind::Nil => "nil",
+            NodeKind::True_ => "true",
+            NodeKind::False_ => "false",
+            NodeKind::SelfExpr => "self",
+            NodeKind::Int(_) => "int",
+            NodeKind::Float(_) => "float",
+            NodeKind::Str(_) => "str",
+            NodeKind::Sym(_) => "sym",
+            NodeKind::Lvar(_) => "lvar",
+            NodeKind::Ivar(_) => "ivar",
+            NodeKind::Cvar(_) => "cvar",
+            NodeKind::Gvar(_) => "gvar",
+            NodeKind::Const { .. } => "const",
+            NodeKind::Lvasgn { .. } => "lvasgn",
+            NodeKind::Ivasgn { .. } => "ivasgn",
+            NodeKind::Casgn { .. } => "casgn",
+            NodeKind::Send { .. } => "send",
+            NodeKind::Csend { .. } => "csend",
+            NodeKind::Block { .. } => "block",
+            NodeKind::BlockPass(_) => "block_pass",
+            NodeKind::Splat(_) => "splat",
+            NodeKind::Array(_) => "array",
+            NodeKind::Hash(_) => "hash",
+            NodeKind::Pair { .. } => "pair",
+            NodeKind::If { .. } => "if",
+            NodeKind::Case { .. } => "case",
+            NodeKind::When { .. } => "when",
+            NodeKind::Begin(_) => "begin",
+            NodeKind::Return(_) => "return",
+            NodeKind::And { .. } => "and",
+            NodeKind::Or { .. } => "or",
+            NodeKind::Def { .. } => "def",
+            NodeKind::Class { .. } => "class",
+            NodeKind::Module { .. } => "module",
+            NodeKind::Args(_) => "args",
+            NodeKind::Arg(_) => "arg",
+        })
+    }
+
+    #[test]
+    fn table_name_matches_variant() {
+        // Catches a MISLABELED table entry (e.g. lvar/ivar swapped), which
+        // `table_matches_tag` alone does not detect.
+        for k in all_variants() {
+            assert_eq!(pattern_name(k.tag()), expected_pattern_name(&k), "{k:?}");
+        }
+    }
+
     #[test]
     fn round_trip_and_unknown() {
         assert_eq!(tag_from_pattern_name("send"), Some(NodeKindTag(17)));
