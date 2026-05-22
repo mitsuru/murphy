@@ -167,3 +167,63 @@ fn inner_of(ast: &Ast) -> NodeId {
     };
     receiver.get().unwrap()
 }
+
+node_pattern!(is_if, "(if _ _ _)");
+node_pattern!(is_top_const, "(const nil? :Foo)");
+node_pattern!(is_array2, "(array 1 2)");
+node_pattern!(is_send_or_csend, "({send csend} ...)");
+node_pattern!(is_any_paren, "(_ ...)");
+
+#[test]
+fn schema_table_and_flexible_heads() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    // if: cond/then/else all Int
+    let c = b.push(NodeKind::Int(0), r());
+    let t = b.push(NodeKind::Int(1), r());
+    let e = b.push(NodeKind::Int(2), r());
+    let iff = b.push(
+        NodeKind::If {
+            cond: c,
+            then_: OptNodeId::some(t),
+            else_: OptNodeId::some(e),
+        },
+        r(),
+    );
+    // const Foo (no scope)
+    let foo = b.intern_symbol("Foo");
+    let kons = b.push(
+        NodeKind::Const {
+            scope: OptNodeId::NONE,
+            name: foo,
+        },
+        r(),
+    );
+    // [1, 2]
+    let a1 = b.push(NodeKind::Int(1), r());
+    let a2 = b.push(NodeKind::Int(2), r());
+    let alist = b.push_list(&[a1, a2]);
+    let arr = b.push(NodeKind::Array(alist), r());
+    // bare puts call: (send nil :puts) with no receiver
+    let puts = b.intern_symbol("puts");
+    let snd = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: puts,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    let list = b.push_list(&[iff, kons, arr, snd]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_if(iff, &cx));
+    assert!(is_top_const(kons, &cx));
+    assert!(is_array2(arr, &cx));
+    assert!(is_send_or_csend(snd, &cx));
+    assert!(!is_send_or_csend(iff, &cx));
+    assert!(is_any_paren(iff, &cx) && is_any_paren(arr, &cx));
+}
