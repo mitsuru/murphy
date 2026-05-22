@@ -112,7 +112,13 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
             out.push(rhs);
         }
 
-        NodeKind::Def { args, body, .. } => {
+        NodeKind::Def {
+            receiver,
+            args,
+            body,
+            ..
+        } => {
+            push_opt(out, receiver);
             out.push(args);
             push_opt(out, body);
         }
@@ -142,6 +148,11 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         NodeKind::RangeExpr { begin_, end_, .. } => {
             push_opt(out, begin_);
             push_opt(out, end_);
+        }
+
+        NodeKind::Sclass { expr, body } => {
+            out.push(expr);
+            push_opt(out, body);
         }
     }
 }

@@ -212,8 +212,14 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, lhs.0);
             put_u32(out, rhs.0);
         }
-        NodeKind::Def { name, args, body } => {
+        NodeKind::Def {
+            receiver,
+            name,
+            args,
+            body,
+        } => {
             put_u8(out, 32);
+            put_u32(out, receiver.0);
             put_u32(out, name.0);
             put_u32(out, args.0);
             put_u32(out, body.0);
@@ -304,6 +310,11 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, end_.0);
             put_u8(out, exclusive as u8);
         }
+        NodeKind::Sclass { expr, body } => {
+            put_u8(out, 50);
+            put_u32(out, expr.0);
+            put_u32(out, body.0);
+        }
     }
 }
 
@@ -388,6 +399,7 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             rhs: NodeId(get_u32(cur)?),
         },
         32 => NodeKind::Def {
+            receiver: OptNodeId(get_u32(cur)?),
             name: Symbol(get_u32(cur)?),
             args: NodeId(get_u32(cur)?),
             body: OptNodeId(get_u32(cur)?),
@@ -439,6 +451,10 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             begin_: OptNodeId(get_u32(cur)?),
             end_: OptNodeId(get_u32(cur)?),
             exclusive: get_u8(cur)? != 0,
+        },
+        50 => NodeKind::Sclass {
+            expr: NodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
         },
         _ => return Err(SerError::BadDiscriminant),
     })
@@ -621,7 +637,7 @@ impl Ast {
 #[cfg(test)]
 mod tests {
     use crate::builder::AstBuilder;
-    use crate::node::{CommentKind, NodeKind, OptNodeId, Range};
+    use crate::node::{CommentKind, NodeKind, NodeList, OptNodeId, Range};
 
     fn r(a: u32, b: u32) -> Range {
         Range { start: a, end: b }
@@ -818,6 +834,58 @@ mod tests {
 
         let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
         assert_eq!(ast, restored, "RangeExpr round-trip must be bit-equal");
+    }
+
+    #[test]
+    fn round_trip_def_with_receiver_and_sclass() {
+        // `Def` 改修（discriminant 32、`receiver` フィールド追加）と `Sclass`
+        // （discriminant 50、`RangeExpr` の次）が byte round-trip で保存される。
+        // singleton `def self.foo` の `receiver` Some と素の `def` の None
+        // 両方を、`Sclass` の present/`None` body とともに確認する。
+        let mut b = AstBuilder::new("class << self\n  def self.f; end\nend", "t.rb");
+        let empty_args1 = b.push(NodeKind::Args(NodeList::EMPTY), r(20, 20));
+        let self_recv = b.push(NodeKind::SelfExpr, r(18, 22));
+        let f_name = b.intern_symbol("f");
+        // singleton def: receiver Some, body None.
+        let singleton_def = b.push(
+            NodeKind::Def {
+                receiver: OptNodeId::some(self_recv),
+                name: f_name,
+                args: empty_args1,
+                body: OptNodeId::NONE,
+            },
+            r(16, 30),
+        );
+        // plain def: receiver None, body Some.
+        let empty_args2 = b.push(NodeKind::Args(NodeList::EMPTY), r(0, 0));
+        let g_name = b.intern_symbol("g");
+        let body = b.push(NodeKind::Nil, r(0, 3));
+        let plain_def = b.push(
+            NodeKind::Def {
+                receiver: OptNodeId::NONE,
+                name: g_name,
+                args: empty_args2,
+                body: OptNodeId::some(body),
+            },
+            r(0, 10),
+        );
+        let def_list = b.push_list(&[singleton_def, plain_def]);
+        let sclass_body = b.push(NodeKind::Begin(def_list), r(16, 30));
+        let expr = b.push(NodeKind::SelfExpr, r(8, 12));
+        let root = b.push(
+            NodeKind::Sclass {
+                expr,
+                body: OptNodeId::some(sclass_body),
+            },
+            r(0, 34),
+        );
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(
+            ast, restored,
+            "Def-with-receiver / Sclass round-trip must be bit-equal"
+        );
     }
 
     #[test]

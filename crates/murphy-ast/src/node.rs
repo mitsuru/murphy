@@ -202,6 +202,8 @@ pub enum NodeKind {
 
     // --- definitions ---
     Def {
+        /// singleton method（`def self.foo`）なら `receiver` が `Some`。
+        receiver: OptNodeId,
         name: Symbol,
         args: NodeId,
         body: OptNodeId,
@@ -289,6 +291,14 @@ pub enum NodeKind {
         end_: OptNodeId,
         /// `true` なら `...`（終端排他）。
         exclusive: bool,
+    },
+
+    // --- definitions (appended post-`RangeExpr` per ADR 0037: variants are
+    // append-only; declaration order is the frozen discriminant) ---
+    /// `class << expr ... end`（`SingletonClassNode`）— singleton class body。
+    Sclass {
+        expr: NodeId,
+        body: OptNodeId,
     },
 }
 

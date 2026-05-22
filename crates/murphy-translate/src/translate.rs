@@ -433,7 +433,57 @@ impl Translator {
             );
         }
 
-        // Task 11 以降、ここに各ノード種の arm を足していく。
+        // --- definitions ---
+        if let Some(d) = node.as_def_node() {
+            // singleton `def self.foo` は `receiver` Some に畳む。
+            let receiver = d
+                .receiver()
+                .map(|r| OptNodeId::some(self.translate_node(&r)))
+                .unwrap_or(OptNodeId::NONE);
+            let name = self.sym(&d.name());
+            let args = self.translate_parameters(d.parameters(), range);
+            // body は foundational helper `translate_body`（`StatementsNode` を畳む）。
+            let body = self.translate_body(d.body());
+            return self.builder.push(
+                NodeKind::Def {
+                    receiver,
+                    name,
+                    args,
+                    body,
+                },
+                range,
+            );
+        }
+        if let Some(c) = node.as_class_node() {
+            // `constant_path()` は名前ノード（`Const` / `ConstantPath`）。
+            let name = self.translate_node(&c.constant_path());
+            let superclass = c
+                .superclass()
+                .map(|s| OptNodeId::some(self.translate_node(&s)))
+                .unwrap_or(OptNodeId::NONE);
+            let body = self.translate_body(c.body());
+            return self.builder.push(
+                NodeKind::Class {
+                    name,
+                    superclass,
+                    body,
+                },
+                range,
+            );
+        }
+        if let Some(m) = node.as_module_node() {
+            let name = self.translate_node(&m.constant_path());
+            let body = self.translate_body(m.body());
+            return self.builder.push(NodeKind::Module { name, body }, range);
+        }
+        if let Some(sc) = node.as_singleton_class_node() {
+            // `expression()` は `class << EXPR` の `EXPR`（非 Option の `Node`）。
+            let expr = self.translate_node(&sc.expression());
+            let body = self.translate_body(sc.body());
+            return self.builder.push(NodeKind::Sclass { expr, body }, range);
+        }
+
+        // Task 12 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
 
@@ -1205,6 +1255,114 @@ mod tests {
                 assert!(end_.get().is_some());
             }
             other => panic!("expected RangeExpr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_def() {
+        // `def foo(a); a; end` → Def { receiver: None, name: foo, body: Some }。
+        let ast = translate("def foo(a); a; end", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Def {
+                receiver,
+                name,
+                body,
+                ..
+            } => {
+                assert!(receiver.is_none());
+                assert_eq!(ast.interner().resolve(name.0), "foo");
+                assert!(body.get().is_some());
+            }
+            other => panic!("expected Def, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_def_args_is_args_node() {
+        // Def の `args` 子は常に `Args` ノード（パラメータ無しでも空 Args）。
+        let ast = translate("def foo(a, b = 1); end", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Def { args, body, .. } => {
+                match ast.kind(*args) {
+                    NodeKind::Args(l) => assert_eq!(l.len, 2),
+                    other => panic!("expected Args, got {other:?}"),
+                }
+                assert!(body.is_none(), "空ボディは None");
+            }
+            other => panic!("expected Def, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_singleton_def() {
+        // `def self.foo; end` → Def { receiver: Some(self) }。
+        let ast = translate("def self.foo; end", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Def { receiver, .. } => {
+                let recv = receiver.get().expect("singleton def → receiver Some");
+                assert!(matches!(ast.kind(recv), NodeKind::SelfExpr));
+            }
+            other => panic!("expected Def, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_class_module_sclass() {
+        let c = translate("class C; end", "t.rb");
+        assert!(matches!(c.kind(c.root()), NodeKind::Class { .. }));
+        let m = translate("module M; end", "t.rb");
+        assert!(matches!(m.kind(m.root()), NodeKind::Module { .. }));
+        let sc = translate("class << self; end", "t.rb");
+        match sc.kind(sc.root()) {
+            NodeKind::Sclass { expr, .. } => {
+                assert!(matches!(sc.kind(*expr), NodeKind::SelfExpr));
+            }
+            other => panic!("expected Sclass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_class_with_superclass_and_body() {
+        // `class C < D; x; end` → Class { name: Const C, superclass: Some, body: Some }。
+        let ast = translate("class C < D\n  x\nend", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Class {
+                name,
+                superclass,
+                body,
+            } => {
+                assert!(matches!(ast.kind(*name), NodeKind::Const { .. }));
+                assert!(superclass.get().is_some());
+                assert!(body.get().is_some());
+            }
+            other => panic!("expected Class, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_module_with_body() {
+        // `module M; x; y; end` → Module、body は複数文なので Begin に畳まれる。
+        let ast = translate("module M\n  x\n  y\nend", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Module { name, body } => {
+                assert!(matches!(ast.kind(*name), NodeKind::Const { .. }));
+                let b = body.get().expect("module body");
+                assert!(matches!(ast.kind(b), NodeKind::Begin(_)));
+            }
+            other => panic!("expected Module, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_sclass_with_body() {
+        // `class << self; def f; end; end` → Sclass、body に Def。
+        let ast = translate("class << self\n  def f; end\nend", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Sclass { body, .. } => {
+                let b = body.get().expect("sclass body");
+                assert!(matches!(ast.kind(b), NodeKind::Def { .. }));
+            }
+            other => panic!("expected Sclass, got {other:?}"),
         }
     }
 
