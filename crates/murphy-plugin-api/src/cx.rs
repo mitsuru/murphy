@@ -145,6 +145,40 @@ impl<'a> Cx<'a> {
         std::str::from_utf8(&src[range.start as usize..range.end as usize])
             .expect("source is valid UTF-8")
     }
+
+    /// Record an offense. `cop_name` is stamped from the `CxRaw` the host
+    /// built for the running cop.
+    pub fn emit_offense(&self, range: Range, message: &str, severity: Option<crate::Severity>) {
+        let offense = crate::RawOffense {
+            cop_name: self.raw.cop_name,
+            message: crate::RawSlice {
+                ptr: message.as_ptr(),
+                len: message.len(),
+            },
+            range,
+            severity: crate::Severity::to_wire(severity),
+        };
+        // Safety: `fns` is non-null per `from_raw`'s contract; `sink` is
+        // an opaque host handle interpreted only by the callback. The
+        // message slice outlives this synchronous call.
+        let fns = unsafe { &*self.raw.fns };
+        unsafe { (fns.emit_offense)(self.raw.sink, &offense) };
+    }
+
+    /// Record an autocorrect edit. Offense↔edit correlation is the host's
+    /// (murphy-9cr.22) concern.
+    pub fn emit_edit(&self, range: Range, replacement: &str) {
+        let edit = crate::RawEdit {
+            range,
+            replacement: crate::RawSlice {
+                ptr: replacement.as_ptr(),
+                len: replacement.len(),
+            },
+        };
+        // Safety: see `emit_offense`.
+        let fns = unsafe { &*self.raw.fns };
+        unsafe { (fns.emit_edit)(self.raw.sink, &edit) };
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +263,68 @@ mod tests {
         assert_eq!(
             cx.raw_source(cx.range(root)),
             ast.raw_source(ast.range(root))
+        );
+    }
+
+    use std::cell::RefCell;
+
+    struct Sink {
+        offenses: Vec<(String, String, Range, u8)>,
+        edits: Vec<(Range, String)>,
+    }
+
+    unsafe extern "C" fn record_offense(sink: *mut std::ffi::c_void, o: *const RawOffense) {
+        let sink = unsafe { &*(sink as *const RefCell<Sink>) };
+        let o = unsafe { &*o };
+        sink.borrow_mut().offenses.push((
+            String::from_utf8(unsafe { o.cop_name.as_bytes() }.to_vec()).unwrap(),
+            String::from_utf8(unsafe { o.message.as_bytes() }.to_vec()).unwrap(),
+            o.range,
+            o.severity,
+        ));
+    }
+
+    unsafe extern "C" fn record_edit(sink: *mut std::ffi::c_void, e: *const RawEdit) {
+        let sink = unsafe { &*(sink as *const RefCell<Sink>) };
+        let e = unsafe { &*e };
+        sink.borrow_mut().edits.push((
+            e.range,
+            String::from_utf8(unsafe { e.replacement.as_bytes() }.to_vec()).unwrap(),
+        ));
+    }
+
+    #[test]
+    fn emit_forwards_offense_and_edit_to_the_fn_table() {
+        let (ast, root) = fixture();
+        let fns = FnTable {
+            emit_offense: record_offense,
+            emit_edit: record_edit,
+        };
+        let sink = RefCell::new(Sink {
+            offenses: Vec::new(),
+            edits: Vec::new(),
+        });
+
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.cop_name = RawSlice::from_str("Plugin/Demo");
+        raw.sink = &sink as *const _ as *mut std::ffi::c_void;
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        cx.emit_offense(cx.range(root), "bad return", Some(crate::Severity::Error));
+        cx.emit_edit(Range { start: 7, end: 10 }, "false");
+
+        let s = sink.borrow();
+        assert_eq!(s.offenses.len(), 1);
+        assert_eq!(s.offenses[0].0, "Plugin/Demo");
+        assert_eq!(s.offenses[0].1, "bad return");
+        assert_eq!(
+            s.offenses[0].3,
+            crate::Severity::to_wire(Some(crate::Severity::Error))
+        );
+        assert_eq!(s.offenses[0].2, cx.range(root));
+        assert_eq!(
+            s.edits,
+            vec![(Range { start: 7, end: 10 }, "false".to_string())]
         );
     }
 

@@ -114,6 +114,10 @@ pub struct RawEdit {
 /// Everything else a cop needs (traversal, `NodeKind` matching, interner
 /// resolution, comments, source text) is a pure read of the immutable
 /// arena and lives on `Cx` directly, off the ABI's hot path.
+///
+/// Callbacks receive pointers valid only for the duration of the
+/// synchronous call; an implementation must not retain any pointer
+/// (including the `RawSlice`s inside the payload) past return.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FnTable {
