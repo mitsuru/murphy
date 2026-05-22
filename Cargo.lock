@@ -485,6 +485,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "murphy-pattern"
+version = "0.1.0"
+dependencies = [
+ "murphy-ast",
+]
+
+[[package]]
 name = "murphy-plugin-api"
 version = "0.1.0"
 dependencies = [
