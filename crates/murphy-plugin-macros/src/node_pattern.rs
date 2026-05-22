@@ -80,7 +80,6 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
 
     let mut ctx = Lower {
         fail: fail.clone(),
-        capture_allowed: true,
         next: 0,
     };
     let body = lower_pat(&ast.root, &quote!(node), &mut ctx)?;
@@ -111,9 +110,6 @@ fn cap_ident(i: usize) -> Ident {
 struct Lower {
     /// The expression a failed guard returns (`false` or `None`).
     fail: TokenStream,
-    /// Whether a `$` capture is legal at the current position. Set false
-    /// inside `{}` union, `!` negation and `` ` `` descend.
-    capture_allowed: bool,
     /// Monotonic counter feeding [`gensym`]; guarantees unique binding
     /// identifiers across recursion depth so nested `(send (send ...) ...)`
     /// matches do not shadow each other's `__b*` / `__n*` / `__list*`.
@@ -705,17 +701,38 @@ fn lower_pat(
             })
         }
         PatKind::Node { head, children } => lower_node(head, children, subject, ctx),
+        PatKind::Union(alts) => {
+            // Each alternative lowers to a `return`-free bool expression; the
+            // node matches the union iff any arm's expression is true.
+            let alt_bools: Vec<TokenStream> = alts
+                .iter()
+                .map(|alt| lower_bool(alt, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            let fail = fail_stmt(ctx);
+            let ok = gensym(ctx, "__ok");
+            Ok(quote! {
+                let #ok: bool = ( #(#alt_bools)||* );
+                if !#ok {
+                    #fail
+                }
+            })
+        }
+        PatKind::Not(inner) => {
+            // `!x` matches iff `x` does not — lower `x` to a bool expression
+            // and fail when it holds.
+            let inner_bool = lower_bool(inner, subject, ctx)?;
+            let fail = fail_stmt(ctx);
+            Ok(quote! {
+                if #inner_bool {
+                    #fail
+                }
+            })
+        }
         PatKind::Capture {
             slot,
             name: _,
             body,
         } => {
-            if !ctx.capture_allowed {
-                return Err(syn::Error::new(
-                    Span::call_site(),
-                    "node_pattern!: `$` capture is not allowed inside `{}` / `!` / `` ` ``",
-                ));
-            }
             // A `$...` seq capture (`Capture` whose `body` is `Rest`) is
             // only valid inside a node's variable-length child list, where
             // `lower_trailing_list` intercepts it. Reaching this arm means
@@ -1113,6 +1130,325 @@ fn lower_trailing_list(
     }
 
     Ok(quote!(#(#guards)*))
+}
+
+/// Lower one `Pat` against `subject` (a `NodeId`-typed expression) into a
+/// single `return`-free **bool expression**.
+///
+/// This is the lowering route for the inside of `{}` union, `!` negation and
+/// `` ` `` descend: those positions need a value, not a guard sequence that
+/// `return`s on mismatch (the `lower_pat` route). The produced expression is
+/// built only from `matches!`, `&&`, `||`, `if let`/`map_or` and method
+/// calls — it never contains a `return` and never touches `ctx.fail`.
+///
+/// v1 restriction: a `Node` pattern reachable here may use only fixed slots
+/// (`Node`/`OptNode`/`Sym`). A node whose pattern carries variable-length
+/// `List`-slot children is rejected with a `compile_error` — fully mirroring
+/// `lower_pat`'s `List` handling in bool form would near-duplicate the Node
+/// machinery and is out of v1 scope. Captures and `...` are never legal here.
+fn lower_bool(
+    pat: &murphy_pattern::Pat,
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    use murphy_pattern::PatKind;
+    match &pat.kind {
+        PatKind::Wildcard => Ok(quote!(true)),
+        PatKind::Lit(lit) => Ok(lower_bool_lit(lit, subject)),
+        PatKind::Kind(tag) => {
+            let tag_u8 = tag.0;
+            Ok(quote! {
+                ( cx.kind(#subject).tag() == ::murphy_ast::NodeKindTag(#tag_u8) )
+            })
+        }
+        PatKind::NilTest => Ok(quote! {
+            ( ::core::matches!(*cx.kind(#subject), ::murphy_ast::NodeKind::Nil) )
+        }),
+        PatKind::Node { head, children } => lower_bool_node(head, children, subject, ctx),
+        PatKind::Union(alts) => {
+            let alt_bools: Vec<TokenStream> = alts
+                .iter()
+                .map(|alt| lower_bool(alt, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            Ok(quote!( ( #(#alt_bools)||* ) ))
+        }
+        PatKind::Not(inner) => {
+            let inner_bool = lower_bool(inner, subject, ctx)?;
+            Ok(quote!( ( !#inner_bool ) ))
+        }
+        PatKind::Predicate(_) => Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: predicate inside `{}` / `!` / `` ` `` not yet supported",
+        )),
+        PatKind::Parent(inner) => {
+            let p = gensym(ctx, "__p");
+            let inner_bool = lower_bool(inner, &quote!(#p), ctx)?;
+            Ok(quote! {
+                ( cx.parent(#subject).get().map_or(false, |#p| #inner_bool) )
+            })
+        }
+        PatKind::Descend(inner) => {
+            let d = gensym(ctx, "__d");
+            let inner_bool = lower_bool(inner, &quote!(#d), ctx)?;
+            Ok(quote! {
+                ( cx.descendants(#subject).into_iter().any(|#d| #inner_bool) )
+            })
+        }
+        PatKind::Capture { .. } => Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: `$` capture is not allowed inside `{}` / `!` / `` ` ``",
+        )),
+        PatKind::Rest => Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: `...` is not valid here",
+        )),
+    }
+}
+
+/// Lower a `Lit` into a `return`-free bool expression — the value-form
+/// counterpart of the `Lit` arm in [`lower_pat`].
+fn lower_bool_lit(lit: &murphy_pattern::Lit, subject: &TokenStream) -> TokenStream {
+    use murphy_pattern::Lit;
+    match lit {
+        Lit::Int(v) => quote! {
+            ( ::core::matches!(
+                *cx.kind(#subject),
+                ::murphy_ast::NodeKind::Int(__v) if __v == #v
+            ) )
+        },
+        Lit::Float(v) => quote! {
+            ( if let ::murphy_ast::NodeKind::Float(__v) = *cx.kind(#subject) {
+                // Exact equality is intentional: the pattern author wrote a specific float literal.
+                #[allow(clippy::float_cmp)]
+                { __v == #v }
+            } else {
+                false
+            } )
+        },
+        Lit::Str(s) => {
+            let s = s.as_str();
+            quote! {
+                ( ::core::matches!(
+                    *cx.kind(#subject),
+                    ::murphy_ast::NodeKind::Str(__id) if cx.string_str(__id) == #s
+                ) )
+            }
+        }
+        Lit::Sym(s) => {
+            let s = s.as_str();
+            quote! {
+                ( ::core::matches!(
+                    *cx.kind(#subject),
+                    ::murphy_ast::NodeKind::Sym(__sym) if cx.symbol_str(__sym) == #s
+                ) )
+            }
+        }
+        Lit::True => quote! {
+            ( ::core::matches!(*cx.kind(#subject), ::murphy_ast::NodeKind::True_) )
+        },
+        Lit::False => quote! {
+            ( ::core::matches!(*cx.kind(#subject), ::murphy_ast::NodeKind::False_) )
+        },
+        Lit::Nil => quote! {
+            ( ::core::matches!(*cx.kind(#subject), ::murphy_ast::NodeKind::Nil) )
+        },
+    }
+}
+
+/// Lower a `(head child...)` node match into a `return`-free bool expression.
+///
+/// `Head::Any` / `Head::OneOf` are kind-only matches (children must be empty
+/// or a single `...`, reusing [`check_kind_only_children`]). `Head::Exact`
+/// destructures the kind and `&&`-chains a per-fixed-slot bool sub-expression.
+/// A node whose pattern carries `List`-slot children is rejected — see the
+/// v1 restriction documented on [`lower_bool`].
+fn lower_bool_node(
+    head: &murphy_pattern::Head,
+    children: &[murphy_pattern::Pat],
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    use murphy_pattern::Head;
+    match head {
+        Head::Any => {
+            check_kind_only_children(children)?;
+            Ok(quote!(true))
+        }
+        Head::OneOf(tags) => {
+            check_kind_only_children(children)?;
+            let tag_u8s: Vec<u8> = tags.iter().map(|t| t.0).collect();
+            Ok(quote! {
+                ( ::core::matches!(cx.kind(#subject).tag().0, #(#tag_u8s)|*) )
+            })
+        }
+        Head::Exact(t) => lower_bool_exact_node(*t, children, subject, ctx),
+    }
+}
+
+/// Lower a `Head::Exact` node match into a `return`-free bool expression.
+fn lower_bool_exact_node(
+    tag: murphy_ast::NodeKindTag,
+    children: &[murphy_pattern::Pat],
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    let schema = schema_for(tag.0).ok_or_else(|| {
+        let name = murphy_ast::pattern_name(tag).unwrap_or("?");
+        syn::Error::new(
+            Span::call_site(),
+            format!(
+                "node_pattern!: node kind `{name}` is not supported by \
+                 node_pattern! in v1 — see follow-up issue"
+            ),
+        )
+    })?;
+
+    let has_list = schema
+        .slots
+        .last()
+        .is_some_and(|s| matches!(s.ty, SlotTy::List));
+    let fixed_count = schema.slots.len() - usize::from(has_list);
+
+    if children.len() < fixed_count {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: too few children",
+        ));
+    }
+    // v1 restriction: a node whose pattern supplies `List`-slot children is
+    // not supported inside `{}` / `!` / `` ` ``. An unconstrained `List` slot
+    // (children fill exactly the fixed slots) is fine — the list is simply
+    // left unmatched. `children.len() > fixed_count` means list children are
+    // present; for a `List`-less kind it also means a plain count mismatch.
+    if children.len() > fixed_count {
+        if has_list {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "node_pattern!: a node pattern with a variable-length child \
+                 list is not supported inside `{}` / `!` / `` ` `` in v1",
+            ));
+        }
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: wrong number of children",
+        ));
+    }
+
+    // Bind every schema slot's field; fixed slots get a gensym binding, a
+    // trailing `List` slot is bound as `_` (the list is left unconstrained).
+    let variant = Ident::new(schema.variant, Span::call_site());
+    let fixed_binds: Vec<Ident> = (0..fixed_count).map(|_| gensym(ctx, "__b")).collect();
+
+    let field_pats: Vec<TokenStream> = schema
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let bind: TokenStream = if i < fixed_count {
+                let b = &fixed_binds[i];
+                quote!(#b)
+            } else {
+                quote!(_)
+            };
+            match slot.field {
+                FieldRef::Named(name) => {
+                    let f = Ident::new(name, Span::call_site());
+                    quote!(#f: #bind)
+                }
+                FieldRef::Pos(arity, index) => {
+                    let holes =
+                        (0..arity).map(|j| if j == index { bind.clone() } else { quote!(_) });
+                    quote!(#(#holes),*)
+                }
+            }
+        })
+        .collect();
+
+    // Per-fixed-slot bool sub-expressions, `&&`-chained.
+    let mut slot_checks: Vec<TokenStream> = Vec::new();
+    for (slot, (bind, child)) in schema
+        .slots
+        .iter()
+        .take(fixed_count)
+        .zip(fixed_binds.iter().zip(children))
+    {
+        slot_checks.push(lower_bool_fixed_slot(slot.ty, bind, child, ctx)?);
+    }
+    let body = if slot_checks.is_empty() {
+        quote!(true)
+    } else {
+        quote!( #(#slot_checks)&&* )
+    };
+
+    let is_tuple = matches!(
+        schema.slots.first().map(|s| s.field),
+        Some(FieldRef::Pos(..))
+    );
+    let destructure = if is_tuple {
+        quote!(::murphy_ast::NodeKind::#variant(#(#field_pats),*))
+    } else {
+        let rest = if schema.covers_all_fields {
+            quote!()
+        } else {
+            quote!(, ..)
+        };
+        quote!(::murphy_ast::NodeKind::#variant { #(#field_pats),* #rest })
+    };
+
+    Ok(quote! {
+        ( if let #destructure = *cx.kind(#subject) {
+            #body
+        } else {
+            false
+        } )
+    })
+}
+
+/// Lower one fixed (non-`List`) slot into a `return`-free bool sub-expression
+/// — the value-form counterpart of [`lower_fixed_slot`].
+fn lower_bool_fixed_slot(
+    ty: SlotTy,
+    bind: &Ident,
+    child: &murphy_pattern::Pat,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    use murphy_pattern::{Lit, PatKind};
+    match ty {
+        SlotTy::Node => lower_bool(child, &quote!(#bind), ctx),
+        SlotTy::OptNode => {
+            if matches!(child.kind, PatKind::NilTest) {
+                // Bare `nil?` at an `OptNode` slot: an absent slot matches,
+                // a present slot must be a `nil` node.
+                let n = gensym(ctx, "__n");
+                Ok(quote! {
+                    ( #bind.get().map_or(true, |#n| ::core::matches!(
+                        *cx.kind(#n),
+                        ::murphy_ast::NodeKind::Nil
+                    )) )
+                })
+            } else {
+                // Any other child: the slot must be present and the child
+                // pattern must hold against it.
+                let n = gensym(ctx, "__n");
+                let inner = lower_bool(child, &quote!(#n), ctx)?;
+                Ok(quote! {
+                    ( #bind.get().map_or(false, |#n| #inner) )
+                })
+            }
+        }
+        SlotTy::Sym => match &child.kind {
+            PatKind::Wildcard => Ok(quote!(true)),
+            PatKind::Lit(Lit::Sym(s)) => {
+                let s = s.as_str();
+                Ok(quote!( ( cx.symbol_str(#bind) == #s ) ))
+            }
+            _ => Err(syn::Error::new(
+                Span::call_site(),
+                "node_pattern!: symbol slot only accepts a `:sym` literal or `_`",
+            )),
+        },
+        SlotTy::List => unreachable!("List slot is excluded from fixed slots"),
+    }
 }
 
 #[cfg(test)]

@@ -359,3 +359,65 @@ fn bare_rest_only_list() {
     assert!(rest_only(arr, &cx));
     assert!(rest_only(empty_arr, &cx));
 }
+
+node_pattern!(is_send_or_int, "{send int}");
+node_pattern!(not_nil, "!nil");
+node_pattern!(send_nonnil_recv, "(send !nil? :foo)");
+
+#[test]
+fn union_and_negation() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let i = b.push(NodeKind::Int(9), r());
+    let niln = b.push(NodeKind::Nil, r());
+    let foo = b.intern_symbol("foo");
+    // `snd`: a `foo` send with NO receiver (`OptNodeId::NONE`).
+    let snd = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: foo,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    // `nil_recv_send`: a `foo` send whose receiver IS a `Nil` node — the
+    // `!nil?` negation must reject it.
+    let nil_recv = b.push(NodeKind::Nil, r());
+    let nil_recv_send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(nil_recv),
+            method: foo,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    // `int_recv_send`: a `foo` send whose receiver is a (non-`Nil`) `Int`
+    // node — the `!nil?` negation must accept it.
+    let int_recv = b.push(NodeKind::Int(3), r());
+    let int_recv_send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(int_recv),
+            method: foo,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    let list = b.push_list(&[i, niln, snd, nil_recv_send, int_recv_send]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_send_or_int(i, &cx) && is_send_or_int(snd, &cx));
+    assert!(!is_send_or_int(niln, &cx));
+    assert!(not_nil(i, &cx));
+    assert!(!not_nil(niln, &cx));
+
+    // `(send !nil? :foo)` — `!`-at-an-`OptNode`-slot runtime path.
+    // Receiver IS a `nil` node: `!nil?` rejects it.
+    assert!(!send_nonnil_recv(nil_recv_send, &cx));
+    // Receiver is present and not a `nil` node: `!nil?` accepts it.
+    assert!(send_nonnil_recv(int_recv_send, &cx));
+    // No receiver at all: `!nil?` requires the receiver present, so reject.
+    assert!(!send_nonnil_recv(snd, &cx));
+}
