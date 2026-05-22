@@ -92,38 +92,34 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             let _ = write!(out, "(gvar {})", interner.resolve(s.0));
         }
         NodeKind::Const { scope, name } => {
-            let _ = write!(out, "(const :{}\n", interner.resolve(name.0));
+            let _ = writeln!(out, "(const :{}", interner.resolve(name.0));
             write_opt(ast, scope, d, out);
             out.push(')');
         }
 
         // --- assignments ---
         NodeKind::Lvasgn { name, value } => {
-            let _ = write!(out, "(lvasgn {}\n", interner.resolve(name.0));
+            let _ = writeln!(out, "(lvasgn {}", interner.resolve(name.0));
             write_opt(ast, value, d, out);
             out.push(')');
         }
         NodeKind::Ivasgn { name, value } => {
-            let _ = write!(out, "(ivasgn {}\n", interner.resolve(name.0));
+            let _ = writeln!(out, "(ivasgn {}", interner.resolve(name.0));
             write_opt(ast, value, d, out);
             out.push(')');
         }
         NodeKind::Gvasgn { name, value } => {
-            let _ = write!(out, "(gvasgn {}\n", interner.resolve(name.0));
+            let _ = writeln!(out, "(gvasgn {}", interner.resolve(name.0));
             write_opt(ast, value, d, out);
             out.push(')');
         }
         NodeKind::Cvasgn { name, value } => {
-            let _ = write!(out, "(cvasgn {}\n", interner.resolve(name.0));
+            let _ = writeln!(out, "(cvasgn {}", interner.resolve(name.0));
             write_opt(ast, value, d, out);
             out.push(')');
         }
-        NodeKind::Casgn {
-            scope,
-            name,
-            value,
-        } => {
-            let _ = write!(out, "(casgn :{}\n", interner.resolve(name.0));
+        NodeKind::Casgn { scope, name, value } => {
+            let _ = writeln!(out, "(casgn :{}", interner.resolve(name.0));
             write_opt(ast, scope, d, out);
             out.push('\n');
             write_opt(ast, value, d, out);
@@ -135,16 +131,23 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         NodeKind::Send {
             receiver, method, ..
         } => {
-            let _ = write!(out, "(send :{}\n", interner.resolve(method.0));
+            let _ = writeln!(out, "(send :{}", interner.resolve(method.0));
             write_opt(ast, receiver, d, out);
-            write_slice(ast, id, receiver.get().is_some() as usize, usize::MAX, d, out);
+            write_slice(
+                ast,
+                id,
+                receiver.get().is_some() as usize,
+                usize::MAX,
+                d,
+                out,
+            );
             out.push(')');
         }
         // collect_children: [receiver] ++ args。receiver は常在。
         NodeKind::Csend {
             receiver, method, ..
         } => {
-            let _ = write!(out, "(csend :{}\n", interner.resolve(method.0));
+            let _ = writeln!(out, "(csend :{}", interner.resolve(method.0));
             write_node(ast, receiver, d, out);
             write_slice(ast, id, 1, usize::MAX, d, out);
             out.push(')');
@@ -257,14 +260,14 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             out.push(')');
         }
         NodeKind::While { cond, body, post } => {
-            let _ = write!(out, "(while post={post}\n");
+            let _ = writeln!(out, "(while post={post}");
             write_node(ast, cond, d, out);
             out.push('\n');
             write_opt(ast, body, d, out);
             out.push(')');
         }
         NodeKind::Until { cond, body, post } => {
-            let _ = write!(out, "(until post={post}\n");
+            let _ = writeln!(out, "(until post={post}");
             write_node(ast, cond, d, out);
             out.push('\n');
             write_opt(ast, body, d, out);
@@ -275,7 +278,7 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             end_,
             exclusive,
         } => {
-            let _ = write!(out, "(range exclusive={exclusive}\n");
+            let _ = writeln!(out, "(range exclusive={exclusive}");
             write_opt(ast, begin_, d, out);
             out.push('\n');
             write_opt(ast, end_, d, out);
@@ -315,7 +318,7 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             args,
             body,
         } => {
-            let _ = write!(out, "(def :{}\n", interner.resolve(name.0));
+            let _ = writeln!(out, "(def :{}", interner.resolve(name.0));
             write_opt(ast, receiver, d, out);
             out.push('\n');
             write_node(ast, args, d, out);
@@ -361,7 +364,7 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             let _ = write!(out, "(arg {})", interner.resolve(s.0));
         }
         NodeKind::Optarg { name, default } => {
-            let _ = write!(out, "(optarg {}\n", interner.resolve(name.0));
+            let _ = writeln!(out, "(optarg {}", interner.resolve(name.0));
             write_node(ast, default, d, out);
             out.push(')');
         }
@@ -372,7 +375,7 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             let _ = write!(out, "(kwarg {})", interner.resolve(s.0));
         }
         NodeKind::Kwoptarg { name, default } => {
-            let _ = write!(out, "(kwoptarg {}\n", interner.resolve(name.0));
+            let _ = writeln!(out, "(kwoptarg {}", interner.resolve(name.0));
             write_node(ast, default, d, out);
             out.push(')');
         }
@@ -433,7 +436,7 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
 
         // --- op-assign ---
         NodeKind::OpAsgn { target, op, value } => {
-            let _ = write!(out, "(op-asgn :{}\n", interner.resolve(op.0));
+            let _ = writeln!(out, "(op-asgn :{}", interner.resolve(op.0));
             write_node(ast, target, d, out);
             out.push('\n');
             write_node(ast, value, d, out);
@@ -508,7 +511,10 @@ fn check(name: &str) {
         return;
     }
     let want = std::fs::read_to_string(&snap_path).unwrap_or_default();
-    assert_eq!(got, want, "snapshot mismatch for {name}; BLESS=1 to re-bless");
+    assert_eq!(
+        got, want,
+        "snapshot mismatch for {name}; BLESS=1 to re-bless"
+    );
 }
 
 #[test]
