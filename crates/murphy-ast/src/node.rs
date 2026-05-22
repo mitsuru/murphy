@@ -83,6 +83,171 @@ impl NodeList {
     pub const EMPTY: NodeList = NodeList { start: 0, len: 0 };
 }
 
+/// A single AST node: a fixed-size POD value. The discriminated payload
+/// lives in `kind`; `parent` is filled in by [`AstBuilder::finish`].
+#[repr(C)]
+// No `Eq`: `NodeKind` carries `Float(f64)`, and `f64` is not `Eq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AstNode {
+    pub kind: NodeKind,
+    /// Parent node. `OptNodeId::NONE` for the root.
+    pub parent: OptNodeId,
+    pub range: Range,
+}
+
+/// The kind of an AST node, with its inline payload.
+///
+/// `#[repr(C, u8)]` gives a stable layout with a `u8` discriminant. The
+/// **declaration order is the discriminant** and is **frozen** — new
+/// variants append at the end only (ADR 0037). v1 follows the Ruby
+/// `parser` gem's node shapes.
+#[repr(C, u8)]
+// No `Eq`: the `Float(f64)` variant means `f64` participates, and it is
+// not `Eq`. `PartialEq` is enough for the round-trip equality test.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NodeKind {
+    /// A prism parse error. Dispatch skips it so syntax errors never crash
+    /// a cop.
+    Error,
+
+    // --- atoms / literals ---
+    Nil,
+    True_,
+    False_,
+    SelfExpr,
+    Int(i64),
+    Float(f64),
+    Str(StringId),
+    Sym(Symbol),
+
+    // --- variable reads ---
+    Lvar(Symbol),
+    Ivar(Symbol),
+    Cvar(Symbol),
+    Gvar(Symbol),
+    Const {
+        scope: OptNodeId,
+        name: Symbol,
+    },
+
+    // --- assignments ---
+    Lvasgn {
+        name: Symbol,
+        value: OptNodeId,
+    },
+    Ivasgn {
+        name: Symbol,
+        value: OptNodeId,
+    },
+    Casgn {
+        scope: OptNodeId,
+        name: Symbol,
+        value: OptNodeId,
+    },
+
+    // --- calls / blocks ---
+    Send {
+        receiver: OptNodeId,
+        method: Symbol,
+        args: NodeList,
+    },
+    /// Safe-navigation call (`&.`). The receiver is always present.
+    Csend {
+        receiver: NodeId,
+        method: Symbol,
+        args: NodeList,
+    },
+    Block {
+        call: NodeId,
+        /// The `args` node (always present, may be an empty `Args`).
+        args: NodeId,
+        body: OptNodeId,
+    },
+    BlockPass(OptNodeId),
+    Splat(OptNodeId),
+
+    // --- collections ---
+    Array(NodeList),
+    Hash(NodeList),
+    Pair {
+        key: NodeId,
+        value: NodeId,
+    },
+
+    // --- control flow ---
+    If {
+        cond: NodeId,
+        then_: OptNodeId,
+        else_: OptNodeId,
+    },
+    Case {
+        subject: OptNodeId,
+        whens: NodeList,
+        else_: OptNodeId,
+    },
+    When {
+        conds: NodeList,
+        body: OptNodeId,
+    },
+    Begin(NodeList),
+    Return(OptNodeId),
+    And {
+        lhs: NodeId,
+        rhs: NodeId,
+    },
+    Or {
+        lhs: NodeId,
+        rhs: NodeId,
+    },
+
+    // --- definitions ---
+    Def {
+        name: Symbol,
+        args: NodeId,
+        body: OptNodeId,
+    },
+    Class {
+        name: NodeId,
+        superclass: OptNodeId,
+        body: OptNodeId,
+    },
+    Module {
+        name: NodeId,
+        body: OptNodeId,
+    },
+
+    // --- arguments ---
+    Args(NodeList),
+    Arg(Symbol),
+}
+
+/// A source comment, stored outside the node tree.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Comment {
+    pub range: Range,
+    pub kind: CommentKind,
+}
+
+/// Whether a comment is a `#` line comment or a `=begin`/`=end` block.
+// A fieldless enum: `#[repr(u8)]` alone (not `#[repr(C, u8)]`, which the
+// compiler rejects as a conflicting hint for a C-like enum) pins a stable
+// `u8` discriminant.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommentKind {
+    Inline,
+    Block,
+}
+
+/// The owned source text and path for one file. All [`Range`] values index
+/// into `text` as byte offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBuffer {
+    pub text: String,
+    pub path: std::path::PathBuf,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +275,34 @@ mod tests {
     #[test]
     fn node_list_empty_is_zero_len() {
         assert_eq!(NodeList::EMPTY.len, 0);
+    }
+
+    #[test]
+    fn layout_invariants() {
+        use std::mem::{align_of, size_of};
+
+        // 4-byte handles.
+        assert_eq!(size_of::<NodeId>(), 4);
+        assert_eq!(size_of::<OptNodeId>(), 4);
+        assert_eq!(size_of::<Symbol>(), 4);
+        assert_eq!(size_of::<StringId>(), 4);
+        // 8-byte side-table refs.
+        assert_eq!(size_of::<Range>(), 8);
+        assert_eq!(size_of::<NodeList>(), 8);
+
+        // AstNode is a fixed-size POD node, small enough for a flat arena.
+        assert!(size_of::<AstNode>() <= 48, "AstNode unexpectedly large");
+        assert_eq!(align_of::<AstNode>(), 8, "i64 payload forces 8-byte align");
+
+        // NodeKind carries the largest payload but stays compact.
+        assert!(size_of::<NodeKind>() <= 32);
+    }
+
+    #[test]
+    fn node_kind_is_copy() {
+        // A POD enum: cheap to copy, no heap, no pointers.
+        let k = NodeKind::Int(42);
+        let copy = k;
+        assert_eq!(k, copy);
     }
 }
