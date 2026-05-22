@@ -10,9 +10,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeKindTag(pub u8);
 
-/// Pattern-name → tag. Declaration order of `NodeKind` minus `Error`
-/// (you cannot match an error node in a pattern). Keep in sync with the
-/// `NodeKind` enum in `node.rs`; the `table_matches_tag` test guards this.
+/// Pattern-name → tag. Declaration order of `NodeKind` minus `Error` and
+/// `Unknown` (you cannot meaningfully match an error or fallback node in a
+/// pattern). Keep in sync with the `NodeKind` enum in `node.rs`; the
+/// `table_matches_tag` test guards this.
 pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("nil", 1),
     ("true", 2),
@@ -50,6 +51,41 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("module", 34),
     ("args", 35),
     ("arg", 36),
+    // tag 37 = `Unknown` — excluded (fallback sentinel, not matchable).
+    ("gvasgn", 38),
+    ("cvasgn", 39),
+    ("optarg", 40),
+    ("restarg", 41),
+    ("kwarg", 42),
+    ("kwoptarg", 43),
+    ("kwrestarg", 44),
+    ("blockarg", 45),
+    ("kwsplat", 46),
+    ("while", 47),
+    ("until", 48),
+    // `RangeExpr` collapses inclusive/exclusive ranges into one variant; the
+    // parser gem splits them as `irange`/`erange`. `range` signals the merge.
+    ("range", 49),
+    ("sclass", 50),
+    ("break", 51),
+    ("next", 52),
+    ("yield", 53),
+    ("super", 54),
+    ("zsuper", 55),
+    // parser gem uses `defined?` with the `?`; `defined` keeps table style.
+    ("defined", 56),
+    ("rescue", 57),
+    ("resbody", 58),
+    ("ensure", 59),
+    ("op_asgn", 60),
+    ("or_asgn", 61),
+    ("and_asgn", 62),
+    ("dstr", 63),
+    ("dsym", 64),
+    ("xstr", 65),
+    ("regexp", 66),
+    ("masgn", 67),
+    ("mlhs", 68),
 ];
 
 /// Resolve a pattern node-type name to its tag. `None` for unknown names.
@@ -151,6 +187,7 @@ mod tests {
             NodeKind::And { lhs: n, rhs: n },
             NodeKind::Or { lhs: n, rhs: n },
             NodeKind::Def {
+                receiver: OptNodeId::NONE,
                 name: s,
                 args: n,
                 body: OptNodeId::NONE,
@@ -166,6 +203,89 @@ mod tests {
             },
             NodeKind::Args(NodeList::EMPTY),
             NodeKind::Arg(s),
+            NodeKind::Unknown,
+            NodeKind::Gvasgn {
+                name: s,
+                value: OptNodeId::NONE,
+            },
+            NodeKind::Cvasgn {
+                name: s,
+                value: OptNodeId::NONE,
+            },
+            NodeKind::Optarg {
+                name: s,
+                default: n,
+            },
+            NodeKind::Restarg(s),
+            NodeKind::Kwarg(s),
+            NodeKind::Kwoptarg {
+                name: s,
+                default: n,
+            },
+            NodeKind::Kwrestarg(s),
+            NodeKind::Blockarg(s),
+            NodeKind::Kwsplat(OptNodeId::NONE),
+            NodeKind::While {
+                cond: n,
+                body: OptNodeId::NONE,
+                post: false,
+            },
+            NodeKind::Until {
+                cond: n,
+                body: OptNodeId::NONE,
+                post: false,
+            },
+            NodeKind::RangeExpr {
+                begin_: OptNodeId::NONE,
+                end_: OptNodeId::NONE,
+                exclusive: false,
+            },
+            NodeKind::Sclass {
+                expr: n,
+                body: OptNodeId::NONE,
+            },
+            NodeKind::Break(OptNodeId::NONE),
+            NodeKind::Next(OptNodeId::NONE),
+            NodeKind::Yield(NodeList::EMPTY),
+            NodeKind::Super(NodeList::EMPTY),
+            NodeKind::Zsuper,
+            NodeKind::Defined(n),
+            NodeKind::Rescue {
+                body: OptNodeId::NONE,
+                resbodies: NodeList::EMPTY,
+                else_: OptNodeId::NONE,
+            },
+            NodeKind::Resbody {
+                exceptions: NodeList::EMPTY,
+                var: OptNodeId::NONE,
+                body: OptNodeId::NONE,
+            },
+            NodeKind::Ensure {
+                body: OptNodeId::NONE,
+                ensure_: OptNodeId::NONE,
+            },
+            NodeKind::OpAsgn {
+                target: n,
+                op: s,
+                value: n,
+            },
+            NodeKind::OrAsgn {
+                target: n,
+                value: n,
+            },
+            NodeKind::AndAsgn {
+                target: n,
+                value: n,
+            },
+            NodeKind::Dstr(NodeList::EMPTY),
+            NodeKind::Dsym(NodeList::EMPTY),
+            NodeKind::Xstr(NodeList::EMPTY),
+            NodeKind::Regexp {
+                parts: NodeList::EMPTY,
+                opts: s,
+            },
+            NodeKind::Masgn { lhs: n, rhs: n },
+            NodeKind::Mlhs(NodeList::EMPTY),
         ]
     }
 
@@ -179,15 +299,22 @@ mod tests {
     #[test]
     fn table_matches_tag() {
         // Every table entry resolves to a real variant with that tag, and
-        // every variant except Error (tag 0) has exactly one table entry.
+        // every variant except Error (tag 0) and Unknown (tag 37) has
+        // exactly one table entry — both are fallback/sentinel kinds that
+        // cannot be matched in a pattern.
         let variants = all_variants();
         for (name, tag) in KIND_PATTERN_NAMES {
             assert_eq!(variants[*tag as usize].tag().0, *tag, "table entry {name}");
         }
+        let error_tag = NodeKind::Error.tag().0;
+        let unknown_tag = NodeKind::Unknown.tag().0;
         for k in &variants {
             let t = k.tag();
-            if t.0 == 0 {
-                assert!(pattern_name(t).is_none(), "Error must have no pattern name");
+            if t.0 == error_tag || t.0 == unknown_tag {
+                assert!(
+                    pattern_name(t).is_none(),
+                    "Error/Unknown must have no pattern name, got {k:?}"
+                );
             } else {
                 assert!(pattern_name(t).is_some(), "missing table entry for {k:?}");
             }
@@ -236,6 +363,38 @@ mod tests {
             NodeKind::Module { .. } => "module",
             NodeKind::Args(_) => "args",
             NodeKind::Arg(_) => "arg",
+            NodeKind::Unknown => return None,
+            NodeKind::Gvasgn { .. } => "gvasgn",
+            NodeKind::Cvasgn { .. } => "cvasgn",
+            NodeKind::Optarg { .. } => "optarg",
+            NodeKind::Restarg(_) => "restarg",
+            NodeKind::Kwarg(_) => "kwarg",
+            NodeKind::Kwoptarg { .. } => "kwoptarg",
+            NodeKind::Kwrestarg(_) => "kwrestarg",
+            NodeKind::Blockarg(_) => "blockarg",
+            NodeKind::Kwsplat(_) => "kwsplat",
+            NodeKind::While { .. } => "while",
+            NodeKind::Until { .. } => "until",
+            NodeKind::RangeExpr { .. } => "range",
+            NodeKind::Sclass { .. } => "sclass",
+            NodeKind::Break(_) => "break",
+            NodeKind::Next(_) => "next",
+            NodeKind::Yield(_) => "yield",
+            NodeKind::Super(_) => "super",
+            NodeKind::Zsuper => "zsuper",
+            NodeKind::Defined(_) => "defined",
+            NodeKind::Rescue { .. } => "rescue",
+            NodeKind::Resbody { .. } => "resbody",
+            NodeKind::Ensure { .. } => "ensure",
+            NodeKind::OpAsgn { .. } => "op_asgn",
+            NodeKind::OrAsgn { .. } => "or_asgn",
+            NodeKind::AndAsgn { .. } => "and_asgn",
+            NodeKind::Dstr(_) => "dstr",
+            NodeKind::Dsym(_) => "dsym",
+            NodeKind::Xstr(_) => "xstr",
+            NodeKind::Regexp { .. } => "regexp",
+            NodeKind::Masgn { .. } => "masgn",
+            NodeKind::Mlhs(_) => "mlhs",
         })
     }
 
