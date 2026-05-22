@@ -300,6 +300,21 @@ pub enum NodeKind {
         expr: NodeId,
         body: OptNodeId,
     },
+
+    // --- control flow / jumps (appended post-`Sclass` per ADR 0037: variants
+    // are append-only; declaration order is the frozen discriminant) ---
+    /// `break`（引数 0→`None`、1→その式、複数→`Array`）。
+    Break(OptNodeId),
+    /// `next`（`Break` と同じ引数畳み込み）。
+    Next(OptNodeId),
+    /// `yield`（引数リスト）。
+    Yield(NodeList),
+    /// `super(args)`（明示引数あり、`SuperNode`）。
+    Super(NodeList),
+    /// `super`（引数も括弧も無いゼロ引数 super、`ForwardingSuperNode`）。
+    Zsuper,
+    /// `defined?(expr)`。
+    Defined(NodeId),
 }
 
 /// A source comment, stored outside the node tree.

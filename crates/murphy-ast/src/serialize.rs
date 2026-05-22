@@ -315,6 +315,27 @@ fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, expr.0);
             put_u32(out, body.0);
         }
+        NodeKind::Break(o) => {
+            put_u8(out, 51);
+            put_u32(out, o.0);
+        }
+        NodeKind::Next(o) => {
+            put_u8(out, 52);
+            put_u32(out, o.0);
+        }
+        NodeKind::Yield(l) => {
+            put_u8(out, 53);
+            write_node_list(l, out);
+        }
+        NodeKind::Super(l) => {
+            put_u8(out, 54);
+            write_node_list(l, out);
+        }
+        NodeKind::Zsuper => put_u8(out, 55),
+        NodeKind::Defined(n) => {
+            put_u8(out, 56);
+            put_u32(out, n.0);
+        }
     }
 }
 
@@ -456,6 +477,12 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             expr: NodeId(get_u32(cur)?),
             body: OptNodeId(get_u32(cur)?),
         },
+        51 => NodeKind::Break(OptNodeId(get_u32(cur)?)),
+        52 => NodeKind::Next(OptNodeId(get_u32(cur)?)),
+        53 => NodeKind::Yield(read_node_list(cur)?),
+        54 => NodeKind::Super(read_node_list(cur)?),
+        55 => NodeKind::Zsuper,
+        56 => NodeKind::Defined(NodeId(get_u32(cur)?)),
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -886,6 +913,47 @@ mod tests {
             ast, restored,
             "Def-with-receiver / Sclass round-trip must be bit-equal"
         );
+    }
+
+    #[test]
+    fn round_trip_jump_variants() {
+        // The six jump variants appended after `Sclass`
+        // (discriminants 51..=56) must survive the byte round-trip. Covers
+        // the `OptNodeId` payloads (`Break`/`Next`) both ways, the
+        // `NodeList` payloads (`Yield`/`Super`), the fieldless `Zsuper`, and
+        // the `NodeId` payload (`Defined`).
+        let mut b = AstBuilder::new(
+            "break 1; next; yield 2; super(3); super; defined?(x)",
+            "t.rb",
+        );
+        let one = b.push(NodeKind::Int(1), r(6, 7));
+        let break_some = b.push(NodeKind::Break(OptNodeId::some(one)), r(0, 7));
+        let next_none = b.push(NodeKind::Next(OptNodeId::NONE), r(9, 13));
+        let two = b.push(NodeKind::Int(2), r(21, 22));
+        let yield_list = b.push_list(&[two]);
+        let yield_node = b.push(NodeKind::Yield(yield_list), r(15, 22));
+        let three = b.push(NodeKind::Int(3), r(30, 31));
+        let super_list = b.push_list(&[three]);
+        let super_node = b.push(NodeKind::Super(super_list), r(24, 32));
+        // empty-list `Yield` to exercise the empty `NodeList` path too.
+        let yield_empty = b.push(NodeKind::Yield(NodeList::EMPTY), r(34, 39));
+        let zsuper = b.push(NodeKind::Zsuper, r(34, 39));
+        let x = b.push(NodeKind::Nil, r(50, 51));
+        let defined = b.push(NodeKind::Defined(x), r(41, 52));
+        let list = b.push_list(&[
+            break_some,
+            next_none,
+            yield_node,
+            super_node,
+            yield_empty,
+            zsuper,
+            defined,
+        ]);
+        let root = b.push(NodeKind::Begin(list), r(0, 52));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        assert_eq!(ast, restored, "jump variant round-trip must be bit-equal");
     }
 
     #[test]

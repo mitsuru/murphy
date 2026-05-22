@@ -483,8 +483,73 @@ impl Translator {
             return self.builder.push(NodeKind::Sclass { expr, body }, range);
         }
 
-        // Task 12 以降、ここに各ノード種の arm を足していく。
+        // --- jumps ---
+        if let Some(r) = node.as_return_node() {
+            let v = self.translate_jump_arg(r.arguments(), range);
+            return self.builder.push(NodeKind::Return(v), range);
+        }
+        if let Some(b) = node.as_break_node() {
+            let v = self.translate_jump_arg(b.arguments(), range);
+            return self.builder.push(NodeKind::Break(v), range);
+        }
+        if let Some(n) = node.as_next_node() {
+            let v = self.translate_jump_arg(n.arguments(), range);
+            return self.builder.push(NodeKind::Next(v), range);
+        }
+        if let Some(y) = node.as_yield_node() {
+            let ids = self.translate_arg_list(y.arguments());
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Yield(list), range);
+        }
+        if let Some(s) = node.as_super_node() {
+            // `super(args)`（明示引数あり）。`super` のブロックは v1 では捨てる。
+            let ids = self.translate_arg_list(s.arguments());
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Super(list), range);
+        }
+        if node.as_forwarding_super_node().is_some() {
+            // 括弧も引数も無い `super` — `ForwardingSuperNode`。
+            return self.builder.push(NodeKind::Zsuper, range);
+        }
+        if let Some(d) = node.as_defined_node() {
+            // `value()` は非 Option の `Node`。
+            let inner = self.translate_node(&d.value());
+            return self.builder.push(NodeKind::Defined(inner), range);
+        }
+
+        // Task 13 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
+    }
+
+    /// `break`/`next`/`return` の引数を単一 `OptNodeId` に畳む。
+    /// 0→`None`、1→その式、複数→`Array`。
+    fn translate_jump_arg(
+        &mut self,
+        args: Option<prism::ArgumentsNode<'_>>,
+        range: Range,
+    ) -> OptNodeId {
+        let ids = self.translate_arg_list(args);
+        match ids.len() {
+            0 => OptNodeId::NONE,
+            1 => OptNodeId::some(ids[0]),
+            _ => {
+                let list = self.builder.push_list(&ids);
+                OptNodeId::some(self.builder.push(NodeKind::Array(list), range))
+            }
+        }
+    }
+
+    /// `Option<ArgumentsNode>` の各引数を翻訳して `Vec<NodeId>` にする。
+    /// `None`（引数無し）は空ベクタ。
+    fn translate_arg_list(&mut self, args: Option<prism::ArgumentsNode<'_>>) -> Vec<NodeId> {
+        match args {
+            Some(a) => a
+                .arguments()
+                .iter()
+                .map(|n| self.translate_node(&n))
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     /// `CallNode` を `Send`/`Csend` へ。`block` が `BlockArgumentNode`（`&blk`）の
@@ -1363,6 +1428,117 @@ mod tests {
                 assert!(matches!(ast.kind(b), NodeKind::Def { .. }));
             }
             other => panic!("expected Sclass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_return() {
+        // `def f; return 1; end` の本体に Return（引数 1 個）。
+        let ast = translate("def f; return 1; end", "t.rb");
+        let ret = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Return(_)))
+            .expect("expected a Return node");
+        match ast.kind(ret) {
+            NodeKind::Return(v) => assert!(v.get().is_some(), "return 1 → 引数 Some"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_bare_return() {
+        // 引数なし `return` → Return(None)。
+        let ast = translate("def f; return; end", "t.rb");
+        let ret = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Return(_)))
+            .expect("expected a Return node");
+        match ast.kind(ret) {
+            NodeKind::Return(v) => assert!(v.is_none(), "bare return → 引数 None"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_break_and_next() {
+        // ループ本体内の break / next。
+        let b = translate("while c; break 1; end", "t.rb");
+        assert!(
+            b.descendants(b.root())
+                .any(|n| matches!(b.kind(n), NodeKind::Break(_)))
+        );
+        let n = translate("while c; next; end", "t.rb");
+        let next = n
+            .descendants(n.root())
+            .find(|&id| matches!(n.kind(id), NodeKind::Next(_)))
+            .expect("expected a Next node");
+        match n.kind(next) {
+            NodeKind::Next(v) => assert!(v.is_none(), "bare next → 引数 None"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_break_multi_arg_to_array() {
+        // `break 1, 2` → Break(Some(Array))。
+        let ast = translate("while c; break 1, 2; end", "t.rb");
+        let brk = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Break(_)))
+            .expect("expected a Break node");
+        match ast.kind(brk) {
+            NodeKind::Break(v) => {
+                let inner = v.get().expect("break 1, 2 → 引数 Some");
+                assert!(matches!(ast.kind(inner), NodeKind::Array(_)));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_yield() {
+        // `def f; yield 1; end` → Yield（引数 1）。
+        let ast = translate("def f; yield 1; end", "t.rb");
+        let y = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Yield(_)))
+            .expect("expected a Yield node");
+        match ast.kind(y) {
+            NodeKind::Yield(l) => assert_eq!(l.len, 1),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_super_and_zsuper() {
+        // 明示引数つき super → Super（NodeList）。
+        let s = translate("def f; super(1); end", "t.rb");
+        let sup = s
+            .descendants(s.root())
+            .find(|&n| matches!(s.kind(n), NodeKind::Super(_)))
+            .expect("expected a Super node");
+        match s.kind(sup) {
+            NodeKind::Super(l) => assert_eq!(l.len, 1),
+            _ => unreachable!(),
+        }
+        // 括弧も引数も無い super → Zsuper。
+        let z = translate("def f; super; end", "t.rb");
+        assert!(
+            z.descendants(z.root())
+                .any(|n| matches!(z.kind(n), NodeKind::Zsuper))
+        );
+    }
+
+    #[test]
+    fn translates_defined() {
+        // `defined?(x)` → Defined(inner)。
+        let ast = translate("defined?(x)", "t.rb");
+        match ast.kind(ast.root()) {
+            NodeKind::Defined(inner) => {
+                // `x` は variable_call なので Send になる。
+                assert!(matches!(ast.kind(*inner), NodeKind::Send { .. }));
+            }
+            other => panic!("expected Defined, got {other:?}"),
         }
     }
 

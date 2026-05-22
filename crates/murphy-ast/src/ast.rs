@@ -42,7 +42,8 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         | NodeKind::Restarg(_)
         | NodeKind::Kwarg(_)
         | NodeKind::Kwrestarg(_)
-        | NodeKind::Blockarg(_) => {}
+        | NodeKind::Blockarg(_)
+        | NodeKind::Zsuper => {}
 
         NodeKind::Const { scope, .. } => push_opt(out, scope),
 
@@ -75,11 +76,16 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
         NodeKind::BlockPass(o)
         | NodeKind::Splat(o)
         | NodeKind::Return(o)
-        | NodeKind::Kwsplat(o) => push_opt(out, o),
+        | NodeKind::Kwsplat(o)
+        | NodeKind::Break(o)
+        | NodeKind::Next(o) => push_opt(out, o),
 
-        NodeKind::Array(l) | NodeKind::Hash(l) | NodeKind::Begin(l) | NodeKind::Args(l) => {
-            push_list(out, lists, l)
-        }
+        NodeKind::Array(l)
+        | NodeKind::Hash(l)
+        | NodeKind::Begin(l)
+        | NodeKind::Args(l)
+        | NodeKind::Yield(l)
+        | NodeKind::Super(l) => push_list(out, lists, l),
 
         NodeKind::Pair { key, value } => {
             out.push(key);
@@ -154,6 +160,8 @@ pub(crate) fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<
             out.push(expr);
             push_opt(out, body);
         }
+
+        NodeKind::Defined(n) => out.push(n),
     }
 }
 
