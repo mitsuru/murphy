@@ -782,6 +782,37 @@ fn lower_pat(
                 }
             })
         }
+        PatKind::Parent(inner) => {
+            // `^x` — bind the parent (fail if absent), then match `inner`
+            // against it. The parent direction is unique, so definite
+            // assignment is preserved and `inner` may capture: lower it via
+            // the `lower_pat` (guard) route.
+            let p = gensym(ctx, "__p");
+            let fail = fail_stmt(ctx);
+            let inner_guards = lower_pat(inner, &quote!(#p), ctx)?;
+            Ok(quote! {
+                let ::core::option::Option::Some(#p) = cx.parent(#subject).get() else {
+                    #fail
+                };
+                #inner_guards
+            })
+        }
+        PatKind::Descend(inner) => {
+            // `` `x `` — succeed iff some descendant matches `inner`. The
+            // descendant scan visits many nodes, so `inner` cannot capture;
+            // lower it via `lower_bool` (which structurally rejects captures)
+            // into a bool expression over the per-descendant binding.
+            let d = gensym(ctx, "__d");
+            let inner_bool = lower_bool(inner, &quote!(#d), ctx)?;
+            let hit = gensym(ctx, "__hit");
+            let fail = fail_stmt(ctx);
+            Ok(quote! {
+                let #hit = cx.descendants(#subject).into_iter().any(|#d| #inner_bool);
+                if !#hit {
+                    #fail
+                }
+            })
+        }
         other => Err(syn::Error::new(
             Span::call_site(),
             format!("node_pattern!: pattern feature not yet supported: {other:?}"),

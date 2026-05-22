@@ -465,3 +465,33 @@ fn predicate_inside_union() {
     assert!(big_or_nil(big, &cx) && big_or_nil(niln, &cx));
     assert!(!big_or_nil(small, &cx));
 }
+
+node_pattern!(parent_is_if, "^if");
+node_pattern!(has_nil_descendant, "`nil");
+
+#[test]
+fn parent_and_descendant() {
+    // if(cond=nil, then=int, else=none)
+    let mut b = AstBuilder::new("src", "t.rb");
+    let cond = b.push(NodeKind::Nil, r());
+    let then_ = b.push(NodeKind::Int(1), r());
+    let iff = b.push(
+        NodeKind::If {
+            cond,
+            then_: OptNodeId::some(then_),
+            else_: OptNodeId::NONE,
+        },
+        r(),
+    );
+    let ast = b.finish(iff);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // cond's parent is the if node.
+    assert!(parent_is_if(cond, &cx));
+    assert!(!parent_is_if(iff, &cx)); // if has no parent
+    // the if subtree contains a nil descendant.
+    assert!(has_nil_descendant(iff, &cx));
+    assert!(!has_nil_descendant(then_, &cx)); // an Int leaf has none
+}
