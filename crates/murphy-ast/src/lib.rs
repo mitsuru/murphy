@@ -19,3 +19,4 @@ pub use node::{
     AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
     StringId, Symbol,
 };
+pub use serialize::SerError;
