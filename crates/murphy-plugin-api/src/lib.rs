@@ -4,11 +4,13 @@
 
 mod abi;
 mod config_error;
+mod cop;
 mod options;
 mod severity;
 
 pub use abi::{OptionSpec, RawSlice};
 pub use config_error::{ConfigError, ConfigErrorKind};
+pub use cop::Cop;
 pub use options::{CopOptions, NoOptions};
 pub use severity::{
     SEVERITY_UNSET, Severity, TRISTATE_UNSET, tristate_from_wire, tristate_to_wire,
