@@ -3,8 +3,8 @@
 //! Task 5 (murphy-9cr.17) implements the atom/prefix skeleton: `_`,
 //! literals, `nil?`, bare kind names, `#predicate`, and the `!`/`^`/backtick
 //! prefixes. Task 6 adds node match `(head child*)` with `Exact`/`Any`/`OneOf`
-//! heads. Task 7 adds union `{a b ...}`. `$` captures land in Task 8 and
-//! currently produce a "not yet supported" error.
+//! heads. Task 7 adds union `{a b ...}`. Task 8 implements `$` captures —
+//! named (`$ident`), anonymous (`$<pattern>`), and seq (`$...`) forms.
 
 use crate::lexer::{Spanned, Token, tokenize};
 use crate::{CaptureKind, Head, Lit, ParseError, Pat, PatKind, PatSpan, PatternAst};
@@ -111,7 +111,8 @@ impl<'a> Parser<'a> {
     fn capture(&mut self, dollar_span: PatSpan) -> Result<Pat, ParseError> {
         self.pos += 1; // consume `$`
         // Reserve the slot now — before the body — so source order holds.
-        let slot = self.captures.len() as u16;
+        let slot = u16::try_from(self.captures.len())
+            .map_err(|_| ParseError::new("too many captures in one pattern", dollar_span))?;
         self.captures.push(CaptureKind::Node);
 
         let Some(next) = self.peek() else {
@@ -121,22 +122,29 @@ impl<'a> Parser<'a> {
             ));
         };
 
-        let (name, body) = match &next.tok {
+        // The Capture node spans `$` through the end of whatever names it.
+        // For most forms that is `body.span.end`, but for `$ident` the body is
+        // a synthetic Wildcard spanning only the `$`, so the identifier token's
+        // span end is tracked separately and used for the outer Capture span.
+        let (name, body, capture_end) = match &next.tok {
             Token::Ident(ident) => {
                 let name = ident.clone();
+                let ident_span = next.span;
                 self.pos += 1; // consume the ident
                 if self.capture_names.contains(&name) {
                     return Err(ParseError::new(
                         format!("duplicate capture name `{name}`"),
-                        next.span,
+                        ident_span,
                     ));
                 }
                 self.capture_names.push(name.clone());
+                // The implicit Wildcard body is synthetic; per spec it spans
+                // the `$` token, not the identifier.
                 let body = Pat {
                     kind: PatKind::Wildcard,
                     span: dollar_span,
                 };
-                (Some(name), body)
+                (Some(name), body, ident_span.end)
             }
             Token::Ellipsis => {
                 let ell_span = next.span;
@@ -146,17 +154,18 @@ impl<'a> Parser<'a> {
                     kind: PatKind::Rest,
                     span: ell_span,
                 };
-                (None, body)
+                (None, body, ell_span.end)
             }
             _ => {
                 let body = self.prefixed()?;
-                (None, body)
+                let end = body.span.end;
+                (None, body, end)
             }
         };
 
         let span = PatSpan {
             start: dollar_span.start,
-            end: body.span.end,
+            end: capture_end,
         };
         Ok(Pat {
             kind: PatKind::Capture {
@@ -486,10 +495,10 @@ mod tests {
     }
 
     #[test]
-    fn no_captures_before_task8() {
-        // Captures (`$`) are not implemented until Task 8; `parse` hardcodes
-        // `captures: Vec::new()`, so every pattern parsed so far must report
-        // zero captures. This pins the contract until Task 8 changes it.
+    fn non_capture_patterns_have_zero_captures() {
+        // A pattern containing no `$` reserves no capture slots, so
+        // `n_captures()` must report zero. `parse` threads the real capture
+        // list, so this pins that a capture-free pattern stays capture-free.
         assert_eq!(parse("_").unwrap().n_captures(), 0);
         assert_eq!(parse("!send").unwrap().n_captures(), 0);
         assert_eq!(parse(":sym").unwrap().n_captures(), 0);
@@ -930,11 +939,12 @@ mod tests {
     }
 
     #[test]
-    fn named_capture_span_covers_dollar_token() {
-        // `$x` — the named-capture body is an implicit Wildcard whose span is
-        // the `$` token's span, so the Capture span ends at the `$`'s end (1).
+    fn named_capture_span_covers_dollar_through_ident() {
+        // `$x` — `$` at 0, `x` at 1; the Capture span must cover `$` through
+        // the identifier (0..2). The implicit Wildcard body is synthetic and,
+        // per spec, spans only the `$` token (0..1).
         let p = parse("$x").expect("ok");
-        assert_eq!((p.root.span.start, p.root.span.end), (0, 1));
+        assert_eq!((p.root.span.start, p.root.span.end), (0, 2));
         match p.root.kind {
             PatKind::Capture { body, .. } => {
                 assert_eq!((body.span.start, body.span.end), (0, 1));
