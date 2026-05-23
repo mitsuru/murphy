@@ -19,6 +19,10 @@ use tempfile::tempdir;
 ///
 /// 2-tier 解決: `CARGO_TARGET_DIR` env → `${CARGO_MANIFEST_DIR}/../../target`。
 /// `.cargo/config.toml` で target-dir を override しない workspace 規約に依存。
+/// 加えて (a) `debug` profile 決め打ち (`cargo test --release` は未対応)、
+/// (b) host triple 仮定 (`--target=<triple>` のクロスビルドだと artifact は
+/// `target/<triple>/debug/` に移動するため未対応)。両条件は CI と通常開発
+/// では成立しており、必要になれば env (`MURPHY_TEST_PROFILE` 等) で拡張。
 fn example_pack_path() -> std::path::PathBuf {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
