@@ -424,7 +424,7 @@ enabled = true
     }
 
     #[test]
-    fn cop_packs_default_to_empty() {
+    fn plugins_default_to_empty() {
         let cfg = MurphyConfig::from_toml_str("").expect("empty config parses");
         assert!(cfg.plugins.is_empty());
     }

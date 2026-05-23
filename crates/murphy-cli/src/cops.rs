@@ -91,7 +91,7 @@ fn list(args: &[String]) -> Result<u8, AppError> {
     // `all_cops_with_packs` so the catalogue includes user-disabled
     // entries with a `disabled: user config` status. Using the
     // pre-filter view is what lets us surface every cop the process
-    // knows about — including ones contributed by `[[cop_packs]]`,
+    // knows about — including ones contributed by `[[plugins]]`,
     // not just `murphy-std`.
     let registry =
         CopRegistry::discover_with_config(Path::new("."), &config, super::builtin_pack())
