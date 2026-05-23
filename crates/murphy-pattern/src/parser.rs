@@ -484,6 +484,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_variable_symbols_in_node_match() {
+        // murphy-afl: `:@x`/`:@@x`/`:$x` flow through the lexer with the
+        // sigil preserved, so RuboCop-style patterns matching the first
+        // child of `(ivar :@foo)` / `(cvar :@@foo)` / `(gvar :$foo)` parse
+        // end-to-end.
+        for (src, name) in [
+            ("(ivar :@foo)", "@foo"),
+            ("(cvar :@@foo)", "@@foo"),
+            ("(gvar :$foo)", "$foo"),
+        ] {
+            let p = parse(src).unwrap_or_else(|e| panic!("parse `{src}`: {e:?}"));
+            let PatKind::Node { children, .. } = p.root.kind else {
+                panic!("`{src}` should be a Node, got {:?}", p.root.kind);
+            };
+            assert_eq!(children.len(), 1, "`{src}` should have one child");
+            assert_eq!(
+                children[0].kind,
+                PatKind::Lit(Lit::Sym(name.into())),
+                "child of `{src}` should be Sym(`{name}`)",
+            );
+        }
+    }
+
+    #[test]
     fn parses_nil_test_distinct_from_nil_literal() {
         assert_eq!(k("nil?"), PatKind::NilTest);
         assert_eq!(k("nil"), PatKind::Lit(Lit::Nil));

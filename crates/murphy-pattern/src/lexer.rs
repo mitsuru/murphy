@@ -167,14 +167,18 @@ impl<'a> Lexer<'a> {
         Ok(Token::Predicate(name))
     }
 
-    /// Scan `:name` — either an identifier-style name
-    /// (`[A-Za-z_][A-Za-z0-9_]*[?!=]?`, including setter names like `foo=`) or
-    /// a Ruby operator-method name (`+`, `[]`, `<=>`, ...).
+    /// Scan `:name` — one of:
+    /// - a variable-style name `:@x`, `:@@x`, `:$x` (the sigil is part of the
+    ///   payload so AST matchers can compare against `(ivar :@foo)` etc.),
+    /// - an identifier-style name
+    ///   (`[A-Za-z_][A-Za-z0-9_]*[?!=]?`, including setter names like `foo=`),
+    /// - or a Ruby operator-method name (`+`, `[]`, `<=>`, ...).
     fn scan_symbol(&mut self) -> Result<Token, ParseError> {
         let colon = self.pos;
         self.pos += 1; // consume `:`
         let name = self
-            .take_method_name()
+            .take_var_symbol_name()
+            .or_else(|| self.take_method_name())
             .or_else(|| self.take_operator_name())
             .ok_or_else(|| self.err_at(colon, colon + 1, "expected a symbol name after `:`"))?;
         Ok(Token::Sym(name))
@@ -340,6 +344,44 @@ impl<'a> Lexer<'a> {
         // 1-byte
         "+", "-", "*", "/", "%", "<", ">", "&", "|", "^", "~", "!",
     ];
+
+    /// Read a variable-style symbol name `@x`, `@@x`, or `$x` at the cursor.
+    /// Returns `None` (leaving the cursor unmoved) when none matches.
+    ///
+    /// The sigil bytes (`@`, `@@`, `$`) are included in the returned name —
+    /// pattern matchers compare against `(ivar :@foo)` / `(cvar :@@foo)` /
+    /// `(gvar :$foo)`, where the AST node's first child carries the sigil.
+    /// At least one `[A-Za-z_]` byte must follow the sigil; numeric globals
+    /// (`$1`, `$~`, ...) are out of scope.
+    fn take_var_symbol_name(&mut self) -> Option<String> {
+        let start = self.pos;
+        let after_sigil = match self.peek() {
+            Some(b'@') => {
+                if self.src.get(start + 1) == Some(&b'@') {
+                    start + 2
+                } else {
+                    start + 1
+                }
+            }
+            Some(b'$') => start + 1,
+            _ => return None,
+        };
+        if !matches!(
+            self.src.get(after_sigil),
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'_')
+        ) {
+            return None;
+        }
+        let mut end = after_sigil + 1;
+        while matches!(
+            self.src.get(end),
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+        ) {
+            end += 1;
+        }
+        self.pos = end;
+        Some(self.slice_str(start, end).to_string())
+    }
 
     /// Read a Ruby operator-method name (`+`, `[]=`, `<=>`, ...) at the cursor.
     /// Returns `None` (leaving the cursor unmoved) when none matches.
@@ -673,5 +715,110 @@ mod tests {
         // `take_method_name` is shared with `#name`; allowing a trailing `=`
         // there is harmless — Ruby permits setter method names.
         assert_eq!(toks("#foo="), vec![Token::Predicate("foo=".into())]);
+    }
+
+    // --- symbol grammar: variable-style names (murphy-afl) -----------------
+
+    #[test]
+    fn lexes_ivar_symbols() {
+        // `:@x` matches the first child of an `(ivar :@foo)` AST node — the
+        // `@` sigil is part of the symbol's name, not stripped.
+        assert_eq!(toks(":@x"), vec![Token::Sym("@x".into())]);
+        assert_eq!(toks(":@foo"), vec![Token::Sym("@foo".into())]);
+        assert_eq!(toks(":@Foo"), vec![Token::Sym("@Foo".into())]);
+        assert_eq!(toks(":@_name"), vec![Token::Sym("@_name".into())]);
+        assert_eq!(toks(":@x1"), vec![Token::Sym("@x1".into())]);
+    }
+
+    #[test]
+    fn lexes_cvar_symbols() {
+        assert_eq!(toks(":@@x"), vec![Token::Sym("@@x".into())]);
+        assert_eq!(toks(":@@foo"), vec![Token::Sym("@@foo".into())]);
+        assert_eq!(toks(":@@Foo"), vec![Token::Sym("@@Foo".into())]);
+    }
+
+    #[test]
+    fn lexes_gvar_symbols() {
+        assert_eq!(toks(":$x"), vec![Token::Sym("$x".into())]);
+        assert_eq!(toks(":$foo"), vec![Token::Sym("$foo".into())]);
+        assert_eq!(toks(":$LOAD_PATH"), vec![Token::Sym("$LOAD_PATH".into())]);
+    }
+
+    #[test]
+    fn variable_symbols_in_node_match() {
+        assert_eq!(
+            toks("(ivar :@foo)"),
+            vec![
+                Token::LParen,
+                Token::Ident("ivar".into()),
+                Token::Sym("@foo".into()),
+                Token::RParen,
+            ]
+        );
+        assert_eq!(
+            toks("(cvar :@@foo)"),
+            vec![
+                Token::LParen,
+                Token::Ident("cvar".into()),
+                Token::Sym("@@foo".into()),
+                Token::RParen,
+            ]
+        );
+        assert_eq!(
+            toks("(gvar :$foo)"),
+            vec![
+                Token::LParen,
+                Token::Ident("gvar".into()),
+                Token::Sym("$foo".into()),
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn variable_symbol_span_covers_sigil_and_name() {
+        let t = tokenize(":@foo").expect("ok");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].tok, Token::Sym("@foo".into()));
+        assert_eq!((t[0].span.start, t[0].span.end), (0, 5));
+
+        let t = tokenize(":@@foo").expect("ok");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].tok, Token::Sym("@@foo".into()));
+        assert_eq!((t[0].span.start, t[0].span.end), (0, 6));
+
+        let t = tokenize(":$foo").expect("ok");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].tok, Token::Sym("$foo".into()));
+        assert_eq!((t[0].span.start, t[0].span.end), (0, 5));
+    }
+
+    #[test]
+    fn bare_ivar_sigil_is_error() {
+        // `:@` alone has no name; must error rather than yield `Sym("@")`.
+        let e = tokenize(":@").expect_err("must reject `:@`");
+        assert!(e.message.contains("expected a symbol name"));
+    }
+
+    #[test]
+    fn bare_cvar_sigil_is_error() {
+        let e = tokenize(":@@").expect_err("must reject `:@@`");
+        assert!(e.message.contains("expected a symbol name"));
+    }
+
+    #[test]
+    fn bare_gvar_sigil_is_error() {
+        let e = tokenize(":$").expect_err("must reject `:$`");
+        assert!(e.message.contains("expected a symbol name"));
+    }
+
+    #[test]
+    fn variable_symbol_with_digit_after_sigil_is_error() {
+        // `:@1` and `:$1` aren't supported in v1 — variable-style symbol
+        // names must start with `[A-Za-z_]` after the sigil.
+        let e = tokenize(":@1").expect_err("must reject `:@1`");
+        assert!(e.message.contains("expected a symbol name"));
+        let e = tokenize(":$1").expect_err("must reject `:$1`");
+        assert!(e.message.contains("expected a symbol name"));
     }
 }
