@@ -79,3 +79,26 @@ fn detailed_form_loads_example_pack_and_emits_offenses() {
         "expected Example/TodoFormat in {names:?}"
     );
 }
+
+#[test]
+fn detailed_form_missing_path_exits_2_with_diagnostic() {
+    let dir = tempdir().expect("tempdir");
+    let rb = dir.path().join("sample.rb");
+    fs::write(&rb, "puts 'hi'\n").expect("write rb");
+
+    let toml = "[[plugins]]\nname = \"nonexistent\"\npath = \"./does-not-exist.so\"\n";
+    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg(&rb)
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("cannot load plugin"),
+        "stderr should mention plugin load failure: {stderr}"
+    );
+}
