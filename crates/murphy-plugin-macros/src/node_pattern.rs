@@ -599,6 +599,72 @@ fn schema_for(tag: u8) -> Option<&'static KindSchema> {
     SCHEMA_TABLE.iter().find(|(t, _)| *t == tag).map(|(_, s)| s)
 }
 
+/// Example literal pattern for an atom kind with a value form
+/// (`5` for `int`, `:foo` for `sym`, …). `None` for the 5 atoms with
+/// no literal form (`self`/`lvar`/`ivar`/`cvar`/`gvar`) and for any
+/// non-atom name. Used after [`is_atom_kind_name`] to choose between
+/// the two rejection phrasings in [`unsupported_node_match_error`].
+fn atom_literal_example(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "int" => "5",
+        "float" => "1.0",
+        "str" => "\"s\"",
+        "sym" => ":foo",
+        "true" => "true",
+        "false" => "false",
+        "nil" => "nil",
+        // `self`/`lvar`/`ivar`/`cvar`/`gvar`: atoms with no literal form.
+        _ => return None,
+    })
+}
+
+/// `true` iff `name` is one of the 12 atom node kinds. Pair with
+/// [`atom_literal_example`] when building the rejection diagnostic for
+/// an atom written in the unsupported `(name …)` node-match form.
+fn is_atom_kind_name(name: &str) -> bool {
+    matches!(
+        name,
+        "nil"
+            | "true"
+            | "false"
+            | "self"
+            | "int"
+            | "float"
+            | "str"
+            | "sym"
+            | "lvar"
+            | "ivar"
+            | "cvar"
+            | "gvar"
+    )
+}
+
+/// Build the `compile_error!` for a node-match head whose kind has no
+/// `SCHEMA_TABLE` entry. Atoms (`int`, `self`, …) get a kind-specific
+/// hint pointing at the literal or bare-kind alternative; other unsupported
+/// kinds (e.g. `rescue`) get the generic "follow-up issue" diagnostic.
+fn unsupported_node_match_error(tag: murphy_ast::NodeKindTag) -> syn::Error {
+    let name = murphy_ast::pattern_name(tag).unwrap_or("?");
+    let msg = if is_atom_kind_name(name) {
+        match atom_literal_example(name) {
+            Some(lit) => format!(
+                "node_pattern!: atom kind `{name}` cannot be matched as \
+                 `({name} ...)` — use literal `{lit}` or bare kind name `{name}`"
+            ),
+            None => format!(
+                "node_pattern!: atom kind `{name}` cannot be matched as \
+                 `({name} ...)` — use bare kind name `{name}`"
+            ),
+        }
+    } else {
+        format!(
+            "node_pattern!: node kind `{name}` is not supported by \
+             node_pattern! in v1 — see follow-up issue"
+        )
+    };
+    syn::Error::new(Span::call_site(), msg)
+}
+
 /// Parse a `#predicate` name into a callable Rust identifier.
 ///
 /// A `#name` resolves to a free function `name(node, cx) -> bool` that must be
@@ -889,16 +955,7 @@ fn lower_exact_node(
     ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
     // 1. Look up the per-NodeKind structural schema.
-    let schema = schema_for(tag.0).ok_or_else(|| {
-        let name = murphy_ast::pattern_name(tag).unwrap_or("?");
-        syn::Error::new(
-            Span::call_site(),
-            format!(
-                "node_pattern!: node kind `{name}` is not supported by \
-                 node_pattern! in v1 — see follow-up issue"
-            ),
-        )
-    })?;
+    let schema = schema_for(tag.0).ok_or_else(|| unsupported_node_match_error(tag))?;
 
     // Split the schema into fixed slots and an optional trailing `List`.
     let has_list = schema
@@ -1355,16 +1412,7 @@ fn lower_bool_exact_node(
     subject: &TokenStream,
     ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
-    let schema = schema_for(tag.0).ok_or_else(|| {
-        let name = murphy_ast::pattern_name(tag).unwrap_or("?");
-        syn::Error::new(
-            Span::call_site(),
-            format!(
-                "node_pattern!: node kind `{name}` is not supported by \
-                 node_pattern! in v1 — see follow-up issue"
-            ),
-        )
-    })?;
+    let schema = schema_for(tag.0).ok_or_else(|| unsupported_node_match_error(tag))?;
 
     let has_list = schema
         .slots

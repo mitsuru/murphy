@@ -1,4 +1,4 @@
-error: node_pattern!: node kind `int` is not supported by node_pattern! in v1 — see follow-up issue
+error: node_pattern!: atom kind `int` cannot be matched as `(int ...)` — use literal `5` or bare kind name `int`
  --> tests/ui/fail_node_pattern_atom_node_match.rs:4:1
   |
 4 | murphy_plugin_macros::node_pattern!(m, "(int 5)");
