@@ -257,20 +257,34 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
             continue;
         };
         if section == "plugins" {
-            if let serde_yaml::Value::Sequence(items) = value {
-                for item in items {
-                    match item {
-                        serde_yaml::Value::String(s) => plugin_names.push(s),
-                        serde_yaml::Value::Mapping(m) => {
-                            // `- foo: {...}` 形は MVP では unsupported コメント
-                            if let Some(name) = m.into_iter().next().and_then(|(k, _)| match k {
-                                serde_yaml::Value::String(s) => Some(s),
-                                _ => None,
-                            }) {
-                                unsupported_plugins.push(name);
-                            }
+            // RuboCop 互換: `plugins: foo` (scalar) は `plugins: [foo]` と同じく扱う。
+            // 非 sequence / 非 string 形は silent drop だと一方向 migrate で
+            // データが消えるので、unsupported コメントで明示する。
+            let items: Vec<serde_yaml::Value> = match value {
+                serde_yaml::Value::Sequence(seq) => seq,
+                serde_yaml::Value::String(s) => vec![serde_yaml::Value::String(s)],
+                other => {
+                    unsupported_plugins.push(format!("{other:?} (unsupported plugins: form)"));
+                    continue;
+                }
+            };
+            for item in items {
+                match item {
+                    serde_yaml::Value::String(s) => plugin_names.push(s),
+                    serde_yaml::Value::Mapping(m) => {
+                        // `- foo: {...}` 形は MVP では unsupported コメント
+                        if let Some(name) = m.into_iter().next().and_then(|(k, _)| match k {
+                            serde_yaml::Value::String(s) => Some(s),
+                            _ => None,
+                        }) {
+                            unsupported_plugins.push(name);
+                        } else {
+                            unsupported_plugins.push("<empty or non-string key>".to_string());
                         }
-                        _ => {}
+                    }
+                    other => {
+                        unsupported_plugins
+                            .push(format!("{other:?} (non-string / non-mapping)"));
                     }
                 }
             }
@@ -508,6 +522,57 @@ plugins = [
         assert!(matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "murphy-rails"));
         assert!(
             matches!(&cfg.plugins[1], PluginConfig::Detailed { name, .. } if name == "local-pack")
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_scalar_form_treated_as_single_element() {
+        // RuboCop 互換: `plugins: foo` を `plugins: [foo]` と同義に扱う
+        let out = migrate_rubocop_yml_to_murphy_toml("plugins: rubocop-rails\n").unwrap();
+        assert!(
+            out.contains("plugins = [\"rubocop-rails\"]"),
+            "scalar plugin should be lifted into 1-element array:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_non_sequence_non_string_emits_unsupported() {
+        // `plugins: 42` のように sequence でも string でもない場合、
+        // データを silently drop せず unsupported コメントで明示する
+        let out = migrate_rubocop_yml_to_murphy_toml("plugins: 42\n").unwrap();
+        assert!(
+            out.contains("# unsupported plugin entry:"),
+            "non-sequence non-string plugins: value should emit unsupported comment:\n{out}"
+        );
+        assert!(
+            !out.contains("plugins ="),
+            "should not emit plugins = ... line when input was unsupported:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_non_string_item_emits_unsupported() {
+        // Sequence 内の非 string / 非 mapping 要素も silently drop しない
+        let out = migrate_rubocop_yml_to_murphy_toml("plugins:\n  - rubocop-rails\n  - 42\n  - true\n").unwrap();
+        assert!(
+            out.contains("plugins = [\"rubocop-rails\"]"),
+            "valid string item should still be present:\n{out}"
+        );
+        // 42 と true の 2 つ分の unsupported コメント (順序非依存)
+        let unsupported_count = out.matches("# unsupported plugin entry:").count();
+        assert_eq!(
+            unsupported_count, 2,
+            "expected 2 unsupported comments for 42 and true, got {unsupported_count}:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_empty_mapping_item_emits_unsupported() {
+        // `- {}` のような空 mapping も silently drop せず unsupported に
+        let out = migrate_rubocop_yml_to_murphy_toml("plugins:\n  - {}\n").unwrap();
+        assert!(
+            out.contains("# unsupported plugin entry: <empty or non-string key>"),
+            "empty mapping should emit named unsupported comment:\n{out}"
         );
     }
 
