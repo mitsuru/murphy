@@ -293,15 +293,6 @@ mod tests {
     static NIL_KINDS: &[PluginNodeKindTag] = &[PluginNodeKindTag(NIL_TAG)];
     static SEND_KINDS: &[PluginNodeKindTag] = &[PluginNodeKindTag(SEND_TAG)];
 
-    /// Build a no-counter, no-emit cop on `KINDS`. Useful when the test only
-    /// inspects host-internal behavior (e.g. DispatchIndex).
-    #[allow(dead_code)]
-    fn noop_cop(name: &'static str, kinds: &'static [PluginNodeKindTag]) -> () {
-        // unused — placeholder to remind future authors a static is required
-        // (a `fn` can't return a `static PluginCopV1`).
-        drop((name, kinds));
-    }
-
     // (1) DispatchIndex correctly buckets the arena's nodes by tag.
     #[test]
     fn dispatch_index_groups_cops_by_kind() {
