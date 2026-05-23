@@ -1095,8 +1095,8 @@ fn detailed_form_missing_path_exits_2_with_diagnostic() {
         .code(2);
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("cannot load cop pack"),
-        "stderr should mention pack load failure: {stderr}"
+        stderr.contains("cannot load plugin"),
+        "stderr should mention plugin load failure: {stderr}"
     );
 }
 ```
