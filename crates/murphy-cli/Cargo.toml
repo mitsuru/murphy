@@ -25,6 +25,12 @@ serde_json = "1"
 [dev-dependencies]
 assert_cmd = "2"
 tempfile = "3"
+# Build-order dependency only. Forces cargo to build
+# murphy-example-pack's cdylib whenever murphy-cli test binaries are
+# compiled. The rlib variant exists solely to satisfy cargo dep
+# resolution — we never `use` it from Rust; the e2e test loads the
+# cdylib via dlopen (tests/plugin_pack_e2e.rs).
+murphy-example-pack = { path = "../murphy-example-pack" }
 
 [features]
 default = []

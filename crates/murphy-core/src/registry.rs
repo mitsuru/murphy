@@ -8,7 +8,7 @@
 //!   that the host obtained from `murphy-std` via its `mode = static`
 //!   `register_cops!`, or an empty slice for tests / minimal embedders),
 //!   and
-//! - any `[[cop_packs]]` configured in `murphy.toml`, loaded via
+//! - any `[[plugins]]` configured in `murphy.toml`, loaded via
 //!   `crate::plugin_loader::load_plugin_pack` (the single-symbol ABI
 //!   loader, murphy-9cr.4).
 //!
@@ -35,6 +35,7 @@ use murphy_plugin_api::PluginCopV1;
 
 use crate::ConfigError;
 use crate::MurphyConfig;
+use crate::PluginConfig;
 #[cfg(not(target_os = "windows"))]
 use crate::plugin_loader::{LoadedPluginPack, load_plugin_pack};
 
@@ -70,7 +71,7 @@ pub struct CopRegistry {
     /// into [`Self::pack_names`].
     all_pack_indices: Vec<usize>,
     /// Friendly pack names, in registration order: `"builtin"` followed
-    /// by each configured `cop_packs[i].name`. Surfaced in `--explain` /
+    /// by each configured `plugins[i]` name. Surfaced in `--explain` /
     /// progress reporting and `murphy cops list`.
     pack_names: Vec<String>,
     /// Owns the `dlopen` handles for the lifetime of the registry; the
@@ -103,7 +104,7 @@ impl CopRegistry {
     }
 
     /// Registry with the caller-supplied built-in pack only — no
-    /// `cop_packs`, no `cops/*.rb`. Useful for callers that don't have a
+    /// `plugins`, no `cops/*.rb`. Useful for callers that don't have a
     /// project root (e.g. tests).
     pub fn native_only(builtins: &[&'static PluginCopV1]) -> Self {
         let all_cops_ptrs: Vec<NonNull<PluginCopV1>> =
@@ -122,7 +123,7 @@ impl CopRegistry {
     }
 
     /// Build a registry for the project rooted at `root`: the caller's
-    /// built-in pack plus every configured `[[cop_packs]]` entry, with
+    /// built-in pack plus every configured `[[plugins]]` entry, with
     /// `[cops.rules."Name"]` applied.
     pub fn discover(root: &Path, builtins: &[&'static PluginCopV1]) -> Result<Self, ConfigError> {
         let config = MurphyConfig::load(root)?;
@@ -152,11 +153,20 @@ impl CopRegistry {
         let mut packs: Vec<LoadedPluginPack> = Vec::new();
 
         #[cfg(not(target_os = "windows"))]
-        for pack in &config.cop_packs {
+        for plugin in &config.plugins {
             let pack_index = pack_names.len();
-            let path = root.join(&pack.path);
+            let (pack_name, path) = match plugin {
+                PluginConfig::Detailed { name, path } => (name.clone(), root.join(path)),
+                PluginConfig::Name(name) => {
+                    return Err(ConfigError::Io(format!(
+                        "Plugin `{name}`: name resolution is not yet implemented \
+                         (murphy-9cr.10.2). Use the detailed form: \
+                         `[[plugins]] name = \"{name}\" path = \"...\"`."
+                    )));
+                }
+            };
             let loaded = load_plugin_pack(&path)
-                .map_err(|e| ConfigError::Io(format!("cannot load cop pack {}: {e}", pack.name)))?;
+                .map_err(|e| ConfigError::Io(format!("cannot load plugin {pack_name}: {e}")))?;
             // Name-collision check against the already-registered cops.
             // `loaded.cops()` borrows from `loaded` for the loop body.
             for cop in loaded.cops() {
@@ -176,23 +186,24 @@ impl CopRegistry {
                 if already {
                     let name_str = String::from_utf8_lossy(name).into_owned();
                     return Err(ConfigError::Io(format!(
-                        "cop pack {} attempts to register `{name_str}` but a cop with that name \
-                         is already registered (built-in or earlier pack)",
-                        pack.name
+                        "plugin {pack_name} attempts to register `{name_str}` but a cop with that name \
+                         is already registered (built-in or earlier plugin)"
                     )));
                 }
                 all_cops_ptrs.push(NonNull::from(cop));
                 all_pack_indices.push(pack_index);
             }
-            pack_names.push(pack.name.clone());
+            pack_names.push(pack_name);
             packs.push(loaded);
         }
 
         #[cfg(target_os = "windows")]
-        if let Some(pack) = config.cop_packs.first() {
+        if let Some(plugin) = config.plugins.first() {
+            let name = match plugin {
+                PluginConfig::Detailed { name, .. } | PluginConfig::Name(name) => name,
+            };
             return Err(ConfigError::Io(format!(
-                "cop packs (`.so` plugins) are not supported on Windows: {}",
-                pack.name
+                "plugins (`.so`/`.dylib` packs) are not supported on Windows: {name}"
             )));
         }
 

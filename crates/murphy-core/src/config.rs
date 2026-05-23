@@ -9,7 +9,7 @@ use crate::ConfigError;
 pub struct MurphyConfig {
     pub files: FilesConfig,
     pub cops: CopsConfig,
-    pub cop_packs: Vec<CopPackConfig>,
+    pub plugins: Vec<PluginConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,12 +24,31 @@ pub struct CopsConfig {
     pub rules: BTreeMap<String, CopRule>,
 }
 
+/// Plugin pack entry from `[[plugins]]` (or `plugins = [...]`) in
+/// `murphy.toml`.
+///
+/// Heterogeneous array of two shapes:
+/// - `plugins = ["murphy-rails"]` — name-only shorthand. RuboCop
+///   `.rubocop.yml` plugins: directive compatibility. Search-path
+///   resolution is deferred to `murphy-9cr.10.2`; in the MVP the
+///   registry returns a setup error directing the user to the detailed
+///   form.
+/// - `[[plugins]] name = "..." path = "..."` — explicit path. The
+///   MVP-supported form.
+///
+/// ## Documented limitation
+///
+/// `#[serde(deny_unknown_fields)]` is not fully honored on struct
+/// variants inside `#[serde(untagged)]` enums — additional fields on
+/// the `Detailed` variant (e.g. a stray `version = "..."`) are silently
+/// accepted. A future refactor will split `Detailed` into a named
+/// struct (`PluginDetailed`) with its own `deny_unknown_fields`. See
+/// `plugins_unknown_field_silently_accepted_for_now` in tests.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CopPackConfig {
-    pub name: String,
-    pub path: PathBuf,
-    pub version: String,
+#[serde(untagged)]
+pub enum PluginConfig {
+    Name(String),
+    Detailed { name: String, path: PathBuf },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -50,7 +69,7 @@ struct MurphyToml {
     #[serde(default)]
     cops: CopsTable,
     #[serde(default)]
-    cop_packs: Vec<CopPackConfig>,
+    plugins: Vec<PluginConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,7 +101,7 @@ impl Default for MurphyConfig {
                 path: default_cops_path(),
                 rules: BTreeMap::new(),
             },
-            cop_packs: Vec::new(),
+            plugins: Vec::new(),
         }
     }
 }
@@ -124,7 +143,7 @@ impl From<MurphyToml> for MurphyConfig {
                 path: value.cops.path,
                 rules: value.cops.rules,
             },
-            cop_packs: value.cop_packs,
+            plugins: value.plugins,
         }
     }
 }
@@ -224,6 +243,8 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
     let mut include: Vec<String> = Vec::new();
     let mut exclude: Vec<String> = Vec::new();
     let mut rules: BTreeMap<String, CopRule> = BTreeMap::new();
+    let mut plugin_names: Vec<String> = Vec::new();
+    let mut unsupported_plugins: Vec<String> = Vec::new();
 
     let serde_yaml::Value::Mapping(top) = yaml else {
         return Err(ConfigError::BadYaml(
@@ -235,6 +256,39 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
         let Some(section) = key.as_str() else {
             continue;
         };
+        if section == "plugins" {
+            // RuboCop 互換: `plugins: foo` (scalar) は `plugins: [foo]` と同じく扱う。
+            // 非 sequence / 非 string 形は silent drop だと一方向 migrate で
+            // データが消えるので、unsupported コメントで明示する。
+            let items: Vec<serde_yaml::Value> = match value {
+                serde_yaml::Value::Sequence(seq) => seq,
+                serde_yaml::Value::String(s) => vec![serde_yaml::Value::String(s)],
+                other => {
+                    unsupported_plugins.push(format!("{other:?} (unsupported plugins: form)"));
+                    continue;
+                }
+            };
+            for item in items {
+                match item {
+                    serde_yaml::Value::String(s) => plugin_names.push(s),
+                    serde_yaml::Value::Mapping(m) => {
+                        // `- foo: {...}` 形は MVP では unsupported コメント
+                        if let Some(name) = m.into_iter().next().and_then(|(k, _)| match k {
+                            serde_yaml::Value::String(s) => Some(s),
+                            _ => None,
+                        }) {
+                            unsupported_plugins.push(name);
+                        } else {
+                            unsupported_plugins.push("<empty or non-string key>".to_string());
+                        }
+                    }
+                    other => {
+                        unsupported_plugins.push(format!("{other:?} (non-string / non-mapping)"));
+                    }
+                }
+            }
+            continue;
+        }
         let serde_yaml::Value::Mapping(map) = value else {
             continue;
         };
@@ -266,6 +320,24 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
     }
 
     let mut out = String::new();
+    if !plugin_names.is_empty() {
+        out.push_str(&format!("plugins = {}\n", toml_array(&plugin_names)));
+    }
+    for unsupported in &unsupported_plugins {
+        // `unsupported` は .rubocop.yml の mapping-key 由来でユーザー由来文字列。
+        // 改行を含むと migrate 出力の `# ...` コメント以降の行が有効な TOML として
+        // 解釈されうる (悪意ある YAML が `# foo\n[[plugins]]\nname = "x"\npath = "y"`
+        // のような entry 名を持つ場合に config injection)。制御文字 (\r \n \x00 ...)
+        // を `?` に置換して 1 行に押し込める。
+        let sanitized: String = unsupported
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect();
+        out.push_str(&format!("# unsupported plugin entry: {sanitized}\n"));
+    }
+    if !plugin_names.is_empty() || !unsupported_plugins.is_empty() {
+        out.push('\n');
+    }
     out.push_str("[files]\n");
     let include_values = if include.is_empty() {
         default_include()
@@ -405,45 +477,169 @@ enabled = true
     }
 
     #[test]
-    fn parses_cop_packs() {
+    fn plugins_default_to_empty() {
+        let cfg = MurphyConfig::from_toml_str("").expect("empty config parses");
+        assert!(cfg.plugins.is_empty());
+    }
+
+    #[test]
+    fn parses_plugins_detailed_form() {
         let cfg = MurphyConfig::from_toml_str(
             r#"
-[[cop_packs]]
+[[plugins]]
 name = "murphy-example-pack"
-path = "packs/murphy-example-pack/libmurphy_example_pack.so"
-version = "0.1.0"
+path = "target/debug/libmurphy_example_pack.so"
 "#,
         )
-        .expect("config parses");
-
-        assert_eq!(cfg.cop_packs.len(), 1);
-        assert_eq!(cfg.cop_packs[0].name, "murphy-example-pack");
-        assert_eq!(
-            cfg.cop_packs[0].path,
-            PathBuf::from("packs/murphy-example-pack/libmurphy_example_pack.so")
-        );
-        assert_eq!(cfg.cop_packs[0].version, "0.1.0");
+        .unwrap();
+        assert_eq!(cfg.plugins.len(), 1);
+        match &cfg.plugins[0] {
+            PluginConfig::Detailed { name, path } => {
+                assert_eq!(name, "murphy-example-pack");
+                assert_eq!(
+                    path.to_str(),
+                    Some("target/debug/libmurphy_example_pack.so")
+                );
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
     }
 
     #[test]
-    fn cop_packs_default_to_empty() {
-        let cfg = MurphyConfig::from_toml_str("").expect("empty config parses");
-        assert!(cfg.cop_packs.is_empty());
+    fn parses_plugins_name_only_form() {
+        let cfg = MurphyConfig::from_toml_str(r#"plugins = ["murphy-rails"]"#).unwrap();
+        assert_eq!(cfg.plugins.len(), 1);
+        match &cfg.plugins[0] {
+            PluginConfig::Name(name) => assert_eq!(name, "murphy-rails"),
+            other => panic!("expected Name, got {other:?}"),
+        }
     }
 
     #[test]
-    fn cop_pack_unknown_fields_are_rejected() {
-        let err = MurphyConfig::from_toml_str(
+    fn parses_plugins_heterogeneous_array() {
+        let cfg = MurphyConfig::from_toml_str(
             r#"
-[[cop_packs]]
-name = "murphy-example-pack"
-path = "pack.so"
-version = "0.1.0"
-checksum = "not-supported-yet"
+plugins = [
+  "murphy-rails",
+  { name = "local-pack", path = "./libfoo.so" }
+]
 "#,
         )
-        .expect_err("unknown fields remain setup errors");
+        .unwrap();
+        assert_eq!(cfg.plugins.len(), 2);
+        assert!(matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "murphy-rails"));
+        assert!(
+            matches!(&cfg.plugins[1], PluginConfig::Detailed { name, .. } if name == "local-pack")
+        );
+    }
 
-        assert!(matches!(err, ConfigError::BadToml(_)));
+    #[test]
+    fn migrate_plugins_scalar_form_treated_as_single_element() {
+        // RuboCop 互換: `plugins: foo` を `plugins: [foo]` と同義に扱う
+        let out = migrate_rubocop_yml_to_murphy_toml("plugins: rubocop-rails\n").unwrap();
+        assert!(
+            out.contains("plugins = [\"rubocop-rails\"]"),
+            "scalar plugin should be lifted into 1-element array:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_non_sequence_non_string_emits_unsupported() {
+        // `plugins: 42` のように sequence でも string でもない場合、
+        // データを silently drop せず unsupported コメントで明示する
+        let out = migrate_rubocop_yml_to_murphy_toml("plugins: 42\n").unwrap();
+        assert!(
+            out.contains("# unsupported plugin entry:"),
+            "non-sequence non-string plugins: value should emit unsupported comment:\n{out}"
+        );
+        assert!(
+            !out.contains("plugins ="),
+            "should not emit plugins = ... line when input was unsupported:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_non_string_item_emits_unsupported() {
+        // Sequence 内の非 string / 非 mapping 要素も silently drop しない
+        let out =
+            migrate_rubocop_yml_to_murphy_toml("plugins:\n  - rubocop-rails\n  - 42\n  - true\n")
+                .unwrap();
+        assert!(
+            out.contains("plugins = [\"rubocop-rails\"]"),
+            "valid string item should still be present:\n{out}"
+        );
+        // 42 と true の 2 つ分の unsupported コメント (順序非依存)
+        let unsupported_count = out.matches("# unsupported plugin entry:").count();
+        assert_eq!(
+            unsupported_count, 2,
+            "expected 2 unsupported comments for 42 and true, got {unsupported_count}:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_unsupported_name_with_newline_sanitized_to_single_line() {
+        // セキュリティ: 悪意ある YAML mapping-key (改行入り) が migrate 出力に
+        // 任意 TOML を inject できないこと。改行 / 制御文字は `?` 置換される。
+        let input = "plugins:\n  - \"evil\\n[[plugins]]\\nname = 'x'\":\n      foo: bar\n";
+        let out = migrate_rubocop_yml_to_murphy_toml(input).unwrap();
+        // LINE-START の "[[plugins]]" (= 有効な TOML section header) が injection
+        // されていないこと。comment 内に文字列として残るのは無害なので、行頭判定。
+        let injected = out
+            .lines()
+            .any(|l| l.trim_start().starts_with("[[plugins]]"));
+        assert!(
+            !injected,
+            "unsupported plugin name with newlines must not inject a [[plugins]] TOML section header:\n{out}"
+        );
+        // 改行は `?` に置換され、unsupported comment は 1 行に押し込められる
+        let unsupported_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with("# unsupported plugin entry:"))
+            .collect();
+        assert_eq!(
+            unsupported_lines.len(),
+            1,
+            "expected exactly 1 unsupported comment line, got {}:\n{out}",
+            unsupported_lines.len()
+        );
+        assert!(
+            !unsupported_lines[0].contains('\n') && !unsupported_lines[0].contains('\r'),
+            "sanitized line must not contain control chars:\n{}",
+            unsupported_lines[0]
+        );
+        // sanitization マーカ `?` が含まれること (injection 試行が検出された証拠)
+        assert!(
+            unsupported_lines[0].contains('?'),
+            "control chars in input should be replaced with `?`:\n{}",
+            unsupported_lines[0]
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_empty_mapping_item_emits_unsupported() {
+        // `- {}` のような空 mapping も silently drop せず unsupported に
+        let out = migrate_rubocop_yml_to_murphy_toml("plugins:\n  - {}\n").unwrap();
+        assert!(
+            out.contains("# unsupported plugin entry: <empty or non-string key>"),
+            "empty mapping should emit named unsupported comment:\n{out}"
+        );
+    }
+
+    #[test]
+    fn plugins_unknown_field_silently_accepted_for_now() {
+        // serde の untagged enum + struct variant は variant 内側で
+        // deny_unknown_fields を受け付けない。将来的に PluginDetailed を
+        // 別 struct に切り出して deny_unknown_fields を効かせる予定 —
+        // それまでは unknown field を silently accept する。
+        let cfg = MurphyConfig::from_toml_str(
+            r#"
+[[plugins]]
+name = "x"
+path = "y"
+version = "0.1"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.plugins.len(), 1);
     }
 }

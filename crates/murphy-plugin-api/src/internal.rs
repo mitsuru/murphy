@@ -144,7 +144,7 @@ mod tests {
     const _: () = assert!(cop_names_unique(["Plugin/A", "Plugin/B"]));
 
     #[test]
-    fn build_cop_packs_cop_and_node_cop_metadata() {
+    fn build_plugins_cop_and_node_cop_metadata() {
         let cop = build_cop::<StubCop>();
         assert_eq!(unsafe { cop.name.as_bytes() }, b"Plugin/Stub");
         assert_eq!(unsafe { cop.description.as_bytes() }, b"");
