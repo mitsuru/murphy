@@ -103,6 +103,7 @@ static FIX_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const LINT_USAGE: &str =
     "murphy lint [--fix|-a] [--debug] [--no-cache] [--format human|json|progress] [--] [path]...";
 
+#[cfg_attr(not(feature = "mruby-user-cops"), allow(dead_code))]
 struct MrubyCopSource {
     name: String,
     source: String,
