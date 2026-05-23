@@ -114,6 +114,83 @@ fn migrate_malformed_rubocop_yml_exits_2() {
 }
 
 #[test]
+fn migrate_translates_plugins_directive_preserving_names() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(
+        root.join(".rubocop.yml"),
+        r#"plugins:
+  - rubocop-rails
+  - rubocop-rspec
+AllCops:
+  Include: ['**/*.rb']
+"#,
+    )
+    .expect("write rubocop config");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("migrate")
+        .arg(".rubocop.yml")
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    // name は preserve (auto-rename しない)
+    assert!(
+        stdout.contains("plugins = [\"rubocop-rails\", \"rubocop-rspec\"]"),
+        "stdout missing plugins line:\n{stdout}"
+    );
+    // [files] section も出ること (regression)
+    assert!(
+        stdout.contains("[files]"),
+        "stdout missing [files]:\n{stdout}"
+    );
+}
+
+#[test]
+fn migrate_plugins_mapping_form_emits_unsupported_comment() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(
+        root.join(".rubocop.yml"),
+        r#"plugins:
+  - rubocop-rails
+  - foo:
+      option: x
+AllCops:
+  Include: ['**/*.rb']
+"#,
+    )
+    .expect("write rubocop config");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("migrate")
+        .arg(".rubocop.yml")
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+    // mapping form は unsupported コメントとして出力される
+    assert!(
+        stdout.contains("# unsupported plugin entry: foo"),
+        "stdout missing unsupported comment:\n{stdout}"
+    );
+    // mapping form の name は plugins 行には含まれない
+    assert!(
+        stdout.contains("plugins = [\"rubocop-rails\"]"),
+        "stdout should list only string-form plugins:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"foo\""),
+        "stdout should not list foo as a plugin name:\n{stdout}"
+    );
+}
+
+#[test]
 fn migrate_inline_yaml_arrays() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();

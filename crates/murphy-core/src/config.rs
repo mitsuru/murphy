@@ -243,6 +243,8 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
     let mut include: Vec<String> = Vec::new();
     let mut exclude: Vec<String> = Vec::new();
     let mut rules: BTreeMap<String, CopRule> = BTreeMap::new();
+    let mut plugin_names: Vec<String> = Vec::new();
+    let mut unsupported_plugins: Vec<String> = Vec::new();
 
     let serde_yaml::Value::Mapping(top) = yaml else {
         return Err(ConfigError::BadYaml(
@@ -254,6 +256,26 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
         let Some(section) = key.as_str() else {
             continue;
         };
+        if section == "plugins" {
+            if let serde_yaml::Value::Sequence(items) = value {
+                for item in items {
+                    match item {
+                        serde_yaml::Value::String(s) => plugin_names.push(s),
+                        serde_yaml::Value::Mapping(m) => {
+                            // `- foo: {...}` 形は MVP では unsupported コメント
+                            if let Some(name) = m.into_iter().next().and_then(|(k, _)| match k {
+                                serde_yaml::Value::String(s) => Some(s),
+                                _ => None,
+                            }) {
+                                unsupported_plugins.push(name);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
         let serde_yaml::Value::Mapping(map) = value else {
             continue;
         };
@@ -285,6 +307,15 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
     }
 
     let mut out = String::new();
+    if !plugin_names.is_empty() {
+        out.push_str(&format!("plugins = {}\n", toml_array(&plugin_names)));
+    }
+    for unsupported in &unsupported_plugins {
+        out.push_str(&format!("# unsupported plugin entry: {unsupported}\n"));
+    }
+    if !plugin_names.is_empty() || !unsupported_plugins.is_empty() {
+        out.push('\n');
+    }
     out.push_str("[files]\n");
     let include_values = if include.is_empty() {
         default_include()
