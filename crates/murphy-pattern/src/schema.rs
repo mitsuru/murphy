@@ -148,9 +148,7 @@ pub fn pattern_children<'a>(kind: &'a NodeKind, lists: &'a [NodeId]) -> Option<V
         // but the v1 slot convention allows at most one trailing `List`. The
         // B backend therefore omits `else_` from `case`'s schema, so `case`
         // patterns expose only `subject` + `whens`. Mirrored here.
-        NodeKind::Case {
-            subject, whens, ..
-        } => vec![
+        NodeKind::Case { subject, whens, .. } => vec![
             PatChild::OptNode(opt(subject)),
             PatChild::List(list(whens, lists)),
         ],
@@ -375,8 +373,7 @@ mod tests {
             r(),
         );
         let ast = b.finish(case);
-        let case_kids =
-            pattern_children(ast.kind(case), ast.raw_parts().node_lists).expect("case");
+        let case_kids = pattern_children(ast.kind(case), ast.raw_parts().node_lists).expect("case");
         assert_eq!(case_kids.len(), 2);
         assert!(matches!(case_kids[1], PatChild::List(_)));
         let when_kids =
@@ -384,5 +381,4 @@ mod tests {
         assert_eq!(when_kids.len(), 1);
         assert!(matches!(when_kids[0], PatChild::List(_)));
     }
-
 }

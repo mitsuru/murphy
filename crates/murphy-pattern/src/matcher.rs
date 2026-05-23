@@ -337,7 +337,9 @@ fn match_list_slot<P: PredicateHost + ?Sized>(
     predicates: &mut P,
 ) -> bool {
     // Locate the at-most-one rest-like pattern child.
-    let rest_at = pattern_kids.iter().position(|p| rest_kind(ctx, *p).is_some());
+    let rest_at = pattern_kids
+        .iter()
+        .position(|p| rest_kind(ctx, *p).is_some());
 
     let Some(r) = rest_at else {
         // No rest: exact length, indexed match.
@@ -405,7 +407,7 @@ fn rest_kind(ctx: &MatcherCtx, pat: IrNodeId) -> Option<Option<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{compile, parse, lower};
+    use crate::{compile, lower, parse};
     use murphy_ast::{AstBuilder, NodeId, NodeKind, NodeList, OptNodeId, Range, Symbol};
 
     fn r() -> Range {
@@ -574,9 +576,7 @@ mod tests {
     fn any_head_matches_arbitrary_kind() {
         let (ast, send) = puts_one_ast();
         assert!(matches(&compile("(_)").unwrap(), &ast, send, &mut NoPredicates).is_some());
-        assert!(
-            matches(&compile("(_ ...)").unwrap(), &ast, send, &mut NoPredicates).is_some()
-        );
+        assert!(matches(&compile("(_ ...)").unwrap(), &ast, send, &mut NoPredicates).is_some());
     }
 
     #[test]
