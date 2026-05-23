@@ -59,6 +59,20 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 `cp`/`mv`/`rm` may be aliased to interactive (`-i`) mode and hang the agent. Always use non-interactive forms: `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`. Also use `ssh`/`scp` with `-o BatchMode=yes`, and `apt-get -y`.
 
+## Worktree Setup
+
+New git worktrees (`.claude/worktrees/*`, `.worktrees/*`) need `mise trust` inside the worktree before tools are visible. mruby3-sys's `build.rs` invokes `make -C mruby` which requires Ruby; without `mise` activation, the script silently emits no `libmruby.a` and later test links fail with `-lmruby` not found.
+
+```bash
+mise trust                       # one-time per worktree
+eval "$(mise activate bash)"     # per shell — exposes ruby/etc.
+cargo clean -p mruby3-sys && cargo build  # if libmruby.a is missing
+```
+
+## Test Parallelism
+
+`cargo test` runs lib tests in parallel. A `static AtomicUsize` shared across multiple `#[test]` fns will race — `store(0)` in one test interleaves with `fetch_add` in another. Use per-test static atomics (one tagged per test) when a dispatch-thunk or callback needs to observe call counts.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
 
