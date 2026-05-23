@@ -23,10 +23,55 @@ pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
     }
     // The root is not a node child, so a rest-like root is correctly rejected.
     validate_rest_placement(&root, false)?;
+    // Every `$` capture must sit on a definite-assignment path so it is
+    // written on exactly the successful arm; `{}` / `!` / `` ` `` violate
+    // this. Matches the B-backend `lower_bool` rejection (murphy-9cr.18).
+    validate_capture_position(&root, false)?;
     Ok(PatternAst {
         root,
         captures: parser.captures,
     })
+}
+
+#[cfg(test)]
+mod capture_position_tests {
+    use crate::parse;
+
+    #[test]
+    fn captures_in_union_arms_are_rejected() {
+        // `{$a $b}` — both arms declare captures; the losing arm's slot
+        // would be unwritten at the matcher's `finish` step (it would
+        // panic at runtime). The parser must reject this up front.
+        let e = parse("{$a $b}").expect_err("must reject capture in union");
+        assert!(e.message.contains('$'));
+    }
+
+    #[test]
+    fn captures_inside_negation_are_rejected() {
+        let e = parse("!$_").expect_err("must reject capture in not");
+        assert!(e.message.contains('$'));
+    }
+
+    #[test]
+    fn captures_inside_descend_are_rejected() {
+        let e = parse("`$_").expect_err("must reject capture in descend");
+        assert!(e.message.contains('$'));
+    }
+
+    #[test]
+    fn captures_under_parent_are_allowed() {
+        // `^x` is definite — the parent direction is unique. Captures are
+        // OK in that subtree (mirrors B's `lower_pat` route).
+        let p = parse("^$_").expect("parent capture should parse");
+        assert_eq!(p.n_captures(), 1);
+    }
+
+    #[test]
+    fn captures_inside_capture_body_are_allowed() {
+        // The body of an outer `$(...)` is a definite-assignment subtree.
+        let p = parse("$(send $_ :foo)").expect("nested capture should parse");
+        assert_eq!(p.n_captures(), 2);
+    }
 }
 
 /// Whether `pat` is a "rest-like" element — one that matches zero-or-more
@@ -38,6 +83,57 @@ fn is_rest_like(pat: &Pat) -> bool {
         PatKind::Rest => true,
         PatKind::Capture { body, .. } => matches!(body.kind, PatKind::Rest),
         _ => false,
+    }
+}
+
+/// Post-parse walk enforcing the "captures live on a definite-assignment
+/// path" rule. A `$` capture must always be written by the matcher's
+/// successful arm — if it could be missed, the runtime would surface an
+/// unwritten slot.
+///
+/// The forbidden positions are exactly those the B-backend's `lower_bool`
+/// route rejects at compile time: `{}` union, `!` negation, `` ` ``
+/// descend. `^` parent is fine — it has a unique parent. The body of an
+/// outer capture, the body of a node-pattern's slots, and the top level
+/// are all definite-assignment positions and recurse with `forbidden =
+/// false`.
+///
+/// `forbidden` is `true` only while traversing the subtree of a union /
+/// not / descend node. A `Capture` reached with `forbidden = true` is the
+/// error case.
+fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseError> {
+    match &pat.kind {
+        PatKind::Capture { body, .. } => {
+            if forbidden {
+                return Err(ParseError::new(
+                    "`$` capture is not allowed inside `{}` / `!` / `` ` `` \
+                     (the body has no definite-assignment path)",
+                    pat.span,
+                ));
+            }
+            // The body of a capture is itself a definite-assignment subtree.
+            validate_capture_position(body, false)
+        }
+        PatKind::Union(alts) => {
+            for alt in alts {
+                validate_capture_position(alt, true)?;
+            }
+            Ok(())
+        }
+        PatKind::Not(b) | PatKind::Descend(b) => validate_capture_position(b, true),
+        PatKind::Parent(b) => validate_capture_position(b, forbidden),
+        PatKind::Node { children, .. } => {
+            for child in children {
+                validate_capture_position(child, forbidden)?;
+            }
+            Ok(())
+        }
+        PatKind::Rest
+        | PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate(_)
+        | PatKind::Kind(_) => Ok(()),
     }
 }
 
