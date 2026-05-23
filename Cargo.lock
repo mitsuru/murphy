@@ -609,6 +609,7 @@ dependencies = [
  "libloading",
  "mruby3-sys",
  "murphy-ast",
+ "murphy-cache",
  "murphy-plugin-api",
  "murphy-translate",
  "ruby-prism",

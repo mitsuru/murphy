@@ -15,7 +15,8 @@
 //! profile against, so re-parsing twice is acceptable; surfacing errors
 //! through translate is a follow-up (out of murphy-9cr.22 scope).
 
-use murphy_ast::Ast;
+use murphy_ast::{Ast, content_hash};
+use murphy_cache::Cache;
 use ruby_prism as prism;
 use std::path::PathBuf;
 
@@ -89,9 +90,67 @@ pub fn parse(source: &str, path: impl Into<PathBuf>) -> Result<Ast, ParseError> 
     Ok(murphy_translate::translate(source, path))
 }
 
+/// Parse Ruby `source` (from `path`) into an arena [`Ast`], consulting an
+/// optional on-disk [`Cache`] first.
+///
+/// - `cache = None` → identical to [`parse`].
+/// - `cache = Some(&c)` → compute `content_hash(source)`, return the
+///   cached arena if hit, otherwise parse + populate the cache (best-effort
+///   write; failures are silent — see [`Cache::put`]).
+///
+/// Syntax errors are surfaced even on a cache hit by short-circuiting the
+/// prism error harvest before the cache lookup. This keeps the
+/// `Murphy/Syntax` contract (ADR 0006) intact when a cached entry exists
+/// for a source whose syntax has since regressed (a degenerate case, but
+/// possible if a previous successful parse was cached and the file later
+/// changed to invalid Ruby without the cache being invalidated — though in
+/// practice `content_hash` keys both runs apart, so this branch is
+/// effectively a no-op safeguard).
+pub fn parse_with_cache(
+    source: &str,
+    path: impl Into<PathBuf>,
+    cache: Option<&Cache>,
+) -> Result<Ast, ParseError> {
+    let Some(cache) = cache else {
+        return parse(source, path);
+    };
+    if exceeds_offset_domain(source.len()) {
+        return parse(source, path); // delegate to surface the structured error
+    }
+    {
+        let result = prism::parse(source.as_bytes());
+        if let Some(err) = result.errors().next() {
+            let loc = err.location();
+            let range = Range::from_prism_location(&loc);
+            let message = String::from_utf8_lossy(err.message().as_bytes()).into_owned();
+            return Err(ParseError { message, range });
+        }
+    }
+    let hash = content_hash(source.as_bytes());
+    if let Some(ast) = cache.lookup(&hash) {
+        return Ok(ast);
+    }
+    let ast = murphy_translate::translate(source, path);
+    cache.put(&hash, &ast);
+    Ok(ast)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unique_tempdir() -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "murphy-core-parse-cache-{stamp}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn parses_valid_ruby_to_arena_ast() {
@@ -114,5 +173,42 @@ mod tests {
 
         let ast = parse("x = 1\n", "t.rb").expect("small source parses");
         assert!(!ast.is_empty());
+    }
+
+    #[test]
+    fn parse_with_cache_without_cache_matches_parse() {
+        let src = "x = 1\n";
+        let a = parse(src, "t.rb").unwrap();
+        let b = parse_with_cache(src, "t.rb", None).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn parse_with_cache_miss_then_hit_returns_same_arena() {
+        let cache = Cache::open_in(unique_tempdir(), 1);
+        let src = "y = 2\n";
+        let first = parse_with_cache(src, "t.rb", Some(&cache)).unwrap();
+        let second = parse_with_cache(src, "t.rb", Some(&cache)).unwrap();
+        assert_eq!(first, second, "cache hit must produce an equal arena");
+    }
+
+    #[test]
+    fn parse_with_cache_populates_disk_on_miss() {
+        let cache = Cache::open_in(unique_tempdir(), 1);
+        let src = "z = 3\n";
+        let hash = content_hash(src.as_bytes());
+        assert!(cache.lookup(&hash).is_none(), "starts empty");
+        let _ = parse_with_cache(src, "t.rb", Some(&cache)).unwrap();
+        assert!(
+            cache.lookup(&hash).is_some(),
+            "successful parse must write the arena to the cache"
+        );
+    }
+
+    #[test]
+    fn parse_with_cache_propagates_syntax_errors() {
+        let cache = Cache::open_in(unique_tempdir(), 1);
+        let err = parse_with_cache("def (\n", "t.rb", Some(&cache)).unwrap_err();
+        assert!(!err.message.is_empty());
     }
 }

@@ -51,7 +51,7 @@ pub use mruby::{
     run_mruby_cop_isolated_with_deadline,
 };
 pub use offense::{Autocorrect, Edit, Offense, Range, SYNTAX_COP_NAME, Severity};
-pub use parse::{ParseError, parse};
+pub use parse::{ParseError, parse, parse_with_cache};
 pub use registry::CopRegistry;
 
 /// Returns the Murphy core crate version.

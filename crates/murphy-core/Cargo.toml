@@ -12,6 +12,8 @@ murphy-ast = { path = "../murphy-ast" }
 murphy-plugin-api = { path = "../murphy-plugin-api" }
 # prism→arena bridge (murphy-9cr.15). `parse()` is a thin wrapper here.
 murphy-translate = { path = "../murphy-translate" }
+# Arena binary cache (murphy-9cr.26). parse_with_cache routes through it.
+murphy-cache = { path = "../murphy-cache" }
 # Exact pin (ADR 0001): a prism node-schema change must not ride in silently
 # on the load-bearing byte offsets; bumping is a deliberate, re-verified step.
 # Kept as a direct dep because `parse()` re-parses to harvest the first
