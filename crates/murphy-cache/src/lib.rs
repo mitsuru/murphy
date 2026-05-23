@@ -99,12 +99,18 @@ impl Cache {
     }
 
     fn put_impl(&self, content_hash: &[u8; 32], ast: &Ast) -> std::io::Result<()> {
+        // Cache writes are best-effort: a non-UTF-8 `source.path` (which
+        // `to_bytes` now rejects rather than lossy-converting) just means
+        // we skip caching this AST.
+        let bytes = ast
+            .to_bytes()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e:?}")))?;
         let path = self.path_for(content_hash);
         let dir = path.parent().expect("path_for always has a parent");
         std::fs::create_dir_all(dir)?;
         // Tempfile in the same directory → atomic rename onto target.
         let tmp = tmp_path(dir);
-        std::fs::write(&tmp, ast.to_bytes())?;
+        std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, &path).inspect_err(|_| {
             // If rename failed, do not orphan the tempfile.
             let _ = std::fs::remove_file(&tmp);

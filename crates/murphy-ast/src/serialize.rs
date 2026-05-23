@@ -87,6 +87,11 @@ pub enum SerError {
     BadNodeListRange { start: u32, len: u32 },
     /// The recorded root was outside `0..nodes.len()`.
     BadRoot { id: u32, count: u32 },
+    /// `source.path` was not valid UTF-8. The on-disk format encodes the
+    /// path as UTF-8, so non-UTF-8 OS paths (e.g. arbitrary-byte Unix paths)
+    /// cannot round-trip and are rejected outright instead of being silently
+    /// replaced with `U+FFFD`.
+    PathNotUtf8,
 }
 
 fn put_u8(out: &mut Vec<u8>, v: u8) {
@@ -1010,8 +1015,11 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
 
 impl Ast {
     /// Serialize to a flat byte buffer with an 88-byte header. Round-trips
-    /// bit-exactly via [`Ast::from_bytes`].
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// bit-exactly via [`Ast::from_bytes`]. Returns [`SerError::PathNotUtf8`]
+    /// when `source.path` is not valid UTF-8 — the on-disk format encodes
+    /// the path as UTF-8 and silently lossy-converting (`U+FFFD`) would
+    /// break the bit-equal round-trip contract.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SerError> {
         let mut out = Vec::new();
         write_header(&self.source.text, &mut out);
 
@@ -1047,8 +1055,11 @@ impl Ast {
         put_u64(&mut out, self.source.text.len() as u64);
         out.extend_from_slice(self.source.text.as_bytes());
 
-        // 7. source path
-        let path = self.source.path.to_string_lossy();
+        // 7. source path — UTF-8 only. Non-UTF-8 OS paths cannot round-trip
+        // through the on-disk format, so reject them here instead of
+        // lossy-converting and producing a buffer whose path field will not
+        // match the original `PathBuf` on read-back.
+        let path = self.source.path.to_str().ok_or(SerError::PathNotUtf8)?;
         let path_bytes = path.as_bytes();
         put_u64(&mut out, path_bytes.len() as u64);
         out.extend_from_slice(path_bytes);
@@ -1056,7 +1067,7 @@ impl Ast {
         // 8. root
         put_u32(&mut out, self.root.0);
 
-        out
+        Ok(out)
     }
 
     /// Deserialize a buffer produced by [`Ast::to_bytes`]. Validates the
@@ -1116,10 +1127,11 @@ impl Ast {
             return Err(SerError::ContentHashMismatch);
         }
 
-        // 7. source path
+        // 7. source path — UTF-8 only; mirrored with the writer's
+        // `PathNotUtf8` rejection.
         let path_len = usize::try_from(get_u64(&mut cur)?).map_err(|_| SerError::UnexpectedEof)?;
         let path_bytes = take(&mut cur, path_len)?.to_vec();
-        let path_string = String::from_utf8(path_bytes).map_err(|_| SerError::InvalidUtf8)?;
+        let path_string = String::from_utf8(path_bytes).map_err(|_| SerError::PathNotUtf8)?;
         let path = std::path::PathBuf::from(path_string);
 
         // 8. root
@@ -1165,7 +1177,7 @@ mod tests {
         b.add_comment(r(6, 9), CommentKind::Inline);
         let ast = b.finish(root);
 
-        let bytes = ast.to_bytes();
+        let bytes = ast.to_bytes().unwrap();
         let restored = crate::Ast::from_bytes(&bytes).expect("round-trip");
         assert_eq!(ast, restored, "round-trip must be bit-equal");
     }
@@ -1197,7 +1209,7 @@ mod tests {
         let root = b.push(NodeKind::Begin(list), r(0, 14));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(ast, restored, "Gvasgn/Cvasgn round-trip must be bit-equal");
     }
 
@@ -1238,7 +1250,7 @@ mod tests {
         let root = b.push(NodeKind::Args(list), r(5, 38));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(
             ast, restored,
             "parameter variant round-trip must be bit-equal"
@@ -1258,7 +1270,7 @@ mod tests {
         let root = b.push(NodeKind::Hash(list), r(0, 10));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(ast, restored, "Kwsplat round-trip must be bit-equal");
     }
 
@@ -1292,7 +1304,7 @@ mod tests {
         let root = b.push(NodeKind::Begin(list), r(0, 23));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(ast, restored, "While/Until round-trip must be bit-equal");
     }
 
@@ -1337,7 +1349,7 @@ mod tests {
         let root = b.push(NodeKind::Begin(list), r(0, 16));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(ast, restored, "RangeExpr round-trip must be bit-equal");
     }
 
@@ -1386,7 +1398,7 @@ mod tests {
         );
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(
             ast, restored,
             "Def-with-receiver / Sclass round-trip must be bit-equal"
@@ -1430,7 +1442,7 @@ mod tests {
         let root = b.push(NodeKind::Begin(list), r(0, 52));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(ast, restored, "jump variant round-trip must be bit-equal");
     }
 
@@ -1485,7 +1497,7 @@ mod tests {
         let root = b.push(NodeKind::Begin(list), r(0, 40));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(
             ast, restored,
             "exception variant round-trip must be bit-equal"
@@ -1556,7 +1568,7 @@ mod tests {
         let root = b.push(NodeKind::Begin(list), r(0, 27));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(
             ast, restored,
             "op-assign variant round-trip must be bit-equal"
@@ -1606,7 +1618,7 @@ mod tests {
         let root = b.push(NodeKind::Begin(list), r(0, 27));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(
             ast, restored,
             "interpolation variant round-trip must be bit-equal"
@@ -1646,7 +1658,7 @@ mod tests {
         let root = b.push(NodeKind::Begin(list), r(0, 11));
         let ast = b.finish(root);
 
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).expect("round-trip");
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(ast, restored, "Masgn/Mlhs round-trip must be bit-equal");
     }
 
@@ -1655,7 +1667,7 @@ mod tests {
         let mut b = AstBuilder::new("", "e.rb");
         let root = b.push(NodeKind::Nil, r(0, 0));
         let ast = b.finish(root);
-        let restored = crate::Ast::from_bytes(&ast.to_bytes()).unwrap();
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).unwrap();
         assert_eq!(ast, restored);
     }
 
@@ -1680,14 +1692,14 @@ mod tests {
     #[test]
     fn to_bytes_starts_with_magic() {
         let ast = simple_ast();
-        let bytes = ast.to_bytes();
+        let bytes = ast.to_bytes().unwrap();
         assert_eq!(&bytes[0..8], super::MAGIC);
     }
 
     #[test]
     fn from_bytes_rejects_bad_magic() {
         let ast = simple_ast();
-        let mut bytes = ast.to_bytes();
+        let mut bytes = ast.to_bytes().unwrap();
         bytes[0] = b'X';
         assert!(matches!(
             crate::Ast::from_bytes(&bytes),
@@ -1698,7 +1710,7 @@ mod tests {
     #[test]
     fn from_bytes_rejects_format_version_mismatch() {
         let ast = simple_ast();
-        let mut bytes = ast.to_bytes();
+        let mut bytes = ast.to_bytes().unwrap();
         let bumped = (super::FORMAT_VERSION + 1).to_le_bytes();
         bytes[8..12].copy_from_slice(&bumped);
         assert!(matches!(
@@ -1710,7 +1722,7 @@ mod tests {
     #[test]
     fn from_bytes_rejects_murphy_version_mismatch() {
         let ast = simple_ast();
-        let mut bytes = ast.to_bytes();
+        let mut bytes = ast.to_bytes().unwrap();
         bytes[16] ^= 0xFF;
         assert!(matches!(
             crate::Ast::from_bytes(&bytes),
@@ -1721,7 +1733,7 @@ mod tests {
     #[test]
     fn from_bytes_rejects_target_mismatch() {
         let ast = simple_ast();
-        let mut bytes = ast.to_bytes();
+        let mut bytes = ast.to_bytes().unwrap();
         bytes[32] ^= 0xFF;
         assert!(matches!(
             crate::Ast::from_bytes(&bytes),
@@ -1732,7 +1744,7 @@ mod tests {
     #[test]
     fn from_bytes_rejects_content_hash_mismatch() {
         let ast = simple_ast();
-        let mut bytes = ast.to_bytes();
+        let mut bytes = ast.to_bytes().unwrap();
         // content_hash lives at offset 64 (8 magic + 4 fmt + 4 reserved +
         // 16 murphy_version + 32 target_triple = 64).
         bytes[64] ^= 0xFF;
@@ -1748,7 +1760,7 @@ mod tests {
         // can rely on a fixed offset for the body. Also verify `to_bytes`
         // actually emits that many header bytes before any body content.
         assert_eq!(super::HEADER_LEN, 96);
-        let bytes = simple_ast().to_bytes();
+        let bytes = simple_ast().to_bytes().unwrap();
         assert!(bytes.len() > super::HEADER_LEN);
     }
 
@@ -1773,7 +1785,7 @@ mod tests {
                 *value = OptNodeId(bad_id);
             }
         });
-        let bytes = ast.to_bytes();
+        let bytes = ast.to_bytes().unwrap();
         assert!(matches!(
             crate::Ast::from_bytes(&bytes),
             Err(SerError::NodeIdOutOfRange { .. })
@@ -1793,7 +1805,7 @@ mod tests {
                 *name = crate::Symbol(bad_sym);
             }
         });
-        let bytes = ast.to_bytes();
+        let bytes = ast.to_bytes().unwrap();
         assert!(matches!(
             crate::Ast::from_bytes(&bytes),
             Err(SerError::SymbolOutOfRange { .. })
@@ -1812,7 +1824,7 @@ mod tests {
                 list.len = 999;
             }
         });
-        let bytes = ast.to_bytes();
+        let bytes = ast.to_bytes().unwrap();
         assert!(matches!(
             crate::Ast::from_bytes(&bytes),
             Err(SerError::BadNodeListRange { .. })
@@ -1822,7 +1834,7 @@ mod tests {
     #[test]
     fn from_bytes_rejects_bad_root() {
         let ast = ast_with_corrupt(|ast| ast.root = crate::NodeId(999));
-        let bytes = ast.to_bytes();
+        let bytes = ast.to_bytes().unwrap();
         assert!(matches!(
             crate::Ast::from_bytes(&bytes),
             Err(SerError::BadRoot { .. })
@@ -1835,10 +1847,42 @@ mod tests {
         // entries currently referenced by a `NodeList { start, len }` slice,
         // so a stray bad NodeId at the end is enough to trip the check.
         let ast = ast_with_corrupt(|ast| ast.node_lists.push(crate::NodeId(999)));
-        let bytes = ast.to_bytes();
+        let bytes = ast.to_bytes().unwrap();
         assert!(matches!(
             crate::Ast::from_bytes(&bytes),
             Err(SerError::NodeIdOutOfRange { .. })
+        ));
+    }
+
+    // murphy-g2u: the on-disk format encodes `source.path` as UTF-8, so a
+    // non-UTF-8 OS path (only constructible on Unix) cannot round-trip.
+    // Writer must reject it instead of silently lossy-converting through
+    // `to_string_lossy`, which would replace bytes with `U+FFFD` and break
+    // the bit-equal round-trip contract.
+    #[cfg(unix)]
+    #[test]
+    fn to_bytes_rejects_non_utf8_path() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut ast = simple_ast();
+        let bad = std::ffi::OsStr::from_bytes(&[0xFF, b'/', b'x', b'.', b'r', b'b']);
+        ast.source.path = std::path::PathBuf::from(bad);
+        assert!(matches!(ast.to_bytes(), Err(SerError::PathNotUtf8)));
+    }
+
+    // Reader side is mirrored: a buffer whose recorded path bytes are not
+    // UTF-8 surfaces as `PathNotUtf8` (rather than the generic
+    // `InvalidUtf8`), keeping writer/reader errors symmetric.
+    #[test]
+    fn from_bytes_rejects_non_utf8_path() {
+        let ast = simple_ast();
+        let mut bytes = ast.to_bytes().unwrap();
+        // The path is the last variable-length field before the 4-byte root.
+        // Mutate the final byte of the path payload to an invalid UTF-8 lead.
+        let root_at = bytes.len() - 4;
+        bytes[root_at - 1] = 0xFF;
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::PathNotUtf8)
         ));
     }
 }
