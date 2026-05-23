@@ -23,18 +23,42 @@ use tempfile::tempdir;
 /// (b) host triple 仮定 (`--target=<triple>` のクロスビルドだと artifact は
 /// `target/<triple>/debug/` に移動するため未対応)。両条件は CI と通常開発
 /// では成立しており、必要になれば env (`MURPHY_TEST_PROFILE` 等) で拡張。
+///
+/// 探索順:
+/// 1. `<target>/debug/lib<name>.{so,dylib}` (Cargo の cdylib 標準配置)
+/// 2. `<target>/debug/deps/lib<name>-<hash>.{so,dylib}` (一部 Cargo バージョン /
+///    ビルド経路で intermediate が deps/ にだけ生成されるケースの fallback)
 fn example_pack_path() -> std::path::PathBuf {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
         });
-    let lib_name = if cfg!(target_os = "macos") {
-        "libmurphy_example_pack.dylib"
+    let (prefix, ext) = if cfg!(target_os = "macos") {
+        ("libmurphy_example_pack", "dylib")
     } else {
-        "libmurphy_example_pack.so"
+        ("libmurphy_example_pack", "so")
     };
-    target_dir.join("debug").join(lib_name)
+    let top = target_dir.join("debug").join(format!("{prefix}.{ext}"));
+    if top.exists() {
+        return top;
+    }
+    // Fallback: search target/debug/deps/lib<name>-<hash>.{so,dylib}
+    let deps = target_dir.join("debug").join("deps");
+    if let Ok(entries) = std::fs::read_dir(&deps) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(prefix)
+                && name.ends_with(&format!(".{ext}"))
+                && name.as_bytes().get(prefix.len()) == Some(&b'-')
+            {
+                return entry.path();
+            }
+        }
+    }
+    // どちらも見つからなければ規約パスを返す (assert で具体 path 付き失敗メッセージへ)
+    top
 }
 
 #[test]

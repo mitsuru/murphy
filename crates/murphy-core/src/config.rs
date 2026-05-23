@@ -324,7 +324,16 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
         out.push_str(&format!("plugins = {}\n", toml_array(&plugin_names)));
     }
     for unsupported in &unsupported_plugins {
-        out.push_str(&format!("# unsupported plugin entry: {unsupported}\n"));
+        // `unsupported` は .rubocop.yml の mapping-key 由来でユーザー由来文字列。
+        // 改行を含むと migrate 出力の `# ...` コメント以降の行が有効な TOML として
+        // 解釈されうる (悪意ある YAML が `# foo\n[[plugins]]\nname = "x"\npath = "y"`
+        // のような entry 名を持つ場合に config injection)。制御文字 (\r \n \x00 ...)
+        // を `?` に置換して 1 行に押し込める。
+        let sanitized: String = unsupported
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect();
+        out.push_str(&format!("# unsupported plugin entry: {sanitized}\n"));
     }
     if !plugin_names.is_empty() || !unsupported_plugins.is_empty() {
         out.push('\n');
@@ -564,6 +573,45 @@ plugins = [
         assert_eq!(
             unsupported_count, 2,
             "expected 2 unsupported comments for 42 and true, got {unsupported_count}:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_unsupported_name_with_newline_sanitized_to_single_line() {
+        // セキュリティ: 悪意ある YAML mapping-key (改行入り) が migrate 出力に
+        // 任意 TOML を inject できないこと。改行 / 制御文字は `?` 置換される。
+        let input = "plugins:\n  - \"evil\\n[[plugins]]\\nname = 'x'\":\n      foo: bar\n";
+        let out = migrate_rubocop_yml_to_murphy_toml(input).unwrap();
+        // LINE-START の "[[plugins]]" (= 有効な TOML section header) が injection
+        // されていないこと。comment 内に文字列として残るのは無害なので、行頭判定。
+        let injected = out
+            .lines()
+            .any(|l| l.trim_start().starts_with("[[plugins]]"));
+        assert!(
+            !injected,
+            "unsupported plugin name with newlines must not inject a [[plugins]] TOML section header:\n{out}"
+        );
+        // 改行は `?` に置換され、unsupported comment は 1 行に押し込められる
+        let unsupported_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with("# unsupported plugin entry:"))
+            .collect();
+        assert_eq!(
+            unsupported_lines.len(),
+            1,
+            "expected exactly 1 unsupported comment line, got {}:\n{out}",
+            unsupported_lines.len()
+        );
+        assert!(
+            !unsupported_lines[0].contains('\n') && !unsupported_lines[0].contains('\r'),
+            "sanitized line must not contain control chars:\n{}",
+            unsupported_lines[0]
+        );
+        // sanitization マーカ `?` が含まれること (injection 試行が検出された証拠)
+        assert!(
+            unsupported_lines[0].contains('?'),
+            "control chars in input should be replaced with `?`:\n{}",
+            unsupported_lines[0]
         );
     }
 
