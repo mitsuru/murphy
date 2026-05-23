@@ -5,20 +5,22 @@
 //!
 //! - [`Example/NoEval`](no_eval) — `Send` (CallNode) dispatch + receiver
 //!   matching.
-//! - `Example/TodoFormat` — file-visit dispatch (`KINDS = &[]`) +
-//!   `#[derive(CopOptions)]` (added by murphy-9cr.10.1 Task 3.3).
+//! - [`Example/TodoFormat`](todo_format) — file-visit dispatch (`KINDS = &[]`)
+//!   + `#[derive(CopOptions)]` (`Vec<String>` + `bool`).
 //!
 //! The pack is the canonical reference distribution for the e2e plugin
 //! loading path (`crates/murphy-cli/tests/plugin_pack_e2e.rs`).
 
 pub mod no_eval;
+pub mod todo_format;
 
 use crate::no_eval::NoEval;
+use crate::todo_format::TodoFormat;
 
 // `register_cops!` re-exported from `murphy-plugin-api`. `mode = dynamic`
 // emits `#[no_mangle] pub unsafe extern "C" fn murphy_plugin_register`
 // for cdylib consumption by the host's plugin loader.
-murphy_plugin_api::register_cops!(mode = dynamic, NoEval);
+murphy_plugin_api::register_cops!(mode = dynamic, NoEval, TodoFormat);
 
 #[cfg(test)]
 mod tests {
