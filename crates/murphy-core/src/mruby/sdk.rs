@@ -1117,6 +1117,70 @@ mod tests {
         assert_eq!(drain_reports(), vec!["true"]);
     }
 
+    #[test]
+    fn prelude_node_wraps_arena_node_primitives() {
+        let _guard = lock_reports();
+        let ctx = AstContext::new(b"puts x\nlogger.info(x)\n".to_vec());
+        let root = ctx.arena_ast().root();
+        let first_child = ctx
+            .arena_ast()
+            .children(root)
+            .next()
+            .expect("fixture root has a first child");
+        let root_kind = murphy_ast::pattern_name(ctx.arena_ast().kind(root).tag())
+            .expect("fixture root kind is pattern-addressable");
+        let root_range = ctx.arena_ast().range(root);
+        let expected = format!(
+            "{}|{}|{},{}|parent={}|children={}|ancestors={}|descendants={}",
+            root.0,
+            root_kind,
+            root_range.start,
+            root_range.end,
+            root.0,
+            ctx.arena_ast().children(root).count(),
+            ctx.arena_ast().ancestors(first_child).count(),
+            ctx.arena_ast().descendants(root).count()
+        );
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: valid mrb state; registration only defines functions/classes.
+            unsafe {
+                crate::mruby::primitives::register(st.raw());
+                register_sdk(st.raw());
+                register_test_report(st.raw());
+            }
+            assert!(
+                !st.eval_checked(PRELUDE),
+                "prelude must load without raising"
+            );
+            assert!(
+                !st.eval_checked(
+                    r##"
+                root = Murphy::Node.new(Murphy.ast_root)
+                first_child = root.children[0]
+                range = root.range
+                Murphy.__test_report(
+                  "#{root.id}|#{root.kind}|#{range.start_offset},#{range.end_offset}|" \
+                  "parent=#{first_child.parent.id}|" \
+                  "children=#{root.children.length}|" \
+                  "ancestors=#{first_child.ancestors.length}|" \
+                  "descendants=#{root.descendants.length}"
+                )
+                "##,
+                ),
+                "arena node wrapper script must run without raising"
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_reports(), vec![expected]);
+    }
+
     /// PIN C / ADR 0001: an edit whose offset exceeds the `u32` domain MUST be
     /// dropped, never `as u32`-truncated. Edits come straight from Ruby ints
     /// (no prism bound), so `decode_edit_blob`'s own predicate is the only

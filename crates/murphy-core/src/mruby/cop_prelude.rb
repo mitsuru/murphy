@@ -68,8 +68,37 @@ class Murphy
   # nothing is cached Ruby-side. `name` is coerced to a Symbol so a cop reads
   # `node.name == :puts` exactly like design §4.
   class Node
-    def initialize(handle)
-      @handle = handle
+    attr_reader :id
+
+    def initialize(id)
+      @id = id
+      @handle = id
+    end
+
+    def kind
+      Murphy.node_kind(@id)
+    end
+
+    def parent
+      pid = Murphy.node_parent(@id)
+      pid && Murphy::Node.new(pid)
+    end
+
+    def children
+      Murphy.node_children(@id).map { |node_id| Murphy::Node.new(node_id) }
+    end
+
+    def ancestors
+      Murphy.node_ancestors(@id).map { |node_id| Murphy::Node.new(node_id) }
+    end
+
+    def descendants
+      Murphy.node_descendants(@id).map { |node_id| Murphy::Node.new(node_id) }
+    end
+
+    def range
+      start_offset, end_offset = Murphy.node_range(@id)
+      Murphy::Range.new(start_offset, end_offset)
     end
 
     # Returns a Symbol (design §4: `node.name == :puts`), or nil if the
