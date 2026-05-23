@@ -649,11 +649,11 @@ unsafe extern "C" fn native_node_msg_end(mrb: *mut mrb_state, _self: mrb_value) 
     unsafe { eval_literal(mrb, &lit) }
 }
 
-/// `Murphy.source_slice(start, end) -> String`. The BYTE slice
+/// `Murphy.raw_source(start, end) -> String`. The BYTE slice
 /// `source[start..end]` of the original parsed source (ADR 0001 byte offsets;
-/// pair with `node_msg_start`/`node_msg_end`). Returns `nil` on an out-of-range or inverted
-/// range rather than panicking — a user cop must not be able to crash the
-/// engine with a bad range.
+/// pair with `node_range`). Returns `nil` on an out-of-range or inverted range
+/// rather than panicking — a user cop must not be able to crash the engine with
+/// a bad range.
 unsafe extern "C" fn native_source_slice(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
     // SAFETY: native callback; `mrb` valid & non-null; `ud` is the live ctx.
     let c = unsafe { ctx(mrb) };
@@ -742,6 +742,7 @@ pub(crate) unsafe fn register(mrb: *mut mrb_state) {
         def(c"node_msg_start", native_node_msg_start, 1);
         def(c"node_msg_end", native_node_msg_end, 1);
         def(c"source_slice", native_source_slice, 2);
+        def(c"raw_source", native_source_slice, 2);
         def(c"compile_pattern", native_compile_pattern, 1);
         def(c"match", native_match, 2);
         def(c"node_descendants", native_node_descendants, 1);
@@ -1089,6 +1090,37 @@ mod tests {
         drop(ctx);
 
         assert_eq!(drain_sink(), vec![expected]);
+    }
+
+    #[test]
+    fn raw_source_primitive_reads_byte_ranges_from_original_source() {
+        let _guard = lock_sink();
+        let src = "# \u{30b3}\u{30e1}\u{30f3}\u{30c8}\nputs x\n";
+        let ctx = AstContext::new(src.as_bytes().to_vec());
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = crate::mruby::sdk::CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: see `run_driver_over` — valid state, live CopRun in ud.
+            unsafe {
+                register(st.raw());
+                register_test_report(st.raw());
+            }
+            st.eval(
+                r##"
+                Murphy.__test_report(Murphy.raw_source(2, 14))
+                Murphy.__test_report(Murphy.raw_source(15, 19))
+                Murphy.__test_report(Murphy.raw_source(20, 15).nil?.to_s)
+                Murphy.__test_report(Murphy.raw_source(-1, 2).nil?.to_s)
+            "##,
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_sink(), vec!["コメント", "puts", "true", "true"]);
     }
 
     /// MULTIBYTE hand-derivation (ADR 0001 — bytes, NOT chars) + handle→node
