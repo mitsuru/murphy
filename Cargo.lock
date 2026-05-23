@@ -596,6 +596,8 @@ dependencies = [
  "ignore",
  "libloading",
  "mruby3-sys",
+ "murphy-ast",
+ "murphy-plugin-api",
  "ruby-prism",
  "serde",
  "serde_json",

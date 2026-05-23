@@ -7,6 +7,7 @@ mod config;
 mod cop;
 mod cops;
 mod discovery;
+mod dispatch;
 mod mruby;
 mod offense;
 mod parse;
