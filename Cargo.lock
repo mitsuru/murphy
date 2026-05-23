@@ -628,7 +628,7 @@ dependencies = [
 name = "murphy-example-pack"
 version = "0.1.0"
 dependencies = [
- "murphy-core",
+ "murphy-plugin-api",
  "serde_json",
 ]
 
