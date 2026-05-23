@@ -1,23 +1,42 @@
-//! End-to-end test (placeholder) for native + `.rb` user cops co-occurring
-//! under the CLI.
-//!
-//! v1 (post-murphy-9cr.22) does NOT load `.rb` user cops at the CLI
-//! level — the legacy `load_mruby_cops` plumbing was removed when the
-//! pre-reboot plugin ABI was retired (design §6.2). The C-backend
-//! matcher in murphy-9cr.24 reintroduces `.rb` user cops through a
-//! different surface, and this test will be re-authored against that
-//! surface there.
-//!
-//! The file is preserved (compilable under
-//! `--features mruby-user-cops`) so .24 has a regression target to fill
-//! in, but no active assertion runs in .22. Asserting on the legacy
-//! behavior would lock in a contract that no longer exists.
-
 #![cfg(feature = "mruby-user-cops")]
 
+use assert_cmd::Command;
+use std::fs;
+use tempfile::tempdir;
+
 #[test]
-fn placeholder_for_24_c_backend_user_cop_e2e() {
-    // Intentionally empty: a sentinel so the file's `cfg`-gating and
-    // the test runner discover-pass remain wired. Once murphy-9cr.24
-    // lands, this is replaced by the real e2e tests.
+fn cli_runs_mruby_arena_user_cop_from_cops_directory() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::create_dir(root.join("cops")).expect("mkdir cops");
+    fs::write(root.join("target.rb"), "logger.info(1)\n").expect("write target");
+    fs::write(
+        root.join("cops").join("no_logger.rb"),
+        r#"
+class NoLogger < Murphy::Cop
+  def on_send(node)
+    return unless node.field(:method) == :info
+    add_offense(node.range, message: "no logger info")
+  end
+end
+"#,
+    )
+    .expect("write cop");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("target.rb")
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON array");
+    assert!(
+        parsed.iter().any(|o| o["message"] == "no logger info"),
+        "mruby user cop offense must be present, got {parsed:?}"
+    );
 }

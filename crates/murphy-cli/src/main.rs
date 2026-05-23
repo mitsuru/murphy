@@ -25,6 +25,8 @@ mod cops;
 mod lsp;
 
 use murphy_cache::Cache;
+#[cfg(feature = "mruby-user-cops")]
+use murphy_core::{AstContext, run_mruby_cop_isolated};
 use murphy_core::{
     CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
     aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
@@ -100,6 +102,11 @@ static FIX_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const LINT_USAGE: &str =
     "murphy lint [--fix|-a] [--debug] [--no-cache] [--format human|json|progress] [--] [path]...";
+
+struct MrubyCopSource {
+    name: String,
+    source: String,
+}
 
 struct AppError {
     code: u8,
@@ -253,13 +260,16 @@ fn lint_source(
     source: &str,
     file: &str,
     cops: &[&PluginCopV1],
+    mruby_cops: &[MrubyCopSource],
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
     let mut offenses = match parse_with_cache(source, file, cache) {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             dispatch::run_cops(&ast, cops, &mut sink);
-            sink.into_offenses()
+            let mut offenses = sink.into_offenses();
+            offenses.extend(run_mruby_user_cops(source, file, mruby_cops));
+            offenses
         }
         Err(err) => vec![Offense::new(
             file,
@@ -271,6 +281,48 @@ fn lint_source(
     };
     offenses = apply_inline_directive_filter(offenses, source);
     offenses
+}
+
+#[cfg(feature = "mruby-user-cops")]
+fn run_mruby_user_cops(source: &str, file: &str, mruby_cops: &[MrubyCopSource]) -> Vec<Offense> {
+    if mruby_cops.is_empty() {
+        return Vec::new();
+    }
+    let ctx = AstContext::new(source.as_bytes().to_vec());
+    mruby_cops
+        .iter()
+        .flat_map(|cop| run_mruby_cop_isolated(&ctx, &cop.source, &cop.name, file))
+        .collect()
+}
+
+#[cfg(not(feature = "mruby-user-cops"))]
+fn run_mruby_user_cops(_source: &str, _file: &str, _mruby_cops: &[MrubyCopSource]) -> Vec<Offense> {
+    Vec::new()
+}
+
+#[cfg(feature = "mruby-user-cops")]
+fn load_mruby_cop_sources(paths: &[PathBuf]) -> Result<Vec<MrubyCopSource>, AppError> {
+    paths
+        .iter()
+        .map(|path| {
+            let source = std::fs::read_to_string(path).map_err(|e| {
+                AppError::setup(format!("cannot read mruby cop {}: {e}", path.display()))
+            })?;
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("user_cop");
+            Ok(MrubyCopSource {
+                name: format!("Murphy/Mruby/{stem}"),
+                source,
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "mruby-user-cops"))]
+fn load_mruby_cop_sources(_paths: &[PathBuf]) -> Result<Vec<MrubyCopSource>, AppError> {
+    Ok(Vec::new())
 }
 
 /// Per-file timed result used by `--debug` output. We measure parse +
@@ -286,6 +338,7 @@ fn lint_source_timed(
     source: &str,
     file: &str,
     cops: &[&PluginCopV1],
+    mruby_cops: &[MrubyCopSource],
     cache: Option<&Cache>,
 ) -> TimedOffenses {
     let parse_started = Instant::now();
@@ -296,7 +349,9 @@ fn lint_source_timed(
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             dispatch::run_cops(&ast, cops, &mut sink);
-            sink.into_offenses()
+            let mut offenses = sink.into_offenses();
+            offenses.extend(run_mruby_user_cops(source, file, mruby_cops));
+            offenses
         }
         Err(err) => vec![Offense::new(
             file,
@@ -476,10 +531,11 @@ fn lint_closure_edits<'a>(
     source: &str,
     file: &'a str,
     cops: &'a [&'a PluginCopV1],
+    mruby_cops: &'a [MrubyCopSource],
     config: &'a MurphyConfig,
     cache: Option<&'a Cache>,
 ) -> Vec<murphy_core::Edit> {
-    let offenses = lint_source(source, file, cops, cache);
+    let offenses = lint_source(source, file, cops, mruby_cops, cache);
     aggregate_with_config(offenses, config)
         .into_iter()
         .filter_map(|o| o.autocorrect.map(|ac| ac.edits))
@@ -499,6 +555,7 @@ struct FileDebugInfo {
 fn lint_files_memoized(
     sources: &[(String, String)],
     cops: &[&PluginCopV1],
+    mruby_cops: &[MrubyCopSource],
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
     // Group paths by content so identical-content files share one lint.
@@ -518,7 +575,7 @@ fn lint_files_memoized(
             // additional path sharing the same content, clone the offense
             // list with `file` rewritten.
             let representative = paths[0];
-            let base = lint_source(content, representative, cops, cache);
+            let base = lint_source(content, representative, cops, mruby_cops, cache);
             let mut all: Vec<Offense> = Vec::with_capacity(base.len() * paths.len());
             all.extend(base.iter().cloned());
             for &other in &paths[1..] {
@@ -540,6 +597,7 @@ fn lint_files_memoized(
 fn lint_files_memoized_debug(
     sources: &[(String, String)],
     cops: &[&PluginCopV1],
+    mruby_cops: &[MrubyCopSource],
     cache: Option<&Cache>,
 ) -> (Vec<Offense>, Vec<(String, u128, u128)>) {
     // Debug variant: keep per-file (parse, cops) timings. No memoization
@@ -548,7 +606,7 @@ fn lint_files_memoized_debug(
     let mut all: Vec<Offense> = Vec::new();
     let mut timings: Vec<(String, u128, u128)> = Vec::new();
     for (path, content) in sources {
-        let t = lint_source_timed(content, path, cops, cache);
+        let t = lint_source_timed(content, path, cops, mruby_cops, cache);
         timings.push((path.clone(), t.parse_micros, t.cops_micros));
         all.extend(t.offenses);
     }
@@ -795,6 +853,11 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // borrowed references stay live across the dispatch + fixpoint loop.
     let cops_vec = registry.cops();
     let cops: &[&PluginCopV1] = &cops_vec;
+    #[cfg(feature = "mruby-user-cops")]
+    let mruby_cop_sources = load_mruby_cop_sources(registry.mruby_cop_paths())?;
+    #[cfg(not(feature = "mruby-user-cops"))]
+    let mruby_cop_sources = load_mruby_cop_sources(&[])?;
+    let mruby_cops: &[MrubyCopSource] = &mruby_cop_sources;
 
     // ── arena binary cache (murphy-9cr.26) ─────────────────────────────────
     // `Cache::open` consults `MURPHY_NO_CACHE` itself; `--no-cache` is the
@@ -830,7 +893,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         for (path, source) in &sources_for_lint {
             let outcome = run_to_fixpoint(
                 source,
-                |s| lint_closure_edits(s, path, cops, &config, cache_ref),
+                |s| lint_closure_edits(s, path, cops, mruby_cops, &config, cache_ref),
                 MAX_FIX_ITERATIONS,
             );
             if outcome.corrected != *source {
@@ -868,7 +931,8 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         );
     }
     let flat_offenses: Vec<Offense> = if debug {
-        let (offenses, timings) = lint_files_memoized_debug(&sources_for_lint, cops, cache_ref);
+        let (offenses, timings) =
+            lint_files_memoized_debug(&sources_for_lint, cops, mruby_cops, cache_ref);
         for (path, parse_us, cops_us) in &timings {
             eprintln!(
                 "murphy: debug: lint {} parse_us={} cops_us={}",
@@ -877,7 +941,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         }
         offenses
     } else {
-        lint_files_memoized(&sources_for_lint, cops, cache_ref)
+        lint_files_memoized(&sources_for_lint, cops, mruby_cops, cache_ref)
     };
     let offenses = aggregate_with_config(flat_offenses, &config);
     if debug {

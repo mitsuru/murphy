@@ -268,7 +268,7 @@ fn run_offenses_for_source(
     let cops_vec = registry.cops();
     // LSP: source mutates with every edit so cache hit rate would be ~0;
     // skip cache for now to avoid spurious disk writes on every keystroke.
-    let offenses = super::lint_source(source, file, &cops_vec, None);
+    let offenses = super::lint_source(source, file, &cops_vec, &[], None);
     aggregate_with_config(offenses, config)
 }
 
