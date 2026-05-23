@@ -152,7 +152,7 @@ impl CopRegistry {
         let mut packs: Vec<LoadedPluginPack> = Vec::new();
 
         #[cfg(not(target_os = "windows"))]
-        for pack in &config.cop_packs {
+        for pack in &config.plugins {
             let pack_index = pack_names.len();
             let path = root.join(&pack.path);
             let loaded = load_plugin_pack(&path)
@@ -189,7 +189,7 @@ impl CopRegistry {
         }
 
         #[cfg(target_os = "windows")]
-        if let Some(pack) = config.cop_packs.first() {
+        if let Some(pack) = config.plugins.first() {
             return Err(ConfigError::Io(format!(
                 "cop packs (`.so` plugins) are not supported on Windows: {}",
                 pack.name

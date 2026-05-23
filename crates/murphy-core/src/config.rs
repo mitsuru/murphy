@@ -9,7 +9,7 @@ use crate::ConfigError;
 pub struct MurphyConfig {
     pub files: FilesConfig,
     pub cops: CopsConfig,
-    pub cop_packs: Vec<CopPackConfig>,
+    pub plugins: Vec<CopPackConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +50,7 @@ struct MurphyToml {
     #[serde(default)]
     cops: CopsTable,
     #[serde(default)]
-    cop_packs: Vec<CopPackConfig>,
+    plugins: Vec<CopPackConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,7 +82,7 @@ impl Default for MurphyConfig {
                 path: default_cops_path(),
                 rules: BTreeMap::new(),
             },
-            cop_packs: Vec::new(),
+            plugins: Vec::new(),
         }
     }
 }
@@ -124,7 +124,7 @@ impl From<MurphyToml> for MurphyConfig {
                 path: value.cops.path,
                 rules: value.cops.rules,
             },
-            cop_packs: value.cop_packs,
+            plugins: value.plugins,
         }
     }
 }
@@ -408,7 +408,7 @@ enabled = true
     fn parses_cop_packs() {
         let cfg = MurphyConfig::from_toml_str(
             r#"
-[[cop_packs]]
+[[plugins]]
 name = "murphy-example-pack"
 path = "packs/murphy-example-pack/libmurphy_example_pack.so"
 version = "0.1.0"
@@ -416,26 +416,26 @@ version = "0.1.0"
         )
         .expect("config parses");
 
-        assert_eq!(cfg.cop_packs.len(), 1);
-        assert_eq!(cfg.cop_packs[0].name, "murphy-example-pack");
+        assert_eq!(cfg.plugins.len(), 1);
+        assert_eq!(cfg.plugins[0].name, "murphy-example-pack");
         assert_eq!(
-            cfg.cop_packs[0].path,
+            cfg.plugins[0].path,
             PathBuf::from("packs/murphy-example-pack/libmurphy_example_pack.so")
         );
-        assert_eq!(cfg.cop_packs[0].version, "0.1.0");
+        assert_eq!(cfg.plugins[0].version, "0.1.0");
     }
 
     #[test]
     fn cop_packs_default_to_empty() {
         let cfg = MurphyConfig::from_toml_str("").expect("empty config parses");
-        assert!(cfg.cop_packs.is_empty());
+        assert!(cfg.plugins.is_empty());
     }
 
     #[test]
     fn cop_pack_unknown_fields_are_rejected() {
         let err = MurphyConfig::from_toml_str(
             r#"
-[[cop_packs]]
+[[plugins]]
 name = "murphy-example-pack"
 path = "pack.so"
 version = "0.1.0"
