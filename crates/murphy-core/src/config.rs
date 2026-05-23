@@ -29,12 +29,12 @@ pub struct CopsConfig {
 ///
 /// Heterogeneous array of two shapes:
 /// - `plugins = ["murphy-rails"]` — name-only shorthand. RuboCop
-///   `.rubocop.yml` plugins: directive compatibility. Search-path
-///   resolution is deferred to `murphy-9cr.10.2`; in the MVP the
-///   registry returns a setup error directing the user to the detailed
-///   form.
-/// - `[[plugins]] name = "..." path = "..."` — explicit path. The
-///   MVP-supported form.
+///   `.rubocop.yml` plugins: directive compatibility. Resolved at load
+///   time against the search path (ADR 0042): same-array `Detailed`
+///   override → `MURPHY_PLUGIN_PATH` env → project-local
+///   `.murphy/plugins/` → user-local `$XDG_DATA_HOME/murphy/plugins/`.
+/// - `[[plugins]] name = "..." path = "..."` — explicit path; bypasses
+///   the search path entirely.
 ///
 /// ## Documented limitation
 ///
@@ -321,6 +321,14 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
 
     let mut out = String::new();
     if !plugin_names.is_empty() {
+        // RuboCop's `rubocop-X` plugin names are not auto-renamed to
+        // `murphy-X` (ADR 0041: explicit > implicit). Surface this once
+        // so the user fixes the names before the first lint run instead
+        // of debugging a `not found` error from the resolver (ADR 0042).
+        out.push_str(
+            "# NOTE: RuboCop `rubocop-X` plugin names must be renamed to `murphy-X` \
+             manually — Murphy does not auto-translate the prefix.\n",
+        );
         out.push_str(&format!("plugins = {}\n", toml_array(&plugin_names)));
     }
     for unsupported in &unsupported_plugins {
@@ -530,6 +538,28 @@ plugins = [
         assert!(matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "murphy-rails"));
         assert!(
             matches!(&cfg.plugins[1], PluginConfig::Detailed { name, .. } if name == "local-pack")
+        );
+    }
+
+    #[test]
+    fn migrate_plugins_emits_rubocop_rename_hint_comment() {
+        // RuboCop's `plugins: rubocop-foo` migrates to a TOML
+        // `plugins = ["rubocop-foo"]`. The user still has to rename
+        // `rubocop-` → `murphy-` themselves (ADR 0041 / 0042: no auto-rename).
+        // The migrate output emits a single `# NOTE: ...` line above the
+        // `plugins = [...]` line so the user sees the rename requirement
+        // immediately instead of getting a cryptic "plugin not found" at
+        // first lint run.
+        let out =
+            migrate_rubocop_yml_to_murphy_toml("plugins:\n  - rubocop-rails\n  - rubocop-rspec\n")
+                .unwrap();
+        assert!(
+            out.contains("plugins = [\"rubocop-rails\", \"rubocop-rspec\"]"),
+            "plugins line preserved verbatim:\n{out}"
+        );
+        assert!(
+            out.contains("# NOTE:") && out.contains("rubocop-") && out.contains("murphy-"),
+            "expected rename-hint NOTE line:\n{out}"
         );
     }
 

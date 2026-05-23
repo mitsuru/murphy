@@ -35,9 +35,12 @@ use murphy_plugin_api::PluginCopV1;
 
 use crate::ConfigError;
 use crate::MurphyConfig;
+#[cfg(target_os = "windows")]
 use crate::PluginConfig;
 #[cfg(not(target_os = "windows"))]
 use crate::plugin_loader::{LoadedPluginPack, load_plugin_pack};
+#[cfg(not(target_os = "windows"))]
+use crate::plugin_resolver::plan_plugin_loads;
 
 /// The cop set for a run: builtins + cops contributed by `.so` plugin
 /// packs, filtered by `[cops.rules."Name".enabled]`.
@@ -152,19 +155,15 @@ impl CopRegistry {
         #[cfg(not(target_os = "windows"))]
         let mut packs: Vec<LoadedPluginPack> = Vec::new();
 
+        // `plan_plugin_loads` (murphy-9cr.10.2 / ADR 0042) resolves any
+        // `Name(String)` shorthand against the search path, applies the
+        // `Detailed → env → project → user` priority, and dedups so a
+        // same-name `Name` + `Detailed` pair loads at most once.
         #[cfg(not(target_os = "windows"))]
-        for plugin in &config.plugins {
+        let plan = plan_plugin_loads(root, &config.plugins)?;
+        #[cfg(not(target_os = "windows"))]
+        for (pack_name, path) in plan {
             let pack_index = pack_names.len();
-            let (pack_name, path) = match plugin {
-                PluginConfig::Detailed { name, path } => (name.clone(), root.join(path)),
-                PluginConfig::Name(name) => {
-                    return Err(ConfigError::Io(format!(
-                        "Plugin `{name}`: name resolution is not yet implemented \
-                         (murphy-9cr.10.2). Use the detailed form: \
-                         `[[plugins]] name = \"{name}\" path = \"...\"`."
-                    )));
-                }
-            };
             let loaded = load_plugin_pack(&path)
                 .map_err(|e| ConfigError::Io(format!("cannot load plugin {pack_name}: {e}")))?;
             // Name-collision check against the already-registered cops.

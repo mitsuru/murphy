@@ -130,25 +130,180 @@ fn detailed_form_missing_path_exits_2_with_diagnostic() {
     );
 }
 
-#[test]
-fn name_only_form_exits_2_with_not_yet_implemented_hint() {
-    let dir = tempdir().expect("tempdir");
-    let rb = dir.path().join("sample.rb");
-    fs::write(&rb, "puts 'hi'\n").expect("write rb");
+/// Stage `pack` under `dir/<filename>` as a symlink. Murphy's `lib_filename`
+/// gives the exact name the resolver will look for (hyphen-to-underscore +
+/// platform extension).
+fn stage_pack_symlink(
+    dir: &std::path::Path,
+    pack: &std::path::Path,
+    name: &str,
+) -> std::path::PathBuf {
+    let staged = dir.join(murphy_core::plugin_resolver::lib_filename(name));
+    std::os::unix::fs::symlink(pack, &staged).expect("symlink staging");
+    staged
+}
 
-    let toml = "plugins = [\"murphy-rails\"]\n";
-    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+#[test]
+fn name_form_resolves_via_murphy_plugin_path_env() {
+    // `plugins = ["murphy-example-pack"]` + `MURPHY_PLUGIN_PATH=<dir>`
+    // proves the resolver follows env-listed search dirs, AND that the
+    // Cargo cdylib hyphen→underscore convention is applied (the artifact
+    // on disk is `libmurphy_example_pack.so`, not `libmurphy-example-pack.so`).
+    let pack = example_pack_path()
+        .canonicalize()
+        .expect("example-pack artifact should exist");
+
+    let dir = tempdir().expect("tempdir");
+    let plugin_dir = dir.path().join("custom_plugins");
+    fs::create_dir(&plugin_dir).expect("mkdir plugin_dir");
+    stage_pack_symlink(&plugin_dir, &pack, "murphy-example-pack");
+
+    let rb = dir.path().join("sample.rb");
+    fs::write(&rb, "# TODO: x\neval(\"x\")\n").expect("write rb");
+    fs::write(
+        dir.path().join("murphy.toml"),
+        "plugins = [\"murphy-example-pack\"]\n",
+    )
+    .expect("write toml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .current_dir(dir.path())
+        .env("MURPHY_PLUGIN_PATH", &plugin_dir)
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb)
+        .assert()
+        .code(1);
+    let stdout = &assert.get_output().stdout;
+    let offenses: Vec<serde_json::Value> = serde_json::from_slice(stdout).expect("stdout JSON");
+    let names: Vec<String> = offenses
+        .iter()
+        .filter_map(|o| o["cop_name"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        names.contains(&"Example/NoEval".to_string()),
+        "expected Example/NoEval in {names:?}"
+    );
+}
+
+#[test]
+fn name_form_resolves_via_project_local_dot_murphy_plugins() {
+    // `plugins = ["murphy-example-pack"]` + `<project>/.murphy/plugins/`
+    // proves the project-local search dir is wired up. Env explicitly
+    // cleared so we only hit the project-local path.
+    let pack = example_pack_path()
+        .canonicalize()
+        .expect("example-pack artifact should exist");
+
+    let dir = tempdir().expect("tempdir");
+    let plugin_dir = dir.path().join(".murphy/plugins");
+    fs::create_dir_all(&plugin_dir).expect("mkdir .murphy/plugins");
+    stage_pack_symlink(&plugin_dir, &pack, "murphy-example-pack");
+
+    let rb = dir.path().join("sample.rb");
+    fs::write(&rb, "# TODO: x\n").expect("write rb");
+    fs::write(
+        dir.path().join("murphy.toml"),
+        "plugins = [\"murphy-example-pack\"]\n",
+    )
+    .expect("write toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .env_remove("MURPHY_PLUGIN_PATH")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb)
+        .assert()
+        .code(1);
+    let stdout = &assert.get_output().stdout;
+    let offenses: Vec<serde_json::Value> = serde_json::from_slice(stdout).expect("stdout JSON");
+    let names: Vec<String> = offenses
+        .iter()
+        .filter_map(|o| o["cop_name"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        names.contains(&"Example/TodoFormat".to_string()),
+        "expected Example/TodoFormat in {names:?}"
+    );
+}
+
+#[test]
+fn name_form_missing_exits_2_with_search_path_and_detailed_hint() {
+    // No staging anywhere; env cleared. The error must echo the
+    // searched dirs and point the user at the `[[plugins]]` detailed form.
+    let dir = tempdir().expect("tempdir");
+    let rb = dir.path().join("sample.rb");
+    fs::write(&rb, "puts 'hi'\n").expect("write rb");
+    fs::write(
+        dir.path().join("murphy.toml"),
+        "plugins = [\"murphy-not-installed\"]\n",
+    )
+    .expect("write toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .env_remove("MURPHY_PLUGIN_PATH")
         .arg("lint")
         .arg(&rb)
         .assert()
         .code(2);
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("name resolution is not yet implemented") && stderr.contains("9cr.10.2"),
-        "stderr should mention not-yet-implemented + 10.2 hint: {stderr}"
+        stderr.contains("murphy-not-installed"),
+        "stderr must echo plugin name: {stderr}"
+    );
+    assert!(
+        stderr.contains("not found") && stderr.contains("Searched"),
+        "stderr must surface not-found + Searched: {stderr}"
+    );
+    assert!(
+        stderr.contains("[[plugins]]") && stderr.contains("path"),
+        "stderr must point user at the detailed form: {stderr}"
+    );
+}
+
+#[test]
+fn name_and_detailed_same_name_loads_once_via_detailed_path() {
+    // Mixing `Name` and `Detailed` for the same plugin must not trigger
+    // the registry's name-collision check (which would happen if the
+    // resolver loaded the pack twice). The `Detailed` `path` wins.
+    let pack = example_pack_path()
+        .canonicalize()
+        .expect("example-pack artifact should exist");
+
+    let dir = tempdir().expect("tempdir");
+    let rb = dir.path().join("sample.rb");
+    fs::write(&rb, "# TODO: x\n").expect("write rb");
+    let toml = format!(
+        "plugins = [\n  \"murphy-example-pack\",\n  {{ name = \"murphy-example-pack\", path = {:?} }}\n]\n",
+        pack.display().to_string()
+    );
+    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .env_remove("MURPHY_PLUGIN_PATH")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&rb)
+        .assert()
+        .code(1); // offense found, NOT setup-error (would be code 2)
+    let stdout = &assert.get_output().stdout;
+    let offenses: Vec<serde_json::Value> = serde_json::from_slice(stdout).expect("stdout JSON");
+    let names: Vec<String> = offenses
+        .iter()
+        .filter_map(|o| o["cop_name"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        names.contains(&"Example/TodoFormat".to_string()),
+        "expected Example/TodoFormat in {names:?}"
     );
 }
