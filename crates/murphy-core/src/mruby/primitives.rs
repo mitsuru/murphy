@@ -319,6 +319,51 @@ unsafe fn ruby_array_of_u32s(mrb: *mut mrb_state, values: &[u32]) -> mrb_value {
     unsafe { eval_literal(mrb, &lit) }
 }
 
+fn push_ruby_quoted_bytes(out: &mut String, bytes: &[u8]) {
+    out.push('"');
+    for &byte in bytes {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    out.push('"');
+}
+
+/// `Murphy.comments -> Array<[start, end, text]>`.
+unsafe extern "C" fn native_comments(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+    // SAFETY: native callback; `mrb` valid & non-null; `ud` is the live ctx.
+    let c = unsafe { ctx(mrb) };
+    let ast = c.arena_ast();
+    let source = ast.source().as_bytes();
+    let mut src = String::from("[");
+    for (i, comment) in ast.comments().iter().enumerate() {
+        if i > 0 {
+            src.push(',');
+        }
+        src.push('[');
+        src.push_str(&comment.range.start.to_string());
+        src.push(',');
+        src.push_str(&comment.range.end.to_string());
+        src.push(',');
+        push_ruby_quoted_bytes(
+            &mut src,
+            &source[comment.range.start as usize..comment.range.end as usize],
+        );
+        src.push(']');
+    }
+    src.push(']');
+    let lit = CString::new(src).expect("comment literal escapes NUL bytes");
+    // SAFETY: `mrb` valid & non-null; `lit` is a Ruby array literal whose
+    // comment text bytes are escaped into quoted strings.
+    unsafe { eval_literal(mrb, &lit) }
+}
+
 /// Resolve an arena interner handle to a Ruby String, or nil if invalid.
 ///
 /// # Safety
@@ -782,6 +827,7 @@ pub(crate) unsafe fn register(mrb: *mut mrb_state) {
         def(c"node_msg_end", native_node_msg_end, 1);
         def(c"source_slice", native_source_slice, 2);
         def(c"raw_source", native_source_slice, 2);
+        def(c"comments", native_comments, 0);
         def(c"symbol_str", native_symbol_str, 1);
         def(c"string_str", native_string_str, 1);
         def(c"compile_pattern", native_compile_pattern, 1);
@@ -1206,6 +1252,46 @@ mod tests {
         drop(ctx);
 
         assert_eq!(drain_sink(), vec!["puts", "hi", "true", "true"]);
+    }
+
+    #[test]
+    fn comments_primitive_returns_ranges_and_source_text() {
+        let _guard = lock_sink();
+        let src = "# top\nputs 1 # inline\n";
+        let ctx = AstContext::new(src.as_bytes().to_vec());
+        let expected = ctx
+            .arena_ast()
+            .comments()
+            .iter()
+            .map(|comment| {
+                let text = &src[comment.range.start as usize..comment.range.end as usize];
+                format!("{}-{}:{text}", comment.range.start, comment.range.end)
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = crate::mruby::sdk::CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: see `run_driver_over` — valid state, live CopRun in ud.
+            unsafe {
+                register(st.raw());
+                register_test_report(st.raw());
+            }
+            st.eval(
+                r##"
+                Murphy.__test_report(
+                  Murphy.comments.map { |c| "#{c[0]}-#{c[1]}:#{c[2]}" }.join("|")
+                )
+            "##,
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_sink(), vec![expected]);
     }
 
     /// MULTIBYTE hand-derivation (ADR 0001 — bytes, NOT chars) + handle→node
