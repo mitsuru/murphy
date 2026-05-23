@@ -744,14 +744,41 @@ impl Translator {
             return self.builder.push(NodeKind::Yield(list), range);
         }
         if let Some(s) = node.as_super_node() {
-            // `super(args)`（明示引数あり）。`super` のブロックは v1 では捨てる。
-            let ids = self.translate_arg_list(s.arguments());
-            let list = self.builder.push_list(&ids);
-            return self.builder.push(NodeKind::Super(list), range);
+            // `super(args)`（明示引数あり）。`.block()` は `Option<Node>` で
+            // `BlockArgumentNode`（`&blk`）か `BlockNode`（`{ }`/`do end`）の
+            // 2 通り。前者は Send と同様に args 末尾へ `BlockPass` を付け、
+            // 後者は素の `Super` を `Block` で包む（parser-gem 準拠）。
+            let mut arg_ids = self.translate_arg_list(s.arguments());
+            let mut block_to_wrap: Option<prism::BlockNode<'_>> = None;
+            if let Some(blk) = s.block() {
+                if let Some(ba) = blk.as_block_argument_node() {
+                    let expr = ba
+                        .expression()
+                        .map(|e| OptNodeId::some(self.translate_node(&e)))
+                        .unwrap_or(OptNodeId::NONE);
+                    let bp = self
+                        .builder
+                        .push(NodeKind::BlockPass(expr), Self::range(&ba.location()));
+                    arg_ids.push(bp);
+                } else if let Some(bn) = blk.as_block_node() {
+                    block_to_wrap = Some(bn);
+                }
+            }
+            let list = self.builder.push_list(&arg_ids);
+            let super_id = self.builder.push(NodeKind::Super(list), range);
+            return match block_to_wrap {
+                Some(bn) => self.translate_block(&bn, super_id, range),
+                None => super_id,
+            };
         }
-        if node.as_forwarding_super_node().is_some() {
+        if let Some(fs) = node.as_forwarding_super_node() {
             // 括弧も引数も無い `super` — `ForwardingSuperNode`。
-            return self.builder.push(NodeKind::Zsuper, range);
+            // `.block()` は `Option<BlockNode>`（`&blk` は構文上不可）。
+            let zsuper = self.builder.push(NodeKind::Zsuper, range);
+            return match fs.block() {
+                Some(bn) => self.translate_block(&bn, zsuper, range),
+                None => zsuper,
+            };
         }
         if let Some(d) = node.as_defined_node() {
             // `value()` は非 Option の `Node`。
@@ -833,15 +860,20 @@ impl Translator {
         }
         if let Some(r) = rest {
             let sr = Self::node_range(&r);
-            // prism は `*rest` を `SplatNode` で渡す。中の `expression()` を
-            // ターゲットとして翻訳し、`Splat` 1 重で包む（二重 `Splat` 回避）。
-            let inner = match r.as_splat_node() {
-                Some(s) => s
-                    .expression()
+            // rest 位置に来うる prism ノード:
+            // - `SplatNode`(`*rest`): `expression()` をターゲット翻訳し
+            //   `Splat` 1 重で包む(二重 `Splat` 回避)。`*`(匿名)は内側 None。
+            // - `ImplicitRestNode`(`a, b, = ...` の末尾カンマ):
+            //   parser-gem 準拠で `Splat(None)`(中身なし)。
+            // - その他は防御的にそのまま target 翻訳。
+            let inner = if r.as_implicit_rest_node().is_some() {
+                OptNodeId::NONE
+            } else if let Some(s) = r.as_splat_node() {
+                s.expression()
                     .map(|e| OptNodeId::some(self.translate_target(&e)))
-                    .unwrap_or(OptNodeId::NONE),
-                // 防御的: `SplatNode` 以外が来たらそのまま target 翻訳。
-                None => OptNodeId::some(self.translate_target(&r)),
+                    .unwrap_or(OptNodeId::NONE)
+            } else {
+                OptNodeId::some(self.translate_target(&r))
             };
             ids.push(self.builder.push(NodeKind::Splat(inner), sr));
         }
@@ -2532,5 +2564,95 @@ mod tests {
         let ast = translate("=begin\nblock\n=end\nx = 1\n", "t.rb");
         assert_eq!(ast.comments().len(), 1);
         assert_eq!(ast.comments()[0].kind, murphy_ast::CommentKind::Block);
+    }
+
+    // --- murphy-ocv: super-with-block ---
+
+    #[test]
+    fn translates_super_with_block_wraps_in_block() {
+        // `super(1) { |x| x }` — SuperNode.block() は BlockNode。
+        // parser-gem 準拠: `(block (super (int 1)) (args (arg :x)) (lvar :x))`。
+        let ast = translate("def f; super(1) { |x| x }; end", "t.rb");
+        let block = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Block { .. }))
+            .expect("expected a Block node wrapping super");
+        match ast.kind(block) {
+            NodeKind::Block { call, .. } => match ast.kind(*call) {
+                NodeKind::Super(l) => assert_eq!(l.len, 1, "super has 1 arg"),
+                other => panic!("expected Block.call = Super, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_forwarding_super_with_block_wraps_zsuper() {
+        // `super { |x| x }` — ForwardingSuperNode.block() は BlockNode。
+        // 括弧なし bare `super` でブロックだけ付いた形は ForwardingSuperNode。
+        let ast = translate("def f; super { |x| x }; end", "t.rb");
+        let block = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Block { .. }))
+            .expect("expected a Block node wrapping zsuper");
+        match ast.kind(block) {
+            NodeKind::Block { call, .. } => {
+                assert!(
+                    matches!(ast.kind(*call), NodeKind::Zsuper),
+                    "expected Block.call = Zsuper, got {:?}",
+                    ast.kind(*call)
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_super_with_block_pass_arg_appends_block_pass() {
+        // `super(&blk)` — SuperNode.block() は BlockArgumentNode。
+        // Send と同様に args 末尾へ BlockPass を付ける（Block では包まない）。
+        let ast = translate("def f; super(&blk); end", "t.rb");
+        let sup = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Super(_)))
+            .expect("expected a Super node");
+        // Block で包まれていないこと。
+        assert!(
+            !ast.descendants(ast.root())
+                .any(|n| matches!(ast.kind(n), NodeKind::Block { .. })),
+            "Super(&blk) は Block で包まれない"
+        );
+        // Super の最後の子（args の最後）が BlockPass。
+        let last = ast.children(sup).last().expect("super has args");
+        assert!(
+            matches!(ast.kind(last), NodeKind::BlockPass(_)),
+            "expected BlockPass at end of Super args, got {:?}",
+            ast.kind(last)
+        );
+    }
+
+    // --- murphy-ocv: ImplicitRestNode in multi-assign LHS ---
+
+    #[test]
+    fn translates_multi_write_implicit_rest_to_bare_splat() {
+        // `a, b, = 1, 2, 3` — 末尾カンマで rest が ImplicitRestNode。
+        // parser-gem 準拠: `(splat)`（中身なし）→ `Splat(OptNodeId::NONE)`。
+        // 以前は `Splat(Some(Unknown))` に落ちていた。
+        let ast = translate("a, b, = 1, 2, 3", "t.rb");
+        let lhs = match ast.kind(ast.root()) {
+            NodeKind::Masgn { lhs, .. } => *lhs,
+            other => panic!("expected Masgn, got {other:?}"),
+        };
+        let targets: Vec<_> = ast.children(lhs).collect();
+        assert_eq!(targets.len(), 3, "a + b + implicit *");
+        match ast.kind(targets[2]) {
+            NodeKind::Splat(inner) => {
+                assert!(
+                    inner.is_none(),
+                    "implicit rest must be bare Splat (no inner)"
+                );
+            }
+            other => panic!("expected bare Splat for implicit rest, got {other:?}"),
+        }
     }
 }
