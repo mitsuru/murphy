@@ -99,7 +99,7 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable, cop_name: RawSlice) -> CxRaw {
 #[test]
 fn static_and_dynamic_modes_produce_equivalent_registrations() {
     let mut s_reg = empty();
-    let s_rc = static_pack::murphy_plugin_register(&mut s_reg);
+    let s_rc = unsafe { static_pack::murphy_plugin_register(&mut s_reg) };
 
     let mut d_reg = empty();
     let d_rc = unsafe { murphy_plugin_register(&mut d_reg) };
@@ -160,7 +160,7 @@ fn static_and_dynamic_dispatch_observably_equal() {
     // somewhere in `Cx::from_raw` / `StubCop::check`, which would tell us
     // the two emissions had diverged.
     let mut s_reg = empty();
-    let _ = static_pack::murphy_plugin_register(&mut s_reg);
+    let _ = unsafe { static_pack::murphy_plugin_register(&mut s_reg) };
     let s_cop = unsafe { &*s_reg.cops_ptr };
 
     let mut d_reg = empty();

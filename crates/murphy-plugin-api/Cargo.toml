@@ -6,5 +6,11 @@ description = "Safe, plugin-author-facing surface over the Murphy native plugin 
 
 [dependencies]
 murphy-ast = { path = "../murphy-ast" }
+# Re-exported (`pub use murphy_plugin_macros::register_cops;`) so a static
+# pack like `murphy-std` keeps its single `murphy-plugin-api` runtime
+# dependency (single-surface ABI, design §5 of
+# `docs/plans/2026-05-22-plugin-reboot-design.md`). Proc-macro crates only
+# run at build time — this entry adds no code to a plugin binary.
+murphy-plugin-macros = { path = "../murphy-plugin-macros" }
 # JSON decoding for `CopOptions::from_config_json` (ADR 0036).
 serde_json = "1"

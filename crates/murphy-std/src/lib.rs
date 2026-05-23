@@ -5,12 +5,31 @@
 //! that external `.so` packs use. The Murphy-internal dependency boundary
 //! is **`murphy-plugin-api` only** — every standard cop reaches Murphy
 //! through that one surface, with no shortcut through `murphy-core`. The
-//! boundary is enforced as a compile-time test in
-//! `tests/dep_boundary.rs` and is the implementation of §5 of
+//! boundary is enforced as an integration test in `tests/dep_boundary.rs`
+//! and is the implementation of §5 of
 //! `docs/plans/2026-05-22-plugin-reboot-design.md`.
 //!
-//! v1 (murphy-9cr.23 §12a) ships an empty pack: the crate exists so the
-//! boundary gate has something to assert and so subsequent §12b–§12d work
-//! has a home for cops, the static registration entry point, and the
-//! disabled registry. Each individual cop migration lands in its own
-//! commit under §12d (and beyond, in epic murphy-au8).
+//! `register_cops!(mode = static, …)` (re-exported from `murphy-plugin-api`)
+//! emits the per-pack registration entry as a plain Rust `pub fn`
+//! `murphy_plugin_register` — no `#[no_mangle]` symbol that could collide
+//! with another statically-linked pack. `murphy-cli` calls
+//! [`murphy_plugin_register`] directly at startup; the resulting
+//! `PluginRegistration` flows into the same code path as `.so`-loaded
+//! packs.
+//!
+//! ## Pack contents
+//!
+//! v1 (murphy-9cr.23 §12b) ships `Murphy/NoReceiverPuts`, migrated out of
+//! `murphy-core/src/builtin/` so murphy-core stops being the home of any
+//! standard cop. Subsequent §12d work adds at least one cop per namespace
+//! (`Lint`, `Style`, `Layout`) covering the four authorship vectors the
+//! issue calls out (call dispatch / flow analysis /
+//! literal+option+autocorrect / raw source access).
+
+pub mod murphy;
+
+use crate::murphy::no_receiver_puts::NoReceiverPuts;
+
+// `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
+// single Murphy-prefixed runtime dependency by design.
+murphy_plugin_api::register_cops!(mode = static, NoReceiverPuts);

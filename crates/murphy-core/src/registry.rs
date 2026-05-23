@@ -4,13 +4,18 @@
 //! goes through a `&[&PluginCopV1]` slice. The registry assembles that
 //! slice from
 //!
-//! - `crate::builtin::BUILTINS` (the host's built-in cops), and
-//! - any `cop_packs` configured in `murphy.toml`, loaded via
+//! - a caller-supplied **built-in pack** (a `&[&'static PluginCopV1]`
+//!   that the host obtained from `murphy-std` via its `mode = static`
+//!   `register_cops!`, or an empty slice for tests / minimal embedders),
+//!   and
+//! - any `[[cop_packs]]` configured in `murphy.toml`, loaded via
 //!   `crate::plugin_loader::load_plugin_pack` (the single-symbol ABI
 //!   loader, murphy-9cr.4).
 //!
-//! Per-cop enable/disable from `[cops.rules."Name"]` is applied here, so
-//! the dispatch host sees the post-config cop set.
+//! Built-in and dynamic packs flow through the *same* registration code
+//! path (design §5) — the registry never special-cases "builtin". Per-cop
+//! enable/disable from `[cops.rules."Name"]` is applied here, so the
+//! dispatch host sees the post-config cop set.
 //!
 //! ## `cops/*.rb` enumeration (deferred to murphy-9cr.24)
 //!
@@ -30,7 +35,6 @@ use murphy_plugin_api::PluginCopV1;
 
 use crate::ConfigError;
 use crate::MurphyConfig;
-use crate::builtin::BUILTINS;
 #[cfg(not(target_os = "windows"))]
 use crate::plugin_loader::{LoadedPluginPack, load_plugin_pack};
 
@@ -78,20 +82,21 @@ unsafe impl Send for CopRegistry {}
 unsafe impl Sync for CopRegistry {}
 
 impl CopRegistry {
-    /// Built-in cop names, in registration order. Available without a
-    /// project root for callers that just want the static catalog.
-    pub fn native_cop_names() -> Vec<String> {
-        BUILTINS
+    /// Built-in cop names, in registration order. Pure projection of the
+    /// caller-supplied static pack — the registry no longer owns one.
+    pub fn native_cop_names(builtins: &[&'static PluginCopV1]) -> Vec<String> {
+        builtins
             .iter()
             .map(|c| String::from_utf8_lossy(unsafe { c.name.as_bytes() }).into_owned())
             .collect()
     }
 
-    /// Registry with builtins only — no `cop_packs`, no `cops/*.rb`.
-    /// Useful for callers that don't have a project root (e.g. tests).
-    pub fn native_only() -> Self {
+    /// Registry with the caller-supplied built-in pack only — no
+    /// `cop_packs`, no `cops/*.rb`. Useful for callers that don't have a
+    /// project root (e.g. tests).
+    pub fn native_only(builtins: &[&'static PluginCopV1]) -> Self {
         CopRegistry {
-            cops_ptrs: BUILTINS.iter().map(|c| NonNull::from(*c)).collect(),
+            cops_ptrs: builtins.iter().map(|c| NonNull::from(*c)).collect(),
             pack_names: vec!["builtin".to_string()],
             #[cfg(not(target_os = "windows"))]
             packs: Vec::new(),
@@ -100,16 +105,20 @@ impl CopRegistry {
         }
     }
 
-    /// Build a registry for the project rooted at `root`: builtins plus
-    /// every configured `[[cop_packs]]` entry, with `[cops.rules."Name"]`
-    /// applied.
-    pub fn discover(root: &Path) -> Result<Self, ConfigError> {
+    /// Build a registry for the project rooted at `root`: the caller's
+    /// built-in pack plus every configured `[[cop_packs]]` entry, with
+    /// `[cops.rules."Name"]` applied.
+    pub fn discover(root: &Path, builtins: &[&'static PluginCopV1]) -> Result<Self, ConfigError> {
         let config = MurphyConfig::load(root)?;
-        Self::discover_with_config(root, &config)
+        Self::discover_with_config(root, &config, builtins)
     }
 
     /// Like [`Self::discover`] but the config is already in hand.
-    pub fn discover_with_config(root: &Path, config: &MurphyConfig) -> Result<Self, ConfigError> {
+    pub fn discover_with_config(
+        root: &Path,
+        config: &MurphyConfig,
+        builtins: &[&'static PluginCopV1],
+    ) -> Result<Self, ConfigError> {
         #[cfg(feature = "mruby-user-cops")]
         let mruby_cop_paths = enumerate_cop_paths(root, &config.cops.path)?;
 
@@ -117,7 +126,7 @@ impl CopRegistry {
         // are appended below as `NonNull<PluginCopV1>` keyed to a
         // `LoadedPluginPack` in `packs` (same drop ordering rule).
         let mut cops_ptrs: Vec<NonNull<PluginCopV1>> =
-            BUILTINS.iter().map(|c| NonNull::from(*c)).collect();
+            builtins.iter().map(|c| NonNull::from(*c)).collect();
         let mut pack_names: Vec<String> = vec!["builtin".to_string()];
 
         #[cfg(not(target_os = "windows"))]
@@ -134,13 +143,13 @@ impl CopRegistry {
                 let name = unsafe { cop.name.as_bytes() };
                 let already = cops_ptrs.iter().any(|existing| {
                     // Safety: each `existing` is a live pointer to an
-                    // immutable `PluginCopV1` (built-in `'static` or in
-                    // an earlier pack); the borrow ends inside this
-                    // closure. `RawSlice::as_bytes` is `unsafe` because
-                    // the slice's pointer/length must be valid — the
-                    // cop tables either come from `register_cops!` or
-                    // the in-crate `&'static` `BUILTINS`, both of which
-                    // satisfy that.
+                    // immutable `PluginCopV1` (a `'static` built-in from
+                    // the caller-supplied pack, or a cop in an earlier
+                    // loaded pack); the borrow ends inside this closure.
+                    // `RawSlice::as_bytes` is `unsafe` because the
+                    // slice's pointer/length must be valid — every
+                    // source (a `register_cops!` static or a loaded
+                    // pack's table) satisfies that.
                     let existing_name = unsafe { existing.as_ref().name.as_bytes() };
                     existing_name == name
                 });
@@ -185,9 +194,9 @@ impl CopRegistry {
         })
     }
 
-    /// The dispatch input view. Order is `BUILTINS` first, then each
-    /// configured `cop_pack`'s cops in pack-registration order, with any
-    /// `enabled = false` rule excluded.
+    /// The dispatch input view. Order is the supplied built-in pack
+    /// first, then each configured `cop_pack`'s cops in pack-registration
+    /// order, with any `enabled = false` rule excluded.
     ///
     /// The returned `Vec<&PluginCopV1>` borrows from `&self`: pack cops
     /// stay valid for as long as the registry is alive. Allocating a
@@ -265,6 +274,30 @@ fn enumerate_cop_paths(root: &Path, cops_path: &Path) -> Result<Vec<PathBuf>, Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use murphy_ast::NodeId;
+    use murphy_plugin_api::{Cop, Cx, NoOptions, NodeCop, NodeKindTag};
+
+    /// Synthetic cop used to exercise the registry's plumbing without
+    /// reaching into `murphy-std`. The registry's own tests must not
+    /// depend on which specific cops the standard pack ships (single-
+    /// surface ABI: the registry treats all cops uniformly through
+    /// `PluginCopV1`, design §5).
+    #[derive(Default)]
+    struct StubBuiltin;
+
+    impl Cop for StubBuiltin {
+        type Options = NoOptions;
+        const NAME: &'static str = "Stub/Builtin";
+    }
+
+    impl NodeCop for StubBuiltin {
+        const KINDS: &'static [NodeKindTag] = &[];
+        fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
+    }
+
+    static STUB_BUILTIN_COP: PluginCopV1 =
+        murphy_plugin_api::__internal::build_cop::<StubBuiltin>();
+    static STUB_BUILTINS: &[&PluginCopV1] = &[&STUB_BUILTIN_COP];
 
     #[test]
     fn registry_is_send_sync() {
@@ -274,18 +307,19 @@ mod tests {
 
     #[test]
     fn native_only_yields_builtins_in_registration_order() {
-        let reg = CopRegistry::native_only();
+        let reg = CopRegistry::native_only(STUB_BUILTINS);
         let names = reg.cop_names();
-        assert_eq!(names, vec!["Murphy/NoReceiverPuts".to_string()]);
+        assert_eq!(names, vec!["Stub/Builtin".to_string()]);
         assert_eq!(reg.pack_names(), &["builtin".to_string()]);
     }
 
     #[test]
     fn discover_with_empty_root_yields_builtins_only() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        let reg = CopRegistry::discover(dir.path()).expect("absent murphy.toml is fine");
+        let reg =
+            CopRegistry::discover(dir.path(), STUB_BUILTINS).expect("absent murphy.toml is fine");
         let names = reg.cop_names();
-        assert_eq!(names, vec!["Murphy/NoReceiverPuts".to_string()]);
+        assert_eq!(names, vec!["Stub/Builtin".to_string()]);
         assert_eq!(reg.pack_names(), &["builtin".to_string()]);
     }
 
@@ -294,11 +328,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         std::fs::write(
             dir.path().join("murphy.toml"),
-            "[cops.rules.\"Murphy/NoReceiverPuts\"]\nenabled = false\n",
+            "[cops.rules.\"Stub/Builtin\"]\nenabled = false\n",
         )
         .expect("write murphy.toml");
 
-        let reg = CopRegistry::discover(dir.path()).expect("discover Ok");
+        let reg = CopRegistry::discover(dir.path(), STUB_BUILTINS).expect("discover Ok");
         let names = reg.cop_names();
         assert!(
             names.is_empty(),

@@ -13,8 +13,9 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
     let config =
         MurphyConfig::load(Path::new(".")).map_err(|e| super::AppError::setup(e.to_string()))?;
 
-    let registry = CopRegistry::discover_with_config(Path::new("."), &config)
-        .map_err(|e| super::AppError::setup(e.to_string()))?;
+    let registry =
+        CopRegistry::discover_with_config(Path::new("."), &config, super::builtin_pack())
+            .map_err(|e| super::AppError::setup(e.to_string()))?;
 
     let mut open_documents: HashMap<String, String> = HashMap::new();
 

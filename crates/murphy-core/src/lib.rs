@@ -7,12 +7,13 @@
 //! - [`parse`] — Ruby → arena AST (thin wrapper over `murphy-translate`).
 //! - [`dispatch::run_cops`] — invoke a slice of `PluginCopV1` cops
 //!   against an arena.
-//! - [`builtin::BUILTINS`] — the v1 cop set (`Murphy/NoReceiverPuts`
-//!   only; more cops migrate over in murphy-9cr.23+).
 //! - [`plugin_loader::load_plugin_pack`] — `dlopen` a `.so` and validate
 //!   its registration.
-//! - [`CopRegistry`] — the host's combined cop list (builtins + loaded
-//!   packs), filtered by config.
+//! - [`CopRegistry`] — the host's combined cop list (caller-supplied
+//!   static built-in pack + loaded dynamic packs), filtered by config.
+//!   The standard cop pack itself lives in `murphy-std` (single-surface
+//!   ABI, ADR 0038; murphy-9cr.23 §12b); murphy-core no longer hardcodes
+//!   it.
 //! - [`aggregate`] / [`run_to_fixpoint`] — offense aggregator + autocorrect
 //!   fixpoint loop (unchanged contract, ADR 0006/0011/0013).
 //! - [`MurphyConfig`] — `murphy.toml` schema (ADR 0015).
@@ -20,7 +21,6 @@
 
 mod aggregator;
 pub mod autocorrect;
-pub mod builtin;
 mod config;
 mod discovery;
 pub mod dispatch;

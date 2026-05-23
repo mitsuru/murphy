@@ -9,8 +9,13 @@
 //! ([`CxRaw`], [`FnTable`], [`PluginCopV1`], [`PluginRegistration`], …)
 //! cross the `.so` boundary and are re-exported at the crate root.
 //!
-//! `register_cops!` / `#[derive(CopOptions)]` / `#[on_node]` live in
-//! `murphy-plugin-macros` (murphy-9cr.21 / .8) and consume this surface.
+//! The pack-authoring proc macros (`register_cops!`, `#[derive(CopOptions)]`,
+//! `#[murphy::cop]`, `#[on_node]`, `node_pattern!`) live in
+//! `murphy-plugin-macros` and are re-exported here so a pack's
+//! `[dependencies]` stays at one Murphy crate (design §5; enforced for
+//! `murphy-std` by `crates/murphy-std/tests/dep_boundary.rs`). The same
+//! single-surface rule re-exports the arena AST types a cop's `check`
+//! body matches against (`NodeKind`, `NodeId`, `OptNodeId`, …).
 
 #[doc(hidden)]
 #[path = "internal.rs"]
@@ -35,3 +40,13 @@ pub use options::{CopOptions, NoOptions};
 pub use severity::{
     SEVERITY_UNSET, Severity, TRISTATE_UNSET, tristate_from_wire, tristate_to_wire,
 };
+
+// Single-surface re-exports — every type and macro a static / dynamic
+// pack needs to author a cop must be reachable through `murphy-plugin-api`
+// alone, so the pack's `[dependencies]` stays at one Murphy crate (design
+// §5; enforced by `crates/murphy-std/tests/dep_boundary.rs`).
+pub use murphy_ast::{
+    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
+    StringId, Symbol,
+};
+pub use murphy_plugin_macros::register_cops;

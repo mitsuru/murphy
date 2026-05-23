@@ -153,16 +153,25 @@ pub fn register_cops(input: TokenStream) -> TokenStream {
             /// calls this directly through the Rust path — no `dlsym`,
             /// no `#[no_mangle]` symbol that could collide with another
             /// statically-linked pack (design §5).
-            pub fn murphy_plugin_register(
+            ///
+            /// # Safety
+            ///
+            /// The signature mirrors the dynamic-mode `extern "C"` entry:
+            /// `out` must be either null (treated as a usage error and
+            /// rejected with `1`) or point to a writable
+            /// `PluginRegistration` slot valid for the duration of the
+            /// call. The dynamic and static entry points share this
+            /// contract so the host can route either through a single
+            /// registration code path.
+            pub unsafe fn murphy_plugin_register(
                 out: *mut ::murphy_plugin_api::PluginRegistration,
             ) -> i32 {
                 if out.is_null() {
                     return 1;
                 }
                 // Safety: `out` is non-null per the check above; the
-                // caller is responsible for the pointee being a writable
-                // `PluginRegistration` slot, matching the dynamic-mode
-                // contract.
+                // caller upholds the pointee-writability part of the
+                // contract documented on this function.
                 unsafe {
                     *out = ::murphy_plugin_api::PluginRegistration {
                         abi_version: ::murphy_plugin_api::MURPHY_PLUGIN_ABI_VERSION,

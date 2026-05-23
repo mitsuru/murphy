@@ -584,6 +584,7 @@ dependencies = [
  "murphy-core",
  "murphy-plugin-api",
  "murphy-reporting",
+ "murphy-std",
  "rayon",
  "serde_json",
  "tempfile",
@@ -629,6 +630,7 @@ name = "murphy-plugin-api"
 version = "0.1.0"
 dependencies = [
  "murphy-ast",
+ "murphy-plugin-macros",
  "serde_json",
 ]
 
