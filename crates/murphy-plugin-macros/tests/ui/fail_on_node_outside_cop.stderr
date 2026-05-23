@@ -1,0 +1,7 @@
+error: #[on_node] must be used inside a #[cop] impl block
+ --> tests/ui/fail_on_node_outside_cop.rs:5:1
+  |
+5 | #[on_node(kind = "send")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `on_node` (in Nightly builds, run with -Z macro-backtrace for more info)
