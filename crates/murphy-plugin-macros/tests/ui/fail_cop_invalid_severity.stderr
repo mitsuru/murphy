@@ -1,0 +1,48 @@
+error: #[cop]: default_severity must be one of "warning" / "error"
+ --> tests/ui/fail_cop_invalid_severity.rs:8:51
+  |
+8 | #[cop(name = "Plugin/MyCheck", default_severity = "danger")]
+  |                                                   ^^^^^^^^
+
+warning: unused import: `murphy_ast::NodeId`
+ --> tests/ui/fail_cop_invalid_severity.rs:1:5
+  |
+1 | use murphy_ast::NodeId;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `murphy_plugin_api::Cx`
+ --> tests/ui/fail_cop_invalid_severity.rs:2:5
+  |
+2 | use murphy_plugin_api::Cx;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `MyCheck: Cop` is not satisfied
+  --> tests/ui/fail_cop_invalid_severity.rs:14:16
+   |
+14 | register_cops!(MyCheck);
+   |                ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `Cop` is not implemented for `MyCheck`
+  --> tests/ui/fail_cop_invalid_severity.rs:6:1
+   |
+ 6 | struct MyCheck;
+   | ^^^^^^^^^^^^^^
+
+error[E0277]: the trait bound `MyCheck: NodeCop` is not satisfied
+  --> tests/ui/fail_cop_invalid_severity.rs:14:16
+   |
+14 | register_cops!(MyCheck);
+   |                ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `NodeCop` is not implemented for `MyCheck`
+  --> tests/ui/fail_cop_invalid_severity.rs:6:1
+   |
+ 6 | struct MyCheck;
+   | ^^^^^^^^^^^^^^
+note: required by a bound in `murphy_plugin_api::__internal::build_cop`
+  --> $WORKSPACE/crates/murphy-plugin-api/src/internal.rs
+   |
+   | pub const fn build_cop<C: NodeCop + Default>() -> PluginCopV1 {
+   |                           ^^^^^^^ required by this bound in `build_cop`
