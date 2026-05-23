@@ -495,3 +495,489 @@ fn parent_and_descendant() {
     assert!(has_nil_descendant(iff, &cx));
     assert!(!has_nil_descendant(then_, &cx)); // an Int leaf has none
 }
+
+// ── Assignment variants ────────────────────────────────────────────────
+// `Lvasgn` / `Ivasgn` / `Gvasgn` / `Cvasgn` share the `{ name, value }`
+// schema; `Casgn` has `{ scope, name, value }`. Verifying each variant
+// guards against schema drift (Sym-in-slot-0 vs slot-1, scope vs no-scope).
+node_pattern!(is_lvasgn_x, "(lvasgn :x _)");
+node_pattern!(is_ivasgn_at_x, "(ivasgn :@x _)");
+node_pattern!(is_casgn_top_foo, "(casgn nil? :Foo _)");
+node_pattern!(is_gvasgn_dollar_x, "(gvasgn :$x _)");
+node_pattern!(is_cvasgn_atat_x, "(cvasgn :@@x _)");
+
+#[test]
+fn assignment_variants_match_each_kind() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let one = b.push(NodeKind::Int(1), r());
+    let lv_name = b.intern_symbol("x");
+    let lvasgn = b.push(
+        NodeKind::Lvasgn {
+            name: lv_name,
+            value: OptNodeId::some(one),
+        },
+        r(),
+    );
+    let iv_one = b.push(NodeKind::Int(1), r());
+    let iv_name = b.intern_symbol("@x");
+    let ivasgn = b.push(
+        NodeKind::Ivasgn {
+            name: iv_name,
+            value: OptNodeId::some(iv_one),
+        },
+        r(),
+    );
+    let ca_one = b.push(NodeKind::Int(1), r());
+    let ca_name = b.intern_symbol("Foo");
+    let casgn = b.push(
+        NodeKind::Casgn {
+            scope: OptNodeId::NONE,
+            name: ca_name,
+            value: OptNodeId::some(ca_one),
+        },
+        r(),
+    );
+    let gv_one = b.push(NodeKind::Int(1), r());
+    let gv_name = b.intern_symbol("$x");
+    let gvasgn = b.push(
+        NodeKind::Gvasgn {
+            name: gv_name,
+            value: OptNodeId::some(gv_one),
+        },
+        r(),
+    );
+    let cv_one = b.push(NodeKind::Int(1), r());
+    let cv_name = b.intern_symbol("@@x");
+    let cvasgn = b.push(
+        NodeKind::Cvasgn {
+            name: cv_name,
+            value: OptNodeId::some(cv_one),
+        },
+        r(),
+    );
+    let list = b.push_list(&[lvasgn, ivasgn, casgn, gvasgn, cvasgn]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_lvasgn_x(lvasgn, &cx));
+    assert!(!is_lvasgn_x(ivasgn, &cx)); // wrong kind
+    assert!(is_ivasgn_at_x(ivasgn, &cx));
+    assert!(!is_ivasgn_at_x(lvasgn, &cx));
+    assert!(is_casgn_top_foo(casgn, &cx));
+    assert!(!is_casgn_top_foo(lvasgn, &cx)); // wrong kind
+    assert!(is_gvasgn_dollar_x(gvasgn, &cx));
+    assert!(!is_gvasgn_dollar_x(cvasgn, &cx));
+    assert!(is_cvasgn_atat_x(cvasgn, &cx));
+    assert!(!is_cvasgn_atat_x(gvasgn, &cx));
+}
+
+// ── Block / Hash / Pair ────────────────────────────────────────────────
+// `Block` has all-required fields (`call: Node`, `args: Node`, `body:
+// OptNode`); `Hash` is a single-list tuple like `Array`; `Pair` is two
+// required `Node` fields.
+node_pattern!(is_block_each, "(block (send nil? :each) _ _)");
+node_pattern!(is_hash_one_pair, "(hash (pair _ _))");
+node_pattern!(is_pair_key_a, "(pair :a _)");
+
+#[test]
+fn block_hash_pair_variants() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    // `each { ... }` shaped as a Block over a Send.
+    let each = b.intern_symbol("each");
+    let call = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: each,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    let args = b.push(NodeKind::Args(NodeList::EMPTY), r());
+    let body = b.push(NodeKind::Int(1), r());
+    let blk = b.push(
+        NodeKind::Block {
+            call,
+            args,
+            body: OptNodeId::some(body),
+        },
+        r(),
+    );
+    // `{:a => 1}` shaped as a Hash with one Pair.
+    let key = {
+        let s = b.intern_symbol("a");
+        b.push(NodeKind::Sym(s), r())
+    };
+    let val = b.push(NodeKind::Int(1), r());
+    let pair = b.push(NodeKind::Pair { key, value: val }, r());
+    let pairs = b.push_list(&[pair]);
+    let hash = b.push(NodeKind::Hash(pairs), r());
+    // Standalone pair to test bare `(pair :a _)` against a Pair root.
+    let key2 = {
+        let s = b.intern_symbol("a");
+        b.push(NodeKind::Sym(s), r())
+    };
+    let val2 = b.push(NodeKind::Int(2), r());
+    let pair2 = b.push(
+        NodeKind::Pair {
+            key: key2,
+            value: val2,
+        },
+        r(),
+    );
+    let key3 = {
+        let s = b.intern_symbol("b");
+        b.push(NodeKind::Sym(s), r())
+    };
+    let val3 = b.push(NodeKind::Int(3), r());
+    let pair3 = b.push(
+        NodeKind::Pair {
+            key: key3,
+            value: val3,
+        },
+        r(),
+    );
+    let list = b.push_list(&[blk, hash, pair2, pair3]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_block_each(blk, &cx));
+    assert!(!is_block_each(hash, &cx));
+    assert!(is_hash_one_pair(hash, &cx));
+    assert!(!is_hash_one_pair(blk, &cx));
+    assert!(is_pair_key_a(pair2, &cx));
+    assert!(!is_pair_key_a(pair3, &cx)); // key is :b
+}
+
+// ── Case / When ────────────────────────────────────────────────────────
+// `Case` and `When` both have `covers_all_fields=false`: the generated
+// destructure ends with `..` so `Case::else_` / `When::body` (which follow
+// the trailing `NodeList`) stay out of the schema. The macro expansion
+// itself is the compile-time guard; the runtime check is a smoke test.
+node_pattern!(is_case_any, "(case _ ...)");
+node_pattern!(is_when_any, "(when ...)");
+
+#[test]
+fn case_and_when_trailing_dotdot_paths() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let subj = b.push(NodeKind::Int(0), r());
+    let cond = b.push(NodeKind::Int(1), r());
+    let body = b.push(NodeKind::Int(2), r());
+    let conds = b.push_list(&[cond]);
+    let wh = b.push(
+        NodeKind::When {
+            conds,
+            body: OptNodeId::some(body),
+        },
+        r(),
+    );
+    let whens = b.push_list(&[wh]);
+    // `else_` is present but the pattern schema must ignore it (the `..`
+    // path in the generated destructure).
+    let else_node = b.push(NodeKind::Int(3), r());
+    let cs = b.push(
+        NodeKind::Case {
+            subject: OptNodeId::some(subj),
+            whens,
+            else_: OptNodeId::some(else_node),
+        },
+        r(),
+    );
+    let list = b.push_list(&[cs]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_case_any(cs, &cx));
+    assert!(!is_case_any(wh, &cx));
+    assert!(is_when_any(wh, &cx));
+    assert!(!is_when_any(cs, &cx));
+}
+
+// ── Return — Pos(1,0) OptNode tuple variant destructure ────────────────
+// `Return(OptNodeId)` is the only `Pos`-tuple variant whose single slot is
+// an `OptNode`. The two branches of `lower_fixed_slot`'s `OptNode` arm
+// (`Some(n) => …` and `None => {}` via `nil?`) must both run.
+node_pattern!(is_return_any, "(return _)");
+node_pattern!(is_return_nil_test, "(return nil?)");
+
+#[test]
+fn return_optnode_both_branches() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let v = b.push(NodeKind::Int(1), r());
+    let ret_some = b.push(NodeKind::Return(OptNodeId::some(v)), r());
+    let ret_none = b.push(NodeKind::Return(OptNodeId::NONE), r());
+    let list = b.push_list(&[ret_some, ret_none]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // `(return _)` requires `Some(..)` — present value branch.
+    assert!(is_return_any(ret_some, &cx));
+    assert!(!is_return_any(ret_none, &cx));
+    // `(return nil?)` matches both `None` and `Some(Nil)`; here `None`
+    // exercises the `None => {}` arm.
+    assert!(is_return_nil_test(ret_none, &cx));
+    assert!(!is_return_nil_test(ret_some, &cx)); // value present and not Nil
+}
+
+// ── And / Or ───────────────────────────────────────────────────────────
+node_pattern!(is_and_two, "(and _ _)");
+node_pattern!(is_or_two, "(or _ _)");
+
+#[test]
+fn and_or_two_node_slots() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let lhs = b.push(NodeKind::Int(1), r());
+    let rhs = b.push(NodeKind::Int(2), r());
+    let and_ = b.push(NodeKind::And { lhs, rhs }, r());
+    let lhs2 = b.push(NodeKind::Int(3), r());
+    let rhs2 = b.push(NodeKind::Int(4), r());
+    let or_ = b.push(
+        NodeKind::Or {
+            lhs: lhs2,
+            rhs: rhs2,
+        },
+        r(),
+    );
+    let list = b.push_list(&[and_, or_]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_and_two(and_, &cx));
+    assert!(!is_and_two(or_, &cx));
+    assert!(is_or_two(or_, &cx));
+    assert!(!is_or_two(and_, &cx));
+}
+
+// ── Def / Class / Module ───────────────────────────────────────────────
+// `Def` has `covers_all_fields=false` (omits `receiver`). `Class` and
+// `Module` are fully covered.
+node_pattern!(is_def_foo, "(def :foo _ nil?)");
+node_pattern!(is_class_any, "(class _ nil? nil?)");
+node_pattern!(is_module_any, "(module _ nil?)");
+
+#[test]
+fn def_class_module_variants() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    // `def foo(); end` — no receiver, empty args, empty body.
+    let def_name = b.intern_symbol("foo");
+    let def_args = b.push(NodeKind::Args(NodeList::EMPTY), r());
+    let def_ = b.push(
+        NodeKind::Def {
+            receiver: OptNodeId::NONE,
+            name: def_name,
+            args: def_args,
+            body: OptNodeId::NONE,
+        },
+        r(),
+    );
+    // `class Foo; end` — `Const Foo`, no superclass, no body.
+    let cls_name_sym = b.intern_symbol("Foo");
+    let cls_name = b.push(
+        NodeKind::Const {
+            scope: OptNodeId::NONE,
+            name: cls_name_sym,
+        },
+        r(),
+    );
+    let cls = b.push(
+        NodeKind::Class {
+            name: cls_name,
+            superclass: OptNodeId::NONE,
+            body: OptNodeId::NONE,
+        },
+        r(),
+    );
+    // `module Bar; end` — `Const Bar`, no body.
+    let mod_name_sym = b.intern_symbol("Bar");
+    let mod_name = b.push(
+        NodeKind::Const {
+            scope: OptNodeId::NONE,
+            name: mod_name_sym,
+        },
+        r(),
+    );
+    let mdl = b.push(
+        NodeKind::Module {
+            name: mod_name,
+            body: OptNodeId::NONE,
+        },
+        r(),
+    );
+    let list = b.push_list(&[def_, cls, mdl]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_def_foo(def_, &cx));
+    assert!(!is_def_foo(cls, &cx));
+    assert!(is_class_any(cls, &cx));
+    assert!(!is_class_any(mdl, &cx));
+    assert!(is_module_any(mdl, &cx));
+    assert!(!is_module_any(cls, &cx));
+}
+
+// ── While / Until ──────────────────────────────────────────────────────
+// `While { cond, body, post: bool }` and `Until { ... }`: `post` is a flag,
+// not a child slot — `covers_all_fields=false` and the macro emits a
+// trailing `..` in the destructure.
+node_pattern!(is_while_any, "(while _ _)");
+node_pattern!(is_until_any, "(until _ _)");
+
+#[test]
+fn while_and_until_skip_post_flag() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let c1 = b.push(NodeKind::Int(1), r());
+    let body1 = b.push(NodeKind::Int(2), r());
+    // `post = true` should NOT affect matching — the schema ignores it.
+    let wh = b.push(
+        NodeKind::While {
+            cond: c1,
+            body: OptNodeId::some(body1),
+            post: true,
+        },
+        r(),
+    );
+    let c2 = b.push(NodeKind::Int(3), r());
+    let body2 = b.push(NodeKind::Int(4), r());
+    let un = b.push(
+        NodeKind::Until {
+            cond: c2,
+            body: OptNodeId::some(body2),
+            post: false,
+        },
+        r(),
+    );
+    let list = b.push_list(&[wh, un]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_while_any(wh, &cx));
+    assert!(!is_while_any(un, &cx));
+    assert!(is_until_any(un, &cx));
+    assert!(!is_until_any(wh, &cx));
+}
+
+// ── Head::OneOf — actually exercise the csend branch ───────────────────
+// The existing `is_send_or_csend` test only built a `Send`. This test
+// builds an actual `Csend` node and asserts the OneOf head accepts it.
+node_pattern!(is_send_or_csend_any, "({send csend} ...)");
+
+#[test]
+fn oneof_head_accepts_csend_arm() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let recv = b.push(NodeKind::Nil, r());
+    let m = b.intern_symbol("foo");
+    let cs = b.push(
+        NodeKind::Csend {
+            receiver: recv,
+            method: m,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    let int_node = b.push(NodeKind::Int(7), r());
+    let list = b.push_list(&[cs, int_node]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_send_or_csend_any(cs, &cx));
+    assert!(!is_send_or_csend_any(int_node, &cx));
+}
+
+// ── `$ident` and `$:sym` capture spellings ─────────────────────────────
+// `$ident` is a named capture with an implicit Wildcard body — it binds
+// any node id at its slot. `$:sym` is an anonymous capture whose body is
+// a `Sym` literal — it binds the Sym node id when its body matches.
+node_pattern!(cap_recv_ident, "(send $recv :foo)");
+node_pattern!(cap_sym_lit_in_array, "(array $:foo)");
+
+#[test]
+fn named_ident_and_sym_literal_captures() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let recv = b.push(NodeKind::Int(7), r());
+    let m = b.intern_symbol("foo");
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv),
+            method: m,
+            args: NodeList::EMPTY,
+        },
+        r(),
+    );
+    // `[:foo]` and `[:bar]` — the second must not match `$:foo`.
+    let foo_sym_id = b.intern_symbol("foo");
+    let foo_node = b.push(NodeKind::Sym(foo_sym_id), r());
+    let foo_arr_list = b.push_list(&[foo_node]);
+    let foo_arr = b.push(NodeKind::Array(foo_arr_list), r());
+    let bar_sym_id = b.intern_symbol("bar");
+    let bar_node = b.push(NodeKind::Sym(bar_sym_id), r());
+    let bar_arr_list = b.push_list(&[bar_node]);
+    let bar_arr = b.push(NodeKind::Array(bar_arr_list), r());
+    let list = b.push_list(&[send, foo_arr, bar_arr]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // `$recv` binds the Int(7) node id.
+    assert_eq!(cap_recv_ident(send, &cx), Some((recv,)));
+    // `$:foo` matches and binds the Sym :foo node; `[:bar]` doesn't match.
+    assert_eq!(cap_sym_lit_in_array(foo_arr, &cx), Some((foo_node,)));
+    assert_eq!(cap_sym_lit_in_array(bar_arr, &cx), None);
+}
+
+// ── Float / Str / False literals ───────────────────────────────────────
+// `is_true_lit` and `is_nil_node` already cover `True_` / `Nil`. Add the
+// remaining literal lowerings: `Float`, `Str`, `False_`.
+node_pattern!(is_float_one_five, "1.5");
+node_pattern!(is_str_hello, "\"hello\"");
+node_pattern!(is_false_lit, "false");
+
+#[test]
+fn float_str_false_literal_lowerings() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let one_five = b.push(NodeKind::Float(1.5), r());
+    let other = b.push(NodeKind::Float(2.5), r());
+    let hello_id = b.intern_string("hello");
+    let hello = b.push(NodeKind::Str(hello_id), r());
+    let world_id = b.intern_string("world");
+    let world = b.push(NodeKind::Str(world_id), r());
+    let f = b.push(NodeKind::False_, r());
+    let t = b.push(NodeKind::True_, r());
+    let list = b.push_list(&[one_five, other, hello, world, f, t]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert!(is_float_one_five(one_five, &cx));
+    assert!(!is_float_one_five(other, &cx));
+    assert!(is_str_hello(hello, &cx));
+    assert!(!is_str_hello(world, &cx));
+    assert!(is_false_lit(f, &cx));
+    assert!(!is_false_lit(t, &cx));
+}
