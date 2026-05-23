@@ -594,6 +594,7 @@ dependencies = [
  "assert_cmd",
  "murphy-cache",
  "murphy-core",
+ "murphy-example-pack",
  "murphy-plugin-api",
  "murphy-reporting",
  "murphy-std",

@@ -64,8 +64,7 @@ fn detailed_form_loads_example_pack_and_emits_offenses() {
         .code(1); // offenses found
 
     let stdout = &assert.get_output().stdout;
-    let offenses: Vec<serde_json::Value> =
-        serde_json::from_slice(stdout).expect("stdout JSON");
+    let offenses: Vec<serde_json::Value> = serde_json::from_slice(stdout).expect("stdout JSON");
     let names: Vec<String> = offenses
         .iter()
         .filter_map(|o| o["cop_name"].as_str().map(str::to_string))
@@ -121,8 +120,7 @@ fn name_only_form_exits_2_with_not_yet_implemented_hint() {
         .code(2);
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("name resolution is not yet implemented")
-            && stderr.contains("9cr.10.2"),
+        stderr.contains("name resolution is not yet implemented") && stderr.contains("9cr.10.2"),
         "stderr should mention not-yet-implemented + 10.2 hint: {stderr}"
     );
 }
