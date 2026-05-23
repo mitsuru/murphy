@@ -55,6 +55,12 @@ pub trait NodeCop: Cop {
     /// selects the file-visit form documented on the trait.
     const KINDS: &'static [NodeKindTag];
 
+    /// Runtime dispatch kinds. Static cops use [`Self::KINDS`]; dynamic
+    /// in-process cops can override this without changing the plugin ABI.
+    fn kinds(&self) -> &[NodeKindTag] {
+        Self::KINDS
+    }
+
     /// Inspect one matched node. Stateless: everything the callback needs
     /// is `node` and `cx`. For a file-visit cop (`KINDS = &[]`) the
     /// caller passes `cx.root()`; the cop typically derives the file's
@@ -89,5 +95,29 @@ mod tests {
             fn check(&self, _node: NodeId, _cx: &crate::Cx<'_>) {}
         }
         assert_eq!(<Stub as NodeCop>::KINDS, &[NodeKindTag(1)]);
+    }
+
+    #[test]
+    fn node_cop_can_override_kinds_for_dynamic_dispatch() {
+        struct Dynamic {
+            kinds: Vec<NodeKindTag>,
+        }
+        impl crate::Cop for Dynamic {
+            type Options = crate::NoOptions;
+            const NAME: &'static str = "Plugin/Dynamic";
+        }
+        impl NodeCop for Dynamic {
+            const KINDS: &'static [NodeKindTag] = &[];
+            fn kinds(&self) -> &[NodeKindTag] {
+                &self.kinds
+            }
+            fn check(&self, _node: NodeId, _cx: &crate::Cx<'_>) {}
+        }
+
+        let cop = Dynamic {
+            kinds: vec![NodeKindTag(1), NodeKindTag(2)],
+        };
+
+        assert_eq!(cop.kinds(), &[NodeKindTag(1), NodeKindTag(2)]);
     }
 }

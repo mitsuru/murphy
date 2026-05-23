@@ -613,6 +613,7 @@ dependencies = [
  "mruby3-sys",
  "murphy-ast",
  "murphy-cache",
+ "murphy-pattern",
  "murphy-plugin-api",
  "murphy-translate",
  "ruby-prism",

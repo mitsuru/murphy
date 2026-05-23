@@ -224,6 +224,20 @@ unsafe fn ruby_string_from_bytes(mrb: *mut mrb_state, bytes: &[u8]) -> mrb_value
     }
 }
 
+/// Copy a `(ptr, len)` mruby string view into an owned `String`.
+///
+/// # Safety
+///
+/// `ptr` must be valid for `len` bytes per the `mrb_get_args("s")` contract.
+unsafe fn owned_string(ptr: *const std::os::raw::c_char, len: mrb_int) -> String {
+    if ptr.is_null() || len <= 0 {
+        return String::new();
+    }
+    // SAFETY: caller guarantees `ptr` is valid for `len` bytes; `len > 0` here.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// Evaluate a tiny Ruby literal and return its value.
 ///
 /// Used to return `Integer`/`true`/`false`: ADR 0002 finding 1 — the inline
@@ -250,6 +264,35 @@ unsafe extern "C" fn native_node_count(mrb: *mut mrb_state, _self: mrb_value) ->
     let lit = CString::new(n.to_string()).expect("decimal digits, no NUL");
     // SAFETY: `mrb` valid & non-null; `lit` is a NUL-terminated decimal
     // integer literal.
+    unsafe { eval_literal(mrb, &lit) }
+}
+
+/// `Murphy.compile_pattern(src) -> Integer`. Parse/lower a node pattern once
+/// per process and return the shared IR handle.
+unsafe extern "C" fn native_compile_pattern(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+    let mut ptr: *const std::os::raw::c_char = std::ptr::null();
+    let mut len: mrb_int = 0;
+    // SAFETY: `mrb` is a valid non-null `mrb_state`; `fmt` requests one string
+    // as a pointer/length pair; out-pointers are live for the call.
+    unsafe {
+        mrb_get_args(
+            mrb,
+            c"s".as_ptr(),
+            &mut ptr as *mut *const std::os::raw::c_char,
+            &mut len as *mut mrb_int,
+        );
+    }
+    // SAFETY: `mrb_get_args("s")` guarantees `ptr` is valid for `len` bytes
+    // for the duration of this callback.
+    let src = unsafe { owned_string(ptr, len) };
+    let Ok(handle) = crate::mruby::pattern_registry::PatternIrRegistry::global().intern(&src)
+    else {
+        // Full load-time error reporting is wired with the mruby proxy. For the
+        // primitive surface, invalid patterns degrade to nil rather than panic.
+        return unsafe { eval_literal(mrb, c"nil") };
+    };
+    let lit = CString::new(handle.to_string()).expect("decimal digits, no NUL");
+    // SAFETY: `mrb` valid & non-null; `lit` is a decimal integer literal.
     unsafe { eval_literal(mrb, &lit) }
 }
 
@@ -440,6 +483,7 @@ pub(crate) unsafe fn register(mrb: *mut mrb_state) {
         def(c"node_msg_start", native_node_msg_start, 1);
         def(c"node_msg_end", native_node_msg_end, 1);
         def(c"source_slice", native_source_slice, 2);
+        def(c"compile_pattern", native_compile_pattern, 1);
     }
 }
 
@@ -566,6 +610,27 @@ mod tests {
         drop(worker);
         drop(ctx);
         drain_sink()
+    }
+
+    #[test]
+    fn compile_pattern_primitive_reuses_registered_handles() {
+        let _guard = lock_sink();
+        {
+            let mut st = MrubyState::open();
+            unsafe {
+                register(st.raw());
+                register_test_report(st.raw());
+            }
+            st.eval(
+                r##"
+                a = Murphy.compile_pattern("(send nil? :puts $...)")
+                b = Murphy.compile_pattern("(send nil? :puts $...)")
+                Murphy.__test_report("#{a}|#{b}")
+            "##,
+            );
+        }
+
+        assert_eq!(drain_sink(), vec!["0|0"]);
     }
 
     /// MULTIBYTE hand-derivation (ADR 0001 — bytes, NOT chars) + handle→node
