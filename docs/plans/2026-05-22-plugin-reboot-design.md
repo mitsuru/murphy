@@ -31,9 +31,9 @@ source
  → murphy-translate : prism AST → arena AST          ← 新規
  → murphy-ast       : arena/parser-shaped/typed AST  ← 単一の共有AST
  → dispatch (arena を1パス走査)
-     ├─ 標準cop (murphy-rails 等)  ─ murphy-plugin-api 経由
-     ├─ .so プラグイン            ─ murphy-plugin-api 経由 (同一表面)
-     └─ .rb ユーザーcop           ─ embedded mruby + ランタイムmatcher(C)
+     ├─ 標準cop (Murphy/Lint/Style/Layout) ─ murphy-plugin-api 経由 (静的リンク)
+     ├─ .so プラグイン (murphy-rails 等)   ─ murphy-plugin-api 経由 (同一表面)
+     └─ .rb ユーザーcop                   ─ embedded mruby + ランタイムmatcher(C)
  → offense 集約 → 出力 / autocorrect
 ```
 
@@ -45,7 +45,7 @@ source
 | `murphy-plugin-api` | 改修 | cop が AST を読む唯一の表面。arena を直読み。`Cop`/`NodeCop` を arena 向けに再定義 |
 | `murphy-plugin-macros` | 改修 | `node_pattern!`(B)を追加。`register_cops!`・`#[derive(CopOptions)]` は存続 |
 | `murphy-core` | 改修 | 「共有不変AST」が `ruby_prism::Node` → `murphy-ast::Ast` に置換 |
-| `murphy-rails` | 改修 | 「組込みプラグインパック」として murphy-plugin-api を消費 |
+| `murphy-rails` | 改修 | 動的 `.so` プラグインパック化 ── murphy-plugin-api を消費し、`[[plugins]] path = "..."` 経由でロードされる(全ユーザー必須ではない opt-in pack) |
 
 > `murphy-pattern` を他クレートで消費する見込みが薄ければ、独立させず
 > `murphy-plugin-api` に畳む案もある(その場合は新規 2 クレート)。
@@ -238,9 +238,17 @@ node_lists + interner blob + FnTable + ABI version」。プラグインのエン
 - `FileCop` 削除(run_file 撤廃)。`CallCop` は `NodeCop` on `Send` の特殊例
   にすぎず `NodeCop` へ統合。
 
-**標準 cop = 組込みプラグインパック。** murphy-rails も murphy-plugin-api に
-対してコンパイルされるが、`.so` ロードではなく **静的リンク**。差は発見
-方法(組込みリスト vs `.so` スキャン)だけ。
+**標準 cop = 組込みプラグインパック (静的リンク)。** murphy-core 同梱の
+標準 cop (Murphy/Lint/Style/Layout、ADR 0018) は murphy-plugin-api に対して
+コンパイルされるが、`.so` ロードではなく **静的リンク** で同梱される。差は
+発見方法(組込みリスト vs `.so` スキャン)だけ。これによって murphy-core
+自身も外部プラグインと同じ ABI 上で動き、標準 cop 専用のショートカット表面
+が存在しないことが保証される(単一表面 ABI の dogfooding)。
+
+**murphy-rails は動的 `.so` プラグイン。** Rails 利用者向けの opt-in pack
+なので、`murphy-rails.so` を `[[plugins]] path = "..."` 経由でロードする
+経路に乗せる。これによって `.so` 配布パス(template repo / load
+diagnostic / plugin pack 形式)も同時に dogfooding される。
 
 **NodeId 有効性。** arena は dispatch 中 immutable・murphy-core 所有で
 プラグイン呼び出しより長生き。プラグインは dispatch を超えてポインタを
@@ -275,7 +283,7 @@ node_lists + interner blob + FnTable + ABI version」。プラグインのエン
 9  register_cops! / derive(CopOptions) 再ターゲット ← 8
 10 #[on_node] / #[murphy::cop]                ← 8,6
 11 murphy-core dispatch を arena へ差替        ← 2,8
-12 一時無効化メカニズム + murphy-rails を組込みパック化(代表数個) ← 8,11
+12 一時無効化メカニズム + 標準 cop pack の組込みパック化(代表数個 arena 再実装) ← 8,11
 13 mruby ブリッジ → C backend                 ← 7,8
 14 run_file 撤廃                              ← 12,13
 15 arena バイナリキャッシュ(fast-follow)     ← 2,3
@@ -288,10 +296,13 @@ node_lists + interner blob + FnTable + ABI version」。プラグインのエン
 
 - §12 で **一時無効化メカニズム** を入れる(未移植 cop を `disabled` 扱いに
   して trunk のビルド/テストを常に green に保つ)。
-- reboot epic 本体は代表数個の cop を arena AST 上に再実装するに留める。
-- 131 個全量の arena AST への書き換えは **専用の follow-up epic** で追跡する。
-  これは reboot の付録ではなく **reboot が存在する目的そのもの** であり、
-  優先度を落とさず一時無効化リストを 0 に向けて消化する。
+- §12 では murphy-core 内の標準 cop pack(Murphy/Lint/Style/Layout)を新
+  plugin-api に乗せ替えて静的組込みパック化し、代表数個の arena AST 再実装
+  で経路を通す。murphy-rails の動的 `.so` 化は §12 のスコープ外。
+- murphy-rails の動的 `.so` 化と 131 個全量の arena AST 移植は **専用の
+  follow-up epic (murphy-au8)** で追跡する。これは reboot の付録ではなく
+  **reboot が存在する目的そのもの** であり、優先度を落とさず一時無効化
+  リストを 0 に向けて消化する。
 
 > reboot epic は murphy-9cr の ID を再利用し、superseded なサブタスクを
 > クローズ・新サブタスクを追加する形で in-place 再構成する。
