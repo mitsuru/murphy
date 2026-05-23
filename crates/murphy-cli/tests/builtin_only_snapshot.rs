@@ -68,16 +68,17 @@ fn clean_file_alone_yields_empty_json_array_and_exit_zero() {
         .assert()
         .code(0);
 
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be valid JSON");
-    assert!(
-        parsed.is_array(),
-        "zero-offense response must be a JSON array, got {parsed:?}"
-    );
-    let arr = parsed.as_array().unwrap();
-    assert!(
-        arr.is_empty(),
-        "clean.rb on its own must produce zero offenses, got {arr:?}"
+    // Byte-exact: the zero-offense wire shape is `[]\n`, not `[ ]`,
+    // `[\n]\n`, or any other serde-equivalent rendering. A parse-only
+    // check would silently accept a whitespace regression that broke
+    // downstream tools doing strict-equality checks (`murphy lint ... |
+    // grep -F '[]'`, etc.), so the bytes are pinned directly.
+    let stdout = &assert.get_output().stdout;
+    assert_eq!(
+        stdout,
+        b"[]\n",
+        "zero-offense stdout must be exactly `[]\\n`, got {:?}",
+        String::from_utf8_lossy(stdout)
     );
 }
 
