@@ -102,3 +102,27 @@ fn detailed_form_missing_path_exits_2_with_diagnostic() {
         "stderr should mention plugin load failure: {stderr}"
     );
 }
+
+#[test]
+fn name_only_form_exits_2_with_not_yet_implemented_hint() {
+    let dir = tempdir().expect("tempdir");
+    let rb = dir.path().join("sample.rb");
+    fs::write(&rb, "puts 'hi'\n").expect("write rb");
+
+    let toml = "plugins = [\"murphy-rails\"]\n";
+    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg(&rb)
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("name resolution is not yet implemented")
+            && stderr.contains("9cr.10.2"),
+        "stderr should mention not-yet-implemented + 10.2 hint: {stderr}"
+    );
+}
