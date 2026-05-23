@@ -24,10 +24,11 @@
 
 mod lsp;
 
+use murphy_cache::Cache;
 use murphy_core::{
     CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
     aggregate_with_config, discover_with_config, dispatch, migrate_rubocop_yml_to_murphy_toml,
-    parse, run_to_fixpoint,
+    parse_with_cache, run_to_fixpoint,
 };
 use murphy_plugin_api::PluginCopV1;
 use murphy_reporting::{OutputFormat, format_lint_output};
@@ -60,7 +61,7 @@ const MAX_FIX_ITERATIONS: u32 = 10;
 static FIX_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const LINT_USAGE: &str =
-    "murphy lint [--fix|-a] [--debug] [--format human|json|progress] [--] [path]...";
+    "murphy lint [--fix|-a] [--debug] [--no-cache] [--format human|json|progress] [--] [path]...";
 
 struct AppError {
     code: u8,
@@ -198,8 +199,13 @@ fn read_batch_sources(
 /// Run every cop in `cops` over `source` (parsed for the given `file`),
 /// applying inline-directive filtering. Syntax errors degrade to a single
 /// `Murphy/Syntax` offense; cops are skipped on a parse failure.
-fn lint_source(source: &str, file: &str, cops: &[&PluginCopV1]) -> Vec<Offense> {
-    let mut offenses = match parse(source, file) {
+fn lint_source(
+    source: &str,
+    file: &str,
+    cops: &[&PluginCopV1],
+    cache: Option<&Cache>,
+) -> Vec<Offense> {
+    let mut offenses = match parse_with_cache(source, file, cache) {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             dispatch::run_cops(&ast, cops, &mut sink);
@@ -226,9 +232,14 @@ struct TimedOffenses {
     cops_micros: u128,
 }
 
-fn lint_source_timed(source: &str, file: &str, cops: &[&PluginCopV1]) -> TimedOffenses {
+fn lint_source_timed(
+    source: &str,
+    file: &str,
+    cops: &[&PluginCopV1],
+    cache: Option<&Cache>,
+) -> TimedOffenses {
     let parse_started = Instant::now();
-    let parsed = parse(source, file);
+    let parsed = parse_with_cache(source, file, cache);
     let parse_micros = parse_started.elapsed().as_micros();
     let cops_started = Instant::now();
     let offenses = match parsed {
@@ -416,8 +427,9 @@ fn lint_closure_edits<'a>(
     file: &'a str,
     cops: &'a [&'a PluginCopV1],
     config: &'a MurphyConfig,
+    cache: Option<&'a Cache>,
 ) -> Vec<murphy_core::Edit> {
-    let offenses = lint_source(source, file, cops);
+    let offenses = lint_source(source, file, cops, cache);
     aggregate_with_config(offenses, config)
         .into_iter()
         .filter_map(|o| o.autocorrect.map(|ac| ac.edits))
@@ -434,7 +446,11 @@ struct FileDebugInfo {
 /// Memoized lint over a batch of files. Identical source content is
 /// linted exactly once; results are fanned out per path with `Offense.file`
 /// rewritten to each contributor path (preserves ADR 0007 determinism).
-fn lint_files_memoized(sources: &[(String, String)], cops: &[&PluginCopV1]) -> Vec<Offense> {
+fn lint_files_memoized(
+    sources: &[(String, String)],
+    cops: &[&PluginCopV1],
+    cache: Option<&Cache>,
+) -> Vec<Offense> {
     // Group paths by content so identical-content files share one lint.
     let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (path, content) in sources {
@@ -452,7 +468,7 @@ fn lint_files_memoized(sources: &[(String, String)], cops: &[&PluginCopV1]) -> V
             // additional path sharing the same content, clone the offense
             // list with `file` rewritten.
             let representative = paths[0];
-            let base = lint_source(content, representative, cops);
+            let base = lint_source(content, representative, cops, cache);
             let mut all: Vec<Offense> = Vec::with_capacity(base.len() * paths.len());
             all.extend(base.iter().cloned());
             for &other in &paths[1..] {
@@ -474,6 +490,7 @@ fn lint_files_memoized(sources: &[(String, String)], cops: &[&PluginCopV1]) -> V
 fn lint_files_memoized_debug(
     sources: &[(String, String)],
     cops: &[&PluginCopV1],
+    cache: Option<&Cache>,
 ) -> (Vec<Offense>, Vec<(String, u128, u128)>) {
     // Debug variant: keep per-file (parse, cops) timings. No memoization
     // across content — `--debug` is for developer visibility, the cost
@@ -481,7 +498,7 @@ fn lint_files_memoized_debug(
     let mut all: Vec<Offense> = Vec::new();
     let mut timings: Vec<(String, u128, u128)> = Vec::new();
     for (path, content) in sources {
-        let t = lint_source_timed(content, path, cops);
+        let t = lint_source_timed(content, path, cops, cache);
         timings.push((path.clone(), t.parse_micros, t.cops_micros));
         all.extend(t.offenses);
     }
@@ -533,6 +550,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     // ── flag extraction ────────────────────────────────────────────────────
     let mut fix = false;
     let mut debug = false;
+    let mut no_cache = false;
     let mut output_format = OutputFormat::Human;
     let mut path_args: Vec<&str> = Vec::new();
     let mut flags_done = false;
@@ -561,6 +579,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
             "--" => flags_done = true,
             "--fix" | "-a" => fix = true,
             "--debug" => debug = true,
+            "--no-cache" => no_cache = true,
             "--format" => pending_format = true,
             flag if flag.starts_with('-') => {
                 return Err(AppError::setup(format!(
@@ -682,6 +701,25 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     let cops_vec = registry.cops();
     let cops: &[&PluginCopV1] = &cops_vec;
 
+    // ── arena binary cache (murphy-9cr.26) ─────────────────────────────────
+    // `Cache::open` consults `MURPHY_NO_CACHE` itself; `--no-cache` is the
+    // CLI-side opt-out. Either path collapses to `Option::None`, which
+    // `parse_with_cache` understands as "no caching".
+    let cache: Option<Cache> = if no_cache {
+        None
+    } else {
+        Cache::open(murphy_translate::LAYER_VERSION)
+    };
+    let cache_ref = cache.as_ref();
+    if debug {
+        eprintln!(
+            "murphy: debug: cache active={} (--no-cache={} MURPHY_NO_CACHE={})",
+            cache_ref.is_some(),
+            no_cache,
+            std::env::var_os("MURPHY_NO_CACHE").is_some()
+        );
+    }
+
     let mut fix_debug: Vec<FileDebugInfo> = Vec::new();
     let mut sources_for_lint = sources;
 
@@ -697,7 +735,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         for (path, source) in &sources_for_lint {
             let outcome = run_to_fixpoint(
                 source,
-                |s| lint_closure_edits(s, path, cops, &config),
+                |s| lint_closure_edits(s, path, cops, &config, cache_ref),
                 MAX_FIX_ITERATIONS,
             );
             if outcome.corrected != *source {
@@ -735,7 +773,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         );
     }
     let flat_offenses: Vec<Offense> = if debug {
-        let (offenses, timings) = lint_files_memoized_debug(&sources_for_lint, cops);
+        let (offenses, timings) = lint_files_memoized_debug(&sources_for_lint, cops, cache_ref);
         for (path, parse_us, cops_us) in &timings {
             eprintln!(
                 "murphy: debug: lint {} parse_us={} cops_us={}",
@@ -744,7 +782,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         }
         offenses
     } else {
-        lint_files_memoized(&sources_for_lint, cops)
+        lint_files_memoized(&sources_for_lint, cops, cache_ref)
     };
     let offenses = aggregate_with_config(flat_offenses, &config);
     if debug {

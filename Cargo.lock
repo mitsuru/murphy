@@ -592,9 +592,11 @@ name = "murphy-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "murphy-cache",
  "murphy-core",
  "murphy-plugin-api",
  "murphy-reporting",
+ "murphy-translate",
  "rayon",
  "serde_json",
  "tempfile",

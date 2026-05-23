@@ -825,3 +825,99 @@ fn lint_two_identical_content_files_emits_offense_per_path() {
     assert_eq!(a["severity"], b["severity"]);
     assert_eq!(a["message"], b["message"]);
 }
+
+// ── arena binary cache (murphy-9cr.26) ───────────────────────────────────────
+
+fn cache_files_in(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(rd) = fs::read_dir(root) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                out.extend(cache_files_in(&p));
+            } else if p.extension().is_some_and(|e| e == "ast") {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn cache_populates_xdg_dir_on_default_run() {
+    let dir = tempdir().expect("create tempdir");
+    let file = dir.path().join("clean.rb");
+    fs::write(&file, CLEAN_SOURCE).expect("write clean.rb");
+
+    let cache_root = dir.path().join("cache");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .env_remove("MURPHY_NO_CACHE")
+        .env("XDG_CACHE_HOME", &cache_root)
+        .arg("lint")
+        .arg(&file)
+        .assert()
+        .code(0);
+
+    let murphy_cache = cache_root.join("murphy").join("v1");
+    assert!(
+        murphy_cache.is_dir(),
+        "cache root should exist: {murphy_cache:?}"
+    );
+    let files = cache_files_in(&murphy_cache);
+    assert!(
+        !files.is_empty(),
+        "cache root should contain at least one .ast file, got {files:?}"
+    );
+}
+
+#[test]
+fn cache_is_disabled_by_no_cache_flag() {
+    let dir = tempdir().expect("create tempdir");
+    let file = dir.path().join("clean.rb");
+    fs::write(&file, CLEAN_SOURCE).expect("write clean.rb");
+
+    let cache_root = dir.path().join("cache");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .env_remove("MURPHY_NO_CACHE")
+        .env("XDG_CACHE_HOME", &cache_root)
+        .arg("lint")
+        .arg("--no-cache")
+        .arg(&file)
+        .assert()
+        .code(0);
+
+    // With --no-cache, Cache::open is never called → root is not created.
+    let murphy_cache = cache_root.join("murphy").join("v1");
+    assert!(
+        cache_files_in(&murphy_cache).is_empty(),
+        "no cache file should be written under --no-cache"
+    );
+}
+
+#[test]
+fn cache_is_disabled_by_env_var() {
+    let dir = tempdir().expect("create tempdir");
+    let file = dir.path().join("clean.rb");
+    fs::write(&file, CLEAN_SOURCE).expect("write clean.rb");
+
+    let cache_root = dir.path().join("cache");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .env("MURPHY_NO_CACHE", "1")
+        .env("XDG_CACHE_HOME", &cache_root)
+        .arg("lint")
+        .arg(&file)
+        .assert()
+        .code(0);
+
+    let murphy_cache = cache_root.join("murphy").join("v1");
+    assert!(
+        cache_files_in(&murphy_cache).is_empty(),
+        "no cache file should be written under MURPHY_NO_CACHE"
+    );
+}

@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 murphy-core = { path = "../murphy-core" }
+murphy-cache = { path = "../murphy-cache" }
+murphy-translate = { path = "../murphy-translate" }
 murphy-plugin-api = { path = "../murphy-plugin-api" }
 murphy-reporting = { path = "../murphy-reporting" }
 rayon = "1"
