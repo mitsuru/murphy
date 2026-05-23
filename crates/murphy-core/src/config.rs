@@ -36,19 +36,68 @@ pub struct CopsConfig {
 /// - `[[plugins]] name = "..." path = "..."` — explicit path; bypasses
 ///   the search path entirely.
 ///
-/// ## Documented limitation
-///
-/// `#[serde(deny_unknown_fields)]` is not fully honored on struct
-/// variants inside `#[serde(untagged)]` enums — additional fields on
-/// the `Detailed` variant (e.g. a stray `version = "..."`) are silently
-/// accepted. A future refactor will split `Detailed` into a named
-/// struct (`PluginDetailed`) with its own `deny_unknown_fields`. See
-/// `plugins_unknown_field_silently_accepted_for_now` in tests.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
+/// Deserialization dispatches manually on input shape (string vs.
+/// table) instead of `#[serde(untagged)]`: an untagged enum buffers
+/// the input, tries each variant, and swallows the inner diagnostics
+/// (`deny_unknown_fields`, `missing field`) into a generic
+/// "data did not match any variant". The hand-rolled `Visitor` routes
+/// a table straight into `PluginDetailed` so its errors propagate
+/// verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginConfig {
     Name(String),
-    Detailed { name: String, path: PathBuf },
+    Detailed(PluginDetailed),
+}
+
+impl<'de> Deserialize<'de> for PluginConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct PluginConfigVisitor;
+        impl<'de> serde::de::Visitor<'de> for PluginConfigVisitor {
+            type Value = PluginConfig;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(r#"a plugin name string or { name = "...", path = "..." } table"#)
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<PluginConfig, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(PluginConfig::Name(v.to_owned()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<PluginConfig, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(PluginConfig::Name(v))
+            }
+
+            fn visit_map<M>(self, map: M) -> Result<PluginConfig, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                PluginDetailed::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(PluginConfig::Detailed)
+            }
+        }
+        deserializer.deserialize_any(PluginConfigVisitor)
+    }
+}
+
+/// Explicit-path plugin entry: `[[plugins]] name = "..." path = "..."`.
+///
+/// Split out of [`PluginConfig::Detailed`] so that `deny_unknown_fields`
+/// and `missing field` diagnostics survive the surrounding
+/// `#[serde(untagged)]` wrapping.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginDetailed {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -502,10 +551,10 @@ path = "target/debug/libmurphy_example_pack.so"
         .unwrap();
         assert_eq!(cfg.plugins.len(), 1);
         match &cfg.plugins[0] {
-            PluginConfig::Detailed { name, path } => {
-                assert_eq!(name, "murphy-example-pack");
+            PluginConfig::Detailed(d) => {
+                assert_eq!(d.name, "murphy-example-pack");
                 assert_eq!(
-                    path.to_str(),
+                    d.path.to_str(),
                     Some("target/debug/libmurphy_example_pack.so")
                 );
             }
@@ -536,9 +585,7 @@ plugins = [
         .unwrap();
         assert_eq!(cfg.plugins.len(), 2);
         assert!(matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "murphy-rails"));
-        assert!(
-            matches!(&cfg.plugins[1], PluginConfig::Detailed { name, .. } if name == "local-pack")
-        );
+        assert!(matches!(&cfg.plugins[1], PluginConfig::Detailed(d) if d.name == "local-pack"));
     }
 
     #[test]
@@ -656,12 +703,13 @@ plugins = [
     }
 
     #[test]
-    fn plugins_unknown_field_silently_accepted_for_now() {
-        // serde の untagged enum + struct variant は variant 内側で
-        // deny_unknown_fields を受け付けない。将来的に PluginDetailed を
-        // 別 struct に切り出して deny_unknown_fields を効かせる予定 —
-        // それまでは unknown field を silently accept する。
-        let cfg = MurphyConfig::from_toml_str(
+    fn plugins_detailed_rejects_unknown_field() {
+        // PluginDetailed carries its own `deny_unknown_fields`, so a
+        // stray key on a Detailed entry surfaces as an unknown-field
+        // error instead of being silently accepted (the previous
+        // limitation around untagged-enum struct variants — fixed in
+        // murphy-9cr.10.3 by extracting PluginDetailed).
+        let err = MurphyConfig::from_toml_str(
             r#"
 [[plugins]]
 name = "x"
@@ -669,7 +717,31 @@ path = "y"
 version = "0.1"
 "#,
         )
-        .unwrap();
-        assert_eq!(cfg.plugins.len(), 1);
+        .expect_err("unknown field on Detailed should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") && msg.contains("version"),
+            "expected unknown-field error mentioning `version`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn plugins_detailed_missing_path_yields_clear_error() {
+        // Confirms the user-facing error for `[[plugins]] name = "x"`
+        // (missing `path`) names the missing field rather than the
+        // cryptic untagged-enum "data did not match any variant"
+        // fallback that murphy-9cr.10.1 had to live with.
+        let err = MurphyConfig::from_toml_str(
+            r#"
+[[plugins]]
+name = "x"
+"#,
+        )
+        .expect_err("missing path should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing field") && msg.contains("path"),
+            "expected `missing field 'path'`-style error, got: {msg}"
+        );
     }
 }

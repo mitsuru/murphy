@@ -156,7 +156,7 @@ pub fn plan_plugin_loads(
     let overrides: BTreeMap<String, PathBuf> = plugins
         .iter()
         .filter_map(|p| match p {
-            PluginConfig::Detailed { name, path } => Some((name.clone(), project_root.join(path))),
+            PluginConfig::Detailed(d) => Some((d.name.clone(), project_root.join(&d.path))),
             PluginConfig::Name(_) => None,
         })
         .collect();
@@ -165,7 +165,8 @@ pub fn plan_plugin_loads(
     let mut plan: Vec<(String, PathBuf)> = Vec::new();
     for plugin in plugins {
         let name = match plugin {
-            PluginConfig::Detailed { name, .. } | PluginConfig::Name(name) => name,
+            PluginConfig::Detailed(d) => &d.name,
+            PluginConfig::Name(name) => name,
         };
         if !seen.insert(name.clone()) {
             continue;
@@ -173,7 +174,7 @@ pub fn plan_plugin_loads(
         let path = match plugin {
             // For a Detailed entry we know `overrides` has the resolved
             // path — same data we just inserted above.
-            PluginConfig::Detailed { .. } => overrides[name].clone(),
+            PluginConfig::Detailed(_) => overrides[name].clone(),
             PluginConfig::Name(_) => resolve_plugin_name(name, project_root, &overrides)?,
         };
         plan.push((name.clone(), path));
@@ -184,6 +185,7 @@ pub fn plan_plugin_loads(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PluginDetailed;
 
     #[test]
     fn validate_rejects_empty_name() {
@@ -379,10 +381,10 @@ mod tests {
         let project = tempfile::tempdir().expect("tempdir");
         let plugins = vec![
             PluginConfig::Name("foo".to_string()),
-            PluginConfig::Detailed {
+            PluginConfig::Detailed(PluginDetailed {
                 name: "foo".to_string(),
                 path: PathBuf::from("./vendor.so"),
-            },
+            }),
         ];
         let plan = plan_plugin_loads(project.path(), &plugins).unwrap();
         assert_eq!(plan.len(), 1, "single load expected: {plan:?}");
@@ -396,10 +398,10 @@ mod tests {
         // Same as above but the `Detailed` comes first. Still 1 load.
         let project = tempfile::tempdir().expect("tempdir");
         let plugins = vec![
-            PluginConfig::Detailed {
+            PluginConfig::Detailed(PluginDetailed {
                 name: "foo".to_string(),
                 path: PathBuf::from("./vendor.so"),
-            },
+            }),
             PluginConfig::Name("foo".to_string()),
         ];
         let plan = plan_plugin_loads(project.path(), &plugins).unwrap();
@@ -413,14 +415,14 @@ mod tests {
         // project root. Multiple distinct names produce multiple entries.
         let project = tempfile::tempdir().expect("tempdir");
         let plugins = vec![
-            PluginConfig::Detailed {
+            PluginConfig::Detailed(PluginDetailed {
                 name: "a".to_string(),
                 path: PathBuf::from("./a.so"),
-            },
-            PluginConfig::Detailed {
+            }),
+            PluginConfig::Detailed(PluginDetailed {
                 name: "b".to_string(),
                 path: PathBuf::from("./b.so"),
-            },
+            }),
         ];
         let plan = plan_plugin_loads(project.path(), &plugins).unwrap();
         let names: Vec<&str> = plan.iter().map(|(n, _)| n.as_str()).collect();
