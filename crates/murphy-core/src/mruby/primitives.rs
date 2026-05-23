@@ -48,9 +48,9 @@ use ruby_prism::Visit;
 
 use mruby3_sys::{
     RClass, mrb_class_get, mrb_define_class, mrb_define_module_function, mrb_get_args, mrb_int,
-    mrb_load_string, mrb_state, mrb_str_new, mrb_value,
+    mrb_load_string, mrb_state, mrb_str_new, mrb_sym, mrb_sym_name_len, mrb_value,
 };
-use murphy_ast::{NodeId, pattern_name};
+use murphy_ast::{NodeId, NodeKind, pattern_name};
 use murphy_pattern::CaptureValue;
 
 use crate::Range;
@@ -229,6 +229,47 @@ unsafe fn arg_two_handles(mrb: *mut mrb_state) -> (mrb_int, mrb_int) {
     (first, second)
 }
 
+/// Read a required node id and Symbol field name from an mruby native call.
+///
+/// # Safety
+///
+/// `mrb` must be a valid non-null `mrb_state` inside a native callback that
+/// was registered with `MRB_ARGS_REQ(2)` and called as `(Integer, Symbol)`.
+unsafe fn arg_node_and_symbol(mrb: *mut mrb_state) -> (mrb_int, mrb_sym) {
+    let mut node_id: mrb_int = -1;
+    let mut field: mrb_sym = 0;
+    let fmt = c"in";
+    // SAFETY: `mrb` is valid; `fmt` requests one integer and one Symbol/String
+    // coerced to `mrb_sym`; both out-pointers are live and correctly typed.
+    unsafe {
+        mrb_get_args(
+            mrb,
+            fmt.as_ptr(),
+            &mut node_id as *mut mrb_int,
+            &mut field as *mut mrb_sym,
+        );
+    }
+    (node_id, field)
+}
+
+/// Resolve a `mrb_sym` argument to an owned Rust field name.
+///
+/// # Safety
+///
+/// `mrb` must be valid and `field` must be a symbol interned in that VM.
+unsafe fn symbol_name(mrb: *mut mrb_state, field: mrb_sym) -> String {
+    let mut len: mrb_int = 0;
+    // SAFETY: `mrb` valid; `field` is from `mrb_get_args("n")`; len pointer is
+    // live for the call. mruby owns the returned bytes for the VM lifetime.
+    let ptr = unsafe { mrb_sym_name_len(mrb, field, &mut len as *mut mrb_int) };
+    if ptr.is_null() || len <= 0 {
+        return String::new();
+    }
+    // SAFETY: mruby returned `ptr` valid for `len` bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// Build a Ruby `String` from arbitrary bytes (length-delimited; NUL-safe).
 ///
 /// # Safety
@@ -296,6 +337,17 @@ unsafe fn ruby_array_of_node_ids(mrb: *mut mrb_state, ids: &[NodeId]) -> mrb_val
     let lit = CString::new(src).expect("array literal contains only digits and punctuation");
     // SAFETY: `mrb` valid & non-null; `lit` is a NUL-terminated Ruby array
     // literal made only from decimal digits, commas, and brackets.
+    unsafe { eval_literal(mrb, &lit) }
+}
+
+/// Return a Ruby integer literal for a node id.
+///
+/// # Safety
+///
+/// `mrb` must be valid and non-null inside a native callback.
+unsafe fn ruby_node_id(mrb: *mut mrb_state, id: NodeId) -> mrb_value {
+    let lit = CString::new(id.0.to_string()).expect("decimal digits, no NUL");
+    // SAFETY: `mrb` valid & non-null; `lit` is a decimal integer literal.
     unsafe { eval_literal(mrb, &lit) }
 }
 
@@ -532,6 +584,52 @@ unsafe extern "C" fn native_node_ancestors(mrb: *mut mrb_state, _self: mrb_value
     let ids = ast.ancestors(NodeId(node_id)).collect::<Vec<_>>();
     // SAFETY: `mrb` valid & non-null; helper builds a safe Ruby literal.
     unsafe { ruby_array_of_node_ids(mrb, &ids) }
+}
+
+/// `Murphy.node_field(node_id, field) -> NodeId/Array<Integer>/Symbol/String/nil`.
+unsafe extern "C" fn native_node_field(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+    // SAFETY: native callback; `mrb` valid & non-null; `ud` is the live ctx.
+    let c = unsafe { ctx(mrb) };
+    // SAFETY: native callback registered with `(Integer, Symbol)` arguments.
+    let (node_id, field) = unsafe { arg_node_and_symbol(mrb) };
+    let Ok(node_id) = u32::try_from(node_id) else {
+        // SAFETY: `mrb` valid & non-null; nil literal.
+        return unsafe { eval_literal(mrb, c"nil") };
+    };
+
+    let ast = c.arena_ast();
+    if node_id as usize >= ast.len() {
+        // SAFETY: `mrb` valid & non-null; nil literal.
+        return unsafe { eval_literal(mrb, c"nil") };
+    }
+    // SAFETY: `field` came from `mrb_get_args("n")` in this VM.
+    let field = unsafe { symbol_name(mrb, field) };
+
+    match (ast.kind(NodeId(node_id)), field.as_str()) {
+        (NodeKind::Send { receiver, .. }, "receiver") => match receiver.get() {
+            // SAFETY: `mrb` valid & non-null; helper returns an integer literal.
+            Some(id) => unsafe { ruby_node_id(mrb, id) },
+            // SAFETY: `mrb` valid & non-null; nil literal.
+            None => unsafe { eval_literal(mrb, c"nil") },
+        },
+        (NodeKind::Send { method, .. }, "method" | "name") => {
+            let name = ast.interner().resolve(method.0);
+            let lit = CString::new(format!(":{name}")).expect("symbol name contains no NUL");
+            // SAFETY: `mrb` valid & non-null; `lit` is a symbol literal.
+            unsafe { eval_literal(mrb, &lit) }
+        }
+        (NodeKind::Send { args, .. }, "args" | "arguments") => {
+            let raw = ast.raw_parts();
+            let start = args.start as usize;
+            let ids = &raw.node_lists[start..start + args.len as usize];
+            // SAFETY: `mrb` valid & non-null; helper builds a safe Ruby literal.
+            unsafe { ruby_array_of_node_ids(mrb, ids) }
+        }
+        _ => {
+            // SAFETY: `mrb` valid & non-null; nil literal.
+            unsafe { eval_literal(mrb, c"nil") }
+        }
+    }
 }
 
 /// `Murphy.node_count -> Integer`. The size of the handle space `0..count`.
@@ -836,6 +934,7 @@ pub(crate) unsafe fn register(mrb: *mut mrb_state) {
         def(c"ast_root", native_ast_root, 0);
         def(c"node_kind", native_node_kind, 1);
         def(c"node_range", native_node_range, 1);
+        def(c"node_field", native_node_field, 2);
         def(c"node_parent", native_node_parent, 1);
         def(c"node_children", native_node_children, 1);
         def(c"node_ancestors", native_node_ancestors, 1);
@@ -1286,6 +1385,71 @@ mod tests {
                 )
             "##,
             );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_sink(), vec![expected]);
+    }
+
+    #[test]
+    fn node_field_primitive_reads_send_payload_fields() {
+        let _guard = lock_sink();
+        let ctx = AstContext::new(b"logger.info(x)\n".to_vec());
+        let root = ctx.arena_ast().root();
+        let send = std::iter::once(root)
+            .chain(ctx.arena_ast().descendants(root))
+            .find(|&id| {
+                matches!(
+                    ctx.arena_ast().kind(id),
+                    murphy_ast::NodeKind::Send { receiver, .. } if receiver.get().is_some()
+                )
+            })
+            .expect("fixture contains an explicit receiver send");
+        let (receiver, method, args) = match ctx.arena_ast().kind(send) {
+            murphy_ast::NodeKind::Send {
+                receiver,
+                method,
+                args,
+            } => {
+                let receiver = receiver.get().expect("explicit receiver");
+                let method = ctx.arena_ast().interner().resolve(method.0).to_owned();
+                let raw = ctx.arena_ast().raw_parts();
+                let start = args.start as usize;
+                let args = raw.node_lists[start..start + args.len as usize]
+                    .iter()
+                    .map(|id| id.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                (receiver, method, args)
+            }
+            _ => unreachable!("selected node is a send"),
+        };
+        let expected = format!(
+            "receiver={}|method={method}|args={args}|bad=true",
+            receiver.0
+        );
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = crate::mruby::sdk::CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: see `run_driver_over` — valid state, live CopRun in ud.
+            unsafe {
+                register(st.raw());
+                register_test_report(st.raw());
+            }
+            st.eval(&format!(
+                r##"
+                receiver = Murphy.node_field({}, :receiver)
+                method = Murphy.node_field({}, :method)
+                args = Murphy.node_field({}, :arguments).join(",")
+                bad = Murphy.node_field({}, :missing).nil?
+                Murphy.__test_report("receiver=#{{receiver}}|method=#{{method}}|args=#{{args}}|bad=#{{bad}}")
+            "##,
+                send.0, send.0, send.0, send.0
+            ));
         }
         drop(cop_run);
         drop(worker);

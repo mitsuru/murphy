@@ -101,6 +101,10 @@ class Murphy
       Murphy::Range.new(start_offset, end_offset)
     end
 
+    def field(name)
+      wrap_field(Murphy.node_field(@id, name))
+    end
+
     # Returns a Symbol (design §4: `node.name == :puts`), or nil if the
     # primitive reports nil (out-of-range — never happens for a handle the
     # SDK itself produced from `node_count`).
@@ -122,6 +126,18 @@ class Murphy
       return nil if start_offset < 0 || end_offset < 0
 
       Murphy::Range.new(start_offset, end_offset)
+    end
+
+    private
+
+    def wrap_field(value)
+      if value.is_a?(Integer)
+        Murphy::Node.new(value)
+      elsif value.is_a?(Array)
+        value.map { |item| item.is_a?(Integer) ? Murphy::Node.new(item) : item }
+      else
+        value
+      end
     end
   end
 

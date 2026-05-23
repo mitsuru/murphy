@@ -1181,6 +1181,59 @@ mod tests {
         assert_eq!(drain_reports(), vec![expected]);
     }
 
+    #[test]
+    fn prelude_node_field_wraps_node_ids_as_nodes() {
+        let _guard = lock_reports();
+        let ctx = AstContext::new(b"logger.info(x)\n".to_vec());
+        let send = std::iter::once(ctx.arena_ast().root())
+            .chain(ctx.arena_ast().descendants(ctx.arena_ast().root()))
+            .find(|&id| {
+                matches!(
+                    ctx.arena_ast().kind(id),
+                    murphy_ast::NodeKind::Send { receiver, .. } if receiver.get().is_some()
+                )
+            })
+            .expect("fixture contains an explicit receiver send");
+        let receiver = match ctx.arena_ast().kind(send) {
+            murphy_ast::NodeKind::Send { receiver, .. } => receiver.get().unwrap(),
+            _ => unreachable!("selected node is a send"),
+        };
+        let expected = format!("receiver={}|method=info", receiver.0);
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: valid mrb state; registration only defines functions/classes.
+            unsafe {
+                crate::mruby::primitives::register(st.raw());
+                register_sdk(st.raw());
+                register_test_report(st.raw());
+            }
+            assert!(
+                !st.eval_checked(PRELUDE),
+                "prelude must load without raising"
+            );
+            assert!(
+                !st.eval_checked(&format!(
+                    r##"
+                node = Murphy::Node.new({})
+                receiver = node.field(:receiver)
+                method = node.field(:method)
+                Murphy.__test_report("receiver=#{{receiver.id}}|method=#{{method}}")
+                "##,
+                    send.0
+                )),
+                "node field wrapper script must run without raising"
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_reports(), vec![expected]);
+    }
+
     /// PIN C / ADR 0001: an edit whose offset exceeds the `u32` domain MUST be
     /// dropped, never `as u32`-truncated. Edits come straight from Ruby ints
     /// (no prism bound), so `decode_edit_blob`'s own predicate is the only
