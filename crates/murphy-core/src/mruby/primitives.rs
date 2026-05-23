@@ -381,6 +381,29 @@ unsafe extern "C" fn native_match(mrb: *mut mrb_state, _self: mrb_value) -> mrb_
     unsafe { ruby_array_of_node_ids(mrb, &ids) }
 }
 
+/// `Murphy.node_descendants(node_id) -> Array<Integer> | nil`. Returns arena
+/// descendant node IDs in DFS pre-order, excluding `node_id` itself.
+unsafe extern "C" fn native_node_descendants(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+    // SAFETY: native callback; `mrb` valid & non-null; `ud` is the live ctx.
+    let c = unsafe { ctx(mrb) };
+    // SAFETY: native callback registered with one required `i` argument.
+    let node_id = unsafe { arg_handle(mrb) };
+    let Ok(node_id) = u32::try_from(node_id) else {
+        // SAFETY: `mrb` valid & non-null; nil literal.
+        return unsafe { eval_literal(mrb, c"nil") };
+    };
+
+    let ast = c.arena_ast();
+    if node_id as usize >= ast.len() {
+        // SAFETY: `mrb` valid & non-null; nil literal.
+        return unsafe { eval_literal(mrb, c"nil") };
+    }
+
+    let ids = ast.descendants(NodeId(node_id)).collect::<Vec<_>>();
+    // SAFETY: `mrb` valid & non-null; helper builds a safe Ruby literal.
+    unsafe { ruby_array_of_node_ids(mrb, &ids) }
+}
+
 /// `Murphy.node_name(handle) -> String`. Resolves the handle to the LIVE
 /// prism call node and reads its real `name()`. Only the integer crossed FFI.
 unsafe extern "C" fn native_node_name(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
@@ -570,6 +593,7 @@ pub(crate) unsafe fn register(mrb: *mut mrb_state) {
         def(c"source_slice", native_source_slice, 2);
         def(c"compile_pattern", native_compile_pattern, 1);
         def(c"match", native_match, 2);
+        def(c"node_descendants", native_node_descendants, 1);
     }
 }
 
@@ -783,6 +807,41 @@ mod tests {
             drain_sink(),
             vec!["bad_ir=true", "bad_node=true", "miss=true"]
         );
+    }
+
+    #[test]
+    fn node_descendants_primitive_returns_dfs_descendant_ids() {
+        let _guard = lock_sink();
+        let ctx = AstContext::new(b"puts x\nlogger.info(x)\n".to_vec());
+        let root = ctx.arena_ast().root();
+        let expected = ctx
+            .arena_ast()
+            .descendants(root)
+            .map(|id| id.0.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = crate::mruby::sdk::CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: see `run_driver_over` — valid state, live CopRun in ud.
+            unsafe {
+                register(st.raw());
+                register_test_report(st.raw());
+            }
+            st.eval(&format!(
+                r##"
+                Murphy.__test_report(Murphy.node_descendants({}).join(","))
+            "##,
+                root.0
+            ));
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_sink(), vec![expected]);
     }
 
     /// MULTIBYTE hand-derivation (ADR 0001 — bytes, NOT chars) + handle→node
