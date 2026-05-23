@@ -3,11 +3,12 @@
 mod aggregator;
 mod ast_sexp;
 pub mod autocorrect;
+pub mod builtin;
 mod config;
 mod cop;
 mod cops;
 mod discovery;
-mod dispatch;
+pub mod dispatch;
 mod mruby;
 mod offense;
 mod parse;

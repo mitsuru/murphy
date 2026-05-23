@@ -278,24 +278,12 @@ mod tests {
 
     // === Test cop scaffolding =================================================
     //
-    // Every test that needs a `PluginCopV1` defines a `unsafe extern "C" fn`
-    // (because dispatch is `unsafe extern "C"`) and wraps it in a static
-    // `PluginCopV1`. Atomics let the dispatch fn observe call counts /
-    // visited node ids without per-thread state.
-
-    static NIL_CALLS: AtomicUsize = AtomicUsize::new(0);
-    static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
-    static LAST_NIL_NODE: AtomicUsize = AtomicUsize::new(usize::MAX);
-
-    unsafe extern "C" fn nil_dispatch(node: NodeId, _cx: *const CxRaw) -> i32 {
-        NIL_CALLS.fetch_add(1, Ordering::SeqCst);
-        LAST_NIL_NODE.store(node.0 as usize, Ordering::SeqCst);
-        0
-    }
-    unsafe extern "C" fn send_dispatch(_node: NodeId, _cx: *const CxRaw) -> i32 {
-        SEND_CALLS.fetch_add(1, Ordering::SeqCst);
-        0
-    }
+    // Every test that needs a `PluginCopV1` defines `unsafe extern "C" fn`
+    // dispatch thunks (the FFI signature is non-negotiable) and wraps them
+    // in a `static PluginCopV1`. Atomics observe call counts WITHOUT
+    // sharing across tests — `cargo test` runs lib tests in parallel, so a
+    // single global `NIL_CALLS` would race between two tests both
+    // incrementing it. Per-test atomics keep each assertion local.
 
     const NIL_TAG: u8 = 1;
     const INT_TAG: u8 = 5;
@@ -305,31 +293,14 @@ mod tests {
     static NIL_KINDS: &[PluginNodeKindTag] = &[PluginNodeKindTag(NIL_TAG)];
     static SEND_KINDS: &[PluginNodeKindTag] = &[PluginNodeKindTag(SEND_TAG)];
 
-    static NIL_COP: PluginCopV1 = PluginCopV1 {
-        size: std::mem::size_of::<PluginCopV1>(),
-        name: RawSlice::from_str("Test/NilCop"),
-        description: RawSlice::from_str(""),
-        default_severity: SEVERITY_UNSET,
-        default_enabled: 255,
-        options_ptr: std::ptr::null(),
-        options_len: 0,
-        kinds_ptr: NIL_KINDS.as_ptr(),
-        kinds_len: NIL_KINDS.len(),
-        dispatch: nil_dispatch,
-    };
-
-    static SEND_COP: PluginCopV1 = PluginCopV1 {
-        size: std::mem::size_of::<PluginCopV1>(),
-        name: RawSlice::from_str("Test/SendCop"),
-        description: RawSlice::from_str(""),
-        default_severity: SEVERITY_UNSET,
-        default_enabled: 255,
-        options_ptr: std::ptr::null(),
-        options_len: 0,
-        kinds_ptr: SEND_KINDS.as_ptr(),
-        kinds_len: SEND_KINDS.len(),
-        dispatch: send_dispatch,
-    };
+    /// Build a no-counter, no-emit cop on `KINDS`. Useful when the test only
+    /// inspects host-internal behavior (e.g. DispatchIndex).
+    #[allow(dead_code)]
+    fn noop_cop(name: &'static str, kinds: &'static [PluginNodeKindTag]) -> () {
+        // unused — placeholder to remind future authors a static is required
+        // (a `fn` can't return a `static PluginCopV1`).
+        drop((name, kinds));
+    }
 
     // (1) DispatchIndex correctly buckets the arena's nodes by tag.
     #[test]
@@ -352,9 +323,27 @@ mod tests {
 
     // (2) Outer cop / inner node iteration: each matched node is visited
     //     exactly once per cop, no more, no less.
+    static ITER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn iter_dispatch(_node: NodeId, _cx: *const CxRaw) -> i32 {
+        ITER_CALLS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+    static ITER_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/IterCop"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: iter_dispatch,
+    };
+
     #[test]
     fn dispatch_iterates_arena_once_per_node() {
-        NIL_CALLS.store(0, Ordering::SeqCst);
+        ITER_CALLS.store(0, Ordering::SeqCst);
 
         // Build `[Nil, Nil, Begin]` — two Nils so the inner loop runs twice.
         let mut b = AstBuilder::new("nil; nil", "t.rb");
@@ -368,34 +357,69 @@ mod tests {
         let ast = b.finish(root);
 
         let mut sink = OffenseSink::new("t.rb");
-        run_cops(&ast, &[&NIL_COP], &mut sink);
+        run_cops(&ast, &[&ITER_COP], &mut sink);
 
         assert_eq!(
-            NIL_CALLS.load(Ordering::SeqCst),
+            ITER_CALLS.load(Ordering::SeqCst),
             2,
-            "NilCop must be invoked exactly once per Nil node in the arena"
+            "IterCop must be invoked exactly once per Nil node in the arena"
         );
     }
 
     // (3) A cop subscribed to NIL does not see SEND nodes, and vice versa.
+    static MATCH_NIL_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static MATCH_SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn match_nil_dispatch(_node: NodeId, _cx: *const CxRaw) -> i32 {
+        MATCH_NIL_CALLS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+    unsafe extern "C" fn match_send_dispatch(_node: NodeId, _cx: *const CxRaw) -> i32 {
+        MATCH_SEND_CALLS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+    static MATCH_NIL_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/MatchNil"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: match_nil_dispatch,
+    };
+    static MATCH_SEND_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/MatchSend"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: SEND_KINDS.as_ptr(),
+        kinds_len: SEND_KINDS.len(),
+        dispatch: match_send_dispatch,
+    };
+
     #[test]
     fn dispatch_invokes_only_matching_kinds() {
-        NIL_CALLS.store(0, Ordering::SeqCst);
-        SEND_CALLS.store(0, Ordering::SeqCst);
+        MATCH_NIL_CALLS.store(0, Ordering::SeqCst);
+        MATCH_SEND_CALLS.store(0, Ordering::SeqCst);
 
         let ast = ast_puts_x(); // contains Send + Str — no Nil.
         let mut sink = OffenseSink::new("t.rb");
-        run_cops(&ast, &[&NIL_COP, &SEND_COP], &mut sink);
+        run_cops(&ast, &[&MATCH_NIL_COP, &MATCH_SEND_COP], &mut sink);
 
         assert_eq!(
-            NIL_CALLS.load(Ordering::SeqCst),
+            MATCH_NIL_CALLS.load(Ordering::SeqCst),
             0,
-            "NilCop must not be invoked on Send/Str nodes"
+            "Nil-subscribed cop must not be invoked on Send/Str nodes"
         );
         assert_eq!(
-            SEND_CALLS.load(Ordering::SeqCst),
+            MATCH_SEND_CALLS.load(Ordering::SeqCst),
             1,
-            "SendCop must be invoked exactly once on the one Send node"
+            "Send-subscribed cop must be invoked exactly once on the one Send node"
         );
     }
 
