@@ -96,18 +96,26 @@ impl std::fmt::Display for LoaderError {
 
 impl std::error::Error for LoaderError {}
 
-/// Validate a [`PluginRegistration`] in isolation (no `dlopen`) and return
-/// a slice view over the cop table on success. Factored out so unit tests
-/// can drive every rejection branch without a real `.so`.
+/// Validate a [`PluginRegistration`] in isolation (no `dlopen`) and
+/// return the raw `(ptr, len)` of the validated cop table on success.
+/// Factored out so unit tests can drive every rejection branch without a
+/// real `.so`.
+///
+/// The return type is deliberately raw, not `&[PluginCopV1]`: the loader
+/// itself does not know what owner the pointer is anchored to (the
+/// caller does — for `load_plugin_pack`, the [`libloading::Library`]
+/// being constructed alongside). Promoting the pointer to a borrow with
+/// the wrong lifetime is the soundness hole this signature avoids.
 ///
 /// # Safety
 /// `cops_ptr` must point to `cops_len` consecutive `PluginCopV1` values
-/// for `'static`, or `cops_len` must be 0. In real use the registration
-/// is filled by `register_cops!` against static cop tables, so this is a
-/// natural fit; tests construct fakes that satisfy it.
+/// valid for at least as long as the caller intends to use the returned
+/// pointer (typically: the lifetime of the owning `LoadedPluginPack` or
+/// `&'static`). When `cops_len == 0`, the pointer may be null and is
+/// ignored.
 pub unsafe fn validate_registration(
     reg: &murphy_plugin_api::PluginRegistration,
-) -> Result<&'static [PluginCopV1], LoaderError> {
+) -> Result<(*const PluginCopV1, usize), LoaderError> {
     if reg.abi_version != MURPHY_PLUGIN_ABI_VERSION {
         return Err(LoaderError::AbiVersionMismatch {
             expected: MURPHY_PLUGIN_ABI_VERSION,
@@ -119,14 +127,15 @@ pub unsafe fn validate_registration(
             cops_len: reg.cops_len,
         });
     }
-    let cops: &'static [PluginCopV1] = if reg.cops_len == 0 {
+    let cops_slice: &[PluginCopV1] = if reg.cops_len == 0 {
         &[]
     } else {
-        // Safety: contract above.
+        // Safety: see contract above; the slice borrow is local — used
+        // only to walk the table for size checks — and does not escape.
         unsafe { std::slice::from_raw_parts(reg.cops_ptr, reg.cops_len) }
     };
     let expected_size = std::mem::size_of::<PluginCopV1>();
-    for (cop_index, cop) in cops.iter().enumerate() {
+    for (cop_index, cop) in cops_slice.iter().enumerate() {
         if cop.size != expected_size {
             return Err(LoaderError::StructSizeMismatch {
                 cop_index,
@@ -135,23 +144,52 @@ pub unsafe fn validate_registration(
             });
         }
     }
-    Ok(cops)
+    Ok((reg.cops_ptr, reg.cops_len))
 }
 
-/// A loaded plugin pack, holding the live `Library` handle and a borrowed
+/// A loaded plugin pack, holding the live `Library` handle and a raw
 /// view of the cop table the registration declared.
 ///
 /// The `_library` field owns the `dlopen` handle: dropping the pack
-/// `dlclose`s the library, which invalidates the cop pointers. Callers
-/// must hold a `LoadedPluginPack` for as long as any borrowed
-/// `&PluginCopV1` from it is in use.
+/// `dlclose`s the library, which invalidates the cop pointers. Direct
+/// borrowed access is therefore exposed ONLY through [`Self::cops`],
+/// whose return lifetime is bound to `&self` — making it impossible to
+/// keep a `&PluginCopV1` alive past the pack's drop in safe code.
 #[cfg(not(target_os = "windows"))]
 pub struct LoadedPluginPack {
     /// Original path, kept for diagnostics.
     pub path: std::path::PathBuf,
-    /// Borrowed cop table — pointers are stable for the library's lifetime.
-    pub cops: &'static [PluginCopV1],
+    /// Validated `(cops_ptr, cops_len)` from the plugin's registration.
+    /// Kept raw — the only safe way to obtain a `&[PluginCopV1]` view
+    /// is via [`Self::cops`], which ties the lifetime to `&self`.
+    cops_ptr: *const PluginCopV1,
+    cops_len: usize,
     _library: libloading::Library,
+}
+
+// Safety: a `LoadedPluginPack` is an immutable bundle of raw pointers
+// and a `libloading::Library` handle (which is already `Send + Sync`).
+// The borrowed cop table view is exposed only through `&self` methods.
+#[cfg(not(target_os = "windows"))]
+unsafe impl Send for LoadedPluginPack {}
+#[cfg(not(target_os = "windows"))]
+unsafe impl Sync for LoadedPluginPack {}
+
+#[cfg(not(target_os = "windows"))]
+impl LoadedPluginPack {
+    /// Borrow the validated cop table. The slice is valid for the
+    /// pack's lifetime — `dlclose` runs only when this pack is dropped,
+    /// which is impossible while the returned borrow is live.
+    pub fn cops(&self) -> &[PluginCopV1] {
+        if self.cops_len == 0 {
+            &[]
+        } else {
+            // Safety: `validate_registration` checked the pointer +
+            // length; the library handle in `_library` keeps the data
+            // mapped for the lifetime of `&self`.
+            unsafe { std::slice::from_raw_parts(self.cops_ptr, self.cops_len) }
+        }
+    }
 }
 
 /// Load a plugin pack from `path`. See module docs for the validation set
@@ -188,11 +226,14 @@ pub fn load_plugin_pack(path: &std::path::Path) -> Result<LoadedPluginPack, Load
 
     // Safety: see `validate_registration`'s contract — the registration's
     // `cops_ptr` was filled by `register_cops!` (which uses a `&'static`
-    // cop table) and lives as long as `library`.
-    let cops = unsafe { validate_registration(&reg)? };
+    // cop table) and lives as long as `library`. Storing the raw
+    // `(ptr, len)` alongside the library handle keeps that lifetime
+    // bound enforced through `LoadedPluginPack::cops`'s borrow.
+    let (cops_ptr, cops_len) = unsafe { validate_registration(&reg)? };
     Ok(LoadedPluginPack {
         path: path.to_path_buf(),
-        cops,
+        cops_ptr,
+        cops_len,
         _library: library,
     })
 }
@@ -236,9 +277,13 @@ mod tests {
             cops_ptr: cops.as_ptr(),
             cops_len: cops.len(),
         };
-        let got = unsafe { validate_registration(&reg) }.expect("should validate");
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].size, std::mem::size_of::<PluginCopV1>());
+        let (ptr, len) = unsafe { validate_registration(&reg) }.expect("should validate");
+        assert_eq!(len, 1);
+        assert_eq!(ptr, cops.as_ptr());
+        // Safety: `cops` outlives this borrow; validate_registration's
+        // raw output is intentionally untyped, so the test re-borrows.
+        let view = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(view[0].size, std::mem::size_of::<PluginCopV1>());
     }
 
     #[test]
@@ -302,7 +347,7 @@ mod tests {
             cops_ptr: std::ptr::null(),
             cops_len: 0,
         };
-        let got = unsafe { validate_registration(&reg) }.expect("zero cops should be allowed");
-        assert!(got.is_empty());
+        let (_, len) = unsafe { validate_registration(&reg) }.expect("zero cops should be allowed");
+        assert_eq!(len, 0);
     }
 }

@@ -264,7 +264,8 @@ fn run_offenses_for_source(
     config: &MurphyConfig,
     registry: &CopRegistry,
 ) -> Vec<Offense> {
-    let offenses = super::lint_source(source, file, registry.cops());
+    let cops_vec = registry.cops();
+    let offenses = super::lint_source(source, file, &cops_vec);
     aggregate_with_config(offenses, config)
 }
 

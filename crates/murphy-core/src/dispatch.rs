@@ -184,7 +184,12 @@ fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink) -> CxRaw {
 /// `sink`. The cop order is the order of `cops`; matching nodes are visited
 /// in arena push order. A non-zero dispatch return (panic-trap) disables
 /// that cop for the rest of the file.
-pub fn run_cops(ast: &Ast, cops: &[&'static PluginCopV1], sink: &mut OffenseSink) {
+///
+/// The cop references' lifetime is intentionally elided: built-ins are
+/// `'static` while pack-loaded cops are bounded by the
+/// [`crate::CopRegistry`] (which owns the `dlopen` handle). Both flow
+/// through this signature without re-asserting `&'static`.
+pub fn run_cops(ast: &Ast, cops: &[&PluginCopV1], sink: &mut OffenseSink) {
     let index = DispatchIndex::build(ast);
     let mut base = build_cx_raw(ast, sink);
     for cop in cops {

@@ -198,7 +198,7 @@ fn read_batch_sources(
 /// Run every cop in `cops` over `source` (parsed for the given `file`),
 /// applying inline-directive filtering. Syntax errors degrade to a single
 /// `Murphy/Syntax` offense; cops are skipped on a parse failure.
-fn lint_source(source: &str, file: &str, cops: &[&'static PluginCopV1]) -> Vec<Offense> {
+fn lint_source(source: &str, file: &str, cops: &[&PluginCopV1]) -> Vec<Offense> {
     let mut offenses = match parse(source, file) {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
@@ -226,7 +226,7 @@ struct TimedOffenses {
     cops_micros: u128,
 }
 
-fn lint_source_timed(source: &str, file: &str, cops: &[&'static PluginCopV1]) -> TimedOffenses {
+fn lint_source_timed(source: &str, file: &str, cops: &[&PluginCopV1]) -> TimedOffenses {
     let parse_started = Instant::now();
     let parsed = parse(source, file);
     let parse_micros = parse_started.elapsed().as_micros();
@@ -414,7 +414,7 @@ fn write_back_atomic(target: &Path, corrected: &str) -> Result<(), AppError> {
 fn lint_closure_edits<'a>(
     source: &str,
     file: &'a str,
-    cops: &'a [&'static PluginCopV1],
+    cops: &'a [&'a PluginCopV1],
     config: &'a MurphyConfig,
 ) -> Vec<murphy_core::Edit> {
     let offenses = lint_source(source, file, cops);
@@ -434,10 +434,7 @@ struct FileDebugInfo {
 /// Memoized lint over a batch of files. Identical source content is
 /// linted exactly once; results are fanned out per path with `Offense.file`
 /// rewritten to each contributor path (preserves ADR 0007 determinism).
-fn lint_files_memoized(
-    sources: &[(String, String)],
-    cops: &[&'static PluginCopV1],
-) -> Vec<Offense> {
+fn lint_files_memoized(sources: &[(String, String)], cops: &[&PluginCopV1]) -> Vec<Offense> {
     // Group paths by content so identical-content files share one lint.
     let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (path, content) in sources {
@@ -476,7 +473,7 @@ fn lint_files_memoized(
 
 fn lint_files_memoized_debug(
     sources: &[(String, String)],
-    cops: &[&'static PluginCopV1],
+    cops: &[&PluginCopV1],
 ) -> (Vec<Offense>, Vec<(String, u128, u128)>) {
     // Debug variant: keep per-file (parse, cops) timings. No memoization
     // across content — `--debug` is for developer visibility, the cost
@@ -679,7 +676,11 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         );
     }
 
-    let cops = registry.cops();
+    // `registry.cops()` allocates a fresh `Vec<&PluginCopV1>` bounded
+    // by `&registry`'s lifetime; hold it for the rest of the run so the
+    // borrowed references stay live across the dispatch + fixpoint loop.
+    let cops_vec = registry.cops();
+    let cops: &[&PluginCopV1] = &cops_vec;
 
     let mut fix_debug: Vec<FileDebugInfo> = Vec::new();
     let mut sources_for_lint = sources;

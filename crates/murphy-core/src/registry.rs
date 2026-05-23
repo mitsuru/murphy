@@ -1,8 +1,8 @@
 //! Cop registry: the single source of the cop set for a run.
 //!
 //! Post-reboot (ADR 0038): everything dispatched against the arena AST
-//! goes through a `&[&'static PluginCopV1]` slice. The registry assembles
-//! that slice from
+//! goes through a `&[&PluginCopV1]` slice. The registry assembles that
+//! slice from
 //!
 //! - `crate::builtin::BUILTINS` (the host's built-in cops), and
 //! - any `cop_packs` configured in `murphy.toml`, loaded via
@@ -24,6 +24,7 @@
 use std::path::Path;
 #[cfg(feature = "mruby-user-cops")]
 use std::path::PathBuf;
+use std::ptr::NonNull;
 
 use murphy_plugin_api::PluginCopV1;
 
@@ -36,22 +37,23 @@ use crate::plugin_loader::{LoadedPluginPack, load_plugin_pack};
 /// The cop set for a run: builtins + cops contributed by `.so` plugin
 /// packs, filtered by `[cops.rules."Name".enabled]`.
 ///
-/// `Send + Sync` so the slice can cross a rayon `par_iter` boundary
-/// (the CLI's memoized lint phase); `LoadedPluginPack`'s
-/// `libloading::Library` is `Send + Sync` on POSIX.
+/// ## Lifetime safety
+///
+/// Each entry in [`Self::cops_ptrs`] points to either a true `&'static`
+/// built-in or into a [`LoadedPluginPack`] kept alive in [`Self::packs`].
+/// Storing the pointers as [`NonNull`] (raw, not `&'static`) makes it
+/// impossible for safe code to outlive the pack: borrowed views are
+/// reconstructed on demand by [`Self::cops`], whose return lifetime is
+/// bound to `&self`. Drop order is `cops_ptrs` before `packs`, so a
+/// pack's `dlclose` never races with a borrow.
+///
+/// `Send + Sync` because every `NonNull<PluginCopV1>` points to
+/// immutable data and `LoadedPluginPack` itself is `Send + Sync`; the
+/// registry never lets a caller mutate either through a shared `&self`.
 pub struct CopRegistry {
-    /// Borrowed cop table assembled at construction. Each entry is one of:
-    ///
-    /// - A built-in `PluginCopV1` (`&'static`, embedded in this crate), or
-    /// - A pointer into a `LoadedPluginPack.cops` slice (lifetime tied to
-    ///   the corresponding `_packs` entry).
-    ///
-    /// The slice is declared `&'static` because every `PluginCopV1` we
-    /// dispatch against today is a `&'static` from `register_cops!`; for
-    /// `.so`-loaded packs the static-ness is upheld by holding the
-    /// `LoadedPluginPack`s alive on the registry (the libraries unload
-    /// only when the registry is dropped).
-    cops: Vec<&'static PluginCopV1>,
+    /// Raw pointers to cops in dispatch order. Borrowed access is only
+    /// available via [`Self::cops`] (whose return lifetime is `&self`).
+    cops_ptrs: Vec<NonNull<PluginCopV1>>,
     /// Friendly pack names, in registration order: `"builtin"` followed
     /// by each configured `cop_packs[i].name`. Surfaced in `--explain` /
     /// progress reporting.
@@ -68,6 +70,13 @@ pub struct CopRegistry {
     mruby_cop_paths: Vec<PathBuf>,
 }
 
+// Safety: every `NonNull<PluginCopV1>` in `cops_ptrs` points to immutable
+// `PluginCopV1` data (built-in `'static` or a pack-owned table whose
+// memory mapping is kept alive by `_library`). Sharing or sending the
+// registry across threads only allows shared reads.
+unsafe impl Send for CopRegistry {}
+unsafe impl Sync for CopRegistry {}
+
 impl CopRegistry {
     /// Built-in cop names, in registration order. Available without a
     /// project root for callers that just want the static catalog.
@@ -82,7 +91,7 @@ impl CopRegistry {
     /// Useful for callers that don't have a project root (e.g. tests).
     pub fn native_only() -> Self {
         CopRegistry {
-            cops: BUILTINS.to_vec(),
+            cops_ptrs: BUILTINS.iter().map(|c| NonNull::from(*c)).collect(),
             pack_names: vec!["builtin".to_string()],
             #[cfg(not(target_os = "windows"))]
             packs: Vec::new(),
@@ -104,7 +113,11 @@ impl CopRegistry {
         #[cfg(feature = "mruby-user-cops")]
         let mruby_cop_paths = enumerate_cop_paths(root, &config.cops.path)?;
 
-        let mut cops: Vec<&'static PluginCopV1> = BUILTINS.to_vec();
+        // Built-ins first; their pointer lifetime is `'static`. Pack cops
+        // are appended below as `NonNull<PluginCopV1>` keyed to a
+        // `LoadedPluginPack` in `packs` (same drop ordering rule).
+        let mut cops_ptrs: Vec<NonNull<PluginCopV1>> =
+            BUILTINS.iter().map(|c| NonNull::from(*c)).collect();
         let mut pack_names: Vec<String> = vec!["builtin".to_string()];
 
         #[cfg(not(target_os = "windows"))]
@@ -116,12 +129,22 @@ impl CopRegistry {
             let loaded = load_plugin_pack(&path)
                 .map_err(|e| ConfigError::Io(format!("cannot load cop pack {}: {e}", pack.name)))?;
             // Name-collision check against the already-registered cops.
-            for cop in loaded.cops {
+            // `loaded.cops()` borrows from `loaded` for the loop body.
+            for cop in loaded.cops() {
                 let name = unsafe { cop.name.as_bytes() };
-                if cops
-                    .iter()
-                    .any(|existing| unsafe { existing.name.as_bytes() } == name)
-                {
+                let already = cops_ptrs.iter().any(|existing| {
+                    // Safety: each `existing` is a live pointer to an
+                    // immutable `PluginCopV1` (built-in `'static` or in
+                    // an earlier pack); the borrow ends inside this
+                    // closure. `RawSlice::as_bytes` is `unsafe` because
+                    // the slice's pointer/length must be valid — the
+                    // cop tables either come from `register_cops!` or
+                    // the in-crate `&'static` `BUILTINS`, both of which
+                    // satisfy that.
+                    let existing_name = unsafe { existing.as_ref().name.as_bytes() };
+                    existing_name == name
+                });
+                if already {
                     let name_str = String::from_utf8_lossy(name).into_owned();
                     return Err(ConfigError::Io(format!(
                         "cop pack {} attempts to register `{name_str}` but a cop with that name \
@@ -129,7 +152,7 @@ impl CopRegistry {
                         pack.name
                     )));
                 }
-                cops.push(cop);
+                cops_ptrs.push(NonNull::from(cop));
             }
             pack_names.push(pack.name.clone());
             packs.push(loaded);
@@ -143,14 +166,17 @@ impl CopRegistry {
             )));
         }
 
-        // Per-cop enablement filter.
-        cops.retain(|cop| {
-            let name = String::from_utf8_lossy(unsafe { cop.name.as_bytes() });
+        // Per-cop enablement filter. Closure borrows the cop briefly to
+        // read its name; the pointer itself is retained.
+        cops_ptrs.retain(|cop| {
+            // Safety: same as the collision check above.
+            let name_bytes = unsafe { cop.as_ref().name.as_bytes() };
+            let name = String::from_utf8_lossy(name_bytes);
             config.cop_enabled(&name)
         });
 
         Ok(CopRegistry {
-            cops,
+            cops_ptrs,
             pack_names,
             #[cfg(not(target_os = "windows"))]
             packs,
@@ -159,16 +185,29 @@ impl CopRegistry {
         })
     }
 
-    /// The dispatch input slice. Order is `BUILTINS` first, then each
+    /// The dispatch input view. Order is `BUILTINS` first, then each
     /// configured `cop_pack`'s cops in pack-registration order, with any
     /// `enabled = false` rule excluded.
-    pub fn cops(&self) -> &[&'static PluginCopV1] {
-        &self.cops
+    ///
+    /// The returned `Vec<&PluginCopV1>` borrows from `&self`: pack cops
+    /// stay valid for as long as the registry is alive. Allocating a
+    /// fresh `Vec` per call is intentional — it's the bridge between
+    /// the registry's raw-pointer storage and the dispatch host's safe
+    /// `&[&PluginCopV1]` interface, and the cop list is small (a few
+    /// builtins + plugin cops, dozens at most in v1+).
+    pub fn cops(&self) -> Vec<&PluginCopV1> {
+        // Safety: each `NonNull` points to immutable `PluginCopV1` data
+        // valid for at least as long as `&self` (built-ins are `'static`;
+        // pack cops are anchored to `self.packs`).
+        self.cops_ptrs
+            .iter()
+            .map(|p| unsafe { p.as_ref() })
+            .collect()
     }
 
     /// Cop names in dispatch order. Surfaced in progress reports.
     pub fn cop_names(&self) -> Vec<String> {
-        self.cops
+        self.cops()
             .iter()
             .map(|c| String::from_utf8_lossy(unsafe { c.name.as_bytes() }).into_owned())
             .collect()
