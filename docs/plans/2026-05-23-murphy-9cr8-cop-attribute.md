@@ -93,7 +93,7 @@ murphy_plugin_macros::register_cops!(NoTabs);
 |---|---|---|---|
 | `name` | ✓ | string literal | — |
 | `description` | | string literal | `""` |
-| `default_severity` | | string literal `"warning"`/`"error"`/`"info"` | `None`(=トレイトデフォルト) |
+| `default_severity` | | string literal `"warning"`/`"error"` | `None`(=トレイトデフォルト) |
 | `default_enabled` | | bool literal | `None` |
 | `options` | | path (型名) | `::murphy_plugin_api::NoOptions` |
 
@@ -102,9 +102,9 @@ murphy_plugin_macros::register_cops!(NoTabs);
 - `name` 欠落 → `error: #[cop]: missing required argument 'name'`(マクロ位置)。
 - 重複キー → `error: #[cop]: duplicate argument 'name'`(2 つめのキーの span)。
 - 未知のキー → `error: #[cop]: unknown argument 'foo'`(キーの span)。
-- `default_severity` の文字列が `"warning"`/`"error"`/`"info"` 以外 →
-  `error: #[cop]: default_severity must be one of "warning"/"error"/"info"`
-  (リテラルの span)。
+- `default_severity` の文字列が `"warning"`/`"error"` 以外 →
+  `error: #[cop]: default_severity must be one of "warning" / "error"`
+  (リテラルの span)。`Severity` enum には `Warning`/`Error` の 2 値しかないため `"info"` は拒否される。
 - 型不一致(例: `name = 42`)→ syn のエラーをそのまま使用。
 
 ## 4. `#[on_node(...)]` 引数
