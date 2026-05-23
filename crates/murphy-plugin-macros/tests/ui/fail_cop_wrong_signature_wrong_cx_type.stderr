@@ -1,0 +1,13 @@
+error: #[on_node]: third parameter type must be `&Cx<'_>` (found different type name)
+  --> tests/ui/fail_cop_wrong_signature_wrong_cx_type.rs:11:46
+   |
+11 |     fn check_send(&self, _node: NodeId, _cx: &str) {}
+   |                                              ^^^^
+
+warning: unused import: `murphy_ast::NodeId`
+ --> tests/ui/fail_cop_wrong_signature_wrong_cx_type.rs:1:5
+  |
+1 | use murphy_ast::NodeId;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

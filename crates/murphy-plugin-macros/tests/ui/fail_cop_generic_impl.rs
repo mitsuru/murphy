@@ -1,0 +1,15 @@
+use murphy_ast::NodeId;
+use murphy_plugin_api::Cx;
+use murphy_plugin_macros::cop;
+
+#[derive(Default)]
+struct Foo<T>(T);
+
+// #[cop] on a generic impl — should error.
+#[cop(name = "Plugin/Foo")]
+impl<T: Default> Foo<T> {
+    #[on_node(kind = "send")]
+    fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) {}
+}
+
+fn main() {}

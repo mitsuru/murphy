@@ -1,0 +1,5 @@
+error: #[cop] must be on an inherent impl block (impl T { } not impl Trait for T)
+  --> tests/ui/fail_cop_on_trait_impl.rs:10:6
+   |
+10 | impl SomeTrait for Foo {}
+   |      ^^^^^^^^^

@@ -1,0 +1,19 @@
+error: #[on_node]: unknown node kind "carrot". Valid kinds are: nil, true, false, self, int, float, str, sym, lvar, ivar, cvar, gvar, const, lvasgn, ivasgn, casgn, send, csend, block, block_pass, splat, array, hash, pair, if, case, when, begin, return, and, or, def, class, module, args, arg, gvasgn, cvasgn, optarg, restarg, kwarg, kwoptarg, kwrestarg, blockarg, kwsplat, while, until, range, sclass, break, next, yield, super, zsuper, defined, rescue, resbody, ensure, op_asgn, or_asgn, and_asgn, dstr, dsym, xstr, regexp, masgn, mlhs
+  --> tests/ui/fail_cop_unknown_kind.rs:10:22
+   |
+10 |     #[on_node(kind = "carrot")]
+   |                      ^^^^^^^^
+
+warning: unused import: `murphy_ast::NodeId`
+ --> tests/ui/fail_cop_unknown_kind.rs:1:5
+  |
+1 | use murphy_ast::NodeId;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `murphy_plugin_api::Cx`
+ --> tests/ui/fail_cop_unknown_kind.rs:2:5
+  |
+2 | use murphy_plugin_api::Cx;
+  |     ^^^^^^^^^^^^^^^^^^^^^
