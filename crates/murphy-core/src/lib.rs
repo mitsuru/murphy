@@ -29,6 +29,7 @@ mod mruby;
 mod offense;
 mod parse;
 pub mod plugin_loader;
+pub mod plugin_resolver;
 mod registry;
 
 pub use aggregator::{aggregate, aggregate_with_config};

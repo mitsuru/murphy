@@ -34,6 +34,11 @@ mruby3-sys = { version = "=3.2.0", optional = true }
 # the discovery-only `murphy.toml` `[files]` table.
 ignore = "0.4"
 globset = "0.4"
+# Plugin name resolution (murphy-9cr.10.2 / ADR 0042): need XDG `data_dir`
+# (Linux) / `Application Support` (macOS) without re-implementing the
+# platform rules. Caret-pinned per project convention (exact `=` pins are
+# reserved for the contract-affecting native bindings only).
+dirs = "5"
 toml = "0.8"
 serde_yaml = "0.9"
 serde_json = "1"
