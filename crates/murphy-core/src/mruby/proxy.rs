@@ -6,9 +6,32 @@
 //! `DispatchFn = unsafe extern "C" fn(NodeId, *const CxRaw) -> i32`
 //! has no self-pointer, so all mruby cops share a single thunk
 //! ([`mruby_dispatch_thunk`]) that looks up the right proxy by
-//! `(*cx).cop_name` in a thread-local map. The host caller populates
-//! that map before [`crate::dispatch::run_cops`] and drains it
-//! afterwards; rayon workers each have their own copy.
+//! `(*cx).cop_name` in a thread-local map.
+//!
+//! # Thread-affinity contract (load-bearing)
+//!
+//! [`CURRENT_MRUBY_PROXIES`] is `thread_local!`, so the proxy map and
+//! the dispatcher must be on the **same thread**:
+//!
+//! 1. The caller invokes [`current_mruby_proxies_populate`] on thread T.
+//! 2. The caller invokes [`crate::dispatch::run_cops`] **on thread T**
+//!    (synchronously, no offload). The dispatcher invokes the thunk
+//!    inline on T, so the lookup hits T's populated map.
+//! 3. The caller invokes [`current_mruby_proxies_drain`] on thread T.
+//!
+//! Violating this contract (populating on T, dispatching on T'):
+//! - [`mruby_dispatch_thunk`] on T' finds an empty map, returns `1`
+//!   for every node, and the dispatcher prints a `cop 'NAME' returned
+//!   non-zero` stderr diagnostic per cop before disabling it.
+//! - **No silent miscompile**: every miss is logged.
+//! - Per-rayon-worker parallelism is achieved by repeating
+//!   `populate → run_cops → drain` on each worker thread (one file per
+//!   worker). murphy-9cr.24.9 (cops_path loader) is responsible for
+//!   that wiring; this slice owns the per-thread API only.
+//!
+//! `MrubyCopProxy` itself is `!Send` + `!Sync` (the owned `MrubyState`
+//! is thread-confined), so moving a proxy across threads is rejected
+//! by the type system before the contract can be broken at runtime.
 //!
 //! # Lifecycle (ADR 0009)
 //!
@@ -49,10 +72,17 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-/// Move `proxies` into this thread's mruby proxy map. The map is read by
-/// [`mruby_dispatch_thunk`] during [`crate::dispatch::run_cops`]; call
-/// [`current_mruby_proxies_drain`] when the run completes so `Drop` can
-/// close the underlying `mrb_state`s.
+/// Move `proxies` into THIS thread's mruby proxy map.
+///
+/// The host then calls [`crate::dispatch::run_cops`] **on the same
+/// thread**; the dispatcher invokes [`mruby_dispatch_thunk`] inline,
+/// which reads this thread-local. Calling `run_cops` from a different
+/// thread will find an empty map there and disable every mruby cop
+/// (with a stderr diagnostic — see module docs).
+///
+/// Call [`current_mruby_proxies_drain`] on the SAME thread when the run
+/// completes so `MrubyState::Drop` (`mrb_close`) fires in the
+/// expected order (ADR 0009).
 pub fn current_mruby_proxies_populate(proxies: HashMap<Vec<u8>, Box<MrubyCopProxy>>) {
     CURRENT_MRUBY_PROXIES.with(|cell| {
         let mut map = cell.borrow_mut();
@@ -64,13 +94,18 @@ pub fn current_mruby_proxies_populate(proxies: HashMap<Vec<u8>, Box<MrubyCopProx
     });
 }
 
-/// Take this thread's mruby proxy map. Dropping the returned map closes
-/// every owned `mrb_state` (per-cop-per-file lifecycle, ADR 0009).
+/// Take THIS thread's mruby proxy map. Must be called on the same
+/// thread that called [`current_mruby_proxies_populate`]. Dropping the
+/// returned map closes every owned `mrb_state` (per-cop-per-file
+/// lifecycle, ADR 0009).
 pub fn current_mruby_proxies_drain() -> HashMap<Vec<u8>, Box<MrubyCopProxy>> {
     CURRENT_MRUBY_PROXIES.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
 }
 
-/// Run `f` with a shared borrow of this thread's mruby proxy map.
+/// Run `f` with a shared borrow of THIS thread's mruby proxy map.
+/// The borrow lasts only for `f`'s body — the dispatch thunk takes a
+/// mutable borrow inside `run_cops`, so callers must not hold this
+/// shared borrow across a `run_cops` call.
 ///
 /// Useful for callers building a `Vec<PluginCopV1>` from the currently
 /// populated proxies (each `PluginCopV1` references proxy-owned memory).
@@ -355,14 +390,19 @@ pub fn build_mruby_cop(proxy: &MrubyCopProxy) -> PluginCopV1 {
 // ---------------------------------------------------------------------
 
 /// The shared `extern "C"` dispatch thunk every mruby cop's
-/// `PluginCopV1::dispatch` points to. Resolves the proxy from this
+/// `PluginCopV1::dispatch` points to. Resolves the proxy from THIS
 /// thread's [`CURRENT_MRUBY_PROXIES`] using `(*cx).cop_name` then
 /// delegates to [`MrubyCopProxy::check`].
 ///
-/// Returns non-zero on (a) missing proxy (the host built a PluginCopV1
-/// without populating the map — contract bug) or (b) cop hook `raise`.
-/// On non-zero the dispatcher disables this cop for the rest of the
-/// file (parent §4 fault isolation).
+/// Returns non-zero on:
+/// (a) missing proxy — the host either failed to populate the map on
+///     this thread, populated it on a different thread (the thread
+///     affinity contract is violated), or built a `PluginCopV1` whose
+///     `cop_name` does not match any entry in the map. A stderr
+///     diagnostic naming the cop + thread is emitted so the contract
+///     break is observable; the dispatcher then disables this cop for
+///     the rest of the file.
+/// (b) cop hook `raise` — fault isolation per parent §4.
 unsafe extern "C" fn mruby_dispatch_thunk(node: NodeId, cx: *const CxRaw) -> i32 {
     if cx.is_null() {
         return 1;
@@ -377,7 +417,16 @@ unsafe extern "C" fn mruby_dispatch_thunk(node: NodeId, cx: *const CxRaw) -> i32
         let mut map = cell.borrow_mut();
         match map.get_mut(&cop_name_bytes) {
             Some(proxy) => unsafe { proxy.check(node, cx) },
-            None => 1,
+            None => {
+                let name = String::from_utf8_lossy(&cop_name_bytes);
+                eprintln!(
+                    "murphy: mruby cop '{name}' not found in this thread's proxy map \
+                     (thread {:?}); was current_mruby_proxies_populate called on a \
+                     different thread? Cop will be disabled for this file.",
+                    std::thread::current().id()
+                );
+                1
+            }
         }
     })
 }
@@ -687,6 +736,15 @@ unsafe fn copy_string(ptr: *const c_char, len: mrb_int) -> Vec<u8> {
 }
 
 const ARENA_PRELUDE: &str = include_str!("arena_prelude.rb");
+
+// `MrubyCopProxy` is `!Send + !Sync` by inference: it owns an
+// `MrubyState` (which carries `*mut mrb_state` and is itself `!Send`),
+// plus `*mut RClass` and `mrb_value` fields that hold thread-confined
+// VM handles. We deliberately do NOT `unsafe impl Send` it; the
+// thread-affinity contract documented at the top of this module rests
+// on the type system rejecting cross-thread moves at compile time. A
+// future contributor adding `unsafe impl Send for MrubyCopProxy` must
+// first prove the contract is no longer needed.
 
 /// Evaluate `script` and print the mruby exception to stderr if one
 /// was raised. Returns `true` on raise (the caller maps that to an
