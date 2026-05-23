@@ -13,9 +13,10 @@
 //! proc-macro–only types (`FieldRef::Named` / `FieldRef::Pos`,
 //! destructuring patterns). That format is not reachable from non-proc-macro
 //! crates, so the runtime version is duplicated here intentionally; a
-//! follow-up may lift a shared source. The
-//! `schema_table_matches_b_backend_conventions` conformance test in
-//! `tests/conformance.rs` guards drift.
+//! follow-up may lift a shared source. The drift guard is
+//! `crates/murphy-plugin-macros/tests/cross_backend_conformance.rs`,
+//! which exercises a representative pattern per backend feature against
+//! both backends and asserts they agree on yes/no and capture values.
 
 use murphy_ast::{NodeId, NodeKind, OptNodeId, Symbol};
 

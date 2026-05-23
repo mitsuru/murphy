@@ -54,7 +54,12 @@ pub fn matches<P: PredicateHost + ?Sized>(
     let mut buf = CaptureBuf::new(ir.captures.len());
     let ctx = MatcherCtx { ir, ast };
     if match_pat(&ctx, ir.root, node, &mut buf, predicates) {
-        Some(buf.finish())
+        // `finish` may return `None` only if a capture slot was left
+        // unwritten — the parser rejects every IR shape that can do
+        // that, so on a normal `compile()`-produced IR this `?` is
+        // never taken. It is the defense-in-depth fallback documented
+        // on `CaptureBuf::finish`.
+        buf.finish()
     } else {
         None
     }

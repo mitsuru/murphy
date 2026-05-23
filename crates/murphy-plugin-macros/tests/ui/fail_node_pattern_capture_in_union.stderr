@@ -1,7 +1,5 @@
-error: node_pattern!: `$` capture is not allowed inside `{}` / `!` / `` ` ``
- --> tests/ui/fail_node_pattern_capture_in_union.rs:4:1
+error: node_pattern!: pattern parse error: `$` capture is not allowed inside `{}` / `!` / `` ` `` (the body has no definite-assignment path) (at 1..3)
+ --> tests/ui/fail_node_pattern_capture_in_union.rs:4:40
   |
 4 | murphy_plugin_macros::node_pattern!(m, "{$_ int}");
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: this error originates in the macro `murphy_plugin_macros::node_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)
+  |                                        ^^^^^^^^^^

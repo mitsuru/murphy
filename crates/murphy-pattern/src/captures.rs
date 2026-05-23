@@ -85,16 +85,17 @@ impl CaptureBuf {
         self.slots[slot as usize] = Some(value);
     }
 
-    /// Finish: unwrap every slot into the public [`Captures`]. A slot that
-    /// is still `None` means the pattern declared a `$` that no successful
-    /// arm wrote — a matcher invariant violation, panicked on in debug.
-    pub(crate) fn finish(self) -> Captures {
-        let values = self
-            .slots
-            .into_iter()
-            .map(|slot| slot.expect("matcher invariant: every capture slot must be written"))
-            .collect();
-        Captures { values }
+    /// Finish: unwrap every slot into the public [`Captures`]. Returns
+    /// `None` if any slot is unwritten — defense in depth against an
+    /// IR shape the parser's `validate_capture_position` should have
+    /// rejected (e.g. a capture inside `{}` / `!` / `` ` ``). The matcher
+    /// surfaces that `None` as a failed match rather than a panic.
+    pub(crate) fn finish(self) -> Option<Captures> {
+        let mut values = Vec::with_capacity(self.slots.len());
+        for slot in self.slots {
+            values.push(slot?);
+        }
+        Some(Captures { values })
     }
 }
 
@@ -116,7 +117,7 @@ mod tests {
         let mut buf = CaptureBuf::new(2);
         buf.set(0, CaptureValue::Node(NodeId(7)));
         buf.set(1, CaptureValue::Seq(vec![NodeId(1), NodeId(2)]));
-        let c = buf.finish();
+        let c = buf.finish().expect("all slots written");
         assert_eq!(c.len(), 2);
         assert_eq!(c.get(0), Some(&CaptureValue::Node(NodeId(7))));
         assert_eq!(
@@ -126,12 +127,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "every capture slot must be written")]
-    fn capture_buf_finish_panics_on_unwritten_slot() {
-        // A `$` was declared but no arm wrote it. The matcher must guarantee
-        // every declared slot is written on the successful arm; reaching
-        // `finish` with a hole is a matcher bug.
-        let buf = CaptureBuf::new(1);
-        let _ = buf.finish();
+    fn capture_buf_finish_returns_none_on_unwritten_slot() {
+        // The parser's `validate_capture_position` already prevents the
+        // patterns that would leave a hole (`{$a $b}`, `!$_`, ` `$_`).
+        // `finish` returning `None` is a defense-in-depth net so a
+        // hand-built PatternAst that bypasses validation degrades to a
+        // failed match instead of a panic.
+        assert!(CaptureBuf::new(1).finish().is_none());
+        let mut buf = CaptureBuf::new(2);
+        buf.set(0, CaptureValue::Node(NodeId(0)));
+        assert!(buf.finish().is_none());
     }
 }
