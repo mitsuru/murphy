@@ -86,28 +86,20 @@ fn list(args: &[String]) -> Result<u8, AppError> {
 
     let config = MurphyConfig::load(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))?;
 
-    // Active cops come from the same registry the lint flow uses: built-in
-    // pack (statically linked `murphy-std`) plus configured `.so` cop
-    // packs. The status filter happens here, not inside the registry,
-    // because the registry's own `cops()` view already drops user-disabled
-    // entries — for `cops list` we want to surface those *with* a status,
-    // not hide them.
+    // Build the same registry the lint flow uses (builtin pack +
+    // configured `.so` cop packs), then enumerate via
+    // `all_cops_with_packs` so the catalogue includes user-disabled
+    // entries with a `disabled: user config` status. Using the
+    // pre-filter view is what lets us surface every cop the process
+    // knows about — including ones contributed by `[[cop_packs]]`,
+    // not just `murphy-std`.
     let registry =
         CopRegistry::discover_with_config(Path::new("."), &config, super::builtin_pack())
             .map_err(|e| AppError::setup(e.to_string()))?;
 
     let mut listings: Vec<Listing> = Vec::new();
 
-    // Active cops — they live in the registry post-`enabled = false`
-    // filter, so to recover the original list we re-derive it from
-    // `builtin_pack()` and any pack-supplied cops the registry knows
-    // about. The pack-name attribution comes from
-    // `registry.pack_names()` paired with the loaded packs; for the
-    // built-in slot the name is always `"builtin"` (the convention
-    // `CopRegistry` writes). Today only the built-in pack contributes
-    // active cops in v1; configured `.so` packs are wired in via the
-    // same merge step in §14a.
-    for cop in super::builtin_pack() {
+    for (cop, pack_name) in registry.all_cops_with_packs() {
         let name = String::from_utf8_lossy(unsafe { cop.name.as_bytes() }).into_owned();
         let namespace = namespace_of(&name).to_owned();
         let status = if config.cop_enabled(&name) {
@@ -119,7 +111,7 @@ fn list(args: &[String]) -> Result<u8, AppError> {
             name,
             namespace,
             status,
-            source_pack: "builtin".to_owned(),
+            source_pack: pack_name.to_owned(),
         });
     }
 
@@ -158,11 +150,6 @@ fn list(args: &[String]) -> Result<u8, AppError> {
         }
         return Err(AppError::setup(format!("failed to write stdout: {e}")));
     }
-
-    // Silence the unused-warning case until packs are loaded for the
-    // catalogue view (today this is a no-op because no `.so` pack
-    // contributes active cops yet).
-    let _ = registry;
 
     Ok(0)
 }

@@ -55,12 +55,23 @@ use crate::plugin_loader::{LoadedPluginPack, load_plugin_pack};
 /// immutable data and `LoadedPluginPack` itself is `Send + Sync`; the
 /// registry never lets a caller mutate either through a shared `&self`.
 pub struct CopRegistry {
-    /// Raw pointers to cops in dispatch order. Borrowed access is only
-    /// available via [`Self::cops`] (whose return lifetime is `&self`).
+    /// Raw pointers to cops in **dispatch order**, post-`enabled = false`
+    /// filter. Borrowed access is only available via [`Self::cops`]
+    /// (whose return lifetime is `&self`).
     cops_ptrs: Vec<NonNull<PluginCopV1>>,
+    /// Raw pointers to **every** registered cop (builtin + every loaded
+    /// pack), in registration order, **before** the `enabled = false`
+    /// filter is applied. Exists so the host's catalogue view
+    /// (`murphy cops list`) can show user-disabled cops with a
+    /// `disabled: user config` status — the post-filter `cops_ptrs`
+    /// alone cannot distinguish "user disabled" from "not registered".
+    all_cops_ptrs: Vec<NonNull<PluginCopV1>>,
+    /// Pack index for each entry of [`Self::all_cops_ptrs`]. Indexes
+    /// into [`Self::pack_names`].
+    all_pack_indices: Vec<usize>,
     /// Friendly pack names, in registration order: `"builtin"` followed
     /// by each configured `cop_packs[i].name`. Surfaced in `--explain` /
-    /// progress reporting.
+    /// progress reporting and `murphy cops list`.
     pack_names: Vec<String>,
     /// Owns the `dlopen` handles for the lifetime of the registry; the
     /// borrows in [`Self::cops`] are valid for as long as this field is
@@ -95,8 +106,13 @@ impl CopRegistry {
     /// `cop_packs`, no `cops/*.rb`. Useful for callers that don't have a
     /// project root (e.g. tests).
     pub fn native_only(builtins: &[&'static PluginCopV1]) -> Self {
+        let all_cops_ptrs: Vec<NonNull<PluginCopV1>> =
+            builtins.iter().map(|c| NonNull::from(*c)).collect();
+        let all_pack_indices: Vec<usize> = (0..all_cops_ptrs.len()).map(|_| 0).collect();
         CopRegistry {
-            cops_ptrs: builtins.iter().map(|c| NonNull::from(*c)).collect(),
+            cops_ptrs: all_cops_ptrs.clone(),
+            all_cops_ptrs,
+            all_pack_indices,
             pack_names: vec!["builtin".to_string()],
             #[cfg(not(target_os = "windows"))]
             packs: Vec::new(),
@@ -125,8 +141,11 @@ impl CopRegistry {
         // Built-ins first; their pointer lifetime is `'static`. Pack cops
         // are appended below as `NonNull<PluginCopV1>` keyed to a
         // `LoadedPluginPack` in `packs` (same drop ordering rule).
-        let mut cops_ptrs: Vec<NonNull<PluginCopV1>> =
+        let mut all_cops_ptrs: Vec<NonNull<PluginCopV1>> =
             builtins.iter().map(|c| NonNull::from(*c)).collect();
+        // Parallel to `all_cops_ptrs`: the pack index each cop came from.
+        // The builtin slot is index 0.
+        let mut all_pack_indices: Vec<usize> = (0..all_cops_ptrs.len()).map(|_| 0).collect();
         let mut pack_names: Vec<String> = vec!["builtin".to_string()];
 
         #[cfg(not(target_os = "windows"))]
@@ -134,6 +153,7 @@ impl CopRegistry {
 
         #[cfg(not(target_os = "windows"))]
         for pack in &config.cop_packs {
+            let pack_index = pack_names.len();
             let path = root.join(&pack.path);
             let loaded = load_plugin_pack(&path)
                 .map_err(|e| ConfigError::Io(format!("cannot load cop pack {}: {e}", pack.name)))?;
@@ -141,7 +161,7 @@ impl CopRegistry {
             // `loaded.cops()` borrows from `loaded` for the loop body.
             for cop in loaded.cops() {
                 let name = unsafe { cop.name.as_bytes() };
-                let already = cops_ptrs.iter().any(|existing| {
+                let already = all_cops_ptrs.iter().any(|existing| {
                     // Safety: each `existing` is a live pointer to an
                     // immutable `PluginCopV1` (a `'static` built-in from
                     // the caller-supplied pack, or a cop in an earlier
@@ -161,7 +181,8 @@ impl CopRegistry {
                         pack.name
                     )));
                 }
-                cops_ptrs.push(NonNull::from(cop));
+                all_cops_ptrs.push(NonNull::from(cop));
+                all_pack_indices.push(pack_index);
             }
             pack_names.push(pack.name.clone());
             packs.push(loaded);
@@ -175,17 +196,24 @@ impl CopRegistry {
             )));
         }
 
-        // Per-cop enablement filter. Closure borrows the cop briefly to
-        // read its name; the pointer itself is retained.
-        cops_ptrs.retain(|cop| {
-            // Safety: same as the collision check above.
-            let name_bytes = unsafe { cop.as_ref().name.as_bytes() };
-            let name = String::from_utf8_lossy(name_bytes);
-            config.cop_enabled(&name)
-        });
+        // Apply the `[cops.rules."Name"].enabled = false` filter to
+        // build the dispatch view, leaving `all_cops_ptrs` unfiltered
+        // for the catalogue (`murphy cops list`).
+        let cops_ptrs: Vec<NonNull<PluginCopV1>> = all_cops_ptrs
+            .iter()
+            .filter(|cop| {
+                // Safety: same as the collision check above.
+                let name_bytes = unsafe { cop.as_ref().name.as_bytes() };
+                let name = String::from_utf8_lossy(name_bytes);
+                config.cop_enabled(&name)
+            })
+            .copied()
+            .collect();
 
         Ok(CopRegistry {
             cops_ptrs,
+            all_cops_ptrs,
+            all_pack_indices,
             pack_names,
             #[cfg(not(target_os = "windows"))]
             packs,
@@ -225,6 +253,27 @@ impl CopRegistry {
     /// Pack registration order: `"builtin"` first, then configured packs.
     pub fn pack_names(&self) -> &[String] {
         &self.pack_names
+    }
+
+    /// **Every** registered cop paired with its source pack name, in
+    /// registration order, **including** entries that the
+    /// `[cops.rules."Name"].enabled = false` filter would drop from
+    /// dispatch. This is the catalogue view (`murphy cops list`) — it
+    /// is intentionally pre-filter so the host can attach a
+    /// `disabled: user config` status to entries the dispatch view
+    /// omits.
+    pub fn all_cops_with_packs(&self) -> Vec<(&PluginCopV1, &str)> {
+        self.all_cops_ptrs
+            .iter()
+            .zip(self.all_pack_indices.iter())
+            .map(|(cop, &idx)| {
+                // Safety: each `NonNull` points to immutable
+                // `PluginCopV1` data valid for at least as long as
+                // `&self` (built-ins are `'static`; pack cops are
+                // anchored to `self.packs`).
+                (unsafe { cop.as_ref() }, self.pack_names[idx].as_str())
+            })
+            .collect()
     }
 
     /// Enumerated `cops/*.rb` paths. Always empty without the
