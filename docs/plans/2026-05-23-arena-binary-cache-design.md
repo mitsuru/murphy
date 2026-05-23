@@ -54,13 +54,13 @@ crates/
 ```text
 file = [header] [body]
 
-header (固定 88 バイト, little-endian):
+header (固定 96 バイト, little-endian):
   +00 magic           = b"MURPHYAS"            (8B)
   +08 format_version  : u32                    (4B)   ← 1 開始
   +0C reserved        : u32                    (4B)   ← 現状 0、将来用
   +10 murphy_version  : [u8; 16]               (16B)  ← CARGO_PKG_VERSION 先頭 16B 0 詰め
-  +20 target_triple   : [u8; 24]               (24B)  ← env!("TARGET") 先頭 24B 0 詰め
-  +38 content_hash    : [u8; 32]               (32B)  ← source bytes の SHA-256
+  +20 target_triple   : [u8; 32]               (32B)  ← env!("MURPHY_TARGET_TRIPLE") 先頭 32B 0 詰め
+  +40 content_hash    : [u8; 32]               (32B)  ← source bytes の SHA-256
 
 body = 既存 to_bytes() の出力
        nodes / node_lists / interner blob / interner offsets /
@@ -69,6 +69,10 @@ body = 既存 to_bytes() の出力
 
 サイズ固定の理由: ヘッダだけ部分読み出しが容易で、format-version
 mismatch を最小コストで検出できる。
+
+**target_triple は 32B**: `aarch64-unknown-linux-gnueabihf`(30) や
+`riscv64gc-unknown-linux-gnu`(27) を取り逃さないように 24 ではなく 32 を
+取る。rustup の全 triple をマージン込みで含む。
 
 ### 3.2 キャッシュキーとファイルパス
 
@@ -117,13 +121,16 @@ pub enum SerError {
     TargetMismatch,
     ContentHashMismatch,
     NodeIdOutOfRange    { id: u32, count: u32 },
-    ListIndexOutOfRange { idx: u32, count: u32 },
     SymbolOutOfRange    { id: u32, count: u32 },
-    BadOptNodeId        { raw: u32 },
     BadRoot             { id: u32, count: u32 },
     BadNodeListRange    { start: u32, len: u32 },
 }
 ```
+
+`ListIndexOutOfRange` と `BadOptNodeId` は当初予定から削った: `node_lists`
+内の各 `NodeId` も、`OptNodeId` の非 sentinel 値も、結局は通常の
+`NodeId` 範囲チェックに合流するので独立 variant にする必要がなく、
+すべて `NodeIdOutOfRange` で表現する。
 
 ### 4.2 検証フェーズ
 

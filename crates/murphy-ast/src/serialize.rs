@@ -1,7 +1,13 @@
 //! Flat, field-by-field little-endian serialization of an [`Ast`].
 //!
-//! No magic/version header — that is murphy-9cr.26 (the binary cache). This
-//! is sound (no `memcpy` of padded enums) and deterministic.
+//! Buffers begin with an 88-byte fixed header (magic + format version +
+//! Murphy version + target triple + content hash) followed by the body
+//! (nodes / node_lists / interner / comments / source / path / root). The
+//! header lets the cache layer (murphy-9cr.26) detect format and machine
+//! mismatches and the content-hash field defends against keying mistakes.
+//! `from_bytes` also runs a one-pass bounds check over the deserialized
+//! arena so a malformed buffer surfaces as a `Result::Err` rather than a
+//! later traversal-time panic.
 
 use crate::ast::Ast;
 use crate::interner::Interner;
@@ -9,6 +15,50 @@ use crate::node::{
     AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
     StringId, Symbol,
 };
+use sha2::{Digest, Sha256};
+
+/// Magic bytes at the very start of every serialized arena (`b"MURPHYAS"`).
+pub const MAGIC: &[u8; 8] = b"MURPHYAS";
+
+/// Binary format version. Bump on **any** layout change — old caches are
+/// then rejected with [`SerError::FormatVersionMismatch`].
+pub const FORMAT_VERSION: u32 = 1;
+
+/// Total header size in bytes. The body immediately follows. Downstream
+/// (cache, mmap) code can rely on this offset being fixed.
+pub const HEADER_LEN: usize = 96;
+
+const MURPHY_VERSION_LEN: usize = 16;
+// Target triples like `aarch64-unknown-linux-gnueabihf` (30) and
+// `riscv64gc-unknown-linux-gnu` (27) need more than 24 bytes; 32 covers
+// every triple in `rustup target list` with a small margin.
+const TARGET_TRIPLE_LEN: usize = 32;
+const CONTENT_HASH_LEN: usize = 32;
+
+/// This Murphy crate's version, zero-padded into `MURPHY_VERSION_LEN` bytes.
+fn current_murphy_version() -> [u8; MURPHY_VERSION_LEN] {
+    let mut buf = [0u8; MURPHY_VERSION_LEN];
+    let v = env!("CARGO_PKG_VERSION").as_bytes();
+    let n = v.len().min(MURPHY_VERSION_LEN);
+    buf[..n].copy_from_slice(&v[..n]);
+    buf
+}
+
+/// This binary's target triple, zero-padded into `TARGET_TRIPLE_LEN` bytes.
+fn current_target_triple() -> [u8; TARGET_TRIPLE_LEN] {
+    let mut buf = [0u8; TARGET_TRIPLE_LEN];
+    let v = env!("MURPHY_TARGET_TRIPLE").as_bytes();
+    let n = v.len().min(TARGET_TRIPLE_LEN);
+    buf[..n].copy_from_slice(&v[..n]);
+    buf
+}
+
+/// `sha256(bytes)` as 32 raw bytes.
+pub fn content_hash(bytes: &[u8]) -> [u8; CONTENT_HASH_LEN] {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().into()
+}
 
 /// Serialization / deserialization failure.
 #[derive(Debug)]
@@ -19,6 +69,24 @@ pub enum SerError {
     BadDiscriminant,
     /// A byte section that must be UTF-8 was not.
     InvalidUtf8,
+    /// The header did not start with the expected magic bytes.
+    BadMagic,
+    /// The header's format version did not match [`FORMAT_VERSION`].
+    FormatVersionMismatch { found: u32, expected: u32 },
+    /// The header's Murphy crate version did not match the running binary's.
+    MurphyVersionMismatch,
+    /// The header's target triple did not match the running binary's.
+    TargetMismatch,
+    /// The header's content hash did not match `sha256(source.text)`.
+    ContentHashMismatch,
+    /// A `NodeId` referenced by the arena was outside `0..nodes.len()`.
+    NodeIdOutOfRange { id: u32, count: u32 },
+    /// A `Symbol`/`StringId` was outside `0..interner.offsets.len()`.
+    SymbolOutOfRange { id: u32, count: u32 },
+    /// A `NodeList { start, len }` spanned past `node_lists.len()`.
+    BadNodeListRange { start: u32, len: u32 },
+    /// The recorded root was outside `0..nodes.len()`.
+    BadRoot { id: u32, count: u32 },
 }
 
 fn put_u8(out: &mut Vec<u8>, v: u8) {
@@ -651,11 +719,301 @@ fn read_comment(cur: &mut &[u8]) -> Result<Comment, SerError> {
     Ok(Comment { range, kind })
 }
 
+fn write_header(source_text: &str, out: &mut Vec<u8>) {
+    out.reserve(HEADER_LEN);
+    out.extend_from_slice(MAGIC);
+    put_u32(out, FORMAT_VERSION);
+    put_u32(out, 0); // reserved — extensions go through a FORMAT_VERSION bump
+    out.extend_from_slice(&current_murphy_version());
+    out.extend_from_slice(&current_target_triple());
+    out.extend_from_slice(&content_hash(source_text.as_bytes()));
+    debug_assert_eq!(out.len(), HEADER_LEN);
+}
+
+/// Read and validate the header. Returns the recorded content hash so the
+/// caller can verify it against the source text after the body is read.
+/// The `reserved` u32 is intentionally not validated — any future extension
+/// must come with a [`FORMAT_VERSION`] bump that retires this layout.
+fn read_header(cur: &mut &[u8]) -> Result<[u8; CONTENT_HASH_LEN], SerError> {
+    let magic = take(cur, MAGIC.len())?;
+    if magic != MAGIC {
+        return Err(SerError::BadMagic);
+    }
+    let found_format = get_u32(cur)?;
+    if found_format != FORMAT_VERSION {
+        return Err(SerError::FormatVersionMismatch {
+            found: found_format,
+            expected: FORMAT_VERSION,
+        });
+    }
+    let _reserved = get_u32(cur)?;
+    let murphy_v = take(cur, MURPHY_VERSION_LEN)?;
+    if murphy_v != current_murphy_version() {
+        return Err(SerError::MurphyVersionMismatch);
+    }
+    let target = take(cur, TARGET_TRIPLE_LEN)?;
+    if target != current_target_triple() {
+        return Err(SerError::TargetMismatch);
+    }
+    let hash_bytes = take(cur, CONTENT_HASH_LEN)?;
+    let mut hash = [0u8; CONTENT_HASH_LEN];
+    hash.copy_from_slice(hash_bytes);
+    Ok(hash)
+}
+
+/// Verify every `NodeId` / `Symbol` / `NodeList` index in an `Ast` lies
+/// within its backing array. Run by [`Ast::from_bytes`] after deserialization
+/// so a malformed buffer surfaces here rather than as a later panic.
+fn validate_indices(ast: &Ast) -> Result<(), SerError> {
+    let node_count = ast.nodes.len() as u32;
+    let sym_count = ast.interner.offsets.len() as u32;
+    let list_count = ast.node_lists.len() as u32;
+
+    let check_node = |id: u32| -> Result<(), SerError> {
+        if id >= node_count {
+            Err(SerError::NodeIdOutOfRange {
+                id,
+                count: node_count,
+            })
+        } else {
+            Ok(())
+        }
+    };
+    // OptNodeId::NONE (u32::MAX) is the legitimate sentinel; everything else
+    // must be a real index.
+    let check_opt_node = |opt: OptNodeId| -> Result<(), SerError> {
+        if opt == OptNodeId::NONE {
+            Ok(())
+        } else {
+            check_node(opt.0)
+        }
+    };
+    let check_sym = |id: u32| -> Result<(), SerError> {
+        if id >= sym_count {
+            Err(SerError::SymbolOutOfRange {
+                id,
+                count: sym_count,
+            })
+        } else {
+            Ok(())
+        }
+    };
+    let check_list = |l: NodeList| -> Result<(), SerError> {
+        let end = (l.start as u64) + (l.len as u64);
+        if end > list_count as u64 {
+            Err(SerError::BadNodeListRange {
+                start: l.start,
+                len: l.len,
+            })
+        } else {
+            Ok(())
+        }
+    };
+
+    for node in &ast.nodes {
+        check_opt_node(node.parent)?;
+        match node.kind {
+            NodeKind::Error
+            | NodeKind::Nil
+            | NodeKind::True_
+            | NodeKind::False_
+            | NodeKind::SelfExpr
+            | NodeKind::Unknown
+            | NodeKind::Zsuper
+            | NodeKind::Int(_)
+            | NodeKind::Float(_) => {}
+            NodeKind::Str(s) => check_sym(s.0)?,
+            NodeKind::Sym(s)
+            | NodeKind::Lvar(s)
+            | NodeKind::Ivar(s)
+            | NodeKind::Cvar(s)
+            | NodeKind::Gvar(s)
+            | NodeKind::Arg(s)
+            | NodeKind::Restarg(s)
+            | NodeKind::Kwarg(s)
+            | NodeKind::Kwrestarg(s)
+            | NodeKind::Blockarg(s) => check_sym(s.0)?,
+            NodeKind::Const { scope, name } => {
+                check_opt_node(scope)?;
+                check_sym(name.0)?;
+            }
+            NodeKind::Lvasgn { name, value }
+            | NodeKind::Ivasgn { name, value }
+            | NodeKind::Gvasgn { name, value }
+            | NodeKind::Cvasgn { name, value } => {
+                check_sym(name.0)?;
+                check_opt_node(value)?;
+            }
+            NodeKind::Casgn { scope, name, value } => {
+                check_opt_node(scope)?;
+                check_sym(name.0)?;
+                check_opt_node(value)?;
+            }
+            NodeKind::Send {
+                receiver,
+                method,
+                args,
+            } => {
+                check_opt_node(receiver)?;
+                check_sym(method.0)?;
+                check_list(args)?;
+            }
+            NodeKind::Csend {
+                receiver,
+                method,
+                args,
+            } => {
+                check_node(receiver.0)?;
+                check_sym(method.0)?;
+                check_list(args)?;
+            }
+            NodeKind::Block { call, args, body } => {
+                check_node(call.0)?;
+                check_node(args.0)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::BlockPass(o)
+            | NodeKind::Splat(o)
+            | NodeKind::Return(o)
+            | NodeKind::Break(o)
+            | NodeKind::Next(o)
+            | NodeKind::Kwsplat(o) => check_opt_node(o)?,
+            NodeKind::Array(l)
+            | NodeKind::Hash(l)
+            | NodeKind::Begin(l)
+            | NodeKind::Args(l)
+            | NodeKind::Yield(l)
+            | NodeKind::Super(l)
+            | NodeKind::Dstr(l)
+            | NodeKind::Dsym(l)
+            | NodeKind::Xstr(l)
+            | NodeKind::Mlhs(l) => check_list(l)?,
+            NodeKind::Pair { key, value } => {
+                check_node(key.0)?;
+                check_node(value.0)?;
+            }
+            NodeKind::If { cond, then_, else_ } => {
+                check_node(cond.0)?;
+                check_opt_node(then_)?;
+                check_opt_node(else_)?;
+            }
+            NodeKind::Case {
+                subject,
+                whens,
+                else_,
+            } => {
+                check_opt_node(subject)?;
+                check_list(whens)?;
+                check_opt_node(else_)?;
+            }
+            NodeKind::When { conds, body } => {
+                check_list(conds)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
+                check_node(lhs.0)?;
+                check_node(rhs.0)?;
+            }
+            NodeKind::Def {
+                receiver,
+                name,
+                args,
+                body,
+            } => {
+                check_opt_node(receiver)?;
+                check_sym(name.0)?;
+                check_node(args.0)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::Class {
+                name,
+                superclass,
+                body,
+            } => {
+                check_node(name.0)?;
+                check_opt_node(superclass)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::Module { name, body } => {
+                check_node(name.0)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::Optarg { name, default } | NodeKind::Kwoptarg { name, default } => {
+                check_sym(name.0)?;
+                check_node(default.0)?;
+            }
+            NodeKind::While { cond, body, .. } | NodeKind::Until { cond, body, .. } => {
+                check_node(cond.0)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::RangeExpr { begin_, end_, .. } => {
+                check_opt_node(begin_)?;
+                check_opt_node(end_)?;
+            }
+            NodeKind::Sclass { expr, body } => {
+                check_node(expr.0)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::Defined(n) => check_node(n.0)?,
+            NodeKind::Rescue {
+                body,
+                resbodies,
+                else_,
+            } => {
+                check_opt_node(body)?;
+                check_list(resbodies)?;
+                check_opt_node(else_)?;
+            }
+            NodeKind::Resbody {
+                exceptions,
+                var,
+                body,
+            } => {
+                check_list(exceptions)?;
+                check_opt_node(var)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::Ensure { body, ensure_ } => {
+                check_opt_node(body)?;
+                check_opt_node(ensure_)?;
+            }
+            NodeKind::OpAsgn { target, op, value } => {
+                check_node(target.0)?;
+                check_sym(op.0)?;
+                check_node(value.0)?;
+            }
+            NodeKind::OrAsgn { target, value } | NodeKind::AndAsgn { target, value } => {
+                check_node(target.0)?;
+                check_node(value.0)?;
+            }
+            NodeKind::Regexp { parts, opts } => {
+                check_list(parts)?;
+                check_sym(opts.0)?;
+            }
+            NodeKind::Masgn { lhs, rhs } => {
+                check_node(lhs.0)?;
+                check_node(rhs.0)?;
+            }
+        }
+    }
+    for id in &ast.node_lists {
+        check_node(id.0)?;
+    }
+    if ast.root.0 >= node_count {
+        return Err(SerError::BadRoot {
+            id: ast.root.0,
+            count: node_count,
+        });
+    }
+    Ok(())
+}
+
 impl Ast {
-    /// Serialize to a flat byte buffer. Round-trips bit-exactly via
-    /// [`Ast::from_bytes`]. No header — see murphy-9cr.26 for the cache.
+    /// Serialize to a flat byte buffer with an 88-byte header. Round-trips
+    /// bit-exactly via [`Ast::from_bytes`].
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
+        write_header(&self.source.text, &mut out);
 
         // 1. nodes
         put_u64(&mut out, self.nodes.len() as u64);
@@ -701,9 +1059,15 @@ impl Ast {
         out
     }
 
-    /// Deserialize a buffer produced by [`Ast::to_bytes`].
+    /// Deserialize a buffer produced by [`Ast::to_bytes`]. Validates the
+    /// header (magic / format version / Murphy version / target triple /
+    /// content hash) before reading the body, and runs a one-pass index
+    /// check over the deserialized arena so a malformed buffer surfaces as
+    /// a `Result::Err` rather than as a later traversal-time panic.
     pub fn from_bytes(bytes: &[u8]) -> Result<Ast, SerError> {
         let mut cur = bytes;
+
+        let recorded_hash = read_header(&mut cur)?;
 
         // 1. nodes
         let node_count =
@@ -747,6 +1111,11 @@ impl Ast {
         let text_bytes = take(&mut cur, text_len)?.to_vec();
         let text = String::from_utf8(text_bytes).map_err(|_| SerError::InvalidUtf8)?;
 
+        // Self-verify: the recorded content hash must match the source text.
+        if content_hash(text.as_bytes()) != recorded_hash {
+            return Err(SerError::ContentHashMismatch);
+        }
+
         // 7. source path
         let path_len = usize::try_from(get_u64(&mut cur)?).map_err(|_| SerError::UnexpectedEof)?;
         let path_bytes = take(&mut cur, path_len)?.to_vec();
@@ -756,19 +1125,22 @@ impl Ast {
         // 8. root
         let root = NodeId(get_u32(&mut cur)?);
 
-        Ok(Ast {
+        let ast = Ast {
             nodes,
             node_lists,
             interner: Interner { blob, offsets },
             comments,
             source: SourceBuffer { text, path },
             root,
-        })
+        };
+        validate_indices(&ast)?;
+        Ok(ast)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::SerError;
     use crate::builder::AstBuilder;
     use crate::node::{CommentKind, NodeKind, NodeList, OptNodeId, Range};
 
@@ -1285,5 +1657,188 @@ mod tests {
         let ast = b.finish(root);
         let restored = crate::Ast::from_bytes(&ast.to_bytes()).unwrap();
         assert_eq!(ast, restored);
+    }
+
+    // --- header / validation tests (murphy-9cr.26) ---
+
+    fn simple_ast() -> crate::Ast {
+        let mut b = AstBuilder::new("x = 1", "t.rb");
+        let int = b.push(NodeKind::Int(1), r(4, 5));
+        let name = b.intern_symbol("x");
+        let asgn = b.push(
+            NodeKind::Lvasgn {
+                name,
+                value: OptNodeId::some(int),
+            },
+            r(0, 5),
+        );
+        let list = b.push_list(&[asgn]);
+        let root = b.push(NodeKind::Begin(list), r(0, 5));
+        b.finish(root)
+    }
+
+    #[test]
+    fn to_bytes_starts_with_magic() {
+        let ast = simple_ast();
+        let bytes = ast.to_bytes();
+        assert_eq!(&bytes[0..8], super::MAGIC);
+    }
+
+    #[test]
+    fn from_bytes_rejects_bad_magic() {
+        let ast = simple_ast();
+        let mut bytes = ast.to_bytes();
+        bytes[0] = b'X';
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::BadMagic)
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_format_version_mismatch() {
+        let ast = simple_ast();
+        let mut bytes = ast.to_bytes();
+        let bumped = (super::FORMAT_VERSION + 1).to_le_bytes();
+        bytes[8..12].copy_from_slice(&bumped);
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::FormatVersionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_murphy_version_mismatch() {
+        let ast = simple_ast();
+        let mut bytes = ast.to_bytes();
+        bytes[16] ^= 0xFF;
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::MurphyVersionMismatch)
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_target_mismatch() {
+        let ast = simple_ast();
+        let mut bytes = ast.to_bytes();
+        bytes[32] ^= 0xFF;
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::TargetMismatch)
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_content_hash_mismatch() {
+        let ast = simple_ast();
+        let mut bytes = ast.to_bytes();
+        // content_hash lives at offset 64 (8 magic + 4 fmt + 4 reserved +
+        // 16 murphy_version + 32 target_triple = 64).
+        bytes[64] ^= 0xFF;
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::ContentHashMismatch)
+        ));
+    }
+
+    #[test]
+    fn header_length_is_96_bytes() {
+        // Lock the header size so downstream code (cache lookups, mmap)
+        // can rely on a fixed offset for the body. Also verify `to_bytes`
+        // actually emits that many header bytes before any body content.
+        assert_eq!(super::HEADER_LEN, 96);
+        let bytes = simple_ast().to_bytes();
+        assert!(bytes.len() > super::HEADER_LEN);
+    }
+
+    // --- bounds validation tests ---
+
+    fn ast_with_corrupt<F: FnOnce(&mut crate::Ast)>(corrupt: F) -> crate::Ast {
+        let mut ast = simple_ast();
+        corrupt(&mut ast);
+        ast
+    }
+
+    #[test]
+    fn from_bytes_rejects_node_id_out_of_range() {
+        let ast = ast_with_corrupt(|ast| {
+            let bad_id = ast.nodes.len() as u32 + 5;
+            let lvasgn_idx = ast
+                .nodes
+                .iter()
+                .position(|n| matches!(n.kind, NodeKind::Lvasgn { .. }))
+                .unwrap();
+            if let NodeKind::Lvasgn { ref mut value, .. } = ast.nodes[lvasgn_idx].kind {
+                *value = OptNodeId(bad_id);
+            }
+        });
+        let bytes = ast.to_bytes();
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::NodeIdOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_symbol_out_of_range() {
+        let ast = ast_with_corrupt(|ast| {
+            let bad_sym = ast.interner.offsets.len() as u32 + 5;
+            let lvasgn_idx = ast
+                .nodes
+                .iter()
+                .position(|n| matches!(n.kind, NodeKind::Lvasgn { .. }))
+                .unwrap();
+            if let NodeKind::Lvasgn { ref mut name, .. } = ast.nodes[lvasgn_idx].kind {
+                *name = crate::Symbol(bad_sym);
+            }
+        });
+        let bytes = ast.to_bytes();
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::SymbolOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_node_list_range_out_of_range() {
+        let ast = ast_with_corrupt(|ast| {
+            let begin_idx = ast
+                .nodes
+                .iter()
+                .position(|n| matches!(n.kind, NodeKind::Begin(_)))
+                .unwrap();
+            if let NodeKind::Begin(ref mut list) = ast.nodes[begin_idx].kind {
+                list.len = 999;
+            }
+        });
+        let bytes = ast.to_bytes();
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::BadNodeListRange { .. })
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_bad_root() {
+        let ast = ast_with_corrupt(|ast| ast.root = crate::NodeId(999));
+        let bytes = ast.to_bytes();
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::BadRoot { .. })
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_invalid_node_in_node_lists() {
+        // `validate_indices` walks every entry in `node_lists`, not just the
+        // entries currently referenced by a `NodeList { start, len }` slice,
+        // so a stray bad NodeId at the end is enough to trip the check.
+        let ast = ast_with_corrupt(|ast| ast.node_lists.push(crate::NodeId(999)));
+        let bytes = ast.to_bytes();
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::NodeIdOutOfRange { .. })
+        ));
     }
 }

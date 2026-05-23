@@ -21,4 +21,4 @@ pub use node::{
     AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
     StringId, Symbol,
 };
-pub use serialize::SerError;
+pub use serialize::{FORMAT_VERSION, HEADER_LEN, MAGIC, SerError, content_hash};

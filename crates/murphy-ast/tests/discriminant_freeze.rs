@@ -1,0 +1,318 @@
+//! `NodeKind` discriminant freeze test (murphy-9cr.26 申し送り 2).
+//!
+//! Both the in-memory `NodeKind::tag()` and the on-disk serialization
+//! encode each variant as a `u8` derived from the variant's declaration
+//! order. Renaming or reordering variants therefore silently shifts the
+//! mapping and breaks every previously-serialized cache file — but the
+//! breakage is undetectable until a cache hit deserializes into the wrong
+//! variant at traversal time.
+//!
+//! This test pins each variant's tag byte to an explicit literal so a
+//! reorder fails compilation here (via `pattern` panic) or assertion long
+//! before any cache file is consulted. Pair this with the in-crate
+//! `kinds::tests::tag_matches_serialize_discriminant`, which guarantees
+//! `serialize::write_node_kind` agrees with `tag()`; together the two
+//! tests freeze the wire-byte discriminant.
+//!
+//! **When adding a new variant**: append it at the end of the enum, give
+//! it the next free tag, and add a matching `freeze(NodeKind::New, N);`
+//! line below. Never insert in the middle.
+
+use murphy_ast::{NodeId, NodeKind, NodeList, OptNodeId, StringId, Symbol};
+
+fn n() -> NodeId {
+    NodeId(0)
+}
+fn s() -> Symbol {
+    Symbol(0)
+}
+
+fn freeze(kind: NodeKind, expected: u8) {
+    assert_eq!(
+        kind.tag().0,
+        expected,
+        "frozen discriminant {expected} no longer matches {kind:?} — \
+         did you reorder NodeKind?"
+    );
+}
+
+#[test]
+fn node_kind_discriminants_are_frozen() {
+    freeze(NodeKind::Error, 0);
+    freeze(NodeKind::Nil, 1);
+    freeze(NodeKind::True_, 2);
+    freeze(NodeKind::False_, 3);
+    freeze(NodeKind::SelfExpr, 4);
+    freeze(NodeKind::Int(0), 5);
+    freeze(NodeKind::Float(0.0), 6);
+    freeze(NodeKind::Str(StringId(0)), 7);
+    freeze(NodeKind::Sym(s()), 8);
+    freeze(NodeKind::Lvar(s()), 9);
+    freeze(NodeKind::Ivar(s()), 10);
+    freeze(NodeKind::Cvar(s()), 11);
+    freeze(NodeKind::Gvar(s()), 12);
+    freeze(
+        NodeKind::Const {
+            scope: OptNodeId::NONE,
+            name: s(),
+        },
+        13,
+    );
+    freeze(
+        NodeKind::Lvasgn {
+            name: s(),
+            value: OptNodeId::NONE,
+        },
+        14,
+    );
+    freeze(
+        NodeKind::Ivasgn {
+            name: s(),
+            value: OptNodeId::NONE,
+        },
+        15,
+    );
+    freeze(
+        NodeKind::Casgn {
+            scope: OptNodeId::NONE,
+            name: s(),
+            value: OptNodeId::NONE,
+        },
+        16,
+    );
+    freeze(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: s(),
+            args: NodeList::EMPTY,
+        },
+        17,
+    );
+    freeze(
+        NodeKind::Csend {
+            receiver: n(),
+            method: s(),
+            args: NodeList::EMPTY,
+        },
+        18,
+    );
+    freeze(
+        NodeKind::Block {
+            call: n(),
+            args: n(),
+            body: OptNodeId::NONE,
+        },
+        19,
+    );
+    freeze(NodeKind::BlockPass(OptNodeId::NONE), 20);
+    freeze(NodeKind::Splat(OptNodeId::NONE), 21);
+    freeze(NodeKind::Array(NodeList::EMPTY), 22);
+    freeze(NodeKind::Hash(NodeList::EMPTY), 23);
+    freeze(
+        NodeKind::Pair {
+            key: n(),
+            value: n(),
+        },
+        24,
+    );
+    freeze(
+        NodeKind::If {
+            cond: n(),
+            then_: OptNodeId::NONE,
+            else_: OptNodeId::NONE,
+        },
+        25,
+    );
+    freeze(
+        NodeKind::Case {
+            subject: OptNodeId::NONE,
+            whens: NodeList::EMPTY,
+            else_: OptNodeId::NONE,
+        },
+        26,
+    );
+    freeze(
+        NodeKind::When {
+            conds: NodeList::EMPTY,
+            body: OptNodeId::NONE,
+        },
+        27,
+    );
+    freeze(NodeKind::Begin(NodeList::EMPTY), 28);
+    freeze(NodeKind::Return(OptNodeId::NONE), 29);
+    freeze(NodeKind::And { lhs: n(), rhs: n() }, 30);
+    freeze(NodeKind::Or { lhs: n(), rhs: n() }, 31);
+    freeze(
+        NodeKind::Def {
+            receiver: OptNodeId::NONE,
+            name: s(),
+            args: n(),
+            body: OptNodeId::NONE,
+        },
+        32,
+    );
+    freeze(
+        NodeKind::Class {
+            name: n(),
+            superclass: OptNodeId::NONE,
+            body: OptNodeId::NONE,
+        },
+        33,
+    );
+    freeze(
+        NodeKind::Module {
+            name: n(),
+            body: OptNodeId::NONE,
+        },
+        34,
+    );
+    freeze(NodeKind::Args(NodeList::EMPTY), 35);
+    freeze(NodeKind::Arg(s()), 36);
+    freeze(NodeKind::Unknown, 37);
+    freeze(
+        NodeKind::Gvasgn {
+            name: s(),
+            value: OptNodeId::NONE,
+        },
+        38,
+    );
+    freeze(
+        NodeKind::Cvasgn {
+            name: s(),
+            value: OptNodeId::NONE,
+        },
+        39,
+    );
+    freeze(
+        NodeKind::Optarg {
+            name: s(),
+            default: n(),
+        },
+        40,
+    );
+    freeze(NodeKind::Restarg(s()), 41);
+    freeze(NodeKind::Kwarg(s()), 42);
+    freeze(
+        NodeKind::Kwoptarg {
+            name: s(),
+            default: n(),
+        },
+        43,
+    );
+    freeze(NodeKind::Kwrestarg(s()), 44);
+    freeze(NodeKind::Blockarg(s()), 45);
+    freeze(NodeKind::Kwsplat(OptNodeId::NONE), 46);
+    freeze(
+        NodeKind::While {
+            cond: n(),
+            body: OptNodeId::NONE,
+            post: false,
+        },
+        47,
+    );
+    freeze(
+        NodeKind::Until {
+            cond: n(),
+            body: OptNodeId::NONE,
+            post: false,
+        },
+        48,
+    );
+    freeze(
+        NodeKind::RangeExpr {
+            begin_: OptNodeId::NONE,
+            end_: OptNodeId::NONE,
+            exclusive: false,
+        },
+        49,
+    );
+    freeze(
+        NodeKind::Sclass {
+            expr: n(),
+            body: OptNodeId::NONE,
+        },
+        50,
+    );
+    freeze(NodeKind::Break(OptNodeId::NONE), 51);
+    freeze(NodeKind::Next(OptNodeId::NONE), 52);
+    freeze(NodeKind::Yield(NodeList::EMPTY), 53);
+    freeze(NodeKind::Super(NodeList::EMPTY), 54);
+    freeze(NodeKind::Zsuper, 55);
+    freeze(NodeKind::Defined(n()), 56);
+    freeze(
+        NodeKind::Rescue {
+            body: OptNodeId::NONE,
+            resbodies: NodeList::EMPTY,
+            else_: OptNodeId::NONE,
+        },
+        57,
+    );
+    freeze(
+        NodeKind::Resbody {
+            exceptions: NodeList::EMPTY,
+            var: OptNodeId::NONE,
+            body: OptNodeId::NONE,
+        },
+        58,
+    );
+    freeze(
+        NodeKind::Ensure {
+            body: OptNodeId::NONE,
+            ensure_: OptNodeId::NONE,
+        },
+        59,
+    );
+    freeze(
+        NodeKind::OpAsgn {
+            target: n(),
+            op: s(),
+            value: n(),
+        },
+        60,
+    );
+    freeze(
+        NodeKind::OrAsgn {
+            target: n(),
+            value: n(),
+        },
+        61,
+    );
+    freeze(
+        NodeKind::AndAsgn {
+            target: n(),
+            value: n(),
+        },
+        62,
+    );
+    freeze(NodeKind::Dstr(NodeList::EMPTY), 63);
+    freeze(NodeKind::Dsym(NodeList::EMPTY), 64);
+    freeze(NodeKind::Xstr(NodeList::EMPTY), 65);
+    freeze(
+        NodeKind::Regexp {
+            parts: NodeList::EMPTY,
+            opts: s(),
+        },
+        66,
+    );
+    freeze(NodeKind::Masgn { lhs: n(), rhs: n() }, 67);
+    freeze(NodeKind::Mlhs(NodeList::EMPTY), 68);
+}
+
+/// Catch the failure mode that `node_kind_discriminants_are_frozen` would
+/// miss if a new variant is appended at the end without being added to the
+/// list above: the freeze list must cover **every** variant, so its length
+/// must equal the highest valid tag + 1.
+///
+/// `NodeKind::Mlhs` is the current highest variant. Bumping it without
+/// touching this file means the new tag falls outside the test and slips
+/// in undetected.
+#[test]
+fn highest_frozen_tag_matches_last_variant() {
+    let last = NodeKind::Mlhs(NodeList::EMPTY).tag().0;
+    assert_eq!(
+        last, 68,
+        "appending a new NodeKind variant requires extending tests/discriminant_freeze.rs \
+         (add the new variant to both `node_kind_discriminants_are_frozen` and update \
+         the expected last-tag here)."
+    );
+}

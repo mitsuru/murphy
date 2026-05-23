@@ -575,6 +575,9 @@ dependencies = [
 [[package]]
 name = "murphy-ast"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "murphy-cli"
