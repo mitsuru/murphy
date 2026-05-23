@@ -156,6 +156,15 @@ impl MurphyConfig {
             .unwrap_or(!is_cop_disabled_by_default(name))
     }
 
+    /// True when the user wrote `[cops.rules."Name"] enabled = true`
+    /// in `murphy.toml`. Used by the `cops list` / lint flow to detect
+    /// a user trying to opt back into a cop that is currently in the
+    /// disabled registry (arena migration), so the host can emit a
+    /// warning without breaking the lint run (§12c).
+    pub fn is_explicitly_enabled(&self, name: &str) -> bool {
+        self.cops.rules.get(name).and_then(|rule| rule.enabled) == Some(true)
+    }
+
     pub fn severity_override(&self, name: &str) -> Option<Severity> {
         self.cops.rules.get(name).and_then(|rule| rule.severity)
     }

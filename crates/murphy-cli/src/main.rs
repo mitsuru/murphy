@@ -22,6 +22,7 @@
 //! await re-introduction once the new dispatcher carries its own per-cop
 //! timing path (.22 perf-gate follow-up).
 
+mod cops;
 mod lsp;
 
 use murphy_core::{
@@ -561,10 +562,15 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         return lsp::run(post_subcommand);
     }
 
+    if subcommand == "cops" {
+        return cops::run(post_subcommand);
+    }
+
     if subcommand != "lint" {
         return Err(AppError::setup(format!(
             "unknown subcommand {subcommand:?} (usage: {LINT_USAGE} | \
-             murphy migrate <.rubocop.yml> | murphy lsp)"
+             murphy migrate <.rubocop.yml> | murphy lsp | \
+             murphy cops list [--format=table|json])"
         )));
     }
 
@@ -629,6 +635,14 @@ fn run(args: &[String]) -> Result<u8, AppError> {
             run_started.elapsed().as_millis()
         );
     }
+    // Warn (once per run) if the user opted back into a cop that's in
+    // the disabled registry — arena migration is still in progress, so
+    // the enable is ineffective and surprising. We do not error: the
+    // intent of `[cops.rules."Name"] enabled = true` becomes effective
+    // automatically when the cop is migrated, and we don't want a
+    // future-prepping config to break today's lint (§12c contract).
+    cops::warn_user_enabled_disabled(&config);
+
     let registry = CopRegistry::discover_with_config(Path::new("."), &config, builtin_pack())
         .map_err(|e| AppError::setup(e.to_string()))?;
     if debug {
