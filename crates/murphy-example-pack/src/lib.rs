@@ -1,11 +1,33 @@
-//! murphy-example-pack — demo cop pack.
+//! murphy-example-pack — demo plugin pack for plugin authors.
 //!
-//! SUPERSEDED by murphy-9cr.23. The legacy lib body (3 cops on the
-//! pre-reboot `MurphyPluginV1` ABI) was deleted in murphy-9cr.22; the
-//! pack will be re-registered against `murphy-plugin-api` (ADR 0038)
-//! in follow-up issues.
+//! Reborn under the single-surface ABI (ADR 0038, murphy-9cr.10.1). Ships
+//! two cops that illustrate complementary authorship vectors:
 //!
-//! The cdylib still builds with an empty cop table; the plugin loader
-//! accepts an empty registration — see the loader's
-//! `validate_registration_accepts_zero_cops` unit test
-//! (`murphy-core::plugin_loader`).
+//! - [`Example/NoEval`](no_eval) — `Send` (CallNode) dispatch + receiver
+//!   matching.
+//! - `Example/TodoFormat` — file-visit dispatch (`KINDS = &[]`) +
+//!   `#[derive(CopOptions)]` (added by murphy-9cr.10.1 Task 3.3).
+//!
+//! The pack is the canonical reference distribution for the e2e plugin
+//! loading path (`crates/murphy-cli/tests/plugin_pack_e2e.rs`).
+
+pub mod no_eval;
+
+use crate::no_eval::NoEval;
+
+// `register_cops!` re-exported from `murphy-plugin-api`. `mode = dynamic`
+// emits `#[no_mangle] pub unsafe extern "C" fn murphy_plugin_register`
+// for cdylib consumption by the host's plugin loader.
+murphy_plugin_api::register_cops!(mode = dynamic, NoEval);
+
+#[cfg(test)]
+mod tests {
+    /// Dummy smoke test: ensures `cargo test --workspace` materialises
+    /// the cdylib build artifact (the e2e test in
+    /// `crates/murphy-cli/tests/plugin_pack_e2e.rs` reads it via dlopen).
+    /// The Cargo dep graph already guarantees this through
+    /// `murphy-cli`'s `[dev-dependencies]`, but the explicit test keeps
+    /// the invariant local to this crate.
+    #[test]
+    fn smoke_compiles() {}
+}
