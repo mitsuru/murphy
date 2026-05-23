@@ -1524,6 +1524,35 @@ end
         );
     }
 
+    #[test]
+    fn def_node_matcher_predicate_calls_cop_instance_method() {
+        let ctx = AstContext::new(b"puts 1\nputs x\n".to_vec());
+        const MRUBY_COP: &str = r#"
+class PredicateCop < Murphy::Cop
+  def_node_matcher :puts_one, "(send nil? :puts #is_one?)"
+
+  def on_send(node)
+    add_offense(node.range, message: "one") if puts_one(node)
+  end
+
+  def is_one?(node)
+    node.kind == :int && Murphy.raw_source(node.range.start_offset, node.range.end_offset) == "1"
+  end
+end
+"#;
+        let offenses = run_mruby_cop(&ctx, MRUBY_COP, "Murphy/Predicate", "t.rb");
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].message, "one");
+        assert_eq!(
+            offenses[0].range,
+            Range {
+                start_offset: 0,
+                end_offset: 6
+            }
+        );
+    }
+
     // ===================================================================
     // Late-finish-after-timeout stress test (P3 Task 8 / ADR 0012 gate
     // prerequisite — murphy-cql).

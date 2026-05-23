@@ -207,7 +207,13 @@ class Murphy
     def self.def_node_matcher(name, pattern)
       ir = Murphy.compile_pattern(pattern.to_s)
       define_method(name) do |node|
-        Murphy::Node.wrap_match(Murphy.match(ir, node.id))
+        previous = $__murphy_current_cop
+        $__murphy_current_cop = self
+        begin
+          Murphy::Node.wrap_match(Murphy.match(ir, node.id))
+        ensure
+          $__murphy_current_cop = previous
+        end
       end
     end
 
@@ -215,9 +221,15 @@ class Murphy
       ir = Murphy.compile_pattern(pattern.to_s)
       define_method(name) do |root|
         return enum_for(name, root) unless block_given?
-        Murphy.node_descendants(root.id).each do |node_id|
-          captures = Murphy::Node.wrap_match(Murphy.match(ir, node_id))
-          yield captures if captures
+        previous = $__murphy_current_cop
+        $__murphy_current_cop = self
+        begin
+          Murphy.node_descendants(root.id).each do |node_id|
+            captures = Murphy::Node.wrap_match(Murphy.match(ir, node_id))
+            yield captures if captures
+          end
+        ensure
+          $__murphy_current_cop = previous
         end
       end
     end

@@ -48,7 +48,8 @@ use ruby_prism::Visit;
 
 use mruby3_sys::{
     RClass, mrb_class_get, mrb_define_class, mrb_define_module_function, mrb_get_args, mrb_int,
-    mrb_load_string, mrb_state, mrb_str_new, mrb_sym, mrb_sym_name_len, mrb_value,
+    mrb_load_string, mrb_special_consts_MRB_Qtrue, mrb_state, mrb_str_new, mrb_sym,
+    mrb_sym_name_len, mrb_value,
 };
 use murphy_ast::{NodeId, NodeKind, pattern_name};
 use murphy_pattern::CaptureValue;
@@ -632,6 +633,28 @@ unsafe extern "C" fn native_node_field(mrb: *mut mrb_state, _self: mrb_value) ->
     }
 }
 
+struct MrubyPredicateHost {
+    mrb: *mut mrb_state,
+}
+
+impl murphy_pattern::PredicateHost for MrubyPredicateHost {
+    fn call(&mut self, name: &str, node: NodeId) -> bool {
+        let mut src = String::from("cop = $__murphy_current_cop; cop && cop.respond_to?(");
+        src.push(':');
+        push_ruby_quoted_bytes(&mut src, name.as_bytes());
+        src.push_str(") && cop.__send__(:");
+        push_ruby_quoted_bytes(&mut src, name.as_bytes());
+        src.push_str(", Murphy::Node.new(");
+        src.push_str(&node.0.to_string());
+        src.push_str(")) ? true : false");
+        let lit = CString::new(src).expect("predicate eval escapes NUL bytes");
+        // SAFETY: `mrb` is the live VM for the native `match` callback; `lit`
+        // is an escaped Ruby expression returning exactly true or false.
+        let value = unsafe { eval_literal(self.mrb, &lit) };
+        value.w == mrb_special_consts_MRB_Qtrue as usize
+    }
+}
+
 /// `Murphy.node_count -> Integer`. The size of the handle space `0..count`.
 /// Resolved by a live re-walk; nothing is cached (ADR 0008).
 unsafe extern "C" fn native_node_count(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
@@ -697,7 +720,7 @@ unsafe extern "C" fn native_match(mrb: *mut mrb_state, _self: mrb_value) -> mrb_
         return unsafe { eval_literal(mrb, c"nil") };
     }
 
-    let mut predicates = murphy_pattern::NoPredicates;
+    let mut predicates = MrubyPredicateHost { mrb };
     let Some(captures) = murphy_pattern::matches(&ir, ast, NodeId(node_id), &mut predicates) else {
         // SAFETY: `mrb` valid & non-null; nil literal.
         return unsafe { eval_literal(mrb, c"nil") };
