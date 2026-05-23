@@ -39,6 +39,11 @@ pub use autocorrect::{
 pub use config::{CopRule, MurphyConfig, migrate_rubocop_yml_to_murphy_toml};
 pub use discovery::{ConfigError, discover, discover_with_config};
 #[cfg(feature = "mruby-user-cops")]
+pub use mruby::proxy::{
+    MrubyCopProxy, build_mruby_cop, current_mruby_proxies_drain, current_mruby_proxies_populate,
+    with_current_mruby_proxies,
+};
+#[cfg(feature = "mruby-user-cops")]
 pub use mruby::sandbox::{
     PackageCacheKey, PackageFingerprint, ResolvedRequire, ResolvedRequireKind,
     SANDBOX_POLICY_VERSION, STDLIB_ALLOWLIST_VERSION, SandboxBootError, SandboxPackage,

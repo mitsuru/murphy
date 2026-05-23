@@ -9,6 +9,7 @@
 
 pub(crate) mod build;
 pub mod primitives;
+pub mod proxy;
 pub mod sandbox;
 pub(crate) mod sdk;
 pub mod state;
