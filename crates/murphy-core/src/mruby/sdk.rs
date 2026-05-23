@@ -1060,6 +1060,46 @@ mod tests {
     }
 
     #[test]
+    fn legacy_on_call_node_receives_call_handle_wrapper_not_arena_node() {
+        let _guard = lock_reports();
+        let ctx = AstContext::new(b"puts 1\n".to_vec());
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: valid mrb state; registration only defines functions/classes.
+            unsafe {
+                crate::mruby::primitives::register(st.raw());
+                register_sdk(st.raw());
+                register_test_report(st.raw());
+            }
+            assert!(
+                !st.eval_checked(PRELUDE),
+                "prelude must load without raising"
+            );
+            assert!(
+                !st.eval_checked(
+                    r##"
+                class LegacyCop < Murphy::Cop
+                  def on_call_node(node)
+                    Murphy.__test_report("#{node.name}|#{node.receiver_nil?}|#{node.kind.inspect}")
+                  end
+                end
+                LegacyCop.new.__run
+                "##,
+                ),
+                "legacy call wrapper script must run without raising"
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_reports(), vec!["puts|true|nil"]);
+    }
+
+    #[test]
     fn prelude_def_node_matcher_defines_an_instance_method() {
         let _guard = lock_reports();
         let mut st = MrubyState::open();

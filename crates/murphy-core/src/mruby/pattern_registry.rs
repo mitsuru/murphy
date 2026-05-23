@@ -11,8 +11,13 @@ pub(crate) struct PatternIrRegistry {
 
 #[derive(Default)]
 struct Inner {
-    by_hash: HashMap<u64, u32>,
-    by_handle: Vec<Arc<PatternIr>>,
+    by_hash: HashMap<u64, Vec<u32>>,
+    by_handle: Vec<PatternIrEntry>,
+}
+
+struct PatternIrEntry {
+    src: String,
+    ir: Arc<PatternIr>,
 }
 
 impl PatternIrRegistry {
@@ -23,26 +28,43 @@ impl PatternIrRegistry {
 
     pub(crate) fn intern(&self, src: &str) -> Result<u32, ParseError> {
         let hash = hash_pattern(src);
-        if let Some(&handle) = self
-            .inner
-            .read()
-            .expect("pattern registry lock poisoned")
-            .by_hash
-            .get(&hash)
+        self.intern_with_hash(src, hash)
+    }
+
+    fn intern_with_hash(&self, src: &str, hash: u64) -> Result<u32, ParseError> {
         {
-            return Ok(handle);
+            let inner = self.inner.read().expect("pattern registry lock poisoned");
+            if let Some(handle) = inner
+                .by_hash
+                .get(&hash)
+                .and_then(|bucket| find_matching_source(&inner, bucket, src))
+            {
+                return Ok(handle);
+            }
         }
 
         let ir = Arc::new(murphy_pattern::compile(src)?);
         let mut inner = self.inner.write().expect("pattern registry lock poisoned");
-        if let Some(&handle) = inner.by_hash.get(&hash) {
+        if let Some(handle) = inner
+            .by_hash
+            .get(&hash)
+            .and_then(|bucket| find_matching_source(&inner, bucket, src))
+        {
             return Ok(handle);
         }
 
         let handle = inner.by_handle.len() as u32;
-        inner.by_handle.push(ir);
-        inner.by_hash.insert(hash, handle);
+        inner.by_handle.push(PatternIrEntry {
+            src: src.to_owned(),
+            ir,
+        });
+        inner.by_hash.entry(hash).or_default().push(handle);
         Ok(handle)
+    }
+
+    #[cfg(test)]
+    fn intern_with_hash_for_test(&self, src: &str, hash: u64) -> Result<u32, ParseError> {
+        self.intern_with_hash(src, hash)
     }
 
     // Used by the upcoming `Murphy.match` primitive; tested now with the
@@ -54,8 +76,17 @@ impl PatternIrRegistry {
             .expect("pattern registry lock poisoned")
             .by_handle
             .get(handle as usize)
-            .cloned()
+            .map(|entry| Arc::clone(&entry.ir))
     }
+}
+
+fn find_matching_source(inner: &Inner, bucket: &[u32], src: &str) -> Option<u32> {
+    bucket.iter().copied().find(|&handle| {
+        inner
+            .by_handle
+            .get(handle as usize)
+            .is_some_and(|entry| entry.src == src)
+    })
 }
 
 fn hash_pattern(src: &str) -> u64 {
@@ -79,6 +110,18 @@ mod tests {
         let second = registry.intern("(send nil? :puts $...)").unwrap();
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn intern_distinguishes_different_sources_with_the_same_hash_bucket() {
+        let registry = PatternIrRegistry::default();
+
+        let first = registry.intern_with_hash_for_test("_", 42).unwrap();
+        let second = registry
+            .intern_with_hash_for_test("(send nil? :puts)", 42)
+            .unwrap();
+
+        assert_ne!(first, second);
     }
 
     #[test]

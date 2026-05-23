@@ -341,6 +341,41 @@ unsafe fn ruby_array_of_node_ids(mrb: *mut mrb_state, ids: &[NodeId]) -> mrb_val
     unsafe { eval_literal(mrb, &lit) }
 }
 
+enum RubyCaptureValue<'a> {
+    Node(NodeId),
+    Seq(&'a [NodeId]),
+}
+
+unsafe fn ruby_array_of_capture_values(
+    mrb: *mut mrb_state,
+    values: &[RubyCaptureValue<'_>],
+) -> mrb_value {
+    let mut src = String::from("[");
+    for (i, value) in values.iter().enumerate() {
+        if i > 0 {
+            src.push(',');
+        }
+        match value {
+            RubyCaptureValue::Node(id) => src.push_str(&id.0.to_string()),
+            RubyCaptureValue::Seq(ids) => {
+                src.push('[');
+                for (j, id) in ids.iter().enumerate() {
+                    if j > 0 {
+                        src.push(',');
+                    }
+                    src.push_str(&id.0.to_string());
+                }
+                src.push(']');
+            }
+        }
+    }
+    src.push(']');
+    let lit = CString::new(src).expect("capture literal contains only digits and punctuation");
+    // SAFETY: `mrb` valid & non-null; `lit` is a NUL-terminated Ruby array
+    // literal made only from decimal digits, commas, and brackets.
+    unsafe { eval_literal(mrb, &lit) }
+}
+
 /// Return a Ruby integer literal for a node id.
 ///
 /// # Safety
@@ -726,15 +761,15 @@ unsafe extern "C" fn native_match(mrb: *mut mrb_state, _self: mrb_value) -> mrb_
         return unsafe { eval_literal(mrb, c"nil") };
     };
 
-    let mut ids = Vec::new();
+    let mut values = Vec::new();
     for capture in captures.as_slice() {
         match capture {
-            CaptureValue::Node(id) => ids.push(*id),
-            CaptureValue::Seq(seq) => ids.extend(seq.iter().copied()),
+            CaptureValue::Node(id) => values.push(RubyCaptureValue::Node(*id)),
+            CaptureValue::Seq(seq) => values.push(RubyCaptureValue::Seq(seq)),
         }
     }
     // SAFETY: `mrb` valid & non-null; helper builds a safe Ruby literal.
-    unsafe { ruby_array_of_node_ids(mrb, &ids) }
+    unsafe { ruby_array_of_capture_values(mrb, &values) }
 }
 
 /// `Murphy.node_descendants(node_id) -> Array<Integer> | nil`. Returns arena
@@ -1140,7 +1175,36 @@ mod tests {
         drop(worker);
         drop(ctx);
 
-        assert_eq!(drain_sink(), vec!["hit:0"]);
+        assert_eq!(drain_sink(), vec!["hit:[0]"]);
+    }
+
+    #[test]
+    fn match_primitive_preserves_sequence_capture_boundaries() {
+        let _guard = lock_sink();
+        let ctx = AstContext::new(b"puts x, y\n".to_vec());
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = crate::mruby::sdk::CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: see `run_driver_over` — valid state, live CopRun in ud.
+            unsafe {
+                register(st.raw());
+                register_test_report(st.raw());
+            }
+            st.eval(
+                r##"
+                ir = Murphy.compile_pattern("(send nil? :puts $_ $...)")
+                captures = Murphy.match(ir, Murphy.ast_root)
+                Murphy.__test_report(captures.inspect)
+            "##,
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_sink(), vec!["[0, [1]]"]);
     }
 
     #[test]

@@ -141,6 +141,39 @@ class Murphy
     end
   end
 
+  class CallHandleNode
+    attr_reader :handle
+
+    def initialize(handle)
+      @handle = handle
+    end
+
+    def id
+      @handle
+    end
+
+    def name
+      n = Murphy.node_name(@handle)
+      n && n.to_sym
+    end
+
+    def receiver_nil?
+      Murphy.node_receiver_nil?(@handle)
+    end
+
+    def message_loc
+      start_offset = Murphy.node_msg_start(@handle)
+      end_offset = Murphy.node_msg_end(@handle)
+      return nil if start_offset < 0 || end_offset < 0
+
+      Murphy::Range.new(start_offset, end_offset)
+    end
+
+    def kind
+      nil
+    end
+  end
+
   # Fix recorder (Phase 4 Task 2, ADR 0013). A cop's `do |fix|` block calls
   # `replace`/`insert`/`remove`; the edits are collected here and marshalled
   # to the host as a binary blob (see blob format spec at top of this file).
@@ -275,7 +308,7 @@ class Murphy
       end
 
       Murphy.node_count.times do |h|
-        on_call_node(Murphy::Node.new(h))
+        on_call_node(Murphy::CallHandleNode.new(h))
       end
     end
   end
