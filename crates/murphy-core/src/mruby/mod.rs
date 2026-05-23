@@ -10,6 +10,7 @@
 pub(crate) mod build;
 pub(crate) mod pattern_registry;
 pub mod primitives;
+pub mod proxy;
 pub mod sandbox;
 pub(crate) mod sdk;
 pub mod state;
