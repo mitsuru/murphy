@@ -38,7 +38,9 @@ toml = "0.8"
 serde_yaml = "0.9"
 serde_json = "1"
 sha2 = "0.10"
+murphy-ast = { path = "../murphy-ast" }
 murphy-pattern = { path = "../murphy-pattern" }
+murphy-translate = { path = "../murphy-translate" }
 
 [dev-dependencies]
 # discovery.rs tests build temp trees with murphy.toml / .murphyignore.

@@ -101,6 +101,8 @@ pub struct AstContext {
     /// The owned source buffer the (transmuted) `parse_result` references.
     /// Dropped LAST (explicitly, in `impl Drop`), after `parse_result`.
     source: ManuallyDrop<Box<[u8]>>,
+    /// Owned arena AST used by the runtime pattern matcher backend.
+    arena_ast: murphy_ast::Ast,
 }
 
 impl AstContext {
@@ -112,6 +114,8 @@ impl AstContext {
     /// `spikes/live_resolution_poc` shape.
     pub fn new(source: impl Into<Box<[u8]>>) -> Arc<Self> {
         let source: Box<[u8]> = source.into();
+        let source_text = String::from_utf8_lossy(&source);
+        let arena_ast = murphy_translate::translate(&source_text, "<mruby>");
 
         // `result` borrows `source` for real here.
         let result: ParseResult<'_> = parse(&source);
@@ -140,6 +144,7 @@ impl AstContext {
         Arc::new(Self {
             parse_result: ManuallyDrop::new(parse_result),
             source: ManuallyDrop::new(source),
+            arena_ast,
         })
     }
 
@@ -153,6 +158,11 @@ impl AstContext {
     /// The owned source bytes (`parse_result` conceptually borrows these).
     pub fn source(&self) -> &[u8] {
         &self.source
+    }
+
+    /// The translated arena AST used by runtime node-pattern matching.
+    pub fn arena_ast(&self) -> &murphy_ast::Ast {
+        &self.arena_ast
     }
 }
 
