@@ -138,196 +138,9 @@ fn lint_default_output_is_human_readable() {
     );
 }
 
-#[test]
-fn lint_profile_outputs_profile_json() {
-    let dir = tempdir().expect("create tempdir");
-    let path = dir.path().join("clean.rb");
-    fs::write(&path, CLEAN_SOURCE).expect("write clean.rb");
-
-    let assert = Command::cargo_bin("murphy")
-        .expect("murphy binary builds")
-        .arg("lint")
-        .arg("--profile")
-        .arg(&path)
-        .assert()
-        .code(0);
-
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(stdout.trim_end()).expect("stdout must be a profile JSON object");
-
-    assert!(parsed.get("cop_wall_micros").is_some());
-    assert!(parsed.get("cop_file_wall_micros").is_some());
-    assert!(parsed.get("cop_dispatch_wall_micros").is_some());
-    assert!(parsed.get("cop_file_micros").is_some());
-    assert!(parsed.get("cop_file_stage_file_micros").is_some());
-    assert!(parsed.get("cop_dispatch_stage_file_micros").is_some());
-    assert!(parsed.get("cop_file_invocation_count").is_some());
-    assert!(parsed.get("cop_dispatch_invocation_count").is_some());
-    assert!(
-        parsed
-            .get("p95_micros")
-            .and_then(serde_json::Value::as_u64)
-            .is_some()
-    );
-    assert!(parsed.get("hot_files").is_some());
-    assert!(parsed.get("invocation_count").is_some());
-}
-
-#[test]
-fn lint_profile_outputs_speedscope_json() {
-    let dir = tempdir().expect("create tempdir");
-    let path = dir.path().join("clean.rb");
-    fs::write(&path, CLEAN_SOURCE).expect("write clean.rb");
-
-    let assert = Command::cargo_bin("murphy")
-        .expect("murphy binary builds")
-        .arg("lint")
-        .arg("--profile")
-        .arg("--profile-format")
-        .arg("speedscope")
-        .arg(&path)
-        .assert()
-        .code(0);
-
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(stdout.trim_end()).expect("stdout must be a profile JSON object");
-
-    assert_eq!(
-        parsed
-            .get("process_name")
-            .and_then(serde_json::Value::as_str),
-        Some("murphy-lint")
-    );
-    let events = parsed
-        .get("traceEvents")
-        .and_then(serde_json::Value::as_array)
-        .expect("traceEvents must be an array");
-    assert_eq!(
-        events.len(),
-        parsed
-            .get("event_count")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or_default() as usize
-    );
-
-    let mut previous_ts: Option<u64> = None;
-    let mut previous_thread: u64 = 0;
-    for event in events {
-        let start = event.get("ts").and_then(serde_json::Value::as_u64);
-        let name = event.get("name").and_then(serde_json::Value::as_str);
-        assert!(start.is_some() && name.is_some());
-        let start = start.unwrap();
-        let thread = event
-            .get("tid")
-            .and_then(serde_json::Value::as_u64)
-            .expect("tid");
-        if let Some(last) = previous_ts {
-            assert!(last <= start);
-        }
-        assert!(
-            event
-                .get("args")
-                .and_then(|args| args.get("thread_name"))
-                .and_then(serde_json::Value::as_str)
-                .is_some()
-        );
-        previous_ts = Some(start);
-        previous_thread = thread;
-    }
-
-    assert!(previous_thread >= 1);
-}
-
-#[test]
-fn lint_profile_speedscope_thread_ids_follow_file_order() {
-    let dir = tempdir().expect("create tempdir");
-    let first = dir.path().join("a.rb");
-    let second = dir.path().join("z.rb");
-    fs::write(&first, CLEAN_SOURCE).expect("write a.rb");
-    fs::write(&second, DIRTY_PUTS_SOURCE).expect("write z.rb");
-
-    let assert = Command::cargo_bin("murphy")
-        .expect("murphy binary builds")
-        .arg("lint")
-        .arg("--profile")
-        .arg("--profile-format")
-        .arg("speedscope")
-        .arg(".")
-        .current_dir(&dir)
-        .assert()
-        .code(1);
-
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(stdout.trim_end()).expect("stdout must be a profile JSON object");
-    let events = parsed
-        .get("traceEvents")
-        .and_then(serde_json::Value::as_array)
-        .expect("traceEvents must be an array");
-
-    let mut tid_files: Vec<(u64, String)> = events
-        .iter()
-        .filter_map(|event| {
-            let tid = event.get("tid").and_then(serde_json::Value::as_u64)?;
-            let args = event.get("args").unwrap_or(&serde_json::Value::Null);
-            let thread_name = args
-                .get("thread_name")
-                .and_then(serde_json::Value::as_str)?;
-            let file = thread_name.strip_prefix("file:").unwrap_or("").to_owned();
-            Some((tid, file))
-        })
-        .collect();
-
-    tid_files.sort_by_key(|(tid, _)| *tid);
-    tid_files.dedup_by_key(|(tid, _)| *tid);
-    assert!(!tid_files.is_empty());
-
-    let actual_files: Vec<String> = tid_files.iter().map(|(_, file)| file.clone()).collect();
-    let mut expected_files = actual_files.clone();
-    expected_files.sort_unstable();
-
-    assert_eq!(actual_files, expected_files);
-}
-
-#[test]
-fn lint_profile_format_requires_profile_flag() {
-    let assert = Command::cargo_bin("murphy")
-        .expect("murphy binary builds")
-        .arg("lint")
-        .arg("--profile-format")
-        .arg("speedscope")
-        .assert()
-        .code(2);
-
-    assert!(
-        String::from_utf8_lossy(&assert.get_output().stderr)
-            .contains("--profile-format requires --profile")
-    );
-}
-
-#[test]
-fn lint_profile_unknown_profile_format_exits_2() {
-    let dir = tempdir().expect("create tempdir");
-    let path = dir.path().join("clean.rb");
-    fs::write(&path, CLEAN_SOURCE).expect("write clean.rb");
-
-    let assert = Command::cargo_bin("murphy")
-        .expect("murphy binary builds")
-        .arg("lint")
-        .arg("--profile")
-        .arg("--profile-format")
-        .arg("not-a-format")
-        .arg(&path)
-        .assert()
-        .code(2);
-
-    assert!(
-        String::from_utf8_lossy(&assert.get_output().stderr)
-            .contains("unknown --profile-format value")
-    );
-}
+// `--profile` / `--profile-format` were dropped in murphy-9cr.22 along with
+// the legacy per-cop timing path (`run_cop_timed`); the new dispatcher will
+// grow its own profile surface in a follow-up issue (perf gate).
 
 #[test]
 fn lint_format_json_preserves_machine_readable_stdout() {
@@ -372,6 +185,10 @@ fn lint_file_with_disable_comment_suppresses_offenses() {
     assert_eq!(assert.get_output().stdout, b"[]\n");
 }
 
+/// `--debug` writes progress lines to STDERR and never to STDOUT (the JSON
+/// channel must remain machine-parseable). The exact line wording is the
+/// post-reboot dispatcher's; the assertion deliberately matches a stable
+/// substring rather than the legacy format.
 #[test]
 fn lint_debug_emits_progress_to_stderr_without_touching_stdout_json() {
     let dir = tempdir().expect("create tempdir");
@@ -394,44 +211,12 @@ fn lint_debug_emits_progress_to_stderr_without_touching_stdout_json() {
 
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("murphy: debug: lint start files=1"),
-        "debug stderr must include lint start progress, got: {stderr:?}"
+        stderr.contains("murphy: debug:"),
+        "--debug must emit at least one debug line to stderr, got: {stderr:?}"
     );
     assert!(
-        stderr.contains("murphy: debug: batch 1/1 read files=1"),
-        "debug stderr must include batch read progress, got: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("murphy: debug: batch 1/1 lint unique="),
-        "debug stderr must include batch lint progress, got: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("native_ms="),
-        "debug stderr must include native lint timing, got: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("parse_ms="),
-        "debug stderr must include parse timing, got: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("cops_ms="),
-        "debug stderr must include native cop timing, got: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("mruby_ms="),
-        "debug stderr must include mruby lint timing, got: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("murphy: debug: aggregate"),
-        "debug stderr must include aggregate progress, got: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("murphy: debug: top cops"),
-        "debug stderr must include top cop counts, got: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("Murphy/NoReceiverPuts=1"),
-        "debug top cop counts must identify noisy cops, got: {stderr:?}"
+        stderr.contains("lint pass done"),
+        "--debug must emit the lint pass completion line to stderr, got: {stderr:?}"
     );
 }
 
@@ -955,34 +740,10 @@ fn syntax_error_severity_cannot_be_downgraded_by_config() {
     assert_eq!(parsed[0]["severity"], "error");
 }
 
-#[test]
-fn directory_discovery_excludes_configured_cops_path() {
-    let dir = tempdir().expect("create tempdir");
-    let root = dir.path();
-    fs::write(root.join("app.rb"), CLEAN_SOURCE).expect("write app.rb");
-    fs::create_dir(root.join("cops")).expect("mkdir cops");
-    fs::write(root.join("cops").join("broken.rb"), "puts \"x\"\ndef (\n")
-        .expect("write broken cop");
-
-    let assert = Command::cargo_bin("murphy")
-        .expect("murphy binary builds")
-        .current_dir(root)
-        .arg("lint")
-        .arg("--format")
-        .arg("json")
-        .assert()
-        .code(1);
-
-    let parsed: Vec<serde_json::Value> =
-        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
-    assert_eq!(
-        parsed.len(),
-        1,
-        "only the loaded broken cop should report, got {parsed:?}"
-    );
-    assert_eq!(parsed[0]["file"], "./app.rb");
-    assert_eq!(parsed[0]["cop_name"], "Murphy/Broken");
-}
+// Removed in murphy-9cr.22: this test loaded a `.rb` user cop from
+// `cops/` (mruby user-cop path). The mruby loader is gone (design §6.2);
+// `.rb` user-cop discovery + dispatch returns in murphy-9cr.24 through
+// the C-backend matcher, with a regression test of its own.
 
 #[test]
 fn explicit_cop_file_path_is_still_linted_as_a_target() {

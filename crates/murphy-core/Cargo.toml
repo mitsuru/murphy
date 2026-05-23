@@ -10,15 +10,21 @@ serde = { version = "1", features = ["derive"] }
 # off the raw prism tree.
 murphy-ast = { path = "../murphy-ast" }
 murphy-plugin-api = { path = "../murphy-plugin-api" }
+# prism→arena bridge (murphy-9cr.15). `parse()` is a thin wrapper here.
+murphy-translate = { path = "../murphy-translate" }
 # Exact pin (ADR 0001): a prism node-schema change must not ride in silently
 # on the load-bearing byte offsets; bumping is a deliberate, re-verified step.
+# Kept as a direct dep because `parse()` re-parses to harvest the first
+# prism error for `Murphy/Syntax` (the syntax-error contract from ADR 0006);
+# murphy-translate's API does not surface that today.
 ruby-prism = "=1.9.0"
 # Exact pin (ADR 0002 discipline, identical to ruby-prism): a contract-affecting
 # native binding. mruby's embedding ABI is load-bearing for the user-cop engine
 # (ADR 0008/0009/0010); a bump is a deliberate, re-verified step — never a
-# silent caret upgrade. (The spikes use a caret pin; that is spike laxness and
-# is intentionally NOT propagated into crates/.)
-mruby3-sys = "=3.2.0"
+# silent caret upgrade. Only consumed under the `mruby-user-cops` feature
+# (default off, murphy-9cr.22); the C-backend matcher (murphy-9cr.24) supersedes
+# the mruby user-cop path and re-introduces it under a different surface.
+mruby3-sys = { version = "=3.2.0", optional = true }
 # File discovery (Task 6, discovery.rs ADR-style doc). Pure-Rust, caret-pinned
 # per project convention (exact `=` pins are reserved for the contract-affecting
 # native bindings only). `ignore` = ripgrep's walker (.murphyignore via custom
@@ -37,7 +43,12 @@ tempfile = "3"
 
 [features]
 default = []
-mruby-custom-build = []
+mruby-custom-build = ["mruby-user-cops"]
+# Gate the legacy mruby user-cop engine. v1 of murphy (post-reboot) does not
+# load `.rb` user cops; murphy-9cr.24 reintroduces them through the C-backend
+# matcher. The mruby code is kept compilable-when-asked so that .24 has a
+# straightforward path back, but is OFF in default builds (design §6.2).
+mruby-user-cops = ["dep:mruby3-sys"]
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libloading = "0.8"

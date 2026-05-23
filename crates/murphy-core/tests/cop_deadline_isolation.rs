@@ -1,8 +1,15 @@
 //! Integration test for per-cop deadline + exception isolation
 //! (Phase 3 Task 5; ADR 0003 Mechanism A; ADR 0009 composition rules).
 //!
+//! Gated behind `mruby-user-cops` (off in v1; design §6.2). The legacy
+//! mruby user-cop dispatch path is reintroduced by the C-backend
+//! matcher in murphy-9cr.24; the wrapper code is preserved compilable
+//! under feature so .24 has a straightforward landing.
+//!
 //! Exercises the public surface a downstream consumer sees:
 //! `murphy_core::{AstContext, run_mruby_cop_isolated, Offense, Severity}`.
+
+#![cfg(feature = "mruby-user-cops")]
 //!
 //! Task 5 wraps the Task-4 synchronous `run_mruby_cop` in:
 //!

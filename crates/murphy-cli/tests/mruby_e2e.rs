@@ -1,5 +1,11 @@
-//! End-to-end test: native + mruby cops co-occur under the real CLI pipeline
-//! (Phase 3 Task 7 — the integration keystone).
+//! End-to-end test: native + mruby cops co-occur under the real CLI pipeline.
+//!
+//! Gated behind `mruby-user-cops` (off in v1; design §6.2). The legacy
+//! mruby user-cop discovery + dispatch path is replaced by the C-backend
+//! matcher (murphy-9cr.24); the test is preserved compilable-when-asked
+//! so .24 has a regression target.
+
+#![cfg(feature = "mruby-user-cops")]
 //!
 //! This is the FIRST place a native cop (`Murphy/NoReceiverPuts`, Rust,
 //! all-core rayon) and a discovered `cops/*.rb` user cop run together over the

@@ -1,18 +1,33 @@
 //! Murphy core: the native engine for the Murphy Ruby linter/formatter.
+//!
+//! Post-reboot (ADR 0038): the single integration point between the
+//! arena AST and cops is the plugin ABI in `murphy-plugin-api`. The
+//! crate exposes:
+//!
+//! - [`parse`] — Ruby → arena AST (thin wrapper over `murphy-translate`).
+//! - [`dispatch::run_cops`] — invoke a slice of `PluginCopV1` cops
+//!   against an arena.
+//! - [`builtin::BUILTINS`] — the v1 cop set (`Murphy/NoReceiverPuts`
+//!   only; more cops migrate over in murphy-9cr.23+).
+//! - [`plugin_loader::load_plugin_pack`] — `dlopen` a `.so` and validate
+//!   its registration.
+//! - [`CopRegistry`] — the host's combined cop list (builtins + loaded
+//!   packs), filtered by config.
+//! - [`aggregate`] / [`run_to_fixpoint`] — offense aggregator + autocorrect
+//!   fixpoint loop (unchanged contract, ADR 0006/0011/0013).
+//! - [`MurphyConfig`] — `murphy.toml` schema (ADR 0015).
+//! - [`discover`] — file discovery (ADR 0014).
 
 mod aggregator;
-mod ast_sexp;
 pub mod autocorrect;
 pub mod builtin;
 mod config;
-mod cop;
-mod cops;
 mod discovery;
 pub mod dispatch;
+#[cfg(feature = "mruby-user-cops")]
 mod mruby;
 mod offense;
 mod parse;
-mod plugin;
 pub mod plugin_loader;
 mod registry;
 
@@ -22,44 +37,21 @@ pub use autocorrect::{
     apply_edits_logged, run_to_fixpoint,
 };
 pub use config::{CopRule, MurphyConfig, migrate_rubocop_yml_to_murphy_toml};
-pub use cop::{
-    Cop, CopContext, CopRunTimings, NodeDispatchRestriction, prism_node_kind,
-    rubocop_hook_node_kinds, run_cop, run_cop_timed, run_cops,
-};
-pub use cops::NoReceiverPuts;
 pub use discovery::{ConfigError, discover, discover_with_config};
-// Phase 3 Task 2 keystone — the mruby lifecycle/ownership wrapper. Task 3's
-// read-only native-primitive IDL registration (`register_primitives`) is
-// in-crate only (`pub(crate)` in `mruby`), so it is deliberately NOT
-// re-exported here — Task 4/5/7 reach it via `crate::mruby::register_primitives`.
-// Nothing in the CLI pipeline calls it yet (Task 7 wires it).
-pub use ast_sexp::ast_to_sexp;
+#[cfg(feature = "mruby-user-cops")]
 pub use mruby::sandbox::{
     PackageCacheKey, PackageFingerprint, ResolvedRequire, ResolvedRequireKind,
     SANDBOX_POLICY_VERSION, STDLIB_ALLOWLIST_VERSION, SandboxBootError, SandboxPackage,
     SandboxViolation, boot_self_check, run_mruby_cop_sandboxed,
     run_mruby_cop_sandboxed_with_package, validate_denied_capabilities_absent,
 };
+#[cfg(feature = "mruby-user-cops")]
 pub use mruby::{
     AstContext, COP_DEADLINE, MrubyState, run_mruby_cop, run_mruby_cop_isolated,
     run_mruby_cop_isolated_with_deadline,
 };
 pub use offense::{Autocorrect, Edit, Offense, Range, SYNTAX_COP_NAME, Severity};
-pub use parse::{Ast, ParseError, parse};
-#[cfg(not(target_os = "windows"))]
-pub use plugin::dynamic::{LoadedPluginPack, load_plugin_pack};
-pub use plugin::{
-    CopOptionMetadata, MURPHY_CALL_ARGUMENT_KIND_OTHER, MURPHY_CALL_ARGUMENT_KIND_STRING,
-    MURPHY_CALL_ARGUMENT_KIND_SYMBOL, MURPHY_CALL_RECEIVER_FLOAT, MURPHY_CALL_RECEIVER_INTEGER,
-    MURPHY_CALL_RECEIVER_NONE, MURPHY_CALL_RECEIVER_OTHER, MURPHY_PLUGIN_ABI_VERSION,
-    MURPHY_SEVERITY_ERROR, MURPHY_SEVERITY_UNSET, MURPHY_SEVERITY_WARNING, MURPHY_TRISTATE_FALSE,
-    MURPHY_TRISTATE_TRUE, MURPHY_TRISTATE_UNSET, MurphyCallContext, MurphyCallDispatchV1,
-    MurphyCopOptionV1, MurphyEmitOffense, MurphyFileContext, MurphyNodeContext,
-    MurphyNodeDispatchV1, MurphyPluginAutocorrect, MurphyPluginCallArgument, MurphyPluginCopV1,
-    MurphyPluginEdit, MurphyPluginOffense, MurphyPluginV1, MurphyRange, MurphyRunCallDispatch,
-    MurphyRunFile, MurphyRunNodeDispatch, MurphySlice, PluginFileCop, cop_v1, cop_v1_dispatch_only,
-    validate_plugin_cop_ids,
-};
+pub use parse::{ParseError, parse};
 pub use registry::CopRegistry;
 
 /// Returns the Murphy core crate version.

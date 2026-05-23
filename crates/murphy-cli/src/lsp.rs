@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
+
 const EXIT_OK: u8 = 0;
 const LSP_ERROR_METHOD_NOT_FOUND: i32 = -32601;
 const LSP_ERROR_INVALID_PARAMS: i32 = -32602;
@@ -15,9 +16,6 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
 
     let registry = CopRegistry::discover_with_config(Path::new("."), &config)
         .map_err(|e| super::AppError::setup(e.to_string()))?;
-
-    let mruby_cops = super::load_mruby_cops(&registry, &config)
-        .map_err(|e| super::AppError::setup(e.message))?;
 
     let mut open_documents: HashMap<String, String> = HashMap::new();
 
@@ -88,7 +86,6 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
                         file,
                         &config,
                         &registry,
-                        &mruby_cops,
                     )?;
                 }
             }
@@ -134,7 +131,6 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
                         file,
                         &config,
                         &registry,
-                        &mruby_cops,
                     )?;
                     continue;
                 }
@@ -146,7 +142,6 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
                     file,
                     &config,
                     &registry,
-                    &mruby_cops,
                 )?;
             }
             continue;
@@ -275,9 +270,8 @@ fn publish_diagnostics(
     file_label: &str,
     config: &MurphyConfig,
     registry: &CopRegistry,
-    mruby_cops: &[super::MrubyCop],
 ) -> Result<(), super::AppError> {
-    let offenses = run_offenses_for_source(source, file_label, config, registry, mruby_cops)?;
+    let offenses = run_offenses_for_source(source, file_label, config, registry);
     let diagnostics = offenses
         .iter()
         .map(|offense| to_diagnostic(offense, source))
@@ -291,12 +285,9 @@ fn run_offenses_for_source(
     file: &str,
     config: &MurphyConfig,
     registry: &CopRegistry,
-    mruby_cops: &[super::MrubyCop],
-) -> Result<Vec<Offense>, super::AppError> {
-    let mut sink = super::lint_source(source, file, registry.native_cops());
-    let (mruby_offenses, _) = super::lint_source_mruby(source, file, mruby_cops, false);
-    sink.extend(mruby_offenses);
-    Ok(aggregate_with_config(sink, config))
+) -> Vec<Offense> {
+    let offenses = super::lint_source(source, file, registry.cops());
+    aggregate_with_config(offenses, config)
 }
 
 fn publish_diagnostics_message(uri: &str, diagnostics: &[Value]) -> Value {
