@@ -20,6 +20,18 @@ mod ir;
 
 pub use ir::{CaptureMeta, IrHead, IrNode, IrNodeId, IrSlice, PatternIr, StrRef, lower};
 
+mod captures;
+
+pub use captures::{CaptureValue, Captures};
+
+mod schema;
+
+pub use schema::{PatChild, pattern_children};
+
+mod matcher;
+
+pub use matcher::{NoPredicates, PredicateHost, matches};
+
 /// Parse and lower a pattern source string to `PatternIr` in one step.
 /// For the C backend (murphy-9cr.19). All errors are parse errors —
 /// lowering itself is infallible.
