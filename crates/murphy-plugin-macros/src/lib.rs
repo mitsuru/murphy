@@ -10,6 +10,7 @@
 //! `#[murphy::cop]` / `#[on_node]` (murphy-9cr.8) will land here
 //! alongside them.
 
+mod cop_attr;
 mod cop_options;
 mod node_pattern;
 
@@ -168,6 +169,55 @@ pub fn derive_cop_options(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn node_pattern(input: TokenStream) -> TokenStream {
     node_pattern::node_pattern(input.into()).into()
+}
+
+/// Attribute macro for defining a Murphy native cop (murphy-9cr.8).
+///
+/// Apply to an inherent `impl` block to declare cop metadata and register
+/// per-node handler methods via `#[on_node]`.
+///
+/// # Example
+///
+/// ```ignore
+/// use murphy_plugin_macros::cop;
+///
+/// #[derive(Default)]
+/// struct NoTabs;
+///
+/// #[cop(name = "Plugin/NoTabs")]
+/// impl NoTabs {
+///     // handler methods will go here (murphy-9cr.8 layer 2+)
+/// }
+/// ```
+///
+/// **Layer 1 note:** the macro currently acts as an identity (passes the
+/// `impl` block through unchanged).  Full trait-impl generation is added in
+/// subsequent layers.
+#[proc_macro_attribute]
+pub fn cop(args: TokenStream, item: TokenStream) -> TokenStream {
+    cop_attr::cop(args.into(), item.into()).into()
+}
+
+/// Declare that a method inside a `#[cop]` impl handles a particular AST
+/// node kind (murphy-9cr.8).
+///
+/// This macro **must** be used inside a `#[cop]` impl block.  When used
+/// correctly the `#[cop]` macro consumes `#[on_node]` before it reaches
+/// this entry point, so this proc-macro is only reachable on misuse and
+/// always emits a compile error.
+///
+/// # Example
+///
+/// ```ignore
+/// #[cop(name = "Plugin/NoTabs")]
+/// impl NoTabs {
+///     #[on_node(kind = "send")]
+///     fn check_send(&self, node: NodeId, cx: &Cx<'_>) { /* … */ }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn on_node(args: TokenStream, item: TokenStream) -> TokenStream {
+    cop_attr::on_node(args.into(), item.into()).into()
 }
 
 /// Parsed form of `register_cops!(Cop1, Cop2, …);`.
