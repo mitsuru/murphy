@@ -7,7 +7,7 @@ if ! command -v rubocop >/dev/null 2>&1; then
 fi
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-source_dir=${1:-"$root_dir/crates/murphy-cli/tests/fixtures/phase6_project"}
+source_dir=${1:-"$root_dir/crates/murphy-cli/tests/fixtures/builtin_only_project"}
 
 if [ ! -d "$source_dir" ]; then
   echo "phase6 corpus not found: $source_dir" >&2

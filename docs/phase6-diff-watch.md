@@ -15,7 +15,7 @@ This script is a **quality watch**, not a hard compatibility gate.
 
 - Requires `rubocop` in PATH.
 - Assumes the phase 6 corpus exists (defaults to
-  `crates/murphy-cli/tests/fixtures/phase6_project`).
+  `crates/murphy-cli/tests/fixtures/builtin_only_project`).
 - Returns `0` on completion; it does not fail CI on mismatch.
 - Prints the raw `diff -ru` output so reviewers can inspect
   deterministic, repeatable differences.
