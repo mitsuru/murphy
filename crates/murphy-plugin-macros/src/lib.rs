@@ -173,26 +173,50 @@ pub fn node_pattern(input: TokenStream) -> TokenStream {
 
 /// Attribute macro for defining a Murphy native cop (murphy-9cr.8).
 ///
-/// Apply to an inherent `impl` block to declare cop metadata and register
-/// per-node handler methods via `#[on_node]`.
+/// Apply to an inherent `impl` block. The macro generates
+/// `impl murphy_plugin_api::Cop` (metadata) and
+/// `impl murphy_plugin_api::NodeCop` (`KINDS` array + a `check` dispatch
+/// that routes by `NodeKindTag`), then re-emits the original `impl` block
+/// with `#[on_node]` attributes stripped. The decorated type must derive
+/// (or otherwise implement) `Default` — `register_cops!` and the dispatch
+/// thunk construct a fresh cop value per matched node (ADR 0035).
+///
+/// # Arguments
+///
+/// - `name = "..."` (**required**) — the cop identifier.
+/// - `description = "..."` — one-line summary; defaults to the trait default.
+/// - `default_severity = "warning" | "error"` — severity default; absent =
+///   trait default.
+/// - `default_enabled = true | false` — enablement default; absent = trait
+///   default.
+/// - `options = <path>` — type to use for `Cop::Options` (defaults to
+///   `::murphy_plugin_api::NoOptions`).
+///
+/// # Requirements
+///
+/// - The `impl` must be **inherent** (`impl T { ... }`), non-generic, and
+///   not `unsafe`. `#[cop]` on a struct, trait impl, or generic impl is a
+///   compile error.
+/// - At least one method inside the `impl` must carry `#[on_node]`.
+/// - Each `#[on_node]` method must have the exact signature
+///   `fn(&self, NodeId, &Cx<'_>)`.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use murphy_plugin_macros::cop;
+/// use murphy_ast::NodeId;
+/// use murphy_plugin_api::Cx;
+/// use murphy_plugin_macros::{cop, on_node};
 ///
 /// #[derive(Default)]
 /// struct NoTabs;
 ///
-/// #[cop(name = "Plugin/NoTabs")]
+/// #[cop(name = "Plugin/NoTabs", description = "flag literal tabs")]
 /// impl NoTabs {
-///     // handler methods will go here (murphy-9cr.8 layer 2+)
+///     #[on_node(kind = "send")]
+///     fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) { /* … */ }
 /// }
 /// ```
-///
-/// **Layer 1 note:** the macro currently acts as an identity (passes the
-/// `impl` block through unchanged).  Full trait-impl generation is added in
-/// subsequent layers.
 #[proc_macro_attribute]
 pub fn cop(args: TokenStream, item: TokenStream) -> TokenStream {
     cop_attr::cop(args.into(), item.into()).into()

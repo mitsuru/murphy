@@ -4,13 +4,28 @@
 //! This module contains the `proc_macro2::TokenStream`-level logic; the
 //! `proc_macro::TokenStream` shims in `lib.rs` call into these functions.
 //!
-//! ## Layer 3 (murphy-9cr.8.3) — Cop メタデータ完全配線
+//! The pipeline is:
 //!
-//! Extends layer 2 with:
-//! - `CopArgs` parsing for `description`, `default_severity`,
-//!   `default_enabled`, and `options`
-//! - Lowering emits conditional `const DESCRIPTION`, `const DEFAULT_SEVERITY`,
-//!   `const DEFAULT_ENABLED`, and `type Options`
+//! 1. `parse_cop_args` decodes the `#[cop(...)]` arguments into [`CopArgs`].
+//! 2. The decorated item is parsed as a [`syn::ItemImpl`]; the impl block is
+//!    validated to be inherent, non-generic, non-unsafe, and to target a
+//!    named type.
+//! 3. `collect_cop_methods` walks the impl's methods, strips `#[on_node]`
+//!    attributes in place, resolves each `kind` string through
+//!    [`murphy_ast::tag_from_pattern_name`], rejects `#[cfg]`/`#[cfg_attr]`
+//!    on dispatched methods, and returns a list of [`CopMethod`]s.
+//! 4. `validate_signature` checks each `#[on_node]` method is exactly
+//!    `fn(&self, NodeId, &Cx<'_>)`.
+//! 5. `validate_no_duplicate_kinds` rejects the same kind appearing on more
+//!    than one `#[on_node]`.
+//! 6. `lower_cop_impl` emits `impl Cop` (metadata `const`s), `impl NodeCop`
+//!    (`KINDS` array + a `check` that matches on `NodeKindTag::of(...).0`
+//!    and routes to the dispatched methods), and re-emits the original
+//!    impl block with `#[on_node]` removed.
+//!
+//! `on_node` itself is registered only so that misuse outside a `#[cop]`
+//! impl produces a clear compile error — correct uses are consumed by
+//! `cop` before the `on_node` proc-macro is ever reached.
 
 use std::collections::BTreeMap;
 
