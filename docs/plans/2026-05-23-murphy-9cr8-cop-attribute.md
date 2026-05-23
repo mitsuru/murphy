@@ -130,6 +130,12 @@ murphy_plugin_macros::register_cops!(NoTabs);
 - 戻り値型は `()`(明示も省略も可)以外不可。
 - `async`、generic、`mut self`、`Self` 受け取り、追加引数すべて不可。
 - 違反は span 付き compile error(各引数または `fn` キーワードの位置)。
+- `#[cfg]` / `#[cfg_attr]` は **`#[on_node]` メソッド上では不可**(v1 制限)。
+  cfg で本体が条件付き消滅すると、生成される `KINDS` 配列要素と `match`
+  arm は無条件のままなので「存在しないメソッドを呼ぶ」コンパイルエラーに
+  なるため。cfg 単位で出し分けたい場合は impl ブロック自体を cfg で
+  括る(`#[cfg(feature = "x")] #[cop(...)] impl T { ... }`)。
+  `#[on_node]` のない helper メソッドの cfg は許容。
 
 これらの制約は厳密なほうがマクロ展開が読みやすく(余計な adapter
 レイヤがいらない)、不適合な書き方は早期に明確なエラーになる。

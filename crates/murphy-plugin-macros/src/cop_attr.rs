@@ -315,6 +315,32 @@ fn collect_cop_methods(item_impl: &mut ItemImpl) -> syn::Result<Vec<CopMethod>> 
         f.attrs = kept_attrs;
 
         if !kinds.is_empty() {
+            // `#[cfg]` / `#[cfg_attr]` on a `#[on_node]` method would
+            // conditionally drop the method body while the generated
+            // `KINDS` array entry and `match` arm remain unconditional,
+            // producing "cannot find method" errors when the cfg is off.
+            // Generating cfg-gated KINDS entries and match arms would
+            // require splitting the const slice and is out of v1 scope —
+            // reject the attribute explicitly instead.
+            for attr in &f.attrs {
+                if attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr") {
+                    let e = Error::new_spanned(
+                        attr,
+                        "#[cfg] / #[cfg_attr] on a #[on_node] method are not supported in v1 \
+                         (the generated KINDS array and dispatch arm would still reference the \
+                         conditionally-removed method); move the conditional gating outside the \
+                         #[cop] impl",
+                    );
+                    match errors.take() {
+                        Some(mut acc) => {
+                            acc.combine(e);
+                            errors = Some(acc);
+                        }
+                        None => errors = Some(e),
+                    }
+                }
+            }
+
             cop_methods.push(CopMethod {
                 ident: f.sig.ident.clone(),
                 kinds,
