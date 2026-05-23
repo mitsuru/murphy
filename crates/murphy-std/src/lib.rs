@@ -26,13 +26,15 @@
 //! issue calls out (call dispatch / flow analysis /
 //! literal+option+autocorrect / raw source access).
 
+pub mod lint;
 pub mod murphy;
 
+use crate::lint::unreachable_code::UnreachableCode;
 use crate::murphy::no_receiver_puts::NoReceiverPuts;
 
 // `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
 // single Murphy-prefixed runtime dependency by design.
-murphy_plugin_api::register_cops!(mode = static, NoReceiverPuts);
+murphy_plugin_api::register_cops!(mode = static, NoReceiverPuts, UnreachableCode);
 
 /// Standard cops that have **not yet been migrated** to the arena AST /
 /// single-surface ABI and are therefore not dispatched. The host (`murphy-cli`)
@@ -55,11 +57,7 @@ murphy_plugin_api::register_cops!(mode = static, NoReceiverPuts);
 /// migrated cops; once those land they move from this list into the
 /// `register_cops!` list above. Until then they sit here so the
 /// disabled-registry plumbing has live test data.
-pub static DISABLED_COPS: &[&str] = &[
-    "Lint/UnreachableCode",
-    "Style/StringLiterals",
-    "Layout/TrailingWhitespace",
-];
+pub static DISABLED_COPS: &[&str] = &["Style/StringLiterals", "Layout/TrailingWhitespace"];
 
 /// Friendly pack name reported by `murphy cops list` for cops registered
 /// (or held in the disabled list) by this crate. Matches the "builtin"
