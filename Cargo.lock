@@ -662,6 +662,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "murphy-std"
+version = "0.1.0"
+dependencies = [
+ "murphy-plugin-api",
+ "serde_json",
+]
+
+[[package]]
 name = "murphy-translate"
 version = "0.1.0"
 dependencies = [
