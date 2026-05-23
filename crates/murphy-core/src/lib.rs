@@ -50,6 +50,7 @@ pub use mruby::{
     AstContext, COP_DEADLINE, MrubyState, run_mruby_cop, run_mruby_cop_isolated,
     run_mruby_cop_isolated_with_deadline,
 };
+pub use murphy_ast::ast_to_sexp;
 pub use offense::{Autocorrect, Edit, Offense, Range, SYNTAX_COP_NAME, Severity};
 pub use parse::{ParseError, parse, parse_with_cache};
 pub use registry::CopRegistry;

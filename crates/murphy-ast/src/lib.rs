@@ -12,6 +12,7 @@ mod interner;
 mod kinds;
 mod node;
 mod serialize;
+mod sexp;
 
 pub use ast::{Ancestors, Ast, AstRawParts, collect_children};
 pub use builder::AstBuilder;
@@ -22,3 +23,4 @@ pub use node::{
     StringId, Symbol,
 };
 pub use serialize::{FORMAT_VERSION, HEADER_LEN, MAGIC, SerError, content_hash};
+pub use sexp::ast_to_sexp;

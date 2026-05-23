@@ -12,15 +12,14 @@
 //!
 //! - `murphy lint [flags] [paths]…` — the main lint loop.
 //! - `murphy migrate <.rubocop.yml>` — one-way config migration.
+//! - `murphy ast --format sexp <path|->` — dump the arena AST as
+//!   S-expression text. `-` reads from stdin. The printer lives in
+//!   `murphy_ast::ast_to_sexp` (re-exported via `murphy_core`).
 //! - `murphy lsp` — JSON-RPC LSP server (see `lsp.rs`).
 //!
-//! `murphy ast --format sexp` was dropped in murphy-9cr.22 — the
-//! prism-based S-expression printer (`ast_sexp.rs`) is gone with the
-//! legacy surface. A new arena S-expression printer is a follow-up
-//! issue; the design (§3) explicitly accepts the temporary UX
-//! degradation. `murphy lint --profile / --profile-format` likewise
-//! await re-introduction once the new dispatcher carries its own per-cop
-//! timing path (.22 perf-gate follow-up).
+//! `murphy lint --profile / --profile-format` await re-introduction
+//! once the new dispatcher carries its own per-cop timing path (.22
+//! perf-gate follow-up).
 
 mod cops;
 mod lsp;
@@ -28,8 +27,8 @@ mod lsp;
 use murphy_cache::Cache;
 use murphy_core::{
     CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
-    aggregate_with_config, discover_with_config, dispatch, migrate_rubocop_yml_to_murphy_toml,
-    parse_with_cache, run_to_fixpoint,
+    aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
+    migrate_rubocop_yml_to_murphy_toml, parse, parse_with_cache, run_to_fixpoint,
 };
 use murphy_plugin_api::{PluginCopV1, PluginRegistration};
 use murphy_reporting::{OutputFormat, format_lint_output};
@@ -140,6 +139,18 @@ fn main() -> ExitCode {
 fn read_source(path: &str) -> Result<String, AppError> {
     std::fs::read_to_string(Path::new(path))
         .map_err(|e| AppError::setup(format!("cannot read {path:?}: {e}")))
+}
+
+/// Like [`read_source`] but accepts `-` as a stdin sentinel. Used by
+/// `murphy ast --format sexp <path|->`.
+fn read_ast_source(path: &str) -> Result<String, AppError> {
+    if path == "-" {
+        let mut source = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut source)
+            .map_err(|e| AppError::setup(format!("cannot read stdin: {e}")))?;
+        return Ok(source);
+    }
+    read_source(path)
 }
 
 /// Read a bounded batch in parallel with a cancellation token. Returns
@@ -544,6 +555,32 @@ fn lint_files_memoized_debug(
     (all, timings)
 }
 
+/// `murphy ast --format sexp <path|->` — parse and dump the arena AST.
+///
+/// A parse failure exits `EXIT_OFFENSES` (1, to mirror the lint convention
+/// that syntax errors are a kind of finding); IO or bad-usage errors exit
+/// `EXIT_SETUP_ERROR` (2). `BrokenPipe` on stdout collapses to `EXIT_OK`.
+fn run_ast(post_subcommand: &[String]) -> Result<u8, AppError> {
+    let path = match post_subcommand {
+        [format, kind, path] if format == "--format" && kind == "sexp" => path,
+        _ => return Err(AppError::setup("usage: murphy ast --format sexp <path|->")),
+    };
+    let source = read_ast_source(path)?;
+    let ast = parse(&source, path).map_err(|err| AppError {
+        code: EXIT_OFFENSES,
+        message: err.message,
+    })?;
+    let sexp = ast_to_sexp(&ast);
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = writeln!(stdout, "{sexp}") {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            return Ok(EXIT_OK);
+        }
+        return Err(AppError::setup(format!("failed to write stdout: {e}")));
+    }
+    Ok(EXIT_OK)
+}
+
 fn run(args: &[String]) -> Result<u8, AppError> {
     let rest = args.get(1..).unwrap_or(&[]);
     let (subcommand, post_subcommand) = match rest {
@@ -551,7 +588,8 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         [] => {
             return Err(AppError::setup(
                 "usage: murphy lint [flags] [path]... | \
-                 murphy migrate <.rubocop.yml> | murphy lsp",
+                 murphy migrate <.rubocop.yml> | \
+                 murphy ast --format sexp <path|-> | murphy lsp",
             ));
         }
     };
@@ -583,11 +621,16 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         return cops::run(post_subcommand);
     }
 
+    if subcommand == "ast" {
+        return run_ast(post_subcommand);
+    }
+
     if subcommand != "lint" {
         return Err(AppError::setup(format!(
             "unknown subcommand {subcommand:?} (usage: {LINT_USAGE} | \
-             murphy migrate <.rubocop.yml> | murphy lsp | \
-             murphy cops list [--format=table|json])"
+             murphy migrate <.rubocop.yml> | \
+             murphy ast --format sexp <path|-> | \
+             murphy cops list [--format=table|json] | murphy lsp)"
         )));
     }
 
