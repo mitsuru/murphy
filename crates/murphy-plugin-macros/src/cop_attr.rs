@@ -4,28 +4,31 @@
 //! This module contains the `proc_macro2::TokenStream`-level logic; the
 //! `proc_macro::TokenStream` shims in `lib.rs` call into these functions.
 //!
-//! ## Layer 2 (murphy-9cr.8.2) — core implementation
+//! ## Layer 3 (murphy-9cr.8.3) — Cop メタデータ完全配線
 //!
-//! Implements:
-//! - `CopArgs` parsing (`name` required; other named args are rejected)
-//! - impl block form validation (inherent, non-generic, non-unsafe)
-//! - `#[on_node]` attribute collection and `kind` resolution
-//! - Method signature validation
-//! - Duplicate kind detection
-//! - Lowering to `impl Cop + impl NodeCop + stripped impl`
+//! Extends layer 2 with:
+//! - `CopArgs` parsing for `description`, `default_severity`,
+//!   `default_enabled`, and `options`
+//! - Lowering emits conditional `const DESCRIPTION`, `const DEFAULT_SEVERITY`,
+//!   `const DEFAULT_ENABLED`, and `type Options`
 
 use std::collections::BTreeMap;
 
 use proc_macro2::{Literal, Span, TokenStream};
 use quote::quote;
 use syn::{
-    Error, Ident, ImplItem, ItemImpl, LitStr, Token,
+    Error, Ident, ImplItem, ItemImpl, LitBool, LitStr, Path, Token,
     parse::{Parse, ParseStream, Parser},
 };
 
 /// Parsed `#[cop(...)]` arguments.
 struct CopArgs {
     name: LitStr,
+    description: Option<LitStr>,
+    /// Parsed severity literal and its resolved variant name ("Warning" / "Error").
+    default_severity: Option<(LitStr, &'static str)>,
+    default_enabled: Option<LitBool>,
+    options: Option<Path>,
 }
 
 /// `key = value` pair in a macro argument list.
@@ -45,7 +48,72 @@ impl Parse for KvArg {
     }
 }
 
-/// Parse `#[cop(name = "...")]` arguments.
+/// Accumulate an error into `acc`, creating it if `None`.
+fn push_error(acc: &mut Option<Error>, e: Error) {
+    match acc.take() {
+        Some(mut prev) => {
+            prev.combine(e);
+            *acc = Some(prev);
+        }
+        None => *acc = Some(e),
+    }
+}
+
+/// Require that `value_expr` is a string literal; return it or add an error.
+fn require_str_lit(key: &Ident, value: &syn::Expr, errors: &mut Option<Error>) -> Option<LitStr> {
+    match value {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) => Some(s.clone()),
+        _ => {
+            push_error(
+                errors,
+                Error::new_spanned(value, format!("#[cop]: '{}' must be a string literal", key)),
+            );
+            None
+        }
+    }
+}
+
+/// Require that `value_expr` is a bool literal; return it or add an error.
+fn require_bool_lit(key: &Ident, value: &syn::Expr, errors: &mut Option<Error>) -> Option<LitBool> {
+    match value {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Bool(b),
+            ..
+        }) => Some(b.clone()),
+        _ => {
+            push_error(
+                errors,
+                Error::new_spanned(
+                    value,
+                    format!("#[cop]: '{}' must be a bool literal (true or false)", key),
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// Require that `value_expr` is a path expression; return it or add an error.
+fn require_path(key: &Ident, value: &syn::Expr, errors: &mut Option<Error>) -> Option<Path> {
+    match value {
+        syn::Expr::Path(ep) => Some(ep.path.clone()),
+        _ => {
+            push_error(
+                errors,
+                Error::new_spanned(value, format!("#[cop]: '{}' must be a type path", key)),
+            );
+            None
+        }
+    }
+}
+
+/// Parse `#[cop(name = "...", ...)]` arguments.
+///
+/// Accepted keys: `name` (required), `description`, `default_severity`,
+/// `default_enabled`, `options`.
 fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
     // Collect all key=value arguments as a comma-separated list.
     let pairs: syn::punctuated::Punctuated<KvArg, Token![,]> =
@@ -54,6 +122,10 @@ fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
             .map_err(|_| Error::new(Span::call_site(), "#[cop]: invalid argument syntax"))?;
 
     let mut name_lit: Option<LitStr> = None;
+    let mut description_lit: Option<LitStr> = None;
+    let mut default_severity: Option<(LitStr, &'static str)> = None;
+    let mut default_enabled: Option<LitBool> = None;
+    let mut options_path: Option<Path> = None;
     let mut errors: Option<Error> = None;
 
     for pair in pairs {
@@ -62,52 +134,75 @@ fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
         match key_str.as_str() {
             "name" => {
                 if name_lit.is_some() {
-                    let e = Error::new_spanned(key, "#[cop]: duplicate argument 'name'");
-                    match errors.take() {
-                        Some(mut acc) => {
-                            acc.combine(e);
-                            errors = Some(acc);
-                        }
-                        None => errors = Some(e),
-                    }
-                } else {
-                    match &pair.value {
-                        syn::Expr::Lit(syn::ExprLit {
-                            lit: syn::Lit::Str(s),
-                            ..
-                        }) => {
-                            name_lit = Some(s.clone());
-                        }
+                    push_error(
+                        &mut errors,
+                        Error::new_spanned(key, "#[cop]: duplicate argument 'name'"),
+                    );
+                } else if let Some(s) = require_str_lit(key, &pair.value, &mut errors) {
+                    name_lit = Some(s);
+                }
+            }
+            "description" => {
+                if description_lit.is_some() {
+                    push_error(
+                        &mut errors,
+                        Error::new_spanned(key, "#[cop]: duplicate argument 'description'"),
+                    );
+                } else if let Some(s) = require_str_lit(key, &pair.value, &mut errors) {
+                    description_lit = Some(s);
+                }
+            }
+            "default_severity" => {
+                if default_severity.is_some() {
+                    push_error(
+                        &mut errors,
+                        Error::new_spanned(key, "#[cop]: duplicate argument 'default_severity'"),
+                    );
+                } else if let Some(lit) = require_str_lit(key, &pair.value, &mut errors) {
+                    let variant: Option<&'static str> = match lit.value().as_str() {
+                        "warning" => Some("Warning"),
+                        "error" => Some("Error"),
                         _ => {
-                            let e = Error::new_spanned(
-                                &pair.value,
-                                "#[cop]: 'name' must be a string literal",
+                            push_error(
+                                &mut errors,
+                                Error::new_spanned(
+                                    &lit,
+                                    "#[cop]: default_severity must be one of \"warning\" / \"error\"",
+                                ),
                             );
-                            match errors.take() {
-                                Some(mut acc) => {
-                                    acc.combine(e);
-                                    errors = Some(acc);
-                                }
-                                None => errors = Some(e),
-                            }
+                            None
                         }
+                    };
+                    if let Some(v) = variant {
+                        default_severity = Some((lit, v));
                     }
                 }
             }
-            other => {
-                let e = Error::new_spanned(
-                    key,
-                    format!(
-                        "#[cop]: unknown argument '{other}' (will be supported in a later layer)"
-                    ),
-                );
-                match errors.take() {
-                    Some(mut acc) => {
-                        acc.combine(e);
-                        errors = Some(acc);
-                    }
-                    None => errors = Some(e),
+            "default_enabled" => {
+                if default_enabled.is_some() {
+                    push_error(
+                        &mut errors,
+                        Error::new_spanned(key, "#[cop]: duplicate argument 'default_enabled'"),
+                    );
+                } else if let Some(b) = require_bool_lit(key, &pair.value, &mut errors) {
+                    default_enabled = Some(b);
                 }
+            }
+            "options" => {
+                if options_path.is_some() {
+                    push_error(
+                        &mut errors,
+                        Error::new_spanned(key, "#[cop]: duplicate argument 'options'"),
+                    );
+                } else if let Some(p) = require_path(key, &pair.value, &mut errors) {
+                    options_path = Some(p);
+                }
+            }
+            other => {
+                push_error(
+                    &mut errors,
+                    Error::new_spanned(key, format!("#[cop]: unknown argument '{other}'")),
+                );
             }
         }
     }
@@ -123,7 +218,13 @@ fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
         )
     })?;
 
-    Ok(CopArgs { name })
+    Ok(CopArgs {
+        name,
+        description: description_lit,
+        default_severity,
+        default_enabled,
+        options: options_path,
+    })
 }
 
 /// Format the list of valid kind names for error messages.
@@ -567,10 +668,50 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
         });
     }
 
+    // Build optional metadata consts for `impl Cop`.
+    // Only emit a const when the caller explicitly provided the value;
+    // the `Cop` trait provides defaults for all of them.
+
+    let description_const: TokenStream = if let Some(lit) = &args.description {
+        quote! { const DESCRIPTION: &'static str = #lit; }
+    } else {
+        quote! {}
+    };
+
+    let default_severity_const: TokenStream = if let Some((_lit, variant)) = &args.default_severity
+    {
+        let variant_ident = syn::Ident::new(variant, proc_macro2::Span::call_site());
+        quote! {
+            const DEFAULT_SEVERITY: ::core::option::Option<::murphy_plugin_api::Severity> =
+                ::core::option::Option::Some(::murphy_plugin_api::Severity::#variant_ident);
+        }
+    } else {
+        quote! {}
+    };
+
+    let default_enabled_const: TokenStream = if let Some(lit) = &args.default_enabled {
+        quote! {
+            const DEFAULT_ENABLED: ::core::option::Option<bool> =
+                ::core::option::Option::Some(#lit);
+        }
+    } else {
+        quote! {}
+    };
+
+    // `type Options` — use the caller-specified path, or fall back to NoOptions.
+    let options_type: TokenStream = if let Some(path) = &args.options {
+        quote! { type Options = #path; }
+    } else {
+        quote! { type Options = ::murphy_plugin_api::NoOptions; }
+    };
+
     let impl_cop = quote! {
         impl ::murphy_plugin_api::Cop for #self_ty {
-            type Options = ::murphy_plugin_api::NoOptions;
+            #options_type
             const NAME: &'static str = #name_lit;
+            #description_const
+            #default_severity_const
+            #default_enabled_const
         }
     };
 
@@ -756,5 +897,60 @@ mod tests {
     fn unknown_kind_returns_none() {
         let tag = murphy_ast::tag_from_pattern_name("carrot");
         assert!(tag.is_none(), "expected None for unknown kind 'carrot'");
+    }
+
+    #[test]
+    fn parse_cop_args_all_optional_fields() {
+        let args = quote! { name = "X", description = "a desc", default_severity = "warning", default_enabled = true };
+        match parse_cop_args(args) {
+            Ok(a) => {
+                assert_eq!(a.name.value(), "X");
+                assert_eq!(a.description.unwrap().value(), "a desc");
+                let (lit, variant) = a.default_severity.unwrap();
+                assert_eq!(lit.value(), "warning");
+                assert_eq!(variant, "Warning");
+                assert!(a.default_enabled.unwrap().value);
+            }
+            Err(e) => panic!("expected Ok, got Err: {e}"),
+        }
+    }
+
+    #[test]
+    fn parse_cop_args_severity_error_variant() {
+        let args = quote! { name = "X", default_severity = "error" };
+        match parse_cop_args(args) {
+            Ok(a) => {
+                let (_lit, variant) = a.default_severity.unwrap();
+                assert_eq!(variant, "Error");
+            }
+            Err(e) => panic!("expected Ok, got Err: {e}"),
+        }
+    }
+
+    #[test]
+    fn parse_cop_args_invalid_severity() {
+        let args = quote! { name = "X", default_severity = "info" };
+        match parse_cop_args(args) {
+            Ok(_) => panic!("expected Err for invalid severity"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("default_severity must be one of"),
+                    "got: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_cop_args_options_path() {
+        let args = quote! { name = "X", options = MyOptions };
+        match parse_cop_args(args) {
+            Ok(a) => {
+                let path = a.options.unwrap();
+                assert_eq!(path.segments.last().unwrap().ident.to_string(), "MyOptions");
+            }
+            Err(e) => panic!("expected Ok, got Err: {e}"),
+        }
     }
 }
