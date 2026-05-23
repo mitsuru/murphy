@@ -49,6 +49,38 @@ fn builtin_only_project_matches_committed_snapshot() {
     );
 }
 
+/// `clean.rb` on its own must lint to a zero-offense JSON response —
+/// the bare-defaults wire shape (`[]` plus newline) is part of the
+/// ADR 0006 contract. The whole-directory test above captures the
+/// surface for *non-empty* output; this one is its zero-offense pair.
+/// If the JSON shape ever regresses to `null` / `{}` / `""`, the
+/// directory test would still pass (offenses elsewhere mask it), but
+/// this one will catch it.
+#[test]
+fn clean_file_alone_yields_empty_json_array_and_exit_zero() {
+    use assert_cmd::Command;
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(std::path::Path::new(FIXTURE_DIR).join("clean.rb"))
+        .assert()
+        .code(0);
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be valid JSON");
+    assert!(
+        parsed.is_array(),
+        "zero-offense response must be a JSON array, got {parsed:?}"
+    );
+    let arr = parsed.as_array().unwrap();
+    assert!(
+        arr.is_empty(),
+        "clean.rb on its own must produce zero offenses, got {arr:?}"
+    );
+}
+
 /// A subset that asserts the `range.start_offset` of the multibyte file's
 /// `puts "日本語"` offense lands on a u8 byte boundary, not a char index.
 /// Byte 162 here is the index of `p` in `puts` after a leading multibyte
