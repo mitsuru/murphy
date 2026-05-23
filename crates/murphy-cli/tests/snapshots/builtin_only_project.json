@@ -1,0 +1,30 @@
+[
+  {
+    "file": "./dirty.rb",
+    "cop_name": "Murphy/NoReceiverPuts",
+    "range": { "start_offset": 31, "end_offset": 39 },
+    "severity": "warning",
+    "message": "Use a logger instead of puts"
+  },
+  {
+    "file": "./dirty.rb",
+    "cop_name": "Murphy/NoReceiverPuts",
+    "range": { "start_offset": 40, "end_offset": 49 },
+    "severity": "warning",
+    "message": "Use a logger instead of puts"
+  },
+  {
+    "file": "./dirty.rb",
+    "cop_name": "Murphy/NoReceiverPuts",
+    "range": { "start_offset": 50, "end_offset": 56 },
+    "severity": "warning",
+    "message": "Use a logger instead of puts"
+  },
+  {
+    "file": "./multibyte.rb",
+    "cop_name": "Murphy/NoReceiverPuts",
+    "range": { "start_offset": 162, "end_offset": 178 },
+    "severity": "warning",
+    "message": "Use a logger instead of puts"
+  }
+]

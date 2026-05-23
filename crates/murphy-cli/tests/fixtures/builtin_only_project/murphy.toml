@@ -1,0 +1,2 @@
+# Empty config — exercises the default cop set (`Murphy/NoReceiverPuts`
+# only in v1) so the snapshot anchors the bare-defaults wire shape.
