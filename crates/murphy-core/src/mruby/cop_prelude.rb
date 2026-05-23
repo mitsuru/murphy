@@ -68,8 +68,41 @@ class Murphy
   # nothing is cached Ruby-side. `name` is coerced to a Symbol so a cop reads
   # `node.name == :puts` exactly like design §4.
   class Node
-    def initialize(handle)
-      @handle = handle
+    attr_reader :id
+
+    def initialize(id)
+      @id = id
+      @handle = id
+    end
+
+    def kind
+      Murphy.node_kind(@id)
+    end
+
+    def parent
+      pid = Murphy.node_parent(@id)
+      pid && Murphy::Node.new(pid)
+    end
+
+    def children
+      Murphy.node_children(@id).map { |node_id| Murphy::Node.new(node_id) }
+    end
+
+    def ancestors
+      Murphy.node_ancestors(@id).map { |node_id| Murphy::Node.new(node_id) }
+    end
+
+    def descendants
+      Murphy.node_descendants(@id).map { |node_id| Murphy::Node.new(node_id) }
+    end
+
+    def range
+      start_offset, end_offset = Murphy.node_range(@id)
+      Murphy::Range.new(start_offset, end_offset)
+    end
+
+    def field(name)
+      wrap_field(Murphy.node_field(@id, name))
     end
 
     # Returns a Symbol (design §4: `node.name == :puts`), or nil if the
@@ -93,6 +126,51 @@ class Murphy
       return nil if start_offset < 0 || end_offset < 0
 
       Murphy::Range.new(start_offset, end_offset)
+    end
+
+    private
+
+    def wrap_field(value)
+      if value.is_a?(Integer)
+        Murphy::Node.new(value)
+      elsif value.is_a?(Array)
+        value.map { |item| item.is_a?(Integer) ? Murphy::Node.new(item) : item }
+      else
+        value
+      end
+    end
+  end
+
+  class CallHandleNode
+    attr_reader :handle
+
+    def initialize(handle)
+      @handle = handle
+    end
+
+    def id
+      @handle
+    end
+
+    def name
+      n = Murphy.node_name(@handle)
+      n && n.to_sym
+    end
+
+    def receiver_nil?
+      Murphy.node_receiver_nil?(@handle)
+    end
+
+    def message_loc
+      start_offset = Murphy.node_msg_start(@handle)
+      end_offset = Murphy.node_msg_end(@handle)
+      return nil if start_offset < 0 || end_offset < 0
+
+      Murphy::Range.new(start_offset, end_offset)
+    end
+
+    def kind
+      nil
     end
   end
 
@@ -151,6 +229,44 @@ class Murphy
       @subclasses ||= []
     end
 
+    def self.__hook_kinds
+      own_methods = instance_methods - Murphy::Cop.instance_methods
+      own_methods.map do |m|
+        s = m.to_s
+        s[0, 3] == "on_" && s.length > 3 ? s[3, s.length - 3] : nil
+      end.compact
+    end
+
+    def self.def_node_matcher(name, pattern)
+      ir = Murphy.compile_pattern(pattern.to_s)
+      define_method(name) do |node|
+        previous = $__murphy_current_cop
+        $__murphy_current_cop = self
+        begin
+          Murphy::Node.wrap_match(Murphy.match(ir, node.id))
+        ensure
+          $__murphy_current_cop = previous
+        end
+      end
+    end
+
+    def self.def_node_search(name, pattern)
+      ir = Murphy.compile_pattern(pattern.to_s)
+      define_method(name) do |root|
+        return enum_for(name, root) unless block_given?
+        previous = $__murphy_current_cop
+        $__murphy_current_cop = self
+        begin
+          Murphy.node_descendants(root.id).each do |node_id|
+            captures = Murphy::Node.wrap_match(Murphy.match(ir, node_id))
+            yield captures if captures
+          end
+        ensure
+          $__murphy_current_cop = previous
+        end
+      end
+    end
+
     # Default visitor: a no-op. A cop overrides the hooks it cares about.
     def on_call_node(node); end
 
@@ -178,12 +294,33 @@ class Murphy
       )
     end
 
-    # Host entry point. Walks the LIVE call-node handle space `0...node_count`
-    # (Task-3 ADR 0008 walk-order index) and dispatches each to the cop.
-    # Read-only traversal (design §4).
+    # Host entry point. Walks the arena AST and dispatches `on_<kind>` hooks.
+    # The legacy `on_call_node` loop remains during the bridge migration so
+    # existing spike-era cops keep running until the CLI fixtures are ported.
     def __run
+      ([Murphy.ast_root] + Murphy.node_descendants(Murphy.ast_root)).each do |node_id|
+        node = Murphy::Node.new(node_id)
+        kind = node.kind
+        next unless kind
+
+        hook = ("on_" + kind.to_s).to_sym
+        send(hook, node) if respond_to?(hook)
+      end
+
       Murphy.node_count.times do |h|
-        on_call_node(Murphy::Node.new(h))
+        on_call_node(Murphy::CallHandleNode.new(h))
+      end
+    end
+  end
+
+  class Node
+    def self.wrap_match(value)
+      if value.is_a?(Integer)
+        Murphy::Node.new(value)
+      elsif value.is_a?(Array)
+        value.map { |item| wrap_match(item) }
+      else
+        value
       end
     end
   end

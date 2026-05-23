@@ -8,6 +8,7 @@
 //! pipeline integration (Task 7) land in their own tasks.
 
 pub(crate) mod build;
+pub(crate) mod pattern_registry;
 pub mod primitives;
 pub mod sandbox;
 pub(crate) mod sdk;

@@ -973,6 +973,356 @@ fn error_offense(file: &str, cop_name: &str, message: &str) -> Offense {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CStr;
+    use std::sync::{Mutex, MutexGuard};
+
+    static REPORTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static REPORT_GUARD: Mutex<()> = Mutex::new(());
+
+    fn lock_reports() -> MutexGuard<'static, ()> {
+        let guard = REPORT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        REPORTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        guard
+    }
+
+    fn drain_reports() -> Vec<String> {
+        std::mem::take(&mut *REPORTS.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    unsafe extern "C" fn native_test_report(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+        let mut ptr: *const std::os::raw::c_char = std::ptr::null();
+        // SAFETY: native callback; `mrb` valid & non-null; `c"z"` requests one
+        // NUL-terminated string and `ptr` is a live out-pointer.
+        unsafe {
+            mrb_get_args(
+                mrb,
+                c"z".as_ptr(),
+                &mut ptr as *mut *const std::os::raw::c_char,
+            );
+        }
+        // SAFETY: mruby's `z` arg points at a NUL-terminated string for the
+        // duration of this callback.
+        let value = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        REPORTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(value);
+        // SAFETY: `mrb` valid & non-null.
+        unsafe { eval_nil(mrb) }
+    }
+
+    unsafe fn register_test_report(mrb: *mut mrb_state) {
+        // SAFETY: `mrb` valid & non-null; `Murphy` exists after primitives
+        // registration; function pointer matches the mruby native ABI.
+        unsafe {
+            let murphy = mrb_class_get(mrb, c"Murphy".as_ptr());
+            mrb_define_module_function(
+                mrb,
+                murphy,
+                c"__test_report".as_ptr(),
+                Some(native_test_report),
+                args_req(1),
+            );
+        }
+    }
+
+    #[test]
+    fn prelude_reports_hook_kinds_from_declared_on_methods_only() {
+        let _guard = lock_reports();
+        let mut st = MrubyState::open();
+        // SAFETY: valid mrb state; registration only defines functions/classes.
+        unsafe {
+            crate::mruby::primitives::register(st.raw());
+            register_sdk(st.raw());
+            register_test_report(st.raw());
+        }
+        assert!(
+            !st.eval_checked(PRELUDE),
+            "prelude must load without raising"
+        );
+        assert!(
+            !st.eval_checked(
+                r#"
+            class HookKindCop < Murphy::Cop
+              def helper; end
+              def on_send(node); end
+              def on_def(node); end
+            end
+            Murphy.__test_report(HookKindCop.__hook_kinds.sort.join(","))
+            "#,
+            ),
+            "hook kind script must run without raising"
+        );
+
+        assert_eq!(drain_reports(), vec!["def,send"]);
+    }
+
+    #[test]
+    fn legacy_on_call_node_receives_call_handle_wrapper_not_arena_node() {
+        let _guard = lock_reports();
+        let ctx = AstContext::new(b"puts 1\n".to_vec());
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: valid mrb state; registration only defines functions/classes.
+            unsafe {
+                crate::mruby::primitives::register(st.raw());
+                register_sdk(st.raw());
+                register_test_report(st.raw());
+            }
+            assert!(
+                !st.eval_checked(PRELUDE),
+                "prelude must load without raising"
+            );
+            assert!(
+                !st.eval_checked(
+                    r##"
+                class LegacyCop < Murphy::Cop
+                  def on_call_node(node)
+                    Murphy.__test_report("#{node.name}|#{node.receiver_nil?}|#{node.kind.inspect}")
+                  end
+                end
+                LegacyCop.new.__run
+                "##,
+                ),
+                "legacy call wrapper script must run without raising"
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_reports(), vec!["puts|true|nil"]);
+    }
+
+    #[test]
+    fn prelude_def_node_matcher_defines_an_instance_method() {
+        let _guard = lock_reports();
+        let mut st = MrubyState::open();
+        // SAFETY: valid mrb state; registration only defines functions/classes.
+        unsafe {
+            crate::mruby::primitives::register(st.raw());
+            register_sdk(st.raw());
+            register_test_report(st.raw());
+        }
+        assert!(
+            !st.eval_checked(PRELUDE),
+            "prelude must load without raising"
+        );
+        assert!(
+            !st.eval_checked(
+                r#"
+            class MatcherCop < Murphy::Cop
+              def_node_matcher :is_puts, "(send nil? :puts $...)"
+            end
+            Murphy.__test_report(MatcherCop.new.respond_to?(:is_puts).to_s)
+            "#,
+            ),
+            "def_node_matcher declaration must run without raising"
+        );
+
+        assert_eq!(drain_reports(), vec!["true"]);
+    }
+
+    #[test]
+    fn prelude_def_node_matcher_wraps_capture_ids_as_nodes() {
+        let _guard = lock_reports();
+        let ctx = AstContext::new(b"puts x\n".to_vec());
+        let root = ctx.arena_ast().root();
+        let captured = match ctx.arena_ast().kind(root) {
+            murphy_ast::NodeKind::Send { args, .. } => {
+                let raw = ctx.arena_ast().raw_parts();
+                raw.node_lists[args.start as usize]
+            }
+            _ => panic!("fixture root is a send"),
+        };
+        let captured_kind = murphy_ast::pattern_name(ctx.arena_ast().kind(captured).tag())
+            .expect("captured kind is pattern-addressable");
+        let expected = format!("{}|{}", captured.0, captured_kind);
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: valid mrb state; registration only defines functions/classes.
+            unsafe {
+                crate::mruby::primitives::register(st.raw());
+                register_sdk(st.raw());
+                register_test_report(st.raw());
+            }
+            assert!(
+                !st.eval_checked(PRELUDE),
+                "prelude must load without raising"
+            );
+            assert!(
+                !st.eval_checked(
+                    r##"
+                class CaptureCop < Murphy::Cop
+                  def_node_matcher :puts_arg, "(send nil? :puts $_)"
+                end
+                cap = CaptureCop.new.puts_arg(Murphy::Node.new(Murphy.ast_root))[0]
+                Murphy.__test_report("#{cap.id}|#{cap.kind}")
+                "##,
+                ),
+                "capture wrapper script must run without raising"
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_reports(), vec![expected]);
+    }
+
+    #[test]
+    fn prelude_def_node_search_defines_an_instance_method() {
+        let _guard = lock_reports();
+        let mut st = MrubyState::open();
+        // SAFETY: valid mrb state; registration only defines functions/classes.
+        unsafe {
+            crate::mruby::primitives::register(st.raw());
+            register_sdk(st.raw());
+            register_test_report(st.raw());
+        }
+        assert!(
+            !st.eval_checked(PRELUDE),
+            "prelude must load without raising"
+        );
+        assert!(
+            !st.eval_checked(
+                r#"
+            class SearchCop < Murphy::Cop
+              def_node_search :each_puts, "(send nil? :puts $...)"
+            end
+            Murphy.__test_report(SearchCop.new.respond_to?(:each_puts).to_s)
+            "#,
+            ),
+            "def_node_search declaration must run without raising"
+        );
+
+        assert_eq!(drain_reports(), vec!["true"]);
+    }
+
+    #[test]
+    fn prelude_node_wraps_arena_node_primitives() {
+        let _guard = lock_reports();
+        let ctx = AstContext::new(b"puts x\nlogger.info(x)\n".to_vec());
+        let root = ctx.arena_ast().root();
+        let first_child = ctx
+            .arena_ast()
+            .children(root)
+            .next()
+            .expect("fixture root has a first child");
+        let root_kind = murphy_ast::pattern_name(ctx.arena_ast().kind(root).tag())
+            .expect("fixture root kind is pattern-addressable");
+        let root_range = ctx.arena_ast().range(root);
+        let expected = format!(
+            "{}|{}|{},{}|parent={}|children={}|ancestors={}|descendants={}",
+            root.0,
+            root_kind,
+            root_range.start,
+            root_range.end,
+            root.0,
+            ctx.arena_ast().children(root).count(),
+            ctx.arena_ast().ancestors(first_child).count(),
+            ctx.arena_ast().descendants(root).count()
+        );
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: valid mrb state; registration only defines functions/classes.
+            unsafe {
+                crate::mruby::primitives::register(st.raw());
+                register_sdk(st.raw());
+                register_test_report(st.raw());
+            }
+            assert!(
+                !st.eval_checked(PRELUDE),
+                "prelude must load without raising"
+            );
+            assert!(
+                !st.eval_checked(
+                    r##"
+                root = Murphy::Node.new(Murphy.ast_root)
+                first_child = root.children[0]
+                range = root.range
+                Murphy.__test_report(
+                  "#{root.id}|#{root.kind}|#{range.start_offset},#{range.end_offset}|" \
+                  "parent=#{first_child.parent.id}|" \
+                  "children=#{root.children.length}|" \
+                  "ancestors=#{first_child.ancestors.length}|" \
+                  "descendants=#{root.descendants.length}"
+                )
+                "##,
+                ),
+                "arena node wrapper script must run without raising"
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_reports(), vec![expected]);
+    }
+
+    #[test]
+    fn prelude_node_field_wraps_node_ids_as_nodes() {
+        let _guard = lock_reports();
+        let ctx = AstContext::new(b"logger.info(x)\n".to_vec());
+        let send = std::iter::once(ctx.arena_ast().root())
+            .chain(ctx.arena_ast().descendants(ctx.arena_ast().root()))
+            .find(|&id| {
+                matches!(
+                    ctx.arena_ast().kind(id),
+                    murphy_ast::NodeKind::Send { receiver, .. } if receiver.get().is_some()
+                )
+            })
+            .expect("fixture contains an explicit receiver send");
+        let receiver = match ctx.arena_ast().kind(send) {
+            murphy_ast::NodeKind::Send { receiver, .. } => receiver.get().unwrap(),
+            _ => unreachable!("selected node is a send"),
+        };
+        let expected = format!("receiver={}|method=info", receiver.0);
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: valid mrb state; registration only defines functions/classes.
+            unsafe {
+                crate::mruby::primitives::register(st.raw());
+                register_sdk(st.raw());
+                register_test_report(st.raw());
+            }
+            assert!(
+                !st.eval_checked(PRELUDE),
+                "prelude must load without raising"
+            );
+            assert!(
+                !st.eval_checked(&format!(
+                    r##"
+                node = Murphy::Node.new({})
+                receiver = node.field(:receiver)
+                method = node.field(:method)
+                Murphy.__test_report("receiver=#{{receiver.id}}|method=#{{method}}")
+                "##,
+                    send.0
+                )),
+                "node field wrapper script must run without raising"
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_reports(), vec![expected]);
+    }
 
     /// PIN C / ADR 0001: an edit whose offset exceeds the `u32` domain MUST be
     /// dropped, never `as u32`-truncated. Edits come straight from Ruby ints
@@ -1186,6 +1536,60 @@ end
         assert_eq!(
             jn["autocorrect"], jm["autocorrect"],
             "native<->mruby parity: autocorrect JSON shape must be identical"
+        );
+    }
+
+    #[test]
+    fn run_mruby_cop_dispatches_arena_on_kind_hooks() {
+        let ctx = AstContext::new(b"puts 1\n".to_vec());
+        const MRUBY_COP: &str = r#"
+class ArenaSendCop < Murphy::Cop
+  def on_send(node)
+    return unless node.field(:method) == :puts
+    add_offense(node.range, message: "arena send")
+  end
+end
+"#;
+        let offenses = run_mruby_cop(&ctx, MRUBY_COP, "Murphy/ArenaSend", "t.rb");
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].cop_name, "Murphy/ArenaSend");
+        assert_eq!(offenses[0].message, "arena send");
+        assert_eq!(
+            offenses[0].range,
+            Range {
+                start_offset: 0,
+                end_offset: 6
+            }
+        );
+    }
+
+    #[test]
+    fn def_node_matcher_predicate_calls_cop_instance_method() {
+        let ctx = AstContext::new(b"puts 1\nputs x\n".to_vec());
+        const MRUBY_COP: &str = r#"
+class PredicateCop < Murphy::Cop
+  def_node_matcher :puts_one, "(send nil? :puts #is_one?)"
+
+  def on_send(node)
+    add_offense(node.range, message: "one") if puts_one(node)
+  end
+
+  def is_one?(node)
+    node.kind == :int && Murphy.raw_source(node.range.start_offset, node.range.end_offset) == "1"
+  end
+end
+"#;
+        let offenses = run_mruby_cop(&ctx, MRUBY_COP, "Murphy/Predicate", "t.rb");
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].message, "one");
+        assert_eq!(
+            offenses[0].range,
+            Range {
+                start_offset: 0,
+                end_offset: 6
+            }
         );
     }
 

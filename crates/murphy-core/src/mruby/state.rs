@@ -101,6 +101,8 @@ pub struct AstContext {
     /// The owned source buffer the (transmuted) `parse_result` references.
     /// Dropped LAST (explicitly, in `impl Drop`), after `parse_result`.
     source: ManuallyDrop<Box<[u8]>>,
+    /// Owned arena AST used by the runtime pattern matcher backend.
+    arena_ast: murphy_ast::Ast,
 }
 
 impl AstContext {
@@ -112,9 +114,12 @@ impl AstContext {
     /// `spikes/live_resolution_poc` shape.
     pub fn new(source: impl Into<Box<[u8]>>) -> Arc<Self> {
         let source: Box<[u8]> = source.into();
+        let source_text =
+            std::str::from_utf8(&source).expect("mruby AST context source must be valid UTF-8");
+        let arena_ast = murphy_translate::translate(source_text, "<mruby>");
 
         // `result` borrows `source` for real here.
-        let result: ParseResult<'_> = parse(&source);
+        let result: ParseResult<'_> = parse(source_text.as_bytes());
 
         // LIFETIME LAUNDER: `ParseResult<'_ borrowing source>` →
         // `ParseResult<'static>`.
@@ -140,6 +145,7 @@ impl AstContext {
         Arc::new(Self {
             parse_result: ManuallyDrop::new(parse_result),
             source: ManuallyDrop::new(source),
+            arena_ast,
         })
     }
 
@@ -153,6 +159,11 @@ impl AstContext {
     /// The owned source bytes (`parse_result` conceptually borrows these).
     pub fn source(&self) -> &[u8] {
         &self.source
+    }
+
+    /// The translated arena AST used by runtime node-pattern matching.
+    pub fn arena_ast(&self) -> &murphy_ast::Ast {
+        &self.arena_ast
     }
 }
 
@@ -508,6 +519,12 @@ mod tests {
         // parse_result alive together (abandon-path structure, ADR 0009 rule
         // 1). Here the last owner drops → explicit ordered teardown.
         drop(ctx);
+    }
+
+    #[test]
+    #[should_panic(expected = "mruby AST context source must be valid UTF-8")]
+    fn ast_context_rejects_invalid_utf8_source() {
+        let _ = AstContext::new(vec![b'p', b'u', b't', b's', b' ', 0xff, b'\n']);
     }
 
     /// Drop-order regression target for `impl Drop for AstContext` (ADR 0008
