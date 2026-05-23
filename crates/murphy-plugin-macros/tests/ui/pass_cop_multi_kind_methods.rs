@@ -17,6 +17,6 @@ impl MultiKind {
     fn check_def(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(MultiKind);
+register_cops!(mode = dynamic, MultiKind);
 
 fn main() {}

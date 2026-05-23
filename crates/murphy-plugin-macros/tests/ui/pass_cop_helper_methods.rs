@@ -23,6 +23,6 @@ impl WithHelpers {
     }
 }
 
-register_cops!(WithHelpers);
+register_cops!(mode = dynamic, WithHelpers);
 
 fn main() {}

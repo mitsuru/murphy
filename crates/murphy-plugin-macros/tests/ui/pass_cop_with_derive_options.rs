@@ -17,6 +17,6 @@ impl Wide {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(Wide);
+register_cops!(mode = dynamic, Wide);
 
 fn main() {}

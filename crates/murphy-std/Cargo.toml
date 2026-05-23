@@ -1,0 +1,18 @@
+[package]
+name = "murphy-std"
+version = "0.1.0"
+edition = "2024"
+description = "Murphy standard cop pack (Murphy/Lint/Style/Layout, ADR 0018) — single-surface plugin pack statically linked into murphy-cli (murphy-9cr.23 §12a)."
+
+[dependencies]
+# Single-surface plugin ABI (ADR 0038). The pack must reach Murphy internals
+# only through this crate — the boundary is asserted by the integration test
+# in tests/dep_boundary.rs and is the compile-time enforcement point for
+# §5 of docs/plans/2026-05-22-plugin-reboot-design.md.
+murphy-plugin-api = { path = "../murphy-plugin-api" }
+# `#[derive(CopOptions)]`-expanded code references `::serde_json` directly
+# in the consuming crate root (the standard proc-macro pattern). Permitted
+# because it is a third-party dependency, not a Murphy-internal crate —
+# the boundary gate only forbids non-`murphy-plugin-api` Murphy deps.
+# Also used by `tests/dep_boundary.rs` to parse `cargo metadata` output.
+serde_json = "1"

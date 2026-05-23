@@ -596,6 +596,7 @@ dependencies = [
  "murphy-core",
  "murphy-plugin-api",
  "murphy-reporting",
+ "murphy-std",
  "murphy-translate",
  "rayon",
  "serde_json",
@@ -643,6 +644,7 @@ name = "murphy-plugin-api"
 version = "0.1.0"
 dependencies = [
  "murphy-ast",
+ "murphy-plugin-macros",
  "serde_json",
 ]
 
@@ -672,6 +674,14 @@ name = "murphy-reporting"
 version = "0.1.0"
 dependencies = [
  "murphy-core",
+ "serde_json",
+]
+
+[[package]]
+name = "murphy-std"
+version = "0.1.0"
+dependencies = [
+ "murphy-plugin-api",
  "serde_json",
 ]
 

@@ -17,6 +17,6 @@ impl FullMeta {
     fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(FullMeta);
+register_cops!(mode = dynamic, FullMeta);
 
 fn main() {}

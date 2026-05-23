@@ -26,6 +26,6 @@ impl NodeCop for Second {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-murphy_plugin_macros::register_cops!(First, Second);
+murphy_plugin_macros::register_cops!(mode = dynamic, First, Second);
 
 fn main() {}

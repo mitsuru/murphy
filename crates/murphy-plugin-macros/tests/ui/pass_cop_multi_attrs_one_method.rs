@@ -13,6 +13,6 @@ impl BranchChecker {
     fn check_branch(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(BranchChecker);
+register_cops!(mode = dynamic, BranchChecker);
 
 fn main() {}

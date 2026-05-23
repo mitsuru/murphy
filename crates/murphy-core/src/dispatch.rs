@@ -194,14 +194,31 @@ pub fn run_cops(ast: &Ast, cops: &[&PluginCopV1], sink: &mut OffenseSink) {
     let mut base = build_cx_raw(ast, sink);
     for cop in cops {
         base.cop_name = cop.name;
-        // Per-cop kind list. Empty kinds = the cop does not subscribe to
-        // any node — silently a no-op (kept as a soft case so a future
-        // file-level cop variant can land without churn here).
-        let kinds: &[PluginNodeKindTag] = if cop.kinds_len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(cop.kinds_ptr, cop.kinds_len) }
-        };
+        // Per-cop kind list. **Empty `KINDS` means file-visit**: the cop
+        // is invoked exactly once with `ast.root()` instead of being
+        // dispatched per matching node. ADR 0038 deletes the `FileCop`
+        // trait — every cop is still a `NodeCop` and still receives a
+        // `NodeId` — but a `NodeCop` with `KINDS = &[]` is the
+        // intentional degenerate form for whole-file cops like
+        // `Layout/TrailingWhitespace`, which scan `cx.raw_source(range)`
+        // over `cx.range(root)`. The dispatcher is the contract surface
+        // for this semantic; the trait doc on `NodeCop` cross-references
+        // back here.
+        if cop.kinds_len == 0 {
+            let root = ast.root();
+            let rc = unsafe { (cop.dispatch)(root, &base) };
+            if rc != 0 {
+                let name = std::str::from_utf8(unsafe { cop.name.as_bytes() })
+                    .unwrap_or("<invalid cop name>");
+                eprintln!(
+                    "murphy: cop '{name}' returned non-zero ({rc}) on file-visit; \
+                     disabling for this file"
+                );
+            }
+            continue;
+        }
+        let kinds: &[PluginNodeKindTag] =
+            unsafe { std::slice::from_raw_parts(cop.kinds_ptr, cop.kinds_len) };
         let mut disabled = false;
         for tag in kinds {
             if disabled {
@@ -603,5 +620,56 @@ mod tests {
         assert_eq!(ac.edits[0].range.start_offset, 0);
         assert_eq!(ac.edits[0].range.end_offset, 3);
         assert_eq!(ac.edits[0].replacement, "logger.info");
+    }
+
+    // (7) Empty `KINDS` = file-visit: the cop is invoked exactly once,
+    //     with `node == ast.root()`. Per-test static atomic + node-id
+    //     cell to avoid races with the parallel test runner (per the
+    //     `Test Parallelism` note in CLAUDE.md).
+    use std::sync::atomic::AtomicU32;
+    static FILE_VISIT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static FILE_VISIT_SEEN_NODE: AtomicU32 = AtomicU32::new(u32::MAX);
+    unsafe extern "C" fn file_visit_dispatch(node: NodeId, _cx: *const CxRaw) -> i32 {
+        FILE_VISIT_CALLS.fetch_add(1, Ordering::SeqCst);
+        FILE_VISIT_SEEN_NODE.store(node.0, Ordering::SeqCst);
+        0
+    }
+    static FILE_VISIT_KINDS: &[PluginNodeKindTag] = &[];
+    static FILE_VISIT_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/FileVisit"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: FILE_VISIT_KINDS.as_ptr(),
+        kinds_len: FILE_VISIT_KINDS.len(),
+        dispatch: file_visit_dispatch,
+    };
+
+    #[test]
+    fn empty_kinds_dispatches_once_per_file_with_root_id() {
+        FILE_VISIT_CALLS.store(0, Ordering::SeqCst);
+        FILE_VISIT_SEEN_NODE.store(u32::MAX, Ordering::SeqCst);
+
+        // Arena: `[Nil, Int, Begin]` — three nodes, root is index 2.
+        let ast = ast_nil_and_int();
+        let expected_root = ast.root().0;
+
+        let mut sink = OffenseSink::new("t.rb");
+        run_cops(&ast, &[&FILE_VISIT_COP], &mut sink);
+
+        assert_eq!(
+            FILE_VISIT_CALLS.load(Ordering::SeqCst),
+            1,
+            "a file-visit cop (KINDS = []) must be called exactly once \
+             regardless of arena size",
+        );
+        assert_eq!(
+            FILE_VISIT_SEEN_NODE.load(Ordering::SeqCst),
+            expected_root,
+            "the file-visit dispatch must hand the cop ast.root()",
+        );
     }
 }

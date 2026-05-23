@@ -1,8 +1,11 @@
 //! Runtime behaviour of `#[derive(CopOptions)]`-generated code, against
 //! the single-surface ABI (murphy-9cr.21).
 
+// `murphy_plugin_api` re-exports both the `CopOptions` trait and the
+// `#[derive(CopOptions)]` macro (single-surface, murphy-9cr.23 §12b/§12d),
+// so neither this test nor any cop crate needs to name `murphy_plugin_macros`
+// directly to use the derive.
 use murphy_plugin_api::{ConfigErrorKind, CopOptions, OptionSpec, RawSlice};
-use murphy_plugin_macros::CopOptions;
 
 #[derive(CopOptions, Debug)]
 struct Opts {

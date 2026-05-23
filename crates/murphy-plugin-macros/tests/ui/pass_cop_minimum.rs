@@ -11,6 +11,6 @@ impl NoTabs {
     fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(NoTabs);
+register_cops!(mode = dynamic, NoTabs);
 
 fn main() {}

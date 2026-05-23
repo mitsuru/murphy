@@ -23,6 +23,6 @@ impl NodeCop for DeepNest {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(DeepNest);
+register_cops!(mode = dynamic, DeepNest);
 
 fn main() {}

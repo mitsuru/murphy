@@ -13,6 +13,12 @@ murphy-cache = { path = "../murphy-cache" }
 murphy-translate = { path = "../murphy-translate" }
 murphy-plugin-api = { path = "../murphy-plugin-api" }
 murphy-reporting = { path = "../murphy-reporting" }
+# Standard cop pack (Murphy/Lint/Style/Layout, ADR 0018) — statically
+# linked into the CLI and registered through the same single-surface
+# plugin ABI as `.so` packs (murphy-9cr.23 §12b). The CLI owns the wiring
+# because murphy-core treats *all* cops uniformly as `PluginCopV1`s and
+# never hardcodes a particular pack.
+murphy-std = { path = "../murphy-std" }
 rayon = "1"
 serde_json = "1"
 

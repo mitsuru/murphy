@@ -36,13 +36,29 @@ impl NodeKindTag {
 /// Merges the spike's `NodeCop` and `CallCop` (a call cop is just a
 /// `NodeCop` on the `NodeKind::Send` variant); `FileCop` / `run_file`
 /// are deleted (ADR 0038).
+///
+/// ## File-visit (`KINDS = &[]`)
+///
+/// A cop with **`KINDS = &[]`** is the intentional degenerate form for
+/// whole-file scans: the dispatcher invokes `check` exactly once per
+/// file with `node == cx.root()`. This keeps the single-surface
+/// invariant — every cop is still a `NodeCop` and still receives a
+/// `NodeId` — while letting raw-source cops like
+/// `Layout/TrailingWhitespace` walk `cx.raw_source(cx.range(root))`
+/// without subscribing to every possible root kind (the root of a Ruby
+/// file can be any of `Begin`, `Nil`, `Send`, `Def`, `Class`, …, so a
+/// fixed kind subscription would not work). The exact dispatch
+/// semantics live in `murphy-core::dispatch::run_cops`.
 pub trait NodeCop: Cop {
     /// Node kinds this cop is dispatched on. `#[on_node]` (murphy-9cr.8)
-    /// generates this; until then it is written by hand.
+    /// generates this; until then it is written by hand. An empty slice
+    /// selects the file-visit form documented on the trait.
     const KINDS: &'static [NodeKindTag];
 
     /// Inspect one matched node. Stateless: everything the callback needs
-    /// is `node` and `cx`.
+    /// is `node` and `cx`. For a file-visit cop (`KINDS = &[]`) the
+    /// caller passes `cx.root()`; the cop typically derives the file's
+    /// range from there.
     fn check(&self, node: NodeId, cx: &Cx<'_>);
 }
 
