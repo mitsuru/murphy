@@ -190,7 +190,7 @@ impl T6 {
 
 // Emit the `murphy_plugin_register` entry point once for T6.
 // Compilation success proves `register_cops!` + `#[cop]` compose correctly.
-murphy_plugin_macros::register_cops!(T6);
+murphy_plugin_macros::register_cops!(mode = dynamic, T6);
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

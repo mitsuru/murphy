@@ -28,6 +28,6 @@ impl NodeCop for NoSpaces {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-murphy_plugin_macros::register_cops!(NoTabs, NoSpaces);
+murphy_plugin_macros::register_cops!(mode = dynamic, NoTabs, NoSpaces);
 
 fn main() {}

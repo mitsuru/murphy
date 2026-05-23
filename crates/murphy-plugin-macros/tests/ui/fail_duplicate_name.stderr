@@ -1,5 +1,5 @@
 error[E0080]: evaluation panicked: register_cops!: two registered cops share the same NAME
   --> tests/ui/fail_duplicate_name.rs:29:1
    |
-29 | murphy_plugin_macros::register_cops!(First, Second);
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed here
+29 | murphy_plugin_macros::register_cops!(mode = dynamic, First, Second);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_::_` failed here

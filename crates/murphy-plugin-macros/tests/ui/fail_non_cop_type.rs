@@ -4,6 +4,6 @@
 
 struct NotACop;
 
-murphy_plugin_macros::register_cops!(NotACop);
+murphy_plugin_macros::register_cops!(mode = dynamic, NotACop);
 
 fn main() {}

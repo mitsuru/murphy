@@ -11,6 +11,6 @@ impl MyCheck {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(MyCheck);
+register_cops!(mode = dynamic, MyCheck);
 
 fn main() {}

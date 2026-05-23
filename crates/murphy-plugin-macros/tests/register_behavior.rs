@@ -37,7 +37,7 @@ impl NodeCop for NoSpaces {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(NoTabs, NoSpaces);
+register_cops!(mode = dynamic, NoTabs, NoSpaces);
 
 unsafe extern "C" {
     fn murphy_plugin_register(out: *mut PluginRegistration) -> i32;
