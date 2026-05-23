@@ -283,8 +283,7 @@ pub fn migrate_rubocop_yml_to_murphy_toml(text: &str) -> Result<String, ConfigEr
                         }
                     }
                     other => {
-                        unsupported_plugins
-                            .push(format!("{other:?} (non-string / non-mapping)"));
+                        unsupported_plugins.push(format!("{other:?} (non-string / non-mapping)"));
                     }
                 }
             }
@@ -553,7 +552,9 @@ plugins = [
     #[test]
     fn migrate_plugins_non_string_item_emits_unsupported() {
         // Sequence 内の非 string / 非 mapping 要素も silently drop しない
-        let out = migrate_rubocop_yml_to_murphy_toml("plugins:\n  - rubocop-rails\n  - 42\n  - true\n").unwrap();
+        let out =
+            migrate_rubocop_yml_to_murphy_toml("plugins:\n  - rubocop-rails\n  - 42\n  - true\n")
+                .unwrap();
         assert!(
             out.contains("plugins = [\"rubocop-rails\"]"),
             "valid string item should still be present:\n{out}"
