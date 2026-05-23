@@ -973,6 +973,149 @@ fn error_offense(file: &str, cop_name: &str, message: &str) -> Offense {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CStr;
+    use std::sync::{Mutex, MutexGuard};
+
+    static REPORTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static REPORT_GUARD: Mutex<()> = Mutex::new(());
+
+    fn lock_reports() -> MutexGuard<'static, ()> {
+        let guard = REPORT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        REPORTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        guard
+    }
+
+    fn drain_reports() -> Vec<String> {
+        std::mem::take(&mut *REPORTS.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    unsafe extern "C" fn native_test_report(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+        let mut ptr: *const std::os::raw::c_char = std::ptr::null();
+        // SAFETY: native callback; `mrb` valid & non-null; `c"z"` requests one
+        // NUL-terminated string and `ptr` is a live out-pointer.
+        unsafe {
+            mrb_get_args(
+                mrb,
+                c"z".as_ptr(),
+                &mut ptr as *mut *const std::os::raw::c_char,
+            );
+        }
+        // SAFETY: mruby's `z` arg points at a NUL-terminated string for the
+        // duration of this callback.
+        let value = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        REPORTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(value);
+        // SAFETY: `mrb` valid & non-null.
+        unsafe { eval_nil(mrb) }
+    }
+
+    unsafe fn register_test_report(mrb: *mut mrb_state) {
+        // SAFETY: `mrb` valid & non-null; `Murphy` exists after primitives
+        // registration; function pointer matches the mruby native ABI.
+        unsafe {
+            let murphy = mrb_class_get(mrb, c"Murphy".as_ptr());
+            mrb_define_module_function(
+                mrb,
+                murphy,
+                c"__test_report".as_ptr(),
+                Some(native_test_report),
+                args_req(1),
+            );
+        }
+    }
+
+    #[test]
+    fn prelude_reports_hook_kinds_from_declared_on_methods_only() {
+        let _guard = lock_reports();
+        let mut st = MrubyState::open();
+        // SAFETY: valid mrb state; registration only defines functions/classes.
+        unsafe {
+            crate::mruby::primitives::register(st.raw());
+            register_sdk(st.raw());
+            register_test_report(st.raw());
+        }
+        assert!(
+            !st.eval_checked(PRELUDE),
+            "prelude must load without raising"
+        );
+        assert!(
+            !st.eval_checked(
+                r#"
+            class HookKindCop < Murphy::Cop
+              def helper; end
+              def on_send(node); end
+              def on_def(node); end
+            end
+            Murphy.__test_report(HookKindCop.__hook_kinds.sort.join(","))
+            "#,
+            ),
+            "hook kind script must run without raising"
+        );
+
+        assert_eq!(drain_reports(), vec!["def,send"]);
+    }
+
+    #[test]
+    fn prelude_def_node_matcher_defines_an_instance_method() {
+        let _guard = lock_reports();
+        let mut st = MrubyState::open();
+        // SAFETY: valid mrb state; registration only defines functions/classes.
+        unsafe {
+            crate::mruby::primitives::register(st.raw());
+            register_sdk(st.raw());
+            register_test_report(st.raw());
+        }
+        assert!(
+            !st.eval_checked(PRELUDE),
+            "prelude must load without raising"
+        );
+        assert!(
+            !st.eval_checked(
+                r#"
+            class MatcherCop < Murphy::Cop
+              def_node_matcher :is_puts, "(send nil? :puts $...)"
+            end
+            Murphy.__test_report(MatcherCop.new.respond_to?(:is_puts).to_s)
+            "#,
+            ),
+            "def_node_matcher declaration must run without raising"
+        );
+
+        assert_eq!(drain_reports(), vec!["true"]);
+    }
+
+    #[test]
+    fn prelude_def_node_search_defines_an_instance_method() {
+        let _guard = lock_reports();
+        let mut st = MrubyState::open();
+        // SAFETY: valid mrb state; registration only defines functions/classes.
+        unsafe {
+            crate::mruby::primitives::register(st.raw());
+            register_sdk(st.raw());
+            register_test_report(st.raw());
+        }
+        assert!(
+            !st.eval_checked(PRELUDE),
+            "prelude must load without raising"
+        );
+        assert!(
+            !st.eval_checked(
+                r#"
+            class SearchCop < Murphy::Cop
+              def_node_search :each_puts, "(send nil? :puts $...)"
+            end
+            Murphy.__test_report(SearchCop.new.respond_to?(:each_puts).to_s)
+            "#,
+            ),
+            "def_node_search declaration must run without raising"
+        );
+
+        assert_eq!(drain_reports(), vec!["true"]);
+    }
 
     /// PIN C / ADR 0001: an edit whose offset exceeds the `u32` domain MUST be
     /// dropped, never `as u32`-truncated. Edits come straight from Ruby ints

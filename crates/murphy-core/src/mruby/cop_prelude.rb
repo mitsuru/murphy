@@ -151,6 +151,32 @@ class Murphy
       @subclasses ||= []
     end
 
+    def self.__hook_kinds
+      own_methods = instance_methods - Murphy::Cop.instance_methods
+      own_methods.map do |m|
+        s = m.to_s
+        s[0, 3] == "on_" && s.length > 3 ? s[3, s.length - 3] : nil
+      end.compact
+    end
+
+    def self.def_node_matcher(name, pattern)
+      ir = Murphy.compile_pattern(pattern.to_s)
+      define_method(name) do |node|
+        Murphy.match(ir, node.id)
+      end
+    end
+
+    def self.def_node_search(name, pattern)
+      ir = Murphy.compile_pattern(pattern.to_s)
+      define_method(name) do |root|
+        return enum_for(name, root) unless block_given?
+        Murphy.node_descendants(root.id).each do |node_id|
+          captures = Murphy.match(ir, node_id)
+          yield captures if captures
+        end
+      end
+    end
+
     # Default visitor: a no-op. A cop overrides the hooks it cares about.
     def on_call_node(node); end
 
