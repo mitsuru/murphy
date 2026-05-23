@@ -1,0 +1,7 @@
+error: #[cop] must be on an impl block
+ --> tests/ui/fail_cop_on_struct.rs:4:1
+  |
+4 | #[cop(name = "Plugin/NoTabs")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `cop` (in Nightly builds, run with -Z macro-backtrace for more info)

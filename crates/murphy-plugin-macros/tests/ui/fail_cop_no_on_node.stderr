@@ -1,0 +1,5 @@
+error: #[cop]: impl block has no #[on_node] methods
+ --> tests/ui/fail_cop_no_on_node.rs:8:1
+  |
+8 | impl NoTabs {
+  | ^^^^

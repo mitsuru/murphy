@@ -1,0 +1,21 @@
+error: #[cop]: missing required argument 'name'
+ --> tests/ui/fail_cop_missing_name.rs:9:1
+  |
+9 | #[cop]
+  | ^^^^^^
+  |
+  = note: this error originates in the attribute macro `cop` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `murphy_ast::NodeId`
+ --> tests/ui/fail_cop_missing_name.rs:1:5
+  |
+1 | use murphy_ast::NodeId;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `murphy_plugin_api::Cx`
+ --> tests/ui/fail_cop_missing_name.rs:2:5
+  |
+2 | use murphy_plugin_api::Cx;
+  |     ^^^^^^^^^^^^^^^^^^^^^

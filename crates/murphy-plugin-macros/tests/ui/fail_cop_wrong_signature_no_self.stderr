@@ -1,0 +1,19 @@
+error: #[on_node] methods must take `&self` as the first parameter
+  --> tests/ui/fail_cop_wrong_signature_no_self.rs:12:19
+   |
+12 |     fn check_send(node: NodeId, _cx: &Cx<'_>) {}
+   |                   ^^^^^^^^^^^^
+
+warning: unused import: `murphy_ast::NodeId`
+ --> tests/ui/fail_cop_wrong_signature_no_self.rs:1:5
+  |
+1 | use murphy_ast::NodeId;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `murphy_plugin_api::Cx`
+ --> tests/ui/fail_cop_wrong_signature_no_self.rs:2:5
+  |
+2 | use murphy_plugin_api::Cx;
+  |     ^^^^^^^^^^^^^^^^^^^^^

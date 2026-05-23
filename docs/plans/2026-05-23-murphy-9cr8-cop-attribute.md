@@ -93,7 +93,7 @@ murphy_plugin_macros::register_cops!(NoTabs);
 |---|---|---|---|
 | `name` | ✓ | string literal | — |
 | `description` | | string literal | `""` |
-| `default_severity` | | string literal `"warning"`/`"error"`/`"info"` | `None`(=トレイトデフォルト) |
+| `default_severity` | | string literal `"warning"`/`"error"` | `None`(=トレイトデフォルト) |
 | `default_enabled` | | bool literal | `None` |
 | `options` | | path (型名) | `::murphy_plugin_api::NoOptions` |
 
@@ -102,9 +102,9 @@ murphy_plugin_macros::register_cops!(NoTabs);
 - `name` 欠落 → `error: #[cop]: missing required argument 'name'`(マクロ位置)。
 - 重複キー → `error: #[cop]: duplicate argument 'name'`(2 つめのキーの span)。
 - 未知のキー → `error: #[cop]: unknown argument 'foo'`(キーの span)。
-- `default_severity` の文字列が `"warning"`/`"error"`/`"info"` 以外 →
-  `error: #[cop]: default_severity must be one of "warning"/"error"/"info"`
-  (リテラルの span)。
+- `default_severity` の文字列が `"warning"`/`"error"` 以外 →
+  `error: #[cop]: default_severity must be one of "warning" / "error"`
+  (リテラルの span)。`Severity` enum には `Warning`/`Error` の 2 値しかないため `"info"` は拒否される。
 - 型不一致(例: `name = 42`)→ syn のエラーをそのまま使用。
 
 ## 4. `#[on_node(...)]` 引数
@@ -130,6 +130,12 @@ murphy_plugin_macros::register_cops!(NoTabs);
 - 戻り値型は `()`(明示も省略も可)以外不可。
 - `async`、generic、`mut self`、`Self` 受け取り、追加引数すべて不可。
 - 違反は span 付き compile error(各引数または `fn` キーワードの位置)。
+- `#[cfg]` / `#[cfg_attr]` は **`#[on_node]` メソッド上では不可**(v1 制限)。
+  cfg で本体が条件付き消滅すると、生成される `KINDS` 配列要素と `match`
+  arm は無条件のままなので「存在しないメソッドを呼ぶ」コンパイルエラーに
+  なるため。cfg 単位で出し分けたい場合は impl ブロック自体を cfg で
+  括る(`#[cfg(feature = "x")] #[cop(...)] impl T { ... }`)。
+  `#[on_node]` のない helper メソッドの cfg は許容。
 
 これらの制約は厳密なほうがマクロ展開が読みやすく(余計な adapter
 レイヤがいらない)、不適合な書き方は早期に明確なエラーになる。

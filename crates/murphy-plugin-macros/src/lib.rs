@@ -10,6 +10,7 @@
 //! `#[murphy::cop]` / `#[on_node]` (murphy-9cr.8) will land here
 //! alongside them.
 
+mod cop_attr;
 mod cop_options;
 mod node_pattern;
 
@@ -168,6 +169,79 @@ pub fn derive_cop_options(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn node_pattern(input: TokenStream) -> TokenStream {
     node_pattern::node_pattern(input.into()).into()
+}
+
+/// Attribute macro for defining a Murphy native cop (murphy-9cr.8).
+///
+/// Apply to an inherent `impl` block. The macro generates
+/// `impl murphy_plugin_api::Cop` (metadata) and
+/// `impl murphy_plugin_api::NodeCop` (`KINDS` array + a `check` dispatch
+/// that routes by `NodeKindTag`), then re-emits the original `impl` block
+/// with `#[on_node]` attributes stripped. The decorated type must derive
+/// (or otherwise implement) `Default` — `register_cops!` and the dispatch
+/// thunk construct a fresh cop value per matched node (ADR 0035).
+///
+/// # Arguments
+///
+/// - `name = "..."` (**required**) — the cop identifier.
+/// - `description = "..."` — one-line summary; defaults to the trait default.
+/// - `default_severity = "warning" | "error"` — severity default; absent =
+///   trait default.
+/// - `default_enabled = true | false` — enablement default; absent = trait
+///   default.
+/// - `options = <path>` — type to use for `Cop::Options` (defaults to
+///   `::murphy_plugin_api::NoOptions`).
+///
+/// # Requirements
+///
+/// - The `impl` must be **inherent** (`impl T { ... }`), non-generic, and
+///   not `unsafe`. `#[cop]` on a struct, trait impl, or generic impl is a
+///   compile error.
+/// - At least one method inside the `impl` must carry `#[on_node]`.
+/// - Each `#[on_node]` method must have the exact signature
+///   `fn(&self, NodeId, &Cx<'_>)`.
+///
+/// # Example
+///
+/// ```ignore
+/// use murphy_ast::NodeId;
+/// use murphy_plugin_api::Cx;
+/// use murphy_plugin_macros::{cop, on_node};
+///
+/// #[derive(Default)]
+/// struct NoTabs;
+///
+/// #[cop(name = "Plugin/NoTabs", description = "flag literal tabs")]
+/// impl NoTabs {
+///     #[on_node(kind = "send")]
+///     fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) { /* … */ }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn cop(args: TokenStream, item: TokenStream) -> TokenStream {
+    cop_attr::cop(args.into(), item.into()).into()
+}
+
+/// Declare that a method inside a `#[cop]` impl handles a particular AST
+/// node kind (murphy-9cr.8).
+///
+/// This macro **must** be used inside a `#[cop]` impl block.  When used
+/// correctly the `#[cop]` macro consumes `#[on_node]` before it reaches
+/// this entry point, so this proc-macro is only reachable on misuse and
+/// always emits a compile error.
+///
+/// # Example
+///
+/// ```ignore
+/// #[cop(name = "Plugin/NoTabs")]
+/// impl NoTabs {
+///     #[on_node(kind = "send")]
+///     fn check_send(&self, node: NodeId, cx: &Cx<'_>) { /* … */ }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn on_node(args: TokenStream, item: TokenStream) -> TokenStream {
+    cop_attr::on_node(args.into(), item.into()).into()
 }
 
 /// Parsed form of `register_cops!(Cop1, Cop2, …);`.
