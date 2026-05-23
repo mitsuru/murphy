@@ -580,6 +580,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "murphy-cache"
+version = "0.1.0"
+dependencies = [
+ "murphy-ast",
+ "sha2",
+]
+
+[[package]]
 name = "murphy-cli"
 version = "0.1.0"
 dependencies = [

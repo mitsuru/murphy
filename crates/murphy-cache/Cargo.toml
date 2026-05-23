@@ -1,0 +1,10 @@
+[package]
+name = "murphy-cache"
+version = "0.1.0"
+edition = "2024"
+description = "On-disk arena binary cache for Murphy — content-hash + version-key keyed lookup of murphy-ast Ast (murphy-9cr.26)."
+build = "build.rs"
+
+[dependencies]
+murphy-ast = { path = "../murphy-ast" }
+sha2 = "0.10"
