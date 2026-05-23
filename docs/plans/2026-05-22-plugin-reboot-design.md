@@ -252,6 +252,30 @@ node_lists + interner blob + FnTable + ABI version」。プラグインのエン
 経路に乗せる。これによって `.so` 配布パス(template repo / load
 diagnostic / plugin pack 形式)も同時に dogfooding される。
 
+**静的リンク時の登録契約。** `murphy-std` と動的 `.so` プラグインは
+`register_cops!` proc-macro が生成する **同一の `MurphyPluginV1` テーブル**
+を返す。違いは呼び出し方だけ:
+
+- 動的: `murphy-cli` が `dlopen` した `.so` から
+  `dlsym("murphy_plugin_register")` を取得して呼ぶ。`register_cops!` は
+  `#[no_mangle] extern "C" fn murphy_plugin_register` を emit する。
+- 静的: `murphy-cli` が `Cargo.toml` 依存として `murphy-std` を取り込み、
+  `register_cops!` が emit する Rust 公開関数(例
+  `murphy_std::__murphy_plugin_register()`)を直接呼ぶ。`#[no_mangle]`
+  シンボルが将来複数 static pack 間で衝突しないよう、Rust 名前空間の
+  ラッパーは crate ごとに別名になる。
+
+`murphy-cli` 側の登録パスは「`MurphyPluginV1` を受け取り plugin-api 経由で
+cop を登録する関数 1 本」に集約し、static/dynamic 両方ともそこに合流する
+── これによって標準 cop 専用ショートカットが ABI レベルでも存在しないこと
+を保証する。
+
+**CI 境界チェック。** `murphy-std` の `Cargo.toml` の Murphy 依存が
+`murphy-plugin-api` 1 本のみであることを CI で検証する(小さな
+`cargo metadata` テスト、または `cargo-deny` の `forbidden` ルール)。
+「後で `murphy-core` の helper をこっそり依存に足してしまう」退行を
+build/CI error として拾う。
+
 **NodeId 有効性。** arena は dispatch 中 immutable・murphy-core 所有で
 プラグイン呼び出しより長生き。プラグインは dispatch を超えてポインタを
 保持しない(`Cx<'a>` がライフタイムで表現)。
@@ -285,9 +309,15 @@ diagnostic / plugin pack 形式)も同時に dogfooding される。
 9  register_cops! / derive(CopOptions) 再ターゲット ← 8
 10 #[on_node] / #[murphy::cop]                ← 8,6
 11 murphy-core dispatch を arena へ差替        ← 2,8
-12 一時無効化メカニズム + 標準 cop pack 切り出し (`murphy-std`、代表数個 arena 再実装) ← 8,11
-13 mruby ブリッジ → C backend                 ← 7,8
-14 run_file 撤廃                              ← 12,13
+12a `murphy-std` 空 crate + dependency boundary
+    (Cargo.toml `murphy-plugin-api` 単一依存、CI 境界検証)      ← 8,11
+12b 静的登録経路(murphy-cli が murphy-std の register を直接呼ぶ、
+    動的 `.so` と同一の `MurphyPluginV1` 契約)                  ← 12a
+12c 一時無効化メカニズム + disabled registry
+    (未移植 cop は `enabled=false` で trunk green)             ← 12a
+12d 代表数個 cop の arena AST 再実装 (`murphy-std` 内)         ← 12b,12c
+13 mruby ブリッジ → C backend                                  ← 7,8
+14 run_file 撤廃                                               ← 12d,13
 15 arena バイナリキャッシュ(fast-follow)     ← 2,3
 16 持ち越し: .9 / .10 / .12
 ```
@@ -296,17 +326,37 @@ diagnostic / plugin pack 形式)も同時に dogfooding される。
 §14 で run_file を撤廃すると、現行の 131 個の text-matching cop は壊れる。
 **移行戦略 = 一時無効化 → 順次移植:**
 
-- §12 で **一時無効化メカニズム** を入れる(未移植 cop を `disabled` 扱いに
-  して trunk のビルド/テストを常に green に保つ)。
-- §12 では murphy-core 内の標準 cop pack(Murphy/Lint/Style/Layout)を専用
-  crate `murphy-std` に切り出し、`murphy-plugin-api` 1 本のみを Murphy 依存
-  とする(単一表面 ABI のコンパイラ境界強制)。`murphy-cli` から静的リンク。
-  代表数個の cop の arena AST 再実装で経路を通す。murphy-rails の動的 `.so`
-  化は §12 のスコープ外。
+- §12 を 4 サブタスク(12a–12d)に分割し、それぞれ独立完了条件を持つ:
+  - **12a 完了条件:** `cargo build -p murphy-std` 成功、`murphy-std/Cargo.toml`
+    の Murphy 依存が `murphy-plugin-api` 1 本のみ、CI が他 Murphy crate への
+    依存追加を build error として拒否。
+  - **12b 完了条件:** `murphy-cli` が起動時に `murphy-std` を `MurphyPluginV1`
+    として登録し、動的 `.so` と同じ登録パスを通る。`register_cops!` が
+    static/dynamic 両モードで `MurphyPluginV1` を生成する(test fixture で
+    bit 等価を検証)。
+  - **12c 完了条件:** 未移植標準 cop が `enabled=false` で skip され、
+    `cargo test --workspace` が green。disabled registry のリストが
+    `murphy plugins list`(or 同等)で可視化される。
+  - **12d 完了条件:** 代表数個(具体名は実装時に確定)の cop が arena 上で
+    再実装され、既存スナップショットテストが green。残りは 12c で disabled。
 - murphy-rails の動的 `.so` 化と 131 個全量の arena AST 移植は **専用の
   follow-up epic (murphy-au8)** で追跡する。これは reboot の付録ではなく
   **reboot が存在する目的そのもの** であり、優先度を落とさず一時無効化
   リストを 0 に向けて消化する。
+
+**移行期のユーザー影響:**
+
+- **設定ファイルの後方互換:** cop 名 (`Style/Foo` 等) は変わらない。
+  `[cops.rules."Style/Foo"]` セクションは reboot 前後で同じ動作。
+  `murphy-std` の `register_cops!` が `cop.name()` を従来名で返すため、
+  既存 `murphy.toml` は touch 不要。
+- **無効化された標準 cop の可視化:** 一時無効化中の cop は disabled
+  registry に登録され、`murphy plugins list`(or 同等の subcommand)で
+  `disabled: arena migration in progress` と共に提示される。
+- **murphy-rails の扱い:** reboot 本体(murphy-9cr)完了時点では
+  `murphy-rails` は依然 text-matching 経路で動作したまま(本 epic の
+  スコープ外)。au8 epic で動的 `.so` 化 + 131 cop 移植が完了するまで、
+  Rails ユーザーは現行と同等の挙動を受け続ける(壊さない)。
 
 > reboot epic は murphy-9cr の ID を再利用し、superseded なサブタスクを
 > クローズ・新サブタスクを追加する形で in-place 再構成する。
