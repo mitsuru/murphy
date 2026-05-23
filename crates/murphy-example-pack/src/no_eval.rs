@@ -4,9 +4,9 @@
 //! Matches the following receiver shapes:
 //! - `eval(...)`            — bare call (no receiver)
 //! - `Kernel.eval(...)`     — top-level `Kernel` constant via `Const { scope: None, name: "Kernel" }`
-//! - `Kernel::eval(...)`    — same `Const` shape (the prism AST does not
-//!   distinguish `.` from `::` for the dispatcher; both lower to a `Send`
-//!   with the same `Const` receiver).
+//! - `Kernel::eval(...)`    — `::` followed by a lowercase method name is a
+//!   method call (same `Send` shape as `Kernel.eval(...)`); the receiver
+//!   is still `Const { scope: None, name: "Kernel" }`.
 //! - `self.eval(...)`       — explicit `SelfExpr` receiver.
 //!
 //! Other receivers (`obj.eval(...)`, `Foo::Bar.eval(...)`, etc.) are

@@ -8,6 +8,13 @@
 //!   "FIXME"]`) and a boolean toggle.
 //! - raw-source byte scanning. Offense ranges are byte offsets (ADR 0001).
 //!
+//! ## Detection heuristic (substring, not anchored)
+//!
+//! Tag detection uses a plain `contains` for `"# Tag"` / `"#Tag"` substrings,
+//! intentionally false-positive-tolerant. Real packs likely want the
+//! anchored "comment-start + tag + word-boundary" form instead — this demo
+//! is kept simple so the template stays readable.
+//!
 //! ## Why the demo emits on every match (even with `require_author = false`)
 //!
 //! Real linters would normally treat `require_author = false` as "this
@@ -57,6 +64,9 @@ impl NodeCop for TodoFormat {
     fn check(&self, _node: NodeId, cx: &Cx<'_>) {
         // Runtime option access (murphy-9cr.9) is not yet wired through
         // `Cx`; v1 honours the `Default` (same staging as `StringLiterals`).
+        // Until that lands, declaring e.g. `tags = ["XXX"]` in `murphy.toml`
+        // for this cop is silently ignored. Plugin authors copying this
+        // template should expect the same staging.
         let opts = TodoFormatOptions::default();
 
         let src = cx.source();
