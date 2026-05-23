@@ -1499,6 +1499,31 @@ end
         );
     }
 
+    #[test]
+    fn run_mruby_cop_dispatches_arena_on_kind_hooks() {
+        let ctx = AstContext::new(b"puts 1\n".to_vec());
+        const MRUBY_COP: &str = r#"
+class ArenaSendCop < Murphy::Cop
+  def on_send(node)
+    return unless node.field(:method) == :puts
+    add_offense(node.range, message: "arena send")
+  end
+end
+"#;
+        let offenses = run_mruby_cop(&ctx, MRUBY_COP, "Murphy/ArenaSend", "t.rb");
+
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].cop_name, "Murphy/ArenaSend");
+        assert_eq!(offenses[0].message, "arena send");
+        assert_eq!(
+            offenses[0].range,
+            Range {
+                start_offset: 0,
+                end_offset: 6
+            }
+        );
+    }
+
     // ===================================================================
     // Late-finish-after-timeout stress test (P3 Task 8 / ADR 0012 gate
     // prerequisite — murphy-cql).

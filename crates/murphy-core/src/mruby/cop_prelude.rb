@@ -249,10 +249,19 @@ class Murphy
       )
     end
 
-    # Host entry point. Walks the LIVE call-node handle space `0...node_count`
-    # (Task-3 ADR 0008 walk-order index) and dispatches each to the cop.
-    # Read-only traversal (design §4).
+    # Host entry point. Walks the arena AST and dispatches `on_<kind>` hooks.
+    # The legacy `on_call_node` loop remains during the bridge migration so
+    # existing spike-era cops keep running until the CLI fixtures are ported.
     def __run
+      ([Murphy.ast_root] + Murphy.node_descendants(Murphy.ast_root)).each do |node_id|
+        node = Murphy::Node.new(node_id)
+        kind = node.kind
+        next unless kind
+
+        hook = ("on_" + kind.to_s).to_sym
+        send(hook, node) if respond_to?(hook)
+      end
+
       Murphy.node_count.times do |h|
         on_call_node(Murphy::Node.new(h))
       end
