@@ -237,14 +237,8 @@ mod tests {
     /// Build `nil; 1` — root `Begin([Nil, Int(1)])`.
     fn ast_nil_and_int() -> Ast {
         let mut b = AstBuilder::new("nil; 1", "t.rb");
-        let nil = b.push(
-            NodeKind::Nil,
-            murphy_ast::Range { start: 0, end: 3 },
-        );
-        let one = b.push(
-            NodeKind::Int(1),
-            murphy_ast::Range { start: 5, end: 6 },
-        );
+        let nil = b.push(NodeKind::Nil, murphy_ast::Range { start: 0, end: 3 });
+        let one = b.push(NodeKind::Int(1), murphy_ast::Range { start: 5, end: 6 });
         let list = b.push_list(&[nil, one]);
         let root = b.push(
             NodeKind::Begin(list),
@@ -259,10 +253,7 @@ mod tests {
     fn ast_puts_x() -> Ast {
         let mut b = AstBuilder::new("puts \"x\"", "t.rb");
         let s = b.intern_string("x");
-        let str_node = b.push(
-            NodeKind::Str(s),
-            murphy_ast::Range { start: 5, end: 8 },
-        );
+        let str_node = b.push(NodeKind::Str(s), murphy_ast::Range { start: 5, end: 8 });
         let args = b.push_list(&[str_node]);
         let method = b.intern_symbol("puts");
         let root = b.push(

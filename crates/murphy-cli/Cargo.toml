@@ -17,3 +17,10 @@ serde_json = "1"
 [dev-dependencies]
 assert_cmd = "2"
 tempfile = "3"
+
+[features]
+default = []
+# Mirror of `murphy-core`'s feature gate so the CLI's gated integration
+# test (`mruby_e2e`) compiles under `--features mruby-user-cops`. With
+# the feature off, the legacy mruby user-cop path stays compiled out.
+mruby-user-cops = ["murphy-core/mruby-user-cops"]

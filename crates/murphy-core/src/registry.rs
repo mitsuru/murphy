@@ -21,9 +21,9 @@
 //! follow-up loader has its inputs ready. Without the feature, the path
 //! list is empty.
 
+use std::path::Path;
 #[cfg(feature = "mruby-user-cops")]
 use std::path::PathBuf;
-use std::path::Path;
 
 use murphy_plugin_api::PluginCopV1;
 
@@ -113,13 +113,15 @@ impl CopRegistry {
         #[cfg(not(target_os = "windows"))]
         for pack in &config.cop_packs {
             let path = root.join(&pack.path);
-            let loaded = load_plugin_pack(&path).map_err(|e| {
-                ConfigError::Io(format!("cannot load cop pack {}: {e}", pack.name))
-            })?;
+            let loaded = load_plugin_pack(&path)
+                .map_err(|e| ConfigError::Io(format!("cannot load cop pack {}: {e}", pack.name)))?;
             // Name-collision check against the already-registered cops.
             for cop in loaded.cops {
                 let name = unsafe { cop.name.as_bytes() };
-                if cops.iter().any(|existing| unsafe { existing.name.as_bytes() } == name) {
+                if cops
+                    .iter()
+                    .any(|existing| unsafe { existing.name.as_bytes() } == name)
+                {
                     let name_str = String::from_utf8_lossy(name).into_owned();
                     return Err(ConfigError::Io(format!(
                         "cop pack {} attempts to register `{name_str}` but a cop with that name \

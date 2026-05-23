@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-
 const EXIT_OK: u8 = 0;
 const LSP_ERROR_METHOD_NOT_FOUND: i32 = -32601;
 const LSP_ERROR_INVALID_PARAMS: i32 = -32602;
@@ -79,14 +78,7 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
                     .and_then(Value::as_str)
                 {
                     open_documents.insert(uri.clone(), text.to_string());
-                    publish_diagnostics(
-                        &mut stdout,
-                        &uri,
-                        text,
-                        file,
-                        &config,
-                        &registry,
-                    )?;
+                    publish_diagnostics(&mut stdout, &uri, text, file, &config, &registry)?;
                 }
             }
             continue;
@@ -124,25 +116,11 @@ pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
 
                 if text.is_empty() {
                     let empty = String::new();
-                    publish_diagnostics(
-                        &mut stdout,
-                        &uri,
-                        &empty,
-                        file,
-                        &config,
-                        &registry,
-                    )?;
+                    publish_diagnostics(&mut stdout, &uri, &empty, file, &config, &registry)?;
                     continue;
                 }
 
-                publish_diagnostics(
-                    &mut stdout,
-                    &uri,
-                    &text,
-                    file,
-                    &config,
-                    &registry,
-                )?;
+                publish_diagnostics(&mut stdout, &uri, &text, file, &config, &registry)?;
             }
             continue;
         }

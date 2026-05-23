@@ -107,7 +107,12 @@ mod tests {
 
     /// Build a one-`Send` arena: `[receiver].method(args)`, with `args` as a
     /// pre-built list of string nodes.
-    fn build_send(source: &str, receiver: OptNodeId, method: &str, args: &[&str]) -> murphy_ast::Ast {
+    fn build_send(
+        source: &str,
+        receiver: OptNodeId,
+        method: &str,
+        args: &[&str],
+    ) -> murphy_ast::Ast {
         let mut b = AstBuilder::new(source, "t.rb");
         let arg_ids: Vec<_> = args
             .iter()

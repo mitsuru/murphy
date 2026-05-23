@@ -85,7 +85,10 @@ impl std::fmt::Display for LoaderError {
                 )
             }
             LoaderError::NullCopsPointer { cops_len } => {
-                write!(f, "plugin registration has cops_len = {cops_len} but a null cops_ptr")
+                write!(
+                    f,
+                    "plugin registration has cops_len = {cops_len} but a null cops_ptr"
+                )
             }
         }
     }
@@ -170,11 +173,9 @@ pub fn load_plugin_pack(path: &std::path::Path) -> Result<LoadedPluginPack, Load
 
     let rc = {
         let symbol: Symbol<'_, MurphyPluginRegister> = unsafe {
-            library
-                .get(REGISTER_SYMBOL)
-                .map_err(|_| LoaderError::MissingSymbol(
-                    String::from_utf8_lossy(REGISTER_SYMBOL).into_owned(),
-                ))?
+            library.get(REGISTER_SYMBOL).map_err(|_| {
+                LoaderError::MissingSymbol(String::from_utf8_lossy(REGISTER_SYMBOL).into_owned())
+            })?
         };
         // Safety: the symbol is `MurphyPluginRegister`-typed; the plugin
         // contract (ADR 0038) forbids the thunk from retaining the
@@ -229,7 +230,7 @@ mod tests {
 
     #[test]
     fn validate_registration_accepts_correct_registration() {
-        let cops = vec![fake_cop(None)];
+        let cops = [fake_cop(None)];
         let reg = PluginRegistration {
             abi_version: MURPHY_PLUGIN_ABI_VERSION,
             cops_ptr: cops.as_ptr(),
@@ -259,7 +260,7 @@ mod tests {
 
     #[test]
     fn validate_registration_rejects_struct_size_mismatch() {
-        let cops = vec![fake_cop(Some(7))];
+        let cops = [fake_cop(Some(7))];
         let reg = PluginRegistration {
             abi_version: MURPHY_PLUGIN_ABI_VERSION,
             cops_ptr: cops.as_ptr(),

@@ -56,10 +56,8 @@ fn builtin_only_project_matches_committed_snapshot() {
 /// char indices") survives the arena rewrite.
 #[test]
 fn multibyte_offsets_are_byte_indices_not_char_indices() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(FIXTURE_DIR).join("multibyte.rb"),
-    )
-    .expect("read multibyte fixture");
+    let source = std::fs::read_to_string(std::path::Path::new(FIXTURE_DIR).join("multibyte.rb"))
+        .expect("read multibyte fixture");
 
     // Find the `puts` call's byte offset in the source.
     let puts_byte_idx = source

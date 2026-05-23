@@ -441,7 +441,10 @@ fn lint_files_memoized(
     // Group paths by content so identical-content files share one lint.
     let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (path, content) in sources {
-        groups.entry(content.as_str()).or_default().push(path.as_str());
+        groups
+            .entry(content.as_str())
+            .or_default()
+            .push(path.as_str());
     }
 
     let groups_vec: Vec<(&str, Vec<&str>)> = groups.into_iter().collect();
@@ -641,8 +644,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
             // For non-cwd roots, load the root-local murphy.toml.
             let local_config =
                 MurphyConfig::load(root).map_err(|e| AppError::setup(e.to_string()))?;
-            discover_with_config(root, &local_config)
-                .map_err(|e| AppError::setup(e.to_string()))?
+            discover_with_config(root, &local_config).map_err(|e| AppError::setup(e.to_string()))?
         };
         for p in discovered {
             all_paths.insert(p.to_string_lossy().into_owned());
