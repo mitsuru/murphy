@@ -166,7 +166,7 @@ impl CopRegistry {
                 }
             };
             let loaded = load_plugin_pack(&path)
-                .map_err(|e| ConfigError::Io(format!("cannot load cop pack {pack_name}: {e}")))?;
+                .map_err(|e| ConfigError::Io(format!("cannot load plugin {pack_name}: {e}")))?;
             // Name-collision check against the already-registered cops.
             // `loaded.cops()` borrows from `loaded` for the loop body.
             for cop in loaded.cops() {
@@ -186,8 +186,8 @@ impl CopRegistry {
                 if already {
                     let name_str = String::from_utf8_lossy(name).into_owned();
                     return Err(ConfigError::Io(format!(
-                        "cop pack {pack_name} attempts to register `{name_str}` but a cop with that name \
-                         is already registered (built-in or earlier pack)"
+                        "plugin {pack_name} attempts to register `{name_str}` but a cop with that name \
+                         is already registered (built-in or earlier plugin)"
                     )));
                 }
                 all_cops_ptrs.push(NonNull::from(cop));
@@ -203,7 +203,7 @@ impl CopRegistry {
                 PluginConfig::Detailed { name, .. } | PluginConfig::Name(name) => name,
             };
             return Err(ConfigError::Io(format!(
-                "cop packs (`.so` plugins) are not supported on Windows: {name}"
+                "plugins (`.so`/`.dylib` packs) are not supported on Windows: {name}"
             )));
         }
 
