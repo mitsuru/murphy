@@ -159,6 +159,16 @@ impl<'a> Cx<'a> {
             .expect("source is valid UTF-8")
     }
 
+    /// The whole file's source text. A `NodeCop` with `KINDS = &[]`
+    /// (file-visit, see `NodeCop` doc) uses this to scan the entire
+    /// file — `cx.range(cx.root())` only spans the AST root node,
+    /// which can be narrower than the file (leading comments, trailing
+    /// whitespace, etc. live outside the root's byte range).
+    pub fn source(&self) -> &'a str {
+        let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
+        std::str::from_utf8(src).expect("source is valid UTF-8")
+    }
+
     /// Record an offense. `cop_name` is stamped from the `CxRaw` the host
     /// built for the running cop.
     pub fn emit_offense(&self, range: Range, message: &str, severity: Option<crate::Severity>) {

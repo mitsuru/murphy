@@ -13,8 +13,11 @@
 //!   0 / cleanly (no error path).
 //! - The active cop (`Murphy/NoReceiverPuts`) is present and reported
 //!   as `enabled`.
-//! - The three §12d-pending cops are present as `disabled: arena
-//!   migration` so the migration backlog is discoverable from the CLI.
+//! - Every entry in `murphy_std::DISABLED_COPS` appears as
+//!   `disabled: arena migration`. The list is empty after §12d
+//!   migrated `Lint/UnreachableCode` / `Style/StringLiterals` /
+//!   `Layout/TrailingWhitespace` and stays empty until murphy-au8
+//!   §14a adds `murphy-rails`'s pending cops.
 
 use assert_cmd::Command;
 use std::fs;
@@ -46,18 +49,23 @@ fn cops_list_default_table_includes_active_and_disabled_cops_and_exits_0() {
         stdout.contains("Murphy/NoReceiverPuts") && stdout.contains("enabled"),
         "Murphy/NoReceiverPuts must appear as enabled; got:\n{stdout}"
     );
-    // The §12d-pending cops appear with the arena-migration status.
-    // `Lint/UnreachableCode` and `Style/StringLiterals` migrated in §12d;
-    // `Layout/TrailingWhitespace` remains in the disabled registry until
-    // its own commit lands.
-    assert!(
-        stdout.contains("Layout/TrailingWhitespace"),
-        "disabled cop `Layout/TrailingWhitespace` must appear in the table; got:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("disabled: arena migration"),
-        "table must surface the arena-migration status string; got:\n{stdout}"
-    );
+    // Every name in `murphy_std::DISABLED_COPS` must surface as a row
+    // with the arena-migration status. After §12d's third cop migrated,
+    // the live list is empty until murphy-au8 §14a adds Rails — but we
+    // keep the contract data-driven so it picks up automatically when
+    // the list repopulates.
+    for name in murphy_std::DISABLED_COPS {
+        assert!(
+            stdout.contains(name),
+            "disabled cop {name:?} must appear in the table; got:\n{stdout}"
+        );
+    }
+    if !murphy_std::DISABLED_COPS.is_empty() {
+        assert!(
+            stdout.contains("disabled: arena migration"),
+            "table must surface the arena-migration status when disabled cops exist; got:\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -102,17 +110,21 @@ fn cops_list_json_format_is_a_machine_readable_array() {
     assert_eq!(active["namespace"], "Murphy");
     assert_eq!(active["source_pack"], "builtin");
 
-    // Remaining disabled cops are tagged as arena migration. The list
-    // shrinks each time a §12d cop is migrated out of DISABLED_COPS.
-    let entry = parsed
-        .iter()
-        .find(|e| e["name"] == "Layout/TrailingWhitespace")
-        .expect("Layout/TrailingWhitespace must appear in JSON listing");
-    assert_eq!(
-        entry["status"], "disabled: arena migration",
-        "Layout/TrailingWhitespace must be tagged as arena migration",
-    );
-    assert_eq!(entry["source_pack"], "builtin");
+    // Data-driven: every name in `DISABLED_COPS` must appear in the
+    // listing with the arena-migration status. Empty list → no
+    // assertions to run (currently the case post-§12d; will repopulate
+    // in murphy-au8 §14a).
+    for name in murphy_std::DISABLED_COPS {
+        let entry = parsed
+            .iter()
+            .find(|e| e["name"] == *name)
+            .unwrap_or_else(|| panic!("{name:?} must appear in JSON listing"));
+        assert_eq!(
+            entry["status"], "disabled: arena migration",
+            "{name:?} must be tagged as arena migration",
+        );
+        assert_eq!(entry["source_pack"], "builtin");
+    }
 }
 
 #[test]
@@ -149,13 +161,21 @@ fn cops_list_reports_user_disabled_status_for_active_cop() {
 
 #[test]
 fn lint_warns_and_continues_when_user_enables_a_disabled_cop() {
-    // Contract: enabling a cop in the disabled registry must produce a
-    // diagnostic on stderr and NOT fail the lint run (exit 0, no
-    // unknown-cop error). The cop itself is not dispatched.
+    // Contract: when at least one cop sits in the disabled registry,
+    // enabling it explicitly must produce a diagnostic on stderr and
+    // NOT fail the lint run (exit 0, no unknown-cop error). When the
+    // disabled registry is empty (post-§12d, pre-§14a) the mechanism
+    // has no live tenant to probe — the warning code path is
+    // exercised once `DISABLED_COPS` repopulates with Rails. Skipping
+    // is preferred over deleting the test so the contract stays
+    // documented next to the live mechanism.
+    let Some(probe) = murphy_std::DISABLED_COPS.first() else {
+        return;
+    };
     let dir = tempdir().expect("create tempdir");
     fs::write(
         dir.path().join("murphy.toml"),
-        "[cops.rules.\"Layout/TrailingWhitespace\"]\nenabled = true\n",
+        format!("[cops.rules.\"{probe}\"]\nenabled = true\n"),
     )
     .expect("write murphy.toml");
     fs::write(dir.path().join("clean.rb"), "x = 1\n").expect("write clean.rb");
@@ -172,10 +192,10 @@ fn lint_warns_and_continues_when_user_enables_a_disabled_cop() {
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8 stderr");
     assert!(
-        stderr.contains("Layout/TrailingWhitespace")
+        stderr.contains(probe)
             && stderr.contains("disabled registry")
             && stderr.contains("arena migration"),
-        "expected warning naming the cop and arena migration; got stderr:\n{stderr}"
+        "expected warning naming {probe:?} and arena migration; got stderr:\n{stderr}",
     );
 }
 

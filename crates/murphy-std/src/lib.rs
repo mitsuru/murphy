@@ -26,10 +26,12 @@
 //! issue calls out (call dispatch / flow analysis /
 //! literal+option+autocorrect / raw source access).
 
+pub mod layout;
 pub mod lint;
 pub mod murphy;
 pub mod style;
 
+use crate::layout::trailing_whitespace::TrailingWhitespace;
 use crate::lint::unreachable_code::UnreachableCode;
 use crate::murphy::no_receiver_puts::NoReceiverPuts;
 use crate::style::string_literals::StringLiterals;
@@ -41,6 +43,7 @@ murphy_plugin_api::register_cops!(
     NoReceiverPuts,
     UnreachableCode,
     StringLiterals,
+    TrailingWhitespace,
 );
 
 /// Standard cops that have **not yet been migrated** to the arena AST /
@@ -64,7 +67,14 @@ murphy_plugin_api::register_cops!(
 /// migrated cops; once those land they move from this list into the
 /// `register_cops!` list above. Until then they sit here so the
 /// disabled-registry plumbing has live test data.
-pub static DISABLED_COPS: &[&str] = &["Layout/TrailingWhitespace"];
+/// Standard cops that have **not yet been migrated** to the arena AST.
+/// Empty after §12d migrated the last three (`Lint/UnreachableCode`,
+/// `Style/StringLiterals`, `Layout/TrailingWhitespace`). The list will
+/// repopulate in murphy-au8 §14a when `murphy-rails`'s 131 text-matching
+/// cops join the disabled registry while their arena ports are staged.
+/// The host (`murphy-cli`) still wires up the warning + skip paths,
+/// they simply have no live tenants today.
+pub static DISABLED_COPS: &[&str] = &[];
 
 /// Friendly pack name reported by `murphy cops list` for cops registered
 /// (or held in the disabled list) by this crate. Matches the "builtin"
