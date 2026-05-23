@@ -319,6 +319,45 @@ unsafe fn ruby_array_of_u32s(mrb: *mut mrb_state, values: &[u32]) -> mrb_value {
     unsafe { eval_literal(mrb, &lit) }
 }
 
+/// Resolve an arena interner handle to a Ruby String, or nil if invalid.
+///
+/// # Safety
+///
+/// `mrb` must be valid and non-null inside a native callback registered with
+/// one required integer argument.
+unsafe fn native_interner_string(mrb: *mut mrb_state) -> mrb_value {
+    // SAFETY: native callback; `mrb` valid & non-null; `ud` is the live ctx.
+    let c = unsafe { ctx(mrb) };
+    // SAFETY: native callback registered with one required `i` argument.
+    let handle = unsafe { arg_handle(mrb) };
+    let Ok(handle) = u32::try_from(handle) else {
+        // SAFETY: `mrb` valid & non-null; nil literal.
+        return unsafe { eval_literal(mrb, c"nil") };
+    };
+
+    let interner = c.arena_ast().interner();
+    if handle as usize >= interner.len() {
+        // SAFETY: `mrb` valid & non-null; nil literal.
+        return unsafe { eval_literal(mrb, c"nil") };
+    }
+
+    // SAFETY: `mrb` valid & non-null; interner entries are valid UTF-8 bytes
+    // copied into an mruby String by the helper.
+    unsafe { ruby_string_from_bytes(mrb, interner.resolve(handle).as_bytes()) }
+}
+
+/// `Murphy.symbol_str(handle) -> String | nil`.
+unsafe extern "C" fn native_symbol_str(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+    // SAFETY: native callback; `mrb` valid & non-null; helper reads one arg.
+    unsafe { native_interner_string(mrb) }
+}
+
+/// `Murphy.string_str(handle) -> String | nil`.
+unsafe extern "C" fn native_string_str(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+    // SAFETY: native callback; `mrb` valid & non-null; helper reads one arg.
+    unsafe { native_interner_string(mrb) }
+}
+
 /// `Murphy.ast_root -> Integer`. Returns the arena AST root node id.
 unsafe extern "C" fn native_ast_root(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
     // SAFETY: native callback; `mrb` valid & non-null; `ud` is the live ctx.
@@ -743,6 +782,8 @@ pub(crate) unsafe fn register(mrb: *mut mrb_state) {
         def(c"node_msg_end", native_node_msg_end, 1);
         def(c"source_slice", native_source_slice, 2);
         def(c"raw_source", native_source_slice, 2);
+        def(c"symbol_str", native_symbol_str, 1);
+        def(c"string_str", native_string_str, 1);
         def(c"compile_pattern", native_compile_pattern, 1);
         def(c"match", native_match, 2);
         def(c"node_descendants", native_node_descendants, 1);
@@ -1121,6 +1162,50 @@ mod tests {
         drop(ctx);
 
         assert_eq!(drain_sink(), vec!["コメント", "puts", "true", "true"]);
+    }
+
+    #[test]
+    fn interner_string_primitives_resolve_symbol_and_string_handles() {
+        let _guard = lock_sink();
+        let ctx = AstContext::new(b"puts \"hi\"\n".to_vec());
+        let mut method_handle = None;
+        let mut string_handle = None;
+        for node_id in std::iter::once(ctx.arena_ast().root())
+            .chain(ctx.arena_ast().descendants(ctx.arena_ast().root()))
+        {
+            match ctx.arena_ast().kind(node_id) {
+                murphy_ast::NodeKind::Send { method, .. } => method_handle = Some(method.0),
+                murphy_ast::NodeKind::Str(id) => string_handle = Some(id.0),
+                _ => {}
+            }
+        }
+        let method_handle = method_handle.expect("fixture contains a send method");
+        let string_handle = string_handle.expect("fixture contains a string literal");
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = crate::mruby::sdk::CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: see `run_driver_over` — valid state, live CopRun in ud.
+            unsafe {
+                register(st.raw());
+                register_test_report(st.raw());
+            }
+            st.eval(&format!(
+                r##"
+                Murphy.__test_report(Murphy.symbol_str({}))
+                Murphy.__test_report(Murphy.string_str({}))
+                Murphy.__test_report(Murphy.symbol_str(999_999).nil?.to_s)
+                Murphy.__test_report(Murphy.string_str(-1).nil?.to_s)
+            "##,
+                method_handle, string_handle
+            ));
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_sink(), vec!["puts", "hi", "true", "true"]);
     }
 
     /// MULTIBYTE hand-derivation (ADR 0001 — bytes, NOT chars) + handle→node
