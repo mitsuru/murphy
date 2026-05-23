@@ -1,7 +1,12 @@
 //! Integration test for the `Murphy::Cop` mruby SDK base (Phase 4 Task 2).
 //!
+//! Gated behind `mruby-user-cops` (off in v1; design §6.2).
+//!
 //! This exercises the public surface a downstream consumer sees:
 //! `murphy_core::{parse_for_mruby (AstContext::new), run_mruby_cop, Offense}`.
+
+#![cfg(feature = "mruby-user-cops")]
+
 //! It loads a `.rb` user cop written in the design §4 style, runs it over a
 //! really-parsed source via the Task-3 live native primitives, and asserts the
 //! emitted `Offense`s carry the ADR 0013 Phase-4 `autocorrect` field when a

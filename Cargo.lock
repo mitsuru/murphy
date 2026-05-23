@@ -582,6 +582,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "murphy-core",
+ "murphy-plugin-api",
  "murphy-reporting",
  "rayon",
  "serde_json",
@@ -596,6 +597,9 @@ dependencies = [
  "ignore",
  "libloading",
  "mruby3-sys",
+ "murphy-ast",
+ "murphy-plugin-api",
+ "murphy-translate",
  "ruby-prism",
  "serde",
  "serde_json",
