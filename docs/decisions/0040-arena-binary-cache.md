@@ -62,6 +62,29 @@ cache 層 (`murphy-cache`) はこの `Err` を含むすべての失敗を `Optio
 に潰す: ヘッダ不一致・bounds 違反・I/O エラーいずれもキャッシュミス
 扱い、リンタは再生成して走り続ける。
 
+## キャッシュヒット時の path 上書き
+
+`content_hash` は `source.text` のみで計算するので、同一内容で path だけ
+違う 2 ファイルは同じキャッシュキーに収束する(意図的: 重複ファイルの parse
+を 1 回にする)。一方で `Ast::path()` は cop からのソースロケーション
+レポートで使われるため、ヒット時は **呼び出し側の path で上書き** する。
+具体的には `parse_with_cache` がヒット後に `ast.set_source_path(path)` を
+呼び、stale な path がリーキングしない。
+
+これにより:
+- `lint a.rb` → cache 書き込み (path = "a.rb")
+- 続けて `lint b.rb` (内容同じ) → ヒット、戻る `Ast::path()` は "b.rb"
+
+## ヒット時に prism parse をスキップする(設計 §3.5 の本質)
+
+ヒットが成立する条件は `sha256(source) == 書き込み時の sha256(source)` で
+あり、書き込み時に成功 parse が確認されているため、ヒット時の source は
+構文的に valid であることが構造的に保証される。`parse_with_cache` は
+ヒットパスで prism parse を呼ばない (設計 §3.5「prism parse と変換層の
+両方をスキップ」)。ミスパスでは `Murphy/Syntax` 契約 (ADR 0006) を維持する
+ため、prism::parse を 1 回走らせて先頭エラーを harvest した上で
+translate + put する。
+
 ## CLI コントラクト
 
 - デフォルト: `$XDG_CACHE_HOME/murphy/v1` (未定義なら `$HOME/.cache/murphy/v1`)

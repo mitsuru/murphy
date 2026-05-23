@@ -297,6 +297,15 @@ impl Ast {
         &self.source.path
     }
 
+    /// Overwrite the file path. Useful after [`Ast::from_bytes`] /
+    /// [`murphy_cache`](https://docs.rs/murphy-cache) lookup, when the
+    /// arena was originally cached under a different filename: the source
+    /// text is content-addressed, but the path stays meta-data and the
+    /// caller may have a more useful name to attach.
+    pub fn set_source_path(&mut self, path: std::path::PathBuf) {
+        self.source.path = path;
+    }
+
     /// The source text covered by `range`.
     pub fn raw_source(&self, range: Range) -> &str {
         &self.source.text[range.start as usize..range.end as usize]
