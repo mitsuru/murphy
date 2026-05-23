@@ -207,7 +207,7 @@ class Murphy
     def self.def_node_matcher(name, pattern)
       ir = Murphy.compile_pattern(pattern.to_s)
       define_method(name) do |node|
-        Murphy.match(ir, node.id)
+        Murphy::Node.wrap_match(Murphy.match(ir, node.id))
       end
     end
 
@@ -216,7 +216,7 @@ class Murphy
       define_method(name) do |root|
         return enum_for(name, root) unless block_given?
         Murphy.node_descendants(root.id).each do |node_id|
-          captures = Murphy.match(ir, node_id)
+          captures = Murphy::Node.wrap_match(Murphy.match(ir, node_id))
           yield captures if captures
         end
       end
@@ -255,6 +255,18 @@ class Murphy
     def __run
       Murphy.node_count.times do |h|
         on_call_node(Murphy::Node.new(h))
+      end
+    end
+  end
+
+  class Node
+    def self.wrap_match(value)
+      if value.is_a?(Integer)
+        Murphy::Node.new(value)
+      elsif value.is_a?(Array)
+        value.map { |item| wrap_match(item) }
+      else
+        value
       end
     end
   end

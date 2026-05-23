@@ -1089,6 +1089,56 @@ mod tests {
     }
 
     #[test]
+    fn prelude_def_node_matcher_wraps_capture_ids_as_nodes() {
+        let _guard = lock_reports();
+        let ctx = AstContext::new(b"puts x\n".to_vec());
+        let root = ctx.arena_ast().root();
+        let captured = match ctx.arena_ast().kind(root) {
+            murphy_ast::NodeKind::Send { args, .. } => {
+                let raw = ctx.arena_ast().raw_parts();
+                raw.node_lists[args.start as usize]
+            }
+            _ => panic!("fixture root is a send"),
+        };
+        let captured_kind = murphy_ast::pattern_name(ctx.arena_ast().kind(captured).tag())
+            .expect("captured kind is pattern-addressable");
+        let expected = format!("{}|{}", captured.0, captured_kind);
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: valid mrb state; registration only defines functions/classes.
+            unsafe {
+                crate::mruby::primitives::register(st.raw());
+                register_sdk(st.raw());
+                register_test_report(st.raw());
+            }
+            assert!(
+                !st.eval_checked(PRELUDE),
+                "prelude must load without raising"
+            );
+            assert!(
+                !st.eval_checked(
+                    r##"
+                class CaptureCop < Murphy::Cop
+                  def_node_matcher :puts_arg, "(send nil? :puts $_)"
+                end
+                cap = CaptureCop.new.puts_arg(Murphy::Node.new(Murphy.ast_root))[0]
+                Murphy.__test_report("#{cap.id}|#{cap.kind}")
+                "##,
+                ),
+                "capture wrapper script must run without raising"
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_reports(), vec![expected]);
+    }
+
+    #[test]
     fn prelude_def_node_search_defines_an_instance_method() {
         let _guard = lock_reports();
         let mut st = MrubyState::open();
