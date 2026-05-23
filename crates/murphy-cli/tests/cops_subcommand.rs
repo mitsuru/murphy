@@ -47,14 +47,13 @@ fn cops_list_default_table_includes_active_and_disabled_cops_and_exits_0() {
         "Murphy/NoReceiverPuts must appear as enabled; got:\n{stdout}"
     );
     // The §12d-pending cops appear with the arena-migration status.
-    // `Lint/UnreachableCode` was migrated in §12d; the remaining two
-    // sit in the disabled registry until their own commits land.
-    for name in ["Layout/TrailingWhitespace", "Style/StringLiterals"] {
-        assert!(
-            stdout.contains(name),
-            "disabled cop {name:?} must appear in the table; got:\n{stdout}"
-        );
-    }
+    // `Lint/UnreachableCode` and `Style/StringLiterals` migrated in §12d;
+    // `Layout/TrailingWhitespace` remains in the disabled registry until
+    // its own commit lands.
+    assert!(
+        stdout.contains("Layout/TrailingWhitespace"),
+        "disabled cop `Layout/TrailingWhitespace` must appear in the table; got:\n{stdout}"
+    );
     assert!(
         stdout.contains("disabled: arena migration"),
         "table must surface the arena-migration status string; got:\n{stdout}"
@@ -105,17 +104,15 @@ fn cops_list_json_format_is_a_machine_readable_array() {
 
     // Remaining disabled cops are tagged as arena migration. The list
     // shrinks each time a §12d cop is migrated out of DISABLED_COPS.
-    for name in ["Layout/TrailingWhitespace", "Style/StringLiterals"] {
-        let entry = parsed
-            .iter()
-            .find(|e| e["name"] == name)
-            .unwrap_or_else(|| panic!("{name:?} must appear in JSON listing"));
-        assert_eq!(
-            entry["status"], "disabled: arena migration",
-            "{name:?} must be tagged as arena migration",
-        );
-        assert_eq!(entry["source_pack"], "builtin");
-    }
+    let entry = parsed
+        .iter()
+        .find(|e| e["name"] == "Layout/TrailingWhitespace")
+        .expect("Layout/TrailingWhitespace must appear in JSON listing");
+    assert_eq!(
+        entry["status"], "disabled: arena migration",
+        "Layout/TrailingWhitespace must be tagged as arena migration",
+    );
+    assert_eq!(entry["source_pack"], "builtin");
 }
 
 #[test]
@@ -158,7 +155,7 @@ fn lint_warns_and_continues_when_user_enables_a_disabled_cop() {
     let dir = tempdir().expect("create tempdir");
     fs::write(
         dir.path().join("murphy.toml"),
-        "[cops.rules.\"Style/StringLiterals\"]\nenabled = true\n",
+        "[cops.rules.\"Layout/TrailingWhitespace\"]\nenabled = true\n",
     )
     .expect("write murphy.toml");
     fs::write(dir.path().join("clean.rb"), "x = 1\n").expect("write clean.rb");
@@ -175,7 +172,7 @@ fn lint_warns_and_continues_when_user_enables_a_disabled_cop() {
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8 stderr");
     assert!(
-        stderr.contains("Style/StringLiterals")
+        stderr.contains("Layout/TrailingWhitespace")
             && stderr.contains("disabled registry")
             && stderr.contains("arena migration"),
         "expected warning naming the cop and arena migration; got stderr:\n{stderr}"

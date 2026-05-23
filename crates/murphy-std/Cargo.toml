@@ -10,7 +10,9 @@ description = "Murphy standard cop pack (Murphy/Lint/Style/Layout, ADR 0018) —
 # in tests/dep_boundary.rs and is the compile-time enforcement point for
 # §5 of docs/plans/2026-05-22-plugin-reboot-design.md.
 murphy-plugin-api = { path = "../murphy-plugin-api" }
-
-[dev-dependencies]
-# Used by tests/dep_boundary.rs to parse `cargo metadata` output.
+# `#[derive(CopOptions)]`-expanded code references `::serde_json` directly
+# in the consuming crate root (the standard proc-macro pattern). Permitted
+# because it is a third-party dependency, not a Murphy-internal crate —
+# the boundary gate only forbids non-`murphy-plugin-api` Murphy deps.
+# Also used by `tests/dep_boundary.rs` to parse `cargo metadata` output.
 serde_json = "1"

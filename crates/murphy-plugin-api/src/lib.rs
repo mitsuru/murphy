@@ -49,4 +49,4 @@ pub use murphy_ast::{
     AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
     StringId, Symbol,
 };
-pub use murphy_plugin_macros::register_cops;
+pub use murphy_plugin_macros::{CopOptions, cop, node_pattern, on_node, register_cops};

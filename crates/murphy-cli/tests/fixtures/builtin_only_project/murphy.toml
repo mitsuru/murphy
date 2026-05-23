@@ -1,2 +1,8 @@
-# Empty config — exercises the default cop set (`Murphy/NoReceiverPuts`
-# only in v1) so the snapshot anchors the bare-defaults wire shape.
+# Exercises the default cop set with one explicit opt-out:
+# `Style/StringLiterals` is disabled here so the snapshot stays anchored
+# on the `Murphy/NoReceiverPuts` offenses the fixture is meant to test.
+# (The fixture's `puts "x"` and `puts "日本語"` would otherwise produce
+# additional `Style/StringLiterals` offenses; that cop's own integration
+# tests live next to the cop, not in this snapshot.)
+[cops.rules."Style/StringLiterals"]
+enabled = false
