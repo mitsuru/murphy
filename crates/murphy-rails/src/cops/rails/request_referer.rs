@@ -86,12 +86,19 @@ fn receiver_is_bare_request(cx: &Cx<'_>, receiver: OptNodeId) -> bool {
     let NodeKind::Send {
         receiver: inner_recv,
         method: inner_method,
-        ..
+        args: inner_args,
     } = *cx.kind(rid)
     else {
         return false;
     };
-    inner_recv == OptNodeId::NONE && cx.symbol_str(inner_method) == "request"
+    // Three gates on the inner Send: bare call (no receiver), method name
+    // exactly `request`, and **zero arguments**. The last gate rules out
+    // `request(foo).referer` where `request` is a user-defined helper /
+    // local method taking arguments — that is not the Rails controller
+    // accessor we want to flag (roborev review feedback on murphy-9v0).
+    inner_recv == OptNodeId::NONE
+        && cx.symbol_str(inner_method) == "request"
+        && cx.list(inner_args).is_empty()
 }
 
 #[cfg(test)]
@@ -180,5 +187,21 @@ mod tests {
     fn does_not_flag_unrelated_method_on_request() {
         // `request.path` is a different accessor entirely.
         expect_no_offenses!(RequestReferer, "request.path\n");
+    }
+
+    #[test]
+    fn does_not_flag_request_with_args() {
+        // User-defined helper `request(foo)` returning an object with
+        // `referer` accessor is **not** the Rails controller `request`.
+        // roborev review (job 1122) found that without the zero-args
+        // gate the cop would false-positive here.
+        expect_no_offenses!(RequestReferer, "request(foo).referer\n");
+    }
+
+    #[test]
+    fn does_not_flag_request_with_block() {
+        // `request { ... }` is also a method call with structure beyond
+        // the bare accessor — block-arg form should not be flagged.
+        expect_no_offenses!(RequestReferer, "request(:get) { |r| r.referer }\n");
     }
 }
