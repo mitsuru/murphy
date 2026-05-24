@@ -1,0 +1,27 @@
+// markdownlint-cli2 config for Murphy.
+//
+// Strategy: lint the curated, maintained surface (README, CLAUDE.md,
+// AGENTS.md, ADRs in docs/decisions, guides in docs/guides). Skip the
+// historical design plans under docs/plans/** and docs/superpowers/**
+// — those are point-in-time records of past design conversations and
+// rewriting them to satisfy new lint rules would distort history.
+{
+  "config": {
+    "default": true,
+    "MD013": false, // line-length — long ADRs, tables, code excerpts
+    "MD033": false, // inline HTML — README badges, details/summary
+    "MD041": false  // first line in file must be h1 — frontmatter, lead paragraphs
+  },
+  "globs": ["**/*.md"],
+  "ignores": [
+    "target/**",
+    ".git/**",
+    ".beads/**",
+    ".claude/**",
+    ".worktrees/**",
+    "spikes/**",
+    "node_modules/**",
+    "docs/plans/**",
+    "docs/superpowers/**"
+  ]
+}

@@ -13,7 +13,7 @@
 
 ADR 0006 froze the Phase-1 offense-JSON shape as five fields:
 
-```
+```text
 { file, cop_name, range:{start_offset,end_offset}, severity, message }
 ```
 

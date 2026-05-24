@@ -69,7 +69,7 @@ inside predictable AST/text transforms.
 | `Style/NilComparison` | `Style/NilComparison` | Prefer `nil?` over direct `== nil` / `!= nil` where safe. |
 | `Style/IfUnlessModifier` | `Style/IfUnlessModifier` | Prefer modifier form for simple single-line bodies. |
 | `Style/RedundantSelf` | `Style/RedundantSelf` | Remove redundant `self.` only when Ruby semantics are not changed. |
-| `Style/AndOr` | `Style/AndOr` | Prefer `&&` / `||` in conditional contexts. |
+| `Style/AndOr` | `Style/AndOr` | Prefer `&&` / `\|\|` in conditional contexts. |
 
 ### Layout
 
