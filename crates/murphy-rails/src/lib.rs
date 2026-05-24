@@ -1,17 +1,17 @@
 //! murphy-rails — Rails-focused dynamic plugin pack (cdylib).
 //!
-//! 138 RuboCop-rails cops registered as **arena-migration stubs** via
-//! `register_cops!(mode = dynamic, …)`. Each stub uses `KINDS = &[]`
-//! (file-visit dispatch) with a no-op `check` and `DEFAULT_ENABLED =
-//! Some(false)`, so the cop is inert at runtime but is enumerable by
-//! `murphy cops list` and accepts `[cops.rules."Rails/..."]` config
-//! sections without error (`§14a` of
-//! `docs/plans/2026-05-22-plugin-reboot-design.md`).
+//! 138 RuboCop-rails cops registered as **arena-migration stubs**.
+//! Each stub uses the standard `#[cop]` / `#[on_new_investigation]`
+//! authorship pattern (same as `murphy-rspec` and `murphy-example-pack`)
+//! with a no-op `investigate` body and `default_enabled = false`, so
+//! the cop is inert at runtime but is enumerable by `murphy cops list`
+//! and accepts `[cops.rules."Rails/..."]` config sections without
+//! error (`§14a` of `docs/plans/2026-05-22-plugin-reboot-design.md`).
 //!
 //! Individual cops are migrated to the real arena AST by `murphy-au8`
-//! subtasks — for each migrated cop the corresponding
-//! `rails_stub_cop!` invocation here is replaced by a full
-//! `#[cop(...)]` implementation, and the cop name is removed from the
+//! subtasks — for each migrated cop the corresponding stub here is
+//! replaced by a full `#[cop(...)] impl` with real `#[on_node]`
+//! dispatch, and the cop name is removed from the
 //! `is_cop_disabled_by_default` hardcode list in
 //! `crates/murphy-core/src/config.rs` (cleanup tracked by
 //! `murphy-bnd`).
@@ -20,214 +20,1939 @@
 //! pre-`murphy-9cr.22` rails crate; see `git show
 //! 46a1de6^:crates/murphy-rails/src/cops/rails/`).
 
-use murphy_plugin_api::{Cop, Cx, NoOptions, NodeCop, NodeId, NodeKindTag, register_cops};
+use murphy_plugin_api::{Cx, NoOptions, cop, register_cops};
 
-/// Emit a stateless, no-op Rails cop stub. Each stub:
-/// - implements `Cop` with `NAME = $name` and `DEFAULT_ENABLED = Some(false)`
-/// - implements `NodeCop` with `KINDS = &[]` (file-visit dispatch) and an
-///   empty `check` body
-///
-/// The `DESCRIPTION` carries the arena-migration context so `murphy cops
-/// list --format=json` is self-explanatory even before `murphy-bnd`
-/// normalises the `status` field.
-macro_rules! rails_stub_cop {
-    ($ident:ident, $name:literal) => {
-        #[derive(Default)]
-        pub struct $ident;
-        impl Cop for $ident {
-            type Options = NoOptions;
-            const NAME: &'static str = $name;
-            const DESCRIPTION: &'static str = "Rails cop pending arena migration (cf. murphy-au8). \
-                 Stub registered for config compatibility.";
-            const DEFAULT_ENABLED: Option<bool> = Some(false);
-        }
-        impl NodeCop for $ident {
-            const KINDS: &'static [NodeKindTag] = &[];
-            fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
-        }
-    };
+#[derive(Default)]
+pub struct ActionControllerFlashBeforeRender;
+
+#[cop(
+    name = "Rails/ActionControllerFlashBeforeRender",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ActionControllerFlashBeforeRender {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
-rails_stub_cop!(
-    ActionControllerFlashBeforeRender,
-    "Rails/ActionControllerFlashBeforeRender"
-);
-rails_stub_cop!(ActionControllerTestCase, "Rails/ActionControllerTestCase");
-rails_stub_cop!(ActionFilter, "Rails/ActionFilter");
-rails_stub_cop!(ActionOrder, "Rails/ActionOrder");
-rails_stub_cop!(ActiveRecordAliases, "Rails/ActiveRecordAliases");
-rails_stub_cop!(
-    ActiveRecordCallbacksOrder,
-    "Rails/ActiveRecordCallbacksOrder"
-);
-rails_stub_cop!(ActiveRecordOverride, "Rails/ActiveRecordOverride");
-rails_stub_cop!(ActiveSupportAliases, "Rails/ActiveSupportAliases");
-rails_stub_cop!(ActiveSupportOnLoad, "Rails/ActiveSupportOnLoad");
-rails_stub_cop!(AddColumnIndex, "Rails/AddColumnIndex");
-rails_stub_cop!(AfterCommitOverride, "Rails/AfterCommitOverride");
-rails_stub_cop!(ApplicationController, "Rails/ApplicationController");
-rails_stub_cop!(ApplicationJob, "Rails/ApplicationJob");
-rails_stub_cop!(ApplicationMailer, "Rails/ApplicationMailer");
-rails_stub_cop!(ApplicationRecord, "Rails/ApplicationRecord");
-rails_stub_cop!(ArelStar, "Rails/ArelStar");
-rails_stub_cop!(AssertNot, "Rails/AssertNot");
-rails_stub_cop!(
-    AttributeDefaultBlockValue,
-    "Rails/AttributeDefaultBlockValue"
-);
-rails_stub_cop!(BelongsTo, "Rails/BelongsTo");
-rails_stub_cop!(Blank, "Rails/Blank");
-rails_stub_cop!(BulkChangeTable, "Rails/BulkChangeTable");
-rails_stub_cop!(CompactBlank, "Rails/CompactBlank");
-rails_stub_cop!(ContentTag, "Rails/ContentTag");
-rails_stub_cop!(CreateTableWithTimestamps, "Rails/CreateTableWithTimestamps");
-rails_stub_cop!(DangerousColumnNames, "Rails/DangerousColumnNames");
-rails_stub_cop!(Date, "Rails/Date");
-rails_stub_cop!(DefaultScope, "Rails/DefaultScope");
-rails_stub_cop!(Delegate, "Rails/Delegate");
-rails_stub_cop!(DelegateAllowBlank, "Rails/DelegateAllowBlank");
-rails_stub_cop!(
-    DeprecatedActiveModelErrorsMethods,
-    "Rails/DeprecatedActiveModelErrorsMethods"
-);
-rails_stub_cop!(DotSeparatedKeys, "Rails/DotSeparatedKeys");
-rails_stub_cop!(DuplicateAssociation, "Rails/DuplicateAssociation");
-rails_stub_cop!(DuplicateScope, "Rails/DuplicateScope");
-rails_stub_cop!(DurationArithmetic, "Rails/DurationArithmetic");
-rails_stub_cop!(DynamicFindBy, "Rails/DynamicFindBy");
-rails_stub_cop!(EagerEvaluationLogMessage, "Rails/EagerEvaluationLogMessage");
-rails_stub_cop!(EnumHash, "Rails/EnumHash");
-rails_stub_cop!(EnumSyntax, "Rails/EnumSyntax");
-rails_stub_cop!(EnumUniqueness, "Rails/EnumUniqueness");
-rails_stub_cop!(Env, "Rails/Env");
-rails_stub_cop!(EnvLocal, "Rails/EnvLocal");
-rails_stub_cop!(EnvironmentComparison, "Rails/EnvironmentComparison");
-rails_stub_cop!(EnvironmentVariableAccess, "Rails/EnvironmentVariableAccess");
-rails_stub_cop!(Exit, "Rails/Exit");
-rails_stub_cop!(ExpandedDateRange, "Rails/ExpandedDateRange");
-rails_stub_cop!(FilePath, "Rails/FilePath");
-rails_stub_cop!(FindBy, "Rails/FindBy");
-rails_stub_cop!(FindById, "Rails/FindById");
-rails_stub_cop!(
-    FindByOrAssignmentMemoization,
-    "Rails/FindByOrAssignmentMemoization"
-);
-rails_stub_cop!(FindEach, "Rails/FindEach");
-rails_stub_cop!(FreezeTime, "Rails/FreezeTime");
-rails_stub_cop!(HasAndBelongsToMany, "Rails/HasAndBelongsToMany");
-rails_stub_cop!(HasManyOrHasOneDependent, "Rails/HasManyOrHasOneDependent");
-rails_stub_cop!(HelperInstanceVariable, "Rails/HelperInstanceVariable");
-rails_stub_cop!(HttpPositionalArguments, "Rails/HttpPositionalArguments");
-rails_stub_cop!(HttpStatus, "Rails/HttpStatus");
-rails_stub_cop!(HttpStatusNameConsistency, "Rails/HttpStatusNameConsistency");
-rails_stub_cop!(I18nLazyLookup, "Rails/I18nLazyLookup");
-rails_stub_cop!(I18nLocaleAssignment, "Rails/I18nLocaleAssignment");
-rails_stub_cop!(I18nLocaleTexts, "Rails/I18nLocaleTexts");
-rails_stub_cop!(IgnoredColumnsAssignment, "Rails/IgnoredColumnsAssignment");
-rails_stub_cop!(
-    IgnoredSkipActionFilterOption,
-    "Rails/IgnoredSkipActionFilterOption"
-);
-rails_stub_cop!(IndexBy, "Rails/IndexBy");
-rails_stub_cop!(IndexWith, "Rails/IndexWith");
-rails_stub_cop!(Inquiry, "Rails/Inquiry");
-rails_stub_cop!(InverseOf, "Rails/InverseOf");
-rails_stub_cop!(
-    LexicallyScopedActionFilter,
-    "Rails/LexicallyScopedActionFilter"
-);
-rails_stub_cop!(LinkToBlank, "Rails/LinkToBlank");
-rails_stub_cop!(MailerName, "Rails/MailerName");
-rails_stub_cop!(MatchRoute, "Rails/MatchRoute");
-rails_stub_cop!(MigrationClassName, "Rails/MigrationClassName");
-rails_stub_cop!(MultipleRoutePaths, "Rails/MultipleRoutePaths");
-rails_stub_cop!(NegateInclude, "Rails/NegateInclude");
-rails_stub_cop!(NotNullColumn, "Rails/NotNullColumn");
-rails_stub_cop!(OrderArguments, "Rails/OrderArguments");
-rails_stub_cop!(OrderById, "Rails/OrderById");
-rails_stub_cop!(Output, "Rails/Output");
-rails_stub_cop!(OutputSafety, "Rails/OutputSafety");
-rails_stub_cop!(Pick, "Rails/Pick");
-rails_stub_cop!(Pluck, "Rails/Pluck");
-rails_stub_cop!(PluckId, "Rails/PluckId");
-rails_stub_cop!(PluckInWhere, "Rails/PluckInWhere");
-rails_stub_cop!(PluralizationGrammar, "Rails/PluralizationGrammar");
-rails_stub_cop!(Presence, "Rails/Presence");
-rails_stub_cop!(Present, "Rails/Present");
-rails_stub_cop!(RakeEnvironment, "Rails/RakeEnvironment");
-rails_stub_cop!(ReadWriteAttribute, "Rails/ReadWriteAttribute");
-rails_stub_cop!(RedirectBackOrTo, "Rails/RedirectBackOrTo");
-rails_stub_cop!(
-    RedundantActiveRecordAllMethod,
-    "Rails/RedundantActiveRecordAllMethod"
-);
-rails_stub_cop!(RedundantAllowNil, "Rails/RedundantAllowNil");
-rails_stub_cop!(RedundantForeignKey, "Rails/RedundantForeignKey");
-rails_stub_cop!(
-    RedundantPresenceValidationOnBelongsTo,
-    "Rails/RedundantPresenceValidationOnBelongsTo"
-);
-rails_stub_cop!(
-    RedundantReceiverInWithOptions,
-    "Rails/RedundantReceiverInWithOptions"
-);
-rails_stub_cop!(RedundantTravelBack, "Rails/RedundantTravelBack");
-rails_stub_cop!(ReflectionClassName, "Rails/ReflectionClassName");
-rails_stub_cop!(RefuteMethods, "Rails/RefuteMethods");
-rails_stub_cop!(RelativeDateConstant, "Rails/RelativeDateConstant");
-rails_stub_cop!(RenderInline, "Rails/RenderInline");
-rails_stub_cop!(RenderPlainText, "Rails/RenderPlainText");
-rails_stub_cop!(RequestReferer, "Rails/RequestReferer");
-rails_stub_cop!(RequireDependency, "Rails/RequireDependency");
-rails_stub_cop!(ResponseParsedBody, "Rails/ResponseParsedBody");
-rails_stub_cop!(ReversibleMigration, "Rails/ReversibleMigration");
-rails_stub_cop!(
-    ReversibleMigrationMethodDefinition,
-    "Rails/ReversibleMigrationMethodDefinition"
-);
-rails_stub_cop!(RootJoinChain, "Rails/RootJoinChain");
-rails_stub_cop!(RootPathnameMethods, "Rails/RootPathnameMethods");
-rails_stub_cop!(RootPublicPath, "Rails/RootPublicPath");
-rails_stub_cop!(SafeNavigation, "Rails/SafeNavigation");
-rails_stub_cop!(SafeNavigationWithBlank, "Rails/SafeNavigationWithBlank");
-rails_stub_cop!(SaveBang, "Rails/SaveBang");
-rails_stub_cop!(SchemaComment, "Rails/SchemaComment");
-rails_stub_cop!(ScopeArgs, "Rails/ScopeArgs");
-rails_stub_cop!(SelectMap, "Rails/SelectMap");
-rails_stub_cop!(ShortI18n, "Rails/ShortI18n");
-rails_stub_cop!(SkipsModelValidations, "Rails/SkipsModelValidations");
-rails_stub_cop!(SquishedSQLHeredocs, "Rails/SquishedSQLHeredocs");
-rails_stub_cop!(StripHeredoc, "Rails/StripHeredoc");
-rails_stub_cop!(StrongParametersExpect, "Rails/StrongParametersExpect");
-rails_stub_cop!(TableNameAssignment, "Rails/TableNameAssignment");
-rails_stub_cop!(ThreeStateBooleanColumn, "Rails/ThreeStateBooleanColumn");
-rails_stub_cop!(TimeZone, "Rails/TimeZone");
-rails_stub_cop!(TimeZoneAssignment, "Rails/TimeZoneAssignment");
-rails_stub_cop!(ToFormattedS, "Rails/ToFormattedS");
-rails_stub_cop!(ToSWithArgument, "Rails/ToSWithArgument");
-rails_stub_cop!(
-    TopLevelHashWithIndifferentAccess,
-    "Rails/TopLevelHashWithIndifferentAccess"
-);
-rails_stub_cop!(TransactionExitStatement, "Rails/TransactionExitStatement");
-rails_stub_cop!(UniqBeforePluck, "Rails/UniqBeforePluck");
-rails_stub_cop!(
-    UniqueValidationWithoutIndex,
-    "Rails/UniqueValidationWithoutIndex"
-);
-rails_stub_cop!(UnknownEnv, "Rails/UnknownEnv");
-rails_stub_cop!(UnusedIgnoredColumns, "Rails/UnusedIgnoredColumns");
-rails_stub_cop!(UnusedRenderContent, "Rails/UnusedRenderContent");
-rails_stub_cop!(Validation, "Rails/Validation");
-rails_stub_cop!(WhereEquals, "Rails/WhereEquals");
-rails_stub_cop!(WhereExists, "Rails/WhereExists");
-rails_stub_cop!(WhereMissing, "Rails/WhereMissing");
-rails_stub_cop!(WhereNot, "Rails/WhereNot");
-rails_stub_cop!(
-    WhereNotWithMultipleConditions,
-    "Rails/WhereNotWithMultipleConditions"
-);
-rails_stub_cop!(WhereRange, "Rails/WhereRange");
+#[derive(Default)]
+pub struct ActionControllerTestCase;
+
+#[cop(
+    name = "Rails/ActionControllerTestCase",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ActionControllerTestCase {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ActionFilter;
+
+#[cop(
+    name = "Rails/ActionFilter",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ActionFilter {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ActionOrder;
+
+#[cop(
+    name = "Rails/ActionOrder",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ActionOrder {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ActiveRecordAliases;
+
+#[cop(
+    name = "Rails/ActiveRecordAliases",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ActiveRecordAliases {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ActiveRecordCallbacksOrder;
+
+#[cop(
+    name = "Rails/ActiveRecordCallbacksOrder",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ActiveRecordCallbacksOrder {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ActiveRecordOverride;
+
+#[cop(
+    name = "Rails/ActiveRecordOverride",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ActiveRecordOverride {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ActiveSupportAliases;
+
+#[cop(
+    name = "Rails/ActiveSupportAliases",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ActiveSupportAliases {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ActiveSupportOnLoad;
+
+#[cop(
+    name = "Rails/ActiveSupportOnLoad",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ActiveSupportOnLoad {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct AddColumnIndex;
+
+#[cop(
+    name = "Rails/AddColumnIndex",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl AddColumnIndex {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct AfterCommitOverride;
+
+#[cop(
+    name = "Rails/AfterCommitOverride",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl AfterCommitOverride {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ApplicationController;
+
+#[cop(
+    name = "Rails/ApplicationController",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ApplicationController {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ApplicationJob;
+
+#[cop(
+    name = "Rails/ApplicationJob",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ApplicationJob {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ApplicationMailer;
+
+#[cop(
+    name = "Rails/ApplicationMailer",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ApplicationMailer {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ApplicationRecord;
+
+#[cop(
+    name = "Rails/ApplicationRecord",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ApplicationRecord {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ArelStar;
+
+#[cop(
+    name = "Rails/ArelStar",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ArelStar {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct AssertNot;
+
+#[cop(
+    name = "Rails/AssertNot",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl AssertNot {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct AttributeDefaultBlockValue;
+
+#[cop(
+    name = "Rails/AttributeDefaultBlockValue",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl AttributeDefaultBlockValue {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct BelongsTo;
+
+#[cop(
+    name = "Rails/BelongsTo",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl BelongsTo {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Blank;
+
+#[cop(
+    name = "Rails/Blank",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Blank {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct BulkChangeTable;
+
+#[cop(
+    name = "Rails/BulkChangeTable",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl BulkChangeTable {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct CompactBlank;
+
+#[cop(
+    name = "Rails/CompactBlank",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl CompactBlank {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ContentTag;
+
+#[cop(
+    name = "Rails/ContentTag",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ContentTag {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct CreateTableWithTimestamps;
+
+#[cop(
+    name = "Rails/CreateTableWithTimestamps",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl CreateTableWithTimestamps {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct DangerousColumnNames;
+
+#[cop(
+    name = "Rails/DangerousColumnNames",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl DangerousColumnNames {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Date;
+
+#[cop(
+    name = "Rails/Date",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Date {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct DefaultScope;
+
+#[cop(
+    name = "Rails/DefaultScope",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl DefaultScope {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Delegate;
+
+#[cop(
+    name = "Rails/Delegate",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Delegate {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct DelegateAllowBlank;
+
+#[cop(
+    name = "Rails/DelegateAllowBlank",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl DelegateAllowBlank {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct DeprecatedActiveModelErrorsMethods;
+
+#[cop(
+    name = "Rails/DeprecatedActiveModelErrorsMethods",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl DeprecatedActiveModelErrorsMethods {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct DotSeparatedKeys;
+
+#[cop(
+    name = "Rails/DotSeparatedKeys",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl DotSeparatedKeys {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct DuplicateAssociation;
+
+#[cop(
+    name = "Rails/DuplicateAssociation",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl DuplicateAssociation {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct DuplicateScope;
+
+#[cop(
+    name = "Rails/DuplicateScope",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl DuplicateScope {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct DurationArithmetic;
+
+#[cop(
+    name = "Rails/DurationArithmetic",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl DurationArithmetic {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct DynamicFindBy;
+
+#[cop(
+    name = "Rails/DynamicFindBy",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl DynamicFindBy {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct EagerEvaluationLogMessage;
+
+#[cop(
+    name = "Rails/EagerEvaluationLogMessage",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl EagerEvaluationLogMessage {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct EnumHash;
+
+#[cop(
+    name = "Rails/EnumHash",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl EnumHash {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct EnumSyntax;
+
+#[cop(
+    name = "Rails/EnumSyntax",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl EnumSyntax {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct EnumUniqueness;
+
+#[cop(
+    name = "Rails/EnumUniqueness",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl EnumUniqueness {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Env;
+
+#[cop(
+    name = "Rails/Env",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Env {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct EnvLocal;
+
+#[cop(
+    name = "Rails/EnvLocal",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl EnvLocal {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct EnvironmentComparison;
+
+#[cop(
+    name = "Rails/EnvironmentComparison",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl EnvironmentComparison {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct EnvironmentVariableAccess;
+
+#[cop(
+    name = "Rails/EnvironmentVariableAccess",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl EnvironmentVariableAccess {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Exit;
+
+#[cop(
+    name = "Rails/Exit",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Exit {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ExpandedDateRange;
+
+#[cop(
+    name = "Rails/ExpandedDateRange",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ExpandedDateRange {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct FilePath;
+
+#[cop(
+    name = "Rails/FilePath",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl FilePath {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct FindBy;
+
+#[cop(
+    name = "Rails/FindBy",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl FindBy {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct FindById;
+
+#[cop(
+    name = "Rails/FindById",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl FindById {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct FindByOrAssignmentMemoization;
+
+#[cop(
+    name = "Rails/FindByOrAssignmentMemoization",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl FindByOrAssignmentMemoization {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct FindEach;
+
+#[cop(
+    name = "Rails/FindEach",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl FindEach {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct FreezeTime;
+
+#[cop(
+    name = "Rails/FreezeTime",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl FreezeTime {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct HasAndBelongsToMany;
+
+#[cop(
+    name = "Rails/HasAndBelongsToMany",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl HasAndBelongsToMany {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct HasManyOrHasOneDependent;
+
+#[cop(
+    name = "Rails/HasManyOrHasOneDependent",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl HasManyOrHasOneDependent {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct HelperInstanceVariable;
+
+#[cop(
+    name = "Rails/HelperInstanceVariable",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl HelperInstanceVariable {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct HttpPositionalArguments;
+
+#[cop(
+    name = "Rails/HttpPositionalArguments",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl HttpPositionalArguments {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct HttpStatus;
+
+#[cop(
+    name = "Rails/HttpStatus",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl HttpStatus {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct HttpStatusNameConsistency;
+
+#[cop(
+    name = "Rails/HttpStatusNameConsistency",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl HttpStatusNameConsistency {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct I18nLazyLookup;
+
+#[cop(
+    name = "Rails/I18nLazyLookup",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl I18nLazyLookup {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct I18nLocaleAssignment;
+
+#[cop(
+    name = "Rails/I18nLocaleAssignment",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl I18nLocaleAssignment {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct I18nLocaleTexts;
+
+#[cop(
+    name = "Rails/I18nLocaleTexts",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl I18nLocaleTexts {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct IgnoredColumnsAssignment;
+
+#[cop(
+    name = "Rails/IgnoredColumnsAssignment",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl IgnoredColumnsAssignment {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct IgnoredSkipActionFilterOption;
+
+#[cop(
+    name = "Rails/IgnoredSkipActionFilterOption",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl IgnoredSkipActionFilterOption {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct IndexBy;
+
+#[cop(
+    name = "Rails/IndexBy",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl IndexBy {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct IndexWith;
+
+#[cop(
+    name = "Rails/IndexWith",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl IndexWith {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Inquiry;
+
+#[cop(
+    name = "Rails/Inquiry",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Inquiry {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct InverseOf;
+
+#[cop(
+    name = "Rails/InverseOf",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl InverseOf {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct LexicallyScopedActionFilter;
+
+#[cop(
+    name = "Rails/LexicallyScopedActionFilter",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl LexicallyScopedActionFilter {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct LinkToBlank;
+
+#[cop(
+    name = "Rails/LinkToBlank",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl LinkToBlank {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct MailerName;
+
+#[cop(
+    name = "Rails/MailerName",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl MailerName {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct MatchRoute;
+
+#[cop(
+    name = "Rails/MatchRoute",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl MatchRoute {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct MigrationClassName;
+
+#[cop(
+    name = "Rails/MigrationClassName",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl MigrationClassName {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct MultipleRoutePaths;
+
+#[cop(
+    name = "Rails/MultipleRoutePaths",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl MultipleRoutePaths {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct NegateInclude;
+
+#[cop(
+    name = "Rails/NegateInclude",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl NegateInclude {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct NotNullColumn;
+
+#[cop(
+    name = "Rails/NotNullColumn",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl NotNullColumn {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct OrderArguments;
+
+#[cop(
+    name = "Rails/OrderArguments",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl OrderArguments {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct OrderById;
+
+#[cop(
+    name = "Rails/OrderById",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl OrderById {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Output;
+
+#[cop(
+    name = "Rails/Output",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Output {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct OutputSafety;
+
+#[cop(
+    name = "Rails/OutputSafety",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl OutputSafety {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Pick;
+
+#[cop(
+    name = "Rails/Pick",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Pick {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Pluck;
+
+#[cop(
+    name = "Rails/Pluck",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Pluck {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct PluckId;
+
+#[cop(
+    name = "Rails/PluckId",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl PluckId {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct PluckInWhere;
+
+#[cop(
+    name = "Rails/PluckInWhere",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl PluckInWhere {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct PluralizationGrammar;
+
+#[cop(
+    name = "Rails/PluralizationGrammar",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl PluralizationGrammar {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Presence;
+
+#[cop(
+    name = "Rails/Presence",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Presence {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Present;
+
+#[cop(
+    name = "Rails/Present",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Present {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RakeEnvironment;
+
+#[cop(
+    name = "Rails/RakeEnvironment",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RakeEnvironment {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ReadWriteAttribute;
+
+#[cop(
+    name = "Rails/ReadWriteAttribute",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ReadWriteAttribute {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RedirectBackOrTo;
+
+#[cop(
+    name = "Rails/RedirectBackOrTo",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RedirectBackOrTo {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RedundantActiveRecordAllMethod;
+
+#[cop(
+    name = "Rails/RedundantActiveRecordAllMethod",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RedundantActiveRecordAllMethod {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RedundantAllowNil;
+
+#[cop(
+    name = "Rails/RedundantAllowNil",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RedundantAllowNil {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RedundantForeignKey;
+
+#[cop(
+    name = "Rails/RedundantForeignKey",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RedundantForeignKey {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RedundantPresenceValidationOnBelongsTo;
+
+#[cop(
+    name = "Rails/RedundantPresenceValidationOnBelongsTo",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RedundantPresenceValidationOnBelongsTo {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RedundantReceiverInWithOptions;
+
+#[cop(
+    name = "Rails/RedundantReceiverInWithOptions",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RedundantReceiverInWithOptions {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RedundantTravelBack;
+
+#[cop(
+    name = "Rails/RedundantTravelBack",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RedundantTravelBack {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ReflectionClassName;
+
+#[cop(
+    name = "Rails/ReflectionClassName",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ReflectionClassName {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RefuteMethods;
+
+#[cop(
+    name = "Rails/RefuteMethods",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RefuteMethods {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RelativeDateConstant;
+
+#[cop(
+    name = "Rails/RelativeDateConstant",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RelativeDateConstant {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RenderInline;
+
+#[cop(
+    name = "Rails/RenderInline",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RenderInline {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RenderPlainText;
+
+#[cop(
+    name = "Rails/RenderPlainText",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RenderPlainText {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RequestReferer;
+
+#[cop(
+    name = "Rails/RequestReferer",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RequestReferer {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RequireDependency;
+
+#[cop(
+    name = "Rails/RequireDependency",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RequireDependency {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ResponseParsedBody;
+
+#[cop(
+    name = "Rails/ResponseParsedBody",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ResponseParsedBody {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ReversibleMigration;
+
+#[cop(
+    name = "Rails/ReversibleMigration",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ReversibleMigration {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ReversibleMigrationMethodDefinition;
+
+#[cop(
+    name = "Rails/ReversibleMigrationMethodDefinition",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ReversibleMigrationMethodDefinition {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RootJoinChain;
+
+#[cop(
+    name = "Rails/RootJoinChain",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RootJoinChain {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RootPathnameMethods;
+
+#[cop(
+    name = "Rails/RootPathnameMethods",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RootPathnameMethods {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct RootPublicPath;
+
+#[cop(
+    name = "Rails/RootPublicPath",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl RootPublicPath {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct SafeNavigation;
+
+#[cop(
+    name = "Rails/SafeNavigation",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl SafeNavigation {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct SafeNavigationWithBlank;
+
+#[cop(
+    name = "Rails/SafeNavigationWithBlank",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl SafeNavigationWithBlank {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct SaveBang;
+
+#[cop(
+    name = "Rails/SaveBang",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl SaveBang {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct SchemaComment;
+
+#[cop(
+    name = "Rails/SchemaComment",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl SchemaComment {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ScopeArgs;
+
+#[cop(
+    name = "Rails/ScopeArgs",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ScopeArgs {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct SelectMap;
+
+#[cop(
+    name = "Rails/SelectMap",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl SelectMap {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ShortI18n;
+
+#[cop(
+    name = "Rails/ShortI18n",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ShortI18n {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct SkipsModelValidations;
+
+#[cop(
+    name = "Rails/SkipsModelValidations",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl SkipsModelValidations {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct SquishedSQLHeredocs;
+
+#[cop(
+    name = "Rails/SquishedSQLHeredocs",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl SquishedSQLHeredocs {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct StripHeredoc;
+
+#[cop(
+    name = "Rails/StripHeredoc",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl StripHeredoc {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct StrongParametersExpect;
+
+#[cop(
+    name = "Rails/StrongParametersExpect",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl StrongParametersExpect {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct TableNameAssignment;
+
+#[cop(
+    name = "Rails/TableNameAssignment",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl TableNameAssignment {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ThreeStateBooleanColumn;
+
+#[cop(
+    name = "Rails/ThreeStateBooleanColumn",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ThreeStateBooleanColumn {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct TimeZone;
+
+#[cop(
+    name = "Rails/TimeZone",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl TimeZone {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct TimeZoneAssignment;
+
+#[cop(
+    name = "Rails/TimeZoneAssignment",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl TimeZoneAssignment {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ToFormattedS;
+
+#[cop(
+    name = "Rails/ToFormattedS",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ToFormattedS {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct ToSWithArgument;
+
+#[cop(
+    name = "Rails/ToSWithArgument",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl ToSWithArgument {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct TopLevelHashWithIndifferentAccess;
+
+#[cop(
+    name = "Rails/TopLevelHashWithIndifferentAccess",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl TopLevelHashWithIndifferentAccess {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct TransactionExitStatement;
+
+#[cop(
+    name = "Rails/TransactionExitStatement",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl TransactionExitStatement {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct UniqBeforePluck;
+
+#[cop(
+    name = "Rails/UniqBeforePluck",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl UniqBeforePluck {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct UniqueValidationWithoutIndex;
+
+#[cop(
+    name = "Rails/UniqueValidationWithoutIndex",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl UniqueValidationWithoutIndex {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct UnknownEnv;
+
+#[cop(
+    name = "Rails/UnknownEnv",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl UnknownEnv {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct UnusedIgnoredColumns;
+
+#[cop(
+    name = "Rails/UnusedIgnoredColumns",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl UnusedIgnoredColumns {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct UnusedRenderContent;
+
+#[cop(
+    name = "Rails/UnusedRenderContent",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl UnusedRenderContent {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct Validation;
+
+#[cop(
+    name = "Rails/Validation",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl Validation {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct WhereEquals;
+
+#[cop(
+    name = "Rails/WhereEquals",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl WhereEquals {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct WhereExists;
+
+#[cop(
+    name = "Rails/WhereExists",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl WhereExists {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct WhereMissing;
+
+#[cop(
+    name = "Rails/WhereMissing",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl WhereMissing {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct WhereNot;
+
+#[cop(
+    name = "Rails/WhereNot",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl WhereNot {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct WhereNotWithMultipleConditions;
+
+#[cop(
+    name = "Rails/WhereNotWithMultipleConditions",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl WhereNotWithMultipleConditions {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
+
+#[derive(Default)]
+pub struct WhereRange;
+
+#[cop(
+    name = "Rails/WhereRange",
+    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
+    default_enabled = false,
+    options = NoOptions,
+)]
+impl WhereRange {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>) {}
+}
 
 register_cops!(
     mode = dynamic,
