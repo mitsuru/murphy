@@ -27,7 +27,7 @@ use murphy_plugin_api::{Cx, NoOptions, cop, register_cops};
 // `murphy-std`). The `register_cops!` list below re-exports them as
 // bare idents via `use`, keeping the registration table flat.
 pub mod cops;
-use cops::rails::Output;
+use cops::rails::{AssertNot, Output, RequestReferer};
 
 #[derive(Default)]
 pub struct ActionControllerFlashBeforeRender;
@@ -249,20 +249,6 @@ pub struct ArelStar;
     options = NoOptions,
 )]
 impl ArelStar {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-
-#[derive(Default)]
-pub struct AssertNot;
-
-#[cop(
-    name = "Rails/AssertNot",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl AssertNot {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
@@ -1405,19 +1391,10 @@ impl RenderPlainText {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
-#[derive(Default)]
-pub struct RequestReferer;
-
-#[cop(
-    name = "Rails/RequestReferer",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RequestReferer {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
+// `RequestReferer` is now a real cop in `cops::rails::request_referer`
+// — `pub use`d at the crate root via the `use cops::rails::{Output,
+// RequestReferer};` above so the `register_cops!` ident below resolves
+// unchanged.
 
 #[derive(Default)]
 pub struct RequireDependency;
