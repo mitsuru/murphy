@@ -11,7 +11,7 @@
 
 [package]
 edition = "2021"
-name = "ruby-prism"
+name = "murphy-prism"
 version = "1.9.0"
 authors = [
     "Steve Loveless <steve.loveless@gmail.com>",
@@ -23,7 +23,8 @@ include = [
     "src/",
     "build.rs",
     "Cargo.toml",
-    "Cargo.lock",
+    "LICENSE.md",
+    "README.md",
     "vendor",
 ]
 autolib = false
@@ -31,8 +32,8 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Rustified version of Ruby's prism parsing library"
-readme = false
+description = "Murphy fork of ruby-prism with token stream access for linters"
+readme = "README.md"
 keywords = [
     "ruby",
     "parser",
@@ -46,15 +47,14 @@ categories = [
     "parsing",
 ]
 license = "MIT"
-license-file = "LICENSE.md"
-repository = "https://github.com/ruby/prism"
+repository = "https://github.com/mitsuru/murphy"
 
 [features]
 default = ["vendored"]
 vendored = ["ruby-prism-sys/vendored"]
 
 [lib]
-name = "ruby_prism"
+name = "murphy_prism"
 path = "src/lib.rs"
 
 [dependencies.ruby-prism-sys]

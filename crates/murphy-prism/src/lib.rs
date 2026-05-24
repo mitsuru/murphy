@@ -13,13 +13,18 @@ mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, c_void, CStr};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 pub use self::bindings::*;
-use ruby_prism_sys::{pm_comment_t, pm_comment_type_t, pm_constant_id_list_t, pm_constant_id_t, pm_diagnostic_t, pm_integer_t, pm_location_t, pm_magic_comment_t, pm_node_destroy, pm_node_list, pm_node_t, pm_parse, pm_parser_free, pm_parser_init, pm_parser_t};
+use ruby_prism_sys::{pm_comment_t, pm_comment_type_t, pm_constant_id_list_t, pm_constant_id_t, pm_diagnostic_t, pm_integer_t, pm_lex_callback_t, pm_location_t, pm_magic_comment_t, pm_node_destroy, pm_node_list, pm_node_t, pm_parse, pm_parser_free, pm_parser_init, pm_parser_t, pm_token_t};
+pub use ruby_prism_sys::{
+    PM_TOKEN_COMMENT, PM_TOKEN_HEREDOC_END, PM_TOKEN_HEREDOC_START, PM_TOKEN_IGNORED_NEWLINE,
+    PM_TOKEN_NEWLINE, PM_TOKEN_PARENTHESIS_LEFT, PM_TOKEN_PARENTHESIS_LEFT_PARENTHESES,
+    PM_TOKEN_PARENTHESIS_RIGHT, pm_token_type_t,
+};
 
 /// A range in the source file.
 pub struct Location<'pr> {
@@ -572,6 +577,55 @@ pub struct ParseResult<'pr> {
     node: NonNull<pm_node_t>,
 }
 
+/// A token emitted by Prism while parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Token {
+    type_: pm_token_type_t,
+    start_offset: usize,
+    end_offset: usize,
+}
+
+impl Token {
+    /// Returns the Prism token type.
+    #[must_use]
+    pub const fn type_(&self) -> pm_token_type_t {
+        self.type_
+    }
+
+    /// Returns the token start byte offset.
+    #[must_use]
+    pub const fn start_offset(&self) -> usize {
+        self.start_offset
+    }
+
+    /// Returns the token end byte offset.
+    #[must_use]
+    pub const fn end_offset(&self) -> usize {
+        self.end_offset
+    }
+}
+
+/// The result of parsing a source string while collecting tokens.
+#[derive(Debug)]
+pub struct ParseResultWithTokens<'pr> {
+    parse: ParseResult<'pr>,
+    tokens: Vec<Token>,
+}
+
+impl<'pr> ParseResultWithTokens<'pr> {
+    /// Returns the parse result.
+    #[must_use]
+    pub const fn parse(&self) -> &ParseResult<'pr> {
+        &self.parse
+    }
+
+    /// Returns the tokens emitted by Prism, in source order.
+    #[must_use]
+    pub fn tokens(&self) -> &[Token] {
+        &self.tokens
+    }
+}
+
 impl<'pr> ParseResult<'pr> {
     /// Returns the source string that was parsed.
     #[must_use]
@@ -704,6 +758,74 @@ pub fn parse(source: &[u8]) -> ParseResult<'_> {
         let node = NonNull::new_unchecked(node);
 
         ParseResult { source, parser, node }
+    }
+}
+
+struct TokenSink {
+    source_start: *const u8,
+    tokens: Vec<Token>,
+}
+
+impl TokenSink {
+    unsafe fn offset(&self, ptr: *const u8) -> usize {
+        if ptr.is_null() {
+            0
+        } else {
+            usize::try_from(ptr.offset_from(self.source_start)).expect("token pointer should be inside source")
+        }
+    }
+
+    unsafe fn push(&mut self, token: *mut pm_token_t) {
+        let token = &*token;
+        self.tokens.push(Token {
+            type_: token.type_,
+            start_offset: self.offset(token.start),
+            end_offset: self.offset(token.end),
+        });
+    }
+}
+
+unsafe extern "C" fn collect_token(data: *mut c_void, _parser: *mut pm_parser_t, token: *mut pm_token_t) {
+    let sink = &mut *data.cast::<TokenSink>();
+    sink.push(token);
+}
+
+/// Parses the given source string and returns the parse result plus tokens.
+///
+/// # Panics
+///
+/// Panics if the parser fails to initialize.
+#[must_use]
+pub fn parse_with_tokens(source: &[u8]) -> ParseResultWithTokens<'_> {
+    unsafe {
+        let uninit = Box::new(MaybeUninit::<pm_parser_t>::uninit());
+        let uninit = Box::into_raw(uninit);
+
+        pm_parser_init((*uninit).as_mut_ptr(), source.as_ptr(), source.len(), std::ptr::null());
+
+        let parser = (*uninit).assume_init_mut();
+        let parser = NonNull::new_unchecked(parser);
+
+        let mut sink = TokenSink {
+            source_start: source.as_ptr(),
+            tokens: Vec::new(),
+        };
+        let data = std::ptr::addr_of_mut!(sink);
+        let mut lex_callback = pm_lex_callback_t {
+            data: data.cast::<c_void>(),
+            callback: Some(collect_token),
+        };
+
+        (*parser.as_ptr()).lex_callback = std::ptr::addr_of_mut!(lex_callback);
+        let node = pm_parse(parser.as_ptr());
+        (*parser.as_ptr()).lex_callback = std::ptr::null_mut();
+
+        let node = NonNull::new_unchecked(node);
+
+        ParseResultWithTokens {
+            parse: ParseResult { source, parser, node },
+            tokens: sink.tokens,
+        }
     }
 }
 
@@ -1385,5 +1507,38 @@ end
         let result = parse(source.as_ref());
         assert!(result.errors().next().is_none());
         assert!(result.warnings().next().is_none());
+    }
+
+    #[test]
+    fn parse_with_tokens_returns_ast_and_source_ordered_tokens() {
+        let source = b"foo( # comment\n  1)\n";
+        let result = crate::parse_with_tokens(source);
+
+        assert!(result.parse().errors().next().is_none());
+
+        let tokens: Vec<_> = result
+            .tokens()
+            .iter()
+            .map(|token| (token.type_(), token.start_offset(), token.end_offset()))
+            .collect();
+
+        assert!(tokens.contains(&(crate::PM_TOKEN_PARENTHESIS_LEFT, 3, 4)), "{tokens:?}");
+        assert!(tokens.contains(&(crate::PM_TOKEN_COMMENT, 5, 15)), "{tokens:?}");
+        assert!(tokens.contains(&(crate::PM_TOKEN_NEWLINE, 19, 20)), "{tokens:?}");
+        assert!(tokens.contains(&(crate::PM_TOKEN_PARENTHESIS_RIGHT, 18, 19)), "{tokens:?}");
+        assert!(tokens.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+    }
+
+    #[test]
+    fn parse_with_tokens_includes_heredoc_tokens() {
+        let source = b"foo( <<~HEREDOC )\nbody\nHEREDOC\n";
+        let result = crate::parse_with_tokens(source);
+
+        assert!(result.parse().errors().next().is_none());
+
+        let token_types: Vec<_> = result.tokens().iter().map(crate::Token::type_).collect();
+
+        assert!(token_types.contains(&crate::PM_TOKEN_HEREDOC_START));
+        assert!(token_types.contains(&crate::PM_TOKEN_HEREDOC_END));
     }
 }
