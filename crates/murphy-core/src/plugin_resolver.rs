@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::plugin_loader::{LoadKind, PluginLoadDiagnostic, ResolveFailure};
 use crate::{ConfigError, PluginConfig};
 
 const MAX_PLUGIN_NAME_LEN: usize = 64;
@@ -88,7 +89,7 @@ pub fn resolve_plugin_name_with_search_dirs(
     name: &str,
     overrides: &BTreeMap<String, PathBuf>,
     search_dirs: &[PathBuf],
-) -> Result<PathBuf, ConfigError> {
+) -> Result<PathBuf, ResolveFailure> {
     if let Some(path) = overrides.get(name) {
         return Ok(path.clone());
     }
@@ -99,20 +100,10 @@ pub fn resolve_plugin_name_with_search_dirs(
             return Ok(candidate);
         }
     }
-    let searched = if search_dirs.is_empty() {
-        "<none>".to_string()
-    } else {
-        search_dirs
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    Err(ConfigError::Io(format!(
-        "Plugin `{name}` not found (looked for `{filename}`). \
-         Searched: {searched}. To pin an explicit path, use the detailed form: \
-         `[[plugins]] name = \"{name}\" path = \"...\"`."
-    )))
+    Err(ResolveFailure {
+        filename,
+        searched_dirs: search_dirs.to_vec(),
+    })
 }
 
 /// Resolve a plugin `name` against the standard search path: env
@@ -137,7 +128,13 @@ pub fn resolve_plugin_name(
     if let Some(data) = dirs::data_dir() {
         search_dirs.push(data.join("murphy/plugins"));
     }
-    resolve_plugin_name_with_search_dirs(name, overrides, &search_dirs)
+    resolve_plugin_name_with_search_dirs(name, overrides, &search_dirs).map_err(|failure| {
+        ConfigError::PluginLoad(PluginLoadDiagnostic {
+            plugin_name: name.to_string(),
+            attempted_path: None,
+            kind: LoadKind::Resolve(failure),
+        })
+    })
 }
 
 /// Pre-pass that turns a `[[plugins]]` array into the ordered `(name,
@@ -308,32 +305,21 @@ mod tests {
     }
 
     #[test]
-    fn resolve_emits_not_found_with_search_path_hint() {
-        // Missing plugin: error must list the dirs we searched and point
-        // the user at the `Detailed` escape hatch.
+    fn resolve_emits_structured_failure_carrying_filename_and_search_dirs() {
+        // Missing plugin: returns ResolveFailure with the filename it
+        // looked for and the dirs it probed, structurally — the user-
+        // facing rendering happens in PluginLoadDiagnostic (murphy-tvh),
+        // not here.
         let empty = tempfile::tempdir().expect("tempdir");
         let dir = empty.path().to_path_buf();
-        let err = resolve_plugin_name_with_search_dirs(
+        let failure = resolve_plugin_name_with_search_dirs(
             "missing",
             &BTreeMap::new(),
             std::slice::from_ref(&dir),
         )
         .expect_err("missing plugin must fail");
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("missing"),
-            "error must echo plugin name: {msg}"
-        );
-        assert!(msg.contains("not found"), "error must say not found: {msg}");
-        assert!(
-            msg.contains(&dir.display().to_string()),
-            "error must list searched dir {}: {msg}",
-            dir.display()
-        );
-        assert!(
-            msg.contains("[[plugins]]") && msg.contains("path"),
-            "error must point user at the detailed form: {msg}"
-        );
+        assert_eq!(failure.filename, lib_filename("missing"));
+        assert_eq!(failure.searched_dirs, vec![dir]);
     }
 
     #[test]

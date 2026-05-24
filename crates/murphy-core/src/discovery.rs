@@ -53,6 +53,9 @@ pub enum ConfigError {
     BadGlob(String),
     /// The discovery root is unreadable / the walk hit an I/O error.
     Io(String),
+    /// A `[[plugins]]` entry could not be resolved or loaded. Renders
+    /// a rustc-style `error:` / `cause:` / `hint:` block (murphy-tvh).
+    PluginLoad(crate::plugin_loader::PluginLoadDiagnostic),
 }
 
 impl fmt::Display for ConfigError {
@@ -62,11 +65,19 @@ impl fmt::Display for ConfigError {
             ConfigError::BadYaml(m) => write!(f, "invalid .rubocop.yml: {m}"),
             ConfigError::BadGlob(m) => write!(f, "invalid glob in murphy.toml: {m}"),
             ConfigError::Io(m) => write!(f, "{m}"),
+            ConfigError::PluginLoad(d) => write!(f, "{d}"),
         }
     }
 }
 
-impl std::error::Error for ConfigError {}
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConfigError::PluginLoad(d) => Some(d),
+            _ => None,
+        }
+    }
+}
 
 /// Build a [`GlobSet`] from glob strings, surfacing a bad pattern as a
 /// structured [`ConfigError::BadGlob`].
