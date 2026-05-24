@@ -341,7 +341,6 @@ fn is_cop_disabled_by_default(name: &str) -> bool {
             | "Rails/OrderArguments"
             | "Rails/OrderById"
             | "Rails/OutputSafety"
-            | "Rails/Pick"
             | "Rails/Pluck"
             | "Rails/PluckId"
             | "Rails/PluckInWhere"
