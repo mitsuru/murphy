@@ -22,6 +22,24 @@ pub trait CopOptions: Default + Sized + 'static {
     }
 }
 
+/// String-backed enum option metadata used by `#[derive(CopOptions)]`.
+///
+/// `#[derive(CopOptionEnum)]` implements this trait for enums whose variants
+/// carry `#[option(value = "...")]` wire values.
+pub trait CopOptionEnum: Copy + Sized + 'static {
+    /// Allowed wire values as plain strings.
+    const VALUES: &'static [&'static str];
+
+    /// Allowed wire values encoded as a JSON array for [`OptionSpec`].
+    const VALUES_JSON: &'static str;
+
+    /// Convert a user-provided wire value into the typed enum.
+    fn from_str(value: &str) -> Option<Self>;
+
+    /// Return this variant's wire value.
+    fn as_str(self) -> &'static str;
+}
+
 /// Marker for cops that declare no options.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoOptions;

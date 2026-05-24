@@ -1,4 +1,4 @@
-error: #[on_new_investigation] methods must have exactly 1 parameter after &self: cx: &Cx<'_> (no NodeId — file-level investigations reach data via cx.comments() etc.)
+error: #[on_new_investigation] methods must have 1 or 2 parameters after &self: cx: &Cx<'_>[, options: &Options] (no NodeId — file-level investigations reach data via cx.comments() etc.)
   --> tests/ui/fail_cop_investigation_with_node_param.rs:17:5
    |
 17 |     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}

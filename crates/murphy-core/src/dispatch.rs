@@ -185,6 +185,7 @@ fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink) -> CxRaw {
         sink: sink as *mut OffenseSink as *mut c_void,
         sorted_tokens: p.sorted_tokens.as_ptr(),
         sorted_tokens_len: p.sorted_tokens.len(),
+        options_json: RawSlice::from_str("{}"),
     }
 }
 
@@ -212,10 +213,25 @@ fn send_method_passes(ast: &Ast, node_id: NodeId, allow_list: &[RawSlice]) -> bo
 /// [`crate::CopRegistry`] (which owns the `dlopen` handle). Both flow
 /// through this signature without re-asserting `&'static`.
 pub fn run_cops(ast: &Ast, cops: &[&PluginCopV1], sink: &mut OffenseSink) {
+    run_cops_with_options(ast, cops, sink, |_| b"{}".to_vec());
+}
+
+pub fn run_cops_with_options(
+    ast: &Ast,
+    cops: &[&PluginCopV1],
+    sink: &mut OffenseSink,
+    mut options_for: impl FnMut(&str) -> Vec<u8>,
+) {
     let index = DispatchIndex::build(ast);
     let mut base = build_cx_raw(ast, sink);
     for cop in cops {
         base.cop_name = cop.name;
+        let name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("");
+        let options_json = options_for(name);
+        base.options_json = RawSlice {
+            ptr: options_json.as_ptr(),
+            len: options_json.len(),
+        };
         // Per-cop kind list. **Empty `KINDS` means file-visit**: the cop
         // is invoked exactly once with `ast.root()` instead of being
         // dispatched per matching node. ADR 0038 deletes the `FileCop`
@@ -289,7 +305,10 @@ pub fn run_cops(ast: &Ast, cops: &[&PluginCopV1], sink: &mut OffenseSink) {
 mod tests {
     use super::*;
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use murphy_ast::{AstBuilder, NodeKind, OptNodeId};
     use murphy_plugin_api::{NodeKindTag as PluginNodeKindTag, PluginCopV1, RawSlice};
@@ -600,6 +619,74 @@ mod tests {
             names,
             vec!["Test/StampA".to_string(), "Test/StampB".to_string()],
             "each cop's offense must carry the cop_name the host stamped"
+        );
+    }
+
+    static OPTION_RECORDS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    unsafe extern "C" fn options_record_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let cx = unsafe { &*cx };
+        let name = String::from_utf8_lossy(unsafe { cx.cop_name.as_bytes() }).into_owned();
+        let options = String::from_utf8_lossy(unsafe { cx.options_json.as_bytes() }).into_owned();
+        OPTION_RECORDS.lock().unwrap().push((name, options));
+        0
+    }
+
+    static OPTIONS_COP_A: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/OptionsA"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: options_record_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+    static OPTIONS_COP_B: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/OptionsB"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: options_record_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn run_cops_with_options_injects_per_cop_options_json() {
+        OPTION_RECORDS.lock().unwrap().clear();
+
+        let mut b = AstBuilder::new("nil", "t.rb");
+        let n = b.push(NodeKind::Nil, murphy_ast::Range { start: 0, end: 3 });
+        let ast = b.finish(n);
+
+        let mut sink = OffenseSink::new("t.rb");
+        run_cops_with_options(
+            &ast,
+            &[&OPTIONS_COP_A, &OPTIONS_COP_B],
+            &mut sink,
+            |name| match name {
+                "Test/OptionsA" => br#"{"style":"a"}"#.to_vec(),
+                "Test/OptionsB" => br#"{"style":"b"}"#.to_vec(),
+                other => panic!("unexpected cop name {other}"),
+            },
+        );
+
+        let records = OPTION_RECORDS.lock().unwrap().clone();
+        assert_eq!(
+            records,
+            vec![
+                ("Test/OptionsA".to_string(), r#"{"style":"a"}"#.to_string()),
+                ("Test/OptionsB".to_string(), r#"{"style":"b"}"#.to_string()),
+            ],
         );
     }
 

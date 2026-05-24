@@ -1,4 +1,4 @@
-error: #[derive(CopOptions)] supports only bool, i64, String, Vec<String>, and Option<bool|i64|String> fields
+error: #[derive(CopOptions)] supports only bool, i64, String, Vec<String>, Option<bool|i64|String>, and CopOptionEnum fields
  --> tests/ui/fail_derive_unsupported_type.rs:6:12
   |
 6 |     ratio: f64,
