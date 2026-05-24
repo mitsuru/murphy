@@ -72,27 +72,110 @@ class Murphy
       @handle = handle
     end
 
+    def kind
+      Murphy.node_kind(@handle)
+    end
+
+    def parent
+      wrap_node(Murphy.node_parent(@handle))
+    end
+
+    def children
+      Murphy.node_children(@handle).map { |id| Murphy::Node.new(id) }
+    end
+
+    def ancestors
+      Murphy.node_ancestors(@handle).map { |id| Murphy::Node.new(id) }
+    end
+
+    def descendants
+      Murphy.node_descendants(@handle).map { |id| Murphy::Node.new(id) }
+    end
+
+    def each_ancestor
+      ancestors.each { |node| yield node }
+    end
+
+    def range
+      r = Murphy.node_range(@handle)
+      return nil unless r
+
+      Murphy::Range.new(r[0], r[1])
+    end
+
+    def field(name)
+      key = name.to_sym
+      value = Murphy.node_field(@handle, key)
+      return value.map { |id| Murphy::Node.new(id) } if value.is_a?(Array)
+
+      case key
+      when :receiver, :block
+        wrap_node(value)
+      when :arguments, :args, :elements, :children, :pairs, :branches, :whens,
+           :conditions, :conds, :targets, :parts, :resbodies, :rescues,
+           :exceptions
+        wrap_node(value)
+      else
+        node_id_field?(key) ? wrap_node(value) : value
+      end
+    end
+
+    def node_id_field?(key)
+      return false if key == :value && [:int, :float, :str, :sym].include?(kind)
+
+      case key
+      when :parent, :scope, :call, :parameters, :body, :default, :key, :target,
+           :receiver, :superclass, :expr, :expression, :begin, :begin_, :end,
+           :end_, :ensure, :ensure_, :var, :reference, :cond, :condition,
+           :then, :then_, :else, :else_, :subject, :left, :right, :lhs, :rhs,
+           :value
+        true
+      else
+        false
+      end
+    end
+
     # Returns a Symbol (design §4: `node.name == :puts`), or nil if the
     # primitive reports nil (out-of-range — never happens for a handle the
     # SDK itself produced from `node_count`).
     def name
-      n = Murphy.node_name(@handle)
-      n && n.to_sym
+      field(:method)
     end
 
     # True when the call has no explicit receiver (bare `puts` vs `obj.puts`).
     def receiver_nil?
-      Murphy.node_receiver_nil?(@handle)
+      field(:receiver).nil?
     end
 
     # The message/selector token span as a Murphy::Range (byte offsets), or
     # nil when the node has no message_loc.
     def message_loc
-      start_offset = Murphy.node_msg_start(@handle)
-      end_offset = Murphy.node_msg_end(@handle)
-      return nil if start_offset < 0 || end_offset < 0
+      return nil unless kind == :send || kind == :csend
 
-      Murphy::Range.new(start_offset, end_offset)
+      node_range = range
+      method = field(:method)
+      return node_range unless node_range && method
+
+      source = Murphy.raw_source(node_range.start_offset, node_range.end_offset)
+      return node_range unless source
+
+      receiver = field(:receiver)
+      search_from = if receiver && receiver.range
+        receiver.range.end_offset - node_range.start_offset
+      else
+        0
+      end
+      offset = source.index(method.to_s, search_from)
+      return node_range unless offset
+
+      start_offset = node_range.start_offset + offset
+      Murphy::Range.new(start_offset, start_offset + method.to_s.bytesize)
+    end
+
+    private
+
+    def wrap_node(id)
+      id.nil? ? nil : Murphy::Node.new(id)
     end
   end
 
@@ -182,8 +265,12 @@ class Murphy
     # (Task-3 ADR 0008 walk-order index) and dispatches each to the cop.
     # Read-only traversal (design §4).
     def __run
-      Murphy.node_count.times do |h|
-        on_call_node(Murphy::Node.new(h))
+      i = 0
+      while (kind = Murphy.node_kind(i))
+        if kind == :send || kind == :csend
+          on_call_node(Murphy::Node.new(i))
+        end
+        i += 1
       end
     end
   end

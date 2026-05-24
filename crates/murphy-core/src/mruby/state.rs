@@ -66,10 +66,11 @@ use crate::mruby::build::{MrubyStateOptions, close_state, open_state};
 ///      Task 5) holds its OWN clone, so `source` + `parse_result` die together,
 ///      never apart, even if the host returns first.
 ///
-/// Nothing about nodes is cached here (no names, ranges, offsets, or even a
-/// node count) — live handle resolution is Task 3. This type is purely the
-/// Arc-shareable, explicitly-drop-ordered, `Send + Sync` *carrier*.
+/// The arena AST is owned here for read-only mruby primitives. It is independent
+/// of the prism `ParseResult` borrow; the explicit `parse_result`-before-`source`
+/// drop contract below remains the only load-bearing self-reference rule.
 pub struct AstContext {
+    ast: Option<murphy_ast::Ast>,
     // SAFETY (ADR 0008 finding 3a + ADR 0009 rules 1 & 3 + ADR 0010 interlock):
     //
     //   * `parse_result` is a `ParseResult<'static>` whose `'static` is a LIE:
@@ -112,6 +113,9 @@ impl AstContext {
     /// `spikes/live_resolution_poc` shape.
     pub fn new(source: impl Into<Box<[u8]>>) -> Arc<Self> {
         let source: Box<[u8]> = source.into();
+        let ast = std::str::from_utf8(&source)
+            .ok()
+            .map(|source_text| murphy_translate::translate(source_text, "<mruby>"));
 
         // `result` borrows `source` for real here.
         let result: ParseResult<'_> = parse(&source);
@@ -138,6 +142,7 @@ impl AstContext {
             unsafe { std::mem::transmute::<ParseResult<'_>, ParseResult<'static>>(result) };
 
         Arc::new(Self {
+            ast,
             parse_result: ManuallyDrop::new(parse_result),
             source: ManuallyDrop::new(source),
         })
@@ -148,6 +153,11 @@ impl AstContext {
     /// minimal accessor the wrapper needs to *hold* and expose the context.
     pub fn parse_result(&self) -> &ParseResult<'static> {
         &self.parse_result
+    }
+
+    /// Borrow the owned arena AST used by the mruby primitive surface.
+    pub fn ast(&self) -> Option<&murphy_ast::Ast> {
+        self.ast.as_ref()
     }
 
     /// The owned source bytes (`parse_result` conceptually borrows these).
@@ -214,9 +224,9 @@ impl Drop for AstContext {
 // SAFETY (ADR 0009 rule 3 — carried into crates/ VERBATIM): the prism C arena
 // is read-only for the lifetime of every cop run — after `parse()` the tree is
 // never mutated, cops are read-only traversal (design §4, no `&mut` ever
-// formed, every primitive takes `&AstContext` and only reads via
-// `parse_result.node()` re-walks); concurrent shared `&` reads of an immutable
-// C arena from many threads are sound; the `Arc` is freed only after all
+// formed, every primitive takes `&AstContext` and only reads shared immutable
+// parse/arena state); concurrent shared `&` reads of an immutable C arena from
+// many threads are sound; the `Arc` is freed only after all
 // reader threads incl. abandoned ones are gone (each owns a clone).
 //
 // ADR 0008 finding 4: `AstContext` is otherwise `!Send`/`!Sync` because the

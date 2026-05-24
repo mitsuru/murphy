@@ -20,17 +20,17 @@ use std::sync::Arc;
 
 use murphy_core::{AstContext, Offense, Range, Severity, run_mruby_cop};
 
-/// The design §4 cop, verbatim-in-spirit. Task-3's `node_name` returns a
-/// String and `receiver` is exposed as `receiver_nil?`, so the prelude's
-/// `Node` coerces `name` to a Symbol and exposes `receiver_nil?` — the cop
-/// reads close to design §4 (`node.name == :puts`, no explicit receiver),
-/// `add_offense(node.message_loc, message:)`, with NO `fix` block.
+/// The design §4 cop, verbatim-in-spirit. The new Node wrapper API is exercised
+/// via `kind`/`field` (`:send`, `:method`, and `:receiver`) with no explicit
+/// receiver gate.
 const NO_PUTS_RB: &str = r#"
 class NoPutsCop < Murphy::Cop
   MSG = "Use a logger instead of puts"
 
   def on_call_node(node)
-    return unless node.name == :puts && node.receiver_nil?
+    return unless node.kind == :send
+    return unless node.field(:method) == :puts
+    return unless node.field(:receiver).nil?
     add_offense(node.message_loc, message: MSG)
   end
 end
@@ -44,7 +44,9 @@ class NoPutsFixCop < Murphy::Cop
   MSG = "Use a logger instead of puts"
 
   def on_call_node(node)
-    return unless node.name == :puts && node.receiver_nil?
+    return unless node.kind == :send
+    return unless node.field(:method) == :puts
+    return unless node.field(:receiver).nil?
     add_offense(node.message_loc, message: MSG) do |fix|
       fix.replace(node.message_loc, "logger.info")
     end
@@ -161,7 +163,9 @@ end
 
 class TypedRangeCop < Murphy::Cop
   def on_call_node(node)
-    return unless node.name == :puts && node.receiver_nil?
+    return unless node.kind == :send
+    return unless node.field(:method) == :puts
+    return unless node.field(:receiver).nil?
 
     loc = node.message_loc
     return unless loc.is_a?(Murphy::Range)
@@ -202,10 +206,12 @@ fn invalid_range_edit_is_silently_dropped_valid_edit_survives() {
     // fix.replace at [0,4] is valid; fix.replace at [4,0] is inverted (start > end) → dropped.
     const COP: &str = r#"
 class InvRangeCop < Murphy::Cop
-  def on_call_node(n)
-    return unless n.name == :puts && n.receiver_nil?
-    add_offense(n.message_loc, message: "m") do |fix|
-      fix.replace(n.message_loc, "ok")  # valid: [0, 4]
+  def on_call_node(node)
+    return unless node.kind == :send
+    return unless node.field(:method) == :puts
+    return unless node.field(:receiver).nil?
+    add_offense(node.message_loc, message: "m") do |fix|
+      fix.replace(node.message_loc, "ok")  # valid: [0, 4]
       # Inverted range (start > end) — must be silently dropped (PIN B).
       fix.replace(Murphy::Range.new(4, 0), "bad")
     end
@@ -238,9 +244,11 @@ fn all_edits_invalid_autocorrect_absent() {
     // Both edits have inverted ranges → both dropped → Vec<Edit> empty → no autocorrect.
     const COP: &str = r#"
 class AllBadCop < Murphy::Cop
-  def on_call_node(n)
-    return unless n.name == :puts && n.receiver_nil?
-    add_offense(n.message_loc, message: "m") do |fix|
+  def on_call_node(node)
+    return unless node.kind == :send
+    return unless node.field(:method) == :puts
+    return unless node.field(:receiver).nil?
+    add_offense(node.message_loc, message: "m") do |fix|
       fix.replace(Murphy::Range.new(4, 0), "bad1")
       fix.replace(Murphy::Range.new(9, 2), "bad2")
     end
@@ -258,7 +266,7 @@ end
 
 #[test]
 fn explicit_receiver_puts_is_not_flagged() {
-    // `obj.puts` HAS a receiver → the cop's `receiver_nil?` gate rejects it.
+    // `obj.puts` HAS a receiver → the `node.field(:receiver).nil?` gate rejects it.
     let offenses = run(NO_PUTS_RB, "Murphy/NoPuts", "t.rb", "obj.puts\n");
     assert!(
         offenses.is_empty(),
@@ -273,7 +281,9 @@ fn severity_kwarg_defaults_to_warning_and_is_overridable() {
     const ERR_RB: &str = r#"
 class ErrPutsCop < Murphy::Cop
   def on_call_node(node)
-    return unless node.name == :puts && node.receiver_nil?
+    return unless node.kind == :send
+    return unless node.field(:method) == :puts
+    return unless node.field(:receiver).nil?
     add_offense(node.message_loc, message: "boom", severity: :error)
   end
 end
@@ -281,4 +291,61 @@ end
     let offenses = run(ERR_RB, "Murphy/ErrPuts", "t.rb", "puts 1\n");
     assert_eq!(offenses.len(), 1);
     assert_eq!(offenses[0].severity, Severity::Error);
+}
+
+#[test]
+fn node_field_wraps_csend_receiver_and_arguments() {
+    const COP: &str = r#"
+class CsendFieldCop < Murphy::Cop
+  def on_call_node(node)
+    return unless node.kind == :csend
+    return unless node.field(:method) == :puts
+    receiver = node.field(:receiver)
+    return unless receiver.is_a?(Murphy::Node)
+
+    args = node.field(:arguments)
+    return unless args.length == 1
+    return unless args[0].kind == :int
+
+    add_offense(node.message_loc, message: "csend fields")
+  end
+end
+"#;
+
+    let offenses = run(COP, "Murphy/CsendField", "t.rb", "obj&.puts(1)\n");
+    assert_eq!(offenses.len(), 1);
+    assert_eq!(
+        offenses[0].range,
+        Range {
+            start_offset: 5,
+            end_offset: 9
+        },
+        "message_loc should remain the selector range inside a csend node"
+    );
+}
+
+#[test]
+fn message_loc_uses_selector_not_receiver_when_names_match() {
+    const COP: &str = r#"
+class SelectorLocCop < Murphy::Cop
+  def on_call_node(node)
+    return unless node.kind == :send
+    return unless node.field(:method) == :foo
+    return if node.field(:receiver).nil?
+
+    add_offense(node.message_loc, message: "selector")
+  end
+end
+"#;
+
+    let offenses = run(COP, "Murphy/SelectorLoc", "t.rb", "foo.foo\n");
+    assert_eq!(offenses.len(), 1);
+    assert_eq!(
+        offenses[0].range,
+        Range {
+            start_offset: 4,
+            end_offset: 7
+        },
+        "message_loc should point to the selector after the dot, not the receiver"
+    );
 }
