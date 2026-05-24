@@ -81,6 +81,10 @@ let edit = offenses[0]
     /* the captured edit list lives next to `CapturedOffense`; if
        a pack needs this routinely, add an `apply_fix` helper to its
        local `tests/test_support_ext.rs` rather than per-cop. */;
+// NOTE: `apply_edit_locally` is a placeholder — write it as a small
+// helper next to the test (or in `tests/test_support_ext.rs`) that
+// applies one edit's `(range, replacement)` to `src` and returns the
+// rewritten string. `murphy-plugin-api` does not ship this helper.
 let fixed_once = apply_edit_locally(src, edit);
 assert!(run_cop::<MyCop>(&fixed_once).is_empty(), "cop fired on its own output");
 ```

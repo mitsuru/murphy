@@ -99,9 +99,18 @@ mod tests {
 
     #[test]
     fn flags_body_exceeding_default_max() {
+        // Real statements inside the block — a comment-only body parses
+        // to `body == None` and the cop short-circuits, so the test
+        // would silently pass for the wrong reason. Six assignments
+        // give the `count_things` descendant walk well over `max = 5`.
         let src = indoc! {r#"
             do_thing do
-              # TODO: enough body to exceed Max
+              a = 1
+              b = 2
+              c = 3
+              d = 4
+              e = 5
+              f = 6
             end
         "#};
         assert_eq!(hits(src), 1);

@@ -65,7 +65,7 @@ Each element of the pattern is one of:
 | `{a b c}` | Alternation — any of `a`, `b`, `c` matches. |
 | `...` | Rest — zero-or-more nodes in a sequence (commonly trailing). |
 | `$_`, `$sym`, `$(send …)` | Capture — emits the matched node / atom into the function's return tuple. Capture order matches source order. |
-| `$...` | Sequence capture — captures the remaining nodes of a sequence as a `Vec<NodeId>`. |
+| `$...` | Sequence capture — captures the remaining nodes of a sequence as `&'a [NodeId]` (borrowed slice into the arena, not owned). |
 
 Worked examples (paired with the RuboCop form they replace):
 
@@ -107,7 +107,9 @@ The signature of the generated function depends on the captures:
 - **No captures** — returns `bool`.
 - **One or more captures** — returns `Option<(C1, C2, …)>`. The capture
   types are: `NodeId` for `$_` / `$(…)` / `${…}`, the atom type for
-  `$sym` / `$int` / etc., and `Vec<NodeId>` for `$...`.
+  `$sym` / `$int` / etc., and `&'a [NodeId]` for `$...` (the macro
+  lowers `CaptureKind::Seq` to a borrowed slice into the arena, not an
+  owned `Vec`).
 
 Always handle the `Option` with `let Some((a, b)) = pattern(node, cx) else { return; }`
 — do not `.unwrap()`.
