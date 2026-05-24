@@ -270,16 +270,30 @@ pub fn node_pattern(input: TokenStream) -> TokenStream {
 /// - The `impl` must be **inherent** (`impl T { ... }`), non-generic, and
 ///   not `unsafe`. `#[cop]` on a struct, trait impl, or generic impl is a
 ///   compile error.
-/// - At least one method inside the `impl` must carry `#[on_node]`.
-/// - Each `#[on_node]` method must have the exact signature
-///   `fn(&self, NodeId, &Cx<'_>)`.
+/// - At least one method inside the `impl` must carry `#[on_node]` (for
+///   per-kind dispatch) or `#[on_new_investigation]` (modelled on
+///   RuboCop's hook of the same name; runs once per file with access
+///   to `cx.comments()`).
+/// - `#[on_node]` and `#[on_new_investigation]` cannot be mixed in the
+///   same impl, and at most one method per impl may use
+///   `#[on_new_investigation]`.
+/// - `#[on_node]` methods must have the signature
+///   `fn(&self, NodeId, &Cx<'_>)`; `#[on_new_investigation]` methods
+///   take only `fn(&self, &Cx<'_>)` (no `NodeId` — the file is the
+///   subject).
 ///
-/// # Example
+/// `#[on_new_investigation]` is the file-scoped entry point. It is
+/// intended for cops that iterate `cx.comments()` or similar
+/// file-level structured data; reaching for `cx.source()` /
+/// `cx.raw_source()` here is the escape-hatch path and should be a
+/// hand-rolled `KINDS = &[]` cop instead (the macro's structured
+/// dispatch is the guardrail).
+///
+/// # Example (per-kind dispatch)
 ///
 /// ```ignore
-/// use murphy_ast::NodeId;
-/// use murphy_plugin_api::Cx;
-/// use murphy_plugin_macros::{cop, on_node};
+/// use murphy_plugin_api::{Cx, NodeId};
+/// use murphy_plugin_macros::cop;
 ///
 /// #[derive(Default)]
 /// struct NoTabs;
@@ -288,6 +302,24 @@ pub fn node_pattern(input: TokenStream) -> TokenStream {
 /// impl NoTabs {
 ///     #[on_node(kind = "send")]
 ///     fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) { /* … */ }
+/// }
+/// ```
+///
+/// # Example (per-file investigation)
+///
+/// ```ignore
+/// use murphy_plugin_api::Cx;
+/// use murphy_plugin_macros::cop;
+///
+/// #[derive(Default)]
+/// struct TodoFormat;
+///
+/// #[cop(name = "Example/TodoFormat")]
+/// impl TodoFormat {
+///     #[on_new_investigation]
+///     fn investigate(&self, cx: &Cx<'_>) {
+///         for c in cx.comments() { /* … */ }
+///     }
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -315,6 +347,40 @@ pub fn cop(args: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn on_node(args: TokenStream, item: TokenStream) -> TokenStream {
     cop_attr::on_node(args.into(), item.into()).into()
+}
+
+/// Declare that a method inside a `#[cop]` impl is the per-file
+/// investigation callback (modelled on RuboCop's hook of the same
+/// name). Lowers to `KINDS = &[]`; the host calls the trait `check`
+/// exactly once per file (with `node == cx.root()`, ignored here),
+/// which then delegates to the user method passing only `cx`.
+///
+/// Takes no arguments. Must be the only dispatched method in the impl
+/// block (cannot coexist with `#[on_node]`).
+///
+/// The signature must be `fn(&self, &Cx<'_>)` — no `NodeId` parameter.
+/// Use `cx.comments()` to walk the file's comments; reaching for
+/// `cx.source()` / `cx.raw_source()` is the escape-hatch path and
+/// should be a hand-rolled `KINDS = &[]` cop instead.
+///
+/// Like `#[on_node]`, this entry point is consumed by `#[cop]` before
+/// the proc-macro runs; reaching it directly is always a misuse and
+/// produces a compile error.
+///
+/// # Example
+///
+/// ```ignore
+/// #[cop(name = "Plugin/Comments")]
+/// impl Comments {
+///     #[on_new_investigation]
+///     fn investigate(&self, cx: &Cx<'_>) {
+///         for comment in cx.comments() { /* … */ }
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn on_new_investigation(args: TokenStream, item: TokenStream) -> TokenStream {
+    cop_attr::on_new_investigation(args.into(), item.into()).into()
 }
 
 /// Whether `register_cops!` emits a `#[no_mangle]` C symbol.
