@@ -39,6 +39,17 @@
 //! describe a scenario rather than a class). The cop reports and lets
 //! the user fix by hand.
 //!
+//! ## Why hand-rolled `impl Cop` / `impl NodeCop` (not `#[cop]`)
+//!
+//! `murphy-plugin-macros::cop` (murphy-9cr.8) generates a `check` whose
+//! signature uses `::murphy_ast::NodeId` as an absolute path, which
+//! requires consumer crates to declare `murphy-ast` as a runtime
+//! dependency. That breaks the single-surface plugin ABI boundary (ADR
+//! 0038) enforced by `tests/dep_boundary.rs`. Every production cop in
+//! the workspace (`murphy-std`, `murphy-example-pack`, here) uses the
+//! manual form for the same reason. Macro adoption is tracked as
+//! murphy-xg5 (fix the macro to emit `::murphy_plugin_api::NodeId`).
+//!
 //! ## Known v1 limitation
 //!
 //! RuboCop only runs RSpec cops on `*_spec.rb` files; Murphy has no
