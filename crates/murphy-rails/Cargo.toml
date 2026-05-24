@@ -2,9 +2,22 @@
 name = "murphy-rails"
 version = "0.1.0"
 edition = "2024"
+description = "Rails-focused dynamic plugin pack for Murphy — 138 RuboCop-rails cops registered as arena-migration stubs (murphy-2ob §14a). Individual cops are migrated to the arena AST by murphy-au8 subtasks."
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+# Mirrors murphy-example-pack: the rlib variant is build-order
+# scaffolding only — murphy-cli's `[dev-dependencies]` reference forces
+# Cargo to materialise the cdylib for tests/rails_pack_e2e.rs. Production
+# never `use`s this crate from Rust; the cdylib is dlopen'd by
+# murphy-core's plugin_loader.
 
 [dependencies]
-murphy-core = { path = "../murphy-core" }
+# Single-surface plugin ABI (ADR 0038, design §5). The pack's only
+# runtime Murphy dependency — boundary asserted by
+# tests/dep_boundary.rs.
+murphy-plugin-api = { path = "../murphy-plugin-api" }
+
+[dev-dependencies]
+# Used by tests/dep_boundary.rs to parse `cargo metadata` JSON.
+serde_json = "1"

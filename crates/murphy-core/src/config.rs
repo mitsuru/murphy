@@ -256,20 +256,153 @@ impl MurphyConfig {
 }
 
 fn is_cop_disabled_by_default(name: &str) -> bool {
+    // murphy-2ob §14a: until `MurphyConfig::cop_enabled` learns to
+    // consult the registry's `DEFAULT_ENABLED` (murphy-bnd), keep the
+    // Rails 138-cop arena-migration stub pack's default-off status
+    // here as a hardcoded fallback. The list mirrors murphy-rails's
+    // `register_cops!` contents one-for-one — adding/removing a cop
+    // in murphy-rails requires the same change here until murphy-bnd
+    // lands.
     matches!(
         name,
-        "Rails/ActionFilter"
+        "Rails/ActionControllerFlashBeforeRender"
+            | "Rails/ActionControllerTestCase"
+            | "Rails/ActionFilter"
+            | "Rails/ActionOrder"
+            | "Rails/ActiveRecordAliases"
+            | "Rails/ActiveRecordCallbacksOrder"
+            | "Rails/ActiveRecordOverride"
+            | "Rails/ActiveSupportAliases"
+            | "Rails/ActiveSupportOnLoad"
+            | "Rails/AddColumnIndex"
+            | "Rails/AfterCommitOverride"
+            | "Rails/ApplicationController"
+            | "Rails/ApplicationJob"
+            | "Rails/ApplicationMailer"
+            | "Rails/ApplicationRecord"
+            | "Rails/ArelStar"
+            | "Rails/AssertNot"
+            | "Rails/AttributeDefaultBlockValue"
+            | "Rails/BelongsTo"
+            | "Rails/Blank"
+            | "Rails/BulkChangeTable"
+            | "Rails/CompactBlank"
+            | "Rails/ContentTag"
+            | "Rails/CreateTableWithTimestamps"
+            | "Rails/DangerousColumnNames"
+            | "Rails/Date"
             | "Rails/DefaultScope"
+            | "Rails/Delegate"
+            | "Rails/DelegateAllowBlank"
+            | "Rails/DeprecatedActiveModelErrorsMethods"
+            | "Rails/DotSeparatedKeys"
+            | "Rails/DuplicateAssociation"
+            | "Rails/DuplicateScope"
+            | "Rails/DurationArithmetic"
+            | "Rails/DynamicFindBy"
+            | "Rails/EagerEvaluationLogMessage"
+            | "Rails/EnumHash"
+            | "Rails/EnumSyntax"
+            | "Rails/EnumUniqueness"
             | "Rails/Env"
+            | "Rails/EnvLocal"
+            | "Rails/EnvironmentComparison"
             | "Rails/EnvironmentVariableAccess"
+            | "Rails/Exit"
+            | "Rails/ExpandedDateRange"
+            | "Rails/FilePath"
+            | "Rails/FindBy"
+            | "Rails/FindById"
+            | "Rails/FindByOrAssignmentMemoization"
+            | "Rails/FindEach"
+            | "Rails/FreezeTime"
+            | "Rails/HasAndBelongsToMany"
+            | "Rails/HasManyOrHasOneDependent"
+            | "Rails/HelperInstanceVariable"
+            | "Rails/HttpPositionalArguments"
+            | "Rails/HttpStatus"
+            | "Rails/HttpStatusNameConsistency"
+            | "Rails/I18nLazyLookup"
+            | "Rails/I18nLocaleAssignment"
+            | "Rails/I18nLocaleTexts"
+            | "Rails/IgnoredColumnsAssignment"
+            | "Rails/IgnoredSkipActionFilterOption"
+            | "Rails/IndexBy"
+            | "Rails/IndexWith"
+            | "Rails/Inquiry"
+            | "Rails/InverseOf"
+            | "Rails/LexicallyScopedActionFilter"
+            | "Rails/LinkToBlank"
+            | "Rails/MailerName"
+            | "Rails/MatchRoute"
+            | "Rails/MigrationClassName"
+            | "Rails/MultipleRoutePaths"
+            | "Rails/NegateInclude"
+            | "Rails/NotNullColumn"
+            | "Rails/OrderArguments"
             | "Rails/OrderById"
+            | "Rails/Output"
+            | "Rails/OutputSafety"
+            | "Rails/Pick"
+            | "Rails/Pluck"
             | "Rails/PluckId"
+            | "Rails/PluckInWhere"
+            | "Rails/PluralizationGrammar"
+            | "Rails/Presence"
+            | "Rails/Present"
+            | "Rails/RakeEnvironment"
+            | "Rails/ReadWriteAttribute"
+            | "Rails/RedirectBackOrTo"
+            | "Rails/RedundantActiveRecordAllMethod"
+            | "Rails/RedundantAllowNil"
+            | "Rails/RedundantForeignKey"
+            | "Rails/RedundantPresenceValidationOnBelongsTo"
+            | "Rails/RedundantReceiverInWithOptions"
+            | "Rails/RedundantTravelBack"
+            | "Rails/ReflectionClassName"
+            | "Rails/RefuteMethods"
+            | "Rails/RelativeDateConstant"
+            | "Rails/RenderInline"
+            | "Rails/RenderPlainText"
+            | "Rails/RequestReferer"
             | "Rails/RequireDependency"
+            | "Rails/ResponseParsedBody"
+            | "Rails/ReversibleMigration"
             | "Rails/ReversibleMigrationMethodDefinition"
+            | "Rails/RootJoinChain"
+            | "Rails/RootPathnameMethods"
+            | "Rails/RootPublicPath"
+            | "Rails/SafeNavigation"
+            | "Rails/SafeNavigationWithBlank"
             | "Rails/SaveBang"
             | "Rails/SchemaComment"
+            | "Rails/ScopeArgs"
+            | "Rails/SelectMap"
+            | "Rails/ShortI18n"
+            | "Rails/SkipsModelValidations"
+            | "Rails/SquishedSQLHeredocs"
+            | "Rails/StripHeredoc"
+            | "Rails/StrongParametersExpect"
             | "Rails/TableNameAssignment"
+            | "Rails/ThreeStateBooleanColumn"
+            | "Rails/TimeZone"
+            | "Rails/TimeZoneAssignment"
+            | "Rails/ToFormattedS"
+            | "Rails/ToSWithArgument"
+            | "Rails/TopLevelHashWithIndifferentAccess"
+            | "Rails/TransactionExitStatement"
+            | "Rails/UniqBeforePluck"
+            | "Rails/UniqueValidationWithoutIndex"
+            | "Rails/UnknownEnv"
             | "Rails/UnusedIgnoredColumns"
+            | "Rails/UnusedRenderContent"
+            | "Rails/Validation"
+            | "Rails/WhereEquals"
+            | "Rails/WhereExists"
+            | "Rails/WhereMissing"
+            | "Rails/WhereNot"
+            | "Rails/WhereNotWithMultipleConditions"
+            | "Rails/WhereRange"
     )
 }
 
@@ -492,7 +625,19 @@ Exclude = ["db/schema.rb"]
     fn cop_enabled_is_false_for_rails_cops_disabled_by_default() {
         let cfg = MurphyConfig::from_toml_str("").expect("empty config parses");
 
-        const DISABLED_BY_DEFAULT: [&str; 12] = [
+        // murphy-2ob §14a: the 138 Rails cops registered as arena-
+        // migration stubs in murphy-rails are all default-off via the
+        // `is_cop_disabled_by_default` hardcode fallback. Spot-check a
+        // representative slice (covering the pre-2ob 12-cop list plus
+        // names added by the 138 expansion) rather than enumerating
+        // all 138 — the authoritative source is the matches! arm in
+        // `is_cop_disabled_by_default`; cleanup is tracked by murphy-bnd.
+        const DISABLED_BY_DEFAULT_SAMPLE: [&str; 15] = [
+            // Names added by the 138-cop expansion (previously default-on).
+            "Rails/ActionControllerFlashBeforeRender",
+            "Rails/ActionControllerTestCase",
+            "Rails/AddColumnIndex",
+            // Pre-2ob 12-cop list (kept default-off throughout).
             "Rails/ActionFilter",
             "Rails/DefaultScope",
             "Rails/Env",
@@ -507,16 +652,16 @@ Exclude = ["db/schema.rb"]
             "Rails/UnusedIgnoredColumns",
         ];
 
-        for name in DISABLED_BY_DEFAULT {
+        for name in DISABLED_BY_DEFAULT_SAMPLE {
             assert!(
                 !cfg.cop_enabled(name),
                 "{name} should be disabled by default"
             );
         }
 
-        assert!(cfg.cop_enabled("Rails/ActionControllerTestCase"));
-        assert!(cfg.cop_enabled("Rails/ActionControllerFlashBeforeRender"));
-        assert!(cfg.cop_enabled("Rails/AddColumnIndex"));
+        // Cops not in the hardcode list default to enabled (unknown
+        // names included — `cop_enabled` is permissive for forward
+        // compatibility with future plugin packs).
         assert!(cfg.cop_enabled("Unknown/Foo"));
     }
 

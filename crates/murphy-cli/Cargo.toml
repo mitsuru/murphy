@@ -35,6 +35,10 @@ murphy-example-pack = { path = "../murphy-example-pack" }
 # bootstrap RSpec cop pack (murphy-4n9.4). Loaded via dlopen by
 # tests/rspec_pack_e2e.rs; never `use`d from Rust.
 murphy-rspec = { path = "../murphy-rspec" }
+# Same build-order rationale: the Rails 138-cop arena-migration stub
+# pack (murphy-2ob §14a). Loaded via dlopen by tests/rails_pack_e2e.rs;
+# never `use`d from Rust.
+murphy-rails = { path = "../murphy-rails" }
 
 [features]
 default = []
