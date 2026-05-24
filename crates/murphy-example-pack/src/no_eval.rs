@@ -15,31 +15,28 @@
 //! built-in this cop targets.
 //!
 //! No autocorrect — mechanically replacing `eval` is unsafe.
+//!
+//! Uses `#[cop]` / `#[on_node]` (murphy-9cr.8) — the macro emits
+//! `impl Cop` (metadata `const`s) and `impl NodeCop` (the `KINDS` array
+//! plus a dispatching `check`) for the methods marked `#[on_node]`. See
+//! `crates/murphy-plugin-macros/src/cop_attr.rs` for the expansion.
 
-use murphy_plugin_api::{
-    Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, OptNodeId, Severity,
-};
-
-/// `NodeKind::Send` tag — declaration order is frozen by ADR 0037; see
-/// `murphy_ast::NodeKind::tag` where `Send { .. }` is `17`.
-const SEND_TAG: NodeKindTag = NodeKindTag(17);
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct NoEval;
 
-impl Cop for NoEval {
-    type Options = NoOptions;
-    const NAME: &'static str = "Example/NoEval";
-    const DESCRIPTION: &'static str = "Flag `eval` calls — dynamic code execution is dangerous.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-impl NodeCop for NoEval {
-    const KINDS: &'static [NodeKindTag] = &[SEND_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "Example/NoEval",
+    description = "Flag `eval` calls — dynamic code execution is dangerous.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl NoEval {
+    #[on_node(kind = "send")]
+    fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         // Pattern-match defends against a future kind-aliasing accident
         // (see `Murphy/NoReceiverPuts` for the same pattern).
         let NodeKind::Send {

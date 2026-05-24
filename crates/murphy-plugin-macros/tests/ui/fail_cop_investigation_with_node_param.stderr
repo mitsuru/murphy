@@ -1,0 +1,13 @@
+error: #[on_new_investigation] methods must have exactly 1 parameter after &self: cx: &Cx<'_> (no NodeId — file-level investigations reach data via cx.comments() etc.)
+  --> tests/ui/fail_cop_investigation_with_node_param.rs:17:5
+   |
+17 |     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
+   |     ^^
+
+warning: unused imports: `Cx` and `NodeId`
+ --> tests/ui/fail_cop_investigation_with_node_param.rs:7:25
+  |
+7 | use murphy_plugin_api::{Cx, NodeId};
+  |                         ^^  ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

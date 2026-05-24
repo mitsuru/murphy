@@ -251,18 +251,43 @@ fn valid_kinds_list() -> String {
         .join(", ")
 }
 
-/// A `#[on_node]` method extracted from an impl block.
+/// Dispatch model for a single cop method.
+///
+/// A method is reached either by per-kind dispatch (one or more
+/// `#[on_node(kind = "...")]`) or by the singular per-file investigation
+/// (`#[on_new_investigation]`, modelled on RuboCop's hook of the same
+/// name); the two are mutually exclusive on the same method and across
+/// the same `#[cop]` impl (see [`validate_dispatch_consistency`]).
+///
+/// `#[on_new_investigation]` is intended for file-scoped passes that
+/// iterate `cx.comments()` (or similar file-level structured data). The
+/// name is the soft guardrail: anything reaching for `cx.source()` /
+/// `cx.raw_source()` is signalling "I really want raw bytes" and
+/// should be a hand-rolled `KINDS = &[]` cop, not the macro shorthand.
+enum Dispatch {
+    /// `#[on_node(kind = "...")]` — one entry per kind on the method.
+    Node(Vec<(LitStr, u8)>),
+    /// `#[on_new_investigation]` — one bare attribute, no payload. The
+    /// kept [`syn::Attribute`] carries the span for diagnostics; boxed
+    /// to keep [`Dispatch`] cheap relative to the `Node` variant
+    /// (clippy::large_enum_variant).
+    Investigation(Box<syn::Attribute>),
+}
+
+/// A dispatched method extracted from an impl block (`#[on_node]` or
+/// `#[on_file]`).
 struct CopMethod {
     /// Method identifier.
     ident: Ident,
-    /// All (kind_lit, kind_tag) from `#[on_node]` on this method, in order.
-    kinds: Vec<(LitStr, u8)>,
+    /// How the host reaches this method.
+    dispatch: Dispatch,
 }
 
-/// Collect all `#[on_node]` methods from an impl block.
+/// Collect all dispatched methods (`#[on_node]` and
+/// `#[on_new_investigation]`) from an impl block.
 ///
-/// Strips `#[on_node]` from method attributes in place (leaves other attrs).
-/// Returns a list of methods that had at least one `#[on_node]`.
+/// Strips both attributes from method attributes in place (leaves other
+/// attrs). Returns a list of methods that had at least one of either.
 fn collect_cop_methods(item_impl: &mut ItemImpl) -> syn::Result<Vec<CopMethod>> {
     let mut cop_methods = Vec::new();
     let mut errors: Option<Error> = None;
@@ -273,8 +298,9 @@ fn collect_cop_methods(item_impl: &mut ItemImpl) -> syn::Result<Vec<CopMethod>> 
         };
 
         let mut kinds: Vec<(LitStr, u8)> = Vec::new();
+        let mut investigation_attrs: Vec<syn::Attribute> = Vec::new();
 
-        // Partition: collect #[on_node] and retain everything else.
+        // Partition: collect #[on_node] / #[on_new_investigation] and retain everything else.
         let mut kept_attrs = Vec::new();
         for attr in f.attrs.drain(..) {
             if attr.path().is_ident("on_node") {
@@ -323,28 +349,15 @@ fn collect_cop_methods(item_impl: &mut ItemImpl) -> syn::Result<Vec<CopMethod>> 
                         None => errors = Some(e),
                     },
                 }
-            } else {
-                kept_attrs.push(attr);
-            }
-        }
-        f.attrs = kept_attrs;
-
-        if !kinds.is_empty() {
-            // `#[cfg]` / `#[cfg_attr]` on a `#[on_node]` method would
-            // conditionally drop the method body while the generated
-            // `KINDS` array entry and `match` arm remain unconditional,
-            // producing "cannot find method" errors when the cfg is off.
-            // Generating cfg-gated KINDS entries and match arms would
-            // require splitting the const slice and is out of v1 scope —
-            // reject the attribute explicitly instead.
-            for attr in &f.attrs {
-                if attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr") {
+            } else if attr.path().is_ident("on_new_investigation") {
+                // `#[on_new_investigation]` takes no arguments. Reject any
+                // payload so typos like `#[on_new_investigation(kind = "send")]`
+                // fail loudly instead of silently behaving as a file-scoped
+                // pass.
+                if !matches!(attr.meta, syn::Meta::Path(_)) {
                     let e = Error::new_spanned(
-                        attr,
-                        "#[cfg] / #[cfg_attr] on a #[on_node] method are not supported in v1 \
-                         (the generated KINDS array and dispatch arm would still reference the \
-                         conditionally-removed method); move the conditional gating outside the \
-                         #[cop] impl",
+                        &attr,
+                        "#[on_new_investigation]: takes no arguments (per-file investigation is the singular dispatch shape)",
                     );
                     match errors.take() {
                         Some(mut acc) => {
@@ -354,13 +367,90 @@ fn collect_cop_methods(item_impl: &mut ItemImpl) -> syn::Result<Vec<CopMethod>> 
                         None => errors = Some(e),
                     }
                 }
+                investigation_attrs.push(attr);
+            } else {
+                kept_attrs.push(attr);
             }
-
-            cop_methods.push(CopMethod {
-                ident: f.sig.ident.clone(),
-                kinds,
-            });
         }
+        f.attrs = kept_attrs;
+
+        // Per-method validation: a method can't mix dispatch shapes, and
+        // `#[on_new_investigation]` must appear at most once on a single
+        // method.
+        if !kinds.is_empty() && !investigation_attrs.is_empty() {
+            let e = Error::new_spanned(
+                &investigation_attrs[0],
+                "#[on_new_investigation] and #[on_node] cannot appear on the same method (choose one dispatch shape)",
+            );
+            match errors.take() {
+                Some(mut acc) => {
+                    acc.combine(e);
+                    errors = Some(acc);
+                }
+                None => errors = Some(e),
+            }
+            continue;
+        }
+        if investigation_attrs.len() > 1 {
+            let e = Error::new_spanned(
+                &investigation_attrs[1],
+                "#[on_new_investigation] may appear at most once per method",
+            );
+            match errors.take() {
+                Some(mut acc) => {
+                    acc.combine(e);
+                    errors = Some(acc);
+                }
+                None => errors = Some(e),
+            }
+            continue;
+        }
+
+        let dispatch = if let Some(attr) = investigation_attrs.into_iter().next() {
+            Dispatch::Investigation(Box::new(attr))
+        } else if !kinds.is_empty() {
+            Dispatch::Node(kinds)
+        } else {
+            // No dispatch attrs — not a cop method.
+            continue;
+        };
+
+        // `#[cfg]` / `#[cfg_attr]` on a dispatched method would conditionally
+        // drop the method body while the generated `KINDS` array and
+        // dispatch arm (or direct investigation call) remain unconditional,
+        // producing "cannot find method" errors when the cfg is off.
+        // Generating cfg-gated dispatch would require splitting the const
+        // slice / branching the `check` body and is out of v1 scope —
+        // reject explicitly instead.
+        let attr_name = match &dispatch {
+            Dispatch::Node(_) => "#[on_node]",
+            Dispatch::Investigation(_) => "#[on_new_investigation]",
+        };
+        for attr in &f.attrs {
+            if attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr") {
+                let e = Error::new_spanned(
+                    attr,
+                    format!(
+                        "#[cfg] / #[cfg_attr] on a {attr_name} method are not supported in v1 \
+                         (the generated KINDS array and dispatch arm would still reference the \
+                         conditionally-removed method); move the conditional gating outside the \
+                         #[cop] impl"
+                    ),
+                );
+                match errors.take() {
+                    Some(mut acc) => {
+                        acc.combine(e);
+                        errors = Some(acc);
+                    }
+                    None => errors = Some(e),
+                }
+            }
+        }
+
+        cop_methods.push(CopMethod {
+            ident: f.sig.ident.clone(),
+            dispatch,
+        });
     }
 
     if let Some(e) = errors {
@@ -370,11 +460,20 @@ fn collect_cop_methods(item_impl: &mut ItemImpl) -> syn::Result<Vec<CopMethod>> 
     Ok(cop_methods)
 }
 
-/// Validate the signature of a `#[on_node]`-tagged method.
+/// Validate the signature of a dispatched method.
 ///
-/// Must be: `fn name(&self, node: <NodeId>, cx: &<Cx<'_>>)`
-/// with no generics, no async, no const, no abi, no return type or `()`.
-fn validate_signature(method: &syn::ImplItemFn) -> syn::Result<()> {
+/// Two shapes are accepted, depending on `dispatch`:
+/// - `Dispatch::Node`: `fn name(&self, node: <NodeId>, cx: &<Cx<'_>>)`
+/// - `Dispatch::Investigation`: `fn name(&self, cx: &<Cx<'_>>)` —
+///   no `NodeId` parameter, modelled on RuboCop's
+///   `on_new_investigation(&self)` hook (the cop reaches file-level
+///   data via `cx.comments()` etc.).
+///
+/// Common to both: no generics, no async, no const, no abi, no return
+/// type or `()`. Error messages keep the `#[on_node]` wording to match
+/// existing trybuild fixtures; a future cleanup can route the attr
+/// name through the messages.
+fn validate_signature(method: &syn::ImplItemFn, dispatch: &Dispatch) -> syn::Result<()> {
     let sig = &method.sig;
 
     // No async.
@@ -460,35 +559,49 @@ fn validate_signature(method: &syn::ImplItemFn) -> syn::Result<()> {
         }
     }
 
-    // Must have exactly 2 more arguments (NodeId and &Cx<'_>).
-    if inputs.len() != 3 {
-        return Err(Error::new_spanned(
-            sig.fn_token,
-            "#[on_node] methods must have exactly 2 parameters after &self: node: NodeId, cx: &Cx<'_>",
-        ));
-    }
-
-    // Second arg: type path with last segment `NodeId`, no generic args.
-    let node_arg = inputs[1];
-    let node_ty = match node_arg {
-        syn::FnArg::Typed(pt) => &*pt.ty,
-        _ => {
-            return Err(Error::new_spanned(
-                node_arg,
-                "#[on_node]: second parameter must be `node: NodeId`",
-            ));
+    // Remaining-argument count depends on the dispatch shape:
+    // - Node:          (&self, NodeId, &Cx<'_>)         → 3 inputs
+    // - Investigation: (&self, &Cx<'_>)                 → 2 inputs
+    let cx_arg = match dispatch {
+        Dispatch::Node(_) => {
+            if inputs.len() != 3 {
+                return Err(Error::new_spanned(
+                    sig.fn_token,
+                    "#[on_node] methods must have exactly 2 parameters after &self: node: NodeId, cx: &Cx<'_>",
+                ));
+            }
+            // Second arg: type path with last segment `NodeId`.
+            let node_arg = inputs[1];
+            let node_ty = match node_arg {
+                syn::FnArg::Typed(pt) => &*pt.ty,
+                _ => {
+                    return Err(Error::new_spanned(
+                        node_arg,
+                        "#[on_node]: second parameter must be `node: NodeId`",
+                    ));
+                }
+            };
+            validate_node_id_type(node_ty)?;
+            inputs[2]
+        }
+        Dispatch::Investigation(_) => {
+            if inputs.len() != 2 {
+                return Err(Error::new_spanned(
+                    sig.fn_token,
+                    "#[on_new_investigation] methods must have exactly 1 parameter after &self: cx: &Cx<'_> \
+                     (no NodeId — file-level investigations reach data via cx.comments() etc.)",
+                ));
+            }
+            inputs[1]
         }
     };
-    validate_node_id_type(node_ty)?;
 
-    // Third arg: type reference to Cx with one lifetime generic.
-    let cx_arg = inputs[2];
     let cx_ty = match cx_arg {
         syn::FnArg::Typed(pt) => &*pt.ty,
         _ => {
             return Err(Error::new_spanned(
                 cx_arg,
-                "#[on_node]: third parameter must be `cx: &Cx<'_>`",
+                "#[on_node]: parameter must be `cx: &Cx<'_>`",
             ));
         }
     };
@@ -598,14 +711,19 @@ fn validate_cx_type(ty: &syn::Type) -> syn::Result<()> {
     Ok(())
 }
 
-/// Check for duplicate kind registrations across all methods.
+/// Check for duplicate kind registrations across all node-dispatch methods.
+///
+/// Investigation methods are not checked: they declare no kinds.
 fn validate_no_duplicate_kinds(methods: &[CopMethod]) -> syn::Result<()> {
     // Map from kind name -> first occurrence LitStr.
     let mut seen: BTreeMap<String, LitStr> = BTreeMap::new();
     let mut errors: Option<Error> = None;
 
     for method in methods {
-        for (kind_lit, _tag) in &method.kinds {
+        let Dispatch::Node(kinds) = &method.dispatch else {
+            continue;
+        };
+        for (kind_lit, _tag) in kinds {
             let name = kind_lit.value();
             if let Some(first) = seen.get(&name) {
                 let mut e = Error::new_spanned(
@@ -637,7 +755,48 @@ fn validate_no_duplicate_kinds(methods: &[CopMethod]) -> syn::Result<()> {
     Ok(())
 }
 
-/// Validate the signature of all `#[on_node]` methods in the impl block.
+/// Enforce per-impl dispatch consistency:
+///
+/// - At most one `#[on_new_investigation]` method per impl
+///   (per-file investigation is singular).
+/// - `#[on_new_investigation]` and `#[on_node]` cannot coexist in the
+///   same impl — mixing would mean the host both dispatches per-kind
+///   and calls once-per-file, which the `NodeCop` trait does not
+///   express.
+fn validate_dispatch_consistency(methods: &[CopMethod]) -> syn::Result<()> {
+    let mut investigation_attrs: Vec<&syn::Attribute> = Vec::new();
+    let mut has_node = false;
+    for m in methods {
+        match &m.dispatch {
+            Dispatch::Node(_) => has_node = true,
+            Dispatch::Investigation(attr) => investigation_attrs.push(attr.as_ref()),
+        }
+    }
+
+    if investigation_attrs.len() > 1 {
+        let mut e = Error::new_spanned(
+            investigation_attrs[1],
+            "#[cop]: at most one #[on_new_investigation] method per impl (per-file investigation is the singular dispatch)",
+        );
+        e.combine(Error::new_spanned(
+            investigation_attrs[0],
+            "#[cop]: first #[on_new_investigation] declared here",
+        ));
+        return Err(e);
+    }
+
+    if has_node && !investigation_attrs.is_empty() {
+        return Err(Error::new_spanned(
+            investigation_attrs[0],
+            "#[cop]: cannot mix #[on_new_investigation] with #[on_node] in the same impl \
+             (choose either per-kind dispatch or per-file investigation)",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate the signature of all dispatched methods in the impl block.
 fn validate_all_signatures(item_impl: &ItemImpl, cop_methods: &[CopMethod]) -> syn::Result<()> {
     let mut errors: Option<Error> = None;
 
@@ -647,7 +806,7 @@ fn validate_all_signatures(item_impl: &ItemImpl, cop_methods: &[CopMethod]) -> s
             if let ImplItem::Fn(f) = item
                 && f.sig.ident == cop_method.ident
             {
-                if let Err(e) = validate_signature(f) {
+                if let Err(e) = validate_signature(f, &cop_method.dispatch) {
                     match errors.take() {
                         Some(mut acc) => {
                             acc.combine(e);
@@ -673,40 +832,55 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
     let self_ty = &item_impl.self_ty;
     let name_lit = &args.name;
 
-    // Build KINDS array entries and match arms.
+    // Build KINDS array entries and the `check` body. An investigation
+    // cop (single `#[on_new_investigation]` method, no node dispatch)
+    // lowers to an empty `KINDS` slice and a `check` that delegates
+    // straight to the user method — the same shape
+    // `Layout/TrailingWhitespace` writes by hand. Per-impl dispatch
+    // consistency (no mixing) is guaranteed by
+    // [`validate_dispatch_consistency`].
+    let investigation_method = cop_methods.iter().find_map(|m| match &m.dispatch {
+        Dispatch::Investigation(_) => Some(&m.ident),
+        Dispatch::Node(_) => None,
+    });
+
     let mut kinds_entries: Vec<TokenStream> = Vec::new();
     let mut match_arms: Vec<TokenStream> = Vec::new();
 
-    for cop_method in cop_methods {
-        let method_ident = &cop_method.ident;
+    if investigation_method.is_none() {
+        for cop_method in cop_methods {
+            let method_ident = &cop_method.ident;
+            let Dispatch::Node(kinds) = &cop_method.dispatch else {
+                continue;
+            };
 
-        // Build KINDS entries for each kind of this method.
-        for (_, tag) in &cop_method.kinds {
-            let tag_lit = Literal::u8_suffixed(*tag);
-            kinds_entries.push(quote! {
-                ::murphy_plugin_api::NodeKindTag(#tag_lit)
+            // Build KINDS entries for each kind of this method.
+            for (_, tag) in kinds {
+                let tag_lit = Literal::u8_suffixed(*tag);
+                kinds_entries.push(quote! {
+                    ::murphy_plugin_api::NodeKindTag(#tag_lit)
+                });
+            }
+
+            // Build the match arm (possibly with or-patterns for multiple kinds).
+            let tag_patterns: Vec<TokenStream> = kinds
+                .iter()
+                .map(|(_, tag)| {
+                    let tag_lit = Literal::u8_suffixed(*tag);
+                    quote! { #tag_lit }
+                })
+                .collect();
+
+            let arm_pattern = if tag_patterns.len() == 1 {
+                quote! { #(#tag_patterns)* }
+            } else {
+                quote! { #(#tag_patterns)|* }
+            };
+
+            match_arms.push(quote! {
+                #arm_pattern => Self::#method_ident(self, node, cx),
             });
         }
-
-        // Build the match arm (possibly with or-patterns for multiple kinds).
-        let tag_patterns: Vec<TokenStream> = cop_method
-            .kinds
-            .iter()
-            .map(|(_, tag)| {
-                let tag_lit = Literal::u8_suffixed(*tag);
-                quote! { #tag_lit }
-            })
-            .collect();
-
-        let arm_pattern = if tag_patterns.len() == 1 {
-            quote! { #(#tag_patterns)* }
-        } else {
-            quote! { #(#tag_patterns)|* }
-        };
-
-        match_arms.push(quote! {
-            #arm_pattern => Self::#method_ident(self, node, cx),
-        });
     }
 
     // Build optional metadata consts for `impl Cop`.
@@ -756,16 +930,33 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
         }
     };
 
-    let impl_node_cop = quote! {
-        impl ::murphy_plugin_api::NodeCop for #self_ty {
-            const KINDS: &'static [::murphy_plugin_api::NodeKindTag] = &[
-                #(#kinds_entries,)*
-            ];
+    let impl_node_cop = if let Some(method_ident) = investigation_method {
+        // Investigation form: empty KINDS, single direct call. The host
+        // contract (see `NodeCop` doc + `dispatch::run_cops`) calls
+        // `check` exactly once per file with `node == cx.root()`; the
+        // user method takes only `cx` (modelled on RuboCop's
+        // `on_new_investigation(&self)`).
+        quote! {
+            impl ::murphy_plugin_api::NodeCop for #self_ty {
+                const KINDS: &'static [::murphy_plugin_api::NodeKindTag] = &[];
 
-            fn check(&self, node: ::murphy_ast::NodeId, cx: &::murphy_plugin_api::Cx<'_>) {
-                match ::murphy_plugin_api::NodeKindTag::of(cx.kind(node)).0 {
-                    #(#match_arms)*
-                    _ => {}
+                fn check(&self, _node: ::murphy_plugin_api::NodeId, cx: &::murphy_plugin_api::Cx<'_>) {
+                    Self::#method_ident(self, cx)
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl ::murphy_plugin_api::NodeCop for #self_ty {
+                const KINDS: &'static [::murphy_plugin_api::NodeKindTag] = &[
+                    #(#kinds_entries,)*
+                ];
+
+                fn check(&self, node: ::murphy_plugin_api::NodeId, cx: &::murphy_plugin_api::Cx<'_>) {
+                    match ::murphy_plugin_api::NodeKindTag::of(cx.kind(node)).0 {
+                        #(#match_arms)*
+                        _ => {}
+                    }
                 }
             }
         }
@@ -805,32 +996,40 @@ pub fn cop(args: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error(),
     };
 
-    // 4. Collect #[on_node] methods (strips them from the impl in place).
+    // 4. Collect dispatched methods (`#[on_node]` and `#[on_file]`).
+    //    Both attributes are stripped from the impl in place.
     let cop_methods = match collect_cop_methods(&mut item_impl) {
         Ok(v) => v,
         Err(e) => return e.to_compile_error(),
     };
 
-    // 5. Validate signatures of all on_node methods.
+    // 5. Validate signatures of all dispatched methods (both shapes
+    //    require `fn(&self, NodeId, &Cx<'_>)`).
     if let Err(e) = validate_all_signatures(&item_impl, &cop_methods) {
         return e.to_compile_error();
     }
 
-    // 6. Check for duplicate kind registrations.
+    // 6. Check for duplicate kind registrations among `#[on_node]` methods.
     if let Err(e) = validate_no_duplicate_kinds(&cop_methods) {
         return e.to_compile_error();
     }
 
-    // 7. Require at least one #[on_node] method.
+    // 7. Enforce per-impl dispatch consistency: at most one `#[on_file]`,
+    //    and no mixing with `#[on_node]`.
+    if let Err(e) = validate_dispatch_consistency(&cop_methods) {
+        return e.to_compile_error();
+    }
+
+    // 8. Require at least one dispatched method.
     if cop_methods.is_empty() {
         return Error::new_spanned(
             item_impl.impl_token,
-            "#[cop]: impl block has no #[on_node] methods",
+            "#[cop]: impl block has no #[on_node] or #[on_new_investigation] methods",
         )
         .to_compile_error();
     }
 
-    // 8. Lower to trait impls + stripped impl.
+    // 9. Lower to trait impls + stripped impl.
     lower_cop_impl(cop_args, &cop_methods, item_impl)
 }
 
@@ -882,6 +1081,21 @@ pub fn on_node(_args: TokenStream, _item: TokenStream) -> TokenStream {
     syn::Error::new(
         proc_macro2::Span::call_site(),
         "#[on_node] must be used inside a #[cop] impl block",
+    )
+    .to_compile_error()
+}
+
+/// `#[on_new_investigation]` — layer-2 core implementation.
+///
+/// When `#[cop]` processes an impl block it consumes every
+/// `#[on_new_investigation]` attribute directly, so this proc-macro
+/// entry point is only reached when the attribute appears outside a
+/// `#[cop]` impl. We always emit a `compile_error!` to surface the
+/// misuse clearly.
+pub fn on_new_investigation(_args: TokenStream, _item: TokenStream) -> TokenStream {
+    syn::Error::new(
+        proc_macro2::Span::call_site(),
+        "#[on_new_investigation] must be used inside a #[cop] impl block",
     )
     .to_compile_error()
 }
