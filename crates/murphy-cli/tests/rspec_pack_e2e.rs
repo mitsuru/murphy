@@ -40,6 +40,10 @@ fn rspec_pack_path() -> std::path::PathBuf {
         return top;
     }
     let deps = target_dir.join("debug").join("deps");
+    let deps_no_hash = deps.join(format!("{prefix}.{ext}"));
+    if deps_no_hash.exists() {
+        return deps_no_hash;
+    }
     if let Ok(entries) = std::fs::read_dir(&deps) {
         for entry in entries.flatten() {
             let name = entry.file_name();

@@ -26,8 +26,9 @@ use tempfile::tempdir;
 ///
 /// 探索順:
 /// 1. `<target>/debug/lib<name>.{so,dylib}` (Cargo の cdylib 標準配置)
-/// 2. `<target>/debug/deps/lib<name>-<hash>.{so,dylib}` (一部 Cargo バージョン /
-///    ビルド経路で intermediate が deps/ にだけ生成されるケースの fallback)
+/// 2. `<target>/debug/deps/lib<name>.{so,dylib}` (workspace + dev-dependency
+///    経由のビルドで cdylib が deps/ 直下にハッシュ無し名で生成されるケース)
+/// 3. `<target>/debug/deps/lib<name>-<hash>.{so,dylib}` (ハッシュ付き intermediate)
 fn example_pack_path() -> std::path::PathBuf {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
@@ -43,8 +44,11 @@ fn example_pack_path() -> std::path::PathBuf {
     if top.exists() {
         return top;
     }
-    // Fallback: search target/debug/deps/lib<name>-<hash>.{so,dylib}
     let deps = target_dir.join("debug").join("deps");
+    let deps_no_hash = deps.join(format!("{prefix}.{ext}"));
+    if deps_no_hash.exists() {
+        return deps_no_hash;
+    }
     if let Ok(entries) = std::fs::read_dir(&deps) {
         for entry in entries.flatten() {
             let name = entry.file_name();
