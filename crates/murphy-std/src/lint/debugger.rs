@@ -1,4 +1,11 @@
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+
+node_pattern!(is_debugger_entrypoint, "(send nil? {:debugger :byebug})");
+node_pattern!(is_binding_pry, "(send (send nil? :binding) :pry)");
+node_pattern!(
+    is_debugger_require,
+    r#"(send nil? :require {"debug" "debug/open" "byebug" "pry" "pry-byebug"})"#
+);
 
 #[derive(Default)]
 pub struct Debugger;
@@ -13,46 +20,14 @@ pub struct Debugger;
 impl Debugger {
     #[on_node(kind = "send", methods = ["debugger", "byebug", "pry", "require"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send {
-            receiver,
-            method,
-            args,
-        } = *cx.kind(node)
-        else {
-            return;
-        };
-        let method = cx.symbol_str(method);
-        if receiver == OptNodeId::NONE && matches!(method, "debugger" | "byebug") {
+        if is_debugger_entrypoint(node, cx) || is_binding_pry(node, cx) {
             cx.emit_offense(cx.range(node), "Remove debugger entrypoint", None);
             return;
         }
-        if method == "pry"
-            && receiver
-                .get()
-                .is_some_and(|r| is_bare_call(cx, r, "binding"))
-        {
-            cx.emit_offense(cx.range(node), "Remove debugger entrypoint", None);
-            return;
-        }
-        if receiver == OptNodeId::NONE && method == "require" {
-            let Some(arg) = cx.list(args).first().copied() else {
-                return;
-            };
-            let NodeKind::Str(s) = *cx.kind(arg) else {
-                return;
-            };
-            if matches!(
-                cx.string_str(s),
-                "debug" | "debug/open" | "byebug" | "pry" | "pry-byebug"
-            ) {
-                cx.emit_offense(cx.range(node), "Remove debugger require", None);
-            }
+        if is_debugger_require(node, cx) {
+            cx.emit_offense(cx.range(node), "Remove debugger require", None);
         }
     }
-}
-
-fn is_bare_call(cx: &Cx<'_>, node: NodeId, name: &str) -> bool {
-    matches!(*cx.kind(node), NodeKind::Send { receiver, method, .. } if receiver == OptNodeId::NONE && cx.symbol_str(method) == name)
 }
 
 #[cfg(test)]
@@ -71,6 +46,10 @@ mod tests {
             ^^^^^^^^^^^ Remove debugger entrypoint
             debugger
             ^^^^^^^^ Remove debugger entrypoint
+            byebug
+            ^^^^^^ Remove debugger entrypoint
+            require 'debug/open'
+            ^^^^^^^^^^^^^^^^^^^^ Remove debugger require
         "#}
         );
     }
