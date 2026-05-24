@@ -370,37 +370,17 @@ unsafe extern "C" fn record_edit(sink_ptr: *mut std::ffi::c_void, e: *const RawE
 /// The cop is instantiated via `T::default()` — matches the stateless
 /// `#[derive(Default)]` shape every Murphy cop uses (ADR 0035).
 pub fn run_cop<T: NodeCop + Default>(source: &str) -> Vec<CapturedOffense> {
-    let ast = murphy_translate::translate(source, "t.rb");
-    let cop = T::default();
-    let cop_name = RawSlice::from_str(<T as Cop>::NAME);
-    let sink = RefCell::new(Sink {
-        offenses: Vec::new(),
-        edits: Vec::new(),
-    });
-    let fns = FnTable {
-        emit_offense: record_offense,
-        emit_edit: ignore_edit,
-    };
-    let raw = cx_raw_for(&ast, &fns, cop_name, &sink);
-    let cx = unsafe { Cx::from_raw(&raw) };
-
-    if T::KINDS.is_empty() {
-        // File-visit / investigation dispatch — single call with root,
-        // matching the host's `KINDS = &[]` contract.
-        cop.check(ast.root(), &cx);
-    } else {
-        // Per-kind dispatch — feed every node; the macro-generated
-        // `check` filters by tag.
-        let node_count = ast.raw_parts().nodes.len();
-        for i in 0..node_count {
-            cop.check(NodeId(i as u32), &cx);
-        }
-    }
-
-    sink.into_inner().offenses
+    run_cop_internal::<T>(source, ignore_edit).offenses
 }
 
 pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
+    run_cop_internal::<T>(source, record_edit)
+}
+
+fn run_cop_internal<T: NodeCop + Default>(
+    source: &str,
+    emit_edit: unsafe extern "C" fn(*mut std::ffi::c_void, *const RawEdit),
+) -> CapturedRun {
     let ast = murphy_translate::translate(source, "t.rb");
     let cop = T::default();
     let cop_name = RawSlice::from_str(<T as Cop>::NAME);
@@ -410,7 +390,7 @@ pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
     });
     let fns = FnTable {
         emit_offense: record_offense,
-        emit_edit: record_edit,
+        emit_edit,
     };
     let raw = cx_raw_for(&ast, &fns, cop_name, &sink);
     let cx = unsafe { Cx::from_raw(&raw) };
@@ -420,7 +400,10 @@ pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
     } else {
         let node_count = ast.raw_parts().nodes.len();
         for i in 0..node_count {
-            cop.check(NodeId(i as u32), &cx);
+            let node = NodeId(i as u32);
+            if send_method_filter_passes::<T>(node, &cx) {
+                cop.check(node, &cx);
+            }
         }
     }
 
@@ -429,6 +412,19 @@ pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
         offenses: sink.offenses,
         edits: sink.edits,
     }
+}
+
+fn send_method_filter_passes<T: NodeCop>(node: NodeId, cx: &Cx<'_>) -> bool {
+    if T::SEND_METHODS.is_empty() {
+        return true;
+    }
+    let murphy_ast::NodeKind::Send { method, .. } = *cx.kind(node) else {
+        return true;
+    };
+    let method = cx.symbol_str(method).as_bytes();
+    T::SEND_METHODS
+        .iter()
+        .any(|allowed| unsafe { allowed.as_bytes() } == method)
 }
 
 /// Build a `CxRaw` borrowing from `ast`, `fns`, and `sink`. The
@@ -461,7 +457,7 @@ fn cx_raw_for(ast: &Ast, fns: &FnTable, cop_name: RawSlice, sink: &RefCell<Sink>
 #[cfg(test)]
 mod tests {
     use super::{parse_annotated, render};
-    use crate::{Cop, Cx, NoOptions, NodeCop, NodeKindTag, Range};
+    use crate::{Cop, Cx, NoOptions, NodeCop, NodeKind, NodeKindTag, Range, RawSlice};
     use murphy_ast::NodeId;
 
     /// Fixture: emits nothing.
@@ -506,6 +502,22 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct SendMethodFilteredCop;
+    impl Cop for SendMethodFilteredCop {
+        type Options = NoOptions;
+        const NAME: &'static str = "Test/SendMethodFiltered";
+    }
+    impl NodeCop for SendMethodFilteredCop {
+        const KINDS: &'static [NodeKindTag] = &[NodeKindTag(17)];
+        const SEND_METHODS: &'static [RawSlice] = &[RawSlice::from_str("target")];
+        fn check(&self, node: NodeId, cx: &Cx<'_>) {
+            if matches!(*cx.kind(node), NodeKind::Send { .. }) {
+                cx.emit_offense(cx.range(node), "called", None);
+            }
+        }
+    }
+
     /// Fixture: emits two offenses on the same source — `[0, 3)` and
     /// `[4, 7)`. Pairs with a "abc\ndef\n" fixture so the second range
     /// lands cleanly on the second line. Used to exercise the count
@@ -536,6 +548,13 @@ mod tests {
         assert_eq!(result.edits.len(), 1);
         assert_eq!(result.edits[0].range, Range { start: 0, end: 3 });
         assert_eq!(result.edits[0].replacement, "xyz");
+    }
+
+    #[test]
+    fn run_cop_honors_send_method_filter() {
+        let offenses = super::run_cop::<SendMethodFilteredCop>("target\nother\n");
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 0, end: 6 });
     }
 
     #[test]

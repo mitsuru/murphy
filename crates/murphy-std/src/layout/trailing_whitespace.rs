@@ -20,26 +20,22 @@
 //! - **Whitespace-only lines**: the whole line is trailing whitespace
 //!   and reported as such.
 
-use murphy_plugin_api::{Cop, Cx, NoOptions, NodeCop, NodeId, NodeKindTag, Range, Severity};
+use murphy_plugin_api::{Cx, NoOptions, Range, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct TrailingWhitespace;
 
-impl Cop for TrailingWhitespace {
-    type Options = NoOptions;
-    const NAME: &'static str = "Layout/TrailingWhitespace";
-    const DESCRIPTION: &'static str = "Flag space or tab characters between the last non-whitespace character on a line and the line terminator.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-impl NodeCop for TrailingWhitespace {
-    /// `KINDS = &[]` → file-visit dispatch (see `NodeCop` doc + the
-    /// `dispatch::run_cops` empty-kinds branch).
-    const KINDS: &'static [NodeKindTag] = &[];
-
-    fn check(&self, _node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "Layout/TrailingWhitespace",
+    description = "Flag space or tab characters between the last non-whitespace character on a line and the line terminator.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl TrailingWhitespace {
+    #[on_new_investigation]
+    fn check_file(&self, cx: &Cx<'_>) {
         let src = cx.source();
         // Walk byte-by-byte so range offsets stay in the file's byte
         // index space (ADR 0001: offense ranges are byte offsets).

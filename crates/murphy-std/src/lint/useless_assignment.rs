@@ -1,24 +1,19 @@
-use murphy_plugin_api::{
-    Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, Range, Severity,
-};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
 #[derive(Default)]
 pub struct UselessAssignment;
 
-impl Cop for UselessAssignment {
-    type Options = NoOptions;
-    const NAME: &'static str = "Lint/UselessAssignment";
-    const DESCRIPTION: &'static str =
-        "Flag local variable assignments that are never read in the same scope.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-impl NodeCop for UselessAssignment {
-    const KINDS: &'static [NodeKindTag] = &[];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
-        visit_scope(cx, node);
+#[cop(
+    name = "Lint/UselessAssignment",
+    description = "Flag local variable assignments that are never read in the same scope.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl UselessAssignment {
+    #[on_new_investigation]
+    fn check_file(&self, cx: &Cx<'_>) {
+        visit_scope(cx, cx.root());
     }
 }
 

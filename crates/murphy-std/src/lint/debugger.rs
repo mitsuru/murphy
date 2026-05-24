@@ -1,24 +1,18 @@
-use murphy_plugin_api::{
-    Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, OptNodeId, Severity,
-};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
 
 #[derive(Default)]
 pub struct Debugger;
 
-impl Cop for Debugger {
-    type Options = NoOptions;
-    const NAME: &'static str = "Lint/Debugger";
-    const DESCRIPTION: &'static str = "Flag debugger calls and debugger requires.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-const SEND_TAG: NodeKindTag = NodeKindTag(17);
-
-impl NodeCop for Debugger {
-    const KINDS: &'static [NodeKindTag] = &[SEND_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "Lint/Debugger",
+    description = "Flag debugger calls and debugger requires.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl Debugger {
+    #[on_node(kind = "send", methods = ["debugger", "byebug", "pry", "require"])]
+    fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Send {
             receiver,
             method,

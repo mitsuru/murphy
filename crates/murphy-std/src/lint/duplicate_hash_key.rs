@@ -1,24 +1,20 @@
 use std::collections::HashMap;
 
-use murphy_plugin_api::{Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, Severity};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
 #[derive(Default)]
 pub struct DuplicateHashKey;
 
-impl Cop for DuplicateHashKey {
-    type Options = NoOptions;
-    const NAME: &'static str = "Lint/DuplicateHashKey";
-    const DESCRIPTION: &'static str = "Flag duplicate literal hash keys.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-const HASH_TAG: NodeKindTag = NodeKindTag(23);
-
-impl NodeCop for DuplicateHashKey {
-    const KINDS: &'static [NodeKindTag] = &[HASH_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "Lint/DuplicateHashKey",
+    description = "Flag duplicate literal hash keys.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl DuplicateHashKey {
+    #[on_node(kind = "hash")]
+    fn check_hash(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Hash(list) = *cx.kind(node) else {
             return;
         };

@@ -1,22 +1,18 @@
-use murphy_plugin_api::{Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, Severity};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
 #[derive(Default)]
 pub struct EmptyWhen;
 
-impl Cop for EmptyWhen {
-    type Options = NoOptions;
-    const NAME: &'static str = "Lint/EmptyWhen";
-    const DESCRIPTION: &'static str = "Flag when branches without a body.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-const WHEN_TAG: NodeKindTag = NodeKindTag(27);
-
-impl NodeCop for EmptyWhen {
-    const KINDS: &'static [NodeKindTag] = &[WHEN_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "Lint/EmptyWhen",
+    description = "Flag when branches without a body.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl EmptyWhen {
+    #[on_node(kind = "when")]
+    fn check_when(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::When { body, .. } = *cx.kind(node) else {
             return;
         };

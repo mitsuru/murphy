@@ -1,33 +1,21 @@
-use murphy_plugin_api::{
-    Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, Range, Severity,
-};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
 #[derive(Default)]
 pub struct DeprecatedClassMethods;
 
-impl Cop for DeprecatedClassMethods {
-    type Options = NoOptions;
-    const NAME: &'static str = "Lint/DeprecatedClassMethods";
-    const DESCRIPTION: &'static str = "Flag deprecated class method calls with safe replacements.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-const SEND_TAG: NodeKindTag = NodeKindTag(17);
-
-impl NodeCop for DeprecatedClassMethods {
-    const KINDS: &'static [NodeKindTag] = &[SEND_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send {
-            receiver, method, ..
-        } = *cx.kind(node)
-        else {
+#[cop(
+    name = "Lint/DeprecatedClassMethods",
+    description = "Flag deprecated class method calls with safe replacements.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl DeprecatedClassMethods {
+    #[on_node(kind = "send", methods = ["exists?"])]
+    fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
             return;
         };
-        if cx.symbol_str(method) != "exists?" {
-            return;
-        }
         let Some(receiver) = receiver.get() else {
             return;
         };

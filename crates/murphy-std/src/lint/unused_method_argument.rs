@@ -1,26 +1,20 @@
 use std::collections::HashSet;
 
-use murphy_plugin_api::{
-    Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, Range, Severity, Symbol,
-};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop};
 
 #[derive(Default)]
 pub struct UnusedMethodArgument;
 
-impl Cop for UnusedMethodArgument {
-    type Options = NoOptions;
-    const NAME: &'static str = "Lint/UnusedMethodArgument";
-    const DESCRIPTION: &'static str = "Flag method parameters that are never read.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-const DEF_TAG: NodeKindTag = NodeKindTag(32);
-
-impl NodeCop for UnusedMethodArgument {
-    const KINDS: &'static [NodeKindTag] = &[DEF_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "Lint/UnusedMethodArgument",
+    description = "Flag method parameters that are never read.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl UnusedMethodArgument {
+    #[on_node(kind = "def")]
+    fn check_def(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Def { args, body, .. } = *cx.kind(node) else {
             return;
         };
