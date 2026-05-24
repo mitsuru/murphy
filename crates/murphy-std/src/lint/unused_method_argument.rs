@@ -67,7 +67,10 @@ fn param_name_and_range(cx: &Cx<'_>, node: NodeId) -> Option<(Symbol, Range)> {
     };
     let raw = cx.raw_source(cx.range(node));
     let text = cx.symbol_str(name);
-    let start = raw.find(text).unwrap_or(0) as u32 + cx.range(node).start;
+    let start = raw
+        .find(text)
+        .expect("parameter name must appear in parameter node source") as u32
+        + cx.range(node).start;
     Some((
         name,
         Range {

@@ -1,6 +1,9 @@
 use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
 
-node_pattern!(is_debugger_entrypoint, "(send nil? {:debugger :byebug})");
+node_pattern!(
+    is_debugger_entrypoint,
+    "(send nil? {:debugger :byebug :pry})"
+);
 node_pattern!(is_binding_pry, "(send (send nil? :binding) :pry)");
 node_pattern!(
     is_debugger_require,
@@ -40,6 +43,8 @@ mod tests {
         expect_offense!(
             Debugger,
             indoc! {r#"
+            pry
+            ^^^ Remove debugger entrypoint
             require 'pry'
             ^^^^^^^^^^^^^ Remove debugger require
             binding.pry

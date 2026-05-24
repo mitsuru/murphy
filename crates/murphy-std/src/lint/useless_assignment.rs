@@ -75,7 +75,9 @@ fn is_scope(cx: &Cx<'_>, node: NodeId) -> bool {
 fn assignment_name_range(cx: &Cx<'_>, node: NodeId, name: &str) -> Range {
     let range = cx.range(node);
     let raw = cx.raw_source(range);
-    let pos = raw.find(name).unwrap_or(0) as u32;
+    let pos = raw
+        .find(name)
+        .expect("variable name must appear in assignment node source") as u32;
     Range {
         start: range.start + pos,
         end: range.start + pos + name.len() as u32,

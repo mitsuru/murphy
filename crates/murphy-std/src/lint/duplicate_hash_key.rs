@@ -38,6 +38,7 @@ fn literal_key(cx: &Cx<'_>, node: NodeId) -> Option<String> {
         NodeKind::Sym(s) => Some(format!("sym:{}", cx.symbol_str(s))),
         NodeKind::Str(s) => Some(format!("str:{}", cx.string_str(s))),
         NodeKind::Int(i) => Some(format!("int:{i}")),
+        NodeKind::Float(f) => Some(format!("float:{f:?}")),
         NodeKind::Nil => Some("nil".to_string()),
         NodeKind::True_ => Some("true".to_string()),
         NodeKind::False_ => Some("false".to_string()),
@@ -63,6 +64,9 @@ mod tests {
               '名前' => 1,
               '名前' => 2,
               ^^^^ Duplicate hash key
+              1.0 => 1,
+              1.0 => 2,
+              ^^^ Duplicate hash key
             }
         "#}
         );
