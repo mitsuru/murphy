@@ -27,7 +27,9 @@ use murphy_plugin_api::{Cx, NoOptions, cop, register_cops};
 // `murphy-std`). The `register_cops!` list below re-exports them as
 // bare idents via `use`, keeping the registration table flat.
 pub mod cops;
-use cops::rails::{AssertNot, EnvironmentVariableAccess, Output, Pick, RequestReferer};
+use cops::rails::{
+    AssertNot, EnvironmentVariableAccess, I18nLocaleAssignment, Output, Pick, RequestReferer,
+};
 
 #[derive(Default)]
 pub struct ActionControllerFlashBeforeRender;
@@ -816,19 +818,8 @@ impl I18nLazyLookup {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
-#[derive(Default)]
-pub struct I18nLocaleAssignment;
-
-#[cop(
-    name = "Rails/I18nLocaleAssignment",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl I18nLocaleAssignment {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
+// `I18nLocaleAssignment` promoted to real cop in
+// `cops::rails::i18n_locale_assignment`.
 
 #[derive(Default)]
 pub struct I18nLocaleTexts;

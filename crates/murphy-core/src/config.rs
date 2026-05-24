@@ -322,7 +322,6 @@ fn is_cop_disabled_by_default(name: &str) -> bool {
             | "Rails/HttpStatus"
             | "Rails/HttpStatusNameConsistency"
             | "Rails/I18nLazyLookup"
-            | "Rails/I18nLocaleAssignment"
             | "Rails/I18nLocaleTexts"
             | "Rails/IgnoredColumnsAssignment"
             | "Rails/IgnoredSkipActionFilterOption"
