@@ -49,6 +49,7 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
         .iter()
         .map(ParsedField::parse)
         .collect::<syn::Result<_>>()?;
+    validate_unique_external_names(&parsed)?;
 
     let default_impl = generate_default(struct_name, &parsed);
     let copoptions_impl = generate_copoptions(struct_name, &parsed);
@@ -57,6 +58,23 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
         #default_impl
         #copoptions_impl
     })
+}
+
+fn validate_unique_external_names(fields: &[ParsedField]) -> syn::Result<()> {
+    let mut seen = std::collections::BTreeMap::new();
+    for field in fields {
+        let name = field.external_name_string();
+        if let Some(first) = seen.insert(name.clone(), field.ident.clone()) {
+            return Err(syn::Error::new_spanned(
+                &field.ident,
+                format!(
+                    "duplicate option name `{name}`; `{}` already uses this name",
+                    first
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Options struct with no fields — empty schema, default decoder.
@@ -134,6 +152,12 @@ struct ParsedField {
 }
 
 impl ParsedField {
+    fn external_name_string(&self) -> String {
+        self.external_name
+            .clone()
+            .unwrap_or_else(|| self.ident.to_string())
+    }
+
     fn parse(field: &syn::Field) -> syn::Result<Self> {
         let ident = field.ident.clone().expect("named field has an identifier");
         let ty = parse_field_type(&field.ty)?;
@@ -388,8 +412,7 @@ fn generate_copoptions(name: &Ident, fields: &[ParsedField]) -> TokenStream {
 }
 
 fn schema_entry(field: &ParsedField) -> TokenStream {
-    let name = field.ident.to_string();
-    let name = field.external_name.as_deref().unwrap_or(&name);
+    let name = field.external_name_string();
     // `ty` is always the base wire type. Enum-ness is carried by a
     // non-empty `enum_values_json`, not by a distinct `ty` string — the
     // single-surface `OptionSpec.ty` is `bool|int|string|string_list`
@@ -431,8 +454,7 @@ fn schema_entry(field: &ParsedField) -> TokenStream {
 
 fn field_decoder(field: &ParsedField) -> TokenStream {
     let ident = &field.ident;
-    let key = ident.to_string();
-    let key = field.external_name.as_deref().unwrap_or(&key);
+    let key = field.external_name_string();
     let wire = field.ty.wire();
 
     // The expression used when the key is absent from the config object.
@@ -457,7 +479,7 @@ fn field_decoder(field: &ParsedField) -> TokenStream {
         },
     };
 
-    let present = present_decoder(field, key, wire);
+    let present = present_decoder(field, &key, wire);
 
     quote! {
         #ident: match __obj.get(#key) {

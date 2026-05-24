@@ -2,6 +2,7 @@
 //! `murphy` binary.
 
 use assert_cmd::Command;
+use murphy_core::{Edit, Range, apply_edits};
 use std::fs;
 use tempfile::tempdir;
 
@@ -44,8 +45,76 @@ fn lint_json_with_config(source: &str, config: &str) -> (i32, Vec<serde_json::Va
     (code, parsed)
 }
 
+fn lint_json_twice_same_path(source: &str) -> (Vec<u8>, Vec<u8>) {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("t.rb");
+    fs::write(&path, source).expect("write source");
+
+    let run = || {
+        Command::cargo_bin("murphy")
+            .expect("murphy binary builds")
+            .arg("lint")
+            .arg("--format")
+            .arg("json")
+            .arg(&path)
+            .assert()
+            .get_output()
+            .stdout
+            .clone()
+    };
+
+    (run(), run())
+}
+
 fn offenses_named<'a>(offenses: &'a [serde_json::Value], cop: &str) -> Vec<&'a serde_json::Value> {
     offenses.iter().filter(|o| o["cop_name"] == cop).collect()
+}
+
+fn autocorrect_edits(offenses: &[&serde_json::Value]) -> Vec<Edit> {
+    offenses
+        .iter()
+        .flat_map(|offense| {
+            offense["autocorrect"]["edits"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .map(|edit| Edit {
+            range: Range {
+                start_offset: edit["range"]["start_offset"].as_u64().unwrap() as u32,
+                end_offset: edit["range"]["end_offset"].as_u64().unwrap() as u32,
+            },
+            replacement: edit["replacement"].as_str().unwrap().to_string(),
+        })
+        .collect()
+}
+
+#[test]
+fn json_contract_is_deterministic() {
+    let (first, second) = lint_json_twice_same_path("foo( 1, 2 )\n");
+
+    assert_eq!(
+        first, second,
+        "same input should produce byte-identical JSON output",
+    );
+}
+
+#[test]
+fn autocorrect_is_idempotent() {
+    let source = "foo( 1, 2 )\n";
+    let (_code, first_offenses) = lint_json(source);
+    let first_edits =
+        autocorrect_edits(&offenses_named(&first_offenses, "Layout/SpaceInsideParens"));
+    let corrected = apply_edits(source, &first_edits);
+
+    let (_code, second_offenses) = lint_json(&corrected);
+    let second_edits = autocorrect_edits(&offenses_named(
+        &second_offenses,
+        "Layout/SpaceInsideParens",
+    ));
+    let corrected_again = apply_edits(&corrected, &second_edits);
+
+    assert_eq!(corrected, corrected_again);
 }
 
 #[test]
@@ -131,6 +200,24 @@ fn space_style_removes_space_inside_empty_parentheses() {
 }
 
 #[test]
+fn space_style_removes_tab_inside_empty_parentheses_without_reinserting_space() {
+    let (_code, offs) = lint_json_with_config(
+        "foo(\t)\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+    );
+    let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
+    assert_eq!(
+        parens.len(),
+        1,
+        "space style should only remove whitespace inside empty parentheses; got {offs:?}",
+    );
+    let edits = parens[0]["autocorrect"]["edits"]
+        .as_array()
+        .expect("empty paren offense must autocorrect");
+    assert_eq!(edits[0]["replacement"], "");
+}
+
+#[test]
 fn compact_style_allows_consecutive_closing_parens_without_space() {
     let (code, offs) = lint_json_with_config(
         "outer(inner(1))\n",
@@ -148,6 +235,23 @@ fn compact_style_allows_consecutive_closing_parens_without_space() {
             offense["range"]["start_offset"] != 14 || offense["range"]["end_offset"] != 14
         }),
         "compact style must not require a space between consecutive `))`; got {parens:?}",
+    );
+}
+
+#[test]
+fn compact_style_removes_multiple_spaces_between_consecutive_closing_parens() {
+    let (_code, offs) = lint_json_with_config(
+        "outer(inner(1)  )\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"compact\"\n",
+    );
+    let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
+    assert!(
+        parens.iter().any(|offense| {
+            offense["range"]["start_offset"] == 14
+                && offense["range"]["end_offset"] == 16
+                && offense["autocorrect"]["edits"][0]["replacement"] == ""
+        }),
+        "compact style should remove the whole whitespace gap between consecutive parens; got {parens:?}",
     );
 }
 

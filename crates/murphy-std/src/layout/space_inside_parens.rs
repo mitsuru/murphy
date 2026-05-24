@@ -118,7 +118,7 @@ fn can_ignore_missing_space(cx: &Cx<'_>, left: SourceToken, right: SourceToken) 
     if !parens(left, right) {
         return true;
     }
-    if empty_parens_with_no_gap(left, right) {
+    if empty_parens(left, right) {
         return true;
     }
     if right.kind == SourceTokenKind::Comment {
@@ -153,7 +153,11 @@ fn remove_single_space_between_consecutive_parens(
         start: left.range.end,
         end: right.range.start,
     };
-    if cx.raw_source(range) != " " {
+    if range.start >= range.end {
+        return;
+    }
+    let gap = cx.raw_source(range);
+    if !gap.bytes().all(|b| matches!(b, b' ' | b'\t')) {
         return;
     }
 
@@ -173,10 +177,8 @@ fn consecutive_parens(left: SourceToken, right: SourceToken) -> bool {
     )
 }
 
-fn empty_parens_with_no_gap(left: SourceToken, right: SourceToken) -> bool {
-    left.kind == SourceTokenKind::LeftParen
-        && right.kind == SourceTokenKind::RightParen
-        && left.range.end == right.range.start
+fn empty_parens(left: SourceToken, right: SourceToken) -> bool {
+    left.kind == SourceTokenKind::LeftParen && right.kind == SourceTokenKind::RightParen
 }
 
 fn same_line_gap(cx: &Cx<'_>, start: u32, end: u32) -> bool {
