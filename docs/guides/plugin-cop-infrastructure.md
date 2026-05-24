@@ -393,10 +393,10 @@ and registers each cop's metadata with the dispatch table.
 
 ## 11. Testing cops: the `test-support` feature
 
-`murphy-plugin-api` exposes a parser-driven test harness gated by the
+`murphy-plugin-api` exposes an in-process cop test harness gated by the
 `test-support` cargo feature. Any pack can enable it in
 `[dev-dependencies]` and write inline `#[cfg(test)] mod tests`
-against its cops:
+against its cops without rebuilding the host plumbing:
 
 ```toml
 [dev-dependencies]
@@ -404,39 +404,24 @@ murphy-plugin-api = { path = "../murphy-plugin-api", features = ["test-support"]
 ```
 
 With the feature off, `murphy-translate` (the runtime parser) is not
-pulled in and the test_support module is `#[cfg]`-gated out — the
+pulled in and the `test_support` module is `#[cfg]`-gated out — the
 production cdylib stays parser-free.
 
-### `run_cop`
+Two assertion macros are the documented test-writing surface. The
+`indoc!` macro lets Ruby fixtures stay indented next to the test code.
 
-The low-level harness — parse `src` as Ruby, run `T::check` once per
-matching node (or once at root for `KINDS = &[]`), return captured
-offenses:
+### `expect_offense!` — assert offenses with caret annotations
 
-```rust
-use murphy_plugin_api::test_support::run_cop;
-
-let offenses = run_cop::<MyCop>("def foo; end\n");
-assert_eq!(offenses.len(), 1);
-assert_eq!(offenses[0].message, "…");
-```
-
-`CapturedOffense` carries `cop_name`, `message`, `range`, and
-`severity: Option<Severity>` (`None` when the cop didn't override —
-the host's default chain applies in production).
-
-### `expect_offense!` / `expect_no_offenses!`
-
-Higher-level assertion macros (murphy-ac6) with rubocop-style caret
-annotations. Each annotation line attaches to the source line
-immediately above; caret column is the **char index** of the source
-line (multibyte safe via `char_indices()`).
+Caret annotations describe each offense's range and message inline.
+Each annotation line attaches to the source line immediately above;
+caret column is the **char index** of the source line (multibyte safe
+via `char_indices()`).
 
 ```rust
-use murphy_plugin_api::test_support::{expect_offense, expect_no_offenses, indoc};
+use murphy_plugin_api::test_support::{expect_offense, indoc};
 
 #[test]
-fn flags_two_expects() {
+fn flags_two_expects_single_line_block() {
     expect_offense!(
         MultipleExpectations,
         indoc! {r#"
@@ -445,6 +430,41 @@ fn flags_two_expects() {
         "#}
     );
 }
+```
+
+Annotation grammar:
+
+- A line whose first non-whitespace char is `^` is an **annotation
+  line**; everything else is a **source line**. Annotation lines are
+  stripped before the source is parsed as Ruby.
+- The caret column equals the char-index start of the offense in the
+  source line above. Number of carets = char length of the range.
+- Text after the last caret (whitespace-trimmed) is the expected
+  message. **Exact-match** comparison. Omit the message
+  (`^^^` only) to assert range only — useful for cops with dynamic
+  message text like `(6/5)`.
+- Matching is **exact-set**: any cop emission without a matching
+  annotation fails the test, any annotation without a matching emission
+  fails the test.
+- On failure, the panic renders **both** expected and actual sides as
+  caret-annotated source for a diff-style read.
+
+Limitations and escape hatches:
+
+- One annotation line per source line in MVP (parser already absorbs
+  multiple; comparator/renderer support is tracked as `murphy-swo`).
+- Multi-line ranges (offense spans past a newline) get carets on the
+  first line only and `(+ N more chars)` is appended to the message.
+  Block-level cops (whole `it … end`) are awkward to annotate with
+  carets in this MVP — use `run_cop` (below) for those until
+  multi-line caret support lands.
+- The macro panics with a "use `expect_no_offenses!` instead" message
+  if the input has no annotations (typo guard).
+
+### `expect_no_offenses!` — assert nothing fires
+
+```rust
+use murphy_plugin_api::test_support::{expect_no_offenses, indoc};
 
 #[test]
 fn does_not_flag_single_expect() {
@@ -459,30 +479,43 @@ fn does_not_flag_single_expect() {
 }
 ```
 
-Rules:
-
-- One annotation line per source line in MVP (parser already absorbs
-  multiple; comparator/renderer support is murphy-swo).
-- Empty annotation message (carets only, no text after) ⇒ range-only
-  match. Useful for cops with dynamic message text like `(6/5)`.
-- `expect_no_offenses!` rejects caret-bearing input as a typo guard
-  for `expect_offense!`; the inverse guard applies the other way.
-- Failure renders both expected and actual sides as caret-annotated
-  source for a diff-style panic message.
-- Multi-line ranges emit carets only on the first line and append
-  `(+ N more chars)` to the message — block-level cops (whole `it … end`)
-  are awkward to annotate with carets; `run_cop` + manual `assert_eq!`
-  is the escape hatch.
-
-Design: `docs/plans/2026-05-24-expect-offense-macro-design.md`.
-Implementation: `crates/murphy-plugin-api/src/test_support.rs`.
+Companion to `expect_offense!`. Panics if the cop emits anything.
+Rejects caret-bearing input as a symmetric typo guard ("use
+`expect_offense!` instead").
 
 ### `indoc!`
 
-Re-exported from `indoc` (also feature-gated). Strips the common
-ASCII-whitespace prefix from each line of a `r#"…"#` literal at
-compile time so Ruby fixtures can stay indented inside the Rust test
-without affecting parse output or caret column math.
+Re-exported from the `indoc` crate (also feature-gated). Strips the
+common ASCII-whitespace prefix from each line of a `r#"…"#` literal at
+compile time so Ruby fixtures can stay indented inside the test
+function without affecting parse output or caret column math. Use it
+on every fixture string the macros take.
+
+### Escape hatch: `run_cop`
+
+For tests the caret grammar can't express cleanly — block-level multi-line
+ranges, asserting `cop_name` / `severity`, parametrised loops over many
+inputs — drop down to `run_cop`:
+
+```rust
+use murphy_plugin_api::test_support::run_cop;
+
+let offenses = run_cop::<MyCop>("def foo; end\n");
+assert_eq!(offenses.len(), 1);
+assert_eq!(offenses[0].cop_name, "Plugin/MyCop");
+```
+
+It parses `src` as Ruby, runs the cop's dispatch (per-kind or
+file-visit, mirroring host semantics), and returns
+`Vec<CapturedOffense>`. `CapturedOffense` carries `cop_name`,
+`message`, `range`, and `severity: Option<Severity>` (`None` when the
+cop didn't override — the host's default chain applies in production).
+The two macros are thin layers on top of `run_cop`.
+
+Design / implementation references:
+
+- `docs/plans/2026-05-24-expect-offense-macro-design.md`
+- `crates/murphy-plugin-api/src/test_support.rs`
 
 ## 12. References
 
