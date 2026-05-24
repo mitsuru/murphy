@@ -363,7 +363,6 @@ fn is_cop_disabled_by_default(name: &str) -> bool {
             | "Rails/RelativeDateConstant"
             | "Rails/RenderInline"
             | "Rails/RenderPlainText"
-            | "Rails/RequestReferer"
             | "Rails/RequireDependency"
             | "Rails/ResponseParsedBody"
             | "Rails/ReversibleMigration"
