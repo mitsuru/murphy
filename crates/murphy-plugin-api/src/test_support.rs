@@ -314,9 +314,22 @@ pub struct CapturedOffense {
     pub severity: Option<Severity>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedEdit {
+    pub range: Range,
+    pub replacement: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CapturedRun {
+    pub offenses: Vec<CapturedOffense>,
+    pub edits: Vec<CapturedEdit>,
+}
+
 /// Mutable scratch the FFI callbacks borrow through a `*mut c_void`.
 struct Sink {
     offenses: Vec<CapturedOffense>,
+    edits: Vec<CapturedEdit>,
 }
 
 unsafe extern "C" fn record_offense(sink_ptr: *mut std::ffi::c_void, o: *const RawOffense) {
@@ -340,6 +353,17 @@ unsafe extern "C" fn ignore_edit(_sink: *mut std::ffi::c_void, _e: *const RawEdi
     // this default keeps the FnTable valid.
 }
 
+unsafe extern "C" fn record_edit(sink_ptr: *mut std::ffi::c_void, e: *const RawEdit) {
+    let sink = unsafe { &*(sink_ptr as *const RefCell<Sink>) };
+    let e = unsafe { &*e };
+    let replacement = String::from_utf8(unsafe { e.replacement.as_bytes() }.to_vec())
+        .expect("replacement must be UTF-8");
+    sink.borrow_mut().edits.push(CapturedEdit {
+        range: e.range,
+        replacement,
+    });
+}
+
 /// Parse `source` as Ruby, drive `T::check` over every relevant node,
 /// and return the captured offenses in emission order.
 ///
@@ -351,6 +375,7 @@ pub fn run_cop<T: NodeCop + Default>(source: &str) -> Vec<CapturedOffense> {
     let cop_name = RawSlice::from_str(<T as Cop>::NAME);
     let sink = RefCell::new(Sink {
         offenses: Vec::new(),
+        edits: Vec::new(),
     });
     let fns = FnTable {
         emit_offense: record_offense,
@@ -373,6 +398,37 @@ pub fn run_cop<T: NodeCop + Default>(source: &str) -> Vec<CapturedOffense> {
     }
 
     sink.into_inner().offenses
+}
+
+pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
+    let ast = murphy_translate::translate(source, "t.rb");
+    let cop = T::default();
+    let cop_name = RawSlice::from_str(<T as Cop>::NAME);
+    let sink = RefCell::new(Sink {
+        offenses: Vec::new(),
+        edits: Vec::new(),
+    });
+    let fns = FnTable {
+        emit_offense: record_offense,
+        emit_edit: record_edit,
+    };
+    let raw = cx_raw_for(&ast, &fns, cop_name, &sink);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    if T::KINDS.is_empty() {
+        cop.check(ast.root(), &cx);
+    } else {
+        let node_count = ast.raw_parts().nodes.len();
+        for i in 0..node_count {
+            cop.check(NodeId(i as u32), &cx);
+        }
+    }
+
+    let sink = sink.into_inner();
+    CapturedRun {
+        offenses: sink.offenses,
+        edits: sink.edits,
+    }
 }
 
 /// Build a `CxRaw` borrowing from `ast`, `fns`, and `sink`. The
@@ -436,6 +492,20 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct EditCop;
+    impl Cop for EditCop {
+        type Options = NoOptions;
+        const NAME: &'static str = "Test/Edit";
+    }
+    impl NodeCop for EditCop {
+        const KINDS: &'static [NodeKindTag] = &[];
+        fn check(&self, _node: NodeId, cx: &Cx<'_>) {
+            cx.emit_offense(Range { start: 0, end: 3 }, "fixed", None);
+            cx.emit_edit(Range { start: 0, end: 3 }, "xyz");
+        }
+    }
+
     /// Fixture: emits two offenses on the same source — `[0, 3)` and
     /// `[4, 7)`. Pairs with a "abc\ndef\n" fixture so the second range
     /// lands cleanly on the second line. Used to exercise the count
@@ -457,6 +527,15 @@ mod tests {
     #[test]
     fn expect_no_offenses_passes_when_cop_emits_nothing() {
         expect_no_offenses!(NoopCop, "x = 1\n");
+    }
+
+    #[test]
+    fn run_cop_with_edits_captures_autocorrect_edits() {
+        let result = super::run_cop_with_edits::<EditCop>("abc\n");
+        assert_eq!(result.offenses.len(), 1);
+        assert_eq!(result.edits.len(), 1);
+        assert_eq!(result.edits[0].range, Range { start: 0, end: 3 });
+        assert_eq!(result.edits[0].replacement, "xyz");
     }
 
     #[test]

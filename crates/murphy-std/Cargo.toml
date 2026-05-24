@@ -16,3 +16,6 @@ murphy-plugin-api = { path = "../murphy-plugin-api" }
 # the boundary gate only forbids non-`murphy-plugin-api` Murphy deps.
 # Also used by `tests/dep_boundary.rs` to parse `cargo metadata` output.
 serde_json = "1"
+
+[dev-dependencies]
+murphy-plugin-api = { path = "../murphy-plugin-api", features = ["test-support"] }

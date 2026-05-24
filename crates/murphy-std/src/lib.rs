@@ -32,7 +32,13 @@ pub mod murphy;
 pub mod style;
 
 use crate::layout::trailing_whitespace::TrailingWhitespace;
+use crate::lint::debugger::Debugger;
+use crate::lint::deprecated_class_methods::DeprecatedClassMethods;
+use crate::lint::duplicate_hash_key::DuplicateHashKey;
+use crate::lint::empty_when::EmptyWhen;
 use crate::lint::unreachable_code::UnreachableCode;
+use crate::lint::unused_method_argument::UnusedMethodArgument;
+use crate::lint::useless_assignment::UselessAssignment;
 use crate::murphy::no_receiver_puts::NoReceiverPuts;
 use crate::style::string_literals::StringLiterals;
 
@@ -41,7 +47,13 @@ use crate::style::string_literals::StringLiterals;
 murphy_plugin_api::register_cops!(
     mode = static,
     NoReceiverPuts,
+    Debugger,
+    DeprecatedClassMethods,
+    DuplicateHashKey,
+    EmptyWhen,
     UnreachableCode,
+    UnusedMethodArgument,
+    UselessAssignment,
     StringLiterals,
     TrailingWhitespace,
 );
