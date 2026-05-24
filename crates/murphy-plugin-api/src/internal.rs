@@ -36,6 +36,8 @@ pub const fn build_cop<C: NodeCop + Default>() -> PluginCopV1 {
         kinds_ptr: <C as NodeCop>::KINDS.as_ptr(),
         kinds_len: <C as NodeCop>::KINDS.len(),
         dispatch: dispatch_thunk::<C>,
+        send_methods_ptr: <C as NodeCop>::SEND_METHODS.as_ptr(),
+        send_methods_len: <C as NodeCop>::SEND_METHODS.len(),
     }
 }
 

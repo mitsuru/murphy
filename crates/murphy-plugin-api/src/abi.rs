@@ -203,6 +203,17 @@ pub struct PluginCopV1 {
     pub kinds_len: usize,
     /// Per-node dispatch entry.
     pub dispatch: DispatchFn,
+    /// Allow-list of method symbol names for `kind = "send"` dispatch
+    /// (murphy-ip0, RuboCop's `restrict_on_send` analogue). When
+    /// non-empty, the host dispatcher peeks at each Send node's
+    /// `method` symbol and skips invoking `dispatch` when the resolved
+    /// string is not in this list — the cop never sees off-list
+    /// Sends. When the slice is empty (the historical default), every
+    /// Send subscribed via `KINDS` reaches `dispatch`. Filtering on
+    /// non-send kinds is meaningless and is rejected at the `#[cop]`
+    /// macro parse site, not here.
+    pub send_methods_ptr: *const RawSlice,
+    pub send_methods_len: usize,
 }
 
 // Safety: PluginCopV1 is an immutable descriptor of non-owning views and
@@ -334,7 +345,13 @@ mod tests {
         assert_eq!(offset_of!(PluginCopV1, kinds_ptr), 64);
         assert_eq!(offset_of!(PluginCopV1, kinds_len), 72);
         assert_eq!(offset_of!(PluginCopV1, dispatch), 80);
-        assert_eq!(size_of::<PluginCopV1>(), 88);
+        // Host-level send-method allow-list (murphy-ip0). Added at the
+        // end of the struct so existing field offsets stay frozen and
+        // the `size`-field rejection in the plugin loader continues to
+        // catch divergent struct layouts.
+        assert_eq!(offset_of!(PluginCopV1, send_methods_ptr), 88);
+        assert_eq!(offset_of!(PluginCopV1, send_methods_len), 96);
+        assert_eq!(size_of::<PluginCopV1>(), 104);
     }
 
     #[test]

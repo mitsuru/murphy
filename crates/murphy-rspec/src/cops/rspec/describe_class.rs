@@ -62,22 +62,17 @@ pub struct DescribeClass;
     options = NoOptions
 )]
 impl DescribeClass {
-    #[on_node(kind = "send")]
+    #[on_node(kind = "send", methods = ["describe"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        // Defensive pattern-match: a future kind-aliasing accident would
-        // silently misreport without the `let-else`. Same posture as
-        // `Murphy/NoReceiverPuts`.
-        let NodeKind::Send {
-            receiver,
-            method,
-            args,
-        } = *cx.kind(node)
-        else {
+        // The `methods = ["describe"]` filter on `#[on_node]` (murphy-34d)
+        // gates dispatch on the method symbol before this body runs;
+        // we only reach here for `Send { method == "describe" }`. The
+        // `let-else` is still defensive against a future kind-aliasing
+        // accident (same posture as `Murphy/NoReceiverPuts`) but is
+        // statically unreachable today.
+        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
             return;
         };
-        if cx.symbol_str(method) != "describe" {
-            return;
-        }
         if !receiver_is_rspec_or_bare(cx, receiver) {
             return;
         }

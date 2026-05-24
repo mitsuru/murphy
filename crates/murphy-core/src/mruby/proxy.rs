@@ -382,6 +382,11 @@ pub fn build_mruby_cop(proxy: &MrubyCopProxy) -> PluginCopV1 {
         kinds_ptr: proxy.kinds.as_ptr(),
         kinds_len: proxy.kinds.len(),
         dispatch: mruby_dispatch_thunk,
+        // mruby proxies don't speak the `restrict_on_send` filter
+        // surface (no `#[cop]` parse path). Leave empty so the host
+        // applies no method allow-list — every Send reaches the proxy.
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     }
 }
 

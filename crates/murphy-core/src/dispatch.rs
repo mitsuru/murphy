@@ -30,11 +30,17 @@
 
 use std::ffi::c_void;
 
-use murphy_ast::{Ast, NodeId};
+use murphy_ast::{Ast, NodeId, NodeKind};
 use murphy_plugin_api::{
     CxRaw, FnTable, NodeKindTag as PluginNodeKindTag, PluginCopV1, RawEdit, RawOffense, RawSlice,
     SEVERITY_UNSET,
 };
+
+/// The `NodeKindTag` for [`NodeKind::Send`] (frozen by ADR 0037).
+/// Mirrors `murphy-plugin-api::NodeKindTag::of(&NodeKind::Send {…})`
+/// but kept as a free constant so the host pre-filter loop does not
+/// pay a per-node tag-of recomputation.
+const SEND_TAG: u8 = 17;
 
 use crate::offense::{Autocorrect, Edit, Offense, Range, Severity};
 
@@ -180,6 +186,20 @@ fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink) -> CxRaw {
     }
 }
 
+/// `true` when `node_id` is a `Send` whose `method` symbol resolves to
+/// one of `allow_list`. Used by the host pre-filter (murphy-ip0); a
+/// non-Send node is a category error here and returns `false` (the
+/// dispatch loop only applies this on tags that are known-Send).
+fn send_method_passes(ast: &Ast, node_id: NodeId, allow_list: &[RawSlice]) -> bool {
+    let NodeKind::Send { method, .. } = *ast.kind(node_id) else {
+        return false;
+    };
+    let m_bytes = ast.interner().resolve(method.0).as_bytes();
+    allow_list
+        .iter()
+        .any(|slot| unsafe { slot.as_bytes() } == m_bytes)
+}
+
 /// Run every cop in `cops` over `ast`, recording offenses + edits into
 /// `sink`. The cop order is the order of `cops`; matching nodes are visited
 /// in arena push order. A non-zero dispatch return (panic-trap) disables
@@ -219,12 +239,28 @@ pub fn run_cops(ast: &Ast, cops: &[&PluginCopV1], sink: &mut OffenseSink) {
         }
         let kinds: &[PluginNodeKindTag] =
             unsafe { std::slice::from_raw_parts(cop.kinds_ptr, cop.kinds_len) };
+        // Host-level `restrict_on_send` pre-filter (murphy-ip0). Empty
+        // slice ⇒ no filter; non-empty ⇒ every Send node is skipped
+        // unless its method symbol resolves to one of the listed
+        // names. The cop's `dispatch` thunk is **not invoked** for
+        // off-list sends — saves the FFI hop + cop body wakeup.
+        // Filtering on non-send kinds is meaningless and rejected at
+        // the `#[cop]` parse site, so we apply it only on the Send tag.
+        let send_methods: &[RawSlice] = if cop.send_methods_len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(cop.send_methods_ptr, cop.send_methods_len) }
+        };
         let mut disabled = false;
         for tag in kinds {
             if disabled {
                 break;
             }
+            let apply_send_filter = !send_methods.is_empty() && tag.0 == SEND_TAG;
             for &node_id in index.nodes_for(*tag) {
+                if apply_send_filter && !send_method_passes(ast, node_id, send_methods) {
+                    continue;
+                }
                 let rc = unsafe { (cop.dispatch)(node_id, &base) };
                 if rc != 0 {
                     let name = std::str::from_utf8(unsafe { cop.name.as_bytes() })
@@ -343,6 +379,8 @@ mod tests {
         kinds_ptr: NIL_KINDS.as_ptr(),
         kinds_len: NIL_KINDS.len(),
         dispatch: iter_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     };
 
     #[test]
@@ -392,6 +430,8 @@ mod tests {
         kinds_ptr: NIL_KINDS.as_ptr(),
         kinds_len: NIL_KINDS.len(),
         dispatch: match_nil_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     };
     static MATCH_SEND_COP: PluginCopV1 = PluginCopV1 {
         size: std::mem::size_of::<PluginCopV1>(),
@@ -404,6 +444,8 @@ mod tests {
         kinds_ptr: SEND_KINDS.as_ptr(),
         kinds_len: SEND_KINDS.len(),
         dispatch: match_send_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     };
 
     #[test]
@@ -427,6 +469,73 @@ mod tests {
         );
     }
 
+    // (3b) `send_methods` allow-list on a Send-subscribed cop pre-filters
+    //      at the host: the cop's dispatch is **not invoked** for Send
+    //      nodes whose method symbol is not in the list (murphy-ip0).
+    static SEND_FILTER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn send_filter_dispatch(_node: NodeId, _cx: *const CxRaw) -> i32 {
+        SEND_FILTER_CALLS.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+    static SEND_FILTER_METHODS: &[RawSlice] = &[RawSlice::from_str("describe")];
+    static SEND_FILTER_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/SendFilter"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: SEND_KINDS.as_ptr(),
+        kinds_len: SEND_KINDS.len(),
+        dispatch: send_filter_dispatch,
+        send_methods_ptr: SEND_FILTER_METHODS.as_ptr(),
+        send_methods_len: SEND_FILTER_METHODS.len(),
+    };
+
+    #[test]
+    fn dispatch_pre_filters_send_by_method_name() {
+        SEND_FILTER_CALLS.store(0, Ordering::SeqCst);
+
+        // Two Sends in the same arena — one `describe`, one `foo`. The
+        // cop's allow-list contains only "describe", so the host must
+        // call `send_filter_dispatch` exactly once.
+        let mut b = AstBuilder::new("describe; foo", "t.rb");
+        let describe_method = b.intern_symbol("describe");
+        let describe_send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method: describe_method,
+                args: murphy_ast::NodeList::EMPTY,
+            },
+            murphy_ast::Range { start: 0, end: 8 },
+        );
+        let foo_method = b.intern_symbol("foo");
+        let foo_send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method: foo_method,
+                args: murphy_ast::NodeList::EMPTY,
+            },
+            murphy_ast::Range { start: 10, end: 13 },
+        );
+        let list = b.push_list(&[describe_send, foo_send]);
+        let root = b.push(
+            NodeKind::Begin(list),
+            murphy_ast::Range { start: 0, end: 13 },
+        );
+        let ast = b.finish(root);
+
+        let mut sink = OffenseSink::new("t.rb");
+        run_cops(&ast, &[&SEND_FILTER_COP], &mut sink);
+
+        assert_eq!(
+            SEND_FILTER_CALLS.load(Ordering::SeqCst),
+            1,
+            "host must pre-filter Send by method; the cop sees only `describe`, not `foo`"
+        );
+    }
+
     // (4) `cop_name` is restamped into the per-cop CxRaw and survives into
     //     emitted offenses.
     static STAMP_COP_A: PluginCopV1 = PluginCopV1 {
@@ -440,6 +549,8 @@ mod tests {
         kinds_ptr: NIL_KINDS.as_ptr(),
         kinds_len: NIL_KINDS.len(),
         dispatch: stamp_emit,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     };
     static STAMP_COP_B: PluginCopV1 = PluginCopV1 {
         size: std::mem::size_of::<PluginCopV1>(),
@@ -452,6 +563,8 @@ mod tests {
         kinds_ptr: NIL_KINDS.as_ptr(),
         kinds_len: NIL_KINDS.len(),
         dispatch: stamp_emit,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     };
 
     /// Emit one offense per visited node; cop_name is whatever the host
@@ -513,6 +626,8 @@ mod tests {
         kinds_ptr: NIL_KINDS.as_ptr(),
         kinds_len: NIL_KINDS.len(),
         dispatch: panicking_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     };
     static AFTER_COP: PluginCopV1 = PluginCopV1 {
         size: std::mem::size_of::<PluginCopV1>(),
@@ -525,6 +640,8 @@ mod tests {
         kinds_ptr: NIL_KINDS.as_ptr(),
         kinds_len: NIL_KINDS.len(),
         dispatch: after_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     };
 
     #[test]
@@ -593,6 +710,8 @@ mod tests {
         kinds_ptr: NIL_KINDS.as_ptr(),
         kinds_len: NIL_KINDS.len(),
         dispatch: render_emit,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     };
 
     #[test]
@@ -646,6 +765,8 @@ mod tests {
         kinds_ptr: FILE_VISIT_KINDS.as_ptr(),
         kinds_len: FILE_VISIT_KINDS.len(),
         dispatch: file_visit_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
     };
 
     #[test]

@@ -34,6 +34,16 @@ pub trait NodeCop: Cop {
     /// selects the file-visit form documented on the trait.
     const KINDS: &'static [NodeKindTag];
 
+    /// Allow-list of method symbol names for `kind = "send"` dispatch
+    /// (RuboCop's `restrict_on_send` analogue; murphy-ip0). The
+    /// `#[cop]` proc-macro emits this from
+    /// `#[on_node(kind = "send", methods = ["foo", "bar"])]`. When
+    /// non-empty, the host dispatcher peeks each Send node's method
+    /// symbol and skips the cop entirely for off-list sends; the cop's
+    /// `check` is never invoked for them. Default empty (no filter),
+    /// matching the historical "every Send reaches the cop" contract.
+    const SEND_METHODS: &'static [crate::abi::RawSlice] = &[];
+
     /// Runtime dispatch kinds. Static cops use [`Self::KINDS`]; dynamic
     /// in-process cops can override this without changing the plugin ABI.
     fn kinds(&self) -> &[NodeKindTag] {

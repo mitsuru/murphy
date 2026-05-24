@@ -58,7 +58,12 @@ fn cx_raw_for<'a>(ast: &'a murphy_ast::Ast, fns: &'a FnTable) -> CxRaw {
 
 /// Push a `Send` node (`recv.method(args…)`) onto `b` and return its `NodeId`.
 fn push_send(b: &mut AstBuilder) -> NodeId {
-    let method = b.intern_symbol("foo");
+    push_send_named(b, "foo")
+}
+
+/// Push a bare `Send` (no receiver) whose method symbol is `name`.
+fn push_send_named(b: &mut AstBuilder, name: &str) -> NodeId {
+    let method = b.intern_symbol(name);
     b.push(
         NodeKind::Send {
             receiver: OptNodeId::NONE,
@@ -192,6 +197,21 @@ impl T6 {
 // Compilation success proves `register_cops!` + `#[cop]` compose correctly.
 murphy_plugin_macros::register_cops!(mode = dynamic, T6);
 
+// --- T7: methods filter on send (murphy-34d) --------------------------------
+
+#[derive(Default)]
+struct T7 {
+    hits: AtomicU32,
+}
+
+#[cop(name = "Plugin/T7")]
+impl T7 {
+    #[on_node(kind = "send", methods = ["describe", "context"])]
+    fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -286,6 +306,31 @@ fn check_is_no_op_for_kinds_outside_kinds_array() {
         0,
         "count should remain 0 for a Nil node (not in KINDS)"
     );
+}
+
+#[test]
+fn methods_filter_lowers_to_send_methods_const() {
+    // The host applies the filter via `PluginCopV1::send_methods_*`
+    // (murphy-ip0); the cop body itself unconditionally invokes its
+    // check method. So the macro contract this test pins is "the
+    // `methods = [...]` array is lowered into the `SEND_METHODS`
+    // associated const in declaration order". The actual host-level
+    // filter behaviour is covered by `dispatch_pre_filters_send_by_method_name`
+    // in `murphy_core::dispatch`.
+    let lowered: Vec<&str> = <T7 as NodeCop>::SEND_METHODS
+        .iter()
+        .map(|s| std::str::from_utf8(unsafe { s.as_bytes() }).unwrap())
+        .collect();
+    assert_eq!(lowered, vec!["describe", "context"]);
+}
+
+#[test]
+fn unfiltered_send_cop_has_empty_send_methods() {
+    // T4 declares `#[on_node(kind = "send")]` without `methods`. The
+    // associated const must default to empty so the host applies no
+    // filter — preserving the historical "every Send reaches the cop"
+    // contract for cops that don't opt in to `restrict_on_send`.
+    assert!(<T4 as NodeCop>::SEND_METHODS.is_empty());
 }
 
 #[test]

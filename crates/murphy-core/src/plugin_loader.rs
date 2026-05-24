@@ -419,6 +419,8 @@ mod tests {
             kinds_ptr: FAKE_KINDS.as_ptr(),
             kinds_len: FAKE_KINDS.len(),
             dispatch: noop_dispatch,
+            send_methods_ptr: std::ptr::null(),
+            send_methods_len: 0,
         }
     }
 
