@@ -5,11 +5,13 @@
 //! `murphy-bnd`).
 
 mod assert_not;
+mod environment_variable_access;
 mod output;
 mod pick;
 mod request_referer;
 
 pub use assert_not::AssertNot;
+pub use environment_variable_access::EnvironmentVariableAccess;
 pub use output::Output;
 pub use pick::Pick;
 pub use request_referer::RequestReferer;
