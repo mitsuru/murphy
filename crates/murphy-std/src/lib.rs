@@ -31,6 +31,7 @@ pub mod lint;
 pub mod murphy;
 pub mod style;
 
+use crate::layout::space_inside_parens::SpaceInsideParens;
 use crate::layout::trailing_whitespace::TrailingWhitespace;
 use crate::lint::unreachable_code::UnreachableCode;
 use crate::murphy::no_receiver_puts::NoReceiverPuts;
@@ -44,6 +45,7 @@ murphy_plugin_api::register_cops!(
     UnreachableCode,
     StringLiterals,
     TrailingWhitespace,
+    SpaceInsideParens,
 );
 
 /// Standard cops that have **not yet been migrated** to the arena AST /
