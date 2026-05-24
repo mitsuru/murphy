@@ -37,7 +37,9 @@ pub use autocorrect::{
     ApplyOutcome, Conflict, ConflictReason, FixpointOutcome, FixpointStatus, apply_edits,
     apply_edits_logged, run_to_fixpoint,
 };
-pub use config::{CopRule, MurphyConfig, PluginConfig, migrate_rubocop_yml_to_murphy_toml};
+pub use config::{
+    CopRule, MurphyConfig, PluginConfig, PluginDetailed, migrate_rubocop_yml_to_murphy_toml,
+};
 pub use discovery::{ConfigError, discover, discover_with_config};
 #[cfg(feature = "mruby-user-cops")]
 pub use mruby::proxy::{

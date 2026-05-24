@@ -199,7 +199,8 @@ impl CopRegistry {
         #[cfg(target_os = "windows")]
         if let Some(plugin) = config.plugins.first() {
             let name = match plugin {
-                PluginConfig::Detailed { name, .. } | PluginConfig::Name(name) => name,
+                PluginConfig::Detailed(d) => &d.name,
+                PluginConfig::Name(name) => name,
             };
             return Err(ConfigError::Io(format!(
                 "plugins (`.so`/`.dylib` packs) are not supported on Windows: {name}"
