@@ -31,6 +31,10 @@ tempfile = "3"
 # resolution — we never `use` it from Rust; the e2e test loads the
 # cdylib via dlopen (tests/plugin_pack_e2e.rs).
 murphy-example-pack = { path = "../murphy-example-pack" }
+# Same build-order rationale as murphy-example-pack above, for the
+# bootstrap RSpec cop pack (murphy-4n9.4). Loaded via dlopen by
+# tests/rspec_pack_e2e.rs; never `use`d from Rust.
+murphy-rspec = { path = "../murphy-rspec" }
 
 [features]
 default = []

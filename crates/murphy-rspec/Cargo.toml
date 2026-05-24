@@ -1,0 +1,23 @@
+[package]
+name = "murphy-rspec"
+version = "0.1.0"
+edition = "2024"
+description = "Bootstrap RSpec cop pack for Murphy (murphy-4n9.4) — ships RSpec/DescribeClass via the single-surface plugin ABI (ADR 0038)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+# `rlib` exists so murphy-cli's [dev-dependencies] entry resolves through
+# the Cargo dep graph (build ordering for the e2e test in
+# crates/murphy-cli/tests/rspec_pack_e2e.rs). Production never `use`s
+# this crate from Rust — the cdylib is dlopen'd by murphy-core's
+# plugin_loader. Same rationale as murphy-example-pack.
+
+[dependencies]
+# Single-surface plugin ABI (ADR 0038). The pack reaches Murphy internals
+# only through this crate; the boundary is asserted by
+# tests/dep_boundary.rs (cargo metadata).
+murphy-plugin-api = { path = "../murphy-plugin-api" }
+
+[dev-dependencies]
+# Used by tests/dep_boundary.rs to parse `cargo metadata` JSON.
+serde_json = "1"
