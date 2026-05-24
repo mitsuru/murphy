@@ -36,75 +36,35 @@ invariant is asserted by a `tests/dep_boundary.rs` in every pack
 and example-pack each carry their own copy).
 
 The crate re-exports everything a pack needs at one path so the pack
-imports stay short:
+imports stay short. A typical cop file pulls:
 
 ```rust
 use murphy_plugin_api::{
-    Cop, Cx, NodeCop, NodeKindTag,        // traits + dispatch
+    Cx,                                   // AST read context
     NodeId, NodeKind, OptNodeId, Range,   // AST types (re-exported from murphy-ast)
-    Symbol, StringId, AstNode, Comment,
-    CopOptions, NoOptions,                // options trait
+    Symbol,                               // interned identifiers
+    NoOptions,                            // marker type for cops with no config
     Severity,                             // offense severity
-    cop, on_node, on_new_investigation,   // attribute macros
-    register_cops, node_pattern,          // function-like macros
-    CopOptions as _DeriveCopOptions,      // #[derive(CopOptions)]
+    cop, on_node, on_new_investigation,   // dispatch attributes
 };
 ```
 
-Anything reachable only through `murphy-core`, `murphy-ast`,
-`murphy-translate`, `murphy-pattern` etc. is **off limits** at runtime —
-the dep-boundary test will fail the build.
+A pack's `lib.rs` also pulls `register_cops` (§8). Cops with options
+pull `CopOptions` for `#[derive(CopOptions)]` (§7). The `node_pattern!`
+macro (§3) is available for deeper shape matching. Anything reachable
+only through `murphy-core`, `murphy-ast`, `murphy-translate`,
+`murphy-pattern` etc. is **off limits** at runtime — the dep-boundary
+test will fail the build.
 
-## 3. The `Cop` trait — compile-time metadata
+## 3. Writing a cop with `#[cop]`
 
-```rust
-pub trait Cop: Send + Sync + 'static {
-    type Options: CopOptions;
-    const NAME: &'static str;
-    const DESCRIPTION: &'static str = "";
-    const DEFAULT_SEVERITY: Option<Severity> = None;
-    const DEFAULT_ENABLED: Option<bool> = None;
-}
-```
+A cop is a stateless unit struct annotated with `#[cop(...)]` on its
+`impl` block. Inside the block, one or more **dispatch methods**
+declare which node kinds the cop subscribes to. This is the only
+authoring shape this guide documents — the underlying `Cop` and
+`NodeCop` traits are implementation detail the macro fills in.
 
-Every field is an associated `const` so `register_cops!` can assemble
-the registration table at const-eval time (ADR 0035). Runtime dispatch
-lives on `NodeCop` (see §4). A `Cop` is a stateless unit struct in
-practice — the `#[cop]` attribute (see §5) generates the impl from
-declarative metadata.
-
-## 4. The `NodeCop` trait — dispatch
-
-```rust
-pub trait NodeCop: Cop {
-    const KINDS: &'static [NodeKindTag];
-    fn kinds(&self) -> &[NodeKindTag] { Self::KINDS }
-    fn check(&self, node: NodeId, cx: &Cx<'_>);
-}
-```
-
-`NodeKindTag` is the `u8` discriminant of a `NodeKind` variant
-(`#[repr(C, u8)]` declaration order, ADR 0037). The host dispatches
-`check` once per matching node.
-
-Two dispatch modes:
-
-- **Per-kind** — `KINDS = &[NodeKindTag::of(&NodeKind::Send(..)), …]`.
-  `check` is called once for every node whose tag is in the list.
-- **File-visit** — `KINDS = &[]`. `check` is called exactly once per
-  file with `node == cx.root()`. Used by whole-file scanners like
-  `Layout/TrailingWhitespace` whose root may be any of `Begin`, `Nil`,
-  `Send`, `Def`, `Class`, … (a fixed kind subscription would not work).
-
-The `kinds()` method exists so dynamic in-process cops (mruby-backed)
-can compute their subscription at runtime without changing the ABI.
-
-See `crates/murphy-plugin-api/src/node_cop.rs` and ADR 0034.
-
-## 5. Authoring a cop with `#[cop]` and `#[on_node]`
-
-The recommended shape is the declarative `#[cop]` attribute. Example
-from `murphy-rspec`:
+Example from `murphy-rspec`:
 
 ```rust
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
@@ -126,32 +86,64 @@ impl DescribeClass {
         if cx.symbol_str(method) != "describe" {
             return;
         }
-        // … emit_offense via cx
+        // … cx.emit_offense(...)
     }
 }
 ```
 
-What `#[cop]` generates:
+### `#[cop(...)]` attribute arguments
 
-- `impl Cop for DescribeClass` populated from the attribute arguments
-  (`NAME`, `DESCRIPTION`, `DEFAULT_SEVERITY`, `DEFAULT_ENABLED`, `Options`).
-- `impl NodeCop for DescribeClass` with:
-  - `KINDS` collected from every `#[on_node(kind = "…")]` in the impl
-    block (multiple `#[on_node]` methods supported).
-  - A `check` body that matches the runtime tag and dispatches to the
-    matching `check_*` method.
+| Argument | Required | Notes |
+|---|---|---|
+| `name` | yes | The cop identifier (`"Pack/CopName"`), must match the name in `murphy.toml` and offense JSON. |
+| `description` | optional | One-line human-readable summary. |
+| `default_severity` | optional | `"warning"` or `"error"`. Omit to leave the host default. |
+| `default_enabled` | optional | `true` / `false`. Omit to leave the host default. |
+| `options` | yes | Options struct type — `NoOptions` for cops with no config, or your own `#[derive(CopOptions)]` struct (see §8). |
 
-`#[on_new_investigation]` declares the file-visit form
-(`KINDS = &[]`). It is the natural mapping for RuboCop's
-`on_new_investigation` lifecycle hook. See
-`docs/guides/rubocop-hook-dispatch.md` for the full RuboCop hook ⇄
-Murphy kind table.
+### Dispatch attributes
 
-The `node_pattern!` macro (ADR 0033 / murphy-9cr.18) provides a Prism
-shape-matching DSL for cops that need to test deeper than one kind at a
-time; the parser is in `crates/murphy-pattern`.
+Two attributes mark dispatch methods inside the `impl` block:
 
-## 6. Reading the AST: `Cx`
+- **`#[on_node(kind = "…")]`** — per-kind dispatch. The method is
+  called once for every AST node whose kind matches. The string is the
+  RuboCop hook name (`"send"`, `"block"`, `"class"`, …); the full
+  mapping lives in `docs/guides/rubocop-hook-dispatch.md`. Multiple
+  `#[on_node]` methods are allowed — the macro collects every kind
+  into the cop's subscription set and dispatches to the matching
+  method by node tag.
+
+- **`#[on_new_investigation]`** — file-visit dispatch. The method is
+  called exactly once per file with `node == cx.root()`. Used by
+  whole-file scanners (raw-source cops like `Layout/TrailingWhitespace`
+  whose root kind can be any of `Begin`, `Nil`, `Send`, `Def`, …).
+  Mirrors RuboCop's `on_new_investigation` lifecycle hook.
+
+Each dispatch method takes `&self, node: NodeId, cx: &Cx<'_>` (see
+§4 for what `Cx` exposes). The body emits offenses via `cx.emit_offense`
+and edits via `cx.emit_edit` (§5).
+
+### Deeper pattern matching: `node_pattern!`
+
+For cops that need to test more than one kind at a time (e.g. "a
+`Send` whose receiver is a `Const` named `RSpec`"), the
+`node_pattern!` macro provides a Prism shape-matching DSL
+(ADR 0033 / murphy-9cr.18). It works inside a dispatch method body and
+returns a `bool` / option binding. The parser lives in
+`crates/murphy-pattern`.
+
+### Reference: what `#[cop]` generates
+
+The macro expands to `impl Cop for T` (compile-time metadata) and
+`impl NodeCop for T` (runtime dispatch). Both traits are in
+`crates/murphy-plugin-api/src/{cop,node_cop}.rs`. The const-eval shape
+(ADR 0035) lets `register_cops!` assemble the registration table at
+build time; the `NodeKindTag` set comes from each `#[on_node]` kind
+string. The traits are not part of the documented authoring API — hand
+implementations exist only for the mruby-backed dynamic proxy
+(`MrubyCopProxy`) that computes its subscription at runtime.
+
+## 4. Reading the AST: `Cx`
 
 `Cx<'a>` is a borrowed, direct-read view of the arena. **Traversal and
 `NodeKind` matching are pure memory reads — zero FFI** (ADR 0038). The
@@ -183,7 +175,7 @@ byte offsets; converting to/from char/column positions is the cop's
 responsibility (see `test_support`'s `char_indices()` translation for
 the canonical pattern).
 
-## 7. Emitting offenses and edits
+## 5. Emitting offenses and edits
 
 ```rust
 cx.emit_offense(
@@ -209,7 +201,7 @@ offense without an edit is a report-only cop. A cop emitting edits
 should also emit the offense the edit fixes (the host pairs them by
 range overlap).
 
-## 8. Severity
+## 6. Severity
 
 ```rust
 #[repr(u8)]
@@ -228,20 +220,12 @@ encodes `DEFAULT_ENABLED`.
 
 See `crates/murphy-plugin-api/src/severity.rs`.
 
-## 9. Options: `CopOptions` and `#[derive(CopOptions)]`
+## 7. Options: `#[derive(CopOptions)]`
 
-```rust
-pub trait CopOptions: Default + Sized + 'static {
-    const SCHEMA: &'static [OptionSpec] = &[];
-    fn from_config_json(_bytes: &[u8]) -> Result<Self, ConfigError>;
-}
-```
+Cops with no configuration pass `options = NoOptions` to `#[cop]`
+(see §3) — `NoOptions` is a unit type with an empty schema.
 
-Cops with no configuration use `NoOptions` (a unit struct that
-implements `CopOptions` with an empty schema).
-
-Cops with options derive the impl with `#[derive(CopOptions)]`
-(ADR 0036, murphy-9cr.7):
+Cops with options declare an options struct and derive the schema:
 
 ```rust
 use murphy_plugin_api::CopOptions;
@@ -256,24 +240,36 @@ pub struct ExampleLengthOptions {
 }
 ```
 
-What `#[derive(CopOptions)]` generates:
+Then pass it through in `#[cop]`:
 
-- `impl Default` returning the field defaults.
-- `const SCHEMA: &[OptionSpec]` — one entry per `#[option]` field,
-  used by the host to validate `murphy.toml` `[cops.rules."Name"]`
-  tables at config-load time.
-- `fn from_config_json` — field-by-field decoding via `serde_json`
-  (the only third-party dep `murphy-plugin-api` carries; the runtime
-  ABI itself does not pull serde).
+```rust
+#[cop(
+    name = "RSpec/ExampleLength",
+    options = ExampleLengthOptions,
+    // …
+)]
+impl ExampleLength { /* … */ }
+```
 
-The `Options` associated type on `Cop` is set to the options struct
-(`options = ExampleLengthOptions` in `#[cop(...)]`).
+`#[option(...)]` arguments on each field:
+
+| Argument | Notes |
+|---|---|
+| `default = …` | Required. Literal default for `Default::default()`. |
+| `description = "…"` | Optional. Surfaced in `murphy cops list` output. |
+
+What `#[derive(CopOptions)]` generates (ADR 0036, murphy-9cr.7) is an
+implementation of the `CopOptions` trait — schema metadata for the
+host to validate `murphy.toml` `[cops.rules."Name"]` tables at
+config-load time, plus a field-by-field `from_config_json` decoder. The
+trait itself lives in `crates/murphy-plugin-api/src/options.rs` and is
+not part of the documented authoring surface.
 
 Runtime option access via `Cx` is murphy-9cr.9 (not yet wired). v1 cops
-read `OptionStruct::default()` inside `check`; live overrides land with
-that ticket.
+read `OptionStruct::default()` inside the dispatch method; live
+overrides land with that ticket.
 
-## 10. Registering a pack: `register_cops!`
+## 8. Registering a pack: `register_cops!`
 
 `register_cops!` (ADR 0038, murphy-9cr.6) emits the registration table
 the host loads. One macro, two modes.
@@ -324,7 +320,7 @@ Both modes assemble the same `PluginRegistration` struct
 (`abi.rs`); the only difference is whether it ships via Rust linkage or
 through an FFI entry point.
 
-## 11. Pack project layout
+## 9. Pack project layout
 
 A typical dynamic pack:
 
@@ -354,7 +350,7 @@ direct imports of `murphy-core`, `murphy-ast`, etc. — copy
 name. New entries to `ALLOWED_MURPHY_RUNTIME_DEPS` are intentional
 API-surface expansions that need an ADR.
 
-## 12. Loading a pack via `murphy.toml`
+## 10. Loading a pack via `murphy.toml`
 
 User-facing config (`murphy.toml`, ADR 0041):
 
@@ -395,7 +391,7 @@ The host calls `dlopen` → `dlsym("murphy_plugin_register")` → reads the
 returned `PluginRegistration`, validates `MURPHY_PLUGIN_ABI_VERSION`,
 and registers each cop's metadata with the dispatch table.
 
-## 13. Testing cops: the `test-support` feature
+## 11. Testing cops: the `test-support` feature
 
 `murphy-plugin-api` exposes a parser-driven test harness gated by the
 `test-support` cargo feature. Any pack can enable it in
@@ -488,7 +484,7 @@ ASCII-whitespace prefix from each line of a `r#"…"#` literal at
 compile time so Ruby fixtures can stay indented inside the Rust test
 without affecting parse output or caret column math.
 
-## 14. References
+## 12. References
 
 - ADR 0031 — Native plugin pack ABI (first cut).
 - ADR 0033 — Plugin ABI v1 option metadata.
