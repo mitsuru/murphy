@@ -638,6 +638,7 @@ dependencies = [
  "murphy-example-pack",
  "murphy-plugin-api",
  "murphy-reporting",
+ "murphy-rspec",
  "murphy-std",
  "murphy-translate",
  "rayon",
@@ -718,6 +719,14 @@ name = "murphy-reporting"
 version = "0.1.0"
 dependencies = [
  "murphy-core",
+ "serde_json",
+]
+
+[[package]]
+name = "murphy-rspec"
+version = "0.1.0"
+dependencies = [
+ "murphy-plugin-api",
  "serde_json",
 ]
 
