@@ -22,6 +22,13 @@
 
 use murphy_plugin_api::{Cx, NoOptions, cop, register_cops};
 
+// Cops promoted out of the stub macro into real arena dispatch live
+// under `cops::<namespace>::<name>` (mirrors `murphy-rspec` /
+// `murphy-std`). The `register_cops!` list below re-exports them as
+// bare idents via `use`, keeping the registration table flat.
+pub mod cops;
+use cops::rails::Output;
+
 #[derive(Default)]
 pub struct ActionControllerFlashBeforeRender;
 
@@ -1086,19 +1093,9 @@ impl OrderById {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
-#[derive(Default)]
-pub struct Output;
-
-#[cop(
-    name = "Rails/Output",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl Output {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
+// `Output` is now a real cop in `cops::rails::output` — `pub use`d at
+// the crate root via the `use cops::rails::Output;` above so the
+// `register_cops!` ident below resolves unchanged.
 
 #[derive(Default)]
 pub struct OutputSafety;

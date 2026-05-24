@@ -341,7 +341,6 @@ fn is_cop_disabled_by_default(name: &str) -> bool {
             | "Rails/NotNullColumn"
             | "Rails/OrderArguments"
             | "Rails/OrderById"
-            | "Rails/Output"
             | "Rails/OutputSafety"
             | "Rails/Pick"
             | "Rails/Pluck"
