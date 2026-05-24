@@ -2612,10 +2612,12 @@ mod tests {
 
         assert!(tokens.contains(&(murphy_ast::SourceTokenKind::LeftParen, "(".to_string())));
         assert!(tokens.contains(&(murphy_ast::SourceTokenKind::RightParen, ")".to_string())));
-        assert!(tokens
-            .iter()
-            .any(|(kind, text)| *kind == murphy_ast::SourceTokenKind::Comment
-                && text.starts_with("# c")));
+        assert!(
+            tokens
+                .iter()
+                .any(|(kind, text)| *kind == murphy_ast::SourceTokenKind::Comment
+                    && text.starts_with("# c"))
+        );
         assert!(tokens.contains(&(murphy_ast::SourceTokenKind::Newline, "\n".to_string())));
         assert!(
             ast.sorted_tokens()
