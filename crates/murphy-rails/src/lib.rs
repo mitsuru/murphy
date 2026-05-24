@@ -27,7 +27,7 @@ use murphy_plugin_api::{Cx, NoOptions, cop, register_cops};
 // `murphy-std`). The `register_cops!` list below re-exports them as
 // bare idents via `use`, keeping the registration table flat.
 pub mod cops;
-use cops::rails::{AssertNot, Output, RequestReferer};
+use cops::rails::{AssertNot, Output, Pick, RequestReferer};
 
 #[derive(Default)]
 pub struct ActionControllerFlashBeforeRender;
@@ -1097,19 +1097,10 @@ impl OutputSafety {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
-#[derive(Default)]
-pub struct Pick;
-
-#[cop(
-    name = "Rails/Pick",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl Pick {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
+// `Pick` is now a real cop in `cops::rails::pick` — `pub use`d at the
+// crate root via the `use cops::rails::{AssertNot, Output, Pick,
+// RequestReferer};` above so the `register_cops!` ident below resolves
+// unchanged.
 
 #[derive(Default)]
 pub struct Pluck;

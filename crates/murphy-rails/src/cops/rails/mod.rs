@@ -6,8 +6,10 @@
 
 mod assert_not;
 mod output;
+mod pick;
 mod request_referer;
 
 pub use assert_not::AssertNot;
 pub use output::Output;
+pub use pick::Pick;
 pub use request_referer::RequestReferer;
