@@ -95,10 +95,13 @@ impl Pick {
         if cx.symbol_str(inner_method) != "pluck" {
             return;
         }
-        // `pluck(:id, :name).first` (multi-column) can't be `pick`-ed,
-        // and `pluck.first` (zero args) is a degenerate non-equivalent
-        // form — only the single-column case is in scope.
-        if cx.list(inner_args).len() != 1 {
+        // Rails 6+ `pick(*columns)` is variadic and equivalent to
+        // `limit(1).pluck(*columns).first`, so multi-column
+        // `pluck(:id, :name).first` is also rewritable to
+        // `pick(:id, :name)`. Only the zero-args `pluck.first` form is
+        // a degenerate non-equivalent shape that should be left alone
+        // (roborev review feedback on murphy-cy1).
+        if cx.list(inner_args).is_empty() {
             return;
         }
         cx.emit_offense(
@@ -170,10 +173,19 @@ mod tests {
     // === no-hit cases ===
 
     #[test]
-    fn does_not_flag_multi_column_pluck() {
-        // `pick` can only project one column — multi-column `pluck` is
-        // not rewritable.
-        expect_no_offenses!(Pick, "Post.pluck(:id, :name).first\n");
+    fn flags_multi_column_pluck() {
+        // Rails 6+ `pick(*columns)` accepts multiple column names and is
+        // equivalent to `limit(1).pluck(*columns).first` — so
+        // multi-column `pluck(...).first` is also rewritable. Promoted
+        // from a no-offense expectation in response to roborev review
+        // feedback on murphy-cy1.
+        expect_offense!(
+            Pick,
+            indoc! {r#"
+                Post.pluck(:id, :name).first
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
+            "#}
+        );
     }
 
     #[test]
