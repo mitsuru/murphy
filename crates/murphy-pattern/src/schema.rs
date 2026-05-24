@@ -24,10 +24,14 @@ use murphy_ast::{NodeId, NodeKind, OptNodeId, Symbol};
 /// B-backend `SCHEMA_TABLE` exactly.** Kinds outside this set deliberately
 /// return `None` from [`pattern_children`] so that the matcher reports a
 /// failed match for `(unsupported_kind …)` patterns, matching the B
-/// backend's compile-time rejection. Atoms (`int`, `nil`, …) and unary
-/// kinds (`lvar`, `splat`, …) are *intentionally absent* — bare kind
-/// patterns (`int`) and literal patterns (`5`) cover the v1 use cases.
+/// backend's compile-time rejection. Atoms with no children (`int`,
+/// `nil`, …) are *intentionally absent* — bare kind patterns (`int`)
+/// and literal patterns (`5`) cover the v1 use cases. Variable-read
+/// atoms (`lvar`/`ivar`/`cvar`/`gvar`) carry a `Symbol` payload, so
+/// `(gvar :$stdout)` etc. is matchable through a single sym slot
+/// (murphy-o5k).
 const SUPPORTED_TAGS: &[u8] = &[
+    9, 10, 11, 12, // Lvar / Ivar / Cvar / Gvar (one-slot sym pattern, murphy-o5k)
     13, // Const
     14, 15, 16, // Lvasgn / Ivasgn / Casgn
     17, 18, 19, // Send / Csend / Block
@@ -93,6 +97,12 @@ pub fn pattern_children<'a>(kind: &'a NodeKind, lists: &'a [NodeId]) -> Option<V
     }
 
     let slots = match *kind {
+        // ── Variable reads (single sym slot, murphy-o5k) ──────────────
+        NodeKind::Lvar(name)
+        | NodeKind::Ivar(name)
+        | NodeKind::Cvar(name)
+        | NodeKind::Gvar(name) => vec![PatChild::Sym(name)],
+
         // ── Variable reads with payload ────────────────────────────────
         NodeKind::Const { scope, name } => vec![PatChild::OptNode(opt(scope)), PatChild::Sym(name)],
 
@@ -270,6 +280,44 @@ mod tests {
         let n = b.push(NodeKind::Int(5), r());
         let ast = b.finish(n);
         assert!(pattern_children(ast.kind(n), ast.raw_parts().node_lists).is_none());
+    }
+
+    #[test]
+    fn gvar_exposes_one_sym_slot_for_name_payload() {
+        // `Gvar(:$stdout)` exposes its `Symbol` name through a single
+        // `PatChild::Sym` slot, which is how `(gvar :$stdout)` patterns
+        // filter on the variable name (murphy-o5k).
+        let mut b = AstBuilder::new("$stdout", "t.rb");
+        let s = b.intern_symbol("$stdout");
+        let g = b.push(NodeKind::Gvar(s), r());
+        let ast = b.finish(g);
+        let kids = pattern_children(ast.kind(g), ast.raw_parts().node_lists).expect("gvar");
+        assert_eq!(kids.len(), 1);
+        assert!(matches!(kids[0], PatChild::Sym(_)));
+        // The exposed `Symbol` round-trips to the original name.
+        let PatChild::Sym(actual) = kids[0] else {
+            unreachable!();
+        };
+        assert_eq!(ast.interner().resolve(actual.0), "$stdout");
+    }
+
+    #[test]
+    fn lvar_ivar_cvar_each_expose_one_sym_slot() {
+        // murphy-o5k extends the same single-sym-slot schema to all four
+        // var-read atoms — Lvar, Ivar, Cvar (Gvar is covered above).
+        let mut b = AstBuilder::new("x", "t.rb");
+        let lx = b.intern_symbol("x");
+        let l = b.push(NodeKind::Lvar(lx), r());
+        let iat = b.intern_symbol("@x");
+        let i = b.push(NodeKind::Ivar(iat), r());
+        let cat = b.intern_symbol("@@c");
+        let c = b.push(NodeKind::Cvar(cat), r());
+        let ast = b.finish(l);
+        for n in [l, i, c] {
+            let kids = pattern_children(ast.kind(n), ast.raw_parts().node_lists).expect("var");
+            assert_eq!(kids.len(), 1);
+            assert!(matches!(kids[0], PatChild::Sym(_)));
+        }
     }
 
     #[test]

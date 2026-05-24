@@ -287,3 +287,65 @@ fn seq_capture_collects_same_args() {
 // `matcher::tests::unsupported_kind_node_pattern_silently_fails`; this
 // file pairs only patterns B will accept.
 // ────────────────────────────────────────────────────────────────────────
+
+// ────────────────────────────────────────────────────────────────────────
+// 7. Atom-payload var kinds (gvar/lvar/ivar/cvar) — single sym slot via
+// `(gvar :$name)` / `(ivar :@n)` / `(cvar :@@c)` / `(lvar :n)` (murphy-o5k).
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_gvar_stdout, "(gvar :$stdout)");
+node_pattern!(b_gvar_any, "(gvar _)");
+node_pattern!(b_lvar_x, "(lvar :x)");
+node_pattern!(b_ivar_at_x, "(ivar :@x)");
+node_pattern!(b_cvar_atat_c, "(cvar :@@c)");
+
+#[test]
+fn gvar_sym_slot_match_agrees() {
+    let mut b = AstBuilder::new("$stdout", "t.rb");
+    let stdout = b.intern_symbol("$stdout");
+    let g = b.push(NodeKind::Gvar(stdout), r());
+    let ast = b.finish(g);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches("(gvar :$stdout)", &ast, g, b_gvar_stdout(g, &cx));
+    // Wildcard sym slot accepts any name.
+    assert_c_matches("(gvar _)", &ast, g, b_gvar_any(g, &cx));
+}
+
+#[test]
+fn gvar_sym_slot_rejects_wrong_name() {
+    let mut b = AstBuilder::new("$other", "t.rb");
+    let other = b.intern_symbol("$other");
+    let g = b.push(NodeKind::Gvar(other), r());
+    let ast = b.finish(g);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches("(gvar :$stdout)", &ast, g, b_gvar_stdout(g, &cx));
+}
+
+#[test]
+fn lvar_ivar_cvar_sym_slot_match_agrees() {
+    let mut b = AstBuilder::new("ignored", "t.rb");
+    let lx = b.intern_symbol("x");
+    let l = b.push(NodeKind::Lvar(lx), r());
+    let iat = b.intern_symbol("@x");
+    let i = b.push(NodeKind::Ivar(iat), r());
+    let cat = b.intern_symbol("@@c");
+    let c = b.push(NodeKind::Cvar(cat), r());
+    // Root has to be some node; pick `l`.
+    let ast = b.finish(l);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches("(lvar :x)", &ast, l, b_lvar_x(l, &cx));
+    assert_c_matches("(ivar :@x)", &ast, i, b_ivar_at_x(i, &cx));
+    assert_c_matches("(cvar :@@c)", &ast, c, b_cvar_atat_c(c, &cx));
+    // A wrong-kind subject must miss.
+    assert_c_matches("(lvar :x)", &ast, i, b_lvar_x(i, &cx));
+}
+

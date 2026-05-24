@@ -564,6 +564,21 @@ mod tests {
     }
 
     #[test]
+    fn gvar_atom_sym_slot_filters_on_name() {
+        // murphy-o5k: `(gvar :$stdout)` matches a `Gvar(:$stdout)` only.
+        let mut b = AstBuilder::new("$stdout", "t.rb");
+        let s = b.intern_symbol("$stdout");
+        let g = b.push(NodeKind::Gvar(s), r());
+        let ast = b.finish(g);
+        let hit = compile("(gvar :$stdout)").unwrap();
+        let miss = compile("(gvar :$stderr)").unwrap();
+        let wild = compile("(gvar _)").unwrap();
+        assert!(matches(&hit, &ast, g, &mut NoPredicates).is_some());
+        assert!(matches(&miss, &ast, g, &mut NoPredicates).is_none());
+        assert!(matches(&wild, &ast, g, &mut NoPredicates).is_some());
+    }
+
+    #[test]
     fn send_match_rejects_wrong_method_sym() {
         let (ast, send) = puts_one_ast();
         let ir = compile("(send nil? :raise _)").unwrap();
