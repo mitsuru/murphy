@@ -79,12 +79,10 @@ pub(crate) fn close_state(state: *mut mrb_state) {
             .expect("custom opened state tracker lock poisoned")
             .remove(&(state as usize));
 
-        if was_custom {
-            if let Some(close_state) = runtime.close_state {
-                // SAFETY: state was opened by custom runtime and not yet closed.
-                unsafe { (close_state)(state) }
-                return;
-            }
+        if was_custom && let Some(close_state) = runtime.close_state {
+            // SAFETY: state was opened by custom runtime and not yet closed.
+            unsafe { (close_state)(state) }
+            return;
         }
     }
 

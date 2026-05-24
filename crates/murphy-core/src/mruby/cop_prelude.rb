@@ -105,27 +105,135 @@ class Murphy
       wrap_field(Murphy.node_field(@id, name))
     end
 
+    def kind
+      Murphy.node_kind(@handle)
+    end
+
+    def parent
+      wrap_node(Murphy.node_parent(@handle))
+    end
+
+    def children
+      Murphy.node_children(@handle).map { |id| Murphy::Node.new(id) }
+    end
+
+    def ancestors
+      Murphy.node_ancestors(@handle).map { |id| Murphy::Node.new(id) }
+    end
+
+    def descendants
+      Murphy.node_descendants(@handle).map { |id| Murphy::Node.new(id) }
+    end
+
+    def each_ancestor
+      ancestors.each { |node| yield node }
+    end
+
+    def range
+      r = Murphy.node_range(@handle)
+      return nil unless r
+
+      Murphy::Range.new(r[0], r[1])
+    end
+
+    def field(name)
+      key = name.to_sym
+      value = Murphy.node_field(@handle, key)
+      return value.map { |id| Murphy::Node.new(id) } if value.is_a?(Array)
+
+      case key
+      when :name
+        return wrap_node(value) if kind == :class || kind == :module
+
+        value
+      when :receiver, :block
+        wrap_node(value)
+      when :arguments, :args, :elements, :children, :pairs, :branches, :whens,
+           :conditions, :conds, :targets, :parts, :resbodies, :rescues,
+           :exceptions
+        wrap_node(value)
+      else
+        node_id_field?(key) ? wrap_node(value) : value
+      end
+    end
+
+    def node_id_field?(key)
+      return false if key == :value && [:int, :float, :str, :sym].include?(kind)
+
+      case key
+      when :parent, :scope, :call, :parameters, :body, :default, :key, :target,
+           :receiver, :superclass, :expr, :expression, :begin, :begin_, :end,
+           :end_, :ensure, :ensure_, :var, :reference, :cond, :condition,
+           :then, :then_, :else, :else_, :subject, :left, :right, :lhs, :rhs,
+           :value
+        true
+      else
+        false
+      end
+    end
+
     # Returns a Symbol (design §4: `node.name == :puts`), or nil if the
     # primitive reports nil (out-of-range — never happens for a handle the
     # SDK itself produced from `node_count`).
     def name
-      n = Murphy.node_name(@handle)
-      n && n.to_sym
+      field(:method)
     end
 
     # True when the call has no explicit receiver (bare `puts` vs `obj.puts`).
     def receiver_nil?
-      Murphy.node_receiver_nil?(@handle)
+      field(:receiver).nil?
     end
 
     # The message/selector token span as a Murphy::Range (byte offsets), or
     # nil when the node has no message_loc.
     def message_loc
-      start_offset = Murphy.node_msg_start(@handle)
-      end_offset = Murphy.node_msg_end(@handle)
-      return nil if start_offset < 0 || end_offset < 0
+      return nil unless kind == :send || kind == :csend
 
-      Murphy::Range.new(start_offset, end_offset)
+      node_range = range
+      method = field(:method)
+      return node_range unless node_range && method
+
+      source = Murphy.raw_source(node_range.start_offset, node_range.end_offset)
+      return node_range unless source
+
+      receiver = field(:receiver)
+      search_from = if receiver && receiver.range
+        receiver.range.end_offset - node_range.start_offset
+      else
+        0
+      end
+      selector = method.to_s
+      if selector == "[]="
+        offset = source.index("[", search_from)
+        return node_range unless offset
+
+        start_offset = node_range.start_offset + offset
+        return Murphy::Range.new(start_offset, start_offset + 1)
+      end
+
+      candidates = [selector]
+      candidates << selector[0...-1] if selector.end_with?("=", "@") && selector.bytesize > 1
+      search_from = 0 if selector.end_with?("@")
+
+      offset = nil
+      matched = nil
+      candidates.each do |candidate|
+        offset = source.index(candidate, search_from)
+        if offset
+          matched = candidate
+          break
+        end
+      end
+      return node_range unless offset
+
+      start_offset = node_range.start_offset + offset
+      Murphy::Range.new(start_offset, start_offset + matched.bytesize)
+    end
+
+    private
+
+    def wrap_node(id)
+      id.nil? ? nil : Murphy::Node.new(id)
     end
 
     private
@@ -298,29 +406,12 @@ class Murphy
     # The legacy `on_call_node` loop remains during the bridge migration so
     # existing spike-era cops keep running until the CLI fixtures are ported.
     def __run
-      ([Murphy.ast_root] + Murphy.node_descendants(Murphy.ast_root)).each do |node_id|
-        node = Murphy::Node.new(node_id)
-        kind = node.kind
-        next unless kind
-
-        hook = ("on_" + kind.to_s).to_sym
-        send(hook, node) if respond_to?(hook)
-      end
-
-      Murphy.node_count.times do |h|
-        on_call_node(Murphy::CallHandleNode.new(h))
-      end
-    end
-  end
-
-  class Node
-    def self.wrap_match(value)
-      if value.is_a?(Integer)
-        Murphy::Node.new(value)
-      elsif value.is_a?(Array)
-        value.map { |item| wrap_match(item) }
-      else
-        value
+      i = 0
+      while (kind = Murphy.node_kind(i))
+        if kind == :send || kind == :csend
+          on_call_node(Murphy::Node.new(i))
+        end
+        i += 1
       end
     end
   end
