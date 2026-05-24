@@ -96,6 +96,159 @@ impl std::fmt::Display for LoaderError {
 
 impl std::error::Error for LoaderError {}
 
+/// Failure context for a name-only `plugins = ["..."]` entry that the
+/// resolver could not locate against the search path (ADR 0042).
+///
+/// Carried structurally rather than as a pre-formatted string so the
+/// host-side [`PluginLoadDiagnostic`] can render a consistent
+/// `error:` / `cause:` / `hint:` block for both resolve and load
+/// failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveFailure {
+    /// The `lib{name}.so` / `lib{name}.dylib` the resolver looked for.
+    pub filename: String,
+    /// The dirs that were probed in order (env, project-local,
+    /// user-local). Empty when nothing was configured.
+    pub searched_dirs: Vec<std::path::PathBuf>,
+}
+
+/// Which side of the plugin pipeline raised the failure: the search-
+/// path resolver or the dlopen-and-validate loader.
+#[derive(Debug)]
+pub enum LoadKind {
+    Resolve(ResolveFailure),
+    Load(LoaderError),
+}
+
+/// User-facing diagnostic for a plugin pack that failed to resolve or
+/// load. Renders a rustc-style three-block message (`error:` /
+/// `cause:` / `hint:`) via [`std::fmt::Display`].
+///
+/// Created at the registry boundary where the plugin name (from
+/// `[[plugins]]`) and the attempted path (None for resolve failures)
+/// are known.
+#[derive(Debug)]
+pub struct PluginLoadDiagnostic {
+    pub plugin_name: String,
+    /// `Some` when the resolver succeeded and dlopen/validate failed;
+    /// `None` when the resolver itself could not locate the pack.
+    pub attempted_path: Option<std::path::PathBuf>,
+    pub kind: LoadKind,
+}
+
+impl std::fmt::Display for PluginLoadDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.attempted_path {
+            Some(path) => writeln!(
+                f,
+                "error: cannot load plugin `{}` from `{}`",
+                self.plugin_name,
+                path.display()
+            )?,
+            None => writeln!(f, "error: cannot load plugin `{}`", self.plugin_name)?,
+        }
+        let (cause, hint) = self.cause_and_hint();
+        writeln!(f, "  cause: {cause}")?;
+        // hint may contain literal '\n' for multi-line; indent
+        // continuation lines to align under the `hint:  ` label
+        // (9 columns: 2 spaces + "hint:  ").
+        let mut lines = hint.lines();
+        if let Some(first) = lines.next() {
+            write!(f, "  hint:  {first}")?;
+        }
+        for line in lines {
+            write!(f, "\n         {line}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PluginLoadDiagnostic {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            LoadKind::Load(err) => Some(err),
+            // ResolveFailure is structural data, not an Error type —
+            // omit from the chain rather than synthesize a wrapper.
+            LoadKind::Resolve(_) => None,
+        }
+    }
+}
+
+impl PluginLoadDiagnostic {
+    fn cause_and_hint(&self) -> (String, String) {
+        match &self.kind {
+            LoadKind::Resolve(rf) => {
+                let cause = format!("plugin pack `{}` not found in search path", rf.filename);
+                let searched = if rf.searched_dirs.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    rf.searched_dirs
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let hint = format!(
+                    "searched: {searched}.\n\
+                     To pin an explicit path, use the detailed form:\n\
+                     `[[plugins]] name = \"{name}\" path = \"...\"`.\n\
+                     See ADR 0042 for the search-path order.",
+                    name = self.plugin_name,
+                );
+                (cause, hint)
+            }
+            LoadKind::Load(err) => match err {
+                LoaderError::Open(msg) => (
+                    format!("dlopen failed: {msg}"),
+                    format!(
+                        "confirm the path exists, or use name-only shorthand\n\
+                         `plugins = [\"{name}\"]` to search MURPHY_PLUGIN_PATH /\n\
+                         .murphy/plugins/ (ADR 0042).",
+                        name = self.plugin_name,
+                    ),
+                ),
+                LoaderError::MissingSymbol(_) => (
+                    "required symbol `murphy_plugin_register` not found".to_string(),
+                    "the pack must use `murphy_plugin_api::register_cops!`.\n\
+                     Packs built against the pre-9cr.13 ABI must be rebuilt (ADR 0038)."
+                        .to_string(),
+                ),
+                LoaderError::RegisterFailed(rc) => (
+                    format!("plugin registration returned non-zero status {rc}"),
+                    "the pack's initialization trapped a panic or returned failure —\n\
+                     inspect the pack's stderr. This is a pack bug."
+                        .to_string(),
+                ),
+                LoaderError::AbiVersionMismatch { expected, got } => (
+                    format!("plugin built against ABI version {got}, host expects {expected}"),
+                    format!(
+                        "rebuild the pack against `murphy-plugin-api = {expected}`\n\
+                         (the version this murphy binary embeds).",
+                    ),
+                ),
+                LoaderError::StructSizeMismatch {
+                    cop_index,
+                    expected,
+                    got,
+                } => (
+                    format!(
+                        "cop #{cop_index}'s PluginCopV1 is {got} bytes, host expects {expected}"
+                    ),
+                    "pack and host disagree on struct layout; rebuild the pack\n\
+                     against the same `murphy-plugin-api` revision as this murphy binary."
+                        .to_string(),
+                ),
+                LoaderError::NullCopsPointer { cops_len } => (
+                    format!("registration reports {cops_len} cops but a null table pointer"),
+                    "this is a pack bug — `register_cops!` should never emit this\n\
+                     combination. File an issue against the pack author."
+                        .to_string(),
+                ),
+            },
+        }
+    }
+}
+
 /// Validate a [`PluginRegistration`] in isolation (no `dlopen`) and
 /// return the raw `(ptr, len)` of the validated cop table on success.
 /// Factored out so unit tests can drive every rejection branch without a
@@ -349,5 +502,191 @@ mod tests {
         };
         let (_, len) = unsafe { validate_registration(&reg) }.expect("zero cops should be allowed");
         assert_eq!(len, 0);
+    }
+
+    // PluginLoadDiagnostic rendering tests. The inline snapshots capture
+    // the exact user-facing text — when a hint copy needs to change,
+    // run `UPDATE_EXPECT=1 cargo test -p murphy-core diag_render` to
+    // refresh them all in one pass.
+    mod diagnostics {
+        use super::super::{LoadKind, LoaderError, PluginLoadDiagnostic, ResolveFailure};
+        use expect_test::expect;
+        use std::path::PathBuf;
+
+        fn loaded(path: &str, kind: LoadKind) -> PluginLoadDiagnostic {
+            PluginLoadDiagnostic {
+                plugin_name: "murphy-foo".to_string(),
+                attempted_path: Some(PathBuf::from(path)),
+                kind,
+            }
+        }
+
+        #[test]
+        fn diag_render_resolve() {
+            let diag = PluginLoadDiagnostic {
+                plugin_name: "murphy-foo".to_string(),
+                attempted_path: None,
+                kind: LoadKind::Resolve(ResolveFailure {
+                    filename: "libmurphy_foo.so".to_string(),
+                    searched_dirs: vec![
+                        PathBuf::from("/opt/murphy/plugins"),
+                        PathBuf::from("/home/u/.murphy/plugins"),
+                    ],
+                }),
+            };
+            expect![[r#"
+                error: cannot load plugin `murphy-foo`
+                  cause: plugin pack `libmurphy_foo.so` not found in search path
+                  hint:  searched: /opt/murphy/plugins, /home/u/.murphy/plugins.
+                         To pin an explicit path, use the detailed form:
+                         `[[plugins]] name = "murphy-foo" path = "..."`.
+                         See ADR 0042 for the search-path order."#]]
+            .assert_eq(&diag.to_string());
+        }
+
+        #[test]
+        fn diag_render_open() {
+            let diag = loaded(
+                "./vendor/libmurphy_foo.so",
+                LoadKind::Load(LoaderError::Open(
+                    "libmurphy_foo.so: cannot open shared object file: No such file or directory"
+                        .to_string(),
+                )),
+            );
+            expect![[r#"
+                error: cannot load plugin `murphy-foo` from `./vendor/libmurphy_foo.so`
+                  cause: dlopen failed: libmurphy_foo.so: cannot open shared object file: No such file or directory
+                  hint:  confirm the path exists, or use name-only shorthand
+                         `plugins = ["murphy-foo"]` to search MURPHY_PLUGIN_PATH /
+                         .murphy/plugins/ (ADR 0042)."#]]
+            .assert_eq(&diag.to_string());
+        }
+
+        #[test]
+        fn diag_render_missing_symbol() {
+            let diag = loaded(
+                "./libfoo.so",
+                LoadKind::Load(LoaderError::MissingSymbol(
+                    "murphy_plugin_register".to_string(),
+                )),
+            );
+            expect![[r#"
+                error: cannot load plugin `murphy-foo` from `./libfoo.so`
+                  cause: required symbol `murphy_plugin_register` not found
+                  hint:  the pack must use `murphy_plugin_api::register_cops!`.
+                         Packs built against the pre-9cr.13 ABI must be rebuilt (ADR 0038)."#]]
+            .assert_eq(&diag.to_string());
+        }
+
+        #[test]
+        fn diag_render_register_failed() {
+            let diag = loaded(
+                "./libfoo.so",
+                LoadKind::Load(LoaderError::RegisterFailed(-1)),
+            );
+            expect![[r#"
+                error: cannot load plugin `murphy-foo` from `./libfoo.so`
+                  cause: plugin registration returned non-zero status -1
+                  hint:  the pack's initialization trapped a panic or returned failure —
+                         inspect the pack's stderr. This is a pack bug."#]]
+            .assert_eq(&diag.to_string());
+        }
+
+        #[test]
+        fn diag_render_abi_mismatch() {
+            let diag = loaded(
+                "./libfoo.so",
+                LoadKind::Load(LoaderError::AbiVersionMismatch {
+                    expected: 1,
+                    got: 2,
+                }),
+            );
+            expect![[r#"
+                error: cannot load plugin `murphy-foo` from `./libfoo.so`
+                  cause: plugin built against ABI version 2, host expects 1
+                  hint:  rebuild the pack against `murphy-plugin-api = 1`
+                         (the version this murphy binary embeds)."#]]
+            .assert_eq(&diag.to_string());
+        }
+
+        #[test]
+        fn diag_render_struct_size_mismatch() {
+            let diag = loaded(
+                "./libfoo.so",
+                LoadKind::Load(LoaderError::StructSizeMismatch {
+                    cop_index: 3,
+                    expected: 64,
+                    got: 56,
+                }),
+            );
+            expect![[r#"
+                error: cannot load plugin `murphy-foo` from `./libfoo.so`
+                  cause: cop #3's PluginCopV1 is 56 bytes, host expects 64
+                  hint:  pack and host disagree on struct layout; rebuild the pack
+                         against the same `murphy-plugin-api` revision as this murphy binary."#]]
+            .assert_eq(&diag.to_string());
+        }
+
+        #[test]
+        fn diag_render_null_cops_ptr() {
+            let diag = loaded(
+                "./libfoo.so",
+                LoadKind::Load(LoaderError::NullCopsPointer { cops_len: 5 }),
+            );
+            expect![[r#"
+                error: cannot load plugin `murphy-foo` from `./libfoo.so`
+                  cause: registration reports 5 cops but a null table pointer
+                  hint:  this is a pack bug — `register_cops!` should never emit this
+                         combination. File an issue against the pack author."#]]
+            .assert_eq(&diag.to_string());
+        }
+
+        #[test]
+        fn diag_resolve_omits_attempted_path() {
+            // Property: a Resolve-kind diagnostic must not render the
+            // `from ...` clause on the error line; that path was never
+            // reached.
+            let diag = PluginLoadDiagnostic {
+                plugin_name: "x".to_string(),
+                attempted_path: None,
+                kind: LoadKind::Resolve(ResolveFailure {
+                    filename: "libx.so".to_string(),
+                    searched_dirs: vec![],
+                }),
+            };
+            let s = diag.to_string();
+            let first_line = s.lines().next().unwrap();
+            assert_eq!(first_line, "error: cannot load plugin `x`");
+            assert!(!first_line.contains("from"), "got: {first_line}");
+        }
+
+        #[test]
+        fn diag_source_chain_exposes_inner_loader_error() {
+            // Property: std::error::Error::source() routes through
+            // LoadKind::Load to surface the LoaderError; Resolve has no
+            // source (it carries structural data only).
+            use std::error::Error;
+            let loaded_diag = loaded(
+                "./libfoo.so",
+                LoadKind::Load(LoaderError::RegisterFailed(7)),
+            );
+            let src = loaded_diag
+                .source()
+                .expect("Load variant must expose source");
+            assert!(
+                src.downcast_ref::<LoaderError>().is_some(),
+                "source should be a LoaderError"
+            );
+
+            let resolve_diag = PluginLoadDiagnostic {
+                plugin_name: "x".to_string(),
+                attempted_path: None,
+                kind: LoadKind::Resolve(ResolveFailure {
+                    filename: "libx.so".to_string(),
+                    searched_dirs: vec![],
+                }),
+            };
+            assert!(resolve_diag.source().is_none());
+        }
     }
 }

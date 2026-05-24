@@ -48,6 +48,8 @@ murphy-pattern = { path = "../murphy-pattern" }
 [dev-dependencies]
 # discovery.rs tests build temp trees with murphy.toml / .murphyignore.
 tempfile = "3"
+# Inline snapshot assertions for PluginLoadDiagnostic Display fixtures.
+expect-test = "1.5"
 
 [features]
 default = []

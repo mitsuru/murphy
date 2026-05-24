@@ -38,7 +38,7 @@ use crate::MurphyConfig;
 #[cfg(target_os = "windows")]
 use crate::PluginConfig;
 #[cfg(not(target_os = "windows"))]
-use crate::plugin_loader::{LoadedPluginPack, load_plugin_pack};
+use crate::plugin_loader::{LoadKind, LoadedPluginPack, PluginLoadDiagnostic, load_plugin_pack};
 #[cfg(not(target_os = "windows"))]
 use crate::plugin_resolver::plan_plugin_loads;
 
@@ -164,8 +164,13 @@ impl CopRegistry {
         #[cfg(not(target_os = "windows"))]
         for (pack_name, path) in plan {
             let pack_index = pack_names.len();
-            let loaded = load_plugin_pack(&path)
-                .map_err(|e| ConfigError::Io(format!("cannot load plugin {pack_name}: {e}")))?;
+            let loaded = load_plugin_pack(&path).map_err(|e| {
+                ConfigError::PluginLoad(PluginLoadDiagnostic {
+                    plugin_name: pack_name.clone(),
+                    attempted_path: Some(path.clone()),
+                    kind: LoadKind::Load(e),
+                })
+            })?;
             // Name-collision check against the already-registered cops.
             // `loaded.cops()` borrows from `loaded` for the loop body.
             for cop in loaded.cops() {

@@ -124,9 +124,19 @@ fn detailed_form_missing_path_exits_2_with_diagnostic() {
         .assert()
         .code(2);
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    // murphy-tvh: detailed-form path miss surfaces the rustc-style block
+    // with the dlopen cause and the name-only shorthand suggestion.
     assert!(
-        stderr.contains("cannot load plugin"),
-        "stderr should mention plugin load failure: {stderr}"
+        stderr.contains("error: cannot load plugin `nonexistent` from"),
+        "stderr must surface multi-line `error:` line with attempted path: {stderr}"
+    );
+    assert!(
+        stderr.contains("cause: dlopen failed"),
+        "stderr must surface dlopen cause: {stderr}"
+    );
+    assert!(
+        stderr.contains("hint:") && stderr.contains("MURPHY_PLUGIN_PATH"),
+        "stderr must surface MURPHY_PLUGIN_PATH hint: {stderr}"
     );
 }
 
@@ -254,13 +264,20 @@ fn name_form_missing_exits_2_with_search_path_and_detailed_hint() {
         .assert()
         .code(2);
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    // murphy-tvh: name-form not-found surfaces the rustc-style
+    // error:/cause:/hint: block and the structured ResolveFailure data
+    // (plugin name, searched dirs, detailed-form escape hatch).
     assert!(
-        stderr.contains("murphy-not-installed"),
-        "stderr must echo plugin name: {stderr}"
+        stderr.contains("error: cannot load plugin `murphy-not-installed`"),
+        "stderr must surface multi-line `error:` line: {stderr}"
     );
     assert!(
-        stderr.contains("not found") && stderr.contains("Searched"),
-        "stderr must surface not-found + Searched: {stderr}"
+        stderr.contains("cause:") && stderr.contains("not found in search path"),
+        "stderr must surface structured `cause:` line: {stderr}"
+    );
+    assert!(
+        stderr.contains("hint:") && stderr.contains("searched:"),
+        "stderr must surface `hint:` with searched dirs: {stderr}"
     );
     assert!(
         stderr.contains("[[plugins]]") && stderr.contains("path"),
