@@ -22,6 +22,18 @@
 //! Send (the chain's receiver) matches the gates above on its own —
 //! independent of the outer `.present?` call.
 //!
+//! ## Implementation
+//!
+//! The two-level Send check is expressed declaratively with
+//! [`node_pattern!`] (RuboCop NodePattern grammar). `nil?` in DSL means
+//! "receiver is `None`" (no AST node), distinct from `nil` which would
+//! be the Ruby `nil` literal. The pattern omits a trailing argument
+//! placeholder on each Send so both have to take **zero** arguments —
+//! that excludes shapes like `request(foo).referer` where `request` is
+//! a user-defined helper (a fix originally driven by murphy-9v0
+//! roborev review job 1122; retained here by the DSL's strict-arity
+//! semantics).
+//!
 //! ## No autocorrect
 //!
 //! Mechanically rewriting `referer` → `referrer` is technically safe
@@ -29,7 +41,12 @@
 //! requires a deliberate fix block per cop, and this v1 implementation
 //! is detect-only. Tracked as a follow-up if dogfood demand surfaces.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+
+// RuboCop NodePattern equivalent: `(send (send nil? :request) :referer)`.
+// See module docs for the `nil?` vs `nil` distinction and why zero-arg
+// strictness is load-bearing.
+node_pattern!(is_request_referer, "(send (send nil? :request) :referer)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -45,27 +62,7 @@ pub struct RequestReferer;
 impl RequestReferer {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        // Defensive pattern-match: the dispatcher feeds us only Send
-        // nodes today (`KINDS = [send]`), but the `let-else` is free
-        // insurance against a future kind-aliasing accident. Same
-        // posture as `Rails/Output`.
-        let NodeKind::Send {
-            receiver, method, ..
-        } = *cx.kind(node)
-        else {
-            return;
-        };
-        // Gate 1: method must be exactly `referer`.
-        if cx.symbol_str(method) != "referer" {
-            return;
-        }
-        // Gate 2: receiver must be the implicit-self `request` send,
-        // i.e. `Send(receiver=None, method="request", args=[])`. A bare
-        // `referer` (no receiver), a constant `Request.referer`, an
-        // instance variable `@request.referer`, or any other receiver
-        // shape is intentionally ignored — this cop only targets the
-        // controller/view `request.referer` accessor.
-        if !receiver_is_bare_request(cx, receiver) {
+        if !is_request_referer(node, cx) {
             return;
         }
         cx.emit_offense(
@@ -74,31 +71,6 @@ impl RequestReferer {
             None,
         );
     }
-}
-
-/// `true` when `receiver` is the bare implicit-self `request` send —
-/// `Send(receiver=None, method="request", args=[])`. Any other shape
-/// (None, Const, IVar, another Send) returns `false`.
-fn receiver_is_bare_request(cx: &Cx<'_>, receiver: OptNodeId) -> bool {
-    let Some(rid) = receiver.get() else {
-        return false;
-    };
-    let NodeKind::Send {
-        receiver: inner_recv,
-        method: inner_method,
-        args: inner_args,
-    } = *cx.kind(rid)
-    else {
-        return false;
-    };
-    // Three gates on the inner Send: bare call (no receiver), method name
-    // exactly `request`, and **zero arguments**. The last gate rules out
-    // `request(foo).referer` where `request` is a user-defined helper /
-    // local method taking arguments — that is not the Rails controller
-    // accessor we want to flag (roborev review feedback on murphy-9v0).
-    inner_recv == OptNodeId::NONE
-        && cx.symbol_str(inner_method) == "request"
-        && cx.list(inner_args).is_empty()
 }
 
 #[cfg(test)]
@@ -194,7 +166,8 @@ mod tests {
         // User-defined helper `request(foo)` returning an object with
         // `referer` accessor is **not** the Rails controller `request`.
         // roborev review (job 1122) found that without the zero-args
-        // gate the cop would false-positive here.
+        // gate the cop would false-positive here; the DSL's strict
+        // arity preserves the guarantee.
         expect_no_offenses!(RequestReferer, "request(foo).referer\n");
     }
 
