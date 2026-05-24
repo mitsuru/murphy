@@ -1,22 +1,31 @@
-//! murphy-rspec — RSpec cop pack bootstrap (murphy-4n9.4).
+//! murphy-rspec — RSpec cop pack (murphy-4n9).
 //!
-//! v1 ships a single cop, [`RSpec/DescribeClass`](describe_class), as
-//! the seed of the pack. The remaining v1 set
-//! (`RSpec/ExampleLength`, `RSpec/MultipleExpectations`) is tracked as
-//! follow-up sub-issues under murphy-4n9.
+//! v1 cops (under [`cops::rspec`]):
+//! - `RSpec/DescribeClass` — bootstrap (murphy-4n9.4).
+//! - `RSpec/ExampleLength` — line cap on example bodies (murphy-6bv).
+//! - `RSpec/MultipleExpectations` — `expect(...)` count cap per
+//!   example (murphy-6tq).
+//!
+//! Source layout: each namespace lives under `src/cops/<namespace>/`
+//! so the file path tells you the cop's id at a glance.
 //!
 //! Authored against `murphy-plugin-api` only (single-surface ABI, ADR
 //! 0038); the runtime `murphy-` dep set is asserted by
 //! `tests/dep_boundary.rs`.
 
-pub mod describe_class;
+pub mod cops;
 
-use crate::describe_class::DescribeClass;
+use cops::rspec::{DescribeClass, ExampleLength, MultipleExpectations};
 
 // `register_cops!` re-exported from `murphy-plugin-api`. `mode = dynamic`
 // emits `#[no_mangle] pub unsafe extern "C" fn murphy_plugin_register`
 // for cdylib consumption by the host's plugin loader.
-murphy_plugin_api::register_cops!(mode = dynamic, DescribeClass);
+murphy_plugin_api::register_cops!(
+    mode = dynamic,
+    DescribeClass,
+    ExampleLength,
+    MultipleExpectations
+);
 
 #[cfg(test)]
 mod tests {

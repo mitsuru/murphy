@@ -187,3 +187,10 @@ fn does_not_flag_describe_with_variable_first_arg() {
         "variable first-arg must not be flagged; got {offs:?}"
     );
 }
+
+// `RSpec/ExampleLength` (murphy-6bv) and `RSpec/MultipleExpectations`
+// (murphy-6tq) are exercised by parser-driven unit tests in
+// `crates/murphy-rspec/src/{example_length,multiple_expectations}.rs`
+// (`#[cfg(test)] mod tests`). Plugin-load + dispatch is already proven
+// for the pack by the DescribeClass cases above, so the follow-up cops
+// don't add e2e smoke here.
