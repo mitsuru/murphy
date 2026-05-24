@@ -105,11 +105,7 @@ fn add_missing_space(cx: &Cx<'_>, left: SourceToken, right: SourceToken) {
         return;
     }
 
-    let offset = if left.kind == SourceTokenKind::LeftParen {
-        right.range.start
-    } else {
-        right.range.start
-    };
+    let offset = right.range.start;
     let range = Range {
         start: offset,
         end: offset,

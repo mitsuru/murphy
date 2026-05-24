@@ -457,7 +457,7 @@ fn field_decoder(field: &ParsedField) -> TokenStream {
         },
     };
 
-    let present = present_decoder(field, &key, wire);
+    let present = present_decoder(field, key, wire);
 
     quote! {
         #ident: match __obj.get(#key) {
