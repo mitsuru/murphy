@@ -72,6 +72,7 @@ cache 層 (`murphy-cache`) はこの `Err` を含むすべての失敗を `Optio
 呼び、stale な path がリーキングしない。
 
 これにより:
+
 - `lint a.rb` → cache 書き込み (path = "a.rb")
 - 続けて `lint b.rb` (内容同じ) → ヒット、戻る `Ast::path()` は "b.rb"
 

@@ -147,8 +147,8 @@ $ echo $?
 Generate a performance summary or a Speedscope trace while linting:
 
 ```console
-$ ./target/debug/murphy lint --profile clean.rb > profile.json
-$ ./target/debug/murphy lint --profile --profile-format speedscope clean.rb > profile-trace.json
+./target/debug/murphy lint --profile clean.rb > profile.json
+./target/debug/murphy lint --profile --profile-format speedscope clean.rb > profile-trace.json
 ```
 
 Run with **no path args** to discover from the current directory:
