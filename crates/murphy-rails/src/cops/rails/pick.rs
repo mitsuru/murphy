@@ -8,7 +8,7 @@
 //! ## Matched shape (Send node)
 //!
 //! Outer `Send(receiver=Some(inner), method="first", args=[])`, where
-//! `inner` is itself `Send(receiver=_, method="pluck", args=[<single>])`.
+//! `inner` is itself `Send(receiver=_, method="pluck", args=[_, ...])`.
 //!
 //! - **outer method == `first`** — the terminator we care about.
 //!   `.last`, `.second`, etc. are intentionally out of scope (upstream
@@ -16,10 +16,11 @@
 //! - **outer args empty** — `pluck(:id).first(5)` carries a limit
 //!   argument and is **not** rewritable to `pick(:id)` (pick has no
 //!   multi-row form), so it's excluded.
-//! - **outer receiver is a `pluck` Send with exactly one argument** —
-//!   `pluck(:id, :name).first` (multi-column) is excluded because
-//!   `pick` can only project one column; `pluck.first` (zero args) is
-//!   excluded as a degenerate / non-equivalent form.
+//! - **outer receiver is a `pluck` Send with ≥1 argument** —
+//!   `pluck.first` (zero args) is excluded as a degenerate /
+//!   non-equivalent form. Rails 6+ `pick(*columns)` is variadic, so
+//!   `pluck(:id, :name).first` (multi-column) **does** match
+//!   (roborev review feedback on murphy-cy1).
 //! - **inner Send's receiver shape is unconstrained** — a const
 //!   (`Post.pluck(:id).first`), a chain
 //!   (`User.where(active: true).pluck(:name).first`), a local
@@ -33,13 +34,28 @@
 //! Send node, and the gates above all apply to it independently of the
 //! outer `.something` call. RuboCop-rails behaves the same way.
 //!
+//! ## Implementation
+//!
+//! Expressed declaratively with [`node_pattern!`] (RuboCop NodePattern
+//! grammar). `_ ...` in the inner Send's argument list means "one
+//! wildcard followed by zero-or-more rest" — i.e. ≥1 arg — which
+//! rules out the zero-arg `pluck.first` shape. Trailing argument
+//! placeholders are omitted on the outer Send (it must take exactly
+//! zero args, ruling out `.first(5)`).
+//!
 //! ## No autocorrect
 //!
 //! Mechanically rewriting `pluck(:x).first` → `pick(:x)` is safe in
 //! Rails 6+, but v1 ships as detect-only; ADR 0006 requires a deliberate
 //! fix block per cop. Tracked as a follow-up.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+
+// RuboCop NodePattern equivalent: `(send (send _ :pluck _ ...) :first)`.
+// - Outer: receiver = inner Send, method `:first`, exactly 0 args.
+// - Inner: receiver `_` (unconstrained), method `:pluck`, ≥1 arg
+//   (`_ ...` = one wildcard + rest, excludes zero-arg `pluck.first`).
+node_pattern!(is_pluck_first, "(send (send _ :pluck _ ...) :first)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -55,53 +71,7 @@ pub struct Pick;
 impl Pick {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        // Defensive pattern-match: the dispatcher feeds us only Send
-        // nodes today (`KINDS = [send]`), but the `let-else` is free
-        // insurance against a future kind-aliasing accident. Same
-        // posture as `Rails/Output` / `Rails/RequestReferer` /
-        // `Rails/AssertNot`.
-        let NodeKind::Send {
-            receiver,
-            method,
-            args,
-        } = *cx.kind(node)
-        else {
-            return;
-        };
-        // Gate 1: outer method must be exactly `first`. `.last`,
-        // `.second`, etc. aren't rewritable to `pick` and are out of
-        // scope (matches upstream RuboCop-rails).
-        if cx.symbol_str(method) != "first" {
-            return;
-        }
-        // Gate 2: outer args must be empty. `.first(5)` carries a limit
-        // argument and is not equivalent to `pick(:x)` (pick is
-        // single-row only).
-        if !cx.list(args).is_empty() {
-            return;
-        }
-        // Gate 3: outer receiver must be `Send(_, "pluck", [_single])`.
-        let Some(receiver_id) = receiver.get() else {
-            return;
-        };
-        let NodeKind::Send {
-            method: inner_method,
-            args: inner_args,
-            ..
-        } = *cx.kind(receiver_id)
-        else {
-            return;
-        };
-        if cx.symbol_str(inner_method) != "pluck" {
-            return;
-        }
-        // Rails 6+ `pick(*columns)` is variadic and equivalent to
-        // `limit(1).pluck(*columns).first`, so multi-column
-        // `pluck(:id, :name).first` is also rewritable to
-        // `pick(:id, :name)`. Only the zero-args `pluck.first` form is
-        // a degenerate non-equivalent shape that should be left alone
-        // (roborev review feedback on murphy-cy1).
-        if cx.list(inner_args).is_empty() {
+        if !is_pluck_first(node, cx) {
             return;
         }
         cx.emit_offense(
@@ -170,15 +140,13 @@ mod tests {
         );
     }
 
-    // === no-hit cases ===
-
     #[test]
     fn flags_multi_column_pluck() {
         // Rails 6+ `pick(*columns)` accepts multiple column names and is
         // equivalent to `limit(1).pluck(*columns).first` — so
-        // multi-column `pluck(...).first` is also rewritable. Promoted
-        // from a no-offense expectation in response to roborev review
-        // feedback on murphy-cy1.
+        // multi-column `pluck(...).first` is also rewritable. The
+        // DSL's `_ ...` (one+rest) matches arity ≥1, which includes
+        // multi-column.
         expect_offense!(
             Pick,
             indoc! {r#"
@@ -188,9 +156,12 @@ mod tests {
         );
     }
 
+    // === no-hit cases ===
+
     #[test]
     fn does_not_flag_first_with_limit_arg() {
         // `.first(5)` carries a limit; not equivalent to `pick(:x)`.
+        // The outer Send's empty trailing arg list excludes this.
         expect_no_offenses!(Pick, "Post.pluck(:id).first(5)\n");
     }
 
@@ -209,7 +180,8 @@ mod tests {
     #[test]
     fn does_not_flag_pluck_zero_args_then_first() {
         // `pluck.first` (zero args) is a degenerate non-equivalent
-        // form — `pick` requires a single explicit column.
+        // form — `pick` requires at least one explicit column. The
+        // DSL's `_ ...` arity-≥1 inner-args gate excludes this.
         expect_no_offenses!(Pick, "Post.pluck.first\n");
     }
 
