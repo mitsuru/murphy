@@ -1,7 +1,7 @@
 //! `Layout/SpaceInsideParens` — flags extra spaces immediately inside
 //! parentheses. Mirrors RuboCop's same-named cop.
 
-use murphy_plugin_api::{CopOptions, Cx, Range, SourceToken, SourceTokenKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, Range, SourceToken, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -12,10 +12,19 @@ pub struct SpaceInsideParensOptions {
     #[option(
         name = "EnforcedStyle",
         default = "no_space",
-        enum_values = ["no_space", "space", "compact"],
         description = "Parenthesis spacing style."
     )]
-    pub enforced_style: String,
+    pub enforced_style: SpaceInsideParensStyle,
+}
+
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceInsideParensStyle {
+    #[option(value = "no_space")]
+    NoSpace,
+    #[option(value = "space")]
+    Space,
+    #[option(value = "compact")]
+    Compact,
 }
 
 #[cop(
@@ -28,10 +37,10 @@ pub struct SpaceInsideParensOptions {
 impl SpaceInsideParens {
     #[on_new_investigation]
     fn investigate(&self, cx: &Cx<'_>, options: &SpaceInsideParensOptions) {
-        match options.enforced_style.as_str() {
-            "space" => check_space_style(cx),
-            "compact" => check_compact_style(cx),
-            _ => check_no_space_style(cx),
+        match options.enforced_style {
+            SpaceInsideParensStyle::Space => check_space_style(cx),
+            SpaceInsideParensStyle::Compact => check_compact_style(cx),
+            SpaceInsideParensStyle::NoSpace => check_no_space_style(cx),
         }
     }
 }

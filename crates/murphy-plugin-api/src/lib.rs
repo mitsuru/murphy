@@ -43,7 +43,7 @@ pub use config_error::{ConfigError, ConfigErrorKind};
 pub use cop::Cop;
 pub use cx::Cx;
 pub use node_cop::NodeCop;
-pub use options::{CopOptions, NoOptions};
+pub use options::{CopOptionEnum, CopOptions, NoOptions};
 pub use severity::{
     SEVERITY_UNSET, Severity, TRISTATE_UNSET, tristate_from_wire, tristate_to_wire,
 };
@@ -57,5 +57,5 @@ pub use murphy_ast::{
     SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
 };
 pub use murphy_plugin_macros::{
-    CopOptions, cop, node_pattern, on_new_investigation, on_node, register_cops,
+    CopOptionEnum, CopOptions, cop, node_pattern, on_new_investigation, on_node, register_cops,
 };
