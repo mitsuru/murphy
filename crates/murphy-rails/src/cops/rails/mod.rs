@@ -4,8 +4,10 @@
 //! `crates/murphy-core/src/config.rs` (cleanup tracked by
 //! `murphy-bnd`).
 
+mod assert_not;
 mod output;
 mod request_referer;
 
+pub use assert_not::AssertNot;
 pub use output::Output;
 pub use request_referer::RequestReferer;

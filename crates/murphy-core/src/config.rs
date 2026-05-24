@@ -281,7 +281,6 @@ fn is_cop_disabled_by_default(name: &str) -> bool {
             | "Rails/ApplicationMailer"
             | "Rails/ApplicationRecord"
             | "Rails/ArelStar"
-            | "Rails/AssertNot"
             | "Rails/AttributeDefaultBlockValue"
             | "Rails/BelongsTo"
             | "Rails/Blank"
