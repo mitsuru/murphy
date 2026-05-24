@@ -335,7 +335,6 @@ fn is_cop_disabled_by_default(name: &str) -> bool {
             | "Rails/MatchRoute"
             | "Rails/MigrationClassName"
             | "Rails/MultipleRoutePaths"
-            | "Rails/NegateInclude"
             | "Rails/NotNullColumn"
             | "Rails/OrderArguments"
             | "Rails/OrderById"
