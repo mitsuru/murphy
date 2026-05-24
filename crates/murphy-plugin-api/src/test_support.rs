@@ -86,6 +86,18 @@ macro_rules! expect_offense {
 
 pub use crate::expect_offense;
 
+/// Assert that `Cop` emits exactly the offenses described by the caret
+/// annotations in `src`, then that applying its emitted autocorrect edits
+/// produces `expected_after`.
+#[macro_export]
+macro_rules! expect_correction {
+    ($cop:ty, $src:expr, $expected_after:expr) => {{
+        $crate::test_support::__assert_correction_match::<$cop>($src, $expected_after);
+    }};
+}
+
+pub use crate::expect_correction;
+
 /// One annotation parsed out of an `expect_offense!` input.
 #[derive(Debug, Clone)]
 struct Expected {
@@ -182,12 +194,20 @@ pub fn __assert_offenses_match<T: NodeCop + Default>(annotated: &str) {
         );
     }
     let actuals = run_cop::<T>(&cleaned);
+    assert_offenses_match("expect_offense!", &cleaned, &expected, &actuals);
+}
 
-    let mut exp_sorted: Vec<Expected> = expected.clone();
+fn assert_offenses_match(
+    macro_name: &str,
+    cleaned: &str,
+    expected: &[Expected],
+    actuals: &[CapturedOffense],
+) {
+    let mut exp_sorted: Vec<Expected> = expected.to_vec();
     exp_sorted.sort_by(|a, b| {
         (a.range.start, a.range.end, &a.message).cmp(&(b.range.start, b.range.end, &b.message))
     });
-    let mut act_sorted: Vec<CapturedOffense> = actuals.clone();
+    let mut act_sorted: Vec<CapturedOffense> = actuals.to_vec();
     act_sorted.sort_by(|a, b| {
         (a.range.start, a.range.end, &a.message).cmp(&(b.range.start, b.range.end, &b.message))
     });
@@ -217,9 +237,40 @@ pub fn __assert_offenses_match<T: NodeCop + Default>(annotated: &str) {
             .map(|a| (a.range, Some(a.message.as_str())))
             .collect();
         panic!(
-            "expect_offense! mismatch\n\nexpected:\n{}\nactual:\n{}",
+            "{} mismatch\n\nexpected:\n{}\nactual:\n{}",
+            macro_name,
             indent_block(&render(&cleaned, &exp_items)),
             indent_block(&render(&cleaned, &act_items)),
+        );
+    }
+}
+
+/// `expect_correction!`'s inner assertion. Not part of the public API —
+/// call sites go through the macro so `#[track_caller]` makes the
+/// panic point at the test line, not this helper.
+#[track_caller]
+pub fn __assert_correction_match<T: NodeCop + Default>(annotated: &str, expected_after: &str) {
+    let (cleaned, expected) = parse_annotated(annotated);
+    if expected.is_empty() {
+        panic!(
+            "expect_correction! must contain at least one annotation; use expect_no_offenses! instead"
+        );
+    }
+
+    let captured = run_cop_with_edits::<T>(&cleaned);
+    assert_offenses_match(
+        "expect_correction!",
+        &cleaned,
+        &expected,
+        &captured.offenses,
+    );
+
+    let actual_after = apply_captured_edits(&cleaned, &captured.edits);
+    if actual_after != expected_after {
+        panic!(
+            "expect_correction! corrected source mismatch\n\nexpected:\n{}\nactual:\n{}",
+            indent_block(expected_after),
+            indent_block(&actual_after),
         );
     }
 }
@@ -314,9 +365,24 @@ pub struct CapturedOffense {
     pub severity: Option<Severity>,
 }
 
+/// One autocorrect edit captured by [`run_cop_with_edits`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedEdit {
+    pub range: Range,
+    pub replacement: String,
+}
+
+/// The complete output captured from one cop run.
+#[derive(Debug, Clone)]
+pub struct CapturedRun {
+    pub offenses: Vec<CapturedOffense>,
+    pub edits: Vec<CapturedEdit>,
+}
+
 /// Mutable scratch the FFI callbacks borrow through a `*mut c_void`.
 struct Sink {
     offenses: Vec<CapturedOffense>,
+    edits: Vec<CapturedEdit>,
 }
 
 unsafe extern "C" fn record_offense(sink_ptr: *mut std::ffi::c_void, o: *const RawOffense) {
@@ -334,10 +400,15 @@ unsafe extern "C" fn record_offense(sink_ptr: *mut std::ffi::c_void, o: *const R
     });
 }
 
-unsafe extern "C" fn ignore_edit(_sink: *mut std::ffi::c_void, _e: *const RawEdit) {
-    // Autocorrect edits are not captured by the basic harness. Cops
-    // that emit edits should write a richer test that records them;
-    // this default keeps the FnTable valid.
+unsafe extern "C" fn record_edit(sink_ptr: *mut std::ffi::c_void, e: *const RawEdit) {
+    let sink = unsafe { &*(sink_ptr as *const RefCell<Sink>) };
+    let e = unsafe { &*e };
+    let replacement = String::from_utf8(unsafe { e.replacement.as_bytes() }.to_vec())
+        .expect("edit replacement must be UTF-8");
+    sink.borrow_mut().edits.push(CapturedEdit {
+        range: e.range,
+        replacement,
+    });
 }
 
 /// Parse `source` as Ruby, drive `T::check` over every relevant node,
@@ -346,15 +417,22 @@ unsafe extern "C" fn ignore_edit(_sink: *mut std::ffi::c_void, _e: *const RawEdi
 /// The cop is instantiated via `T::default()` — matches the stateless
 /// `#[derive(Default)]` shape every Murphy cop uses (ADR 0035).
 pub fn run_cop<T: NodeCop + Default>(source: &str) -> Vec<CapturedOffense> {
+    run_cop_with_edits::<T>(source).offenses
+}
+
+/// Parse `source` as Ruby, drive `T::check`, and return both captured
+/// offenses and autocorrect edits in emission order.
+pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
     let ast = murphy_translate::translate(source, "t.rb");
     let cop = T::default();
     let cop_name = RawSlice::from_str(<T as Cop>::NAME);
     let sink = RefCell::new(Sink {
         offenses: Vec::new(),
+        edits: Vec::new(),
     });
     let fns = FnTable {
         emit_offense: record_offense,
-        emit_edit: ignore_edit,
+        emit_edit: record_edit,
     };
     let raw = cx_raw_for(&ast, &fns, cop_name, &sink);
     let cx = unsafe { Cx::from_raw(&raw) };
@@ -372,7 +450,67 @@ pub fn run_cop<T: NodeCop + Default>(source: &str) -> Vec<CapturedOffense> {
         }
     }
 
-    sink.into_inner().offenses
+    let sink = sink.into_inner();
+    CapturedRun {
+        offenses: sink.offenses,
+        edits: sink.edits,
+    }
+}
+
+fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
+    let mut ordered: Vec<&CapturedEdit> = edits.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.range
+            .start
+            .cmp(&a.range.start)
+            .then(b.range.end.cmp(&a.range.end))
+            .then(a.replacement.cmp(&b.replacement))
+    });
+
+    let mut accepted: Vec<&CapturedEdit> = Vec::new();
+    for edit in &ordered {
+        let start = edit.range.start as usize;
+        let end = edit.range.end as usize;
+        if start > end {
+            panic!(
+                "expect_correction!: edit has invalid range {:?}",
+                edit.range
+            );
+        }
+        if start > source.len() || end > source.len() {
+            panic!(
+                "expect_correction!: edit range {:?} is outside source length {}",
+                edit.range,
+                source.len()
+            );
+        }
+        if !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+            panic!(
+                "expect_correction!: edit range {:?} does not fall on UTF-8 char boundaries",
+                edit.range
+            );
+        }
+        if accepted.iter().any(|accepted| {
+            let accepted_start = accepted.range.start as usize;
+            let accepted_end = accepted.range.end as usize;
+            accepted_start < end && start < accepted_end
+        }) {
+            panic!(
+                "expect_correction!: overlapping edit range {:?}",
+                edit.range
+            );
+        }
+        accepted.push(edit);
+    }
+
+    let mut corrected = source.to_owned();
+    for edit in accepted {
+        corrected.replace_range(
+            edit.range.start as usize..edit.range.end as usize,
+            &edit.replacement,
+        );
+    }
+    corrected
 }
 
 /// Build a `CxRaw` borrowing from `ast`, `fns`, and `sink`. The
@@ -437,6 +575,22 @@ mod tests {
         }
     }
 
+    /// Fixture: emits the same offense as `FixedRangeCop` and replaces
+    /// that range with `xyz`.
+    #[derive(Default)]
+    struct CorrectingCop;
+    impl Cop for CorrectingCop {
+        type Options = NoOptions;
+        const NAME: &'static str = "Test/Correcting";
+    }
+    impl NodeCop for CorrectingCop {
+        const KINDS: &'static [NodeKindTag] = &[];
+        fn check(&self, _node: NodeId, cx: &Cx<'_>) {
+            cx.emit_offense(Range { start: 0, end: 3 }, "fixed", None);
+            cx.emit_edit(Range { start: 0, end: 3 }, "xyz");
+        }
+    }
+
     /// Fixture: emits two offenses on the same source — `[0, 3)` and
     /// `[4, 7)`. Pairs with a "abc\ndef\n" fixture so the second range
     /// lands cleanly on the second line. Used to exercise the count
@@ -482,6 +636,40 @@ mod tests {
             FixedRangeCop,
             "abc\n\
              ^^^\n"
+        );
+    }
+
+    #[test]
+    fn expect_correction_matches_offenses_and_corrected_source() {
+        expect_correction!(
+            CorrectingCop,
+            "abc\n\
+             ^^^ fixed\n",
+            "xyz\n"
+        );
+    }
+
+    #[test]
+    fn run_cop_with_edits_captures_autocorrect_edits() {
+        let captured = super::run_cop_with_edits::<CorrectingCop>("abc\n");
+        assert_eq!(captured.offenses.len(), 1);
+        assert_eq!(
+            captured.edits,
+            vec![super::CapturedEdit {
+                range: Range { start: 0, end: 3 },
+                replacement: "xyz".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "expect_correction! corrected source mismatch")]
+    fn expect_correction_panics_on_corrected_source_mismatch() {
+        expect_correction!(
+            CorrectingCop,
+            "abc\n\
+             ^^^ fixed\n",
+            "abc\n"
         );
     }
 
