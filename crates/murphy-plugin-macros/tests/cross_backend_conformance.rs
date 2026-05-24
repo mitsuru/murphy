@@ -15,7 +15,7 @@
 //! the explicit drift guard for design §4 ("1 grammar, 2 backends").
 
 use murphy_ast::{Ast, AstBuilder, NodeId, NodeKind, OptNodeId, Range};
-use murphy_pattern::{CaptureValue, Captures, NoPredicates, compile, matches};
+use murphy_pattern::{CaptureValue, Captures, NoPredicates, PredicateHost, compile, matches};
 use murphy_plugin_api::{Cx, CxRaw, FnTable, RawSlice};
 use murphy_plugin_macros::node_pattern;
 
@@ -115,6 +115,29 @@ fn dotcall_three_args_ast() -> (Ast, NodeId, NodeId) {
 fn assert_c_matches(src: &str, ast: &Ast, node: NodeId, b_matched: bool) -> Option<Captures> {
     let ir = compile(src).unwrap_or_else(|e| panic!("compile `{src}` failed: {e}"));
     let c = matches(&ir, ast, node, &mut NoPredicates);
+    assert_eq!(
+        c.is_some(),
+        b_matched,
+        "B/C disagree on `{src}` against node {node:?}: B={b_matched}, C={}",
+        c.is_some()
+    );
+    c
+}
+
+/// Like [`assert_c_matches`] but drives the C-backend matcher with a
+/// custom [`PredicateHost`]. Used by the section-9 predicate-suffix
+/// pairings, which require both backends to evaluate the *same*
+/// predicate semantics — the default `NoPredicates` always returns
+/// `false` and would mask a real disagreement.
+fn assert_c_matches_with<P: PredicateHost>(
+    src: &str,
+    ast: &Ast,
+    node: NodeId,
+    b_matched: bool,
+    host: &mut P,
+) -> Option<Captures> {
+    let ir = compile(src).unwrap_or_else(|e| panic!("compile `{src}` failed: {e}"));
+    let c = matches(&ir, ast, node, host);
     assert_eq!(
         c.is_some(),
         b_matched,
@@ -468,5 +491,112 @@ fn gvar_sym_slot_union_matches_any_listed_name() {
         &ast,
         g,
         b_gvar_stdout_or_stderr(g, &cx),
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 9. `#predicate?` / `#predicate!` suffix mangling (murphy-bj7). The B
+// backend emits a call to `name_p` / `name_bang`; the C backend keeps
+// the original source name and dispatches via [`PredicateHost`]. A
+// matching pair must agree on hit/miss, so the test's host returns the
+// same answer as the Rust fn for each name.
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_pred_odd_q, "#odd?");
+node_pattern!(b_pred_save_bang, "#save!");
+node_pattern!(b_pred_in_union, "{#odd? #save!}");
+
+/// Free fns the B backend's mangled call sites resolve to.
+fn odd_p(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(*cx.kind(node), NodeKind::Int(v) if v % 2 != 0)
+}
+fn save_bang(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(*cx.kind(node), NodeKind::Int(v) if v == 42)
+}
+
+/// C-backend host that dispatches the *source* predicate names (with
+/// the `?` / `!` suffix intact) onto the same predicates the B backend
+/// reaches via the mangled call site. A real cop would wire this
+/// through the mruby bridge — here we hard-code the test fixture so
+/// the conformance assertion is meaningful.
+struct PredFixture<'a, 'cx> {
+    cx: &'a Cx<'cx>,
+}
+impl PredicateHost for PredFixture<'_, '_> {
+    fn call(&mut self, name: &str, node: NodeId) -> bool {
+        match name {
+            "odd?" => odd_p(node, self.cx),
+            "save!" => save_bang(node, self.cx),
+            _ => false,
+        }
+    }
+}
+
+#[test]
+fn predicate_question_suffix_agrees_across_backends() {
+    let mut b = AstBuilder::new("3", "t.rb");
+    let odd = b.push(NodeKind::Int(3), r());
+    let even = b.push(NodeKind::Int(4), r());
+    let ast = b.finish(odd);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let mut host = PredFixture { cx: &cx };
+    assert_c_matches_with("#odd?", &ast, odd, b_pred_odd_q(odd, &cx), &mut host);
+    assert_c_matches_with("#odd?", &ast, even, b_pred_odd_q(even, &cx), &mut host);
+}
+
+#[test]
+fn predicate_bang_suffix_agrees_across_backends() {
+    let mut b = AstBuilder::new("42", "t.rb");
+    let hit = b.push(NodeKind::Int(42), r());
+    let miss = b.push(NodeKind::Int(0), r());
+    let ast = b.finish(hit);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let mut host = PredFixture { cx: &cx };
+    assert_c_matches_with("#save!", &ast, hit, b_pred_save_bang(hit, &cx), &mut host);
+    assert_c_matches_with("#save!", &ast, miss, b_pred_save_bang(miss, &cx), &mut host);
+}
+
+#[test]
+fn predicate_suffix_inside_union_agrees() {
+    // `{#odd? #save!}` — the union flows through `lower_bool`, which
+    // also routes predicates through the mangled call site. C reaches
+    // the same predicates via `match_pat`'s Union arm.
+    let mut b = AstBuilder::new("42", "t.rb");
+    let n42 = b.push(NodeKind::Int(42), r());
+    let n3 = b.push(NodeKind::Int(3), r());
+    let n4 = b.push(NodeKind::Int(4), r());
+    let ast = b.finish(n42);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let mut host = PredFixture { cx: &cx };
+    // 42 matches via `#save!`; 3 matches via `#odd?`; 4 misses both.
+    assert_c_matches_with(
+        "{#odd? #save!}",
+        &ast,
+        n42,
+        b_pred_in_union(n42, &cx),
+        &mut host,
+    );
+    assert_c_matches_with(
+        "{#odd? #save!}",
+        &ast,
+        n3,
+        b_pred_in_union(n3, &cx),
+        &mut host,
+    );
+    assert_c_matches_with(
+        "{#odd? #save!}",
+        &ast,
+        n4,
+        b_pred_in_union(n4, &cx),
+        &mut host,
     );
 }
