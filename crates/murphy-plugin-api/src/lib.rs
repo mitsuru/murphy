@@ -28,6 +28,13 @@ mod node_cop;
 mod options;
 mod severity;
 
+/// Parser-driven cop test harness. Available only when the
+/// `test-support` feature is enabled (typically as a plugin pack's
+/// `[dev-dependencies]` entry — production code never pulls in the
+/// runtime parser). See the module docs for the usage shape.
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 pub use abi::{
     CxRaw, DispatchFn, FnTable, MURPHY_PLUGIN_ABI_VERSION, MurphyPluginRegister, OptionSpec,
     PluginCopV1, PluginRegistration, RawEdit, RawOffense, RawSlice,

@@ -14,3 +14,21 @@ murphy-ast = { path = "../murphy-ast" }
 murphy-plugin-macros = { path = "../murphy-plugin-macros" }
 # JSON decoding for `CopOptions::from_config_json` (ADR 0036).
 serde_json = "1"
+# Optional: only pulled in by the `test-support` feature so the
+# parser-driven cop harness (`test_support` module) can `translate`
+# Ruby source. Production plugins never use this path; the cdylib
+# binary stays free of murphy-translate.
+murphy-translate = { path = "../murphy-translate", optional = true }
+# Optional, test-support only: re-exported as
+# `murphy_plugin_api::test_support::indoc` so plugin packs writing
+# `#[cfg(test)] mod tests` get the heredoc-style fixture writer
+# without re-declaring the dep. `indoc` is tiny and proc-macro-only.
+indoc = { version = "2", optional = true }
+
+[features]
+# Exposes the `test_support` module — a parser-driven harness + the
+# re-exported `indoc!` macro. Any plugin pack can use this in
+# `[dev-dependencies]` to write `#[cfg(test)] mod tests` against its
+# cops without rebuilding the `CxRaw` + sink plumbing or pulling in
+# `indoc` directly. See `src/test_support.rs`.
+test-support = ["dep:murphy-translate", "dep:indoc"]
