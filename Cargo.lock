@@ -662,6 +662,7 @@ dependencies = [
  "murphy-core",
  "murphy-example-pack",
  "murphy-plugin-api",
+ "murphy-rails",
  "murphy-reporting",
  "murphy-rspec",
  "murphy-std",
@@ -739,7 +740,8 @@ dependencies = [
 name = "murphy-rails"
 version = "0.1.0"
 dependencies = [
- "murphy-core",
+ "murphy-plugin-api",
+ "serde_json",
 ]
 
 [[package]]
