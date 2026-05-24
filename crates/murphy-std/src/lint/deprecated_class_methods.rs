@@ -1,4 +1,22 @@
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, node_pattern};
+
+node_pattern!(
+    is_deprecated_env_method,
+    "(send (const nil? :ENV) {:clone :dup :freeze})"
+);
+node_pattern!(
+    is_deprecated_exists_method,
+    "(send (const nil? {:File :Dir :FileTest}) :exists? _)"
+);
+node_pattern!(
+    is_deprecated_socket_method,
+    "(send (const nil? :Socket) {:gethostbyaddr :gethostbyname} ...)"
+);
+node_pattern!(
+    is_deprecated_attr_method,
+    "(send nil? :attr _ {true false})"
+);
+node_pattern!(is_deprecated_iterator_method, "(send nil? :iterator?)");
 
 #[derive(Default)]
 pub struct DeprecatedClassMethods;
@@ -11,42 +29,168 @@ pub struct DeprecatedClassMethods;
     options = NoOptions
 )]
 impl DeprecatedClassMethods {
-    #[on_node(kind = "send", methods = ["exists?"])]
+    #[on_node(
+        kind = "send",
+        methods = [
+            "attr",
+            "clone",
+            "dup",
+            "exists?",
+            "freeze",
+            "gethostbyaddr",
+            "gethostbyname",
+            "iterator?"
+        ]
+    )]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
+        if !is_deprecated_class_method(node, cx) {
             return;
         };
-        let Some(receiver) = receiver.get() else {
+
+        let Some(offense) = offense(node, cx) else {
             return;
         };
-        if !matches_const(cx, receiver, &["File"]) && !matches_const(cx, receiver, &["FileTest"]) {
-            return;
-        }
-        cx.emit_offense(
-            cx.range(node),
-            "Use `exist?` instead of deprecated `exists?`",
-            None,
-        );
-        if let Some(range) = selector_range(cx, node, "exists?") {
-            cx.emit_edit(range, "exist?");
+        cx.emit_offense(offense.range, &offense.message, None);
+        if let Some(replacement) = offense.replacement {
+            cx.emit_edit(replacement.range, &replacement.text);
         }
     }
 }
 
-fn matches_const(cx: &Cx<'_>, node: NodeId, names: &[&str]) -> bool {
-    let mut out = Vec::new();
-    let mut cur = Some(node);
-    while let Some(id) = cur {
-        match *cx.kind(id) {
-            NodeKind::Const { scope, name } => {
-                out.push(cx.symbol_str(name));
-                cur = scope.get();
-            }
-            _ => return false,
-        }
+fn is_deprecated_class_method(node: NodeId, cx: &Cx<'_>) -> bool {
+    is_deprecated_env_method(node, cx)
+        || is_deprecated_exists_method(node, cx)
+        || is_deprecated_socket_method(node, cx)
+        || is_deprecated_attr_method(node, cx)
+        || is_deprecated_iterator_method(node, cx)
+}
+
+struct DeprecatedOffense {
+    range: Range,
+    message: String,
+    replacement: Option<Replacement>,
+}
+
+struct Replacement {
+    range: Range,
+    text: String,
+}
+
+fn offense(node: NodeId, cx: &Cx<'_>) -> Option<DeprecatedOffense> {
+    let NodeKind::Send {
+        receiver,
+        method,
+        args,
+    } = *cx.kind(node)
+    else {
+        return None;
+    };
+    let method = cx.symbol_str(method);
+
+    if method == "attr" {
+        let boolean_arg = cx.list(args).get(1).copied()?;
+        let preferred = match cx.raw_source(cx.range(boolean_arg)) {
+            "true" => "attr_accessor",
+            "false" => "attr_reader",
+            _ => return None,
+        };
+        let first_arg = cx.list(args).first().copied()?;
+        let replacement = format!("{preferred} {}", cx.raw_source(cx.range(first_arg)));
+        return Some(DeprecatedOffense {
+            range: cx.range(node),
+            message: format!(
+                "`{}` is deprecated in favor of `{replacement}`.",
+                cx.raw_source(cx.range(node))
+            ),
+            replacement: Some(Replacement {
+                range: cx.range(node),
+                text: replacement,
+            }),
+        });
     }
-    out.reverse();
-    out == names
+
+    if method == "iterator?" {
+        let range = cx.range(node);
+        return Some(DeprecatedOffense {
+            range,
+            message: "`iterator?` is deprecated in favor of `block_given?`.".to_string(),
+            replacement: Some(Replacement {
+                range,
+                text: "block_given?".to_string(),
+            }),
+        });
+    }
+
+    let receiver = receiver.get()?;
+    let const_name = top_level_const_name(cx, receiver)?;
+    match (const_name, method) {
+        ("File" | "Dir" | "FileTest", "exists?") => {
+            let selector = selector_range(cx, node, "exists?")?;
+            Some(DeprecatedOffense {
+                range: cx.range(node),
+                message: "Use `exist?` instead of deprecated `exists?`".to_string(),
+                replacement: Some(Replacement {
+                    range: selector,
+                    text: "exist?".to_string(),
+                }),
+            })
+        }
+        ("ENV", "clone" | "dup") => {
+            let range = cx.range(node);
+            let preferred = "ENV.to_h";
+            Some(DeprecatedOffense {
+                range,
+                message: format!(
+                    "`{}` is deprecated in favor of `{preferred}`.",
+                    cx.raw_source(range)
+                ),
+                replacement: Some(Replacement {
+                    range,
+                    text: preferred.to_string(),
+                }),
+            })
+        }
+        ("ENV", "freeze") => {
+            let range = cx.range(node);
+            Some(DeprecatedOffense {
+                range,
+                message: format!(
+                    "`{}` is deprecated in favor of `ENV`.",
+                    cx.raw_source(range)
+                ),
+                replacement: Some(Replacement {
+                    range,
+                    text: "ENV".to_string(),
+                }),
+            })
+        }
+        ("Socket", "gethostbyaddr") => socket_offense(node, cx, "Addrinfo#getnameinfo"),
+        ("Socket", "gethostbyname") => socket_offense(node, cx, "Addrinfo.getaddrinfo"),
+        _ => None,
+    }
+}
+
+fn top_level_const_name<'a>(cx: &Cx<'a>, node: NodeId) -> Option<&'a str> {
+    let NodeKind::Const { scope, name } = *cx.kind(node) else {
+        return None;
+    };
+    if scope.is_none() {
+        Some(cx.symbol_str(name))
+    } else {
+        None
+    }
+}
+
+fn socket_offense(node: NodeId, cx: &Cx<'_>, preferred: &str) -> Option<DeprecatedOffense> {
+    let range = receiver_selector_range(cx, node)?;
+    Some(DeprecatedOffense {
+        range,
+        message: format!(
+            "`{}` is deprecated in favor of `{preferred}`.",
+            cx.raw_source(range)
+        ),
+        replacement: None,
+    })
 }
 
 fn selector_range(cx: &Cx<'_>, node: NodeId, selector: &str) -> Option<Range> {
@@ -56,6 +200,23 @@ fn selector_range(cx: &Cx<'_>, node: NodeId, selector: &str) -> Option<Range> {
     Some(Range {
         start: range.start + pos,
         end: range.start + pos + selector.len() as u32,
+    })
+}
+
+fn receiver_selector_range(cx: &Cx<'_>, node: NodeId) -> Option<Range> {
+    let NodeKind::Send {
+        receiver, method, ..
+    } = *cx.kind(node)
+    else {
+        return None;
+    };
+    let receiver = receiver.get()?;
+    let selector = cx.symbol_str(method);
+    let receiver_range = cx.range(receiver);
+    let selector_range = selector_range(cx, node, selector)?;
+    Some(Range {
+        start: receiver_range.start,
+        end: selector_range.end,
     })
 }
 
@@ -74,8 +235,27 @@ mod tests {
             indoc! {r#"
             File.exists?(path)
             ^^^^^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+            Dir.exists?(path)
+            ^^^^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
             FileTest.exists?(path)
             ^^^^^^^^^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+        "#}
+        );
+    }
+
+    #[test]
+    fn flags_rubocop_deprecated_class_method_shapes() {
+        expect_offense!(
+            DeprecatedClassMethods,
+            indoc! {r#"
+            ENV.freeze
+            ^^^^^^^^^^ `ENV.freeze` is deprecated in favor of `ENV`.
+            Socket.gethostbyname(host)
+            ^^^^^^^^^^^^^^^^^^^^ `Socket.gethostbyname` is deprecated in favor of `Addrinfo.getaddrinfo`.
+            iterator?
+            ^^^^^^^^^ `iterator?` is deprecated in favor of `block_given?`.
+            attr :name, true
+            ^^^^^^^^^^^^^^^^ `attr :name, true` is deprecated in favor of `attr_accessor :name`.
         "#}
         );
     }
