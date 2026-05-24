@@ -68,6 +68,16 @@ class Murphy
   # nothing is cached Ruby-side. `name` is coerced to a Symbol so a cop reads
   # `node.name == :puts` exactly like design §4.
   class Node
+    def self.wrap_match(value)
+      if value.is_a?(Integer)
+        Murphy::Node.new(value)
+      elsif value.is_a?(Array)
+        value.map { |item| wrap_match(item) }
+      else
+        value
+      end
+    end
+
     attr_reader :id
 
     def initialize(id)
@@ -408,8 +418,11 @@ class Murphy
     def __run
       i = 0
       while (kind = Murphy.node_kind(i))
+        node = Murphy::Node.new(i)
+        hook = ("on_" + kind.to_s).to_sym
+        send(hook, node) if respond_to?(hook)
         if kind == :send || kind == :csend
-          on_call_node(Murphy::Node.new(i))
+          on_call_node(node)
         end
         i += 1
       end

@@ -115,9 +115,10 @@ impl AstContext {
     /// `spikes/live_resolution_poc` shape.
     pub fn new(source: impl Into<Box<[u8]>>) -> Arc<Self> {
         let source: Box<[u8]> = source.into();
-        let ast = std::str::from_utf8(&source)
-            .ok()
-            .map(|source_text| murphy_translate::translate(source_text, "<mruby>"));
+        let source_text =
+            std::str::from_utf8(&source).expect("mruby AST context source must be valid UTF-8");
+        let ast = Some(murphy_translate::translate(source_text, "<mruby>"));
+        let arena_ast = murphy_translate::translate(source_text, "<mruby>");
 
         // `result` borrows `source` for real here.
         let result: ParseResult<'_> = parse(source_text.as_bytes());

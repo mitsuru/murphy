@@ -1096,7 +1096,7 @@ mod tests {
         drop(worker);
         drop(ctx);
 
-        assert_eq!(drain_reports(), vec!["puts|true|nil"]);
+        assert_eq!(drain_reports(), vec!["puts|true|:send"]);
     }
 
     #[test]
