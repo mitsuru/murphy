@@ -28,8 +28,8 @@ use murphy_plugin_api::{Cx, NoOptions, cop, register_cops};
 // bare idents via `use`, keeping the registration table flat.
 pub mod cops;
 use cops::rails::{
-    AssertNot, EnvironmentVariableAccess, I18nLocaleAssignment, Output, Pick, RequestReferer,
-    UniqBeforePluck,
+    AssertNot, EnvironmentVariableAccess, I18nLocaleAssignment, NegateInclude, Output, Pick,
+    RequestReferer, UniqBeforePluck,
 };
 
 #[derive(Default)]
@@ -1004,19 +1004,8 @@ impl MultipleRoutePaths {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
-#[derive(Default)]
-pub struct NegateInclude;
-
-#[cop(
-    name = "Rails/NegateInclude",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl NegateInclude {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
+// `NegateInclude` promoted to real cop in
+// `cops::rails::negate_include`.
 
 #[derive(Default)]
 pub struct NotNullColumn;
