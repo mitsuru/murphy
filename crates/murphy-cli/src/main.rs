@@ -262,12 +262,15 @@ fn lint_source(
     file: &str,
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
+    config: &MurphyConfig,
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
     let mut offenses = match parse_with_cache(source, file, cache) {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
-            dispatch::run_cops(&ast, cops, &mut sink);
+            dispatch::run_cops_with_options(&ast, cops, &mut sink, |name| {
+                config.cop_options_json(name)
+            });
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops));
             offenses
@@ -340,6 +343,7 @@ fn lint_source_timed(
     file: &str,
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
+    config: &MurphyConfig,
     cache: Option<&Cache>,
 ) -> TimedOffenses {
     let parse_started = Instant::now();
@@ -349,7 +353,9 @@ fn lint_source_timed(
     let offenses = match parsed {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
-            dispatch::run_cops(&ast, cops, &mut sink);
+            dispatch::run_cops_with_options(&ast, cops, &mut sink, |name| {
+                config.cop_options_json(name)
+            });
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops));
             offenses
@@ -536,7 +542,7 @@ fn lint_closure_edits<'a>(
     config: &'a MurphyConfig,
     cache: Option<&'a Cache>,
 ) -> Vec<murphy_core::Edit> {
-    let offenses = lint_source(source, file, cops, mruby_cops, cache);
+    let offenses = lint_source(source, file, cops, mruby_cops, config, cache);
     aggregate_with_config(offenses, config)
         .into_iter()
         .filter_map(|o| o.autocorrect.map(|ac| ac.edits))
@@ -557,6 +563,7 @@ fn lint_files_memoized(
     sources: &[(String, String)],
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
+    config: &MurphyConfig,
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
     // Group paths by content so identical-content files share one lint.
@@ -576,7 +583,7 @@ fn lint_files_memoized(
             // additional path sharing the same content, clone the offense
             // list with `file` rewritten.
             let representative = paths[0];
-            let base = lint_source(content, representative, cops, mruby_cops, cache);
+            let base = lint_source(content, representative, cops, mruby_cops, config, cache);
             let mut all: Vec<Offense> = Vec::with_capacity(base.len() * paths.len());
             all.extend(base.iter().cloned());
             for &other in &paths[1..] {
@@ -599,6 +606,7 @@ fn lint_files_memoized_debug(
     sources: &[(String, String)],
     cops: &[&PluginCopV1],
     mruby_cops: &[MrubyCopSource],
+    config: &MurphyConfig,
     cache: Option<&Cache>,
 ) -> (Vec<Offense>, Vec<(String, u128, u128)>) {
     // Debug variant: keep per-file (parse, cops) timings. No memoization
@@ -607,7 +615,7 @@ fn lint_files_memoized_debug(
     let mut all: Vec<Offense> = Vec::new();
     let mut timings: Vec<(String, u128, u128)> = Vec::new();
     for (path, content) in sources {
-        let t = lint_source_timed(content, path, cops, mruby_cops, cache);
+        let t = lint_source_timed(content, path, cops, mruby_cops, config, cache);
         timings.push((path.clone(), t.parse_micros, t.cops_micros));
         all.extend(t.offenses);
     }
@@ -933,7 +941,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
     }
     let flat_offenses: Vec<Offense> = if debug {
         let (offenses, timings) =
-            lint_files_memoized_debug(&sources_for_lint, cops, mruby_cops, cache_ref);
+            lint_files_memoized_debug(&sources_for_lint, cops, mruby_cops, &config, cache_ref);
         for (path, parse_us, cops_us) in &timings {
             eprintln!(
                 "murphy: debug: lint {} parse_us={} cops_us={}",
@@ -942,7 +950,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         }
         offenses
     } else {
-        lint_files_memoized(&sources_for_lint, cops, mruby_cops, cache_ref)
+        lint_files_memoized(&sources_for_lint, cops, mruby_cops, &config, cache_ref)
     };
     let offenses = aggregate_with_config(flat_offenses, &config);
     if debug {

@@ -24,6 +24,26 @@ fn lint_json(source: &str) -> (i32, Vec<serde_json::Value>) {
     (code, parsed)
 }
 
+fn lint_json_with_config(source: &str, config: &str) -> (i32, Vec<serde_json::Value>) {
+    let dir = tempdir().expect("create tempdir");
+    fs::write(dir.path().join("murphy.toml"), config).expect("write murphy.toml");
+    fs::write(dir.path().join("t.rb"), source).expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("t.rb")
+        .assert();
+    let output = assert.get_output().clone();
+    let code = output.status.code().unwrap_or(-1);
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).expect("stdout must be JSON");
+    (code, parsed)
+}
+
 fn offenses_named<'a>(offenses: &'a [serde_json::Value], cop: &str) -> Vec<&'a serde_json::Value> {
     offenses.iter().filter(|o| o["cop_name"] == cop).collect()
 }
@@ -38,6 +58,12 @@ fn flags_spaces_inside_send_parentheses() {
         2,
         "one offense after `(` and one before `)`; got {offs:?}",
     );
+    assert!(
+        parens
+            .iter()
+            .all(|offense| offense["message"] == "Space inside parentheses detected."),
+        "message should match RuboCop; got {parens:?}",
+    );
 
     let edits: Vec<_> = parens
         .iter()
@@ -51,6 +77,77 @@ fn flags_spaces_inside_send_parentheses() {
     assert!(
         edits.iter().all(|edit| edit["replacement"] == ""),
         "edits delete only the extra spaces; got {edits:?}",
+    );
+}
+
+#[test]
+fn space_style_requires_spaces_inside_non_empty_parentheses() {
+    let (code, offs) = lint_json_with_config(
+        "foo(1)\nbar()\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+    );
+    assert_eq!(code, 1);
+    let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
+    assert_eq!(
+        parens.len(),
+        2,
+        "space style should add one space after `(` and one before `)`; got {offs:?}",
+    );
+    assert!(
+        parens
+            .iter()
+            .all(|offense| offense["message"] == "No space inside parentheses detected."),
+        "space-style message should match RuboCop; got {parens:?}",
+    );
+
+    let replacements: Vec<_> = parens
+        .iter()
+        .flat_map(|offense| {
+            offense["autocorrect"]["edits"]
+                .as_array()
+                .expect("missing-space offenses must autocorrect")
+        })
+        .map(|edit| edit["replacement"].as_str().unwrap())
+        .collect();
+    assert_eq!(replacements, vec![" ", " "]);
+}
+
+#[test]
+fn space_style_removes_space_inside_empty_parentheses() {
+    let (_code, offs) = lint_json_with_config(
+        "foo( )\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+    );
+    let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
+    assert_eq!(
+        parens.len(),
+        1,
+        "space style still keeps empty parentheses compact; got {offs:?}",
+    );
+    let edits = parens[0]["autocorrect"]["edits"]
+        .as_array()
+        .expect("empty paren offense must autocorrect");
+    assert_eq!(edits[0]["replacement"], "");
+}
+
+#[test]
+fn compact_style_allows_consecutive_closing_parens_without_space() {
+    let (code, offs) = lint_json_with_config(
+        "outer(inner(1))\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"compact\"\n",
+    );
+    assert_eq!(code, 1);
+    let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
+    assert_eq!(
+        parens.len(),
+        3,
+        "compact style should require spaces except between consecutive parens; got {offs:?}",
+    );
+    assert!(
+        parens.iter().all(|offense| {
+            offense["range"]["start_offset"] != 14 || offense["range"]["end_offset"] != 14
+        }),
+        "compact style must not require a space between consecutive `))`; got {parens:?}",
     );
 }
 

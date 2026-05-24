@@ -167,6 +167,8 @@ pub struct CxRaw {
     /// Source tokens in source order.
     pub sorted_tokens: *const SourceToken,
     pub sorted_tokens_len: usize,
+    /// JSON object for the current cop's runtime options.
+    pub options_json: RawSlice,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -302,7 +304,8 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, sink), 128);
         assert_eq!(offset_of!(CxRaw, sorted_tokens), 136);
         assert_eq!(offset_of!(CxRaw, sorted_tokens_len), 144);
-        assert_eq!(size_of::<CxRaw>(), 152);
+        assert_eq!(offset_of!(CxRaw, options_json), 152);
+        assert_eq!(size_of::<CxRaw>(), 168);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use murphy_ast::{
 };
 
 use crate::abi::CxRaw;
+use crate::{ConfigError, CopOptions};
 
 /// Borrowed, direct-read view of the arena for one dispatch call.
 ///
@@ -159,6 +160,12 @@ impl<'a> Cx<'a> {
         unsafe { slice(self.raw.sorted_tokens, self.raw.sorted_tokens_len) }
     }
 
+    /// Decode the current cop's runtime options.
+    pub fn options<T: CopOptions>(&self) -> Result<T, ConfigError> {
+        let bytes = unsafe { self.raw.options_json.as_bytes() };
+        T::from_config_json(bytes)
+    }
+
     /// The source text covered by `range`.
     pub fn raw_source(&self, range: Range) -> &'a str {
         let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
@@ -257,6 +264,7 @@ mod tests {
             sink: std::ptr::null_mut(),
             sorted_tokens: p.sorted_tokens.as_ptr(),
             sorted_tokens_len: p.sorted_tokens.len(),
+            options_json: RawSlice::from_str("{}"),
         }
     }
 

@@ -53,6 +53,7 @@ fn cx_raw_for<'a>(ast: &'a murphy_ast::Ast, fns: &'a FnTable) -> CxRaw {
         sink: std::ptr::null_mut(),
         sorted_tokens: p.sorted_tokens.as_ptr(),
         sorted_tokens_len: p.sorted_tokens.len(),
+        options_json: RawSlice::from_str("{}"),
     }
 }
 

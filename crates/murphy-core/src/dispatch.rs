@@ -185,6 +185,7 @@ fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink) -> CxRaw {
         sink: sink as *mut OffenseSink as *mut c_void,
         sorted_tokens: p.sorted_tokens.as_ptr(),
         sorted_tokens_len: p.sorted_tokens.len(),
+        options_json: RawSlice::from_str("{}"),
     }
 }
 
@@ -212,10 +213,25 @@ fn send_method_passes(ast: &Ast, node_id: NodeId, allow_list: &[RawSlice]) -> bo
 /// [`crate::CopRegistry`] (which owns the `dlopen` handle). Both flow
 /// through this signature without re-asserting `&'static`.
 pub fn run_cops(ast: &Ast, cops: &[&PluginCopV1], sink: &mut OffenseSink) {
+    run_cops_with_options(ast, cops, sink, |_| b"{}".to_vec());
+}
+
+pub fn run_cops_with_options(
+    ast: &Ast,
+    cops: &[&PluginCopV1],
+    sink: &mut OffenseSink,
+    mut options_for: impl FnMut(&str) -> Vec<u8>,
+) {
     let index = DispatchIndex::build(ast);
     let mut base = build_cx_raw(ast, sink);
     for cop in cops {
         base.cop_name = cop.name;
+        let name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("");
+        let options_json = options_for(name);
+        base.options_json = RawSlice {
+            ptr: options_json.as_ptr(),
+            len: options_json.len(),
+        };
         // Per-cop kind list. **Empty `KINDS` means file-visit**: the cop
         // is invoked exactly once with `ast.root()` instead of being
         // dispatched per matching node. ADR 0038 deletes the `FileCop`
