@@ -1,6 +1,7 @@
 // node_pattern! must reject the node-match form on an atom kind that has
-// no literal pattern (e.g. `self`, `lvar`, `ivar`, `cvar`, `gvar`). For
-// these the only valid form is the bare kind name.
+// no literal pattern (`self`). For this the only valid form is the bare
+// kind name. (`lvar`/`ivar`/`cvar`/`gvar` were promoted to one-slot
+// kinds with a `Symbol` sub-pattern in murphy-o5k.)
 
 murphy_plugin_macros::node_pattern!(m, "(self _)");
 

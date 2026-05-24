@@ -287,3 +287,186 @@ fn seq_capture_collects_same_args() {
 // `matcher::tests::unsupported_kind_node_pattern_silently_fails`; this
 // file pairs only patterns B will accept.
 // ────────────────────────────────────────────────────────────────────────
+
+// ────────────────────────────────────────────────────────────────────────
+// 7. Atom-payload var kinds (gvar/lvar/ivar/cvar) — single sym slot via
+// `(gvar :$name)` / `(ivar :@n)` / `(cvar :@@c)` / `(lvar :n)` (murphy-o5k).
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_gvar_stdout, "(gvar :$stdout)");
+node_pattern!(b_gvar_any, "(gvar _)");
+node_pattern!(b_lvar_x, "(lvar :x)");
+node_pattern!(b_ivar_at_x, "(ivar :@x)");
+node_pattern!(b_cvar_atat_c, "(cvar :@@c)");
+
+#[test]
+fn gvar_sym_slot_match_agrees() {
+    let mut b = AstBuilder::new("$stdout", "t.rb");
+    let stdout = b.intern_symbol("$stdout");
+    let g = b.push(NodeKind::Gvar(stdout), r());
+    let ast = b.finish(g);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches("(gvar :$stdout)", &ast, g, b_gvar_stdout(g, &cx));
+    // Wildcard sym slot accepts any name.
+    assert_c_matches("(gvar _)", &ast, g, b_gvar_any(g, &cx));
+}
+
+#[test]
+fn gvar_sym_slot_rejects_wrong_name() {
+    let mut b = AstBuilder::new("$other", "t.rb");
+    let other = b.intern_symbol("$other");
+    let g = b.push(NodeKind::Gvar(other), r());
+    let ast = b.finish(g);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches("(gvar :$stdout)", &ast, g, b_gvar_stdout(g, &cx));
+}
+
+#[test]
+fn lvar_ivar_cvar_sym_slot_match_agrees() {
+    let mut b = AstBuilder::new("ignored", "t.rb");
+    let lx = b.intern_symbol("x");
+    let l = b.push(NodeKind::Lvar(lx), r());
+    let iat = b.intern_symbol("@x");
+    let i = b.push(NodeKind::Ivar(iat), r());
+    let cat = b.intern_symbol("@@c");
+    let c = b.push(NodeKind::Cvar(cat), r());
+    // Root has to be some node; pick `l`.
+    let ast = b.finish(l);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches("(lvar :x)", &ast, l, b_lvar_x(l, &cx));
+    assert_c_matches("(ivar :@x)", &ast, i, b_ivar_at_x(i, &cx));
+    assert_c_matches("(cvar :@@c)", &ast, c, b_cvar_atat_c(c, &cx));
+    // A wrong-kind subject must miss.
+    assert_c_matches("(lvar :x)", &ast, i, b_lvar_x(i, &cx));
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 8. Symbol-slot literal union `{:a :b :c}` for method-table cops
+// (murphy-rs7). The Send method slot accepts a union of sym literals;
+// it hits when the method name matches any arm.
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_send_puts_or_print, "(send nil? {:puts :print} ...)");
+node_pattern!(b_gvar_stdout_or_stderr, "(gvar {:$stdout :$stderr})");
+// `!(gvar {:$stdout :$stderr})` routes the sym-union check through
+// the B-backend's `lower_bool_fixed_slot` (the value-form sibling of
+// `lower_fixed_slot`). Without it the bool-form rewrite has no test
+// coverage and a future change to it would silently regress. A
+// `gvar` kind is used here, not `send`, because `send` has a trailing
+// `List` slot whose unconstrained semantics differ between B's
+// `lower_bool` (slot floats free) and C's matcher (slot must be
+// empty when no list pattern children are given) — a pre-existing
+// gap, independent of sym-union.
+node_pattern!(b_not_gvar_stdout_or_stderr, "!(gvar {:$stdout :$stderr})");
+
+#[test]
+fn send_method_slot_union_matches_any_listed_name() {
+    let (ast, send, _) = puts_one_ast();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // `puts` is in the union — must hit.
+    assert_c_matches(
+        "(send nil? {:puts :print} ...)",
+        &ast,
+        send,
+        b_send_puts_or_print(send, &cx),
+    );
+}
+
+#[test]
+fn send_method_slot_union_misses_unlisted_name() {
+    // `foo.bar(...)` — `bar` is NOT in `{:puts :print}`.
+    let (ast, send, _) = dotcall_three_args_ast();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches(
+        "(send nil? {:puts :print} ...)",
+        &ast,
+        send,
+        b_send_puts_or_print(send, &cx),
+    );
+}
+
+#[test]
+fn negated_gvar_with_sym_union_routes_through_bool_form() {
+    // `!(gvar {:$stdout :$stderr})` — `Not` lowers its body via the
+    // B-backend's `lower_bool` route, which dispatches the sym slot
+    // to `lower_bool_fixed_slot`. C's matcher reaches the same union
+    // arm through `Not` + `match_fixed_slot` + the `IrNode::Union`
+    // branch. The matcher returns `true` (negation succeeds) when the
+    // gvar's name is NOT in the union, and `false` when it is.
+    let fns = fns();
+
+    // `$stdout` — in the union; both backends must report `false`.
+    let mut b = AstBuilder::new("$stdout", "t.rb");
+    let s = b.intern_symbol("$stdout");
+    let g = b.push(NodeKind::Gvar(s), r());
+    let ast = b.finish(g);
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert_c_matches(
+        "!(gvar {:$stdout :$stderr})",
+        &ast,
+        g,
+        b_not_gvar_stdout_or_stderr(g, &cx),
+    );
+
+    // `$log` — outside the union; both backends must report `true`.
+    let mut b = AstBuilder::new("$log", "t.rb");
+    let s = b.intern_symbol("$log");
+    let g = b.push(NodeKind::Gvar(s), r());
+    let ast = b.finish(g);
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert_c_matches(
+        "!(gvar {:$stdout :$stderr})",
+        &ast,
+        g,
+        b_not_gvar_stdout_or_stderr(g, &cx),
+    );
+}
+
+#[test]
+fn gvar_sym_slot_union_matches_any_listed_name() {
+    let mut b = AstBuilder::new("$stderr", "t.rb");
+    let stderr = b.intern_symbol("$stderr");
+    let g = b.push(NodeKind::Gvar(stderr), r());
+    let ast = b.finish(g);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches(
+        "(gvar {:$stdout :$stderr})",
+        &ast,
+        g,
+        b_gvar_stdout_or_stderr(g, &cx),
+    );
+
+    // A non-listed gvar misses.
+    let mut b = AstBuilder::new("$log", "t.rb");
+    let log = b.intern_symbol("$log");
+    let g = b.push(NodeKind::Gvar(log), r());
+    let ast = b.finish(g);
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert_c_matches(
+        "(gvar {:$stdout :$stderr})",
+        &ast,
+        g,
+        b_gvar_stdout_or_stderr(g, &cx),
+    );
+}
