@@ -6,9 +6,33 @@
 //! author writes (`send`, `lvasgn`, …) to that tag.
 
 /// The `u8` discriminant of a [`NodeKind`](crate::NodeKind) variant.
+///
+/// `NodeKind` is `#[repr(C, u8)]` (ADR 0037, frozen layout), so its
+/// first byte is the discriminant; [`NodeKindTag::of`] reads it.
+///
+/// Originally `murphy-plugin-api` shipped its own private copy of this
+/// struct so the two crates could be merged in parallel (see the
+/// `#[plugin-api]` `node_cop.rs` Task 8 note in the murphy-9cr.17 plan).
+/// As of murphy-a70 the plugin-api re-exports this type instead, so
+/// `murphy_plugin_api::NodeKindTag` and `murphy_ast::NodeKindTag` are
+/// the same nominal type — required so that `node_pattern!`-generated
+/// matchers (which compare `cx.kind(node).tag()` against a literal
+/// tag) type-check across crates.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeKindTag(pub u8);
+
+impl NodeKindTag {
+    /// The tag of a node kind. Reads the first byte of `kind`, which is
+    /// the `#[repr(C, u8)]` discriminant (ADR 0037 frozen layout).
+    pub fn of(kind: &crate::NodeKind) -> NodeKindTag {
+        // Safety: the pointer has valid provenance from the `&NodeKind`
+        // reference; `u8` has alignment 1 so the read cannot be misaligned.
+        // `NodeKind` is `#[repr(C, u8)]` (ADR 0037 — frozen layout), so
+        // its first byte is the discriminant.
+        NodeKindTag(unsafe { *(kind as *const crate::NodeKind as *const u8) })
+    }
+}
 
 /// Pattern-name → tag. Declaration order of `NodeKind` minus `Error` and
 /// `Unknown` (you cannot meaningfully match an error or fallback node in a

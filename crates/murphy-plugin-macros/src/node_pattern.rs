@@ -55,8 +55,8 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
         .capture_kinds()
         .iter()
         .map(|k| match k {
-            CaptureKind::Node => quote!(::murphy_ast::NodeId),
-            CaptureKind::Seq => quote!(&'a [::murphy_ast::NodeId]),
+            CaptureKind::Node => quote!(::murphy_plugin_api::NodeId),
+            CaptureKind::Seq => quote!(&'a [::murphy_plugin_api::NodeId]),
         })
         .collect();
     let cap_decls: Vec<TokenStream> = (0..n_caps)
@@ -91,7 +91,7 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
         // matcher returns `bool`, not `Option` — so silence the lint here.
         #[allow(clippy::question_mark)]
         fn #name<'a>(
-            node: ::murphy_ast::NodeId,
+            node: ::murphy_plugin_api::NodeId,
             cx: &::murphy_plugin_api::Cx<'a>,
         ) -> #ret_ty {
             #(#cap_decls)*
@@ -700,13 +700,13 @@ fn lower_pat(
                 Lit::Int(v) => quote! {
                     if !::core::matches!(
                         *cx.kind(#subject),
-                        ::murphy_ast::NodeKind::Int(__v) if __v == #v
+                        ::murphy_plugin_api::NodeKind::Int(__v) if __v == #v
                     ) {
                         #fail
                     }
                 },
                 Lit::Float(v) => quote! {
-                    if let ::murphy_ast::NodeKind::Float(__v) = *cx.kind(#subject) {
+                    if let ::murphy_plugin_api::NodeKind::Float(__v) = *cx.kind(#subject) {
                         // Exact equality is intentional: the pattern author wrote a specific float literal.
                         #[allow(clippy::float_cmp)]
                         if __v != #v {
@@ -721,7 +721,7 @@ fn lower_pat(
                     quote! {
                         if !::core::matches!(
                             *cx.kind(#subject),
-                            ::murphy_ast::NodeKind::Str(__id) if cx.string_str(__id) == #s
+                            ::murphy_plugin_api::NodeKind::Str(__id) if cx.string_str(__id) == #s
                         ) {
                             #fail
                         }
@@ -732,7 +732,7 @@ fn lower_pat(
                     quote! {
                         if !::core::matches!(
                             *cx.kind(#subject),
-                            ::murphy_ast::NodeKind::Sym(__sym) if cx.symbol_str(__sym) == #s
+                            ::murphy_plugin_api::NodeKind::Sym(__sym) if cx.symbol_str(__sym) == #s
                         ) {
                             #fail
                         }
@@ -741,7 +741,7 @@ fn lower_pat(
                 Lit::True => quote! {
                     if !::core::matches!(
                         *cx.kind(#subject),
-                        ::murphy_ast::NodeKind::True_
+                        ::murphy_plugin_api::NodeKind::True_
                     ) {
                         #fail
                     }
@@ -749,7 +749,7 @@ fn lower_pat(
                 Lit::False => quote! {
                     if !::core::matches!(
                         *cx.kind(#subject),
-                        ::murphy_ast::NodeKind::False_
+                        ::murphy_plugin_api::NodeKind::False_
                     ) {
                         #fail
                     }
@@ -757,7 +757,7 @@ fn lower_pat(
                 Lit::Nil => quote! {
                     if !::core::matches!(
                         *cx.kind(#subject),
-                        ::murphy_ast::NodeKind::Nil
+                        ::murphy_plugin_api::NodeKind::Nil
                     ) {
                         #fail
                     }
@@ -769,7 +769,7 @@ fn lower_pat(
             let fail = fail_stmt(ctx);
             let tag_u8 = tag.0;
             Ok(quote! {
-                if cx.kind(#subject).tag() != ::murphy_ast::NodeKindTag(#tag_u8) {
+                if cx.kind(#subject).tag() != ::murphy_plugin_api::NodeKindTag(#tag_u8) {
                     #fail
                 }
             })
@@ -779,7 +779,7 @@ fn lower_pat(
             Ok(quote! {
                 if !::core::matches!(
                     *cx.kind(#subject),
-                    ::murphy_ast::NodeKind::Nil
+                    ::murphy_plugin_api::NodeKind::Nil
                 ) {
                     #fail
                 }
@@ -1042,7 +1042,7 @@ fn build_destructure(
         .collect();
     match schema.slots.first().map(|s| s.field) {
         Some(FieldRef::Pos(..)) => quote! {
-            let ::murphy_ast::NodeKind::#variant(#(#field_pats),*) = *cx.kind(#subject) else {
+            let ::murphy_plugin_api::NodeKind::#variant(#(#field_pats),*) = *cx.kind(#subject) else {
                 #fail
             };
         },
@@ -1054,7 +1054,7 @@ fn build_destructure(
                 quote!(, ..)
             };
             quote! {
-                let ::murphy_ast::NodeKind::#variant { #(#field_pats),* #rest } = *cx.kind(#subject) else {
+                let ::murphy_plugin_api::NodeKind::#variant { #(#field_pats),* #rest } = *cx.kind(#subject) else {
                     #fail
                 };
             }
@@ -1083,7 +1083,7 @@ fn lower_fixed_slot(
                         ::core::option::Option::Some(#n) => {
                             if !::core::matches!(
                                 *cx.kind(#n),
-                                ::murphy_ast::NodeKind::Nil
+                                ::murphy_plugin_api::NodeKind::Nil
                             ) {
                                 #fail
                             }
@@ -1276,11 +1276,11 @@ fn lower_bool(
         PatKind::Kind(tag) => {
             let tag_u8 = tag.0;
             Ok(quote! {
-                ( cx.kind(#subject).tag() == ::murphy_ast::NodeKindTag(#tag_u8) )
+                ( cx.kind(#subject).tag() == ::murphy_plugin_api::NodeKindTag(#tag_u8) )
             })
         }
         PatKind::NilTest => Ok(quote! {
-            ( ::core::matches!(*cx.kind(#subject), ::murphy_ast::NodeKind::Nil) )
+            ( ::core::matches!(*cx.kind(#subject), ::murphy_plugin_api::NodeKind::Nil) )
         }),
         PatKind::Node { head, children } => lower_bool_node(head, children, subject, ctx),
         PatKind::Union(alts) => {
@@ -1333,11 +1333,11 @@ fn lower_bool_lit(lit: &murphy_pattern::Lit, subject: &TokenStream) -> TokenStre
         Lit::Int(v) => quote! {
             ( ::core::matches!(
                 *cx.kind(#subject),
-                ::murphy_ast::NodeKind::Int(__v) if __v == #v
+                ::murphy_plugin_api::NodeKind::Int(__v) if __v == #v
             ) )
         },
         Lit::Float(v) => quote! {
-            ( if let ::murphy_ast::NodeKind::Float(__v) = *cx.kind(#subject) {
+            ( if let ::murphy_plugin_api::NodeKind::Float(__v) = *cx.kind(#subject) {
                 // Exact equality is intentional: the pattern author wrote a specific float literal.
                 #[allow(clippy::float_cmp)]
                 { __v == #v }
@@ -1350,7 +1350,7 @@ fn lower_bool_lit(lit: &murphy_pattern::Lit, subject: &TokenStream) -> TokenStre
             quote! {
                 ( ::core::matches!(
                     *cx.kind(#subject),
-                    ::murphy_ast::NodeKind::Str(__id) if cx.string_str(__id) == #s
+                    ::murphy_plugin_api::NodeKind::Str(__id) if cx.string_str(__id) == #s
                 ) )
             }
         }
@@ -1359,18 +1359,18 @@ fn lower_bool_lit(lit: &murphy_pattern::Lit, subject: &TokenStream) -> TokenStre
             quote! {
                 ( ::core::matches!(
                     *cx.kind(#subject),
-                    ::murphy_ast::NodeKind::Sym(__sym) if cx.symbol_str(__sym) == #s
+                    ::murphy_plugin_api::NodeKind::Sym(__sym) if cx.symbol_str(__sym) == #s
                 ) )
             }
         }
         Lit::True => quote! {
-            ( ::core::matches!(*cx.kind(#subject), ::murphy_ast::NodeKind::True_) )
+            ( ::core::matches!(*cx.kind(#subject), ::murphy_plugin_api::NodeKind::True_) )
         },
         Lit::False => quote! {
-            ( ::core::matches!(*cx.kind(#subject), ::murphy_ast::NodeKind::False_) )
+            ( ::core::matches!(*cx.kind(#subject), ::murphy_plugin_api::NodeKind::False_) )
         },
         Lit::Nil => quote! {
-            ( ::core::matches!(*cx.kind(#subject), ::murphy_ast::NodeKind::Nil) )
+            ( ::core::matches!(*cx.kind(#subject), ::murphy_plugin_api::NodeKind::Nil) )
         },
     }
 }
@@ -1496,14 +1496,14 @@ fn lower_bool_exact_node(
         Some(FieldRef::Pos(..))
     );
     let destructure = if is_tuple {
-        quote!(::murphy_ast::NodeKind::#variant(#(#field_pats),*))
+        quote!(::murphy_plugin_api::NodeKind::#variant(#(#field_pats),*))
     } else {
         let rest = if schema.covers_all_fields {
             quote!()
         } else {
             quote!(, ..)
         };
-        quote!(::murphy_ast::NodeKind::#variant { #(#field_pats),* #rest })
+        quote!(::murphy_plugin_api::NodeKind::#variant { #(#field_pats),* #rest })
     };
 
     Ok(quote! {
@@ -1534,7 +1534,7 @@ fn lower_bool_fixed_slot(
                 Ok(quote! {
                     ( #bind.get().map_or(true, |#n| ::core::matches!(
                         *cx.kind(#n),
-                        ::murphy_ast::NodeKind::Nil
+                        ::murphy_plugin_api::NodeKind::Nil
                     )) )
                 })
             } else {

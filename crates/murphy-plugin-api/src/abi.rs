@@ -5,9 +5,7 @@
 
 use std::ffi::c_void;
 
-use murphy_ast::{AstNode, Comment, NodeId, Range};
-
-use crate::node_cop::NodeKindTag;
+use murphy_ast::{AstNode, Comment, NodeId, NodeKindTag, Range};
 
 /// The ABI's borrowed-slice primitive: a `#[repr(C)]` pointer+length pair.
 ///
