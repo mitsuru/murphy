@@ -248,6 +248,8 @@ mod tests {
             cop_name: RawSlice::from_str("Plugin/Emit"),
             fns: fns as *const FnTable,
             sink,
+            sorted_tokens: p.sorted_tokens.as_ptr(),
+            sorted_tokens_len: p.sorted_tokens.len(),
         }
     }
 
