@@ -737,6 +737,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "murphy-prism"
+version = "1.9.0"
+dependencies = [
+ "ruby-prism-sys",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "murphy-rails"
 version = "0.1.0"
 dependencies = [
