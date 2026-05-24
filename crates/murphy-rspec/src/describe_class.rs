@@ -5,7 +5,8 @@
 //!
 //! ## Matched shapes
 //!
-//! Subscribes to `NodeKind::Send` and gates on:
+//! Dispatched on `NodeKind::Send` via `#[on_node(kind = "send")]` and
+//! gates on:
 //!
 //! - **method == `describe`**.
 //! - **receiver** is either:
@@ -39,17 +40,6 @@
 //! describe a scenario rather than a class). The cop reports and lets
 //! the user fix by hand.
 //!
-//! ## Why hand-rolled `impl Cop` / `impl NodeCop` (not `#[cop]`)
-//!
-//! `murphy-plugin-macros::cop` (murphy-9cr.8) generates a `check` whose
-//! signature uses `::murphy_ast::NodeId` as an absolute path, which
-//! requires consumer crates to declare `murphy-ast` as a runtime
-//! dependency. That breaks the single-surface plugin ABI boundary (ADR
-//! 0038) enforced by `tests/dep_boundary.rs`. Every production cop in
-//! the workspace (`murphy-std`, `murphy-example-pack`, here) uses the
-//! manual form for the same reason. Macro adoption is tracked as
-//! murphy-xg5 (fix the macro to emit `::murphy_plugin_api::NodeId`).
-//!
 //! ## Known v1 limitation
 //!
 //! RuboCop only runs RSpec cops on `*_spec.rb` files; Murphy has no
@@ -58,31 +48,22 @@
 //! codebases can disable the cop via
 //! `[cops.rules."RSpec/DescribeClass"] enabled = false`.
 
-use murphy_plugin_api::{
-    Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, OptNodeId, Severity,
-};
-
-/// `NodeKind::Send` tag — declaration order is frozen by ADR 0037; see
-/// `murphy_ast::node::NodeKind::tag` where `Send { .. }` is `17`.
-const SEND_TAG: NodeKindTag = NodeKindTag(17);
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct DescribeClass;
 
-impl Cop for DescribeClass {
-    type Options = NoOptions;
-    const NAME: &'static str = "RSpec/DescribeClass";
-    const DESCRIPTION: &'static str =
-        "The first argument to `describe` should be the class or module under test, not a string.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-impl NodeCop for DescribeClass {
-    const KINDS: &'static [NodeKindTag] = &[SEND_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "RSpec/DescribeClass",
+    description = "The first argument to `describe` should be the class or module under test, not a string.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl DescribeClass {
+    #[on_node(kind = "send")]
+    fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         // Defensive pattern-match: a future kind-aliasing accident would
         // silently misreport without the `let-else`. Same posture as
         // `Murphy/NoReceiverPuts`.
