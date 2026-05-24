@@ -10,6 +10,7 @@ mod i18n_locale_assignment;
 mod output;
 mod pick;
 mod request_referer;
+mod uniq_before_pluck;
 
 pub use assert_not::AssertNot;
 pub use environment_variable_access::EnvironmentVariableAccess;
@@ -17,3 +18,4 @@ pub use i18n_locale_assignment::I18nLocaleAssignment;
 pub use output::Output;
 pub use pick::Pick;
 pub use request_referer::RequestReferer;
+pub use uniq_before_pluck::UniqBeforePluck;

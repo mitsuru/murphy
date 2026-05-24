@@ -386,7 +386,6 @@ fn is_cop_disabled_by_default(name: &str) -> bool {
             | "Rails/ToSWithArgument"
             | "Rails/TopLevelHashWithIndifferentAccess"
             | "Rails/TransactionExitStatement"
-            | "Rails/UniqBeforePluck"
             | "Rails/UniqueValidationWithoutIndex"
             | "Rails/UnknownEnv"
             | "Rails/UnusedIgnoredColumns"

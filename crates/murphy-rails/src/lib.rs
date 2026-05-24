@@ -29,6 +29,7 @@ use murphy_plugin_api::{Cx, NoOptions, cop, register_cops};
 pub mod cops;
 use cops::rails::{
     AssertNot, EnvironmentVariableAccess, I18nLocaleAssignment, Output, Pick, RequestReferer,
+    UniqBeforePluck,
 };
 
 #[derive(Default)]
@@ -1731,19 +1732,8 @@ impl TransactionExitStatement {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
-#[derive(Default)]
-pub struct UniqBeforePluck;
-
-#[cop(
-    name = "Rails/UniqBeforePluck",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl UniqBeforePluck {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
+// `UniqBeforePluck` promoted to real cop in
+// `cops::rails::uniq_before_pluck`.
 
 #[derive(Default)]
 pub struct UniqueValidationWithoutIndex;
