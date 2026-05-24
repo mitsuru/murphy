@@ -58,7 +58,12 @@ fn cx_raw_for<'a>(ast: &'a murphy_ast::Ast, fns: &'a FnTable) -> CxRaw {
 
 /// Push a `Send` node (`recv.method(args…)`) onto `b` and return its `NodeId`.
 fn push_send(b: &mut AstBuilder) -> NodeId {
-    let method = b.intern_symbol("foo");
+    push_send_named(b, "foo")
+}
+
+/// Push a bare `Send` (no receiver) whose method symbol is `name`.
+fn push_send_named(b: &mut AstBuilder, name: &str) -> NodeId {
+    let method = b.intern_symbol(name);
     b.push(
         NodeKind::Send {
             receiver: OptNodeId::NONE,
@@ -192,6 +197,21 @@ impl T6 {
 // Compilation success proves `register_cops!` + `#[cop]` compose correctly.
 murphy_plugin_macros::register_cops!(mode = dynamic, T6);
 
+// --- T7: methods filter on send (murphy-34d) --------------------------------
+
+#[derive(Default)]
+struct T7 {
+    hits: AtomicU32,
+}
+
+#[cop(name = "Plugin/T7")]
+impl T7 {
+    #[on_node(kind = "send", methods = ["describe", "context"])]
+    fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -285,6 +305,37 @@ fn check_is_no_op_for_kinds_outside_kinds_array() {
         t4.count.load(Ordering::Relaxed),
         0,
         "count should remain 0 for a Nil node (not in KINDS)"
+    );
+}
+
+#[test]
+fn methods_filter_passes_listed_method_names() {
+    // T7 lists ["describe", "context"]. Dispatching `describe` and
+    // `context` send nodes must invoke check_send; `foo` must not.
+    let mut b = AstBuilder::new("src", "t.rb".to_string());
+    let describe_id = push_send_named(&mut b, "describe");
+    let context_id = push_send_named(&mut b, "context");
+    let foo_id = push_send_named(&mut b, "foo");
+    let begin_list = b.push_list(&[describe_id, context_id, foo_id]);
+    let root = b.push(NodeKind::Begin(begin_list), Range { start: 0, end: 30 });
+    let ast = b.finish(root);
+
+    let fns = FnTable {
+        emit_offense: noop_offense,
+        emit_edit: noop_edit,
+    };
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let t7 = T7::default();
+    t7.check(describe_id, &cx);
+    t7.check(context_id, &cx);
+    t7.check(foo_id, &cx);
+
+    assert_eq!(
+        t7.hits.load(Ordering::Relaxed),
+        2,
+        "only describe + context should pass the methods filter (foo is filtered out)"
     );
 }
 
