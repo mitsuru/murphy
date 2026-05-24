@@ -5,12 +5,12 @@ edition = "2024"
 description = "prism AST → murphy-ast arena AST translation layer (murphy-9cr.15)."
 
 [dependencies]
-# Exact pin: identical to murphy-core. A prism node-schema change must not
-# ride in silently on the translation mapping (ADR 0001 discipline).
-ruby-prism = "=1.9.0"
+murphy-prism = { path = "../murphy-prism" }
 murphy-ast = { path = "../murphy-ast" }
 
 [dev-dependencies]
+# Bench-only; runtime translation uses Murphy's fork for token access.
+ruby-prism = "=1.9.0"
 # Benchmark-only. default-features off drops plotters/rayon (HTML reports and
 # gnuplot are not needed for the murphy-9cr.16 cost gate; cargo_bench_support
 # is the single feature required to run under `cargo bench`).

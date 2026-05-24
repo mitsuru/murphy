@@ -183,6 +183,8 @@ fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink) -> CxRaw {
         cop_name: RawSlice::EMPTY,
         fns: &FNS as *const FnTable,
         sink: sink as *mut OffenseSink as *mut c_void,
+        sorted_tokens: p.sorted_tokens.as_ptr(),
+        sorted_tokens_len: p.sorted_tokens.len(),
     }
 }
 

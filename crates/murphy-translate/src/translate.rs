@@ -1,7 +1,9 @@
 //! 再帰ポストオーダー DFS による prism→arena 変換。
 
-use murphy_ast::{Ast, AstBuilder, NodeId, NodeKind, OptNodeId, Range};
-use ruby_prism as prism;
+use murphy_ast::{
+    Ast, AstBuilder, NodeId, NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind,
+};
+use murphy_prism as prism;
 use std::path::PathBuf;
 
 /// Ruby ソースを prism で 1 回 parse し、所有権を持つ arena [`Ast`] へ翻訳する。
@@ -9,13 +11,22 @@ use std::path::PathBuf;
 /// prism は total・panic-free なので本関数も常に成功する。prism の借用ツリーは
 /// 本関数内で drop され、ライフタイムは外へ漏れない。
 pub fn translate(source: &str, path: impl Into<PathBuf>) -> Ast {
-    let result = prism::parse(source.as_bytes());
+    let result = prism::parse_with_tokens(source.as_bytes());
     let mut t = Translator {
         builder: AstBuilder::new(source, path),
     };
-    let root = t.translate_program(&result.node());
+    let root = t.translate_program(&result.parse().node());
+    for token in result.tokens() {
+        t.builder.add_source_token(SourceToken {
+            kind: Translator::source_token_kind(token.type_()),
+            range: Range {
+                start: token.start_offset() as u32,
+                end: token.end_offset() as u32,
+            },
+        });
+    }
     // prism のコメントを arena の comment list へ移送する。
-    for c in result.comments() {
+    for c in result.parse().comments() {
         let loc = c.location();
         let range = Translator::range(&loc);
         // `CommentType` は `InlineComment`（`#`）/ `EmbDocComment`
@@ -36,6 +47,21 @@ struct Translator {
 }
 
 impl Translator {
+    fn source_token_kind(kind: prism::pm_token_type_t) -> SourceTokenKind {
+        match kind {
+            prism::PM_TOKEN_PARENTHESIS_LEFT | prism::PM_TOKEN_PARENTHESIS_LEFT_PARENTHESES => {
+                SourceTokenKind::LeftParen
+            }
+            prism::PM_TOKEN_PARENTHESIS_RIGHT => SourceTokenKind::RightParen,
+            prism::PM_TOKEN_COMMENT => SourceTokenKind::Comment,
+            prism::PM_TOKEN_NEWLINE => SourceTokenKind::Newline,
+            prism::PM_TOKEN_IGNORED_NEWLINE => SourceTokenKind::IgnoredNewline,
+            prism::PM_TOKEN_HEREDOC_START => SourceTokenKind::HeredocStart,
+            prism::PM_TOKEN_HEREDOC_END => SourceTokenKind::HeredocEnd,
+            _ => SourceTokenKind::Other,
+        }
+    }
+
     /// prism Location → murphy Range。
     fn range(loc: &prism::Location<'_>) -> Range {
         Range {
@@ -2564,6 +2590,52 @@ mod tests {
         let ast = translate("=begin\nblock\n=end\nx = 1\n", "t.rb");
         assert_eq!(ast.comments().len(), 1);
         assert_eq!(ast.comments()[0].kind, murphy_ast::CommentKind::Block);
+    }
+
+    #[test]
+    fn translates_sorted_tokens_for_layout_punctuation_and_comments() {
+        let ast = translate("foo(1) # c\nbar(\n  2\n)\n", "t.rb");
+        let tokens: Vec<_> = ast
+            .sorted_tokens()
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.kind,
+                    murphy_ast::SourceTokenKind::LeftParen
+                        | murphy_ast::SourceTokenKind::RightParen
+                        | murphy_ast::SourceTokenKind::Comment
+                        | murphy_ast::SourceTokenKind::Newline
+                )
+            })
+            .map(|t| (t.kind, ast.raw_source(t.range).to_string()))
+            .collect();
+
+        assert!(tokens.contains(&(murphy_ast::SourceTokenKind::LeftParen, "(".to_string())));
+        assert!(tokens.contains(&(murphy_ast::SourceTokenKind::RightParen, ")".to_string())));
+        assert!(
+            tokens
+                .iter()
+                .any(|(kind, text)| *kind == murphy_ast::SourceTokenKind::Comment
+                    && text.starts_with("# c"))
+        );
+        assert!(tokens.contains(&(murphy_ast::SourceTokenKind::Newline, "\n".to_string())));
+        assert!(
+            ast.sorted_tokens()
+                .windows(2)
+                .all(|pair| pair[0].range.start <= pair[1].range.start)
+        );
+    }
+
+    #[test]
+    fn translates_ignored_newline_and_heredoc_tokens() {
+        let ignored = translate("foo(\n  1\n)\n", "t.rb");
+        let kinds: Vec<_> = ignored.sorted_tokens().iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&murphy_ast::SourceTokenKind::IgnoredNewline));
+
+        let heredoc = translate("foo( <<~HEREDOC )\nbody\nHEREDOC\n", "t.rb");
+        let kinds: Vec<_> = heredoc.sorted_tokens().iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&murphy_ast::SourceTokenKind::HeredocStart));
+        assert!(kinds.contains(&murphy_ast::SourceTokenKind::HeredocEnd));
     }
 
     // --- murphy-ocv: super-with-block ---

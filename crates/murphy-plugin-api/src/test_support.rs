@@ -397,6 +397,8 @@ fn cx_raw_for(ast: &Ast, fns: &FnTable, cop_name: RawSlice, sink: &RefCell<Sink>
         cop_name,
         fns: fns as *const FnTable,
         sink: sink as *const _ as *mut std::ffi::c_void,
+        sorted_tokens: p.sorted_tokens.as_ptr(),
+        sorted_tokens_len: p.sorted_tokens.len(),
     }
 }
 

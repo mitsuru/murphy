@@ -5,7 +5,7 @@
 
 use std::ffi::c_void;
 
-use murphy_ast::{AstNode, Comment, NodeId, NodeKindTag, Range};
+use murphy_ast::{AstNode, Comment, NodeId, NodeKindTag, Range, SourceToken};
 
 /// The ABI's borrowed-slice primitive: a `#[repr(C)]` pointer+length pair.
 ///
@@ -164,6 +164,9 @@ pub struct CxRaw {
     pub fns: *const FnTable,
     /// Opaque host offense sink, passed back to `fns` callbacks.
     pub sink: *mut c_void,
+    /// Source tokens in source order.
+    pub sorted_tokens: *const SourceToken,
+    pub sorted_tokens_len: usize,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -297,7 +300,9 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, cop_name), 104);
         assert_eq!(offset_of!(CxRaw, fns), 120);
         assert_eq!(offset_of!(CxRaw, sink), 128);
-        assert_eq!(size_of::<CxRaw>(), 136);
+        assert_eq!(offset_of!(CxRaw, sorted_tokens), 136);
+        assert_eq!(offset_of!(CxRaw, sorted_tokens_len), 144);
+        assert_eq!(size_of::<CxRaw>(), 152);
     }
 
     #[test]

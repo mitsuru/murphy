@@ -783,6 +783,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "murphy-ast",
+ "murphy-prism",
  "ruby-prism",
 ]
 

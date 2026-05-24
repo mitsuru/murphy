@@ -2,7 +2,9 @@
 
 use std::marker::PhantomData;
 
-use murphy_ast::{AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, collect_children};
+use murphy_ast::{
+    AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken, collect_children,
+};
 
 use crate::abi::CxRaw;
 
@@ -152,6 +154,11 @@ impl<'a> Cx<'a> {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
     }
 
+    /// The file's source tokens, in source order.
+    pub fn sorted_tokens(&self) -> &'a [SourceToken] {
+        unsafe { slice(self.raw.sorted_tokens, self.raw.sorted_tokens_len) }
+    }
+
     /// The source text covered by `range`.
     pub fn raw_source(&self, range: Range) -> &'a str {
         let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
@@ -248,6 +255,8 @@ mod tests {
             cop_name: RawSlice::EMPTY,
             fns: fns as *const FnTable,
             sink: std::ptr::null_mut(),
+            sorted_tokens: p.sorted_tokens.as_ptr(),
+            sorted_tokens_len: p.sorted_tokens.len(),
         }
     }
 
@@ -323,6 +332,25 @@ mod tests {
         assert_eq!(cx.list(args), &[one, two]);
         // An empty NodeList resolves to an empty slice.
         assert_eq!(cx.list(NodeList::EMPTY), &[] as &[murphy_ast::NodeId]);
+    }
+
+    #[test]
+    fn sorted_tokens_match_the_underlying_ast() {
+        let mut b = AstBuilder::new("foo(1)", "t.rb".to_string());
+        let root = b.push(NodeKind::Int(1), Range { start: 4, end: 5 });
+        b.add_source_token(murphy_ast::SourceToken {
+            kind: murphy_ast::SourceTokenKind::LeftParen,
+            range: Range { start: 3, end: 4 },
+        });
+        let ast = b.finish(root);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(cx.sorted_tokens(), ast.sorted_tokens());
     }
 
     use std::cell::RefCell;

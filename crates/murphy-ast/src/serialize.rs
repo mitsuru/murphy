@@ -13,7 +13,7 @@ use crate::ast::Ast;
 use crate::interner::Interner;
 use crate::node::{
     AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
-    StringId, Symbol,
+    SourceToken, SourceTokenKind, StringId, Symbol,
 };
 use sha2::{Digest, Sha256};
 
@@ -22,7 +22,7 @@ pub const MAGIC: &[u8; 8] = b"MURPHYAS";
 
 /// Binary format version. Bump on **any** layout change — old caches are
 /// then rejected with [`SerError::FormatVersionMismatch`].
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Total header size in bytes. The body immediately follows. Downstream
 /// (cache, mmap) code can rely on this offset being fixed.
@@ -724,6 +724,26 @@ fn read_comment(cur: &mut &[u8]) -> Result<Comment, SerError> {
     Ok(Comment { range, kind })
 }
 
+fn write_source_token(t: SourceToken, out: &mut Vec<u8>) {
+    write_range(t.range, out);
+    put_u8(out, t.kind as u8);
+}
+fn read_source_token(cur: &mut &[u8]) -> Result<SourceToken, SerError> {
+    let range = read_range(cur)?;
+    let kind = match get_u8(cur)? {
+        0 => SourceTokenKind::LeftParen,
+        1 => SourceTokenKind::RightParen,
+        2 => SourceTokenKind::Comment,
+        3 => SourceTokenKind::Newline,
+        4 => SourceTokenKind::IgnoredNewline,
+        5 => SourceTokenKind::HeredocStart,
+        6 => SourceTokenKind::HeredocEnd,
+        7 => SourceTokenKind::Other,
+        _ => return Err(SerError::BadDiscriminant),
+    };
+    Ok(SourceToken { range, kind })
+}
+
 fn write_header(source_text: &str, out: &mut Vec<u8>) {
     out.reserve(HEADER_LEN);
     out.extend_from_slice(MAGIC);
@@ -1051,11 +1071,17 @@ impl Ast {
             write_comment(c, &mut out);
         }
 
-        // 6. source text
+        // 6. source tokens
+        put_u64(&mut out, self.source_tokens.len() as u64);
+        for t in &self.source_tokens {
+            write_source_token(*t, &mut out);
+        }
+
+        // 7. source text
         put_u64(&mut out, self.source.text.len() as u64);
         out.extend_from_slice(self.source.text.as_bytes());
 
-        // 7. source path — UTF-8 only. Non-UTF-8 OS paths cannot round-trip
+        // 8. source path — UTF-8 only. Non-UTF-8 OS paths cannot round-trip
         // through the on-disk format, so reject them here instead of
         // lossy-converting and producing a buffer whose path field will not
         // match the original `PathBuf` on read-back.
@@ -1064,7 +1090,7 @@ impl Ast {
         put_u64(&mut out, path_bytes.len() as u64);
         out.extend_from_slice(path_bytes);
 
-        // 8. root
+        // 9. root
         put_u32(&mut out, self.root.0);
 
         Ok(out)
@@ -1117,7 +1143,15 @@ impl Ast {
             comments.push(read_comment(&mut cur)?);
         }
 
-        // 6. source text
+        // 6. source tokens
+        let token_count =
+            usize::try_from(get_u64(&mut cur)?).map_err(|_| SerError::UnexpectedEof)?;
+        let mut source_tokens = Vec::with_capacity(token_count);
+        for _ in 0..token_count {
+            source_tokens.push(read_source_token(&mut cur)?);
+        }
+
+        // 7. source text
         let text_len = usize::try_from(get_u64(&mut cur)?).map_err(|_| SerError::UnexpectedEof)?;
         let text_bytes = take(&mut cur, text_len)?.to_vec();
         let text = String::from_utf8(text_bytes).map_err(|_| SerError::InvalidUtf8)?;
@@ -1127,14 +1161,14 @@ impl Ast {
             return Err(SerError::ContentHashMismatch);
         }
 
-        // 7. source path — UTF-8 only; mirrored with the writer's
+        // 8. source path — UTF-8 only; mirrored with the writer's
         // `PathNotUtf8` rejection.
         let path_len = usize::try_from(get_u64(&mut cur)?).map_err(|_| SerError::UnexpectedEof)?;
         let path_bytes = take(&mut cur, path_len)?.to_vec();
         let path_string = String::from_utf8(path_bytes).map_err(|_| SerError::PathNotUtf8)?;
         let path = std::path::PathBuf::from(path_string);
 
-        // 8. root
+        // 9. root
         let root = NodeId(get_u32(&mut cur)?);
 
         let ast = Ast {
@@ -1142,6 +1176,7 @@ impl Ast {
             node_lists,
             interner: Interner { blob, offsets },
             comments,
+            source_tokens,
             source: SourceBuffer { text, path },
             root,
         };
@@ -1154,7 +1189,9 @@ impl Ast {
 mod tests {
     use crate::SerError;
     use crate::builder::AstBuilder;
-    use crate::node::{CommentKind, NodeKind, NodeList, OptNodeId, Range};
+    use crate::node::{
+        CommentKind, NodeKind, NodeList, OptNodeId, Range, SourceToken, SourceTokenKind,
+    };
 
     fn r(a: u32, b: u32) -> Range {
         Range { start: a, end: b }
@@ -1669,6 +1706,47 @@ mod tests {
         let ast = b.finish(root);
         let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).unwrap();
         assert_eq!(ast, restored);
+    }
+
+    #[test]
+    fn round_trip_source_tokens() {
+        let mut b = AstBuilder::new("foo(1)\n", "t.rb");
+        let root = b.push(NodeKind::Int(1), r(4, 5));
+        b.add_source_token(SourceToken {
+            kind: SourceTokenKind::LeftParen,
+            range: r(3, 4),
+        });
+        b.add_source_token(SourceToken {
+            kind: SourceTokenKind::Newline,
+            range: r(6, 7),
+        });
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
+        assert_eq!(restored.sorted_tokens(), ast.sorted_tokens());
+    }
+
+    #[test]
+    fn from_bytes_rejects_bad_source_token_kind() {
+        let mut b = AstBuilder::new("foo(1)", "t.rb");
+        let root = b.push(NodeKind::Int(1), r(4, 5));
+        b.add_source_token(SourceToken {
+            kind: SourceTokenKind::LeftParen,
+            range: r(3, 4),
+        });
+        let ast = b.finish(root);
+        let mut bytes = ast.to_bytes().unwrap();
+        let encoded_token = [3, 0, 0, 0, 4, 0, 0, 0, SourceTokenKind::LeftParen as u8];
+        let token_at = bytes
+            .windows(encoded_token.len())
+            .position(|window| window == encoded_token)
+            .expect("encoded source token present");
+        bytes[token_at + encoded_token.len() - 1] = 99;
+
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::BadDiscriminant)
+        ));
     }
 
     // --- header / validation tests (murphy-9cr.26) ---
