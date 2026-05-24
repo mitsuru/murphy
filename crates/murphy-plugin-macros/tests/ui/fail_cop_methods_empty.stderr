@@ -1,0 +1,19 @@
+error: #[on_node]: `methods = []` is not allowed — list at least one method name or omit the argument
+  --> tests/ui/fail_cop_methods_empty.rs:14:30
+   |
+14 |     #[on_node(kind = "send", methods = [])]
+   |                              ^^^^^^^
+
+warning: unused import: `murphy_ast::NodeId`
+ --> tests/ui/fail_cop_methods_empty.rs:1:5
+  |
+1 | use murphy_ast::NodeId;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `murphy_plugin_api::Cx`
+ --> tests/ui/fail_cop_methods_empty.rs:2:5
+  |
+2 | use murphy_plugin_api::Cx;
+  |     ^^^^^^^^^^^^^^^^^^^^^

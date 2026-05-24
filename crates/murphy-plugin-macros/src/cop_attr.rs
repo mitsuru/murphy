@@ -266,12 +266,29 @@ fn valid_kinds_list() -> String {
 /// should be a hand-rolled `KINDS = &[]` cop, not the macro shorthand.
 enum Dispatch {
     /// `#[on_node(kind = "...")]` — one entry per kind on the method.
-    Node(Vec<(LitStr, u8)>),
+    Node(Vec<NodeKindEntry>),
     /// `#[on_new_investigation]` — one bare attribute, no payload. The
     /// kept [`syn::Attribute`] carries the span for diagnostics; boxed
     /// to keep [`Dispatch`] cheap relative to the `Node` variant
     /// (clippy::large_enum_variant).
     Investigation(Box<syn::Attribute>),
+}
+
+/// One `#[on_node(kind = "...", methods = [...])]` declaration on a
+/// dispatch method.
+///
+/// `methods` is **only** meaningful for `kind = "send"` — it lists the
+/// allow-listed `Send.method` symbol names that should reach the
+/// user's check method. Empty `methods` means no restriction (the
+/// historical behaviour: every `Send` reaches the cop). RuboCop's
+/// `restrict_on_send` analogue (murphy-34d).
+struct NodeKindEntry {
+    kind_lit: LitStr,
+    tag: u8,
+    /// Allow-listed method names for `kind = "send"`. Empty ⇒ no
+    /// filter applied; the macro-generated dispatch arm invokes the
+    /// user method for every matching node.
+    methods: Vec<LitStr>,
 }
 
 /// A dispatched method extracted from an impl block (`#[on_node]` or
@@ -281,6 +298,60 @@ struct CopMethod {
     ident: Ident,
     /// How the host reaches this method.
     dispatch: Dispatch,
+}
+
+/// Parse the contents of `#[on_node(kind = "..."[, methods = ["..."]])]`.
+///
+/// Returns the kind literal plus the (possibly empty) list of method
+/// name literals. The methods array is rejected at the call site if
+/// the kind is not `"send"` (RuboCop's `restrict_on_send` analogue —
+/// `methods` only makes sense on send dispatch).
+fn parse_on_node_args(input: ParseStream<'_>) -> syn::Result<(LitStr, Vec<LitStr>)> {
+    let key: Ident = input.parse()?;
+    if key != "kind" {
+        return Err(Error::new_spanned(
+            &key,
+            format!("#[on_node]: unknown argument '{key}'; expected 'kind'"),
+        ));
+    }
+    input.parse::<Token![=]>()?;
+    let kind: LitStr = input.parse()?;
+
+    let mut methods: Vec<LitStr> = Vec::new();
+    if input.peek(Token![,]) {
+        input.parse::<Token![,]>()?;
+        // Optional trailing comma — accept it and stop.
+        if input.is_empty() {
+            return Ok((kind, methods));
+        }
+        let second_key: Ident = input.parse()?;
+        if second_key != "methods" {
+            return Err(Error::new_spanned(
+                &second_key,
+                format!("#[on_node]: unknown argument '{second_key}'; expected 'methods'",),
+            ));
+        }
+        input.parse::<Token![=]>()?;
+        // `methods = [...]` — a bracketed list of string literals.
+        let content;
+        syn::bracketed!(content in input);
+        while !content.is_empty() {
+            let m: LitStr = content.parse()?;
+            methods.push(m);
+            if content.is_empty() {
+                break;
+            }
+            content.parse::<Token![,]>()?;
+        }
+        if methods.is_empty() {
+            return Err(Error::new_spanned(
+                &second_key,
+                "#[on_node]: `methods = []` is not allowed — list at least one method name or omit the argument",
+            ));
+        }
+    }
+
+    Ok((kind, methods))
 }
 
 /// Collect all dispatched methods (`#[on_node]` and
@@ -297,31 +368,43 @@ fn collect_cop_methods(item_impl: &mut ItemImpl) -> syn::Result<Vec<CopMethod>> 
             continue;
         };
 
-        let mut kinds: Vec<(LitStr, u8)> = Vec::new();
+        let mut kinds: Vec<NodeKindEntry> = Vec::new();
         let mut investigation_attrs: Vec<syn::Attribute> = Vec::new();
 
         // Partition: collect #[on_node] / #[on_new_investigation] and retain everything else.
         let mut kept_attrs = Vec::new();
         for attr in f.attrs.drain(..) {
             if attr.path().is_ident("on_node") {
-                match attr.parse_args_with(|input: ParseStream<'_>| {
-                    // Parse as OnNodeArgsRaw then resolve.
-                    let key: Ident = input.parse()?;
-                    if key != "kind" {
-                        return Err(Error::new_spanned(
-                            &key,
-                            format!("#[on_node]: unknown argument '{key}'; expected 'kind'"),
-                        ));
-                    }
-                    input.parse::<Token![=]>()?;
-                    let kind: LitStr = input.parse()?;
-                    Ok(kind)
-                }) {
-                    Ok(kind_lit) => {
+                match attr.parse_args_with(parse_on_node_args) {
+                    Ok((kind_lit, methods_lits)) => {
                         let kind_str = kind_lit.value();
                         match murphy_ast::tag_from_pattern_name(&kind_str) {
                             Some(tag) => {
-                                kinds.push((kind_lit, tag.0));
+                                // `methods` is only meaningful on send (RuboCop's
+                                // `restrict_on_send` analogue). For any other kind it's
+                                // a category error — the cop is filtering by an axis
+                                // that does not exist on that node type.
+                                if !methods_lits.is_empty() && kind_str != "send" {
+                                    let e = Error::new_spanned(
+                                        &kind_lit,
+                                        format!(
+                                            "#[on_node]: `methods = [...]` is only valid for `kind = \"send\"`; got kind \"{kind_str}\"",
+                                        ),
+                                    );
+                                    match errors.take() {
+                                        Some(mut acc) => {
+                                            acc.combine(e);
+                                            errors = Some(acc);
+                                        }
+                                        None => errors = Some(e),
+                                    }
+                                } else {
+                                    kinds.push(NodeKindEntry {
+                                        kind_lit,
+                                        tag: tag.0,
+                                        methods: methods_lits,
+                                    });
+                                }
                             }
                             None => {
                                 let valid = valid_kinds_list();
@@ -723,7 +806,8 @@ fn validate_no_duplicate_kinds(methods: &[CopMethod]) -> syn::Result<()> {
         let Dispatch::Node(kinds) = &method.dispatch else {
             continue;
         };
-        for (kind_lit, _tag) in kinds {
+        for entry in kinds {
+            let kind_lit = &entry.kind_lit;
             let name = kind_lit.value();
             if let Some(first) = seen.get(&name) {
                 let mut e = Error::new_spanned(
@@ -850,36 +934,68 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
     if investigation_method.is_none() {
         for cop_method in cop_methods {
             let method_ident = &cop_method.ident;
-            let Dispatch::Node(kinds) = &cop_method.dispatch else {
+            let Dispatch::Node(entries) = &cop_method.dispatch else {
                 continue;
             };
 
             // Build KINDS entries for each kind of this method.
-            for (_, tag) in kinds {
-                let tag_lit = Literal::u8_suffixed(*tag);
+            for entry in entries {
+                let tag_lit = Literal::u8_suffixed(entry.tag);
                 kinds_entries.push(quote! {
                     ::murphy_plugin_api::NodeKindTag(#tag_lit)
                 });
             }
 
-            // Build the match arm (possibly with or-patterns for multiple kinds).
-            let tag_patterns: Vec<TokenStream> = kinds
+            // Partition entries into unfiltered (no `methods`) and
+            // filtered (send-only with `methods = [...]`). Unfiltered
+            // entries share one match arm with an or-pattern over their
+            // tags; each filtered entry needs its own arm with the
+            // symbol_str gate (one send entry per cop today, but the
+            // shape generalises naturally).
+            let unfiltered_tags: Vec<u8> = entries
                 .iter()
-                .map(|(_, tag)| {
-                    let tag_lit = Literal::u8_suffixed(*tag);
-                    quote! { #tag_lit }
-                })
+                .filter(|e| e.methods.is_empty())
+                .map(|e| e.tag)
                 .collect();
+            if !unfiltered_tags.is_empty() {
+                let tag_patterns: Vec<TokenStream> = unfiltered_tags
+                    .iter()
+                    .map(|t| {
+                        let tag_lit = Literal::u8_suffixed(*t);
+                        quote! { #tag_lit }
+                    })
+                    .collect();
+                let arm_pattern = if tag_patterns.len() == 1 {
+                    quote! { #(#tag_patterns)* }
+                } else {
+                    quote! { #(#tag_patterns)|* }
+                };
+                match_arms.push(quote! {
+                    #arm_pattern => Self::#method_ident(self, node, cx),
+                });
+            }
 
-            let arm_pattern = if tag_patterns.len() == 1 {
-                quote! { #(#tag_patterns)* }
-            } else {
-                quote! { #(#tag_patterns)|* }
-            };
-
-            match_arms.push(quote! {
-                #arm_pattern => Self::#method_ident(self, node, cx),
-            });
+            for entry in entries.iter().filter(|e| !e.methods.is_empty()) {
+                let tag_lit = Literal::u8_suffixed(entry.tag);
+                // The methods filter is guaranteed (by parser-time validation)
+                // to apply only to kind = "send". The dispatch arm
+                // destructures `NodeKind::Send` to read the method symbol
+                // and compares it against the allow-list before reaching
+                // the user method. `cx.symbol_str` is a pure arena read.
+                let method_lits = &entry.methods;
+                match_arms.push(quote! {
+                    #tag_lit => {
+                        if let ::murphy_plugin_api::NodeKind::Send { method, .. } =
+                            *cx.kind(node)
+                        {
+                            let m = cx.symbol_str(method);
+                            if matches!(m, #(#method_lits)|*) {
+                                Self::#method_ident(self, node, cx);
+                            }
+                        }
+                    },
+                });
+            }
         }
     }
 
