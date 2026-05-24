@@ -309,34 +309,28 @@ fn check_is_no_op_for_kinds_outside_kinds_array() {
 }
 
 #[test]
-fn methods_filter_passes_listed_method_names() {
-    // T7 lists ["describe", "context"]. Dispatching `describe` and
-    // `context` send nodes must invoke check_send; `foo` must not.
-    let mut b = AstBuilder::new("src", "t.rb".to_string());
-    let describe_id = push_send_named(&mut b, "describe");
-    let context_id = push_send_named(&mut b, "context");
-    let foo_id = push_send_named(&mut b, "foo");
-    let begin_list = b.push_list(&[describe_id, context_id, foo_id]);
-    let root = b.push(NodeKind::Begin(begin_list), Range { start: 0, end: 30 });
-    let ast = b.finish(root);
+fn methods_filter_lowers_to_send_methods_const() {
+    // The host applies the filter via `PluginCopV1::send_methods_*`
+    // (murphy-ip0); the cop body itself unconditionally invokes its
+    // check method. So the macro contract this test pins is "the
+    // `methods = [...]` array is lowered into the `SEND_METHODS`
+    // associated const in declaration order". The actual host-level
+    // filter behaviour is covered by `dispatch_pre_filters_send_by_method_name`
+    // in `murphy_core::dispatch`.
+    let lowered: Vec<&str> = <T7 as NodeCop>::SEND_METHODS
+        .iter()
+        .map(|s| std::str::from_utf8(unsafe { s.as_bytes() }).unwrap())
+        .collect();
+    assert_eq!(lowered, vec!["describe", "context"]);
+}
 
-    let fns = FnTable {
-        emit_offense: noop_offense,
-        emit_edit: noop_edit,
-    };
-    let raw = cx_raw_for(&ast, &fns);
-    let cx = unsafe { Cx::from_raw(&raw) };
-
-    let t7 = T7::default();
-    t7.check(describe_id, &cx);
-    t7.check(context_id, &cx);
-    t7.check(foo_id, &cx);
-
-    assert_eq!(
-        t7.hits.load(Ordering::Relaxed),
-        2,
-        "only describe + context should pass the methods filter (foo is filtered out)"
-    );
+#[test]
+fn unfiltered_send_cop_has_empty_send_methods() {
+    // T4 declares `#[on_node(kind = "send")]` without `methods`. The
+    // associated const must default to empty so the host applies no
+    // filter — preserving the historical "every Send reaches the cop"
+    // contract for cops that don't opt in to `restrict_on_send`.
+    assert!(<T4 as NodeCop>::SEND_METHODS.is_empty());
 }
 
 #[test]

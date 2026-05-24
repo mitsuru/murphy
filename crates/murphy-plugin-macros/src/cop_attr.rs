@@ -931,6 +931,25 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
     let mut kinds_entries: Vec<TokenStream> = Vec::new();
     let mut match_arms: Vec<TokenStream> = Vec::new();
 
+    // Union of every `methods = [...]` literal across the impl, in
+    // declaration order. Parser-time validation restricts `methods` to
+    // `kind = "send"` and duplicate-kind detection (see
+    // `validate_no_duplicate_kinds`) prevents two send methods from
+    // competing for the filter, so concatenation is safe. The host
+    // reads this through `PluginCopV1::send_methods_ptr` and
+    // pre-filters every Send before it reaches the cop's `dispatch`
+    // thunk (murphy-ip0); the generated `check` body therefore does
+    // not perform a method-name comparison.
+    let send_method_lits: Vec<&LitStr> = cop_methods
+        .iter()
+        .filter_map(|m| match &m.dispatch {
+            Dispatch::Node(entries) => Some(entries),
+            Dispatch::Investigation(_) => None,
+        })
+        .flatten()
+        .flat_map(|e| e.methods.iter())
+        .collect();
+
     if investigation_method.is_none() {
         for cop_method in cop_methods {
             let method_ident = &cop_method.ident;
@@ -946,56 +965,25 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
                 });
             }
 
-            // Partition entries into unfiltered (no `methods`) and
-            // filtered (send-only with `methods = [...]`). Unfiltered
-            // entries share one match arm with an or-pattern over their
-            // tags; each filtered entry needs its own arm with the
-            // symbol_str gate (one send entry per cop today, but the
-            // shape generalises naturally).
-            let unfiltered_tags: Vec<u8> = entries
+            // One match arm per method listing every subscribed kind
+            // in an or-pattern. The shape is uniform whether or not
+            // the attribute carries `methods = [...]` — the filter is
+            // applied by the host before this `check` is ever called.
+            let tag_patterns: Vec<TokenStream> = entries
                 .iter()
-                .filter(|e| e.methods.is_empty())
-                .map(|e| e.tag)
+                .map(|e| {
+                    let tag_lit = Literal::u8_suffixed(e.tag);
+                    quote! { #tag_lit }
+                })
                 .collect();
-            if !unfiltered_tags.is_empty() {
-                let tag_patterns: Vec<TokenStream> = unfiltered_tags
-                    .iter()
-                    .map(|t| {
-                        let tag_lit = Literal::u8_suffixed(*t);
-                        quote! { #tag_lit }
-                    })
-                    .collect();
-                let arm_pattern = if tag_patterns.len() == 1 {
-                    quote! { #(#tag_patterns)* }
-                } else {
-                    quote! { #(#tag_patterns)|* }
-                };
-                match_arms.push(quote! {
-                    #arm_pattern => Self::#method_ident(self, node, cx),
-                });
-            }
-
-            for entry in entries.iter().filter(|e| !e.methods.is_empty()) {
-                let tag_lit = Literal::u8_suffixed(entry.tag);
-                // The methods filter is guaranteed (by parser-time validation)
-                // to apply only to kind = "send". The dispatch arm
-                // destructures `NodeKind::Send` to read the method symbol
-                // and compares it against the allow-list before reaching
-                // the user method. `cx.symbol_str` is a pure arena read.
-                let method_lits = &entry.methods;
-                match_arms.push(quote! {
-                    #tag_lit => {
-                        if let ::murphy_plugin_api::NodeKind::Send { method, .. } =
-                            *cx.kind(node)
-                        {
-                            let m = cx.symbol_str(method);
-                            if matches!(m, #(#method_lits)|*) {
-                                Self::#method_ident(self, node, cx);
-                            }
-                        }
-                    },
-                });
-            }
+            let arm_pattern = if tag_patterns.len() == 1 {
+                quote! { #(#tag_patterns)* }
+            } else {
+                quote! { #(#tag_patterns)|* }
+            };
+            match_arms.push(quote! {
+                #arm_pattern => Self::#method_ident(self, node, cx),
+            });
         }
     }
 
@@ -1036,6 +1024,20 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
         quote! { type Options = ::murphy_plugin_api::NoOptions; }
     };
 
+    // `const SEND_METHODS` — host-level `restrict_on_send` allow-list
+    // (murphy-ip0). Emit only when the impl declares at least one
+    // `methods = [...]`; otherwise rely on the `NodeCop` trait default
+    // (empty slice ⇒ no filter).
+    let send_methods_const: TokenStream = if send_method_lits.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            const SEND_METHODS: &'static [::murphy_plugin_api::RawSlice] = &[
+                #( ::murphy_plugin_api::RawSlice::from_str(#send_method_lits), )*
+            ];
+        }
+    };
+
     let impl_cop = quote! {
         impl ::murphy_plugin_api::Cop for #self_ty {
             #options_type
@@ -1067,6 +1069,8 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
                 const KINDS: &'static [::murphy_plugin_api::NodeKindTag] = &[
                     #(#kinds_entries,)*
                 ];
+
+                #send_methods_const
 
                 fn check(&self, node: ::murphy_plugin_api::NodeId, cx: &::murphy_plugin_api::Cx<'_>) {
                     match ::murphy_plugin_api::NodeKindTag::of(cx.kind(node)).0 {

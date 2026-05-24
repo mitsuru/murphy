@@ -126,31 +126,58 @@ and edits via `cx.emit_edit` (§5).
 ### Method-name filtering on `Send` dispatch
 
 `#[on_node(kind = "send")]` fires for **every** `Send` node in the file
-— `puts(x)`, `obj.foo`, `a + b`, `arr[i]`, all of it. Cops that only
-care about a specific method name filter inside the dispatch body:
+— `puts(x)`, `obj.foo`, `a + b`, `arr[i]`, all of it. The
+`methods = [...]` argument restricts dispatch to a fixed allow-list of
+method symbol names — Murphy's analogue of RuboCop's
+`RESTRICT_ON_SEND = %i[describe context]` (murphy-34d, murphy-ip0):
 
 ```rust
-#[on_node(kind = "send")]
+#[on_node(kind = "send", methods = ["describe", "context"])]
 fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send { receiver, method, args } = *cx.kind(node) else { return };
-    if cx.symbol_str(method) != "describe" {
-        return;
-    }
+    // Reached only when the Send's method symbol is "describe" or "context".
+    let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else { return };
     // … real check
 }
 ```
 
-This `let-else` + `symbol_str` guard is the load-bearing idiom; every
-Murphy `Send` cop opens this way. The `let-else` defends against
-future `NodeKind` aliasing accidents, and `cx.symbol_str(method)`
-resolves the interned identifier without allocating.
+The macro lowers the array into the cop's `SEND_METHODS` associated
+const, which `register_cops!` pushes into `PluginCopV1::send_methods_ptr`.
+**The filter is applied by the host dispatcher** — for a `Send` whose
+method symbol is not in the list, the cop's `dispatch` thunk is never
+invoked, saving the FFI call + cop body wake-up. Cops that don't opt
+in (`SEND_METHODS` defaults to empty) keep the historical "every
+`Send` reaches the cop" contract.
 
-There is **no `restrict_on_send` equivalent yet** — RuboCop's
-`RESTRICT_ON_SEND = %i[foo bar]` class const that pre-filters by
-method name before the hook is called. Tracked as `murphy-34d`; the
-likely surface is an additional `#[on_node(kind = "send", methods =
-["foo", "bar"])]` argument that the macro lowers into the dispatch
-wrapper so the cop body no longer starts with the guard.
+Rules:
+
+- `methods` is **only** valid on `kind = "send"`. The macro rejects it
+  on any other kind at parse time (other node types don't have a
+  single "method name" axis).
+- `methods = []` is rejected — it silently disables the cop, which is
+  almost always a typo.
+- The same kind cannot dispatch to multiple methods (`#[cop]`-level
+  duplicate-kind check), so combine multiple allow-lists into one
+  attribute rather than declaring two competing
+  `#[on_node(kind = "send", methods = […])]` instances.
+- The `let-else` destructure inside the cop is still defensive — a
+  future `NodeKind` aliasing accident would silently misreport without
+  it, but the method-name check is gone.
+
+Without `methods = [...]`, the dispatch fires for every `Send` and the
+cop body uses the historical manual idiom:
+
+```rust
+#[on_node(kind = "send")]
+fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+    let NodeKind::Send { method, .. } = *cx.kind(node) else { return };
+    if cx.symbol_str(method) != "describe" { return; }
+    // …
+}
+```
+
+Use this form when the method-name predicate is not a fixed literal
+set (runtime-computed, configuration-dependent, etc.); reach for
+`methods = [...]` whenever the allow-list is statically known.
 
 ### Reusable matchers: `node_pattern!`
 
