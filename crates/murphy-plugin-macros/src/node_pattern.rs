@@ -138,7 +138,8 @@ enum SlotTy {
     /// `OptNodeId` field — `nil?` matches absence, else the child must be
     /// present and recurse.
     OptNode,
-    /// `Symbol` field — only a `:sym` literal or `_` pattern child.
+    /// `Symbol` field — accepts `_`, a single `:sym` literal, or a
+    /// `{:a :b ...}` union of `:sym` literals (murphy-rs7).
     Sym,
     /// `NodeList` field — the remaining pattern children, `cx.list()`-resolved.
     List,
@@ -1107,7 +1108,7 @@ fn lower_fixed_slot(
     child: &murphy_pattern::Pat,
     ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
-    use murphy_pattern::{Lit, PatKind};
+    use murphy_pattern::PatKind;
     let fail = fail_stmt(ctx);
     match ty {
         SlotTy::Node => lower_pat(child, &quote!(#bind), ctx),
@@ -1138,22 +1139,65 @@ fn lower_fixed_slot(
                 })
             }
         }
-        SlotTy::Sym => match &child.kind {
-            PatKind::Wildcard => Ok(quote!()),
-            PatKind::Lit(Lit::Sym(s)) => {
-                let s = s.as_str();
-                Ok(quote! {
+        SlotTy::Sym => {
+            let syms = sym_slot_alternatives(child)?;
+            // One arm: `if cx.symbol_str(b) != "x" { fail }`.
+            // Many arms: `if !matches!(cx.symbol_str(b), "a" | "b") { fail }`.
+            // Empty: the wildcard child returns an empty list — emit no guard.
+            if syms.is_empty() {
+                return Ok(quote!());
+            }
+            if syms.len() == 1 {
+                let s = syms[0];
+                return Ok(quote! {
                     if cx.symbol_str(#bind) != #s {
                         #fail
                     }
-                })
+                });
             }
-            _ => Err(syn::Error::new(
-                Span::call_site(),
-                "node_pattern!: symbol slot only accepts a `:sym` literal or `_`",
-            )),
-        },
+            Ok(quote! {
+                if !::core::matches!(cx.symbol_str(#bind), #(#syms)|*) {
+                    #fail
+                }
+            })
+        }
         SlotTy::List => unreachable!("List slot is excluded from fixed slots"),
+    }
+}
+
+/// Classify a sym-slot pattern child into a flat list of accepted name
+/// strings. Used by both [`lower_fixed_slot`] and [`lower_bool_fixed_slot`]
+/// to share the wildcard / `:sym` literal / `{:a :b ...}` union surface
+/// (murphy-rs7). Returns an empty `Vec` for a wildcard (the slot
+/// matches any name and emits no guard) and a one-element `Vec` for a
+/// single literal. A union must hold only `:sym` literals — any other
+/// arm is a span-carrying compile error.
+fn sym_slot_alternatives(child: &murphy_pattern::Pat) -> syn::Result<Vec<&str>> {
+    use murphy_pattern::{Lit, PatKind};
+    match &child.kind {
+        PatKind::Wildcard => Ok(Vec::new()),
+        PatKind::Lit(Lit::Sym(s)) => Ok(vec![s.as_str()]),
+        PatKind::Union(alts) => {
+            let mut out = Vec::with_capacity(alts.len());
+            for alt in alts {
+                match &alt.kind {
+                    PatKind::Lit(Lit::Sym(s)) => out.push(s.as_str()),
+                    _ => {
+                        return Err(syn::Error::new(
+                            Span::call_site(),
+                            "node_pattern!: symbol slot union `{...}` only \
+                             accepts `:sym` literals",
+                        ));
+                    }
+                }
+            }
+            Ok(out)
+        }
+        _ => Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: symbol slot only accepts a `:sym` literal, `_`, \
+             or a `{:sym :sym ...}` union of `:sym` literals",
+        )),
     }
 }
 
@@ -1560,7 +1604,7 @@ fn lower_bool_fixed_slot(
     child: &murphy_pattern::Pat,
     ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
-    use murphy_pattern::{Lit, PatKind};
+    use murphy_pattern::PatKind;
     match ty {
         SlotTy::Node => lower_bool(child, &quote!(#bind), ctx),
         SlotTy::OptNode => {
@@ -1584,17 +1628,20 @@ fn lower_bool_fixed_slot(
                 })
             }
         }
-        SlotTy::Sym => match &child.kind {
-            PatKind::Wildcard => Ok(quote!(true)),
-            PatKind::Lit(Lit::Sym(s)) => {
-                let s = s.as_str();
-                Ok(quote!( ( cx.symbol_str(#bind) == #s ) ))
+        SlotTy::Sym => {
+            let syms = sym_slot_alternatives(child)?;
+            // The bool form mirrors `lower_fixed_slot`'s sym branch with
+            // an inverted polarity: a wildcard slot is `true`; a single
+            // literal compares; a union routes through `matches!`.
+            if syms.is_empty() {
+                return Ok(quote!(true));
             }
-            _ => Err(syn::Error::new(
-                Span::call_site(),
-                "node_pattern!: symbol slot only accepts a `:sym` literal or `_`",
-            )),
-        },
+            if syms.len() == 1 {
+                let s = syms[0];
+                return Ok(quote!( ( cx.symbol_str(#bind) == #s ) ));
+            }
+            Ok(quote!((::core::matches!(cx.symbol_str(#bind), #(#syms)|*))))
+        }
         SlotTy::List => unreachable!("List slot is excluded from fixed slots"),
     }
 }

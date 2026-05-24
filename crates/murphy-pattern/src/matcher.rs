@@ -316,12 +316,25 @@ fn match_fixed_slot<P: PredicateHost + ?Sized>(
             (Some(n), _) => match_pat(ctx, pat_id, n, buf, predicates),
         },
 
-        // Symbol slots accept only `_` or a `:sym` literal — same surface
-        // as the B backend's `SlotTy::Sym`. Anything else is a structural
-        // mismatch (no capture or recursion).
+        // Symbol slots accept `_`, a `:sym` literal, or a `{:a :b ...}`
+        // union whose arms are all `:sym` literals (murphy-rs7) — same
+        // surface as the B backend's `SlotTy::Sym`. Anything else is a
+        // structural mismatch (no capture or recursion). The B backend
+        // rejects non-sym union arms at compile time; the C backend
+        // tolerates them at runtime by simply failing every comparison
+        // (a defensive non-LitSym arm matches nothing).
         PatChild::Sym(actual_sym) => match ctx.ir_node(pat_id) {
             IrNode::Wildcard => true,
             IrNode::LitSym(r) => ctx.ast.interner().resolve(actual_sym.0) == ctx.pool(*r),
+            IrNode::Union(arms) => {
+                let actual = ctx.ast.interner().resolve(actual_sym.0);
+                let arm_ids =
+                    &ctx.ir.children[arms.start as usize..(arms.start + arms.len) as usize];
+                arm_ids.iter().any(|id| match ctx.ir_node(*id) {
+                    IrNode::LitSym(r) => ctx.pool(*r) == actual,
+                    _ => false,
+                })
+            }
             _ => false,
         },
 
@@ -561,6 +574,35 @@ mod tests {
         // `puts(1)` has no receiver — `nil?` must match the absent slot.
         let ir = compile("(send nil? :puts _)").unwrap();
         assert!(matches(&ir, &ast, send, &mut NoPredicates).is_some());
+    }
+
+    #[test]
+    fn send_method_slot_union_matches_any_listed_sym() {
+        // murphy-rs7: `{:puts :print}` at the send method slot accepts
+        // either name. `puts(1)` has method `:puts` — must hit.
+        let (ast, send) = puts_one_ast();
+        let ir = compile("(send nil? {:puts :print} ...)").unwrap();
+        assert!(matches(&ir, &ast, send, &mut NoPredicates).is_some());
+    }
+
+    #[test]
+    fn send_method_slot_union_misses_unlisted_sym() {
+        // `foo.bar(...)` — `:bar` is not in `{:puts :print}`.
+        let (ast, send) = dotcall_three_args_ast();
+        let ir = compile("(send _ {:puts :print} ...)").unwrap();
+        assert!(matches(&ir, &ast, send, &mut NoPredicates).is_none());
+    }
+
+    #[test]
+    fn gvar_sym_slot_union_filters_on_name_membership() {
+        // murphy-rs7 on top of murphy-o5k: `{:$stdout :$stderr}` at
+        // a Gvar sym slot accepts either name and misses others.
+        let mut b = AstBuilder::new("$stdout", "t.rb");
+        let s = b.intern_symbol("$stdout");
+        let g = b.push(NodeKind::Gvar(s), r());
+        let ast = b.finish(g);
+        let un = compile("(gvar {:$stdout :$stderr})").unwrap();
+        assert!(matches(&un, &ast, g, &mut NoPredicates).is_some());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-error: node_pattern!: symbol slot only accepts a `:sym` literal or `_`
+error: node_pattern!: symbol slot only accepts a `:sym` literal, `_`, or a `{:sym :sym ...}` union of `:sym` literals
  --> tests/ui/fail_node_pattern_sym_capture.rs:4:1
   |
 4 | murphy_plugin_macros::node_pattern!(m, "(send nil? $_)");
