@@ -165,11 +165,25 @@ class Murphy
       else
         0
       end
-      offset = source.index(method.to_s, search_from)
+      selector = method.to_s
+      candidates = [selector]
+      candidates << selector[0...-1] if selector.end_with?("=", "@") && selector.bytesize > 1
+      candidates << "[]" if selector == "[]="
+      search_from = 0 if selector.end_with?("@")
+
+      offset = nil
+      matched = nil
+      candidates.each do |candidate|
+        offset = source.index(candidate, search_from)
+        if offset
+          matched = candidate
+          break
+        end
+      end
       return node_range unless offset
 
       start_offset = node_range.start_offset + offset
-      Murphy::Range.new(start_offset, start_offset + method.to_s.bytesize)
+      Murphy::Range.new(start_offset, start_offset + matched.bytesize)
     end
 
     private

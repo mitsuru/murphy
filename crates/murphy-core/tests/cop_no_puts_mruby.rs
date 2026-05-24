@@ -349,3 +349,37 @@ end
         "message_loc should point to the selector after the dot, not the receiver"
     );
 }
+
+#[test]
+fn message_loc_handles_setter_and_unary_selector_spelling() {
+    const COP: &str = r#"
+class SelectorSpellingCop < Murphy::Cop
+  def on_call_node(node)
+    if node.field(:method) == :foo=
+      add_offense(node.message_loc, message: "setter")
+    elsif node.field(:method) == :-@
+      add_offense(node.message_loc, message: "unary")
+    end
+  end
+end
+"#;
+
+    let offenses = run(COP, "Murphy/SelectorSpelling", "t.rb", "obj.foo = 1\n-x\n");
+    assert_eq!(offenses.len(), 2);
+    assert_eq!(
+        offenses[0].range,
+        Range {
+            start_offset: 4,
+            end_offset: 7
+        },
+        "setter message_loc should cover the foo selector, not the whole assignment"
+    );
+    assert_eq!(
+        offenses[1].range,
+        Range {
+            start_offset: 12,
+            end_offset: 13
+        },
+        "unary message_loc should cover the '-' token, not the full expression"
+    );
+}
