@@ -22,6 +22,13 @@ struct Opts {
 
     #[option(deprecated = "use max")]
     maybe: Option<i64>,
+
+    #[option(
+        name = "EnforcedStyle",
+        default = "no_space",
+        enum_values = ["no_space", "space", "compact"]
+    )]
+    enforced_style: String,
 }
 
 fn slice_str(slice: RawSlice) -> &'static str {
@@ -36,6 +43,7 @@ fn default_reflects_option_defaults() {
     assert_eq!(d.allowed, vec!["id".to_string()]);
     assert!(!d.required_flag); // no #[option(default)] -> Default::default()
     assert_eq!(d.maybe, None);
+    assert_eq!(d.enforced_style, "no_space");
 }
 
 #[test]
@@ -45,7 +53,8 @@ fn from_config_json_decodes_valid_input() {
         "style": "aligned",
         "allowed": ["a", "b"],
         "required_flag": true,
-        "maybe": 5
+        "maybe": 5,
+        "EnforcedStyle": "compact"
     }"#;
     let o = Opts::from_config_json(json).expect("valid config decodes");
     assert_eq!(o.max, 100);
@@ -53,6 +62,7 @@ fn from_config_json_decodes_valid_input() {
     assert_eq!(o.allowed, vec!["a".to_string(), "b".to_string()]);
     assert!(o.required_flag);
     assert_eq!(o.maybe, Some(5));
+    assert_eq!(o.enforced_style, "compact");
 }
 
 #[test]
@@ -63,6 +73,7 @@ fn from_config_json_fills_defaults_for_absent_fields() {
     assert_eq!(o.style, "indented");
     assert_eq!(o.allowed, vec!["id".to_string()]);
     assert_eq!(o.maybe, None);
+    assert_eq!(o.enforced_style, "no_space");
 }
 
 #[test]
@@ -125,7 +136,7 @@ fn from_config_json_rejects_invalid_json() {
 #[test]
 fn schema_describes_each_field_in_order() {
     let schema: &[OptionSpec] = Opts::SCHEMA;
-    assert_eq!(schema.len(), 5);
+    assert_eq!(schema.len(), 6);
 
     assert_eq!(slice_str(schema[0].name), "max");
     assert_eq!(slice_str(schema[0].ty), "int");
@@ -154,4 +165,12 @@ fn schema_describes_each_field_in_order() {
     assert_eq!(slice_str(schema[4].name), "maybe");
     assert_eq!(slice_str(schema[4].ty), "int");
     assert_eq!(slice_str(schema[4].replacement), "use max");
+
+    assert_eq!(slice_str(schema[5].name), "EnforcedStyle");
+    assert_eq!(slice_str(schema[5].ty), "string");
+    assert_eq!(slice_str(schema[5].default_json), "\"no_space\"");
+    assert_eq!(
+        slice_str(schema[5].enum_values_json),
+        "[\"no_space\",\"space\",\"compact\"]"
+    );
 }

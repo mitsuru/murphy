@@ -215,6 +215,44 @@ impl T7 {
     }
 }
 
+// --- T8/T9: macro-injected runtime options ----------------------------------
+
+#[derive(CopOptions)]
+struct InjectedOptions {
+    #[option(default = "default")]
+    mode: String,
+}
+
+#[derive(Default)]
+struct T8 {
+    hits: AtomicU32,
+}
+
+#[cop(name = "Plugin/T8", options = InjectedOptions)]
+impl T8 {
+    #[on_node(kind = "send")]
+    fn check_send(&self, _node: NodeId, _cx: &Cx<'_>, options: &InjectedOptions) {
+        if options.mode == "configured" {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[derive(Default)]
+struct T9 {
+    hits: AtomicU32,
+}
+
+#[cop(name = "Plugin/T9", options = InjectedOptions)]
+impl T9 {
+    #[on_new_investigation]
+    fn investigate(&self, _cx: &Cx<'_>, options: &InjectedOptions) {
+        if options.mode == "configured" {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -334,6 +372,46 @@ fn unfiltered_send_cop_has_empty_send_methods() {
     // filter — preserving the historical "every Send reaches the cop"
     // contract for cops that don't opt in to `restrict_on_send`.
     assert!(<T4 as NodeCop>::SEND_METHODS.is_empty());
+}
+
+#[test]
+fn on_node_method_can_receive_decoded_options() {
+    let mut b = AstBuilder::new("foo", "t.rb".to_string());
+    let send_id = push_send(&mut b);
+    let ast = b.finish(send_id);
+
+    let fns = FnTable {
+        emit_offense: noop_offense,
+        emit_edit: noop_edit,
+    };
+    let mut raw = cx_raw_for(&ast, &fns);
+    raw.options_json = RawSlice::from_str(r#"{"mode":"configured"}"#);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let t8 = T8::default();
+    t8.check(send_id, &cx);
+
+    assert_eq!(t8.hits.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn on_new_investigation_method_can_receive_decoded_options() {
+    let mut b = AstBuilder::new("nil", "t.rb".to_string());
+    let root = push_nil(&mut b);
+    let ast = b.finish(root);
+
+    let fns = FnTable {
+        emit_offense: noop_offense,
+        emit_edit: noop_edit,
+    };
+    let mut raw = cx_raw_for(&ast, &fns);
+    raw.options_json = RawSlice::from_str(r#"{"mode":"configured"}"#);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let t9 = T9::default();
+    t9.check(root, &cx);
+
+    assert_eq!(t9.hits.load(Ordering::Relaxed), 1);
 }
 
 #[test]

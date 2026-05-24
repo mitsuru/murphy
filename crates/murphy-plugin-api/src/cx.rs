@@ -166,6 +166,11 @@ impl<'a> Cx<'a> {
         T::from_config_json(bytes)
     }
 
+    /// Decode the current cop's runtime options, falling back to defaults.
+    pub fn options_or_default<T: CopOptions>(&self) -> T {
+        self.options::<T>().unwrap_or_default()
+    }
+
     /// The source text covered by `range`.
     pub fn raw_source(&self, range: Range) -> &'a str {
         let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
@@ -221,6 +226,7 @@ impl<'a> Cx<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CopOptions;
     use crate::abi::{CxRaw, FnTable, RawEdit, RawOffense, RawSlice};
     use murphy_ast::{Ast, AstBuilder, NodeKind, OptNodeId, Range};
 
@@ -265,6 +271,24 @@ mod tests {
             sorted_tokens: p.sorted_tokens.as_ptr(),
             sorted_tokens_len: p.sorted_tokens.len(),
             options_json: RawSlice::from_str("{}"),
+        }
+    }
+
+    #[derive(Default)]
+    struct TestOptions {
+        style: String,
+    }
+
+    impl CopOptions for TestOptions {
+        fn from_config_json(bytes: &[u8]) -> Result<Self, crate::ConfigError> {
+            let value: serde_json::Value =
+                serde_json::from_slice(bytes).map_err(crate::ConfigError::parse)?;
+            let style = value
+                .get("style")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("default")
+                .to_string();
+            Ok(Self { style })
         }
     }
 
@@ -359,6 +383,36 @@ mod tests {
         let cx = unsafe { Cx::from_raw(&raw) };
 
         assert_eq!(cx.sorted_tokens(), ast.sorted_tokens());
+    }
+
+    #[test]
+    fn options_or_default_decodes_current_cop_options() {
+        let (ast, _) = fixture();
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.options_json = RawSlice::from_str(r#"{"style":"configured"}"#);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let options = cx.options_or_default::<TestOptions>();
+        assert_eq!(options.style, "configured");
+    }
+
+    #[test]
+    fn options_or_default_falls_back_on_decode_error() {
+        let (ast, _) = fixture();
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.options_json = RawSlice::from_str("not json");
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let options = cx.options_or_default::<TestOptions>();
+        assert_eq!(options.style, "");
     }
 
     use std::cell::RefCell;

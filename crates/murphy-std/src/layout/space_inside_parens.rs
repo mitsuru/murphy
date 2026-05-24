@@ -7,15 +7,15 @@ use murphy_plugin_api::{CopOptions, Cx, Range, SourceToken, SourceTokenKind, cop
 #[derive(Default)]
 pub struct SpaceInsideParens;
 
-#[allow(non_snake_case)]
 #[derive(CopOptions)]
 pub struct SpaceInsideParensOptions {
     #[option(
+        name = "EnforcedStyle",
         default = "no_space",
         enum_values = ["no_space", "space", "compact"],
         description = "Parenthesis spacing style."
     )]
-    pub EnforcedStyle: String,
+    pub enforced_style: String,
 }
 
 #[cop(
@@ -27,11 +27,8 @@ pub struct SpaceInsideParensOptions {
 )]
 impl SpaceInsideParens {
     #[on_new_investigation]
-    fn investigate(&self, cx: &Cx<'_>) {
-        let options = cx
-            .options::<SpaceInsideParensOptions>()
-            .unwrap_or_else(|_| SpaceInsideParensOptions::default());
-        match options.EnforcedStyle.as_str() {
+    fn investigate(&self, cx: &Cx<'_>, options: &SpaceInsideParensOptions) {
+        match options.enforced_style.as_str() {
             "space" => check_space_style(cx),
             "compact" => check_compact_style(cx),
             _ => check_no_space_style(cx),

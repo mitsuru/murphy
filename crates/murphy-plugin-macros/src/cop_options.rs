@@ -117,6 +117,7 @@ enum DefaultValue {
 /// How a field was marked deprecated, if at all.
 struct ParsedField {
     ident: Ident,
+    external_name: Option<String>,
     ty: FieldType,
     default: Option<DefaultValue>,
     description: Option<String>,
@@ -134,6 +135,7 @@ impl ParsedField {
 
         let mut parsed = ParsedField {
             ident,
+            external_name: None,
             ty,
             default: None,
             description: None,
@@ -149,6 +151,8 @@ impl ParsedField {
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("default") {
                     parsed.default = Some(parse_default(&meta, ty)?);
+                } else if meta.path.is_ident("name") {
+                    parsed.external_name = Some(parse_str(&meta)?);
                 } else if meta.path.is_ident("description") {
                     parsed.description = Some(parse_str(&meta)?);
                 } else if meta.path.is_ident("enum_values") {
@@ -357,6 +361,7 @@ fn generate_copoptions(name: &Ident, fields: &[ParsedField]) -> TokenStream {
 
 fn schema_entry(field: &ParsedField) -> TokenStream {
     let name = field.ident.to_string();
+    let name = field.external_name.as_deref().unwrap_or(&name);
     // `ty` is always the base wire type. Enum-ness is carried by a
     // non-empty `enum_values_json`, not by a distinct `ty` string — the
     // single-surface `OptionSpec.ty` is `bool|int|string|string_list`
@@ -393,6 +398,7 @@ fn schema_entry(field: &ParsedField) -> TokenStream {
 fn field_decoder(field: &ParsedField) -> TokenStream {
     let ident = &field.ident;
     let key = ident.to_string();
+    let key = field.external_name.as_deref().unwrap_or(&key);
     let wire = field.ty.wire();
 
     // The expression used when the key is absent from the config object.
