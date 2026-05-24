@@ -49,11 +49,20 @@ impl Output {
         else {
             return;
         };
-        // Gate 1: an explicit receiver is intentional output.
-        if receiver != OptNodeId::NONE {
+        // Gate 1: the receiver must be either bare (no receiver) or
+        // one of the standard-output stream aliases (`$stdout`,
+        // `$stderr`, `STDOUT`, `STDERR`). Any other receiver
+        // (`logger`, `Rails.logger`, an arbitrary Const like
+        // `Foo.puts`, a chain like `obj.pp`) is intentional output and
+        // is left alone. roborev review (job 1124) flagged that an
+        // earlier "receiver-less only" gate let through
+        // `$stdout.puts "x"` / `STDOUT.write "x"` /
+        // `$stderr.print "x"`, which are exactly the stdio-bypass
+        // shapes this cop wants to catch.
+        if !receiver_targets_stdout(cx, receiver) {
             return;
         }
-        // Gate 2: only the bare debug-output method names. Mirrors the
+        // Gate 2: only the debug-output method names. Mirrors the
         // pre-9cr.22 `output_dispatch` table.
         if !matches!(
             cx.symbol_str(method),
@@ -75,6 +84,30 @@ impl Output {
             "Do not write to stdout. Use Rails's logger if you want to log.",
             None,
         );
+    }
+}
+
+/// `true` if `receiver` is one of the standard-output stream aliases
+/// — bare (None), `$stdout` / `$stderr` (`Gvar`), or top-level
+/// `STDOUT` / `STDERR` (`Const` with no scope). These are exactly the
+/// receivers whose `puts` / `write` / etc. calls bypass `Rails.logger`
+/// and write directly to the process's stdio fds.
+///
+/// Any other receiver (logger object, `Rails.logger`, custom Const,
+/// chained expression) is intentional output for this cop's purposes
+/// and returns `false`.
+fn receiver_targets_stdout(cx: &Cx<'_>, receiver: OptNodeId) -> bool {
+    let Some(rid) = receiver.get() else {
+        return true; // bare call
+    };
+    match *cx.kind(rid) {
+        NodeKind::Gvar(name) => {
+            matches!(cx.symbol_str(name), "$stdout" | "$stderr")
+        }
+        NodeKind::Const { scope, name } => {
+            scope == OptNodeId::NONE && matches!(cx.symbol_str(name), "STDOUT" | "STDERR")
+        }
+        _ => false,
     }
 }
 
@@ -206,5 +239,65 @@ mod tests {
         // `puts = "x"` parses as a local assignment, not a send, so it
         // must not trip the cop.
         expect_no_offenses!(Output, "puts = \"x\"\n");
+    }
+
+    // === stdio-alias receiver cases (should flag, added per roborev review 1124) ===
+
+    #[test]
+    fn flags_stdout_gvar_puts() {
+        expect_offense!(
+            Output,
+            indoc! {r#"
+                $stdout.puts "x"
+                ^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#}
+        );
+    }
+
+    #[test]
+    fn flags_stderr_gvar_print() {
+        expect_offense!(
+            Output,
+            indoc! {r#"
+                $stderr.print "x"
+                ^^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#}
+        );
+    }
+
+    #[test]
+    fn flags_stdout_const_write() {
+        expect_offense!(
+            Output,
+            indoc! {r#"
+                STDOUT.write "x"
+                ^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#}
+        );
+    }
+
+    #[test]
+    fn flags_stderr_const_write_nonblock() {
+        expect_offense!(
+            Output,
+            indoc! {r#"
+                STDERR.write_nonblock "x"
+                ^^^^^^^^^^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#}
+        );
+    }
+
+    #[test]
+    fn does_not_flag_other_gvar_puts() {
+        // Only `$stdout` / `$stderr` are stdio aliases — a custom
+        // global like `$log` is not.
+        expect_no_offenses!(Output, "$log.puts \"x\"\n");
+    }
+
+    #[test]
+    fn does_not_flag_scoped_const_stdout_puts() {
+        // `Foo::STDOUT` is a namespaced constant, not the top-level
+        // stdio alias.
+        expect_no_offenses!(Output, "Foo::STDOUT.puts \"x\"\n");
     }
 }
