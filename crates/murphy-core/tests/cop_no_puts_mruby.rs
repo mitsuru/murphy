@@ -359,13 +359,20 @@ class SelectorSpellingCop < Murphy::Cop
       add_offense(node.message_loc, message: "setter")
     elsif node.field(:method) == :-@
       add_offense(node.message_loc, message: "unary")
+    elsif node.field(:method) == :[]=
+      add_offense(node.message_loc, message: "indexed assignment")
     end
   end
 end
 "#;
 
-    let offenses = run(COP, "Murphy/SelectorSpelling", "t.rb", "obj.foo = 1\n-x\n");
-    assert_eq!(offenses.len(), 2);
+    let offenses = run(
+        COP,
+        "Murphy/SelectorSpelling",
+        "t.rb",
+        "obj.foo = 1\n-x\nobj[0] = 1\n",
+    );
+    assert_eq!(offenses.len(), 3);
     assert_eq!(
         offenses[0].range,
         Range {
@@ -382,4 +389,34 @@ end
         },
         "unary message_loc should cover the '-' token, not the full expression"
     );
+    assert_eq!(
+        offenses[2].range,
+        Range {
+            start_offset: 18,
+            end_offset: 19
+        },
+        "indexed assignment message_loc should cover the '[' selector token"
+    );
+}
+
+#[test]
+fn node_field_wraps_class_and_module_name_nodes() {
+    const COP: &str = r#"
+class ClassNameFieldCop < Murphy::Cop
+  def on_call_node(node)
+    owner = node.ancestors.find { |ancestor| ancestor.kind == :class }
+    name = owner&.field(:name)
+    add_offense(node.message_loc, message: name.kind.to_s) if name
+  end
+end
+"#;
+
+    let offenses = run(
+        COP,
+        "Murphy/ClassNameField",
+        "t.rb",
+        "class Foo\n  puts 1\nend\n",
+    );
+    assert_eq!(offenses.len(), 1);
+    assert_eq!(offenses[0].message, "const");
 }

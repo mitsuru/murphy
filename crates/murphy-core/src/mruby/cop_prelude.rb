@@ -109,6 +109,10 @@ class Murphy
       return value.map { |id| Murphy::Node.new(id) } if value.is_a?(Array)
 
       case key
+      when :name
+        return wrap_node(value) if kind == :class || kind == :module
+
+        value
       when :receiver, :block
         wrap_node(value)
       when :arguments, :args, :elements, :children, :pairs, :branches, :whens,
@@ -166,9 +170,16 @@ class Murphy
         0
       end
       selector = method.to_s
+      if selector == "[]="
+        offset = source.index("[", search_from)
+        return node_range unless offset
+
+        start_offset = node_range.start_offset + offset
+        return Murphy::Range.new(start_offset, start_offset + 1)
+      end
+
       candidates = [selector]
       candidates << selector[0...-1] if selector.end_with?("=", "@") && selector.bytesize > 1
-      candidates << "[]" if selector == "[]="
       search_from = 0 if selector.end_with?("@")
 
       offset = nil
