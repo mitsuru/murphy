@@ -69,6 +69,28 @@ pub struct Range {
     pub end: u32,
 }
 
+/// A compact source token for RuboCop-style layout cops.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceToken {
+    pub range: Range,
+    pub kind: SourceTokenKind,
+}
+
+/// Murphy's compact classification of Prism source tokens.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceTokenKind {
+    LeftParen,
+    RightParen,
+    Comment,
+    Newline,
+    IgnoredNewline,
+    HeredocStart,
+    HeredocEnd,
+    Other,
+}
+
 /// A reference to a contiguous slice of `node_lists` — the side table for
 /// variable-length children (call args, array elements, …).
 #[repr(C)]

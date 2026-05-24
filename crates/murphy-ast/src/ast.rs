@@ -1,7 +1,9 @@
 //! The [`Ast`] arena and its traversal API.
 
 use crate::interner::Interner;
-use crate::node::{AstNode, Comment, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer};
+use crate::node::{
+    AstNode, Comment, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer, SourceToken,
+};
 
 #[inline]
 fn push_opt(out: &mut Vec<NodeId>, o: OptNodeId) {
@@ -219,6 +221,7 @@ pub struct Ast {
     pub(crate) node_lists: Vec<NodeId>,
     pub(crate) interner: Interner,
     pub(crate) comments: Vec<Comment>,
+    pub(crate) source_tokens: Vec<SourceToken>,
     pub(crate) source: SourceBuffer,
     pub(crate) root: NodeId,
 }
@@ -316,6 +319,11 @@ impl Ast {
         &self.comments
     }
 
+    /// The source tokens, in source order.
+    pub fn sorted_tokens(&self) -> &[SourceToken] {
+        &self.source_tokens
+    }
+
     /// The string interner.
     pub fn interner(&self) -> &Interner {
         &self.interner
@@ -335,6 +343,7 @@ impl Ast {
             interner_blob: &self.interner.blob,
             interner_offsets: &self.interner.offsets,
             comments: &self.comments,
+            sorted_tokens: &self.source_tokens,
             source: &self.source.text,
             root: self.root,
         }
@@ -355,6 +364,8 @@ pub struct AstRawParts<'a> {
     pub interner_offsets: &'a [Range],
     /// The source comments, in source order.
     pub comments: &'a [Comment],
+    /// The source tokens, in source order.
+    pub sorted_tokens: &'a [SourceToken],
     /// The full source text (UTF-8).
     pub source: &'a str,
     /// The arena root node.
@@ -483,5 +494,38 @@ mod tests {
         assert_eq!(p.interner_offsets.len(), ast.interner().len());
         let r = p.interner_offsets[x.0 as usize];
         assert_eq!(&p.interner_blob[r.start as usize..r.end as usize], b"x");
+    }
+
+    #[test]
+    fn sorted_tokens_and_raw_parts_borrow_the_arena_storage() {
+        use crate::builder::AstBuilder;
+        use crate::node::{SourceToken, SourceTokenKind};
+
+        let mut b = AstBuilder::new("foo(1)", "t.rb");
+        let one = b.push(NodeKind::Int(1), Range { start: 4, end: 5 });
+        b.add_source_token(SourceToken {
+            kind: SourceTokenKind::LeftParen,
+            range: Range { start: 3, end: 4 },
+        });
+        b.add_source_token(SourceToken {
+            kind: SourceTokenKind::RightParen,
+            range: Range { start: 5, end: 6 },
+        });
+        let ast = b.finish(one);
+
+        assert_eq!(
+            ast.sorted_tokens(),
+            &[
+                SourceToken {
+                    kind: SourceTokenKind::LeftParen,
+                    range: Range { start: 3, end: 4 },
+                },
+                SourceToken {
+                    kind: SourceTokenKind::RightParen,
+                    range: Range { start: 5, end: 6 },
+                },
+            ]
+        );
+        assert_eq!(ast.raw_parts().sorted_tokens, ast.sorted_tokens());
     }
 }

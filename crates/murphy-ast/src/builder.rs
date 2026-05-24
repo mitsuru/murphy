@@ -6,7 +6,7 @@ use crate::ast::{Ast, collect_children};
 use crate::interner::InternBuilder;
 use crate::node::{
     AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
-    StringId, Symbol,
+    SourceToken, StringId, Symbol,
 };
 
 /// Builds an [`Ast`]. Push nodes and lists; `finish` computes parent links
@@ -16,6 +16,7 @@ pub struct AstBuilder {
     node_lists: Vec<NodeId>,
     interner: InternBuilder,
     comments: Vec<Comment>,
+    source_tokens: Vec<SourceToken>,
     source: SourceBuffer,
 }
 
@@ -27,6 +28,7 @@ impl AstBuilder {
             node_lists: Vec::new(),
             interner: InternBuilder::default(),
             comments: Vec::new(),
+            source_tokens: Vec::new(),
             source: SourceBuffer {
                 text: source_text.into(),
                 path: path.into(),
@@ -71,6 +73,11 @@ impl AstBuilder {
         self.comments.push(Comment { range, kind });
     }
 
+    /// Record a source token.
+    pub fn add_source_token(&mut self, token: SourceToken) {
+        self.source_tokens.push(token);
+    }
+
     /// Finish building. Computes every node's `parent` from the structure
     /// in one pass, then returns the immutable [`Ast`]. `root` keeps
     /// `parent == NONE`.
@@ -89,6 +96,7 @@ impl AstBuilder {
             node_lists: self.node_lists,
             interner: self.interner.finish(),
             comments: self.comments,
+            source_tokens: self.source_tokens,
             source: self.source,
             root,
         }

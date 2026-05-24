@@ -1142,6 +1142,7 @@ impl Ast {
             node_lists,
             interner: Interner { blob, offsets },
             comments,
+            source_tokens: Vec::new(),
             source: SourceBuffer { text, path },
             root,
         };
