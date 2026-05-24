@@ -23,25 +23,24 @@
 //! Outer `Send(receiver=None, method="assert", args=[inner])`, where
 //! `inner` is itself a `Send(receiver=Some(_), method="!", args=[])`.
 //!
-//! - **receiver None on the outer Send** — `obj.assert(!x)` is an
-//!   intentional method call on a receiver and is intentionally
-//!   ignored.
-//! - **method == `assert`** — the minitest helper name.
-//! - **exactly one arg** — `assert foo, "msg"` carries a message
-//!   argument and is a different call shape; we only target the
-//!   single-arg negated form spelled out in the task description.
-//! - **inner is the bang send** — `Send(Some(_), "!", [])`. Any other
-//!   inner shape (a positive call `assert foo`, a literal, a block
-//!   send) doesn't match.
-//!
-//! ## No autocorrect
-//!
-//! Rewriting `assert !x` → `assert_not x` is mechanically safe in
-//! Rails (both methods are defined on `ActiveSupport::TestCase`), but
-//! v1 ships as detect-only; ADR 0006 requires a deliberate fix block
-//! per cop. Tracked as a follow-up.
+//! Expressed declaratively with [`node_pattern!`] (RuboCop NodePattern
+//! grammar): in DSL `nil?` means receiver-None on the outer Send,
+//! `!nil?` on the inner Send forces a non-None receiver (the negated
+//! expression), and the trailing argument list is omitted so each
+//! Send must take exactly its specified arity (outer = 1 inner arg,
+//! inner = 0).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+
+// RuboCop NodePattern equivalent:
+//   `(send nil? :assert (send !nil? :!))`
+//
+// - Outer: receiver None (`nil?`), method `:assert`, exactly 1 arg.
+// - Inner: receiver non-None (`!nil?`), method `:!`, exactly 0 args.
+//
+// Strict arity on both Sends is load-bearing (excludes
+// `assert foo, "msg"`, `assert()`, and any inner-bang oddity).
+node_pattern!(is_assert_bang, "(send nil? :assert (send !nil? :!))");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -57,60 +56,11 @@ pub struct AssertNot;
 impl AssertNot {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        // Defensive pattern-match: the dispatcher feeds us only Send
-        // nodes today (`KINDS = [send]`), but the `let-else` is free
-        // insurance against a future kind-aliasing accident. Same
-        // posture as `Rails/Output` / `Rails/RequestReferer`.
-        let NodeKind::Send {
-            receiver,
-            method,
-            args,
-        } = *cx.kind(node)
-        else {
-            return;
-        };
-        // Gate 1: bare `assert` only — `obj.assert(!x)` is intentional.
-        if receiver != OptNodeId::NONE {
-            return;
-        }
-        // Gate 2: method must be exactly `assert`.
-        if cx.symbol_str(method) != "assert" {
-            return;
-        }
-        // Gate 3: exactly one argument. `assert foo, "msg"` is a
-        // different call shape with an explicit message and is out of
-        // scope per the task description; `assert()` with no args is
-        // also out.
-        let arg_ids = cx.list(args);
-        let [inner_id] = arg_ids else {
-            return;
-        };
-        // Gate 4: the lone argument must itself be the bang send
-        // `Send(Some(_), "!", [])`. A positive call, literal, or any
-        // other inner shape doesn't match.
-        if !is_bang_send(cx, *inner_id) {
+        if !is_assert_bang(node, cx) {
             return;
         }
         cx.emit_offense(cx.range(node), "Prefer `assert_not` over `assert !`.", None);
     }
-}
-
-/// `true` when `id` is a `Send(receiver=Some(_), method="!", args=[])`
-/// — the AST shape Ruby's unary `!` (and the `not` keyword) emit.
-fn is_bang_send(cx: &Cx<'_>, id: NodeId) -> bool {
-    let NodeKind::Send {
-        receiver, method, ..
-    } = *cx.kind(id)
-    else {
-        return false;
-    };
-    // The bang has a receiver (the negated expression). A bare `Send`
-    // whose method literally spells `"!"` with no receiver isn't the
-    // Ruby `!x` operator and shouldn't count.
-    if receiver == OptNodeId::NONE {
-        return false;
-    }
-    cx.symbol_str(method) == "!"
 }
 
 #[cfg(test)]

@@ -117,10 +117,10 @@ mod tests {
     use crate::abi::{CxRaw, FnTable, PluginCopV1, RawEdit, RawOffense, RawSlice};
     use crate::cop::Cop;
     use crate::cx::Cx;
-    use crate::node_cop::{NodeCop, NodeKindTag};
+    use crate::node_cop::NodeCop;
     use crate::options::NoOptions;
     use crate::severity::{Severity, tristate_to_wire};
-    use murphy_ast::{Ast, AstBuilder, NodeId, NodeKind, Range};
+    use murphy_ast::{Ast, AstBuilder, NodeId, NodeKind, NodeKindTag, Range};
     use std::cell::RefCell;
 
     /// A minimal cop: metadata + an empty `check`.
