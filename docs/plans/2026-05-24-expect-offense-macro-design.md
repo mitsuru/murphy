@@ -93,7 +93,7 @@ the leading-space count of an annotation line equals the caret start
 column in the source line above. Conversion to a byte range happens
 via `source_line.char_indices().nth(col)`.
 
-```
+```text
 expect(a).to eq 1
 expect(b).to eq 2
 ^^^^^^^^^^^^^^^^^ Example has too many expects
@@ -197,12 +197,12 @@ Input: `annotated: &str`, `T: NodeCop + Default`.
   annotation lines (consistent with the parser's extension point).
 - Multi-line ranges (`range.end` falls in a later line than `range.start`):
   emit the caret only on the first line, append
-  ` (+N more chars)` to the message so the reader knows the range
+  `(+ N more chars)` to the message so the reader knows the range
   extends.
 
 Final panic shape:
 
-```
+```text
 expect_offense! mismatch
 
 expected:
