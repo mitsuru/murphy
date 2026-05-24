@@ -450,6 +450,48 @@ fn predicate_calls_a_free_function() {
     assert!(!is_big_int(small, &cx));
 }
 
+// `#odd?` / `#save!` — predicate names carrying a Ruby-style `?` / `!`
+// suffix (murphy-bj7). The macro mangles the call site: `?` → `_p`
+// (predicate, mruby convention), `!` → `_bang`. `#save` and `#save?`
+// resolve to *different* Rust fns, mirroring how Ruby's `save` and
+// `save?` are distinct methods (the use case from murphy-bj7).
+node_pattern!(is_odd_int, "#odd?");
+node_pattern!(is_bang_int, "#bang!");
+
+fn odd_p(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(*cx.kind(node), NodeKind::Int(v) if v % 2 != 0)
+}
+
+fn bang_bang(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(*cx.kind(node), NodeKind::Int(v) if v == 42)
+}
+
+#[test]
+fn predicate_question_suffix_mangles_to_p_call() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let odd = b.push(NodeKind::Int(3), r());
+    let even = b.push(NodeKind::Int(4), r());
+    let ast = b.finish(odd);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert!(is_odd_int(odd, &cx));
+    assert!(!is_odd_int(even, &cx));
+}
+
+#[test]
+fn predicate_bang_suffix_mangles_to_bang_call() {
+    let mut b = AstBuilder::new("src", "t.rb");
+    let hit = b.push(NodeKind::Int(42), r());
+    let miss = b.push(NodeKind::Int(0), r());
+    let ast = b.finish(hit);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert!(is_bang_int(hit, &cx));
+    assert!(!is_bang_int(miss, &cx));
+}
+
 #[test]
 fn predicate_inside_union() {
     let mut b = AstBuilder::new("src", "t.rb");

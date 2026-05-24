@@ -705,18 +705,39 @@ fn unsupported_node_match_error(tag: murphy_ast::NodeKindTag) -> syn::Error {
 
 /// Parse a `#predicate` name into a callable Rust identifier.
 ///
-/// A `#name` resolves to a free function `name(node, cx) -> bool` that must be
-/// in scope at the `node_pattern!` call site. The murphy-pattern lexer permits
-/// a trailing `?` / `!` in predicate names (e.g. `odd?`, `foo!`), but those
-/// are not valid Rust identifiers — `syn::parse_str` rejects them, and that is
-/// the intended `compile_error` path for v1.
+/// A `#name` resolves to a free function in scope at the `node_pattern!`
+/// call site. Ruby-style `?` / `!` suffixes are mangled so the call site
+/// uses a valid Rust identifier (murphy-bj7):
+///
+/// - `#odd?` → calls `odd_p` (predicate; `_p` matches the mruby
+///   `_p_method` C-binding convention).
+/// - `#save!` → calls `save_bang` (Ruby's "bang method" idiom).
+/// - `#save` → calls `save` (unchanged).
+///
+/// `#save?` and `#save` therefore resolve to *different* Rust fns,
+/// matching the Rails idiom where `save` and `save?` are distinct
+/// methods. Ruby setter names (`foo=`) are deliberately rejected: the
+/// `=` has no canonical Rust counterpart, and a `#foo=` predicate has
+/// no use case the EPIC needs to cover.
 fn predicate_ident(name: &str) -> syn::Result<Ident> {
-    syn::parse_str::<Ident>(name).map_err(|_| {
+    let mangled = if let Some(stem) = name.strip_suffix('?') {
+        format!("{stem}_p")
+    } else if let Some(stem) = name.strip_suffix('!') {
+        format!("{stem}_bang")
+    } else {
+        name.to_string()
+    };
+    syn::parse_str::<Ident>(&mangled).map_err(|_| {
+        // The lexer constrains `#name` to a Ruby-method-shaped identifier
+        // optionally suffixed by `?`/`!`/`=`. After stripping `?`/`!`
+        // above, only the `=` (setter) case can still fail Rust ident
+        // parsing — reported with the original source name for clarity.
         syn::Error::new(
             Span::call_site(),
             format!(
                 "node_pattern!: predicate name `{name}` is not a valid Rust \
-                 identifier; `?`/`!` are not allowed in v1"
+                 identifier; `?`/`!` are mangled to `_p`/`_bang`, but other \
+                 Ruby suffixes (e.g. `=`) have no Rust counterpart"
             ),
         )
     })
