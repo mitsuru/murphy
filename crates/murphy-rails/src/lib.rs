@@ -27,7 +27,7 @@ use murphy_plugin_api::{Cx, NoOptions, cop, register_cops};
 // `murphy-std`). The `register_cops!` list below re-exports them as
 // bare idents via `use`, keeping the registration table flat.
 pub mod cops;
-use cops::rails::{AssertNot, Output, Pick, RequestReferer};
+use cops::rails::{AssertNot, EnvironmentVariableAccess, Output, Pick, RequestReferer};
 
 #[derive(Default)]
 pub struct ActionControllerFlashBeforeRender;
@@ -603,19 +603,8 @@ impl EnvironmentComparison {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
-#[derive(Default)]
-pub struct EnvironmentVariableAccess;
-
-#[cop(
-    name = "Rails/EnvironmentVariableAccess",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl EnvironmentVariableAccess {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
+// `EnvironmentVariableAccess` promoted to real cop in
+// `cops::rails::environment_variable_access`.
 
 #[derive(Default)]
 pub struct Exit;
