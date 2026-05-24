@@ -123,14 +123,68 @@ Each dispatch method takes `&self, node: NodeId, cx: &Cx<'_>` (see
 §4 for what `Cx` exposes). The body emits offenses via `cx.emit_offense`
 and edits via `cx.emit_edit` (§5).
 
-### Deeper pattern matching: `node_pattern!`
+### Method-name filtering on `Send` dispatch
 
-For cops that need to test more than one kind at a time (e.g. "a
-`Send` whose receiver is a `Const` named `RSpec`"), the
-`node_pattern!` macro provides a Prism shape-matching DSL
-(ADR 0033 / murphy-9cr.18). It works inside a dispatch method body and
-returns a `bool` / option binding. The parser lives in
-`crates/murphy-pattern`.
+`#[on_node(kind = "send")]` fires for **every** `Send` node in the file
+— `puts(x)`, `obj.foo`, `a + b`, `arr[i]`, all of it. Cops that only
+care about a specific method name filter inside the dispatch body:
+
+```rust
+#[on_node(kind = "send")]
+fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+    let NodeKind::Send { receiver, method, args } = *cx.kind(node) else { return };
+    if cx.symbol_str(method) != "describe" {
+        return;
+    }
+    // … real check
+}
+```
+
+This `let-else` + `symbol_str` guard is the load-bearing idiom; every
+Murphy `Send` cop opens this way. The `let-else` defends against
+future `NodeKind` aliasing accidents, and `cx.symbol_str(method)`
+resolves the interned identifier without allocating.
+
+There is **no `restrict_on_send` equivalent yet** — RuboCop's
+`RESTRICT_ON_SEND = %i[foo bar]` class const that pre-filters by
+method name before the hook is called. Tracked as `murphy-34d`; the
+likely surface is an additional `#[on_node(kind = "send", methods =
+["foo", "bar"])]` argument that the macro lowers into the dispatch
+wrapper so the cop body no longer starts with the guard.
+
+### Reusable matchers: `node_pattern!`
+
+For cops that need to test more than one kind at a time — RuboCop's
+`def_node_matcher` use cases — the `node_pattern!` macro lowers a
+RuboCop-subset S-expression pattern to a free function at compile
+time (ADR 0033, murphy-9cr.17 / .18; the runtime IR lives in
+`crates/murphy-pattern`).
+
+```rust
+use murphy_plugin_macros::node_pattern;
+
+// Zero captures → bool. Tests shape only.
+node_pattern!(is_bare_expect_call, "(send nil :expect _)");
+
+// Captured atoms → Option<(Capture1, Capture2, ...)>.
+node_pattern!(describe_first_arg, "(send {nil (const nil :RSpec)} :describe $_ ...)");
+
+#[on_node(kind = "send")]
+fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+    if !is_bare_expect_call(node, cx) {
+        return;
+    }
+    // …
+}
+```
+
+The generated function takes `(node: NodeId, cx: &Cx<'_>)` and is a
+plain item at the module scope where the macro is invoked — invoke it
+once per pattern at module top level, then call the matcher from any
+cop's dispatch body. Pattern grammar (v1 RuboCop subset): atoms
+(`42`, `:foo`, `true`, `nil`), node-kind heads (`int`, `send`, …),
+wildcard `_`, alternation `{a b c}`, `...` rest, `$_` captures, `$...`
+seq captures. Full grammar in `docs/plans/2026-05-22-murphy-9cr17-pattern-grammar.md`.
 
 ### Reference: what `#[cop]` generates
 
