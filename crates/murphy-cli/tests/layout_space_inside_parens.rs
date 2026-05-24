@@ -86,6 +86,33 @@ fn does_not_flag_clean_parentheses_or_block_params() {
 }
 
 #[test]
+fn does_not_flag_space_before_comment_after_open_paren() {
+    let (_code, offs) = lint_json("foo( # inline comment\n  1\n)\n");
+    assert!(
+        offenses_named(&offs, "Layout/SpaceInsideParens").is_empty(),
+        "space before an opening-paren comment is not inside-paren spacing; got {offs:?}",
+    );
+}
+
+#[test]
+fn does_not_flag_multiline_parentheses() {
+    let (_code, offs) = lint_json("foo(\n  1\n)\nx = (\n  1 + 2\n)\n");
+    assert!(
+        offenses_named(&offs, "Layout/SpaceInsideParens").is_empty(),
+        "newlines inside parentheses must not be reported as inline spacing; got {offs:?}",
+    );
+}
+
+#[test]
+fn does_not_flag_heredoc_argument_parentheses() {
+    let (_code, offs) = lint_json("foo(<<~TEXT)\n  body\nTEXT\n");
+    assert!(
+        offenses_named(&offs, "Layout/SpaceInsideParens").is_empty(),
+        "heredoc argument parentheses without inline spaces must stay clean; got {offs:?}",
+    );
+}
+
+#[test]
 fn does_not_flag_string_interpolation_braces() {
     let (_code, offs) = lint_json("name = \"#{ value }\"\n");
     assert!(

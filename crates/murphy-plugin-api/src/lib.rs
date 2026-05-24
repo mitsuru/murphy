@@ -54,7 +54,7 @@ pub use severity::{
 // §5; enforced by `crates/murphy-std/tests/dep_boundary.rs`).
 pub use murphy_ast::{
     AstNode, Comment, CommentKind, NodeId, NodeKind, NodeKindTag, NodeList, OptNodeId, Range,
-    SourceBuffer, StringId, Symbol,
+    SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
 };
 pub use murphy_plugin_macros::{
     CopOptions, cop, node_pattern, on_new_investigation, on_node, register_cops,
