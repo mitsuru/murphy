@@ -285,6 +285,7 @@ unsafe fn eval_literal(mrb: *mut mrb_state, lit: &CStr) -> mrb_value {
 enum RubyCaptureValue<'a> {
     Node(NodeId),
     Seq(&'a [NodeId]),
+    OptNode(Option<NodeId>),
 }
 
 unsafe fn ruby_array_of_capture_values(
@@ -308,6 +309,8 @@ unsafe fn ruby_array_of_capture_values(
                 }
                 src.push(']');
             }
+            RubyCaptureValue::OptNode(Some(id)) => src.push_str(&id.0.to_string()),
+            RubyCaptureValue::OptNode(None) => src.push_str("nil"),
         }
     }
     src.push(']');
@@ -1150,6 +1153,7 @@ unsafe extern "C" fn native_match(mrb: *mut mrb_state, _self: mrb_value) -> mrb_
         match capture {
             CaptureValue::Node(id) => values.push(RubyCaptureValue::Node(*id)),
             CaptureValue::Seq(seq) => values.push(RubyCaptureValue::Seq(seq)),
+            CaptureValue::OptNode(id) => values.push(RubyCaptureValue::OptNode(*id)),
         }
     }
     // SAFETY: `mrb` valid & non-null; helper builds a safe Ruby literal.

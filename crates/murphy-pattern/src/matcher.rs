@@ -201,13 +201,9 @@ fn match_pat<P: PredicateHost + ?Sized>(
             false
         }
         IrNode::Quantifier { .. } => {
-            // PR #2 lands lowering only; the sibling-list backtracker that
-            // dispatches a quantifier onto a node's child list arrives in
-            // PR #3 (murphy-ycx). Until then, a quantifier-bearing pattern
-            // compiles and lowers cleanly but every match attempt against
-            // it returns `false` — a silent miss rather than a runtime
-            // panic. Patterns built before PR #3 ships should not rely on
-            // quantifiers for actual match behavior.
+            // Quantifiers are sequence operators, consumed by
+            // `match_list_slot`. Reaching one as a scalar pattern means an
+            // invalid hand-built IR or an unsupported fixed-slot shape.
             false
         }
     }
@@ -355,8 +351,9 @@ fn match_fixed_slot<P: PredicateHost + ?Sized>(
 }
 
 /// Match the trailing `List` slot's pattern children against the node-list
-/// elements. At most one rest-like pattern child is permitted (parser-
-/// enforced) and splits the remaining children into prefix + rest + suffix.
+/// elements. Handles bare rest, seq captures, and murphy-ycx postfix
+/// quantifiers with greedy backtracking so a variable-length element can
+/// give nodes back to a suffix pattern.
 fn match_list_slot<P: PredicateHost + ?Sized>(
     ctx: &MatcherCtx,
     pattern_kids: &[IrNodeId],
@@ -364,55 +361,125 @@ fn match_list_slot<P: PredicateHost + ?Sized>(
     buf: &mut CaptureBuf,
     predicates: &mut P,
 ) -> bool {
-    // Locate the at-most-one rest-like pattern child.
-    let rest_at = pattern_kids
-        .iter()
-        .position(|p| rest_kind(ctx, *p).is_some());
+    let mut trial = buf.clone();
+    if match_list_from(ctx, pattern_kids, elems, &mut trial, predicates) {
+        *buf = trial;
+        true
+    } else {
+        false
+    }
+}
 
-    let Some(r) = rest_at else {
-        // No rest: exact length, indexed match.
-        if pattern_kids.len() != elems.len() {
-            return false;
-        }
-        for (i, p) in pattern_kids.iter().enumerate() {
-            if !match_pat(ctx, *p, elems[i], buf, predicates) {
-                return false;
-            }
-        }
-        return true;
+fn match_list_from<P: PredicateHost + ?Sized>(
+    ctx: &MatcherCtx,
+    pattern_kids: &[IrNodeId],
+    elems: &[NodeId],
+    buf: &mut CaptureBuf,
+    predicates: &mut P,
+) -> bool {
+    let Some((&pat, rest)) = pattern_kids.split_first() else {
+        return elems.is_empty();
     };
 
-    // Rest-like child at index `r`. `non_rest = k - 1` non-rest pattern
-    // children split into `r` prefix + `(non_rest - r)` suffix.
-    let k = pattern_kids.len();
-    let non_rest = k - 1;
-    let suffix_count = non_rest - r;
-
-    if elems.len() < non_rest {
+    if let Some(slot) = rest_kind(ctx, pat) {
+        for count in (0..=elems.len()).rev() {
+            let mut trial = buf.clone();
+            if let Some(slot) = slot {
+                trial.set(slot, CaptureValue::Seq(elems[..count].to_vec()));
+            }
+            if match_list_from(ctx, rest, &elems[count..], &mut trial, predicates) {
+                *buf = trial;
+                return true;
+            }
+        }
         return false;
     }
 
-    // Prefix.
-    for (i, p) in pattern_kids.iter().take(r).enumerate() {
-        if !match_pat(ctx, *p, elems[i], buf, predicates) {
+    if let Some(repeat) = repeat_kind(ctx, pat) {
+        let max = repeat.max.unwrap_or(elems.len()).min(elems.len());
+        let states = repeat_states(ctx, repeat.body, &elems[..max], buf, predicates);
+        let upper = states.len() - 1;
+        if upper < repeat.min {
             return false;
         }
-    }
-    // Suffix matches the last `suffix_count` elements.
-    let len = elems.len();
-    for (j, p) in pattern_kids.iter().skip(r + 1).enumerate() {
-        let actual = elems[len - (suffix_count - j)];
-        if !match_pat(ctx, *p, actual, buf, predicates) {
-            return false;
+
+        for count in (repeat.min..=upper).rev() {
+            let mut trial = states[count].clone();
+            if let Some(slot) = repeat.capture_slot {
+                let value = if repeat.max == Some(1) {
+                    CaptureValue::OptNode(if count == 1 { Some(elems[0]) } else { None })
+                } else {
+                    CaptureValue::Seq(elems[..count].to_vec())
+                };
+                trial.set(slot, value);
+            }
+            if match_list_from(ctx, rest, &elems[count..], &mut trial, predicates) {
+                *buf = trial;
+                return true;
+            }
         }
+        return false;
     }
-    // Middle: the rest span `elems[r..len - suffix_count]`. A `$...`
-    // capture binds it; a bare `...` binds nothing.
-    let rest_slice = &elems[r..len - suffix_count];
-    if let Some(Some(s)) = rest_kind(ctx, pattern_kids[r]) {
-        buf.set(s, CaptureValue::Seq(rest_slice.to_vec()));
+
+    let Some((&actual, remaining)) = elems.split_first() else {
+        return false;
+    };
+    let mut trial = buf.clone();
+    if match_pat(ctx, pat, actual, &mut trial, predicates)
+        && match_list_from(ctx, rest, remaining, &mut trial, predicates)
+    {
+        *buf = trial;
+        true
+    } else {
+        false
     }
-    true
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RepeatPat {
+    body: IrNodeId,
+    min: usize,
+    max: Option<usize>,
+    capture_slot: Option<u16>,
+}
+
+fn repeat_kind(ctx: &MatcherCtx, pat: IrNodeId) -> Option<RepeatPat> {
+    match ctx.ir_node(pat) {
+        IrNode::Quantifier { body, min, max } => Some(RepeatPat {
+            body: *body,
+            min: *min as usize,
+            max: (*max != u8::MAX).then_some(*max as usize),
+            capture_slot: None,
+        }),
+        IrNode::Capture { slot, body } => match ctx.ir_node(*body) {
+            IrNode::Quantifier { body, min, max } => Some(RepeatPat {
+                body: *body,
+                min: *min as usize,
+                max: (*max != u8::MAX).then_some(*max as usize),
+                capture_slot: Some(*slot),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn repeat_states<P: PredicateHost + ?Sized>(
+    ctx: &MatcherCtx,
+    body: IrNodeId,
+    elems: &[NodeId],
+    buf: &CaptureBuf,
+    predicates: &mut P,
+) -> Vec<CaptureBuf> {
+    let mut states = vec![buf.clone()];
+    for elem in elems {
+        let mut next = states.last().expect("seed state").clone();
+        if !match_pat(ctx, body, *elem, &mut next, predicates) {
+            break;
+        }
+        states.push(next);
+    }
+    states
 }
 
 /// Classify a `List`-slot pattern child as rest-like and, if so, report the
@@ -492,6 +559,26 @@ mod tests {
         let arr = b.push(NodeKind::Array(l), r());
         let ast = b.finish(arr);
         (ast, arr, ints)
+    }
+
+    fn bare_send_ast<F>(src: &str, method: &str, build_args: F) -> (Ast, NodeId, Vec<NodeId>)
+    where
+        F: FnOnce(&mut AstBuilder) -> Vec<NodeId>,
+    {
+        let mut b = AstBuilder::new(src, "t.rb");
+        let args_vec = build_args(&mut b);
+        let m = b.intern_symbol(method);
+        let args = b.push_list(&args_vec);
+        let send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method: m,
+                args,
+            },
+            r(),
+        );
+        let ast = b.finish(send);
+        (ast, send, args_vec)
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -697,6 +784,159 @@ mod tests {
         assert!(matches(&ir, &ast, arr, &mut NoPredicates).is_none());
     }
 
+    #[test]
+    fn array_plus_quantifier_matches_one_or_more_elements() {
+        let (ast, arr, _) = three_array_ast();
+        let ir = compile("(array int+)").unwrap();
+        assert!(matches(&ir, &ast, arr, &mut NoPredicates).is_some());
+
+        let mut b = AstBuilder::new("[]", "t.rb");
+        let empty_list = b.push_list(&[]);
+        let empty = b.push(NodeKind::Array(empty_list), r());
+        let empty_ast = b.finish(empty);
+        assert!(matches(&ir, &empty_ast, empty, &mut NoPredicates).is_none());
+    }
+
+    #[test]
+    fn send_list_quantifiers_match_optional_and_repeated_args() {
+        let (many_ast, many_send, _) = bare_send_ast("foo(1,2,\"x\")", "foo", |b| {
+            let one = b.push(NodeKind::Int(1), r());
+            let two = b.push(NodeKind::Int(2), r());
+            let x = b.intern_string("x");
+            let str_x = b.push(NodeKind::Str(x), r());
+            vec![one, two, str_x]
+        });
+        let (str_ast, str_send, _) = bare_send_ast("foo(\"x\")", "foo", |b| {
+            let x = b.intern_string("x");
+            vec![b.push(NodeKind::Str(x), r())]
+        });
+        let (empty_ast, empty_send, _) = bare_send_ast("foo()", "foo", |_| vec![]);
+
+        let int_star_str = compile("(send nil? :foo int* str)").unwrap();
+        assert!(matches(&int_star_str, &many_ast, many_send, &mut NoPredicates).is_some());
+        assert!(matches(&int_star_str, &str_ast, str_send, &mut NoPredicates).is_some());
+        assert!(matches(&int_star_str, &empty_ast, empty_send, &mut NoPredicates).is_none());
+
+        let pluck_sym_plus = compile("(send nil? :pluck sym+)").unwrap();
+        let (pluck_ast, pluck_send, _) = bare_send_ast("pluck(:a,:b)", "pluck", |b| {
+            let a = b.intern_symbol("a");
+            let b_sym = b.intern_symbol("b");
+            vec![
+                b.push(NodeKind::Sym(a), r()),
+                b.push(NodeKind::Sym(b_sym), r()),
+            ]
+        });
+        let (pluck_empty_ast, pluck_empty_send, _) = bare_send_ast("pluck()", "pluck", |_| vec![]);
+        assert!(matches(&pluck_sym_plus, &pluck_ast, pluck_send, &mut NoPredicates).is_some());
+        assert!(
+            matches(
+                &pluck_sym_plus,
+                &pluck_empty_ast,
+                pluck_empty_send,
+                &mut NoPredicates
+            )
+            .is_none()
+        );
+
+        let update_hash_optional = compile("(send nil? :update_columns hash?)").unwrap();
+        let (hash_ast, hash_send, _) =
+            bare_send_ast("update_columns({a:1})", "update_columns", |b| {
+                let a = b.intern_symbol("a");
+                let key = b.push(NodeKind::Sym(a), r());
+                let value = b.push(NodeKind::Int(1), r());
+                let pair = b.push(NodeKind::Pair { key, value }, r());
+                let pairs = b.push_list(&[pair]);
+                vec![b.push(NodeKind::Hash(pairs), r())]
+            });
+        let (no_hash_ast, no_hash_send, _) =
+            bare_send_ast("update_columns()", "update_columns", |_| vec![]);
+        assert!(
+            matches(
+                &update_hash_optional,
+                &hash_ast,
+                hash_send,
+                &mut NoPredicates
+            )
+            .is_some()
+        );
+        assert!(
+            matches(
+                &update_hash_optional,
+                &no_hash_ast,
+                no_hash_send,
+                &mut NoPredicates
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn quantifier_backtracks_to_allow_suffix_match_and_captures() {
+        let mut b = AstBuilder::new("[1,2,1]", "t.rb");
+        let first = b.push(NodeKind::Int(1), r());
+        let second = b.push(NodeKind::Int(2), r());
+        let last = b.push(NodeKind::Int(1), r());
+        let elems = b.push_list(&[first, second, last]);
+        let arr = b.push(NodeKind::Array(elems), r());
+        let ast = b.finish(arr);
+
+        let greedy_suffix = compile("(array int+ int)").unwrap();
+        assert!(matches(&greedy_suffix, &ast, arr, &mut NoPredicates).is_some());
+
+        let captured = compile("(array $int+ $1)").unwrap();
+        let c = matches(&captured, &ast, arr, &mut NoPredicates).expect("captures");
+        let CaptureValue::Seq(seq) = c.get(0).unwrap() else {
+            panic!("expected Seq capture");
+        };
+        assert_eq!(seq, &vec![first, second]);
+        let CaptureValue::Node(id) = c.get(1).unwrap() else {
+            panic!("expected Node capture");
+        };
+        assert_eq!(*id, last);
+    }
+
+    #[test]
+    fn optional_quantifier_capture_records_some_and_none() {
+        let (str_ast, str_send, args) = bare_send_ast("foo(\"x\")", "foo", |b| {
+            let x = b.intern_string("x");
+            vec![b.push(NodeKind::Str(x), r())]
+        });
+        let (empty_ast, empty_send, _) = bare_send_ast("foo()", "foo", |_| vec![]);
+        let ir = compile("(send nil? :foo $str?)").unwrap();
+
+        let some = matches(&ir, &str_ast, str_send, &mut NoPredicates).expect("some");
+        assert_eq!(
+            some.get(0),
+            Some(&CaptureValue::OptNode(Some(args[0]))),
+            "$str? should capture the present arg"
+        );
+
+        let none = matches(&ir, &empty_ast, empty_send, &mut NoPredicates).expect("none");
+        assert_eq!(
+            none.get(0),
+            Some(&CaptureValue::OptNode(None)),
+            "$str? should write an explicit None capture"
+        );
+    }
+
+    #[test]
+    fn rest_and_quantifier_can_coexist_in_list_slot() {
+        let (ast, send, _) = bare_send_ast("foo(\"x\",1,2)", "foo", |b| {
+            let x = b.intern_string("x");
+            let str_x = b.push(NodeKind::Str(x), r());
+            let one = b.push(NodeKind::Int(1), r());
+            let two = b.push(NodeKind::Int(2), r());
+            vec![str_x, one, two]
+        });
+        let (miss_ast, miss_send, _) = bare_send_ast("foo(\"x\")", "foo", |b| {
+            let x = b.intern_string("x");
+            vec![b.push(NodeKind::Str(x), r())]
+        });
+        let ir = compile("(send nil? :foo ... int+)").unwrap();
+        assert!(matches(&ir, &ast, send, &mut NoPredicates).is_some());
+        assert!(matches(&ir, &miss_ast, miss_send, &mut NoPredicates).is_none());
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // Union / Not
     // ────────────────────────────────────────────────────────────────────
@@ -899,33 +1139,25 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // murphy-ycx PR #2: quantifier IR is reachable but inert until PR #3
+    // murphy-ycx PR #3: quantifier IR misses quietly outside list dispatch
     // ────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn quantifier_pattern_compiles_and_does_not_panic_on_match() {
-        // Regression: PR #2 lowers `pat*`/`pat+`/`pat?` but the runtime
-        // backtracker is still PR #3 scope. Until then, `matches` on a
-        // quantifier-bearing pattern must NOT panic — it should fall
-        // through to a silent miss (`None`). PR #3 replaces this arm
-        // with the real backtracker.
+    fn quantifier_as_scalar_pattern_does_not_panic() {
         let (ast, arr, _ints) = three_array_ast();
-        for src in [
-            "(array int+)",
-            "(array int*)",
-            "(send _ :update_columns hash?)",
-            "(send _ :pluck sym+)",
-            "(send _ :foo ... int+)",
-            "(array $int+)",
-            "(send _ :update_columns $hash?)",
-        ] {
-            let ir = compile(src).unwrap_or_else(|e| panic!("compile `{src}`: {e:?}"));
-            // No panic, no `todo!()` — just a silent miss.
-            assert!(
-                matches(&ir, &ast, arr, &mut NoPredicates).is_none(),
-                "`{src}` must miss until PR #3 lands, got Some(_)",
-            );
-        }
+        let ir = lower(&parse("(array int+)").unwrap());
+        let IrNode::Node { children, .. } = ir.nodes[ir.root.0 as usize] else {
+            panic!("expected node root");
+        };
+        let quantifier = ir.children[children.start as usize];
+        let mut buf = CaptureBuf::new(0);
+        assert!(!match_pat(
+            &MatcherCtx { ir: &ir, ast: &ast },
+            quantifier,
+            arr,
+            &mut buf,
+            &mut NoPredicates,
+        ));
     }
 
     // Pull in unused-import suppression for ergonomics.

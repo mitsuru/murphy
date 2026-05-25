@@ -563,7 +563,7 @@ unsafe extern "C" fn arena_node_range(mrb: *mut mrb_state, _self: mrb_value) -> 
         return unsafe { mrb_load_string(mrb, c"nil".as_ptr()) };
     }
     let node_ptr = unsafe { cx.nodes.add(id_int as usize) };
-    let range = unsafe { (*node_ptr).range };
+    let range = unsafe { (*node_ptr).loc.expression };
     let lit = CString::new(format!("[{},{}]", range.start, range.end))
         .expect("decimal digits and brackets, no NUL");
     unsafe { mrb_load_string(mrb, lit.as_ptr()) }
