@@ -125,9 +125,12 @@ fn offense(node: NodeId, cx: &Cx<'_>) -> Option<DeprecatedOffense> {
     let const_name = top_level_const_name(cx, receiver)?;
     match (const_name, method) {
         ("File" | "Dir" | "FileTest", "exists?") => {
+            // RuboCop-style range: `receiver.selector` only, excluding
+            // arguments — `File.exists?(path)` flags `File.exists?`.
+            let range = receiver_selector_range(cx, node)?;
             let selector = cx.node(node).loc.name;
             Some(DeprecatedOffense {
-                range: cx.range(node),
+                range,
                 message: "Use `exist?` instead of deprecated `exists?`".to_string(),
                 replacement: Some(Replacement {
                     range: selector,
@@ -136,7 +139,7 @@ fn offense(node: NodeId, cx: &Cx<'_>) -> Option<DeprecatedOffense> {
             })
         }
         ("ENV", "clone" | "dup") => {
-            let range = cx.range(node);
+            let range = receiver_selector_range(cx, node)?;
             let preferred = "ENV.to_h";
             Some(DeprecatedOffense {
                 range,
@@ -145,13 +148,13 @@ fn offense(node: NodeId, cx: &Cx<'_>) -> Option<DeprecatedOffense> {
                     cx.raw_source(range)
                 ),
                 replacement: Some(Replacement {
-                    range,
+                    range: cx.range(node),
                     text: preferred.to_string(),
                 }),
             })
         }
         ("ENV", "freeze") => {
-            let range = cx.range(node);
+            let range = receiver_selector_range(cx, node)?;
             Some(DeprecatedOffense {
                 range,
                 message: format!(
@@ -159,7 +162,7 @@ fn offense(node: NodeId, cx: &Cx<'_>) -> Option<DeprecatedOffense> {
                     cx.raw_source(range)
                 ),
                 replacement: Some(Replacement {
-                    range,
+                    range: cx.range(node),
                     text: "ENV".to_string(),
                 }),
             })
@@ -214,15 +217,16 @@ mod tests {
 
     #[test]
     fn flags_file_exists_and_filetest_exists() {
+        // RuboCop-style range: receiver.selector only, no args.
         expect_offense!(
             DeprecatedClassMethods,
             indoc! {r#"
             File.exists?(path)
-            ^^^^^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+            ^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
             Dir.exists?(path)
-            ^^^^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+            ^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
             FileTest.exists?(path)
-            ^^^^^^^^^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+            ^^^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
         "#}
         );
     }
@@ -241,6 +245,46 @@ mod tests {
             attr :name, true
             ^^^^^^^^^^^^^^^^ `attr :name, true` is deprecated in favor of `attr_accessor :name`.
         "#}
+        );
+    }
+
+    // murphy-h03f: cbase (::X) modifier + receiver.selector range.
+
+    #[test]
+    fn flags_cbase_env_freeze() {
+        // `::ENV` and bare `ENV` collapse to the same `Const{scope:None}`
+        // in Murphy's AST, so the existing pattern already accepts both.
+        // This test pins that contract so a future AST that splits the
+        // shapes can't silently regress us.
+        expect_offense!(
+            DeprecatedClassMethods,
+            indoc! {r#"
+                ::ENV.freeze
+                ^^^^^^^^^^^^ `::ENV.freeze` is deprecated in favor of `ENV`.
+            "#}
+        );
+    }
+
+    #[test]
+    fn flags_cbase_file_exists_with_receiver_selector_range() {
+        // Range covers `::File.exists?`, not the whole call with args.
+        expect_offense!(
+            DeprecatedClassMethods,
+            indoc! {r#"
+                ::File.exists?(path)
+                ^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+            "#}
+        );
+    }
+
+    #[test]
+    fn flags_file_exists_uses_receiver_selector_range() {
+        expect_offense!(
+            DeprecatedClassMethods,
+            indoc! {r#"
+                File.exists?(path)
+                ^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+            "#}
         );
     }
 
