@@ -180,14 +180,21 @@ fn body_contains_yield(cx: &Cx<'_>, body: NodeId) -> bool {
     false
 }
 
-/// Whether `body` is (or, for a `Begin`, ends with) a single `raise` /
-/// `fail` call whose first argument is `Const(name)` or
-/// `Const(name).new(...)` with `name` in `exceptions`.
+/// Whether `body` consists of nothing but a single `raise` / `fail`
+/// call whose first argument is `Const(name)` or `Const(name).new(...)`
+/// with `name` in `exceptions`. A multi-statement body like
+/// `do_something; raise NotImplementedError` is *not* matched —
+/// `do_something` could legitimately use the method's arguments, and a
+/// trailing exception should not silence the cop on the whole method.
 fn is_not_implemented_body(cx: &Cx<'_>, body: NodeId, exceptions: &[String]) -> bool {
     let target = match *cx.kind(body) {
-        NodeKind::Begin(list) => match cx.list(list).last() {
-            Some(&last) => last,
-            None => return false,
+        // `Begin` with a single child is the parser sometimes wrapping a
+        // lone statement (`def foo(_); raise X; end` → `Begin([Send])`).
+        // More than one statement means there is real code besides the
+        // raise; in that case the method isn't "just unimplemented".
+        NodeKind::Begin(list) => match cx.list(list) {
+            [only] => *only,
+            _ => return false,
         },
         _ => body,
     };
@@ -329,6 +336,24 @@ mod tests {
                 def foo(x)
                         ^ Unused method argument
                   raise ArgumentError
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn multi_statement_body_ending_in_raise_not_implemented_still_flags() {
+        // Only methods whose body is *just* `raise NotImplementedError`
+        // bypass the cop. A real implementation that happens to end with
+        // an unimplemented-class raise should still report unused args
+        // — `do_something` could legitimately consume them.
+        expect_offense!(
+            UnusedMethodArgument,
+            indoc! {r#"
+                def foo(unused)
+                        ^^^^^^ Unused method argument
+                  do_something
+                  raise NotImplementedError
                 end
             "#}
         );
