@@ -387,6 +387,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn options_are_accepted_but_not_yet_honored() {
+        // The struct surface is frozen (murphy-lpc.3.2), the runtime
+        // wiring lands in murphy-xszo. Until then, the v1 contract is:
+        // setting `AllowForAlignment = false` or either `EnforcedStyle*`
+        // = `space` must not change observable behaviour. Pin that here
+        // via the typed-options test path so murphy-xszo's wiring shows
+        // up as a deliberate test flip rather than a silent change.
+        expect_offense!(
+            SpaceAroundOperators,
+            indoc! {r#"
+                a&&b
+                 ^^ Surrounding space missing for operator `&&`.
+            "#},
+            &SpaceAroundOperatorsOptions {
+                allow_for_alignment: false,
+                enforced_style_for_exponent_operator: SpaceAroundOperatorsBinaryStyle::Space,
+                enforced_style_for_rational_literals: SpaceAroundOperatorsBinaryStyle::Space,
+            }
+        );
+    }
+
     /// Apply the cop's edits to `source` repeatedly until the result no
     /// longer changes. Used by the multi-operator-per-line tests where
     /// the `expect_offense!` annotation grammar's one-caret-per-line
