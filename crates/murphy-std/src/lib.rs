@@ -28,6 +28,7 @@
 
 pub mod cops;
 
+use crate::cops::layout::space_around_operators::SpaceAroundOperators;
 use crate::cops::layout::space_inside_parens::SpaceInsideParens;
 use crate::cops::layout::trailing_whitespace::TrailingWhitespace;
 use crate::cops::lint::debugger::Debugger;
@@ -55,6 +56,7 @@ murphy_plugin_api::register_cops!(
     StringLiterals,
     TrailingWhitespace,
     SpaceInsideParens,
+    SpaceAroundOperators,
 );
 
 /// Standard cops that have **not yet been migrated** to the arena AST /
