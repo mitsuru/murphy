@@ -170,11 +170,19 @@ fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
         // or in a shallower one that `write` *must* fall through to.
         // Compare on `end` so the OpAsgn self-read at the same byte
         // position as the OpAsgn's start doesn't shadow its own write.
+        //
+        // Writes inside a `begin`/`rescue`/`ensure`-protected body are
+        // not eligible dominators: an exception in the body can skip
+        // the rest of it, so we can't guarantee the candidate actually
+        // executes. This is conservative — purely-side-effect-free
+        // writes between two assignments wouldn't really raise — but
+        // it keeps us false-positive-free against exception flow.
         let dominating_overwrite = writes
             .iter()
             .enumerate()
             .filter(|(j, w)| *j != i && w.name == write.name && w.end > write.end)
             .filter(|(j, _)| chain_is_prefix(&write_chains[*j], &write_chains[i]))
+            .filter(|(_, w)| !is_in_protected_begin_body(cx, root, w.node))
             .min_by_key(|(_, w)| w.end);
 
         match (next_read_pos, dominating_overwrite) {
@@ -246,6 +254,32 @@ fn is_branch_barrier(cx: &Cx<'_>, node: NodeId) -> bool {
 /// out to.
 fn chain_is_prefix(short: &[(NodeId, NodeId)], long: &[(NodeId, NodeId)]) -> bool {
     short.len() <= long.len() && short == &long[..short.len()]
+}
+
+/// Whether `node` is inside the `body` arm of an enclosing `Rescue` or
+/// `Ensure`. A write here can be interrupted by an exception, so we
+/// can't claim it always executes — exclude it from dominating-overwrite
+/// candidates.
+fn is_in_protected_begin_body(cx: &Cx<'_>, root: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent) = cx.parent(current).get() {
+        if parent == root {
+            return false;
+        }
+        let parent_kind = *cx.kind(parent);
+        let body = match parent_kind {
+            NodeKind::Rescue { body, .. } | NodeKind::Ensure { body, .. } => body,
+            _ => {
+                current = parent;
+                continue;
+            }
+        };
+        if body.get() == Some(current) {
+            return true;
+        }
+        current = parent;
+    }
+    false
 }
 
 /// Two chains describe compatible control-flow paths iff no shared
@@ -727,6 +761,26 @@ mod tests {
                   x = 1
                 end
                 if b
+                  puts x
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn begin_body_write_interrupted_by_exception_is_observed_by_rescue() {
+        // `may_raise` can throw between `x = 1` and `x = 2`. On the
+        // exception path, `rescue` reads x = 1 — the value survives.
+        // The cop must not flag x = 1 as overwritten by x = 2.
+        // (PR #70 review job 1165.)
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                begin
+                  x = 1
+                  may_raise
+                  x = 2
+                rescue
                   puts x
                 end
             "#}
