@@ -564,8 +564,8 @@ merge — proceed once CI is green.
   expectations, and the offense/edit pairing the host uses.
 - **`references/testing.md`** — `test::<T>()` tester-builder API, the
   caret annotation grammar (multi-annotation-per-line included), and
-  the `run_cop` escape hatch. Covers the legacy `expect_*!` macros as
-  the still-supported alternative.
+  the `run_cop` escape hatch. Legacy `expect_*!` macros are not
+  exported.
 
 ### Example cop files in-tree
 

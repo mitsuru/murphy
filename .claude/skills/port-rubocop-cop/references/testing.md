@@ -1,4 +1,4 @@
-# Testing cops — `test::<T>()` tester builder (plus the legacy `expect_*!` macros)
+# Testing cops — `test::<T>()` tester builder
 
 Authoritative source: infra guide §11 plus
 `crates/murphy-plugin-api/src/test_support.rs`.
