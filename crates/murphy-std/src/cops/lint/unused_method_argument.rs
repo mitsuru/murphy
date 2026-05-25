@@ -264,20 +264,17 @@ mod tests {
     use super::UnusedMethodArgument;
     use murphy_plugin_api::{
         Range,
-        test_support::{expect_no_offenses, expect_offense, indoc, run_cop_with_edits},
+        test_support::{indoc, run_cop_with_edits, test},
     };
 
     #[test]
     fn flags_unused_method_arguments() {
-        expect_offense!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
             def call(used, unused, _ignored)
                            ^^^^^^ Unused method argument
               used
             end
-        "#}
-        );
+        "#});
     }
 
     #[test]
@@ -285,7 +282,7 @@ mod tests {
         let run = run_cop_with_edits::<UnusedMethodArgument>("def 名前(foo)\n  1\nend\n");
         assert_eq!(run.edits[0].range, Range { start: 11, end: 11 });
         assert_eq!(run.edits[0].replacement, "_");
-        expect_no_offenses!(UnusedMethodArgument, "def 名前(_foo)\n  1\nend\n");
+        test::<UnusedMethodArgument>().expect_no_offenses("def 名前(_foo)\n  1\nend\n");
     }
 
     // murphy-lmqm: IgnoreNotImplementedMethods + block_argument_with_yield +
@@ -293,52 +290,40 @@ mod tests {
 
     #[test]
     fn skips_method_whose_body_just_raises_not_implemented_error() {
-        expect_no_offenses!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
                 def foo(x)
                   raise NotImplementedError
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn skips_method_whose_body_just_raises_not_implemented_error_dot_new() {
-        expect_no_offenses!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
                 def foo(x)
                   raise NotImplementedError.new("nope")
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn skips_method_with_fail_not_implemented_error() {
-        expect_no_offenses!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
                 def foo(x)
                   fail NotImplementedError
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn raise_of_different_exception_still_flags() {
         // Only NotImplementedError-class raises trigger the bypass.
-        expect_offense!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
                 def foo(x)
                         ^ Unused method argument
                   raise ArgumentError
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -347,41 +332,32 @@ mod tests {
         // bypass the cop. A real implementation that happens to end with
         // an unimplemented-class raise should still report unused args
         // — `do_something` could legitimately consume them.
-        expect_offense!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
                 def foo(unused)
                         ^^^^^^ Unused method argument
                   do_something
                   raise NotImplementedError
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn block_arg_with_yield_in_body_is_not_flagged() {
-        expect_no_offenses!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
                 def foo(&blk)
                   yield
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn block_arg_without_yield_is_still_flagged() {
-        expect_offense!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
                 def foo(&blk)
                          ^^^ Unused method argument
                   1
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -422,33 +398,27 @@ mod tests {
         // The nested `def inner; yield; end` has its own block scope —
         // its `yield` refers to `inner`'s block, not `outer`'s. So the
         // outer `&blk` is still unused.
-        expect_offense!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
                 def outer(&blk)
                            ^^^ Unused method argument
                   def inner
                     yield
                   end
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn yield_inside_block_body_still_uses_outer_blockarg() {
         // `yield` inside a block refers to the *enclosing method's*
         // block, so the outer `&blk` is implicitly used.
-        expect_no_offenses!(
-            UnusedMethodArgument,
-            indoc! {r#"
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
                 def outer(&blk)
                   [1, 2].each do |x|
                     yield x
                   end
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]

@@ -108,96 +108,79 @@ fn region_has_comment(cx: &Cx<'_>, region: Range) -> bool {
 #[cfg(test)]
 mod tests {
     use super::EmptyWhen;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
     fn flags_empty_when() {
-        expect_offense!(
-            EmptyWhen,
-            indoc! {r#"
+        test::<EmptyWhen>().expect_offense(indoc! {r#"
             case value
             when 1
             ^^^^^^ Avoid empty when branches
             when 2
               :ok
             end
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn ignores_non_empty_when_with_multibyte_body() {
-        expect_no_offenses!(EmptyWhen, "case x\nwhen 1\n  名前\nend\n");
+        test::<EmptyWhen>().expect_no_offenses("case x\nwhen 1\n  名前\nend\n");
     }
 
     // murphy-aj9q: AllowComments (default true).
 
     #[test]
     fn comment_only_body_is_allowed_by_default() {
-        expect_no_offenses!(
-            EmptyWhen,
-            indoc! {r#"
+        test::<EmptyWhen>().expect_no_offenses(indoc! {r#"
                 case value
                 when 1
                   # noop
                 when 2
                   :ok
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn comment_in_last_when_before_end_is_allowed() {
-        expect_no_offenses!(
-            EmptyWhen,
-            indoc! {r#"
+        test::<EmptyWhen>().expect_no_offenses(indoc! {r#"
                 case value
                 when 1
                   :ok
                 when 2
                   # noop
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn comment_in_when_before_else_is_allowed() {
-        expect_no_offenses!(
-            EmptyWhen,
-            indoc! {r#"
+        test::<EmptyWhen>().expect_no_offenses(indoc! {r#"
                 case value
                 when 1
                   # noop
                 else
                   :ok
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn empty_when_with_no_comment_is_still_flagged() {
-        expect_offense!(
-            EmptyWhen,
-            indoc! {r#"
+        test::<EmptyWhen>().expect_offense(indoc! {r#"
                 case value
                 when 1
                 ^^^^^^ Avoid empty when branches
                 when 2
                   :ok
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn comment_outside_when_body_does_not_save_other_empty_when() {
         // The `# noop` belongs to `when 2`'s body, not `when 1`'s.
-        expect_offense!(
-            EmptyWhen,
-            indoc! {r#"
+        test::<EmptyWhen>().expect_offense(indoc! {r#"
                 case value
                 when 1
                 ^^^^^^ Avoid empty when branches
@@ -205,7 +188,6 @@ mod tests {
                   # noop
                   :ok
                 end
-            "#}
-        );
+            "#});
     }
 }

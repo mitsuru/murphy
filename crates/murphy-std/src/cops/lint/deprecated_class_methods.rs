@@ -212,30 +212,25 @@ mod tests {
     use super::DeprecatedClassMethods;
     use murphy_plugin_api::{
         Range,
-        test_support::{expect_no_offenses, expect_offense, indoc, run_cop_with_edits},
+        test_support::{indoc, run_cop_with_edits, test},
     };
 
     #[test]
     fn flags_file_exists_and_filetest_exists() {
         // RuboCop-style range: receiver.selector only, no args.
-        expect_offense!(
-            DeprecatedClassMethods,
-            indoc! {r#"
+        test::<DeprecatedClassMethods>().expect_offense(indoc! {r#"
             File.exists?(path)
             ^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
             Dir.exists?(path)
             ^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
             FileTest.exists?(path)
             ^^^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn flags_rubocop_deprecated_class_method_shapes() {
-        expect_offense!(
-            DeprecatedClassMethods,
-            indoc! {r#"
+        test::<DeprecatedClassMethods>().expect_offense(indoc! {r#"
             ENV.freeze
             ^^^^^^^^^^ `ENV.freeze` is deprecated in favor of `ENV`.
             Socket.gethostbyname(host)
@@ -244,8 +239,7 @@ mod tests {
             ^^^^^^^^^ `iterator?` is deprecated in favor of `block_given?`.
             attr :name, true
             ^^^^^^^^^^^^^^^^ `attr :name, true` is deprecated in favor of `attr_accessor :name`.
-        "#}
-        );
+        "#});
     }
 
     // murphy-h03f: cbase (::X) modifier + receiver.selector range.
@@ -256,36 +250,27 @@ mod tests {
         // in Murphy's AST, so the existing pattern already accepts both.
         // This test pins that contract so a future AST that splits the
         // shapes can't silently regress us.
-        expect_offense!(
-            DeprecatedClassMethods,
-            indoc! {r#"
+        test::<DeprecatedClassMethods>().expect_offense(indoc! {r#"
                 ::ENV.freeze
                 ^^^^^^^^^^^^ `::ENV.freeze` is deprecated in favor of `ENV`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_cbase_file_exists_with_receiver_selector_range() {
         // Range covers `::File.exists?`, not the whole call with args.
-        expect_offense!(
-            DeprecatedClassMethods,
-            indoc! {r#"
+        test::<DeprecatedClassMethods>().expect_offense(indoc! {r#"
                 ::File.exists?(path)
                 ^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_file_exists_uses_receiver_selector_range() {
-        expect_offense!(
-            DeprecatedClassMethods,
-            indoc! {r#"
+        test::<DeprecatedClassMethods>().expect_offense(indoc! {r#"
                 File.exists?(path)
                 ^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -293,9 +278,7 @@ mod tests {
         let run = run_cop_with_edits::<DeprecatedClassMethods>("File.exists?(path)\n");
         assert_eq!(run.edits[0].range, Range { start: 5, end: 12 });
         assert_eq!(run.edits[0].replacement, "exist?");
-        expect_no_offenses!(
-            DeprecatedClassMethods,
-            "File.exist?(path)\n名前 = File.exist?(path)\n"
-        );
+        test::<DeprecatedClassMethods>()
+            .expect_no_offenses("File.exist?(path)\n名前 = File.exist?(path)\n");
     }
 }

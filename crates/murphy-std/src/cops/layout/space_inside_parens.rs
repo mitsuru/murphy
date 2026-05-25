@@ -217,24 +217,23 @@ fn has_space_after(cx: &Cx<'_>, start: u32, end: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::SpaceInsideParens;
-    use murphy_plugin_api::test_support::{expect_correction, expect_no_corrections, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
     fn corrects_spaces_inside_parentheses() {
-        expect_correction!(
-            SpaceInsideParens,
+        test::<SpaceInsideParens>().expect_correction(
             indoc! {r#"
                 foo( 1)
                     ^ Space inside parentheses detected.
                 bar(1 )
                      ^ Space inside parentheses detected.
             "#},
-            "foo(1)\nbar(1)\n"
+            "foo(1)\nbar(1)\n",
         );
     }
 
     #[test]
     fn leaves_clean_parentheses_without_corrections() {
-        expect_no_corrections!(SpaceInsideParens, "foo(1, 2)\nbar()\n");
+        test::<SpaceInsideParens>().expect_no_corrections("foo(1, 2)\nbar()\n");
     }
 }

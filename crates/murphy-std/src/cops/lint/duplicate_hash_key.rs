@@ -166,13 +166,11 @@ fn literal_key(cx: &Cx<'_>, node: NodeId) -> Option<LiteralKey> {
 #[cfg(test)]
 mod tests {
     use super::DuplicateHashKey;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
     fn flags_duplicate_literal_keys() {
-        expect_offense!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
             {
               a: 1,
               b: 2,
@@ -185,111 +183,89 @@ mod tests {
               1.0 => 2,
               ^^^ Duplicated key in hash literal.
             }
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn ignores_dynamic_keys_and_distinct_literal_types() {
-        expect_no_offenses!(DuplicateHashKey, "{ a => 1, a => 2, :a => 1, 'a' => 2 }\n");
+        test::<DuplicateHashKey>().expect_no_offenses("{ a => 1, a => 2, :a => 1, 'a' => 2 }\n");
     }
 
     // murphy-sn9r: const + compound literal key support.
 
     #[test]
     fn flags_duplicate_const_keys() {
-        expect_offense!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
                 {
                   STATUS_OK => 1,
                   STATUS_OK => 2,
                   ^^^^^^^^^ Duplicated key in hash literal.
                 }
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_duplicate_const_path_keys() {
-        expect_offense!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
                 {
                   Foo::Bar => 1,
                   Foo::Bar => 2,
                   ^^^^^^^^ Duplicated key in hash literal.
                 }
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn const_vs_different_const_is_not_duplicate() {
-        expect_no_offenses!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_no_offenses(indoc! {r#"
                 {
                   STATUS_OK => 1,
                   STATUS_ERR => 2,
                 }
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_duplicate_array_keys() {
-        expect_offense!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
                 {
                   [1, 2] => :a,
                   [1, 2] => :b,
                   ^^^^^^ Duplicated key in hash literal.
                 }
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_duplicate_range_keys() {
-        expect_offense!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
                 {
                   1..3 => :a,
                   1..3 => :b,
                   ^^^^ Duplicated key in hash literal.
                 }
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn exclusive_range_differs_from_inclusive() {
-        expect_no_offenses!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_no_offenses(indoc! {r#"
                 {
                   1..3 => :a,
                   1...3 => :b,
                 }
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_duplicate_regexp_keys() {
-        expect_offense!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
                 {
                   /foo/i => 1,
                   /foo/i => 2,
                   ^^^^^^ Duplicated key in hash literal.
                 }
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -297,16 +273,13 @@ mod tests {
         // Ruby's `Hash#==` ignores insertion order, so two hash keys
         // that hold the same pairs must compare equal even when the
         // literal order differs.
-        expect_offense!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
                 {
                   { a: 1, b: 2 } => :x,
                   { b: 2, a: 1 } => :y,
                   ^^^^^^^^^^^^^^ Duplicated key in hash literal.
                 }
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -314,29 +287,23 @@ mod tests {
         // Regression guard for the naive `,`-joined-string approach:
         // `["a,str:b"]` and `["a", "b"]` would have flattened to the
         // same `array:[str:a,str:b]` string and falsely flagged.
-        expect_no_offenses!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_no_offenses(indoc! {r#"
                 {
                   ["a,str:b"] => 1,
                   ["a", "b"] => 2,
                 }
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn array_with_non_literal_element_is_not_keyed() {
         // `[x, 1]` contains an Lvar; the compound can't be keyed
         // statically, so the cop must not flag.
-        expect_no_offenses!(
-            DuplicateHashKey,
-            indoc! {r#"
+        test::<DuplicateHashKey>().expect_no_offenses(indoc! {r#"
                 {
                   [x, 1] => :a,
                   [x, 1] => :b,
                 }
-            "#}
-        );
+            "#});
     }
 }
