@@ -491,8 +491,7 @@ production cdylib stays parser-free.
 The preferred test-writing surface is the **tester builder**
 (`test::<T>()`). Each cop sits behind the generic parameter, options
 flow through `with_options(&T::Options)`, and one or more
-`expect_*` methods chain off the same tester. The legacy `expect_*!`
-macros are no longer exported.
+`expect_*` methods chain off the same tester.
 
 ### `test::<T>()` — the tester builder
 
@@ -604,10 +603,6 @@ fn flags_two_expects_single_line_block() {
         "#});
 }
 ```
-
-The legacy macro form (`expect_offense!`, `expect_no_offenses!`,
-`expect_correction!`, `expect_no_corrections!`) is no longer exported.
-Use `test::<Cop>()` for all new cop tests.
 
 ### `indoc!`
 

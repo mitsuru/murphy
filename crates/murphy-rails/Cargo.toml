@@ -22,10 +22,9 @@ murphy-plugin-api = { path = "../murphy-plugin-api" }
 # Used by tests/dep_boundary.rs to parse `cargo metadata` JSON.
 serde_json = "1"
 # Parser-driven cop tests live in each cop file's `#[cfg(test)] mod
-# tests` and use `murphy_plugin_api::test_support::{expect_offense!,
-# expect_no_offenses!, indoc}`. Enabling the feature here pulls
-# `murphy-translate` into plugin-api at test time only; production
-# builds (no feature) stay free of the parser.
+# tests` and use `murphy_plugin_api::test_support::{indoc, test}`.
+# Enabling the feature here pulls `murphy-translate` into plugin-api at
+# test time only; production builds (no feature) stay free of the parser.
 # `tests/dep_boundary.rs` checks runtime `murphy-*` deps only, so the
 # single-surface invariant holds.
 murphy-plugin-api = { path = "../murphy-plugin-api", features = ["test-support"] }
