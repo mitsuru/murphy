@@ -491,9 +491,8 @@ production cdylib stays parser-free.
 The preferred test-writing surface is the **tester builder**
 (`test::<T>()`). Each cop sits behind the generic parameter, options
 flow through `with_options(&T::Options)`, and one or more
-`expect_*` methods chain off the same tester. The legacy
-`expect_*!` macros are still exported and pass through to the same
-internal helpers; both APIs coexist.
+`expect_*` methods chain off the same tester. The legacy `expect_*!`
+macros are no longer exported.
 
 ### `test::<T>()` — the tester builder
 
@@ -592,29 +591,23 @@ Rules:
   `expect_no_offenses` panics with the symmetric message when the
   input contains carets.
 
-### Legacy `expect_*!` macros
+### Single-line offense example
 
 ```rust
-use murphy_plugin_api::test_support::{expect_offense, indoc};
+use murphy_plugin_api::test_support::{indoc, test};
 
 #[test]
 fn flags_two_expects_single_line_block() {
-    expect_offense!(
-        MultipleExpectations,
-        indoc! {r#"
+    test::<MultipleExpectations>().expect_offense(indoc! {r#"
             it "x" do expect(a).to eq(1); expect(b).to eq(2) end
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Example has too many expectations (2/1)
-        "#}
-    );
+        "#});
 }
 ```
 
-The macro form (`expect_offense!` / `expect_no_offenses!` /
-`expect_correction!` / `expect_no_corrections!`) is still exported.
-Each macro forwards to the same internal helpers the tester builder
-uses, so behavior is identical. New cop tests prefer the tester
-builder for the type-safe options story and the chain; existing
-macro callsites do not need to migrate.
+The legacy macro form (`expect_offense!`, `expect_no_offenses!`,
+`expect_correction!`, `expect_no_corrections!`) is no longer exported.
+Use `test::<Cop>()` for all new cop tests.
 
 ### `indoc!`
 

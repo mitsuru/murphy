@@ -101,8 +101,8 @@ The tester-builder entry point and the items used by every test:
   multi-line fixture.
 
 The legacy `expect_offense!` / `expect_no_offenses!` /
-`expect_correction!` / `expect_no_corrections!` macros remain
-exported and forward to the same internal helpers.
+`expect_correction!` / `expect_no_corrections!` macros are not
+exported. Use `test::<T>()` and `Tester<T>` methods instead.
 
 Gated behind the `test-support` cargo feature. The pack's `Cargo.toml`
 [dev-dependencies] must enable it:

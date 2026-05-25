@@ -243,26 +243,14 @@ fn flags_two_expects() {
 Since `run_cop` only dispatches the one cop type, every emission is
 already from that cop — no per-name filter needed.
 
-## Legacy `expect_*!` macros
+## No legacy `expect_*!` macros
 
 `expect_offense!` / `expect_no_offenses!` / `expect_correction!` /
-`expect_no_corrections!` macros are still exported and pass through
-to the same internal helpers. The macro form is fine for one-off
-single-expectation tests, but new cop tests prefer the tester
-builder for the type-safe-options story and the chain. Existing
-macro callsites do not have to migrate; both APIs will coexist.
+`expect_no_corrections!` macros are not exported. Use the tester
+builder for every expectation, including one-off single-expectation
+tests.
 
 ```rust
-// macro form (still supported)
-expect_offense!(
-    MyCop,
-    indoc! {r#"
-        x==0
-         ^^ Surrounding space missing for operator `==`.
-    "#}
-);
-
-// tester builder form (preferred for new tests)
 test::<MyCop>().expect_offense(indoc! {r#"
     x==0
      ^^ Surrounding space missing for operator `==`.

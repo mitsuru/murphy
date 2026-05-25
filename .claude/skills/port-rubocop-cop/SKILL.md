@@ -327,11 +327,8 @@ Each `expect_*` method is `#[track_caller]` and returns `&Self`, so a
 single tester can carry many expectations through the same options.
 When tests do not share setup, one-tester-per-`#[test]` is also fine.
 
-The legacy `expect_*!` macros (`expect_offense!` etc.) remain exported
-and still work — both paths forward to the same internal helpers. Use
-the macros only when the typed-options surface is genuinely not
-needed (i.e. `Cop::Options = NoOptions`) and the test is single-call;
-otherwise prefer the tester builder.
+The legacy `expect_*!` macros (`expect_offense!` etc.) are not exported.
+Use `test::<Cop>()` for every expectation, including single-call tests.
 
 Wrap every Ruby fixture string in `indoc!` (re-exported from the
 harness) so the source can stay indented in the test body without
