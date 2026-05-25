@@ -647,6 +647,26 @@ mod tests {
     // ----- v1 known-limitation pins --------------------------------
 
     #[test]
+    fn pattern_matching_in_clause_is_skipped_via_parser_unknown() {
+        // `case .. in` pattern-matching expressions parse to
+        // `NodeKind::Unknown` in Murphy v1 — the `Send` inside the
+        // pattern body never reaches dispatch, so the cop never
+        // sees it. The lack-of-offense matches RuboCop's expected
+        // behaviour (RuboCop's `on_in_pattern` would collect the
+        // match-var name into scope and skip the Send). Pinned so
+        // a future translator upgrade that lowers pattern matching
+        // into visible nodes flips this test alongside the cop
+        // logic — at which point the cop needs to grow real
+        // match-var scope handling.
+        test::<RedundantSelf>().expect_no_offenses(indoc! {"
+            case foo
+            in Integer => bar
+              self.bar
+            end
+        "});
+    }
+
+    #[test]
     fn self_op_asgn_lhs_is_skipped_via_parser_unknown() {
         // `self.x ||= 42` parses to a `NodeKind::Unknown` in Murphy
         // — the inner `Send` never reaches dispatch — so the cop
