@@ -27,13 +27,15 @@ jobs:
         run: rustup component add rustfmt clippy
 
       - name: Install nightly rustfmt
-        run: rustup toolchain install nightly --profile minimal --component rustfmt
+        # Pinned date keeps fmt output stable across CI runs; bump deliberately
+        # when adopting a new nightly rustfmt release.
+        run: rustup toolchain install nightly-2026-05-24 --profile minimal --component rustfmt
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
 
       - name: cargo fmt
-        run: cargo +nightly fmt --check
+        run: cargo +nightly-2026-05-24 fmt --check
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
