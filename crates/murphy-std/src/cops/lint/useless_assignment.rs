@@ -1,5 +1,6 @@
 //! `Lint/UselessAssignment` — flags local-variable writes whose result is
-//! never read inside the same lexical scope.
+//! never read, *or* whose result is overwritten by a sibling write before
+//! any read can observe it.
 //!
 //! ## Matched shapes
 //!
@@ -13,6 +14,28 @@
 //!   not flagged just because `x += 1` follows.
 //! - `Resbody.var` (`rescue => e`) — `e`'s name range, "exception
 //!   variable" message.
+//!
+//! ## Flow-sensitive dataflow (murphy-xek)
+//!
+//! The cop runs a single-pass intra-scope dataflow:
+//!
+//! 1. Collect every write (`Lvasgn`, `Masgn` target, `OpAsgn`/`OrAsgn`/
+//!    `AndAsgn`, `Resbody.var`) and every read (`Lvar`, plus the implicit
+//!    read inside `OpAsgn`/`OrAsgn`/`AndAsgn`) with byte positions.
+//! 2. For each write `w` to a variable named `n`:
+//!    a. If there is no later read of `n`, flag `w`.
+//!    b. Else find the first later read of `n` and the first later write
+//!    of `n`. If the later write happens *before* the later read **and**
+//!    lies on the same control-flow path as `w`, flag `w` as
+//!    overwrite-before-read.
+//!
+//! "Same control-flow path" is computed by walking up via `cx.parent` and
+//! collecting branch-introducing ancestors (`If` / `Case` / `When` /
+//! `While` / `Until` / `Rescue` / `Resbody`). Two writes share a path iff
+//! their barrier chains up to the scope root are identical. Sequential
+//! statements inside a `Begin` are therefore straight-line, but a
+//! conditional write inside `if c; …; end` is not on the same path as
+//! a sibling write at the outer level.
 //!
 //! ## Known v1 limitations (Phase 4 — escalate to extend the AST)
 //!
@@ -69,6 +92,9 @@ struct Write {
     /// Range to emit the offense on.
     range: Range,
     message: &'static str,
+    /// Node id used to compute the control-flow barrier chain when
+    /// deciding whether two writes are on the same path.
+    node: NodeId,
 }
 
 struct Read {
@@ -83,14 +109,86 @@ fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
     for id in scope_nodes(cx, root) {
         classify(cx, id, &mut writes, &mut reads);
     }
-    for write in &writes {
-        let read_after = reads
+    for (i, write) in writes.iter().enumerate() {
+        // Earliest later read of the same name.
+        let next_read_pos = reads
             .iter()
-            .any(|r| r.name == write.name && r.pos > write.end);
-        if !read_after {
-            cx.emit_offense(write.range, write.message, None);
+            .filter(|r| r.name == write.name && r.pos > write.end)
+            .map(|r| r.pos)
+            .min();
+        // Earliest later sibling write of the same name. We compare on
+        // `end` so the `OpAsgn` self-read at the same byte position as
+        // the OpAsgn's start doesn't get treated as "after" its own
+        // write.
+        let next_write = writes
+            .iter()
+            .enumerate()
+            .filter(|(j, w)| *j != i && w.name == write.name && w.end > write.end)
+            .min_by_key(|(_, w)| w.end);
+
+        match (next_read_pos, next_write) {
+            (None, None) => {
+                // No later read, no later write — classic useless write.
+                cx.emit_offense(write.range, write.message, None);
+            }
+            (Some(r), Some((_, w))) if r <= w.end => {
+                // Read first: the value is observed before any overwrite.
+                continue;
+            }
+            (None, Some((_, w))) | (Some(_), Some((_, w))) => {
+                // Overwrite first (or no later read at all but a later
+                // write). Flag only if the two writes share a
+                // control-flow path; otherwise the overwrite might not
+                // actually happen at runtime.
+                if same_control_flow_chunk(cx, root, write.node, w.node) {
+                    cx.emit_offense(write.range, write.message, None);
+                }
+            }
+            (Some(_), None) => {
+                // A later read exists and no overwrite at all — the
+                // value is used.
+                continue;
+            }
         }
     }
+}
+
+/// Walk up from `node` via `cx.parent`, collecting any branch-
+/// introducing ancestors up to (but not including) the scope `root`.
+/// Two writes are in the same straight-line chunk iff their chains are
+/// equal — i.e. they sit under the same set of conditional /
+/// loop / rescue scopes.
+fn barrier_chain(cx: &Cx<'_>, root: NodeId, node: NodeId) -> Vec<NodeId> {
+    let mut chain: Vec<NodeId> = Vec::new();
+    let mut current = cx.parent(node).get();
+    while let Some(c) = current {
+        if c == root {
+            break;
+        }
+        if is_branch_barrier(cx, c) {
+            chain.push(c);
+        }
+        current = cx.parent(c).get();
+    }
+    chain
+}
+
+fn is_branch_barrier(cx: &Cx<'_>, node: NodeId) -> bool {
+    matches!(
+        *cx.kind(node),
+        NodeKind::If { .. }
+            | NodeKind::Case { .. }
+            | NodeKind::When { .. }
+            | NodeKind::While { .. }
+            | NodeKind::Until { .. }
+            | NodeKind::Rescue { .. }
+            | NodeKind::Resbody { .. }
+            | NodeKind::Ensure { .. }
+    )
+}
+
+fn same_control_flow_chunk(cx: &Cx<'_>, root: NodeId, a: NodeId, b: NodeId) -> bool {
+    barrier_chain(cx, root, a) == barrier_chain(cx, root, b)
 }
 
 fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Read>) {
@@ -117,6 +215,7 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
                         end: cx.range(id).end,
                         range: cx.range(id),
                         message: MSG_OPERATOR,
+                        node: id,
                     });
                 }
             }
@@ -135,6 +234,7 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
                     end: cx.range(var_id).end,
                     range: cx.range(var_id),
                     message: MSG_EXCEPTION,
+                    node: var_id,
                 });
             }
         }
@@ -185,6 +285,7 @@ fn push_local_write(
         end: asgn_end,
         range: assignment_name_range(cx, node, name_str),
         message: MSG_LOCAL,
+        node,
     });
 }
 
@@ -417,6 +518,97 @@ mod tests {
                 rescue => _err
                   :rescued
                 end
+            "#}
+        );
+    }
+
+    // murphy-xek: flow-sensitive dataflow — overwrite-before-read +
+    // branch-aware barriers.
+
+    #[test]
+    fn overwrite_before_read_flags_the_overwritten_write() {
+        // `x = 1` is overwritten by `x = 2` before any read.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 1
+                ^ Useless assignment to local variable
+                x = 2
+                x
+            "#}
+        );
+    }
+
+    #[test]
+    fn overwrite_with_no_read_flags_both_writes() {
+        let offenses =
+            murphy_plugin_api::test_support::run_cop::<UselessAssignment>("x = 1\nx = 2\n");
+        assert_eq!(
+            offenses.len(),
+            2,
+            "expected both writes flagged, got {offenses:?}"
+        );
+    }
+
+    #[test]
+    fn conditional_overwrite_does_not_flag_outer_write() {
+        // `x = 1` may survive — the `x = 2` is inside an `if`, so on
+        // the `cond == false` path the final `x` reads `1`.
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 1
+                if cond
+                  x = 2
+                end
+                x
+            "#}
+        );
+    }
+
+    #[test]
+    fn overwrite_inside_same_branch_still_flags() {
+        // Both writes live inside the same `if` body — straight-line
+        // within the branch, so the first is still overwritten.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                if cond
+                  x = 1
+                  ^ Useless assignment to local variable
+                  x = 2
+                  x
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn overwrite_separated_by_use_does_not_flag() {
+        // `x = 1; foo(x); x = 2` — the call reads `x`, so `x = 1` is
+        // used.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 1
+                foo(x)
+                x = 2
+                ^ Useless assignment to local variable
+            "#}
+        );
+    }
+
+    #[test]
+    fn op_asgn_overwriting_a_prior_write_does_not_flag_the_prior_write() {
+        // Already covered by the murphy-8k4y tests, but pin again under
+        // the dataflow framing: `x = 0; x += 1` — only the OpAsgn is
+        // useless.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 0
+                x += 1
+                ^^^^^^ Useless operator-assignment to local variable
             "#}
         );
     }
