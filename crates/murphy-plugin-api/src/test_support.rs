@@ -86,6 +86,28 @@ macro_rules! expect_offense {
 
 pub use crate::expect_offense;
 
+/// Assert that `Cop` emits exactly the offenses described by the caret
+/// annotations in `src`, then that applying its emitted autocorrect edits
+/// produces `expected_after`.
+#[macro_export]
+macro_rules! expect_correction {
+    ($cop:ty, $src:expr, $expected_after:expr) => {{
+        $crate::test_support::__assert_correction_match::<$cop>($src, $expected_after);
+    }};
+}
+
+pub use crate::expect_correction;
+
+/// Assert that `Cop` emits no autocorrect edits against `src`.
+#[macro_export]
+macro_rules! expect_no_corrections {
+    ($cop:ty, $src:expr) => {{
+        $crate::test_support::__assert_no_corrections::<$cop>($src);
+    }};
+}
+
+pub use crate::expect_no_corrections;
+
 /// One annotation parsed out of an `expect_offense!` input.
 #[derive(Debug, Clone)]
 struct Expected {
@@ -182,12 +204,20 @@ pub fn __assert_offenses_match<T: NodeCop + Default>(annotated: &str) {
         );
     }
     let actuals = run_cop::<T>(&cleaned);
+    assert_offenses_match("expect_offense!", &cleaned, &expected, &actuals);
+}
 
-    let mut exp_sorted: Vec<Expected> = expected.clone();
+fn assert_offenses_match(
+    macro_name: &str,
+    cleaned: &str,
+    expected: &[Expected],
+    actuals: &[CapturedOffense],
+) {
+    let mut exp_sorted: Vec<Expected> = expected.to_vec();
     exp_sorted.sort_by(|a, b| {
         (a.range.start, a.range.end, &a.message).cmp(&(b.range.start, b.range.end, &b.message))
     });
-    let mut act_sorted: Vec<CapturedOffense> = actuals.clone();
+    let mut act_sorted: Vec<CapturedOffense> = actuals.to_vec();
     act_sorted.sort_by(|a, b| {
         (a.range.start, a.range.end, &a.message).cmp(&(b.range.start, b.range.end, &b.message))
     });
@@ -217,9 +247,60 @@ pub fn __assert_offenses_match<T: NodeCop + Default>(annotated: &str) {
             .map(|a| (a.range, Some(a.message.as_str())))
             .collect();
         panic!(
-            "expect_offense! mismatch\n\nexpected:\n{}\nactual:\n{}",
-            indent_block(&render(&cleaned, &exp_items)),
-            indent_block(&render(&cleaned, &act_items)),
+            "{} mismatch\n\nexpected:\n{}\nactual:\n{}",
+            macro_name,
+            indent_block(&render(cleaned, &exp_items)),
+            indent_block(&render(cleaned, &act_items)),
+        );
+    }
+}
+
+/// `expect_correction!`'s inner assertion. Not part of the public API —
+/// call sites go through the macro so `#[track_caller]` makes the
+/// panic point at the test line, not this helper.
+#[track_caller]
+pub fn __assert_correction_match<T: NodeCop + Default>(annotated: &str, expected_after: &str) {
+    let (cleaned, expected) = parse_annotated(annotated);
+    if expected.is_empty() {
+        panic!(
+            "expect_correction! must contain at least one annotation; use expect_no_offenses! instead"
+        );
+    }
+
+    let captured = run_cop_with_edits::<T>(&cleaned);
+    assert_offenses_match(
+        "expect_correction!",
+        &cleaned,
+        &expected,
+        &captured.offenses,
+    );
+
+    let actual_after = apply_captured_edits(&cleaned, &captured.edits);
+    if actual_after != expected_after {
+        panic!(
+            "expect_correction! corrected source mismatch\n\nexpected:\n{}\nactual:\n{}",
+            indent_block(expected_after),
+            indent_block(&actual_after),
+        );
+    }
+}
+
+/// `expect_no_corrections!`'s inner assertion. Not part of the public API.
+#[track_caller]
+pub fn __assert_no_corrections<T: NodeCop + Default>(src: &str) {
+    let (_cleaned, expected) = parse_annotated(src);
+    if !expected.is_empty() {
+        panic!(
+            "expect_no_corrections! must not contain annotations; use expect_correction! instead"
+        );
+    }
+
+    let captured = run_cop_with_edits::<T>(src);
+    if !captured.edits.is_empty() {
+        panic!(
+            "expect_no_corrections! found {} edit(s) for {}",
+            captured.edits.len(),
+            <T as Cop>::NAME,
         );
     }
 }
@@ -314,12 +395,14 @@ pub struct CapturedOffense {
     pub severity: Option<Severity>,
 }
 
+/// One autocorrect edit captured by [`run_cop_with_edits`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedEdit {
     pub range: Range,
     pub replacement: String,
 }
 
+/// The complete output captured from one cop run.
 #[derive(Debug, Clone)]
 pub struct CapturedRun {
     pub offenses: Vec<CapturedOffense>,
@@ -347,17 +430,11 @@ unsafe extern "C" fn record_offense(sink_ptr: *mut std::ffi::c_void, o: *const R
     });
 }
 
-unsafe extern "C" fn ignore_edit(_sink: *mut std::ffi::c_void, _e: *const RawEdit) {
-    // Autocorrect edits are not captured by the basic harness. Cops
-    // that emit edits should write a richer test that records them;
-    // this default keeps the FnTable valid.
-}
-
 unsafe extern "C" fn record_edit(sink_ptr: *mut std::ffi::c_void, e: *const RawEdit) {
     let sink = unsafe { &*(sink_ptr as *const RefCell<Sink>) };
     let e = unsafe { &*e };
     let replacement = String::from_utf8(unsafe { e.replacement.as_bytes() }.to_vec())
-        .expect("replacement must be UTF-8");
+        .expect("edit replacement must be UTF-8");
     sink.borrow_mut().edits.push(CapturedEdit {
         range: e.range,
         replacement,
@@ -370,17 +447,12 @@ unsafe extern "C" fn record_edit(sink_ptr: *mut std::ffi::c_void, e: *const RawE
 /// The cop is instantiated via `T::default()` — matches the stateless
 /// `#[derive(Default)]` shape every Murphy cop uses (ADR 0035).
 pub fn run_cop<T: NodeCop + Default>(source: &str) -> Vec<CapturedOffense> {
-    run_cop_internal::<T>(source, ignore_edit).offenses
+    run_cop_with_edits::<T>(source).offenses
 }
 
+/// Parse `source` as Ruby, drive `T::check`, and return both captured
+/// offenses and autocorrect edits in emission order.
 pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
-    run_cop_internal::<T>(source, record_edit)
-}
-
-fn run_cop_internal<T: NodeCop + Default>(
-    source: &str,
-    emit_edit: unsafe extern "C" fn(*mut std::ffi::c_void, *const RawEdit),
-) -> CapturedRun {
     let ast = murphy_translate::translate(source, "t.rb");
     let cop = T::default();
     let cop_name = RawSlice::from_str(<T as Cop>::NAME);
@@ -390,14 +462,20 @@ fn run_cop_internal<T: NodeCop + Default>(
     });
     let fns = FnTable {
         emit_offense: record_offense,
-        emit_edit,
+        emit_edit: record_edit,
     };
     let raw = cx_raw_for(&ast, &fns, cop_name, &sink);
     let cx = unsafe { Cx::from_raw(&raw) };
 
     if T::KINDS.is_empty() {
+        // File-visit / investigation dispatch — single call with root,
+        // matching the host's `KINDS = &[]` contract.
         cop.check(ast.root(), &cx);
     } else {
+        // Per-kind dispatch — feed every node; the macro-generated
+        // `check` filters by tag. `SEND_METHODS` mirrors the host's
+        // pre-dispatch filter so cops using `methods = [...]` see the
+        // same call pattern in tests as in production.
         let node_count = ast.raw_parts().nodes.len();
         for i in 0..node_count {
             let node = NodeId(i as u32);
@@ -414,6 +492,11 @@ fn run_cop_internal<T: NodeCop + Default>(
     }
 }
 
+/// Mirror the host's `Send`-method pre-dispatch filter (see
+/// `murphy-core::dispatch::send_method_passes`) so cops declared with
+/// `#[on_node(kind = "send", methods = [...])]` get the same per-node
+/// filtering in tests as they do in production. Non-`Send` nodes pass
+/// through unchanged; cops without an allow-list pass through too.
 fn send_method_filter_passes<T: NodeCop>(node: NodeId, cx: &Cx<'_>) -> bool {
     if T::SEND_METHODS.is_empty() {
         return true;
@@ -425,6 +508,62 @@ fn send_method_filter_passes<T: NodeCop>(node: NodeId, cx: &Cx<'_>) -> bool {
     T::SEND_METHODS
         .iter()
         .any(|allowed| unsafe { allowed.as_bytes() } == method)
+}
+
+fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
+    let mut ordered: Vec<&CapturedEdit> = edits.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.range
+            .start
+            .cmp(&a.range.start)
+            .then(b.range.end.cmp(&a.range.end))
+            .then(a.replacement.cmp(&b.replacement))
+    });
+
+    let mut accepted: Vec<&CapturedEdit> = Vec::new();
+    for edit in &ordered {
+        let start = edit.range.start as usize;
+        let end = edit.range.end as usize;
+        if start > end {
+            panic!(
+                "expect_correction!: edit has invalid range {:?}",
+                edit.range
+            );
+        }
+        if start > source.len() || end > source.len() {
+            panic!(
+                "expect_correction!: edit range {:?} is outside source length {}",
+                edit.range,
+                source.len()
+            );
+        }
+        if !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+            panic!(
+                "expect_correction!: edit range {:?} does not fall on UTF-8 char boundaries",
+                edit.range
+            );
+        }
+        if accepted.iter().any(|accepted| {
+            let accepted_start = accepted.range.start as usize;
+            let accepted_end = accepted.range.end as usize;
+            accepted_start < end && start < accepted_end
+        }) {
+            panic!(
+                "expect_correction!: overlapping edit range {:?}",
+                edit.range
+            );
+        }
+        accepted.push(edit);
+    }
+
+    let mut corrected = source.to_owned();
+    for edit in accepted {
+        corrected.replace_range(
+            edit.range.start as usize..edit.range.end as usize,
+            &edit.replacement,
+        );
+    }
+    corrected
 }
 
 /// Build a `CxRaw` borrowing from `ast`, `fns`, and `sink`. The
@@ -451,6 +590,7 @@ fn cx_raw_for(ast: &Ast, fns: &FnTable, cop_name: RawSlice, sink: &RefCell<Sink>
         sink: sink as *const _ as *mut std::ffi::c_void,
         sorted_tokens: p.sorted_tokens.as_ptr(),
         sorted_tokens_len: p.sorted_tokens.len(),
+        options_json: RawSlice::from_str("{}"),
     }
 }
 
@@ -488,33 +628,19 @@ mod tests {
         }
     }
 
+    /// Fixture: emits the same offense as `FixedRangeCop` and replaces
+    /// that range with `xyz`.
     #[derive(Default)]
-    struct EditCop;
-    impl Cop for EditCop {
+    struct CorrectingCop;
+    impl Cop for CorrectingCop {
         type Options = NoOptions;
-        const NAME: &'static str = "Test/Edit";
+        const NAME: &'static str = "Test/Correcting";
     }
-    impl NodeCop for EditCop {
+    impl NodeCop for CorrectingCop {
         const KINDS: &'static [NodeKindTag] = &[];
         fn check(&self, _node: NodeId, cx: &Cx<'_>) {
             cx.emit_offense(Range { start: 0, end: 3 }, "fixed", None);
             cx.emit_edit(Range { start: 0, end: 3 }, "xyz");
-        }
-    }
-
-    #[derive(Default)]
-    struct SendMethodFilteredCop;
-    impl Cop for SendMethodFilteredCop {
-        type Options = NoOptions;
-        const NAME: &'static str = "Test/SendMethodFiltered";
-    }
-    impl NodeCop for SendMethodFilteredCop {
-        const KINDS: &'static [NodeKindTag] = &[NodeKindTag(17)];
-        const SEND_METHODS: &'static [RawSlice] = &[RawSlice::from_str("target")];
-        fn check(&self, node: NodeId, cx: &Cx<'_>) {
-            if matches!(*cx.kind(node), NodeKind::Send { .. }) {
-                cx.emit_offense(cx.range(node), "called", None);
-            }
         }
     }
 
@@ -536,18 +662,36 @@ mod tests {
         }
     }
 
+    /// Fixture: emits one offense per visited `Send` node, gated by
+    /// `SEND_METHODS = ["target"]`. Exercises the test harness's
+    /// `send_method_filter_passes` path so dispatch in tests matches the
+    /// host pre-filter for cops authored as
+    /// `#[on_node(kind = "send", methods = [...])]`.
+    #[derive(Default)]
+    struct SendMethodFilteredCop;
+    impl Cop for SendMethodFilteredCop {
+        type Options = NoOptions;
+        const NAME: &'static str = "Test/SendMethodFiltered";
+    }
+    impl NodeCop for SendMethodFilteredCop {
+        const KINDS: &'static [NodeKindTag] = &[NodeKindTag(17)];
+        const SEND_METHODS: &'static [RawSlice] = &[RawSlice::from_str("target")];
+        fn check(&self, node: NodeId, cx: &Cx<'_>) {
+            if matches!(*cx.kind(node), NodeKind::Send { .. }) {
+                cx.emit_offense(cx.range(node), "called", None);
+            }
+        }
+    }
+
     #[test]
     fn expect_no_offenses_passes_when_cop_emits_nothing() {
         expect_no_offenses!(NoopCop, "x = 1\n");
     }
 
     #[test]
-    fn run_cop_with_edits_captures_autocorrect_edits() {
-        let result = super::run_cop_with_edits::<EditCop>("abc\n");
-        assert_eq!(result.offenses.len(), 1);
-        assert_eq!(result.edits.len(), 1);
-        assert_eq!(result.edits[0].range, Range { start: 0, end: 3 });
-        assert_eq!(result.edits[0].replacement, "xyz");
+    #[should_panic(expected = "expect_no_offenses! found 1 offense(s)")]
+    fn expect_no_offenses_panics_when_cop_emits() {
+        expect_no_offenses!(FixedRangeCop, "abc\n");
     }
 
     #[test]
@@ -555,12 +699,6 @@ mod tests {
         let offenses = super::run_cop::<SendMethodFilteredCop>("target\nother\n");
         assert_eq!(offenses.len(), 1);
         assert_eq!(offenses[0].range, Range { start: 0, end: 6 });
-    }
-
-    #[test]
-    #[should_panic(expected = "expect_no_offenses! found 1 offense(s)")]
-    fn expect_no_offenses_panics_when_cop_emits() {
-        expect_no_offenses!(FixedRangeCop, "abc\n");
     }
 
     #[test]
@@ -579,6 +717,51 @@ mod tests {
             FixedRangeCop,
             "abc\n\
              ^^^\n"
+        );
+    }
+
+    #[test]
+    fn expect_correction_matches_offenses_and_corrected_source() {
+        expect_correction!(
+            CorrectingCop,
+            "abc\n\
+             ^^^ fixed\n",
+            "xyz\n"
+        );
+    }
+
+    #[test]
+    fn expect_no_corrections_passes_when_cop_emits_no_edits() {
+        expect_no_corrections!(FixedRangeCop, "abc\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "expect_no_corrections! found 1 edit(s)")]
+    fn expect_no_corrections_panics_when_cop_emits_edits() {
+        expect_no_corrections!(CorrectingCop, "abc\n");
+    }
+
+    #[test]
+    fn run_cop_with_edits_captures_autocorrect_edits() {
+        let captured = super::run_cop_with_edits::<CorrectingCop>("abc\n");
+        assert_eq!(captured.offenses.len(), 1);
+        assert_eq!(
+            captured.edits,
+            vec![super::CapturedEdit {
+                range: Range { start: 0, end: 3 },
+                replacement: "xyz".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "expect_correction! corrected source mismatch")]
+    fn expect_correction_panics_on_corrected_source_mismatch() {
+        expect_correction!(
+            CorrectingCop,
+            "abc\n\
+             ^^^ fixed\n",
+            "abc\n"
         );
     }
 

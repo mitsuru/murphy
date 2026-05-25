@@ -5,12 +5,14 @@
 //! to turn their cop implementations into the static
 //! `murphy_plugin_api::PluginRegistration` table Murphy's loader expects,
 //! and [`derive@CopOptions`], which generates a cop's option schema and
-//! JSON decoder.
+//! JSON decoder. [`derive@CopOptionEnum`] generates typed string enum
+//! options for use inside `CopOptions` structs.
 //!
 //! `#[murphy::cop]` / `#[on_node]` (murphy-9cr.8) will land here
 //! alongside them.
 
 mod cop_attr;
+mod cop_option_enum;
 mod cop_options;
 mod node_pattern;
 
@@ -195,7 +197,8 @@ pub fn register_cops(input: TokenStream) -> TokenStream {
 ///
 /// # Supported field types
 ///
-/// `bool`, `i64`, `String`, `Vec<String>`, and `Option<bool|i64|String>`.
+/// `bool`, `i64`, `String`, `Vec<String>`, `Option<bool|i64|String>`, and
+/// enums deriving `CopOptionEnum`.
 ///
 /// # `#[option(...)]` keys
 ///
@@ -220,6 +223,40 @@ pub fn register_cops(input: TokenStream) -> TokenStream {
 pub fn derive_cop_options(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     cop_options::derive(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derive `murphy_plugin_api::CopOptionEnum` for a string-backed enum option.
+///
+/// Each unit variant must specify its wire value with
+/// `#[option(value = "...")]`. `#[derive(CopOptions)]` uses the generated
+/// metadata to publish `enum_values_json` and decode the option into the
+/// typed enum.
+///
+/// # Example
+///
+/// ```ignore
+/// use murphy_plugin_macros::{CopOptionEnum, CopOptions};
+///
+/// #[derive(CopOptionEnum, Clone, Copy)]
+/// enum Style {
+///     #[option(value = "no_space")]
+///     NoSpace,
+///     #[option(value = "space")]
+///     Space,
+/// }
+///
+/// #[derive(CopOptions)]
+/// struct Options {
+///     #[option(default = "no_space")]
+///     style: Style,
+/// }
+/// ```
+#[proc_macro_derive(CopOptionEnum, attributes(option))]
+pub fn derive_cop_option_enum(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    cop_option_enum::derive(input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

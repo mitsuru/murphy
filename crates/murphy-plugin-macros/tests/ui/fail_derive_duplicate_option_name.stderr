@@ -1,0 +1,5 @@
+error: duplicate option name `Shared`; `first` already uses this name
+ --> tests/ui/fail_derive_duplicate_option_name.rs:8:5
+  |
+8 |     second: String,
+  |     ^^^^^^

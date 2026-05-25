@@ -298,6 +298,8 @@ struct CopMethod {
     ident: Ident,
     /// How the host reaches this method.
     dispatch: Dispatch,
+    /// Whether the method accepts `&<Self as Cop>::Options` after `cx`.
+    passes_options: bool,
 }
 
 /// Parse the contents of `#[on_node(kind = "..."[, methods = ["..."]])]`.
@@ -532,6 +534,7 @@ fn collect_cop_methods(item_impl: &mut ItemImpl) -> syn::Result<Vec<CopMethod>> 
 
         cop_methods.push(CopMethod {
             ident: f.sig.ident.clone(),
+            passes_options: signature_uses_options(f, &dispatch),
             dispatch,
         });
     }
@@ -551,6 +554,9 @@ fn collect_cop_methods(item_impl: &mut ItemImpl) -> syn::Result<Vec<CopMethod>> 
 ///   no `NodeId` parameter, modelled on RuboCop's
 ///   `on_new_investigation(&self)` hook (the cop reaches file-level
 ///   data via `cx.comments()` etc.).
+///
+/// Either shape may add one final `options: &Options` parameter; the
+/// generated `NodeCop::check` decodes it from `Cx`.
 ///
 /// Common to both: no generics, no async, no const, no abi, no return
 /// type or `()`. Error messages keep the `#[on_node]` wording to match
@@ -645,12 +651,12 @@ fn validate_signature(method: &syn::ImplItemFn, dispatch: &Dispatch) -> syn::Res
     // Remaining-argument count depends on the dispatch shape:
     // - Node:          (&self, NodeId, &Cx<'_>)         → 3 inputs
     // - Investigation: (&self, &Cx<'_>)                 → 2 inputs
-    let cx_arg = match dispatch {
+    let (cx_arg, options_arg) = match dispatch {
         Dispatch::Node(_) => {
-            if inputs.len() != 3 {
+            if inputs.len() != 3 && inputs.len() != 4 {
                 return Err(Error::new_spanned(
                     sig.fn_token,
-                    "#[on_node] methods must have exactly 2 parameters after &self: node: NodeId, cx: &Cx<'_>",
+                    "#[on_node] methods must have 2 or 3 parameters after &self: node: NodeId, cx: &Cx<'_>[, options: &Options]",
                 ));
             }
             // Second arg: type path with last segment `NodeId`.
@@ -665,17 +671,24 @@ fn validate_signature(method: &syn::ImplItemFn, dispatch: &Dispatch) -> syn::Res
                 }
             };
             validate_node_id_type(node_ty)?;
-            inputs[2]
+            (inputs[2], inputs.get(3).copied())
         }
         Dispatch::Investigation(_) => {
-            if inputs.len() != 2 {
+            if inputs.len() != 2 && inputs.len() != 3 {
                 return Err(Error::new_spanned(
                     sig.fn_token,
-                    "#[on_new_investigation] methods must have exactly 1 parameter after &self: cx: &Cx<'_> \
+                    "#[on_new_investigation] methods must have 1 or 2 parameters after &self: cx: &Cx<'_>[, options: &Options] \
                      (no NodeId — file-level investigations reach data via cx.comments() etc.)",
                 ));
             }
-            inputs[1]
+            if inputs.len() == 3 && !fn_arg_is_cx(inputs[1]) {
+                return Err(Error::new_spanned(
+                    sig.fn_token,
+                    "#[on_new_investigation] methods must have 1 or 2 parameters after &self: cx: &Cx<'_>[, options: &Options] \
+                     (no NodeId — file-level investigations reach data via cx.comments() etc.)",
+                ));
+            }
+            (inputs[1], inputs.get(2).copied())
         }
     };
 
@@ -690,7 +703,35 @@ fn validate_signature(method: &syn::ImplItemFn, dispatch: &Dispatch) -> syn::Res
     };
     validate_cx_type(cx_ty)?;
 
+    if let Some(options_arg) = options_arg {
+        let options_ty = match options_arg {
+            syn::FnArg::Typed(pt) => &*pt.ty,
+            _ => {
+                return Err(Error::new_spanned(
+                    options_arg,
+                    "#[on_node]: options parameter must be `options: &Options`",
+                ));
+            }
+        };
+        validate_options_ref_type(options_ty)?;
+    }
+
     Ok(())
+}
+
+fn signature_uses_options(method: &syn::ImplItemFn, dispatch: &Dispatch) -> bool {
+    let inputs_len = method.sig.inputs.len();
+    match dispatch {
+        Dispatch::Node(_) => inputs_len == 4,
+        Dispatch::Investigation(_) => inputs_len == 3,
+    }
+}
+
+fn fn_arg_is_cx(arg: &syn::FnArg) -> bool {
+    let syn::FnArg::Typed(pt) = arg else {
+        return false;
+    };
+    validate_cx_type(&pt.ty).is_ok()
 }
 
 /// Validate that `ty` is a path whose last segment is `NodeId` with no
@@ -791,6 +832,22 @@ fn validate_cx_type(ty: &syn::Type) -> syn::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_options_ref_type(ty: &syn::Type) -> syn::Result<()> {
+    let syn::Type::Reference(reference) = ty else {
+        return Err(Error::new_spanned(
+            ty,
+            "#[on_node]: options parameter must be a shared reference (`&Options`)",
+        ));
+    };
+    if reference.mutability.is_some() {
+        return Err(Error::new_spanned(
+            ty,
+            "#[on_node]: options parameter must be shared, not `&mut`",
+        ));
+    }
     Ok(())
 }
 
@@ -953,6 +1010,7 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
     if investigation_method.is_none() {
         for cop_method in cop_methods {
             let method_ident = &cop_method.ident;
+            let passes_options = cop_method.passes_options;
             let Dispatch::Node(entries) = &cop_method.dispatch else {
                 continue;
             };
@@ -981,8 +1039,21 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
             } else {
                 quote! { #(#tag_patterns)|* }
             };
+            let call = if passes_options {
+                quote! {
+                    {
+                        let __murphy_options =
+                            cx.options_or_default::<
+                                <Self as ::murphy_plugin_api::Cop>::Options
+                            >();
+                        Self::#method_ident(self, node, cx, &__murphy_options)
+                    }
+                }
+            } else {
+                quote! { Self::#method_ident(self, node, cx) }
+            };
             match_arms.push(quote! {
-                #arm_pattern => Self::#method_ident(self, node, cx),
+                #arm_pattern => #call,
             });
         }
     }
@@ -1049,6 +1120,22 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
     };
 
     let impl_node_cop = if let Some(method_ident) = investigation_method {
+        let passes_options = cop_methods
+            .iter()
+            .find(|m| m.ident == *method_ident)
+            .map(|m| m.passes_options)
+            .unwrap_or(false);
+        let investigation_call = if passes_options {
+            quote! {
+                let __murphy_options =
+                    cx.options_or_default::<
+                        <Self as ::murphy_plugin_api::Cop>::Options
+                    >();
+                Self::#method_ident(self, cx, &__murphy_options)
+            }
+        } else {
+            quote! { Self::#method_ident(self, cx) }
+        };
         // Investigation form: empty KINDS, single direct call. The host
         // contract (see `NodeCop` doc + `dispatch::run_cops`) calls
         // `check` exactly once per file with `node == cx.root()`; the
@@ -1059,7 +1146,7 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
                 const KINDS: &'static [::murphy_plugin_api::NodeKindTag] = &[];
 
                 fn check(&self, _node: ::murphy_plugin_api::NodeId, cx: &::murphy_plugin_api::Cx<'_>) {
-                    Self::#method_ident(self, cx)
+                    #investigation_call
                 }
             }
         }

@@ -488,7 +488,7 @@ With the feature off, `murphy-translate` (the runtime parser) is not
 pulled in and the `test_support` module is `#[cfg]`-gated out — the
 production cdylib stays parser-free.
 
-Two assertion macros are the documented test-writing surface. The
+The assertion macros are the documented test-writing surface. The
 `indoc!` macro lets Ruby fixtures stay indented next to the test code.
 
 ### `expect_offense!` — assert offenses with caret annotations
@@ -564,6 +564,51 @@ Companion to `expect_offense!`. Panics if the cop emits anything.
 Rejects caret-bearing input as a symmetric typo guard ("use
 `expect_offense!` instead").
 
+### `expect_correction!` — assert offenses and autocorrect output
+
+Use `expect_correction!` for cops that emit `RawEdit`s through
+`cx.emit_edit`. The first fixture uses the same caret grammar as
+`expect_offense!`; the third argument is the exact source expected
+after applying all emitted edits to the annotation-stripped input.
+
+```rust
+use murphy_plugin_api::test_support::{expect_correction, indoc};
+
+#[test]
+fn corrects_redundant_self() {
+    expect_correction!(
+        RedundantSelf,
+        indoc! {r#"
+            self.foo
+            ^^^^^^^^ Redundant self detected
+        "#},
+        "foo\n"
+    );
+}
+```
+
+The macro first checks the exact offense set, then compares the
+corrected source string. `run_cop_with_edits` is available when a test
+needs to inspect the raw captured edits directly.
+
+### `expect_no_corrections!` — assert no autocorrect edits
+
+Use `expect_no_corrections!` when a cop may emit offenses but must not
+emit any autocorrect edits for the fixture.
+
+```rust
+use murphy_plugin_api::test_support::expect_no_corrections;
+
+#[test]
+fn does_not_autocorrect_unsafe_case() {
+    expect_no_corrections!(MyCop, "dangerous_call\n");
+}
+```
+
+The macro rejects caret-bearing input as a typo guard; use
+`expect_correction!` when the fixture should assert both offenses and
+the corrected output.
+
 ### `indoc!`
 
 Re-exported from the `indoc` crate (also feature-gated). Strips the
@@ -591,7 +636,10 @@ file-visit, mirroring host semantics), and returns
 `Vec<CapturedOffense>`. `CapturedOffense` carries `cop_name`,
 `message`, `range`, and `severity: Option<Severity>` (`None` when the
 cop didn't override — the host's default chain applies in production).
-The two macros are thin layers on top of `run_cop`.
+The offense assertion macros are thin layers on top of `run_cop`.
+
+For autocorrect tests, `run_cop_with_edits` returns `CapturedRun`
+with both `offenses` and `edits`.
 
 Design / implementation references:
 

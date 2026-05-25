@@ -31,6 +31,7 @@ pub mod lint;
 pub mod murphy;
 pub mod style;
 
+use crate::layout::space_inside_parens::SpaceInsideParens;
 use crate::layout::trailing_whitespace::TrailingWhitespace;
 use crate::lint::debugger::Debugger;
 use crate::lint::deprecated_class_methods::DeprecatedClassMethods;
@@ -56,6 +57,7 @@ murphy_plugin_api::register_cops!(
     UselessAssignment,
     StringLiterals,
     TrailingWhitespace,
+    SpaceInsideParens,
 );
 
 /// Standard cops that have **not yet been migrated** to the arena AST /

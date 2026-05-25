@@ -8,7 +8,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    Data, DeriveInput, Expr, ExprArray, ExprLit, Fields, GenericArgument, Ident, Lit,
+    Data, DeriveInput, Expr, ExprArray, ExprLit, Fields, GenericArgument, Ident, Lit, Path,
     PathArguments, Type, spanned::Spanned,
 };
 
@@ -49,6 +49,7 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
         .iter()
         .map(ParsedField::parse)
         .collect::<syn::Result<_>>()?;
+    validate_unique_external_names(&parsed)?;
 
     let default_impl = generate_default(struct_name, &parsed);
     let copoptions_impl = generate_copoptions(struct_name, &parsed);
@@ -57,6 +58,23 @@ pub fn derive(input: DeriveInput) -> syn::Result<TokenStream> {
         #default_impl
         #copoptions_impl
     })
+}
+
+fn validate_unique_external_names(fields: &[ParsedField]) -> syn::Result<()> {
+    let mut seen = std::collections::BTreeMap::new();
+    for field in fields {
+        let name = field.external_name_string();
+        if let Some(first) = seen.insert(name.clone(), field.ident.clone()) {
+            return Err(syn::Error::new_spanned(
+                &field.ident,
+                format!(
+                    "duplicate option name `{name}`; `{}` already uses this name",
+                    first
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Options struct with no fields — empty schema, default decoder.
@@ -72,7 +90,7 @@ fn generate_unit(name: &Ident) -> TokenStream {
 }
 
 /// Supported option field type.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 enum FieldType {
     Bool,
     Int,
@@ -81,28 +99,33 @@ enum FieldType {
     OptBool,
     OptInt,
     OptStr,
+    Enum(Path),
 }
 
 impl FieldType {
     /// Schema `ty` wire string.
-    fn wire(self) -> &'static str {
+    fn wire(&self) -> &'static str {
         match self {
             FieldType::Bool | FieldType::OptBool => "bool",
             FieldType::Int | FieldType::OptInt => "int",
-            FieldType::Str | FieldType::OptStr => "string",
+            FieldType::Str | FieldType::OptStr | FieldType::Enum(_) => "string",
             FieldType::StrList => "string_list",
         }
     }
 
-    fn is_optional(self) -> bool {
+    fn is_optional(&self) -> bool {
         matches!(
             self,
             FieldType::OptBool | FieldType::OptInt | FieldType::OptStr
         )
     }
 
-    fn is_string(self) -> bool {
+    fn is_string(&self) -> bool {
         matches!(self, FieldType::Str | FieldType::OptStr)
+    }
+
+    fn is_enum(&self) -> bool {
+        matches!(self, FieldType::Enum(_))
     }
 }
 
@@ -117,6 +140,7 @@ enum DefaultValue {
 /// How a field was marked deprecated, if at all.
 struct ParsedField {
     ident: Ident,
+    external_name: Option<String>,
     ty: FieldType,
     default: Option<DefaultValue>,
     description: Option<String>,
@@ -128,13 +152,20 @@ struct ParsedField {
 }
 
 impl ParsedField {
+    fn external_name_string(&self) -> String {
+        self.external_name
+            .clone()
+            .unwrap_or_else(|| self.ident.to_string())
+    }
+
     fn parse(field: &syn::Field) -> syn::Result<Self> {
         let ident = field.ident.clone().expect("named field has an identifier");
         let ty = parse_field_type(&field.ty)?;
 
         let mut parsed = ParsedField {
             ident,
-            ty,
+            external_name: None,
+            ty: ty.clone(),
             default: None,
             description: None,
             enum_values: None,
@@ -148,7 +179,9 @@ impl ParsedField {
             }
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("default") {
-                    parsed.default = Some(parse_default(&meta, ty)?);
+                    parsed.default = Some(parse_default(&meta, &ty)?);
+                } else if meta.path.is_ident("name") {
+                    parsed.external_name = Some(parse_str(&meta)?);
                 } else if meta.path.is_ident("description") {
                     parsed.description = Some(parse_str(&meta)?);
                 } else if meta.path.is_ident("enum_values") {
@@ -179,6 +212,12 @@ impl ParsedField {
             return Err(syn::Error::new_spanned(
                 field,
                 "#[option(enum_values = ...)] is only valid on `String` fields",
+            ));
+        }
+        if self.ty.is_enum() && !matches!(self.default, Some(DefaultValue::Str(_)) | None) {
+            return Err(syn::Error::new_spanned(
+                field,
+                "#[option(default = ...)] for CopOptionEnum fields must be a string literal",
             ));
         }
         if let (Some(values), Some(DefaultValue::Str(d))) = (&self.enum_values, &self.default)
@@ -229,15 +268,26 @@ fn parse_field_type(ty: &Type) -> syn::Result<FieldType> {
                 )),
             }
         }
+        _ if segment.arguments.is_empty() && is_custom_type_name(&segment.ident) => {
+            Ok(FieldType::Enum(path.clone()))
+        }
         _ => Err(unsupported_type(ty)),
     }
+}
+
+fn is_custom_type_name(ident: &Ident) -> bool {
+    ident
+        .to_string()
+        .chars()
+        .next()
+        .is_some_and(char::is_uppercase)
 }
 
 fn unsupported_type(ty: &Type) -> syn::Error {
     syn::Error::new(
         ty.span(),
         "#[derive(CopOptions)] supports only bool, i64, String, \
-         Vec<String>, and Option<bool|i64|String> fields",
+         Vec<String>, Option<bool|i64|String>, and CopOptionEnum fields",
     )
 }
 
@@ -258,7 +308,7 @@ fn single_generic_arg<'a>(segment: &'a syn::PathSegment, ty: &Type) -> syn::Resu
 
 fn parse_default(
     meta: &syn::meta::ParseNestedMeta<'_>,
-    ty: FieldType,
+    ty: &FieldType,
 ) -> syn::Result<DefaultValue> {
     let value = meta.value()?;
     match ty {
@@ -270,7 +320,7 @@ fn parse_default(
             let lit: syn::LitInt = value.parse()?;
             Ok(DefaultValue::Int(lit.base10_parse()?))
         }
-        FieldType::Str | FieldType::OptStr => {
+        FieldType::Str | FieldType::OptStr | FieldType::Enum(_) => {
             let lit: syn::LitStr = value.parse()?;
             Ok(DefaultValue::Str(lit.value()))
         }
@@ -307,9 +357,15 @@ fn expr_to_string(expr: &Expr) -> syn::Result<String> {
 fn generate_default(name: &Ident, fields: &[ParsedField]) -> TokenStream {
     let inits = fields.iter().map(|f| {
         let ident = &f.ident;
-        let value = match (&f.default, f.ty) {
+        let value = match (&f.default, &f.ty) {
             (Some(DefaultValue::Bool(b)), _) => quote! { #b },
             (Some(DefaultValue::Int(i)), _) => quote! { #i },
+            (Some(DefaultValue::Str(s)), FieldType::Enum(path)) => {
+                quote! {
+                    <#path as ::murphy_plugin_api::CopOptionEnum>::from_str(#s)
+                        .expect("CopOptionEnum default must be one of its values")
+                }
+            }
             (Some(DefaultValue::Str(s)), _) => {
                 quote! { ::std::string::String::from(#s) }
             }
@@ -356,7 +412,7 @@ fn generate_copoptions(name: &Ident, fields: &[ParsedField]) -> TokenStream {
 }
 
 fn schema_entry(field: &ParsedField) -> TokenStream {
-    let name = field.ident.to_string();
+    let name = field.external_name_string();
     // `ty` is always the base wire type. Enum-ness is carried by a
     // non-empty `enum_values_json`, not by a distinct `ty` string — the
     // single-surface `OptionSpec.ty` is `bool|int|string|string_list`
@@ -370,9 +426,15 @@ fn schema_entry(field: &ParsedField) -> TokenStream {
         None => String::new(),
     };
     let description = field.description.clone().unwrap_or_default();
-    let enum_values_json = match &field.enum_values {
-        Some(values) => serde_json::to_string(values).unwrap(),
-        None => String::new(),
+    let enum_values_json = match (&field.ty, &field.enum_values) {
+        (FieldType::Enum(path), _) => {
+            quote! { <#path as ::murphy_plugin_api::CopOptionEnum>::VALUES_JSON }
+        }
+        (_, Some(values)) => {
+            let values = serde_json::to_string(values).unwrap();
+            quote! { #values }
+        }
+        (_, None) => quote! { "" },
     };
     let replacement = field.replacement.clone().unwrap_or_default();
     let reason = field.reason.clone().unwrap_or_default();
@@ -392,14 +454,20 @@ fn schema_entry(field: &ParsedField) -> TokenStream {
 
 fn field_decoder(field: &ParsedField) -> TokenStream {
     let ident = &field.ident;
-    let key = ident.to_string();
+    let key = field.external_name_string();
     let wire = field.ty.wire();
 
     // The expression used when the key is absent from the config object.
     let on_absent: TokenStream = match (&field.default, field.ty.is_optional()) {
         (Some(DefaultValue::Bool(b)), _) => quote! { #b },
         (Some(DefaultValue::Int(i)), _) => quote! { #i },
-        (Some(DefaultValue::Str(s)), _) => quote! { ::std::string::String::from(#s) },
+        (Some(DefaultValue::Str(s)), _) => match &field.ty {
+            FieldType::Enum(path) => quote! {
+                <#path as ::murphy_plugin_api::CopOptionEnum>::from_str(#s)
+                    .expect("CopOptionEnum default must be one of its values")
+            },
+            _ => quote! { ::std::string::String::from(#s) },
+        },
         (Some(DefaultValue::StrList(items)), _) => {
             quote! { ::std::vec![ #(::std::string::String::from(#items)),* ] }
         }
@@ -427,7 +495,7 @@ fn present_decoder(field: &ParsedField, key: &str, wire: &str) -> TokenStream {
         ::murphy_plugin_api::ConfigError::type_mismatch(#key, #wire)
     };
 
-    match field.ty {
+    match &field.ty {
         FieldType::Bool => quote! {
             __v.as_bool().ok_or_else(|| #mismatch)?
         },
@@ -471,6 +539,13 @@ fn present_decoder(field: &ParsedField, key: &str, wire: &str) -> TokenStream {
                 }
             }
         }
+        FieldType::Enum(path) => quote! {
+            {
+                let __s = __v.as_str().ok_or_else(|| #mismatch)?;
+                <#path as ::murphy_plugin_api::CopOptionEnum>::from_str(__s)
+                    .ok_or_else(|| ::murphy_plugin_api::ConfigError::enum_violation(#key, __s))?
+            }
+        },
     }
 }
 
