@@ -28,6 +28,7 @@
 
 pub mod cops;
 
+use crate::cops::layout::dot_position::DotPosition;
 use crate::cops::layout::space_around_operators::SpaceAroundOperators;
 use crate::cops::layout::space_inside_parens::SpaceInsideParens;
 use crate::cops::layout::trailing_whitespace::TrailingWhitespace;
@@ -57,6 +58,7 @@ murphy_plugin_api::register_cops!(
     TrailingWhitespace,
     SpaceInsideParens,
     SpaceAroundOperators,
+    DotPosition,
 );
 
 /// Standard cops that have **not yet been migrated** to the arena AST /
