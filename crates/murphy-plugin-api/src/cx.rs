@@ -190,6 +190,73 @@ impl<'a> Cx<'a> {
             .expect("source is valid UTF-8")
     }
 
+    /// Source range of the `.` or `&.` operator for an explicit-dot call
+    /// — the parser-gem `node.loc.dot` analog, computed on demand.
+    ///
+    /// Returns `None` for:
+    /// - non-call kinds (anything but `Send` / `Csend`),
+    /// - implicit `Send` (no receiver, e.g. a bare `foo` resolved as
+    ///   `Kernel#foo`),
+    /// - operator and bracket methods (`a + b`, `a[b]`) — the source
+    ///   between receiver and selector holds no dot,
+    /// - implicit-call `foo.()` where the call has no selector range,
+    ///   so the scan window degenerates to empty.
+    ///
+    /// Scans the bytes between `receiver.expression.end` and the
+    /// selector's `loc.name.start`, ignoring `#` line comments. The
+    /// window is short in practice (avg 0.6 byte, max ≈ a multi-line
+    /// chain), so this is cheaper than maintaining a side-table that
+    /// every `Ast` would pay for. Cops that never call it pay nothing.
+    pub fn call_operator_loc(&self, id: NodeId) -> Option<Range> {
+        let node = &self.nodes()[id.0 as usize];
+        let (receiver, name_start) = match node.kind {
+            NodeKind::Send { receiver, .. } => (receiver.get()?, node.loc.name.start),
+            NodeKind::Csend { receiver, .. } => (receiver, node.loc.name.start),
+            _ => return None,
+        };
+        let scan_start = self.nodes()[receiver.0 as usize].loc.expression.end;
+        if scan_start >= name_start {
+            return None;
+        }
+        let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
+        let window = &src[scan_start as usize..name_start as usize];
+        let mut i = 0;
+        let mut in_comment = false;
+        while i < window.len() {
+            let b = window[i];
+            if b == b'\n' {
+                in_comment = false;
+                i += 1;
+                continue;
+            }
+            if in_comment {
+                i += 1;
+                continue;
+            }
+            if b == b'#' {
+                in_comment = true;
+                i += 1;
+                continue;
+            }
+            if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
+                let start = scan_start + i as u32;
+                return Some(Range {
+                    start,
+                    end: start + 2,
+                });
+            }
+            if b == b'.' {
+                let start = scan_start + i as u32;
+                return Some(Range {
+                    start,
+                    end: start + 1,
+                });
+            }
+            i += 1;
+        }
+        None
+    }
+
     /// The whole file's source text. A `NodeCop` with `KINDS = &[]`
     /// (file-visit, see `NodeCop` doc) uses this to scan the entire
     /// file — `cx.range(cx.root())` only spans the AST root node,
@@ -395,6 +462,204 @@ mod tests {
         let cx = unsafe { Cx::from_raw(&raw) };
 
         assert_eq!(cx.sorted_tokens(), ast.sorted_tokens());
+    }
+
+    /// Build a synthetic Send/Csend with the receiver/name ranges a real
+    /// parser would emit for `source[recv]` (the receiver text) chained
+    /// onto `source[name]` (the selector text). Returns the call's
+    /// `NodeId` plus the owned `Ast`.
+    fn build_call(
+        source: &str,
+        recv: Option<Range>,
+        name: Range,
+        is_csend: bool,
+    ) -> (Ast, murphy_ast::NodeId) {
+        let mut b = AstBuilder::new(source.to_string(), "t.rb".to_string());
+        let recv_id = recv.map(|r| {
+            let recv_method = b.intern_symbol("recv");
+            b.push_named(
+                NodeKind::Send {
+                    receiver: OptNodeId::NONE,
+                    method: recv_method,
+                    args: murphy_ast::NodeList::EMPTY,
+                },
+                r,
+                r,
+            )
+        });
+        let method = b.intern_symbol(&source[name.start as usize..name.end as usize]);
+        let expression = Range {
+            start: recv.map(|r| r.start).unwrap_or(name.start),
+            end: name.end,
+        };
+        let root = if is_csend {
+            let recv_id = recv_id.expect("Csend requires a receiver");
+            b.push_named(
+                NodeKind::Csend {
+                    receiver: recv_id,
+                    method,
+                    args: murphy_ast::NodeList::EMPTY,
+                },
+                expression,
+                name,
+            )
+        } else {
+            b.push_named(
+                NodeKind::Send {
+                    receiver: recv_id.map(OptNodeId::some).unwrap_or(OptNodeId::NONE),
+                    method,
+                    args: murphy_ast::NodeList::EMPTY,
+                },
+                expression,
+                name,
+            )
+        };
+        (b.finish(root), root)
+    }
+
+    #[test]
+    fn call_operator_loc_finds_explicit_dot() {
+        // `foo.bar`
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.call_operator_loc(root), Some(Range { start: 3, end: 4 }));
+        assert_eq!(cx.raw_source(cx.call_operator_loc(root).unwrap()), ".");
+    }
+
+    #[test]
+    fn call_operator_loc_finds_safe_navigation() {
+        // `foo&.bar`
+        let (ast, root) = build_call(
+            "foo&.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 5, end: 8 },
+            true,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.call_operator_loc(root), Some(Range { start: 3, end: 5 }));
+        assert_eq!(cx.raw_source(cx.call_operator_loc(root).unwrap()), "&.");
+    }
+
+    #[test]
+    fn call_operator_loc_handles_multiline_chain() {
+        // `foo\n  .bar` — receiver ends at offset 3, name starts at 7.
+        let (ast, root) = build_call(
+            "foo\n  .bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 7, end: 10 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.call_operator_loc(root), Some(Range { start: 6, end: 7 }));
+    }
+
+    #[test]
+    fn call_operator_loc_skips_dots_inside_line_comments() {
+        // `foo # x.y\n  .bar` — the `.` in the comment must not match.
+        let src = "foo # x.y\n  .bar";
+        let (ast, root) = build_call(
+            src,
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 13, end: 16 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(
+            cx.call_operator_loc(root),
+            Some(Range { start: 12, end: 13 })
+        );
+        assert_eq!(cx.raw_source(cx.call_operator_loc(root).unwrap()), ".");
+    }
+
+    #[test]
+    fn call_operator_loc_returns_none_for_implicit_send() {
+        // bare `foo` — Send with receiver = None
+        let (ast, root) = build_call("foo", None, Range { start: 0, end: 3 }, false);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.call_operator_loc(root), None);
+    }
+
+    #[test]
+    fn call_operator_loc_returns_none_for_operator_method() {
+        // `foo + bar` — Send with method `:+`. Window is " " (no dot).
+        let (ast, root) = build_call(
+            "foo + bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 5 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.call_operator_loc(root), None);
+    }
+
+    #[test]
+    fn call_operator_loc_returns_none_for_bracket_method() {
+        // `a[b]` — Send with method `:[]`, name range starts at the
+        // bracket (= receiver end). Empty window ⇒ None.
+        let (ast, root) = build_call(
+            "a[b]",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 1, end: 3 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.call_operator_loc(root), None);
+    }
+
+    #[test]
+    fn call_operator_loc_returns_none_for_non_call_kinds() {
+        // A bare `nil` literal — not a call kind.
+        let (ast, root) = fixture();
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        // `root` is Return, child is Nil — both non-call.
+        assert_eq!(cx.call_operator_loc(root), None);
+        let nil = cx.children(root)[0];
+        assert_eq!(cx.call_operator_loc(nil), None);
     }
 
     #[test]

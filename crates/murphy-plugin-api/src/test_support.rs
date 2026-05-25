@@ -683,6 +683,56 @@ mod tests {
         }
     }
 
+    /// Fixture: emits an offense on every Send/Csend whose
+    /// `call_operator_loc` resolves — covering the M1 accessor end-to-end
+    /// against real prism-parsed byte offsets (not the synthetic ranges
+    /// in `cx::tests`).
+    #[derive(Default)]
+    struct ReportCallOperatorCop;
+    impl Cop for ReportCallOperatorCop {
+        type Options = NoOptions;
+        const NAME: &'static str = "Test/ReportCallOperator";
+    }
+    impl NodeCop for ReportCallOperatorCop {
+        const KINDS: &'static [NodeKindTag] = &[NodeKindTag(17), NodeKindTag(18)];
+        fn check(&self, node: NodeId, cx: &Cx<'_>) {
+            if let Some(range) = cx.call_operator_loc(node) {
+                cx.emit_offense(range, cx.raw_source(range), None);
+            }
+        }
+    }
+
+    #[test]
+    fn call_operator_loc_resolves_against_real_prism_offsets() {
+        // Plain dot: receiver `foo` → selector `bar`, operator `.` at 3..4.
+        let offenses = super::run_cop::<ReportCallOperatorCop>("foo.bar\n");
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 3, end: 4 });
+        assert_eq!(offenses[0].message, ".");
+
+        // Safe navigation: `foo&.bar`, operator `&.` at 3..5.
+        let offenses = super::run_cop::<ReportCallOperatorCop>("foo&.bar\n");
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 3, end: 5 });
+        assert_eq!(offenses[0].message, "&.");
+
+        // Multi-line chain: `foo\n  .bar` — leading-dot style.
+        let offenses = super::run_cop::<ReportCallOperatorCop>("foo\n  .bar\n");
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 6, end: 7 });
+
+        // Trailing-dot style: `foo.\n  bar` — dot stays on first line.
+        let offenses = super::run_cop::<ReportCallOperatorCop>("foo.\n  bar\n");
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 3, end: 4 });
+
+        // Operator method (`+`) and bracket method (`[]`) do not emit.
+        let offenses = super::run_cop::<ReportCallOperatorCop>("a + b\n");
+        assert_eq!(offenses.len(), 0);
+        let offenses = super::run_cop::<ReportCallOperatorCop>("a[b]\n");
+        assert_eq!(offenses.len(), 0);
+    }
+
     #[test]
     fn expect_no_offenses_passes_when_cop_emits_nothing() {
         expect_no_offenses!(NoopCop, "x = 1\n");
