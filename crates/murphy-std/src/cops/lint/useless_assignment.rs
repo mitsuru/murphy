@@ -31,19 +31,34 @@
 //!
 //! "Same control-flow path" is computed by walking up via `cx.parent` and
 //! collecting branch-introducing ancestors (`If` / `Case` / `When` /
-//! `While` / `Until` / `Rescue`). `Resbody` and `Ensure` are *not*
-//! barriers — their children run sequentially, not exclusively, and
-//! treating them as barriers would falsely cut the `rescue => e`
-//! binding off from reads inside the body. Each chain entry
-//! is a pair `(barrier_node, branch_child)` — the child of the barrier
-//! on the path from the write — so two writes in different arms of the
-//! same `if` get distinct chain entries even though they share the
-//! `If` barrier. A write `w'` is guaranteed to be reached after `w`
-//! iff `w'`'s chain (outermost-first) is a prefix of `w`'s chain;
-//! that captures both the same-chunk case and the "exit some inner
-//! branches then continue at a shallower level" case (e.g.
-//! `x = 1; if c; x = 2; end; x = 3; x` flags `x = 1` because `x = 3`
-//! is in a shallower-than-w2 chunk that is a prefix of `w1`'s).
+//! `While` / `Until`). `Resbody` / `Rescue` / `Ensure` are *not*
+//! barriers — exception flow carries partial begin-body writes into
+//! the rescue handler, so treating those as exclusive arms would
+//! produce false positives. Each chain entry is a pair
+//! `(barrier_node, branch_child)` — the child of the barrier on the
+//! path from the node — so two writes in different arms of the same
+//! `if` get distinct chain entries even though they share the `If`
+//! barrier.
+//!
+//! Two checks use these chains:
+//!
+//! * **Dominating overwrite** (for `w'` to *always* overwrite `w`): `w'`'s
+//!   chain must be a prefix (outermost-first) of `w`'s. Same chunk or
+//!   shallower-than-`w` qualifies; sibling sequential `if`s do not.
+//! * **Read observation** (for `r` to *possibly* observe `w`): no shared
+//!   barrier disagrees on its arm. Sequential `if`s are compatible
+//!   (both can run on `a && b`); sibling arms of the same `if` are
+//!   not (mutually exclusive at runtime).
+//!
+//! ### Known v1 limitations
+//!
+//! * Two writes in different `resbody`s of the same `Rescue` are not
+//!   recognised as mutually exclusive (we conservatively treat them as
+//!   compatible). The cop will not flag a write in one resbody as
+//!   "overwritten" by a write in a sibling resbody.
+//! * Loops are treated as a single barrier — we don't unroll. A write
+//!   inside a `while` body is in the loop's chunk; we don't reason about
+//!   iteration counts.
 //!
 //! ## Known v1 limitations (Phase 4 — escalate to extend the AST)
 //!
@@ -205,10 +220,15 @@ fn barrier_chain(cx: &Cx<'_>, root: NodeId, node: NodeId) -> Vec<(NodeId, NodeId
 }
 
 fn is_branch_barrier(cx: &Cx<'_>, node: NodeId) -> bool {
-    // `Resbody` and `Ensure` are *not* barriers: their children
-    // (var/body for resbody, body/ensure_ for ensure) run sequentially,
-    // not exclusively. Branch exclusivity at the rescue level is
-    // captured by the enclosing `Rescue` instead.
+    // `Rescue` / `Resbody` / `Ensure` are *not* barriers. A write in
+    // the begin body can be observed by a read in the rescue handler
+    // (exception flow carries the partially-executed body state into
+    // the handler), so treating them as exclusive arms would produce
+    // false positives — the cop would flag the begin write as never
+    // observed even though the rescue read sees it. The known v1
+    // limitation is that two writes in different resbodies of the
+    // same Rescue are *not* recognised as mutually exclusive; that
+    // sits in the doc-comment so users see it.
     matches!(
         *cx.kind(node),
         NodeKind::If { .. }
@@ -216,7 +236,6 @@ fn is_branch_barrier(cx: &Cx<'_>, node: NodeId) -> bool {
             | NodeKind::When { .. }
             | NodeKind::While { .. }
             | NodeKind::Until { .. }
-            | NodeKind::Rescue { .. }
     )
 }
 
@@ -229,14 +248,19 @@ fn chain_is_prefix(short: &[(NodeId, NodeId)], long: &[(NodeId, NodeId)]) -> boo
     short.len() <= long.len() && short == &long[..short.len()]
 }
 
-/// Two chains describe compatible control-flow paths iff one is a
-/// prefix of the other. That covers the same-chunk case, the
-/// shallower-than case (one exits inner branches to reach the other),
-/// and the deeper-than case (one enters an inner branch when it runs);
-/// it excludes pairs that diverge into mutually exclusive sibling
-/// branches of the same `if` / `case`.
+/// Two chains describe compatible control-flow paths iff no shared
+/// branch barrier disagrees on which arm each chain is inside.
+/// Sequential `if`s (different barriers) are compatible; sibling
+/// arms of the *same* barrier are not.
 fn paths_compatible(a: &[(NodeId, NodeId)], b: &[(NodeId, NodeId)]) -> bool {
-    chain_is_prefix(a, b) || chain_is_prefix(b, a)
+    for (barrier_a, arm_a) in a {
+        for (barrier_b, arm_b) in b {
+            if barrier_a == barrier_b && arm_a != arm_b {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Read>) {
@@ -686,6 +710,43 @@ mod tests {
                   x = 2
                 end
                 x
+            "#}
+        );
+    }
+
+    #[test]
+    fn read_in_a_sibling_conditional_observes_the_outer_write() {
+        // `x = 1` is set when `a` is true; `puts x` runs when `b` is
+        // true. The path `a && b` actually observes `x = 1`. The cop
+        // must not flag `x = 1` as useless. (PR #70 review job 1163
+        // finding 1.)
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                if a
+                  x = 1
+                end
+                if b
+                  puts x
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn rescue_handler_read_observes_begin_body_write() {
+        // Exception flow carries the partial begin-body write into
+        // the rescue handler — `puts x` can see `x = 1`. (PR #70
+        // review job 1163 finding 2.)
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                begin
+                  x = 1
+                  raise
+                rescue
+                  puts x
+                end
             "#}
         );
     }
