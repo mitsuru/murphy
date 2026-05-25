@@ -26,22 +26,19 @@
 //! issue calls out (call dispatch / flow analysis /
 //! literal+option+autocorrect / raw source access).
 
-pub mod layout;
-pub mod lint;
-pub mod murphy;
-pub mod style;
+pub mod cops;
 
-use crate::layout::space_inside_parens::SpaceInsideParens;
-use crate::layout::trailing_whitespace::TrailingWhitespace;
-use crate::lint::debugger::Debugger;
-use crate::lint::deprecated_class_methods::DeprecatedClassMethods;
-use crate::lint::duplicate_hash_key::DuplicateHashKey;
-use crate::lint::empty_when::EmptyWhen;
-use crate::lint::unreachable_code::UnreachableCode;
-use crate::lint::unused_method_argument::UnusedMethodArgument;
-use crate::lint::useless_assignment::UselessAssignment;
-use crate::murphy::no_receiver_puts::NoReceiverPuts;
-use crate::style::string_literals::StringLiterals;
+use crate::cops::layout::space_inside_parens::SpaceInsideParens;
+use crate::cops::layout::trailing_whitespace::TrailingWhitespace;
+use crate::cops::lint::debugger::Debugger;
+use crate::cops::lint::deprecated_class_methods::DeprecatedClassMethods;
+use crate::cops::lint::duplicate_hash_key::DuplicateHashKey;
+use crate::cops::lint::empty_when::EmptyWhen;
+use crate::cops::lint::unreachable_code::UnreachableCode;
+use crate::cops::lint::unused_method_argument::UnusedMethodArgument;
+use crate::cops::lint::useless_assignment::UselessAssignment;
+use crate::cops::murphy::no_receiver_puts::NoReceiverPuts;
+use crate::cops::style::string_literals::StringLiterals;
 
 // `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
 // single Murphy-prefixed runtime dependency by design.
