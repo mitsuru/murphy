@@ -2,7 +2,8 @@
 
 use crate::interner::Interner;
 use crate::node::{
-    AstNode, Comment, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer, SourceToken,
+    AstNode, Comment, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range, SourceBuffer,
+    SourceToken,
 };
 
 #[inline]
@@ -252,9 +253,19 @@ impl Ast {
         &self.nodes[id.0 as usize].kind
     }
 
-    /// The source range of the node at `id`.
+    /// The source range of the node at `id` — shorthand for
+    /// `self.loc(id).expression`.
     pub fn range(&self, id: NodeId) -> Range {
-        self.nodes[id.0 as usize].range
+        self.nodes[id.0 as usize].loc.expression
+    }
+
+    /// The `node.loc` bundle for `id` — Murphy's analog of the parser
+    /// gem's `node.loc` accessor. `expression` is the AST node's full
+    /// source range; `name` is the identifier range (the
+    /// `node.loc.name` analog), [`Range::ZERO`] for nodes without
+    /// an identifier.
+    pub fn loc(&self, id: NodeId) -> NodeLoc {
+        self.nodes[id.0 as usize].loc
     }
 
     /// The parent of `id`. `OptNodeId::NONE` for the root.

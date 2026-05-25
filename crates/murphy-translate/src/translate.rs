@@ -75,6 +75,12 @@ impl Translator {
         Self::range(&node.location())
     }
 
+    /// `Option<Location>` → `Range`。`None`（anonymous `*`/`**`/`&` 等）は
+    /// [`Range::ZERO`] にフォールバック。
+    fn opt_loc_range(loc: Option<prism::Location<'_>>) -> Range {
+        loc.as_ref().map(Self::range).unwrap_or(Range::ZERO)
+    }
+
     /// `ConstantId` → interned `Symbol`。非 UTF-8 は lossy 変換。
     fn sym(&mut self, cid: &prism::ConstantId<'_>) -> murphy_ast::Symbol {
         let text = String::from_utf8_lossy(cid.as_slice());
@@ -1122,6 +1128,10 @@ impl Translator {
     fn translate_call(&mut self, call: &prism::CallNode<'_>, range: Range) -> NodeId {
         let method = self.sym(&call.name());
         let receiver = call.receiver();
+        // `loc.name` には selector (e.g. `File.exists?` の `exists?` 部分)
+        // を入れる。implicit call (`foo.()`) 等は selector がないので
+        // `Range::ZERO` フォールバック。
+        let selector_range = Self::opt_loc_range(call.message_loc());
 
         // 引数リスト。
         let mut arg_ids: Vec<NodeId> = Vec::new();
@@ -1149,26 +1159,28 @@ impl Translator {
         match (receiver, call.is_safe_navigation()) {
             (Some(r), true) => {
                 let recv = self.translate_node(&r);
-                self.builder.push(
+                self.builder.push_named(
                     NodeKind::Csend {
                         receiver: recv,
                         method,
                         args,
                     },
                     range,
+                    selector_range,
                 )
             }
             (recv_opt, _) => {
                 let receiver = recv_opt
                     .map(|r| OptNodeId::some(self.translate_node(&r)))
                     .unwrap_or(OptNodeId::NONE);
-                self.builder.push(
+                self.builder.push_named(
                     NodeKind::Send {
                         receiver,
                         method,
                         args,
                     },
                     range,
+                    selector_range,
                 )
             }
         }
@@ -1234,42 +1246,52 @@ impl Translator {
     }
 
     /// 単一パラメータ prism ノード → arg 系 `NodeKind`。未対応は `Unknown`。
+    ///
+    /// 各 arg/rest/block ノードでは prism の `name_loc()` を `loc.name`
+    /// として記録し、`cx.node(arg).loc.name` で sigil 後の識別子範囲を
+    /// 直接取れるようにする (`UnusedMethodArgument` の autocorrect が
+    /// `*  args` のような sigil + 空白パターンを正しく扱うため)。
+    /// `RequiredParameterNode` には `name_loc()` がない (sigil なしで
+    /// expression 全体が name そのもの)。
     fn translate_param(&mut self, node: &prism::Node<'_>) -> NodeId {
         let range = Self::node_range(node);
-        if let Some(p) = node.as_required_parameter_node() {
+        let (kind, name_range) = if let Some(p) = node.as_required_parameter_node() {
+            (NodeKind::Arg(self.sym(&p.name())), range)
+        } else if let Some(p) = node.as_optional_parameter_node() {
             let name = self.sym(&p.name());
-            return self.builder.push(NodeKind::Arg(name), range);
-        }
-        if let Some(p) = node.as_optional_parameter_node() {
-            let name = self.sym(&p.name());
+            let nr = Self::range(&p.name_loc());
             let default = self.translate_node(&p.value());
-            return self.builder.push(NodeKind::Optarg { name, default }, range);
-        }
-        if let Some(p) = node.as_rest_parameter_node() {
-            let name = self.opt_sym(p.name());
-            return self.builder.push(NodeKind::Restarg(name), range);
-        }
-        if let Some(p) = node.as_required_keyword_parameter_node() {
+            (NodeKind::Optarg { name, default }, nr)
+        } else if let Some(p) = node.as_rest_parameter_node() {
+            (
+                NodeKind::Restarg(self.opt_sym(p.name())),
+                Self::opt_loc_range(p.name_loc()),
+            )
+        } else if let Some(p) = node.as_required_keyword_parameter_node() {
+            (
+                NodeKind::Kwarg(self.sym(&p.name())),
+                Self::range(&p.name_loc()),
+            )
+        } else if let Some(p) = node.as_optional_keyword_parameter_node() {
             let name = self.sym(&p.name());
-            return self.builder.push(NodeKind::Kwarg(name), range);
-        }
-        if let Some(p) = node.as_optional_keyword_parameter_node() {
-            let name = self.sym(&p.name());
+            let nr = Self::range(&p.name_loc());
             let default = self.translate_node(&p.value());
-            return self
-                .builder
-                .push(NodeKind::Kwoptarg { name, default }, range);
-        }
-        if let Some(p) = node.as_keyword_rest_parameter_node() {
-            let name = self.opt_sym(p.name());
-            return self.builder.push(NodeKind::Kwrestarg(name), range);
-        }
-        if let Some(p) = node.as_block_parameter_node() {
-            let name = self.opt_sym(p.name());
-            return self.builder.push(NodeKind::Blockarg(name), range);
-        }
-        // `MultiTargetNode`（分割代入パラメータ）等は Task 16 / Unknown。
-        self.builder.push(NodeKind::Unknown, range)
+            (NodeKind::Kwoptarg { name, default }, nr)
+        } else if let Some(p) = node.as_keyword_rest_parameter_node() {
+            (
+                NodeKind::Kwrestarg(self.opt_sym(p.name())),
+                Self::opt_loc_range(p.name_loc()),
+            )
+        } else if let Some(p) = node.as_block_parameter_node() {
+            (
+                NodeKind::Blockarg(self.opt_sym(p.name())),
+                Self::opt_loc_range(p.name_loc()),
+            )
+        } else {
+            // `MultiTargetNode`（分割代入パラメータ）等は Task 16 / Unknown。
+            return self.builder.push(NodeKind::Unknown, range);
+        };
+        self.builder.push_named(kind, range, name_range)
     }
 
     /// `Option<ConstantId>` → `Symbol`。`None`（匿名 `*`/`**`/`&`）は空文字

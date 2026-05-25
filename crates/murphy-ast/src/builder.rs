@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crate::ast::{Ast, collect_children};
 use crate::interner::InternBuilder;
 use crate::node::{
-    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
-    SourceToken, StringId, Symbol,
+    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range,
+    SourceBuffer, SourceToken, StringId, Symbol,
 };
 
 /// Builds an [`Ast`]. Push nodes and lists; `finish` computes parent links
@@ -47,13 +47,32 @@ impl AstBuilder {
     }
 
     /// Append a node. `parent` is left as `NONE` until [`AstBuilder::finish`].
-    pub fn push(&mut self, kind: NodeKind, range: Range) -> NodeId {
+    /// `loc.name` defaults to [`Range::ZERO`]; use [`AstBuilder::push_named`]
+    /// to record an identifier range alongside the expression range.
+    pub fn push(&mut self, kind: NodeKind, expression: Range) -> NodeId {
+        self.push_with_loc(
+            kind,
+            NodeLoc {
+                expression,
+                name: Range::ZERO,
+            },
+        )
+    }
+
+    /// Append a name-bearing node, recording both its full source range
+    /// (`expression`) and the identifier range (`name`) — the parser-gem
+    /// `node.loc.name` analog.
+    pub fn push_named(&mut self, kind: NodeKind, expression: Range, name: Range) -> NodeId {
+        self.push_with_loc(kind, NodeLoc { expression, name })
+    }
+
+    fn push_with_loc(&mut self, kind: NodeKind, loc: NodeLoc) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
         debug_assert!(id.0 != u32::MAX, "arena exceeded u32 node capacity");
         self.nodes.push(AstNode {
             kind,
             parent: OptNodeId::NONE,
-            range,
+            loc,
         });
         id
     }

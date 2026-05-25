@@ -53,8 +53,8 @@ pub use severity::{
 // alone, so the pack's `[dependencies]` stays at one Murphy crate (design
 // §5; enforced by `crates/murphy-std/tests/dep_boundary.rs`).
 pub use murphy_ast::{
-    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeKindTag, NodeList, OptNodeId, Range,
-    SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
+    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeKindTag, NodeList, NodeLoc, OptNodeId,
+    Range, SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
 };
 pub use murphy_plugin_macros::{
     CopOptionEnum, CopOptions, cop, node_pattern, on_new_investigation, on_node, register_cops,
