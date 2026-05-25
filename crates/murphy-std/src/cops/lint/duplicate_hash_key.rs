@@ -59,7 +59,7 @@ impl DuplicateHashKey {
 /// `f64` is normalized via `to_bits` so the variant can derive `Hash` /
 /// `Eq`. Two `NaN` bit patterns therefore compare unequal — fine for
 /// this cop because a literal `0.0/0.0` doesn't appear as a hash key.
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Hash, PartialEq, Eq, PartialOrd, Ord)]
 enum LiteralKey {
     Sym(String),
     Str(String),
@@ -122,6 +122,11 @@ fn literal_key(cx: &Cx<'_>, node: NodeId) -> Option<LiteralKey> {
                 };
                 items.push((literal_key(cx, key)?, literal_key(cx, value)?));
             }
+            // Ruby's `Hash#==` is order-independent, so two hashes with
+            // the same `{key => value}` set should compare equal even
+            // when literal order differs. Sort by `(key, value)` to give
+            // them the same canonical form.
+            items.sort();
             LiteralKey::Hash(items)
         }
         NodeKind::RangeExpr {
@@ -282,6 +287,23 @@ mod tests {
                   /foo/i => 1,
                   /foo/i => 2,
                   ^^^^^^ Duplicated key in hash literal.
+                }
+            "#}
+        );
+    }
+
+    #[test]
+    fn inner_hash_key_is_order_independent() {
+        // Ruby's `Hash#==` ignores insertion order, so two hash keys
+        // that hold the same pairs must compare equal even when the
+        // literal order differs.
+        expect_offense!(
+            DuplicateHashKey,
+            indoc! {r#"
+                {
+                  { a: 1, b: 2 } => :x,
+                  { b: 2, a: 1 } => :y,
+                  ^^^^^^^^^^^^^^ Duplicated key in hash literal.
                 }
             "#}
         );
