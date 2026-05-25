@@ -13,6 +13,17 @@
 //! - **`block_argument_with_yield`**: when the body uses `yield`, the
 //!   `&blk` argument is implicitly used; do not flag it.
 //!
+//! ## Known v1 limitation: option overrides not wired through `Cx`
+//!
+//! Both `ignore_not_implemented_methods` and `not_implemented_exceptions`
+//! are exported via `#[derive(CopOptions)]` so the host validates the
+//! schema, but runtime reads still come from `Options::default()`.
+//! `murphy-9cr.9` will route `[cops.rules."Lint/UnusedMethodArgument"]`
+//! overrides through `Cx`; until then setting these keys in
+//! `murphy.toml` has no effect at dispatch time. See
+//! `references/options.md` in the port-rubocop-cop skill for the same
+//! limitation in `RSpec/ExampleLength`.
+//!
 //! ## Autocorrect
 //!
 //! - Positional / optional / rest / kwrest args: prefix the name with
