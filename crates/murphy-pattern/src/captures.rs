@@ -9,8 +9,8 @@
 use murphy_ast::NodeId;
 
 /// One captured value. The variant mirrors the pattern's [`CaptureKind`]:
-/// `$_` / `$name` / `$(...)` bind a single node; `$...` binds the slice of
-/// sibling nodes that the rest position consumed.
+/// `$_` / `$name` / `$(...)` bind a single node; `$...` / `$pat+` / `$pat*`
+/// bind a slice of sibling nodes; `$pat?` binds an optional single node.
 ///
 /// [`CaptureKind`]: crate::CaptureKind
 #[derive(Debug, Clone, PartialEq)]
@@ -19,11 +19,23 @@ pub enum CaptureValue {
     ///
     /// [`CaptureKind::Node`]: crate::CaptureKind::Node
     Node(NodeId),
-    /// A captured slice of consecutive sibling nodes (the `$...` span).
-    /// Slot kind is [`CaptureKind::Seq`].
+    /// A captured slice of consecutive sibling nodes (the `$...` span, or
+    /// the iterations of a `$pat+` / `$pat*` quantifier). Slot kind is
+    /// [`CaptureKind::Seq`].
     ///
     /// [`CaptureKind::Seq`]: crate::CaptureKind::Seq
     Seq(Vec<NodeId>),
+    /// An optional single captured node (the `$pat?` quantifier —
+    /// murphy-ycx). `Some(id)` when the `?` matched one node; `None` when
+    /// it matched zero. Slot kind is [`CaptureKind::OptNode`].
+    ///
+    /// Distinct from an unwritten slot: `OptNode(None)` is a
+    /// *successfully written* slot whose value is the absence of a match,
+    /// so [`CaptureBuf::finish`] keeps the `Captures` record and does NOT
+    /// degrade the match to "incomplete capture".
+    ///
+    /// [`CaptureKind::OptNode`]: crate::CaptureKind::OptNode
+    OptNode(Option<NodeId>),
 }
 
 /// The result of a successful match: one [`CaptureValue`] per `$` capture in
@@ -137,5 +149,33 @@ mod tests {
         let mut buf = CaptureBuf::new(2);
         buf.set(0, CaptureValue::Node(NodeId(0)));
         assert!(buf.finish().is_none());
+    }
+
+    // --- murphy-ycx: OptNode is a written value, NOT an empty slot ---------
+
+    #[test]
+    fn capture_buf_round_trips_optnode_some() {
+        // `$pat?` with one match -> `OptNode(Some(id))`. Round-trips
+        // through CaptureBuf::set/finish identically to `Node` / `Seq`.
+        let mut buf = CaptureBuf::new(1);
+        buf.set(0, CaptureValue::OptNode(Some(NodeId(7))));
+        let c = buf.finish().expect("OptNode(Some) is a written value");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c.get(0), Some(&CaptureValue::OptNode(Some(NodeId(7)))));
+    }
+
+    #[test]
+    fn capture_buf_round_trips_optnode_none() {
+        // `$pat?` with zero matches -> `OptNode(None)`. The slot is still
+        // *written* — `finish` returns `Some(_)`. This is the contract
+        // that lets `?` produce a `Captures` for every successful match,
+        // even when the optional pattern didn't fire.
+        let mut buf = CaptureBuf::new(1);
+        buf.set(0, CaptureValue::OptNode(None));
+        let c = buf
+            .finish()
+            .expect("OptNode(None) is a written value, not an empty slot");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c.get(0), Some(&CaptureValue::OptNode(None)));
     }
 }

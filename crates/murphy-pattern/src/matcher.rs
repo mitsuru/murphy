@@ -200,6 +200,14 @@ fn match_pat<P: PredicateHost + ?Sized>(
             }
             false
         }
+        IrNode::Quantifier { .. } => {
+            // A quantifier never matches at top level — it is only valid
+            // as a direct child of a node match, where `match_node_match`
+            // (PR #3) will dispatch it onto the child list. Reaching this
+            // arm means a hand-built or malformed IR; PR #3 lands the
+            // sibling-list backtracker that actually consumes it.
+            todo!("PR #3: matcher backtracker for IrNode::Quantifier")
+        }
     }
 }
 
