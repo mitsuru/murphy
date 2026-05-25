@@ -4,8 +4,20 @@
 //!
 //! - **`AllowComments`** (default `true`): a `when` branch whose body
 //!   region contains only a comment (`when 1; # noop`) is treated as
-//!   intentionally empty and not flagged. Set to `false` to flag those
-//!   too.
+//!   intentionally empty and not flagged. The `allow_comments = false`
+//!   override is exported in the schema but is not yet wired at
+//!   dispatch time — see the "Known v1 limitation" note below.
+//!
+//! ## Known v1 limitation: option overrides not wired through `Cx`
+//!
+//! `allow_comments` is exported via `#[derive(CopOptions)]` so the host
+//! validates `[cops.rules."Lint/EmptyWhen"]` keys, but runtime reads
+//! still come from `Options::default()`. `murphy-9cr.9` will route
+//! overrides through `Cx`; until then, setting
+//! `allow_comments = false` in `murphy.toml` has no effect at dispatch
+//! time. This is the same shape as `RSpec/ExampleLength` and the new
+//! `Lint/UnusedMethodArgument` options — see `references/options.md`
+//! in the port-rubocop-cop skill.
 //!
 //! ## Body-region heuristic
 //!
