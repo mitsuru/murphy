@@ -31,7 +31,10 @@
 //!
 //! "Same control-flow path" is computed by walking up via `cx.parent` and
 //! collecting branch-introducing ancestors (`If` / `Case` / `When` /
-//! `While` / `Until` / `Rescue` / `Resbody` / `Ensure`). Each chain entry
+//! `While` / `Until` / `Rescue`). `Resbody` and `Ensure` are *not*
+//! barriers — their children run sequentially, not exclusively, and
+//! treating them as barriers would falsely cut the `rescue => e`
+//! binding off from reads inside the body. Each chain entry
 //! is a pair `(barrier_node, branch_child)` — the child of the barrier
 //! on the path from the write — so two writes in different arms of the
 //! same `if` get distinct chain entries even though they share the
@@ -106,6 +109,9 @@ struct Read {
     name: Symbol,
     /// Byte position of the read.
     pos: u32,
+    /// Node id used to compute the read's control-flow barrier chain so
+    /// we can ask "is this read reachable from a particular write?"
+    node: NodeId,
 }
 
 fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
@@ -114,19 +120,29 @@ fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
     for id in scope_nodes(cx, root) {
         classify(cx, id, &mut writes, &mut reads);
     }
-    // Pre-compute each write's branch chain so we don't pay for the
-    // `cx.parent` walk in the O(W^2) loop below.
-    let chains: Vec<Vec<(NodeId, NodeId)>> = writes
+    // Pre-compute each write's and read's branch chain so we don't pay
+    // for the `cx.parent` walk in the O(W^2) / O(W*R) loops below.
+    let write_chains: Vec<Vec<(NodeId, NodeId)>> = writes
         .iter()
         .map(|w| barrier_chain(cx, root, w.node))
         .collect();
+    let read_chains: Vec<Vec<(NodeId, NodeId)>> = reads
+        .iter()
+        .map(|r| barrier_chain(cx, root, r.node))
+        .collect();
 
     for (i, write) in writes.iter().enumerate() {
-        // Earliest later read of the same name.
+        // Earliest later read of the same name that's actually on a
+        // control-flow path reachable from this write. A read inside
+        // an exclusive branch (e.g. the `else` arm when the write is
+        // in the `then`) can't observe the write, so it must not
+        // suppress an overwrite-before-read flag.
         let next_read_pos = reads
             .iter()
-            .filter(|r| r.name == write.name && r.pos > write.end)
-            .map(|r| r.pos)
+            .enumerate()
+            .filter(|(_, r)| r.name == write.name && r.pos > write.end)
+            .filter(|(k, _)| chain_is_prefix(&read_chains[*k], &write_chains[i]))
+            .map(|(_, r)| r.pos)
             .min();
 
         // Earliest later write of the same name whose chain is a
@@ -138,7 +154,7 @@ fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
             .iter()
             .enumerate()
             .filter(|(j, w)| *j != i && w.name == write.name && w.end > write.end)
-            .filter(|(j, _)| chain_is_prefix(&chains[*j], &chains[i]))
+            .filter(|(j, _)| chain_is_prefix(&write_chains[*j], &write_chains[i]))
             .min_by_key(|(_, w)| w.end);
 
         match (next_read_pos, dominating_overwrite) {
@@ -184,6 +200,10 @@ fn barrier_chain(cx: &Cx<'_>, root: NodeId, node: NodeId) -> Vec<(NodeId, NodeId
 }
 
 fn is_branch_barrier(cx: &Cx<'_>, node: NodeId) -> bool {
+    // `Resbody` and `Ensure` are *not* barriers: their children
+    // (var/body for resbody, body/ensure_ for ensure) run sequentially,
+    // not exclusively. Branch exclusivity at the rescue level is
+    // captured by the enclosing `Rescue` instead.
     matches!(
         *cx.kind(node),
         NodeKind::If { .. }
@@ -192,8 +212,6 @@ fn is_branch_barrier(cx: &Cx<'_>, node: NodeId) -> bool {
             | NodeKind::While { .. }
             | NodeKind::Until { .. }
             | NodeKind::Rescue { .. }
-            | NodeKind::Resbody { .. }
-            | NodeKind::Ensure { .. }
     )
 }
 
@@ -223,6 +241,7 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
                 reads.push(Read {
                     name,
                     pos: cx.range(target).start,
+                    node: target,
                 });
                 if !cx.symbol_str(name).starts_with('_') {
                     writes.push(Write {
@@ -257,6 +276,7 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
             reads.push(Read {
                 name,
                 pos: cx.range(id).start,
+                node: id,
             });
         }
         _ => {}
@@ -650,6 +670,27 @@ mod tests {
                 else
                   x = 2
                 end
+                x
+            "#}
+        );
+    }
+
+    #[test]
+    fn read_in_exclusive_branch_does_not_save_a_write_from_another_branch() {
+        // `x = 1` is in the `then` arm; `puts x` is in the `else` arm.
+        // They are mutually exclusive at runtime, so the `puts x` does
+        // *not* observe `x = 1`. The dominating `x = 2` afterward
+        // overwrites `x = 1` unconditionally → flag.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                if cond
+                  x = 1
+                  ^ Useless assignment to local variable
+                else
+                  puts x
+                end
+                x = 2
                 x
             "#}
         );
