@@ -122,14 +122,8 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
             }
         }
         NodeKind::Masgn { lhs, .. } => {
-            if let NodeKind::Mlhs(list) = *cx.kind(lhs) {
-                let asgn_end = cx.range(id).end;
-                for &target in cx.list(list) {
-                    if let NodeKind::Lvasgn { name, .. } = *cx.kind(target) {
-                        push_local_write(cx, target, name, asgn_end, writes);
-                    }
-                }
-            }
+            let asgn_end = cx.range(id).end;
+            collect_mlhs_targets(cx, lhs, asgn_end, writes);
         }
         NodeKind::Resbody { var, .. } => {
             if let Some(var_id) = var.get()
@@ -151,6 +145,27 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
             });
         }
         _ => {}
+    }
+}
+
+/// Walk an `Mlhs` (or anything that decomposes into target write nodes)
+/// and push every `Lvasgn` target as a local-variable write. Nested
+/// destructuring `a, (b, c) = …` produces nested `Mlhs`, so this
+/// recurses through inner `Mlhs` nodes.
+fn collect_mlhs_targets(cx: &Cx<'_>, lhs: NodeId, asgn_end: u32, writes: &mut Vec<Write>) {
+    match *cx.kind(lhs) {
+        NodeKind::Mlhs(list) => {
+            for &target in cx.list(list) {
+                collect_mlhs_targets(cx, target, asgn_end, writes);
+            }
+        }
+        NodeKind::Lvasgn { name, .. } => {
+            push_local_write(cx, lhs, name, asgn_end, writes);
+        }
+        _ => {
+            // Other target kinds (`Ivasgn`, `Casgn`, …) are not local
+            // variables, so this cop does not flag them.
+        }
     }
 }
 
@@ -214,7 +229,7 @@ fn assignment_name_range(cx: &Cx<'_>, node: NodeId, name: &str) -> Range {
 mod tests {
     use super::UselessAssignment;
     use murphy_plugin_api::test_support::{
-        expect_no_offenses, expect_offense, indoc, run_cop_with_edits,
+        expect_no_offenses, expect_offense, indoc, run_cop, run_cop_with_edits,
     };
 
     #[test]
@@ -276,6 +291,30 @@ mod tests {
             b
         "#}
         );
+    }
+
+    #[test]
+    fn masgn_nested_lhs_targets_are_inspected() {
+        // `a, (b, c) = [1, [2, 3]]` — the inner `(b, c)` is its own
+        // `Mlhs`. `b` is used, `a` and `c` are not. The `expect_offense!`
+        // caret grammar can't annotate two offsets on one line, so check
+        // via `run_cop` directly.
+        let offenses = run_cop::<UselessAssignment>("a, (b, c) = [1, [2, 3]]\nb\n");
+        let names: Vec<&str> = offenses
+            .iter()
+            .map(|o| {
+                let r = o.range;
+                &"a, (b, c) = [1, [2, 3]]\nb\n"[r.start as usize..r.end as usize]
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["a", "c"],
+            "expected only `a` and `c` flagged, got {names:?} (offenses={offenses:?})",
+        );
+        for offense in &offenses {
+            assert_eq!(offense.message, "Useless assignment to local variable");
+        }
     }
 
     #[test]
