@@ -72,15 +72,14 @@ fn is_scope(cx: &Cx<'_>, node: NodeId) -> bool {
     )
 }
 
+/// `Lvasgn` ranges always start at the variable name: Prism emits
+/// `[name_start, value_end)` for `x = 1` and `[name_start, name_end)` for
+/// the LHS of `x += 1` (the enclosing `OpAsgn` carries the RHS).
 fn assignment_name_range(cx: &Cx<'_>, node: NodeId, name: &str) -> Range {
-    let range = cx.range(node);
-    let raw = cx.raw_source(range);
-    let pos = raw
-        .find(name)
-        .expect("variable name must appear in assignment node source") as u32;
+    let start = cx.range(node).start;
     Range {
-        start: range.start + pos,
-        end: range.start + pos + name.len() as u32,
+        start,
+        end: start + name.len() as u32,
     }
 }
 

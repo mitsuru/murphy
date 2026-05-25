@@ -89,9 +89,9 @@ fn offense(node: NodeId, cx: &Cx<'_>) -> Option<DeprecatedOffense> {
 
     if method == "attr" {
         let boolean_arg = cx.list(args).get(1).copied()?;
-        let preferred = match cx.raw_source(cx.range(boolean_arg)) {
-            "true" => "attr_accessor",
-            "false" => "attr_reader",
+        let preferred = match *cx.kind(boolean_arg) {
+            NodeKind::True_ => "attr_accessor",
+            NodeKind::False_ => "attr_reader",
             _ => return None,
         };
         let first_arg = cx.list(args).first().copied()?;
