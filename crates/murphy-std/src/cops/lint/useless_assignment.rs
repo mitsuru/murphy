@@ -136,12 +136,17 @@ fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
         // control-flow path reachable from this write. A read inside
         // an exclusive branch (e.g. the `else` arm when the write is
         // in the `then`) can't observe the write, so it must not
-        // suppress an overwrite-before-read flag.
+        // suppress an overwrite-before-read flag. The compatibility
+        // test is *either direction* of prefix: a read at the same
+        // level as the write or deeper-into-a-conditional (write's
+        // chain is a prefix of read's) is reachable when that branch
+        // runs; a read in a shallower chunk (read's chain is a prefix
+        // of write's) is reachable after exiting w's branches.
         let next_read_pos = reads
             .iter()
             .enumerate()
             .filter(|(_, r)| r.name == write.name && r.pos > write.end)
-            .filter(|(k, _)| chain_is_prefix(&read_chains[*k], &write_chains[i]))
+            .filter(|(k, _)| paths_compatible(&read_chains[*k], &write_chains[i]))
             .map(|(_, r)| r.pos)
             .min();
 
@@ -222,6 +227,16 @@ fn is_branch_barrier(cx: &Cx<'_>, node: NodeId) -> bool {
 /// out to.
 fn chain_is_prefix(short: &[(NodeId, NodeId)], long: &[(NodeId, NodeId)]) -> bool {
     short.len() <= long.len() && short == &long[..short.len()]
+}
+
+/// Two chains describe compatible control-flow paths iff one is a
+/// prefix of the other. That covers the same-chunk case, the
+/// shallower-than case (one exits inner branches to reach the other),
+/// and the deeper-than case (one enters an inner branch when it runs);
+/// it excludes pairs that diverge into mutually exclusive sibling
+/// branches of the same `if` / `case`.
+fn paths_compatible(a: &[(NodeId, NodeId)], b: &[(NodeId, NodeId)]) -> bool {
+    chain_is_prefix(a, b) || chain_is_prefix(b, a)
 }
 
 fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Read>) {
@@ -671,6 +686,22 @@ mod tests {
                   x = 2
                 end
                 x
+            "#}
+        );
+    }
+
+    #[test]
+    fn read_inside_a_later_conditional_observes_the_outer_write() {
+        // The `puts x` runs when `cond` is true — that path observes
+        // the outer `x = 1`, so the write must not be flagged.
+        // (PR #70 review job 1162.)
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 1
+                if cond
+                  puts x
+                end
             "#}
         );
     }
