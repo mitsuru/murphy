@@ -57,54 +57,42 @@ impl UniqBeforePluck {
 #[cfg(test)]
 mod tests {
     use super::UniqBeforePluck;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     // === hit cases ===
 
     #[test]
     fn flags_pluck_id_uniq() {
-        expect_offense!(
-            UniqBeforePluck,
-            indoc! {r#"
+        test::<UniqBeforePluck>().expect_offense(indoc! {r#"
                 Post.pluck(:id).uniq
                 ^^^^^^^^^^^^^^^^^^^^ Use `distinct` before `pluck` instead of `uniq` after.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_chain_then_pluck_uniq() {
-        expect_offense!(
-            UniqBeforePluck,
-            indoc! {r#"
+        test::<UniqBeforePluck>().expect_offense(indoc! {r#"
                 User.where(active: true).pluck(:name).uniq
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `distinct` before `pluck` instead of `uniq` after.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_local_receiver_pluck_uniq() {
-        expect_offense!(
-            UniqBeforePluck,
-            indoc! {r#"
+        test::<UniqBeforePluck>().expect_offense(indoc! {r#"
                 posts.pluck(:title).uniq
                 ^^^^^^^^^^^^^^^^^^^^^^^^ Use `distinct` before `pluck` instead of `uniq` after.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_multi_column_pluck() {
         // Multi-column `pluck(:id, :name).uniq` is also a candidate —
         // `distinct.pluck(:id, :name)` is the AR-relation equivalent.
-        expect_offense!(
-            UniqBeforePluck,
-            indoc! {r#"
+        test::<UniqBeforePluck>().expect_offense(indoc! {r#"
                 Post.pluck(:id, :name).uniq
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `distinct` before `pluck` instead of `uniq` after.
-            "#}
-        );
+            "#});
     }
 
     // === no-hit cases ===
@@ -114,20 +102,20 @@ mod tests {
         // Already the recommended form — leave alone. The chain
         // (send (send _ :distinct) :pluck _) does not match the
         // (send (send _ :pluck _ ...) :uniq) shape.
-        expect_no_offenses!(UniqBeforePluck, "Post.distinct.pluck(:id)\n");
+        test::<UniqBeforePluck>().expect_no_offenses("Post.distinct.pluck(:id)\n");
     }
 
     #[test]
     fn does_not_flag_pluck_distinct() {
         // `pluck.distinct` is also a recommended-equivalent form
         // (ActiveRecord chain ordering). Out of scope for the cop.
-        expect_no_offenses!(UniqBeforePluck, "Post.pluck(:id).distinct\n");
+        test::<UniqBeforePluck>().expect_no_offenses("Post.pluck(:id).distinct\n");
     }
 
     #[test]
     fn does_not_flag_bare_uniq() {
         // No `pluck` in the chain.
-        expect_no_offenses!(UniqBeforePluck, "arr.uniq\n");
+        test::<UniqBeforePluck>().expect_no_offenses("arr.uniq\n");
     }
 
     #[test]
@@ -139,25 +127,22 @@ mod tests {
         // RuboCop-rails behaves the same way (a custom dedup-key block
         // is still a client-side dedup that `distinct` on the AR
         // relation would have avoided).
-        expect_offense!(
-            UniqBeforePluck,
-            indoc! {r#"
+        test::<UniqBeforePluck>().expect_offense(indoc! {r#"
                 Post.pluck(:id).uniq { |x| x.id }
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `distinct` before `pluck` instead of `uniq` after.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn does_not_flag_pluck_zero_args_then_uniq() {
         // Degenerate `pluck.uniq` — `pluck` with no args is
         // ill-formed for `distinct.pluck` rewriting too.
-        expect_no_offenses!(UniqBeforePluck, "Post.pluck.uniq\n");
+        test::<UniqBeforePluck>().expect_no_offenses("Post.pluck.uniq\n");
     }
 
     #[test]
     fn does_not_flag_pluck_without_uniq() {
         // No terminator.
-        expect_no_offenses!(UniqBeforePluck, "Post.pluck(:id)\n");
+        test::<UniqBeforePluck>().expect_no_offenses("Post.pluck(:id)\n");
     }
 }

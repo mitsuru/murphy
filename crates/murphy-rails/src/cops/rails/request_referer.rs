@@ -76,19 +76,16 @@ impl RequestReferer {
 #[cfg(test)]
 mod tests {
     use super::RequestReferer;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     // === hit cases ===
 
     #[test]
     fn flags_request_referer() {
-        expect_offense!(
-            RequestReferer,
-            indoc! {r#"
+        test::<RequestReferer>().expect_offense(indoc! {r#"
                 request.referer
                 ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -96,29 +93,23 @@ mod tests {
         // Two hits — one on each `request.referer` Send. The
         // dispatcher visits every Send node, so both fire
         // independently.
-        expect_offense!(
-            RequestReferer,
-            indoc! {r#"
+        test::<RequestReferer>().expect_offense(indoc! {r#"
                 if request.referer.present?
                    ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
                   redirect_to request.referer
                               ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_request_referer_chained() {
         // `request.referer.present?` — the inner Send `request.referer`
         // is the outer Send's receiver and still hits on its own.
-        expect_offense!(
-            RequestReferer,
-            indoc! {r#"
+        test::<RequestReferer>().expect_offense(indoc! {r#"
                 request.referer.present?
                 ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
-            "#}
-        );
+            "#});
     }
 
     // === no-hit cases ===
@@ -126,19 +117,19 @@ mod tests {
     #[test]
     fn does_not_flag_request_referrer() {
         // Correct spelling — leave alone.
-        expect_no_offenses!(RequestReferer, "request.referrer\n");
+        test::<RequestReferer>().expect_no_offenses("request.referrer\n");
     }
 
     #[test]
     fn does_not_flag_other_receiver_referer() {
         // Different receiver — not the controller `request` accessor.
-        expect_no_offenses!(RequestReferer, "other.referer\n");
+        test::<RequestReferer>().expect_no_offenses("other.referer\n");
     }
 
     #[test]
     fn does_not_flag_bare_referer() {
         // Receiver-less call; not `request.referer`.
-        expect_no_offenses!(RequestReferer, "referer\n");
+        test::<RequestReferer>().expect_no_offenses("referer\n");
     }
 
     #[test]
@@ -146,19 +137,19 @@ mod tests {
         // `Request` is a Const, not a `Send(None, "request")`; the
         // controller `request.referer` we care about is the implicit-
         // self method call, not a top-level constant accessor.
-        expect_no_offenses!(RequestReferer, "Request.referer\n");
+        test::<RequestReferer>().expect_no_offenses("Request.referer\n");
     }
 
     #[test]
     fn does_not_flag_ivar_request_receiver() {
         // `@request` is an IVar read, not the `request` Send.
-        expect_no_offenses!(RequestReferer, "@request.referer\n");
+        test::<RequestReferer>().expect_no_offenses("@request.referer\n");
     }
 
     #[test]
     fn does_not_flag_unrelated_method_on_request() {
         // `request.path` is a different accessor entirely.
-        expect_no_offenses!(RequestReferer, "request.path\n");
+        test::<RequestReferer>().expect_no_offenses("request.path\n");
     }
 
     #[test]
@@ -168,13 +159,13 @@ mod tests {
         // roborev review (job 1122) found that without the zero-args
         // gate the cop would false-positive here; the DSL's strict
         // arity preserves the guarantee.
-        expect_no_offenses!(RequestReferer, "request(foo).referer\n");
+        test::<RequestReferer>().expect_no_offenses("request(foo).referer\n");
     }
 
     #[test]
     fn does_not_flag_request_with_block() {
         // `request { ... }` is also a method call with structure beyond
         // the bare accessor — block-arg form should not be flagged.
-        expect_no_offenses!(RequestReferer, "request(:get) { |r| r.referer }\n");
+        test::<RequestReferer>().expect_no_offenses("request(:get) { |r| r.referer }\n");
     }
 }

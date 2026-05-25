@@ -68,19 +68,16 @@ impl NegateInclude {
 #[cfg(test)]
 mod tests {
     use super::NegateInclude;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     // === hit cases ===
 
     #[test]
     fn flags_negate_array_include() {
-        expect_offense!(
-            NegateInclude,
-            indoc! {r#"
+        test::<NegateInclude>().expect_offense(indoc! {r#"
                 !arr.include?(x)
                 ^^^^^^^^^^^^^^^^ Use `exclude?` instead of `!include?`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -92,36 +89,27 @@ mod tests {
         // becomes `Begin([...])` rather than the inner `include?`
         // Send. Out of scope for v1; if dogfood surfaces this shape we
         // can extend the DSL with a `begin`-stripping helper.
-        expect_offense!(
-            NegateInclude,
-            indoc! {r#"
+        test::<NegateInclude>().expect_offense(indoc! {r#"
                 !hash.include?(:key)
                 ^^^^^^^^^^^^^^^^^^^^ Use `exclude?` instead of `!include?`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_negate_chain_include() {
         // Receiver is itself a chain — still hits.
-        expect_offense!(
-            NegateInclude,
-            indoc! {r#"
+        test::<NegateInclude>().expect_offense(indoc! {r#"
                 !user.tags.include?("admin")
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `exclude?` instead of `!include?`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_negate_include_with_literal_arg() {
-        expect_offense!(
-            NegateInclude,
-            indoc! {r#"
+        test::<NegateInclude>().expect_offense(indoc! {r#"
                 !arr.include?("foo")
                 ^^^^^^^^^^^^^^^^^^^^ Use `exclude?` instead of `!include?`.
-            "#}
-        );
+            "#});
     }
 
     // === no-hit cases ===
@@ -129,19 +117,19 @@ mod tests {
     #[test]
     fn does_not_flag_plain_include() {
         // No negation — leave alone.
-        expect_no_offenses!(NegateInclude, "arr.include?(x)\n");
+        test::<NegateInclude>().expect_no_offenses("arr.include?(x)\n");
     }
 
     #[test]
     fn does_not_flag_exclude() {
         // Already the recommended form.
-        expect_no_offenses!(NegateInclude, "arr.exclude?(x)\n");
+        test::<NegateInclude>().expect_no_offenses("arr.exclude?(x)\n");
     }
 
     #[test]
     fn does_not_flag_negate_empty() {
         // Different method on the inner Send.
-        expect_no_offenses!(NegateInclude, "!arr.empty?\n");
+        test::<NegateInclude>().expect_no_offenses("!arr.empty?\n");
     }
 
     #[test]
@@ -151,19 +139,19 @@ mod tests {
         // (it accepts any node, but None has no node) — so this
         // does NOT match. Bare `include?` is also semantically
         // different (it's a class-level Module#include?, e.g.).
-        expect_no_offenses!(NegateInclude, "!include?(x)\n");
+        test::<NegateInclude>().expect_no_offenses("!include?(x)\n");
     }
 
     #[test]
     fn does_not_flag_negate_include_no_args() {
         // `!arr.include?` (zero args) is ill-formed call; the DSL's
         // `_ ...` arity-≥1 gate excludes it.
-        expect_no_offenses!(NegateInclude, "!arr.include?\n");
+        test::<NegateInclude>().expect_no_offenses("!arr.include?\n");
     }
 
     #[test]
     fn does_not_flag_other_negation_target() {
         // `!arr.size.zero?` — outer `!` on `zero?`, not `include?`.
-        expect_no_offenses!(NegateInclude, "!arr.size.zero?\n");
+        test::<NegateInclude>().expect_no_offenses("!arr.size.zero?\n");
     }
 }

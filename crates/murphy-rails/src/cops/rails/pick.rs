@@ -85,44 +85,35 @@ impl Pick {
 #[cfg(test)]
 mod tests {
     use super::Pick;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     // === hit cases ===
 
     #[test]
     fn flags_pluck_id_first() {
-        expect_offense!(
-            Pick,
-            indoc! {r#"
+        test::<Pick>().expect_offense(indoc! {r#"
                 Post.pluck(:id).first
                 ^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_chain_then_pluck_first() {
         // The receiver of `pluck` is itself a chain — the inner Send's
         // receiver shape is unconstrained, so this still hits.
-        expect_offense!(
-            Pick,
-            indoc! {r#"
+        test::<Pick>().expect_offense(indoc! {r#"
                 User.where(active: true).pluck(:name).first
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_local_receiver_pluck_first() {
         // Bare local receiver — same shape, still hits.
-        expect_offense!(
-            Pick,
-            indoc! {r#"
+        test::<Pick>().expect_offense(indoc! {r#"
                 posts.pluck(:title).first
                 ^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -131,13 +122,10 @@ mod tests {
         // every Send node, including the inner `Post.pluck(:id).first`
         // that is the outer `.something`'s receiver. That inner Send
         // matches all our gates on its own.
-        expect_offense!(
-            Pick,
-            indoc! {r#"
+        test::<Pick>().expect_offense(indoc! {r#"
                 Post.pluck(:id).first.something
                 ^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -147,13 +135,10 @@ mod tests {
         // multi-column `pluck(...).first` is also rewritable. The
         // DSL's `_ ...` (one+rest) matches arity ≥1, which includes
         // multi-column.
-        expect_offense!(
-            Pick,
-            indoc! {r#"
+        test::<Pick>().expect_offense(indoc! {r#"
                 Post.pluck(:id, :name).first
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
-            "#}
-        );
+            "#});
     }
 
     // === no-hit cases ===
@@ -162,19 +147,19 @@ mod tests {
     fn does_not_flag_first_with_limit_arg() {
         // `.first(5)` carries a limit; not equivalent to `pick(:x)`.
         // The outer Send's empty trailing arg list excludes this.
-        expect_no_offenses!(Pick, "Post.pluck(:id).first(5)\n");
+        test::<Pick>().expect_no_offenses("Post.pluck(:id).first(5)\n");
     }
 
     #[test]
     fn does_not_flag_bare_first() {
         // No `pluck` in the chain.
-        expect_no_offenses!(Pick, "obj.first\n");
+        test::<Pick>().expect_no_offenses("obj.first\n");
     }
 
     #[test]
     fn does_not_flag_pluck_then_last() {
         // Different terminator — out of scope (matches upstream).
-        expect_no_offenses!(Pick, "Post.pluck(:id).last\n");
+        test::<Pick>().expect_no_offenses("Post.pluck(:id).last\n");
     }
 
     #[test]
@@ -182,12 +167,12 @@ mod tests {
         // `pluck.first` (zero args) is a degenerate non-equivalent
         // form — `pick` requires at least one explicit column. The
         // DSL's `_ ...` arity-≥1 inner-args gate excludes this.
-        expect_no_offenses!(Pick, "Post.pluck.first\n");
+        test::<Pick>().expect_no_offenses("Post.pluck.first\n");
     }
 
     #[test]
     fn does_not_flag_pluck_without_first() {
         // No terminator — just `pluck`, no chain to rewrite.
-        expect_no_offenses!(Pick, "Post.pluck(:id)\n");
+        test::<Pick>().expect_no_offenses("Post.pluck(:id)\n");
     }
 }

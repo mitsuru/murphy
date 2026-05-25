@@ -114,74 +114,56 @@ fn receiver_targets_stdout(cx: &Cx<'_>, receiver: OptNodeId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Output;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     // === bare-call cases (should flag) ===
 
     #[test]
     fn flags_bare_puts() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 puts "debug"
                 ^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_bare_p() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 p obj
                 ^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_bare_print() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 print "x"
                 ^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_bare_pp() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 pp data
                 ^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_bare_pretty_print() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 pretty_print value
                 ^^^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_bare_ap() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 ap hash
                 ^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -189,115 +171,100 @@ mod tests {
         // binwrite/syswrite/write/write_nonblock are filesystem-output
         // methods that, on a bare call, write to whatever Rails has
         // bound to `$stdout` — same problem as puts.
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 binwrite data
                 ^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     // === explicit-receiver cases (should NOT flag) ===
 
     #[test]
     fn does_not_flag_logger_call() {
-        expect_no_offenses!(Output, "logger.info \"x\"\n");
+        test::<Output>().expect_no_offenses("logger.info \"x\"\n");
     }
 
     #[test]
     fn does_not_flag_rails_logger_call() {
-        expect_no_offenses!(Output, "Rails.logger.info \"x\"\n");
+        test::<Output>().expect_no_offenses("Rails.logger.info \"x\"\n");
     }
 
     #[test]
     fn does_not_flag_const_receiver() {
-        expect_no_offenses!(Output, "Foo.puts \"x\"\n");
+        test::<Output>().expect_no_offenses("Foo.puts \"x\"\n");
     }
 
     #[test]
     fn does_not_flag_self_receiver() {
-        expect_no_offenses!(Output, "self.puts \"x\"\n");
+        test::<Output>().expect_no_offenses("self.puts \"x\"\n");
     }
 
     #[test]
     fn does_not_flag_method_chain_pp() {
         // `obj.pp` is fine — the offense is *bare* `pp`, not the
         // ActiveSupport `Object#pp` instance method.
-        expect_no_offenses!(Output, "obj.pp\n");
+        test::<Output>().expect_no_offenses("obj.pp\n");
     }
 
     // === unrelated-method cases (should NOT flag) ===
 
     #[test]
     fn does_not_flag_unrelated_method() {
-        expect_no_offenses!(Output, "do_something\n");
+        test::<Output>().expect_no_offenses("do_something\n");
     }
 
     #[test]
     fn does_not_flag_local_variable_named_like_method() {
         // `puts = "x"` parses as a local assignment, not a send, so it
         // must not trip the cop.
-        expect_no_offenses!(Output, "puts = \"x\"\n");
+        test::<Output>().expect_no_offenses("puts = \"x\"\n");
     }
 
     // === stdio-alias receiver cases (should flag, added per roborev review 1124) ===
 
     #[test]
     fn flags_stdout_gvar_puts() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 $stdout.puts "x"
                 ^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_stderr_gvar_print() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 $stderr.print "x"
                 ^^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_stdout_const_write() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 STDOUT.write "x"
                 ^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_stderr_const_write_nonblock() {
-        expect_offense!(
-            Output,
-            indoc! {r#"
+        test::<Output>().expect_offense(indoc! {r#"
                 STDERR.write_nonblock "x"
                 ^^^^^^^^^^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn does_not_flag_other_gvar_puts() {
         // Only `$stdout` / `$stderr` are stdio aliases — a custom
         // global like `$log` is not.
-        expect_no_offenses!(Output, "$log.puts \"x\"\n");
+        test::<Output>().expect_no_offenses("$log.puts \"x\"\n");
     }
 
     #[test]
     fn does_not_flag_scoped_const_stdout_puts() {
         // `Foo::STDOUT` is a namespaced constant, not the top-level
         // stdio alias.
-        expect_no_offenses!(Output, "Foo::STDOUT.puts \"x\"\n");
+        test::<Output>().expect_no_offenses("Foo::STDOUT.puts \"x\"\n");
     }
 }

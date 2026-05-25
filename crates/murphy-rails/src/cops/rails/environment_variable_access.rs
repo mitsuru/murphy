@@ -70,74 +70,56 @@ impl EnvironmentVariableAccess {
 #[cfg(test)]
 mod tests {
     use super::EnvironmentVariableAccess;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     // === hit cases ===
 
     #[test]
     fn flags_env_bracket_read() {
-        expect_offense!(
-            EnvironmentVariableAccess,
-            indoc! {r#"
+        test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV["DATABASE_URL"]
                 ^^^^^^^^^^^^^^^^^^^ Don't access environment variables directly; use a settings layer instead.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_env_fetch() {
-        expect_offense!(
-            EnvironmentVariableAccess,
-            indoc! {r#"
+        test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV.fetch("DATABASE_URL")
                 ^^^^^^^^^^^^^^^^^^^^^^^^^ Don't access environment variables directly; use a settings layer instead.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_env_fetch_with_default() {
-        expect_offense!(
-            EnvironmentVariableAccess,
-            indoc! {r#"
+        test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV.fetch("DATABASE_URL", "sqlite::memory:")
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Don't access environment variables directly; use a settings layer instead.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_env_bracket_write() {
-        expect_offense!(
-            EnvironmentVariableAccess,
-            indoc! {r#"
+        test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV["DATABASE_URL"] = "postgres://..."
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Don't access environment variables directly; use a settings layer instead.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_env_store() {
-        expect_offense!(
-            EnvironmentVariableAccess,
-            indoc! {r#"
+        test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV.store("KEY", "VALUE")
                 ^^^^^^^^^^^^^^^^^^^^^^^^^ Don't access environment variables directly; use a settings layer instead.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_env_to_h() {
-        expect_offense!(
-            EnvironmentVariableAccess,
-            indoc! {r#"
+        test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV.to_h
                 ^^^^^^^^ Don't access environment variables directly; use a settings layer instead.
-            "#}
-        );
+            "#});
     }
 
     // === no-hit cases ===
@@ -146,25 +128,25 @@ mod tests {
     fn does_not_flag_scoped_env_const() {
         // `Foo::ENV` is a namespaced constant — not the top-level
         // `ENV` we want to flag.
-        expect_no_offenses!(EnvironmentVariableAccess, "Foo::ENV.fetch(\"KEY\")\n");
+        test::<EnvironmentVariableAccess>().expect_no_offenses("Foo::ENV.fetch(\"KEY\")\n");
     }
 
     #[test]
     fn does_not_flag_lvar_env() {
         // `env` (lowercase, local variable) is not the `ENV` const.
-        expect_no_offenses!(EnvironmentVariableAccess, "env.fetch(\"KEY\")\n");
+        test::<EnvironmentVariableAccess>().expect_no_offenses("env.fetch(\"KEY\")\n");
     }
 
     #[test]
     fn does_not_flag_other_const() {
         // A different top-level constant with `fetch`/`[]` is fine.
-        expect_no_offenses!(EnvironmentVariableAccess, "MyEnv.fetch(\"KEY\")\n");
+        test::<EnvironmentVariableAccess>().expect_no_offenses("MyEnv.fetch(\"KEY\")\n");
     }
 
     #[test]
     fn does_not_flag_bare_env_read() {
         // `puts ENV` references the const directly without a Send —
         // the dispatcher never visits the Const node from this cop.
-        expect_no_offenses!(EnvironmentVariableAccess, "puts ENV\n");
+        test::<EnvironmentVariableAccess>().expect_no_offenses("puts ENV\n");
     }
 }

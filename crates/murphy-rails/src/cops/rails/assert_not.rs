@@ -66,30 +66,24 @@ impl AssertNot {
 #[cfg(test)]
 mod tests {
     use super::AssertNot;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     // === hit cases ===
 
     #[test]
     fn flags_assert_with_bang() {
-        expect_offense!(
-            AssertNot,
-            indoc! {r#"
+        test::<AssertNot>().expect_offense(indoc! {r#"
                 assert !foo.empty?
                 ^^^^^^^^^^^^^^^^^^ Prefer `assert_not` over `assert !`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_assert_paren_bang() {
-        expect_offense!(
-            AssertNot,
-            indoc! {r#"
+        test::<AssertNot>().expect_offense(indoc! {r#"
                 assert(!user.admin?)
                 ^^^^^^^^^^^^^^^^^^^^ Prefer `assert_not` over `assert !`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -97,45 +91,39 @@ mod tests {
         // The cop matches the bang send shape regardless of what's
         // inside; even `!true` (always false, definitely a smell) is
         // a hit.
-        expect_offense!(
-            AssertNot,
-            indoc! {r#"
+        test::<AssertNot>().expect_offense(indoc! {r#"
                 assert(!true)
                 ^^^^^^^^^^^^^ Prefer `assert_not` over `assert !`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_assert_bang_local() {
         // `!x` on a bare local works the same way — Send(Some(x), "!", []).
-        expect_offense!(
-            AssertNot,
-            indoc! {r#"
+        test::<AssertNot>().expect_offense(indoc! {r#"
                 assert !x
                 ^^^^^^^^^ Prefer `assert_not` over `assert !`.
-            "#}
-        );
+            "#});
     }
 
     // === no-hit cases ===
 
     #[test]
     fn does_not_flag_assert_without_bang() {
-        expect_no_offenses!(AssertNot, "assert foo.empty?\n");
+        test::<AssertNot>().expect_no_offenses("assert foo.empty?\n");
     }
 
     #[test]
     fn does_not_flag_assert_not() {
         // Already the recommended form — leave alone.
-        expect_no_offenses!(AssertNot, "assert_not foo.empty?\n");
+        test::<AssertNot>().expect_no_offenses("assert_not foo.empty?\n");
     }
 
     #[test]
     fn does_not_flag_receiver_assert() {
         // `obj.assert(!x)` is a method call on a receiver, not the
         // bare minitest `assert`.
-        expect_no_offenses!(AssertNot, "obj.assert(!x)\n");
+        test::<AssertNot>().expect_no_offenses("obj.assert(!x)\n");
     }
 
     #[test]
@@ -143,13 +131,13 @@ mod tests {
         // `assert foo, "msg"` carries an explicit failure message;
         // the arity gate excludes it (and the single arg is not a
         // bang send anyway).
-        expect_no_offenses!(AssertNot, "assert foo, \"msg\"\n");
+        test::<AssertNot>().expect_no_offenses("assert foo, \"msg\"\n");
     }
 
     #[test]
     fn does_not_flag_assert_with_no_args() {
         // `assert()` would be a runtime error, but defensively we
         // don't want to fire on the zero-arg arity either.
-        expect_no_offenses!(AssertNot, "assert()\n");
+        test::<AssertNot>().expect_no_offenses("assert()\n");
     }
 }
