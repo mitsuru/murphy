@@ -1,6 +1,6 @@
 ---
 name: port-rubocop-cop
-description: This skill should be used when the user asks to "port a RuboCop cop", "move RuboCop's X cop to Murphy", "add an RSpec/Rails/Style/Layout cop to murphy-*", "RuboCop の cop を移植", "X cop を移植して", or otherwise wants to translate a RuboCop (or RuboCop-RSpec / RuboCop-Rails) rule into a Murphy plugin cop using the single-surface ABI from `docs/guides/plugin-cop-infrastructure.md`. Runs the full porting workflow end-to-end: read the RuboCop source, implement against the guide (target pack, `#[on_node]` dispatch including `methods = […]` and `node_pattern!`, `#[derive(CopOptions)]`, `register_cops!`, `expect_offense!` / `expect_correction!` / `run_cop` tests), analyse the gap to the RuboCop original, escalate gaps the guide cannot cover (AST mismatches, missing hooks, ABI extensions), iterate through `roborev-refine` review until passing, then open a PR and merge after CI is green.
+description: This skill should be used when the user asks to "port a RuboCop cop", "move RuboCop's X cop to Murphy", "add an RSpec/Rails/Style/Layout cop to murphy-*", "RuboCop の cop を移植", "X cop を移植して", or otherwise wants to translate a RuboCop (or RuboCop-RSpec / RuboCop-Rails) rule into a Murphy plugin cop using the single-surface ABI from `docs/guides/plugin-cop-infrastructure.md`. Runs the full porting workflow end-to-end: read the RuboCop source, implement against the guide (target pack, `#[on_node]` dispatch including `methods = […]` and `node_pattern!`, `#[derive(CopOptions)]`, `register_cops!`, `test::<T>()` tester-builder tests covering offense / correction / no-correction shapes), analyse the gap to the RuboCop original, escalate gaps the guide cannot cover (AST mismatches, missing hooks, ABI extensions), iterate through `roborev-refine` review until passing, then open a PR and merge after CI is green.
 ---
 
 # Porting a RuboCop cop to Murphy
@@ -249,8 +249,8 @@ directly, and the cop struct is reached via the use line at the top of
 ### Phase 2.5: write tests against the test-support harness
 
 Every cop ships its tests in the same file, inside `#[cfg(test)] mod
-tests` and using the `murphy_plugin_api::test_support` macros. The pack
-must have
+tests` and using `murphy_plugin_api::test_support`. The pack must
+have
 
 ```toml
 [dev-dependencies]
@@ -260,32 +260,78 @@ murphy-plugin-api = { path = "../murphy-plugin-api", features = ["test-support"]
 in its `Cargo.toml` (already true for `murphy-std`, `murphy-rspec`,
 `murphy-rails`, `murphy-example-pack`).
 
-Pick the right macro:
+The new preferred API is the tester builder — Cop is a generic
+parameter, options are typed, and one tester drives many expectations
+through a method chain:
 
-- **`expect_offense!`** — the default for positive cases whose emit
-  range fits on one source line. Caret annotations describe the
-  expected range and message. See `references/testing.md` for the
-  annotation grammar and the multi-line caveat.
-- **`expect_no_offenses!`** — the default for negative cases.
-- **`expect_correction!`** — mandatory for shapes the cop autocorrects
-  via `cx.emit_edit`. First fixture uses the same caret grammar; third
-  argument is the exact source expected after the cop's edits are
-  applied. Pins offense set *and* corrected output in one assertion.
-  See `crates/murphy-std/src/cops/layout/space_inside_parens.rs` for the
+```rust
+use murphy_plugin_api::test_support::{indoc, test};
+
+#[test]
+fn flags_and_corrects_equals_equals() {
+    test::<MyCop>()
+        .expect_offense(indoc! {r#"
+            x==0
+             ^^ Surrounding space missing for operator `==`.
+        "#})
+        .expect_correction(
+            indoc! {r#"
+                a+b
+                 ^ Surrounding space missing for operator `+`.
+            "#},
+            "a + b\n",
+        );
+}
+```
+
+For cops with non-default options, prefix the chain with
+`with_options(&T::Options)` — the struct comes in by reference, no JSON
+is constructed at the callsite:
+
+```rust
+test::<MyCop>()
+    .with_options(&MyOpts { foo: true, ..Default::default() })
+    .expect_offense(indoc! {r#"
+        …
+    "#});
+```
+
+Pick the right method:
+
+- **`expect_offense(annotated)`** — positive case. Caret annotations
+  describe the expected range and message; multiple annotation lines
+  can stack under one source line. See `references/testing.md` for
+  the full grammar and the multi-line caveat.
+- **`expect_no_offenses(src)`** — negative case.
+- **`expect_correction(annotated, after)`** — mandatory for shapes
+  the cop autocorrects via `cx.emit_edit`. The annotated source uses
+  the same caret grammar; `after` is the exact source expected after
+  applying every emitted edit. Pins offense set *and* corrected
+  output in one assertion. See
+  `crates/murphy-std/src/cops/layout/space_inside_parens.rs` for the
   canonical in-tree usage.
-- **`expect_no_corrections!`** — for shapes the cop deliberately
+- **`expect_no_corrections(src)`** — for shapes the cop deliberately
   reports without emitting an edit (unsafe rewrite, judgement
-  required), and for clean inputs that should produce no edits. The
-  macro only constrains the edit set, so pair with
-  `expect_offense!` / `expect_no_offenses!` when the offense set also
-  matters.
-- **`run_cop`** — escape hatch for multi-line emit ranges (block-level
-  cops, layout cops), parameterised loops, or assertions on
-  `cop_name` / `severity`. Returns `Vec<CapturedOffense>`. See the
-  `RSpec/MultipleExpectations` test file for the canonical pattern of
-  using `run_cop` for whole-block emits. For autocorrect tests that
-  need to inspect raw edits, use `run_cop_with_edits` (returns
-  `CapturedRun { offenses, edits }`).
+  required), and for clean inputs that should produce no edits. Only
+  constrains the edit set — pair with `expect_offense` /
+  `expect_no_offenses` when the offense set also matters.
+- **`run_cop` escape hatch** — for tests the caret grammar can't
+  express cleanly (multi-line emit ranges, parameterised loops,
+  asserting `cop_name` / `severity`). Returns `Vec<CapturedOffense>`.
+  See `RSpec/MultipleExpectations`' tests for the whole-block emit
+  pattern. For raw edits, use `run_cop_with_edits` (returns
+  `CapturedRun { offenses, edits }`); for non-default options use
+  `run_cop_with_options` / `run_cop_with_options_and_edits`.
+
+Each `expect_*` method is `#[track_caller]` and returns `&Self`, so a
+single tester can carry many expectations through the same options.
+When tests do not share setup, one-tester-per-`#[test]` is also fine.
+
+The legacy `expect_*!` macros (`expect_offense!` etc.) remain exported
+and still work — both paths forward to the same internal helpers. Use
+the macros only when the typed-options surface is genuinely not
+needed (i.e. `Cop::Options = NoOptions`) and the test is single-call;
+otherwise prefer the tester builder.
 
 Wrap every Ruby fixture string in `indoc!` (re-exported from the
 harness) so the source can stay indented in the test body without
@@ -519,8 +565,10 @@ merge — proceed once CI is green.
   wire live overrides through `Cx`).
 - **`references/autocorrect.md`** — when to ship `emit_edit`, idempotency
   expectations, and the offense/edit pairing the host uses.
-- **`references/testing.md`** — full `expect_offense!` annotation
-  grammar, the multi-line caret caveat, and the `run_cop` escape hatch.
+- **`references/testing.md`** — `test::<T>()` tester-builder API, the
+  caret annotation grammar (multi-annotation-per-line included), and
+  the `run_cop` escape hatch. Covers the legacy `expect_*!` macros as
+  the still-supported alternative.
 
 ### Example cop files in-tree
 
@@ -539,9 +587,15 @@ The canonical reference cops to read while porting:
   conditional `emit_edit` gated on a safety predicate. Closest peer
   when porting `Style/*` cops with autocorrect.
 - `crates/murphy-std/src/cops/layout/space_inside_parens.rs` — pure
-  autocorrect cop with the canonical `expect_correction!` and
-  `expect_no_corrections!` usage; closest peer when porting `Layout/*`
+  autocorrect cop with the canonical `expect_correction` and
+  `expect_no_corrections` usage; closest peer when porting `Layout/*`
   cops.
+- `crates/murphy-std/src/cops/layout/space_around_operators.rs` —
+  canonical reference for the tester-builder API end-to-end: typed
+  `with_options` against a 3-key `CopOptions` struct, chained
+  `expect_offense` / `expect_correction` / `expect_no_offenses`
+  calls, and multi-annotation-per-source-line tests for the
+  operator-run shapes.
 
 ### Companion docs
 

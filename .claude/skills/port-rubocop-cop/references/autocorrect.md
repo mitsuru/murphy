@@ -68,46 +68,44 @@ whose edit re-introduces something the cop itself would flag will
 infinite-loop the fix-point (and `cargo run -p murphy-cli -- lint --fix --debug`
 will surface it).
 
-Plugin-api's `test_support` exposes `expect_correction!` for the
-common case: pin the offense set with caret annotations *and* the
-corrected source in one assertion. The macro applies the cop's
-emitted edits to the annotation-stripped input and asserts the result
-matches `expected_after` byte-for-byte. See `references/testing.md`
-for the full grammar.
+Plugin-api's `test_support` exposes `expect_correction` (on the
+tester builder) for the common case: pin the offense set with caret
+annotations *and* the corrected source in one assertion. The method
+applies the cop's emitted edits to the annotation-stripped input and
+asserts the result matches `expected_after` byte-for-byte. See
+`references/testing.md` for the full grammar.
 
 ```rust
-use murphy_plugin_api::test_support::{expect_correction, indoc};
+use murphy_plugin_api::test_support::{indoc, test};
 
 #[test]
 fn corrects_spaces_inside_parentheses() {
-    expect_correction!(
-        SpaceInsideParens,
+    test::<SpaceInsideParens>().expect_correction(
         indoc! {r#"
             foo( 1)
                 ^ Space inside parentheses detected.
         "#},
-        "foo(1)\n"
+        "foo(1)\n",
     );
 }
 ```
 
-For shapes the cop reports without correcting (unsafe rewrite, judgement
-required), use `expect_no_corrections!`:
+For shapes the cop reports without correcting (unsafe rewrite,
+judgement required), use `expect_no_corrections`:
 
 ```rust
-use murphy_plugin_api::test_support::expect_no_corrections;
-
-#[test]
-fn does_not_autocorrect_when_body_contains_escapes() {
-    expect_no_corrections!(MyCop, r#""line\n""#);
-}
+test::<MyCop>().expect_no_corrections(r#""line\n""#);
 ```
+
+The legacy `expect_correction!` / `expect_no_corrections!` macros
+still work — both APIs share the same internal helpers.
 
 The end-to-end fix-point invariant is also asserted at the CLI level
 in `crates/murphy-cli/tests/cli.rs` — adding a cop that breaks
-idempotency will surface there even without a per-cop unit test. Reach
-for `run_cop_with_edits` (returns `CapturedRun { offenses, edits }`)
-only when a test needs to inspect raw edits directly, which is rare.
+idempotency will surface there even without a per-cop unit test.
+Reach for `run_cop_with_edits` (returns
+`CapturedRun { offenses, edits }`) only when a test needs to inspect
+raw edits directly, which is rare.
 
 ## Idiomatic patterns
 

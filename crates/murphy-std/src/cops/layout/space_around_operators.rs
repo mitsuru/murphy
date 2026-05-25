@@ -359,14 +359,15 @@ fn is_word_char(b: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! Tests use the tester-builder API (`test::<T>().expect_*()`) so the
+    //! cop's `Options` struct flows through the chain typed — see the
+    //! `options_are_accepted_but_not_yet_honored` test for the
+    //! non-default-options shape.
+
     use super::{
         SpaceAroundOperators, SpaceAroundOperatorsBinaryStyle, SpaceAroundOperatorsOptions,
     };
-    use murphy_plugin_api::NodeCop;
-    use murphy_plugin_api::test_support::{
-        expect_correction, expect_no_corrections, expect_no_offenses, expect_offense, indoc,
-        run_cop_with_edits,
-    };
+    use murphy_plugin_api::test_support::{indoc, test};
 
     // ---------- options surface (frozen v1 contract) ----------
 
@@ -393,244 +394,165 @@ mod tests {
         // wiring lands in murphy-xszo. Until then, the v1 contract is:
         // setting `AllowForAlignment = false` or either `EnforcedStyle*`
         // = `space` must not change observable behaviour. Pin that here
-        // via the typed-options test path so murphy-xszo's wiring shows
-        // up as a deliberate test flip rather than a silent change.
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                a&&b
-                 ^^ Surrounding space missing for operator `&&`.
-            "#},
-            &SpaceAroundOperatorsOptions {
+        // through the tester's `with_options` clause so murphy-xszo's
+        // wiring shows up as a deliberate test flip rather than a silent
+        // change.
+        test::<SpaceAroundOperators>()
+            .with_options(&SpaceAroundOperatorsOptions {
                 allow_for_alignment: false,
                 enforced_style_for_exponent_operator: SpaceAroundOperatorsBinaryStyle::Space,
                 enforced_style_for_rational_literals: SpaceAroundOperatorsBinaryStyle::Space,
-            }
-        );
-    }
-
-    /// Apply the cop's edits to `source` repeatedly until the result no
-    /// longer changes. Used by the multi-operator-per-line tests where
-    /// the `expect_offense!` annotation grammar's one-caret-per-line
-    /// limit blocks direct expression — we still pin the corrected
-    /// source for the canonical RuboCop case verbatim.
-    fn apply_until_stable<T: NodeCop + Default>(source: &str) -> String {
-        let mut current = source.to_string();
-        for _ in 0..16 {
-            let run = run_cop_with_edits::<T>(&current);
-            if run.edits.is_empty() {
-                return current;
-            }
-            let mut next = current.clone();
-            // Apply non-overlapping edits in reverse so byte offsets
-            // earlier in the source remain valid as we splice.
-            let mut sorted = run.edits.clone();
-            sorted.sort_by_key(|e| std::cmp::Reverse(e.range.start));
-            for edit in sorted {
-                let start = edit.range.start as usize;
-                let end = edit.range.end as usize;
-                next.replace_range(start..end, &edit.replacement);
-            }
-            if next == current {
-                return next;
-            }
-            current = next;
-        }
-        panic!("apply_until_stable: fix-point did not converge in 16 iterations");
+            })
+            .expect_offense(indoc! {r#"
+                a&&b
+                 ^^ Surrounding space missing for operator `&&`.
+            "#});
     }
 
     // ---------- Send: binary operator method calls ----------
 
     #[test]
-    fn flags_missing_space_around_equals_equals() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
+    fn flags_and_corrects_missing_space_around_equals_equals() {
+        // Single tester drives both the offense set and the correction
+        // — the chain demonstrates the multi-expectation shape of the
+        // new API.
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
                 x==0
                  ^^ Surrounding space missing for operator `==`.
-            "#}
-        );
-    }
-
-    #[test]
-    fn corrects_missing_space_around_equals_equals() {
-        expect_correction!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                x==0
-                 ^^ Surrounding space missing for operator `==`.
-            "#},
-            "x == 0\n"
-        );
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    x==0
+                     ^^ Surrounding space missing for operator `==`.
+                "#},
+                "x == 0\n",
+            );
     }
 
     #[test]
     fn flags_missing_space_around_each_basic_binary_op() {
-        // One operator per source line — the annotation grammar only
-        // supports a single caret span per source line.
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                a+b
-                 ^ Surrounding space missing for operator `+`.
-                c-d
-                 ^ Surrounding space missing for operator `-`.
-                e*f
-                 ^ Surrounding space missing for operator `*`.
-                g/h
-                 ^ Surrounding space missing for operator `/`.
-                i%j
-                 ^ Surrounding space missing for operator `%`.
-                k&l
-                 ^ Surrounding space missing for operator `&`.
-                m|n
-                 ^ Surrounding space missing for operator `|`.
-                o^p
-                 ^ Surrounding space missing for operator `^`.
-            "#}
-        );
+        // One operator per source line is no longer required by the
+        // parser, but keeping each on its own line here keeps the
+        // failure rendering for a specific op trivially scannable.
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            a+b
+             ^ Surrounding space missing for operator `+`.
+            c-d
+             ^ Surrounding space missing for operator `-`.
+            e*f
+             ^ Surrounding space missing for operator `*`.
+            g/h
+             ^ Surrounding space missing for operator `/`.
+            i%j
+             ^ Surrounding space missing for operator `%`.
+            k&l
+             ^ Surrounding space missing for operator `&`.
+            m|n
+             ^ Surrounding space missing for operator `|`.
+            o^p
+             ^ Surrounding space missing for operator `^`.
+        "#});
     }
 
     #[test]
     fn corrects_run_of_missing_spaces_on_one_line() {
-        // Multi-operator single-line input — verified end-to-end via
-        // `run_cop_with_edits` and an idempotent fix-point so we can
-        // assert the corrected source while sidestepping the annotation
-        // grammar's one-caret-per-line restriction.
-        let before = "a+b-c*d/e%f\n";
-        let after = apply_until_stable::<SpaceAroundOperators>(before);
-        assert_eq!(after, "a + b - c * d / e % f\n");
+        // Multi-operator single-line — the parser anchors every `^...`
+        // line to the nearest source line, so the five offenses on
+        // `a+b-c*d/e%f` stack directly under the source line.
+        test::<SpaceAroundOperators>().expect_correction(
+            indoc! {r#"
+                a+b-c*d/e%f
+                 ^ Surrounding space missing for operator `+`.
+                   ^ Surrounding space missing for operator `-`.
+                     ^ Surrounding space missing for operator `*`.
+                       ^ Surrounding space missing for operator `/`.
+                         ^ Surrounding space missing for operator `%`.
+            "#},
+            "a + b - c * d / e % f\n",
+        );
     }
 
     #[test]
     fn flags_missing_space_around_equality_family() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                x==0
-                 ^^ Surrounding space missing for operator `==`.
-                y!=0
-                 ^^ Surrounding space missing for operator `!=`.
-                Hash===z
-                    ^^^ Surrounding space missing for operator `===`.
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x==0
+             ^^ Surrounding space missing for operator `==`.
+            y!=0
+             ^^ Surrounding space missing for operator `!=`.
+            Hash===z
+                ^^^ Surrounding space missing for operator `===`.
+        "#});
     }
 
     #[test]
     fn flags_missing_space_around_match_operators() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                x=~/abc/
-                 ^^ Surrounding space missing for operator `=~`.
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x=~/abc/
+             ^^ Surrounding space missing for operator `=~`.
+        "#});
     }
 
     #[test]
     fn flags_missing_space_around_shift_operator() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                x<<y
-                 ^^ Surrounding space missing for operator `<<`.
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x<<y
+             ^^ Surrounding space missing for operator `<<`.
+        "#});
     }
 
     #[test]
-    fn flags_extra_space_around_binary_op() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
+    fn flags_and_corrects_extra_space_around_binary_op() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
                 a  +  b
                    ^ Operator `+` should be surrounded by a single space.
-            "#}
-        );
-    }
-
-    #[test]
-    fn corrects_extra_space_around_binary_op() {
-        expect_correction!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                a  +  b
-                   ^ Operator `+` should be surrounded by a single space.
-            "#},
-            "a + b\n"
-        );
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    a  +  b
+                       ^ Operator `+` should be surrounded by a single space.
+                "#},
+                "a + b\n",
+            );
     }
 
     #[test]
     fn flags_extra_space_on_just_one_side() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                a +  b
-                  ^ Operator `+` should be surrounded by a single space.
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            a +  b
+              ^ Operator `+` should be surrounded by a single space.
+        "#});
     }
 
     #[test]
-    fn accepts_single_space_around_binary_op() {
-        expect_no_offenses!(SpaceAroundOperators, "a + b\nx == 0\nh & i\n");
-    }
-
-    #[test]
-    fn ignores_method_call_form() {
-        expect_no_offenses!(SpaceAroundOperators, "Date.today.+(1).to_s\n");
-    }
-
-    #[test]
-    fn ignores_operator_definitions() {
-        expect_no_offenses!(
-            SpaceAroundOperators,
-            indoc! {r#"
+    fn accepts_canonical_shapes() {
+        // Several no-offense scenarios share one tester — the chain
+        // saves the per-call ceremony.
+        test::<SpaceAroundOperators>()
+            .expect_no_offenses("a + b\nx == 0\nh & i\n")
+            .expect_no_offenses("Date.today.+(1).to_s\n")
+            .expect_no_offenses(indoc! {r#"
                 def +(other); end
                 def self.===(other); end
-            "#}
-        );
-    }
-
-    #[test]
-    fn ignores_unary_operators() {
-        expect_no_offenses!(
-            SpaceAroundOperators,
-            indoc! {r#"
+            "#})
+            .expect_no_offenses(indoc! {r#"
                 x = +2
                 y = -3
                 arr.collect { |e| -e }
-            "#}
-        );
-    }
-
-    #[test]
-    fn ignores_symbol_literals() {
-        expect_no_offenses!(SpaceAroundOperators, "func(:-)\n");
-    }
-
-    #[test]
-    fn ignores_ranges() {
-        expect_no_offenses!(SpaceAroundOperators, "(1..2)\n(1...3)\n");
-    }
-
-    #[test]
-    fn ignores_splat() {
-        expect_no_offenses!(SpaceAroundOperators, "[*list, *tail]\n");
+            "#})
+            .expect_no_offenses("func(:-)\n")
+            .expect_no_offenses("(1..2)\n(1...3)\n")
+            .expect_no_offenses("[*list, *tail]\n");
     }
 
     #[test]
     fn ignores_operator_at_end_of_line() {
-        expect_no_offenses!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                'Here is a' +
-                'joined string' +
-                'across three lines'
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            'Here is a' +
+            'joined string' +
+            'across three lines'
+        "#});
     }
 
     #[test]
@@ -638,73 +560,56 @@ mod tests {
         // `a+\n b` — leading space missing; trailing newline is OK but the
         // missing leading space is still flagged. Autocorrect should not
         // introduce trailing whitespace.
-        expect_correction!(
-            SpaceAroundOperators,
+        test::<SpaceAroundOperators>().expect_correction(
             indoc! {r#"
                 'a'+
                    ^ Surrounding space missing for operator `+`.
                 'b'
             "#},
-            "'a' +\n'b'\n"
+            "'a' +\n'b'\n",
         );
     }
 
     #[test]
     fn ignores_operator_at_start_of_continuation_line() {
-        expect_no_offenses!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                a = b \
-                    && c
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            a = b \
+                && c
+        "#});
     }
 
     // ---------- And / Or ----------
 
     #[test]
-    fn flags_missing_space_around_double_amp() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
+    fn flags_and_corrects_missing_space_around_double_amp() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
                 a&&b
                  ^^ Surrounding space missing for operator `&&`.
-            "#}
-        );
-    }
-
-    #[test]
-    fn corrects_missing_space_around_double_amp() {
-        expect_correction!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                !a&&!b
-                  ^^ Surrounding space missing for operator `&&`.
-            "#},
-            "!a && !b\n"
-        );
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    !a&&!b
+                      ^^ Surrounding space missing for operator `&&`.
+                "#},
+                "!a && !b\n",
+            );
     }
 
     #[test]
     fn flags_missing_space_around_double_pipe() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                a||b
-                 ^^ Surrounding space missing for operator `||`.
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            a||b
+             ^^ Surrounding space missing for operator `||`.
+        "#});
     }
 
     #[test]
     fn accepts_word_form_and_or_with_spaces() {
-        expect_no_offenses!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                a and b
-                c or d
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            a and b
+            c or d
+        "#});
     }
 
     #[test]
@@ -714,165 +619,111 @@ mod tests {
         // parenthesised string containing the substring `"or"`, the gap
         // does not include the string contents — it is just `) || `, so
         // we still find `||` and not the embedded `or`. Pin the contract.
-        expect_no_offenses!(SpaceAroundOperators, "(x = \"or\") || y\n");
+        test::<SpaceAroundOperators>().expect_no_offenses("(x = \"or\") || y\n");
     }
 
     #[test]
     fn flags_extra_space_around_double_amp() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                a  &&  b
-                   ^^ Operator `&&` should be surrounded by a single space.
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            a  &&  b
+               ^^ Operator `&&` should be surrounded by a single space.
+        "#});
     }
 
     // ---------- OpAsgn ----------
 
     #[test]
-    fn flags_missing_space_around_plus_eq() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
+    fn flags_and_corrects_missing_space_around_plus_eq() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
                 x+=0
                  ^^ Surrounding space missing for operator `+=`.
-            "#}
-        );
-    }
-
-    #[test]
-    fn corrects_missing_space_around_plus_eq() {
-        expect_correction!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                y+= 0
-                 ^^ Surrounding space missing for operator `+=`.
-            "#},
-            "y += 0\n"
-        );
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    y+= 0
+                     ^^ Surrounding space missing for operator `+=`.
+                "#},
+                "y += 0\n",
+            );
     }
 
     #[test]
     fn flags_missing_space_around_various_op_eq_shapes() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                z*=2
-                 ^^ Surrounding space missing for operator `*=`.
-                @a+=0
-                  ^^ Surrounding space missing for operator `+=`.
-                @@b-=0
-                   ^^ Surrounding space missing for operator `-=`.
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            z*=2
+             ^^ Surrounding space missing for operator `*=`.
+            @a+=0
+              ^^ Surrounding space missing for operator `+=`.
+            @@b-=0
+               ^^ Surrounding space missing for operator `-=`.
+        "#});
     }
 
     #[test]
     fn flags_extra_space_around_plus_eq() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                x  +=  0
-                   ^^ Operator `+=` should be surrounded by a single space.
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x  +=  0
+               ^^ Operator `+=` should be surrounded by a single space.
+        "#});
     }
 
     #[test]
     fn flags_missing_space_around_shift_eq() {
-        expect_offense!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                x<<=2
-                 ^^^ Surrounding space missing for operator `<<=`.
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x<<=2
+             ^^^ Surrounding space missing for operator `<<=`.
+        "#});
     }
 
     // ---------- documented v1 gaps — should not register offenses today ----------
 
     #[test]
-    fn v1_gap_plain_assignment_not_flagged() {
-        // Lvasgn — RuboCop flags `x=0`; v1 documents this as out of scope.
-        expect_no_offenses!(SpaceAroundOperators, "x=0\n");
-    }
-
-    #[test]
-    fn v1_gap_hash_rocket_not_flagged() {
-        // Pair — RuboCop flags `{ 1=>2 }`; v1 does not dispatch on Pair.
-        expect_no_offenses!(SpaceAroundOperators, "{ 1=>2 }\n");
-    }
-
-    #[test]
-    fn v1_gap_conditional_assignment_not_flagged() {
-        // OrAsgn / AndAsgn — RuboCop flags `x||=0`; v1 only dispatches on OpAsgn.
-        expect_no_offenses!(SpaceAroundOperators, "x||=0\ny&&=0\n");
-    }
-
-    #[test]
-    fn v1_gap_class_inheritance_not_flagged() {
-        // Class — RuboCop flags `class C<D`; v1 does not dispatch on Class.
-        expect_no_offenses!(
-            SpaceAroundOperators,
-            indoc! {r#"
+    fn v1_gaps_are_silently_accepted() {
+        // RuboCop flags each of these shapes, but v1 does not dispatch
+        // on the underlying NodeKind (Lvasgn, Pair, OrAsgn, AndAsgn,
+        // Class, Sclass, If-ternary, IndexOperatorWriteNode). The chain
+        // pins the v1 contract for the full list at once.
+        test::<SpaceAroundOperators>()
+            .expect_no_offenses("x=0\n")
+            .expect_no_offenses("{ 1=>2 }\n")
+            .expect_no_offenses("x||=0\ny&&=0\n")
+            .expect_no_offenses(indoc! {r#"
                 class C<D
                 end
-            "#}
-        );
-    }
-
-    #[test]
-    fn v1_gap_singleton_class_not_flagged() {
-        // Sclass — RuboCop flags `class<<self`; v1 does not dispatch on Sclass.
-        // Pins the v1 contract — if a future change starts dispatching on
-        // Sclass without thinking it through, this test fails loudly.
-        expect_no_offenses!(
-            SpaceAroundOperators,
-            indoc! {r#"
+            "#})
+            .expect_no_offenses(indoc! {r#"
                 class<<self
                 end
-            "#}
-        );
-    }
-
-    #[test]
-    fn v1_gap_ternary_not_flagged() {
-        // If (ternary form) — RuboCop flags `x == 0?1:2`; v1 does not
-        // dispatch on ternary `?` / `:` since `If` is not in our hook list.
-        expect_no_offenses!(SpaceAroundOperators, "x == 0?1:2\n");
-    }
-
-    #[test]
-    fn v1_gap_index_op_asgn_not_flagged() {
-        // IndexOperatorWriteNode — `x[i] += 1` is currently lowered to
-        // `Unknown` by murphy-translate; no OpAsgn fires, so the cop has
-        // nothing to inspect.
-        expect_no_offenses!(SpaceAroundOperators, "x[i]+=1\n");
+            "#})
+            .expect_no_offenses("x == 0?1:2\n")
+            .expect_no_offenses("x[i]+=1\n");
     }
 
     // ---------- multiple offenses + idempotent autocorrect ----------
 
     #[test]
     fn corrects_run_of_op_asgn_and_binary() {
-        // Same fix-point assertion shape as
-        // `corrects_run_of_missing_spaces_on_one_line` — the canonical
-        // RuboCop case `x+= a+b-c` has three operators on one line.
-        let before = "x+= a+b-c\n";
-        let after = apply_until_stable::<SpaceAroundOperators>(before);
-        assert_eq!(after, "x += a + b - c\n");
+        // The canonical RuboCop case `x+= a+b-c` has three operators on
+        // one line — annotations stack directly under it.
+        test::<SpaceAroundOperators>().expect_correction(
+            indoc! {r#"
+                x+= a+b-c
+                 ^^ Surrounding space missing for operator `+=`.
+                     ^ Surrounding space missing for operator `+`.
+                       ^ Surrounding space missing for operator `-`.
+            "#},
+            "x += a + b - c\n",
+        );
     }
 
     #[test]
     fn leaves_clean_program_without_corrections() {
-        expect_no_corrections!(
-            SpaceAroundOperators,
-            indoc! {r#"
-                x = 1 + 2
-                y = a && b
-                z += 4
-                w = c || d
-            "#}
-        );
+        test::<SpaceAroundOperators>().expect_no_corrections(indoc! {r#"
+            x = 1 + 2
+            y = a && b
+            z += 4
+            w = c || d
+        "#});
     }
 }

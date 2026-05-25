@@ -34,6 +34,7 @@
 //! `murphy-core::dispatch::run_cops` contract.
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
 
 use murphy_ast::Ast;
 
@@ -47,6 +48,98 @@ use crate::{
 /// the surrounding Rust indentation without re-declaring the dep. The
 /// macro strips the common leading whitespace at compile time.
 pub use indoc::indoc;
+
+/// Entry point for the tester-builder API. Cop type comes in as a
+/// generic parameter, options are added via `with_options`, and one or
+/// more expectations chain off the resulting `Tester`.
+///
+/// ```ignore
+/// use murphy_plugin_api::test_support::test;
+///
+/// // No options: every field of `Cop::Options` falls back to default.
+/// test::<MyCop>()
+///     .expect_offense(indoc! {r#"
+///         x==0
+///          ^^ Surrounding space missing for operator `==`.
+///     "#})
+///     .expect_correction(indoc! {r#"
+///         a+b
+///          ^ Surrounding space missing for operator `+`.
+///     "#}, "a + b\n");
+///
+/// // Typed options:
+/// test::<MyCop>()
+///     .with_options(&MyOpts { foo: true, ..Default::default() })
+///     .expect_offense(indoc! {r#"
+///         …
+///     "#});
+/// ```
+///
+/// Each `expect_*` method returns `&Self` so multiple expectations
+/// chain without an intermediate `let`.
+pub fn test<T: NodeCop + Default>() -> Tester<T> {
+    Tester {
+        options_json: DEFAULT_OPTIONS_JSON.to_string(),
+        _phantom: PhantomData,
+    }
+}
+
+/// Cop-tester returned by [`test`]. Holds the per-test options JSON and
+/// dispatches every expectation through the same dispatch loop as the
+/// legacy `expect_*!` macros — they share the internal `assert_*_inner`
+/// helpers.
+///
+/// `PhantomData<fn() -> T>` makes the phantom type both covariant and
+/// `Send + Sync` regardless of `T`; the tester itself owns no `T`
+/// value.
+pub struct Tester<T: NodeCop + Default> {
+    options_json: String,
+    _phantom: PhantomData<fn() -> T>,
+}
+
+impl<T: NodeCop + Default> Tester<T> {
+    /// Attach typed options to the tester. Consumes and returns `Self`
+    /// so it can sit at the start of the method chain
+    /// (`test::<T>().with_options(&opts).expect_offense(…)`).
+    /// Subsequent calls overwrite any previously-stored options.
+    pub fn with_options(mut self, opts: &<T as Cop>::Options) -> Self {
+        self.options_json = opts.to_config_json();
+        self
+    }
+
+    /// Assert the cop emits exactly the offenses described by the caret
+    /// annotations in `annotated`. See the module docs for the
+    /// annotation grammar.
+    #[track_caller]
+    pub fn expect_offense(&self, annotated: &str) -> &Self {
+        assert_offenses_match_inner::<T>(annotated, &self.options_json);
+        self
+    }
+
+    /// Assert the cop emits no offenses against `src`.
+    #[track_caller]
+    pub fn expect_no_offenses(&self, src: &str) -> &Self {
+        assert_no_offenses_inner::<T>(src, &self.options_json);
+        self
+    }
+
+    /// Assert the cop emits the annotated offenses against `annotated`
+    /// and that applying its autocorrect edits produces `after`.
+    #[track_caller]
+    pub fn expect_correction(&self, annotated: &str, after: &str) -> &Self {
+        assert_correction_match_inner::<T>(annotated, after, &self.options_json);
+        self
+    }
+
+    /// Assert the cop emits no autocorrect edits against `src`. The
+    /// offense set is not constrained — pair with
+    /// [`Tester::expect_offense`] when both must hold.
+    #[track_caller]
+    pub fn expect_no_corrections(&self, src: &str) -> &Self {
+        assert_no_corrections_inner::<T>(src, &self.options_json);
+        self
+    }
+}
 
 /// Assert that `Cop` emits no offenses against `src`. Companion to
 /// [`expect_offense!`]; see the module docs for the annotation grammar.
@@ -160,7 +253,13 @@ struct Expected {
 /// Parse `annotated` into (cleaned source, expected items).
 ///
 /// Annotation lines (first non-whitespace char is `^`) are stripped and
-/// converted to expected ranges against the source line directly above.
+/// converted to expected ranges against the **most recent source line**
+/// above. Multiple consecutive annotation lines under the same source
+/// line are allowed — each describes one expected offense on that line.
+/// Annotations across multiple source lines work as before; the rule is
+/// just "an annotation always anchors to the nearest preceding source
+/// line".
+///
 /// Caret columns are interpreted as **char indices** of the source
 /// line, then translated to bytes via `char_indices`. Non-ASCII source
 /// lines are supported.
@@ -170,7 +269,6 @@ fn parse_annotated(annotated: &str) -> (String, Vec<Expected>) {
     let mut byte_offset: u32 = 0;
     let mut last_source_line_start: Option<u32> = None;
     let mut last_source_line: Option<&str> = None;
-    let mut annotations_for_current_line: u32 = 0;
 
     for line in annotated.lines() {
         let trimmed = line.trim_start();
@@ -189,14 +287,6 @@ fn parse_annotated(annotated: &str) -> (String, Vec<Expected>) {
                 .expect("expect_offense!: annotation precedes any source line");
             let src_line = last_source_line.unwrap();
 
-            if annotations_for_current_line >= 1 {
-                panic!(
-                    "expect_offense!: multiple annotations per source line not yet supported (line: {:?})",
-                    src_line
-                );
-            }
-            annotations_for_current_line += 1;
-
             let s_byte = nth_char_byte(src_line, leading_ws);
             let e_byte = nth_char_byte(src_line, leading_ws + caret_len);
             expected.push(Expected {
@@ -211,7 +301,6 @@ fn parse_annotated(annotated: &str) -> (String, Vec<Expected>) {
             last_source_line = Some(line);
             cleaned_lines.push(line);
             byte_offset += line.len() as u32 + 1; // +1 for the joined '\n'
-            annotations_for_current_line = 0;
         }
     }
 
@@ -1065,6 +1154,21 @@ mod tests {
     }
 
     #[test]
+    fn render_stacks_multiple_annotations_under_same_source_line() {
+        // The render path is symmetric to parse_annotated for the new
+        // multi-annotation grammar: feeding two ranges that anchor to
+        // the same source line produces two stacked `^...` lines under
+        // it, in input order.
+        let src = "abc\n";
+        let items = vec![
+            (Range { start: 0, end: 1 }, Some("first")),
+            (Range { start: 2, end: 3 }, Some("second")),
+        ];
+        let rendered = render(src, &items);
+        assert_eq!(rendered, "abc\n^ first\n  ^ second\n");
+    }
+
+    #[test]
     fn render_marks_multi_line_range_with_overflow_suffix() {
         // A range that crosses a newline gets carets only on the first
         // line and ` (+ N more chars)` appended to the message. Source
@@ -1125,11 +1229,32 @@ mod tests {
         expect_offense!(FixedRangeCop, "^^^ orphan\nabc\n");
     }
 
+    /// Fixture: emits two offenses on the same source line — `[0, 3)`
+    /// twice (overlapping on purpose). Pairs with the multi-annotation
+    /// parser test: under a single source line, two `^^^` annotations
+    /// must both be reported.
+    #[derive(Default)]
+    struct SameLineTwoEmitCop;
+    impl Cop for SameLineTwoEmitCop {
+        type Options = NoOptions;
+        const NAME: &'static str = "Test/SameLineTwoEmit";
+    }
+    impl NodeCop for SameLineTwoEmitCop {
+        const KINDS: &'static [NodeKindTag] = &[];
+        fn check(&self, _node: NodeId, cx: &Cx<'_>) {
+            cx.emit_offense(Range { start: 0, end: 3 }, "first", None);
+            cx.emit_offense(Range { start: 0, end: 3 }, "second", None);
+        }
+    }
+
     #[test]
-    #[should_panic(expected = "multiple annotations per source line not yet supported")]
-    fn expect_offense_panics_on_two_consecutive_annotations() {
+    fn parse_annotated_accepts_multiple_annotations_per_source_line() {
+        // Two consecutive `^^^` lines under one source line — the parser
+        // anchors both to that line. This was previously rejected; it is
+        // now the supported shape for cops that fire multiple offenses
+        // on the same row.
         expect_offense!(
-            FixedRangeCop,
+            SameLineTwoEmitCop,
             "abc\n\
              ^^^ first\n\
              ^^^ second\n"
@@ -1269,5 +1394,60 @@ mod tests {
         // empty even though the caller could have asked for the alternate
         // behaviour.
         expect_no_corrections!(OptionAwareCop, "abc\n", &ToggleOptions { emit: false });
+    }
+
+    // ---------- tester-builder API ----------
+
+    #[test]
+    fn tester_default_options_silent_when_emit_is_false() {
+        super::test::<OptionAwareCop>().expect_no_offenses("abc\n");
+    }
+
+    #[test]
+    fn tester_with_options_drives_non_default_branch() {
+        super::test::<OptionAwareCop>()
+            .with_options(&ToggleOptions { emit: true })
+            .expect_offense(
+                "abc\n\
+                 ^^^ toggle\n",
+            );
+    }
+
+    #[test]
+    fn tester_chain_threads_options_through_multiple_expectations() {
+        // Pins the chaining contract: with_options is set once and
+        // every subsequent expectation observes the same options.
+        super::test::<OptionAwareCop>()
+            .with_options(&ToggleOptions { emit: true })
+            .expect_offense(
+                "abc\n\
+                 ^^^ toggle\n",
+            )
+            .expect_correction(
+                "abc\n\
+                 ^^^ toggle\n",
+                "xyz\n",
+            );
+    }
+
+    #[test]
+    fn tester_with_options_can_be_overwritten() {
+        // Set `emit: true`, then immediately overwrite with `emit: false`
+        // — the later call wins, and the no-offense expectation holds.
+        super::test::<OptionAwareCop>()
+            .with_options(&ToggleOptions { emit: true })
+            .with_options(&ToggleOptions { emit: false })
+            .expect_no_offenses("abc\n")
+            .expect_no_corrections("abc\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "expect_offense! must contain at least one annotation")]
+    fn tester_expect_offense_without_annotations_panics() {
+        // Mirror of the legacy macro guard so the tester can't silently
+        // pass on a malformed fixture.
+        super::test::<OptionAwareCop>()
+            .with_options(&ToggleOptions { emit: true })
+            .expect_offense("abc\n");
     }
 }

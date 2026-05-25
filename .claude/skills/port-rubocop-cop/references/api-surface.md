@@ -79,20 +79,30 @@ is part of the single-surface ABI's macro half. See
 
 ```rust
 #[cfg(test)]
-use murphy_plugin_api::test_support::{
-    expect_correction, expect_no_corrections, expect_no_offenses, expect_offense, indoc, run_cop,
-};
+use murphy_plugin_api::test_support::{indoc, test};
 ```
 
-Pull only the macros each test file actually uses:
+The tester-builder entry point and the items used by every test:
 
-- `expect_offense!` / `expect_no_offenses!` — offense-only assertions.
-- `expect_correction!` / `expect_no_corrections!` — autocorrect-aware
+- `test::<T>() -> Tester<T>` — generic-Cop tester. Chain
+  `.with_options(&T::Options)` to set typed options, then one or
+  more `expect_*` methods.
+- `Tester<T>::expect_offense(annotated)` /
+  `Tester<T>::expect_no_offenses(src)` — offense-only assertions.
+- `Tester<T>::expect_correction(annotated, after)` /
+  `Tester<T>::expect_no_corrections(src)` — autocorrect-aware
   assertions; mandatory whenever the cop ships `cx.emit_edit`.
-- `run_cop` / `run_cop_with_edits` — escape hatch for tests the caret
-  grammar can't express (block-level multi-line ranges, parametrised
-  loops, raw-edit inspection).
-- `indoc!` — re-export of the `indoc` crate; use on every fixture.
+- `run_cop` / `run_cop_with_edits` /
+  `run_cop_with_options` / `run_cop_with_options_and_edits` —
+  escape hatch for tests the caret grammar can't express
+  (block-level multi-line ranges, parametrised loops, raw-edit
+  inspection).
+- `indoc!` — re-export of the `indoc` crate; use on every
+  multi-line fixture.
+
+The legacy `expect_offense!` / `expect_no_offenses!` /
+`expect_correction!` / `expect_no_corrections!` macros remain
+exported and forward to the same internal helpers.
 
 Gated behind the `test-support` cargo feature. The pack's `Cargo.toml`
 [dev-dependencies] must enable it:

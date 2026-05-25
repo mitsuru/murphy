@@ -63,38 +63,26 @@ impl MyCop {
 #[cfg(test)]
 mod tests {
     use super::MyCop;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
-    fn flags_target_call() {
-        expect_offense!(
-            MyCop,
-            indoc! {r#"
+    fn target_call_dispatch_contract() {
+        test::<MyCop>()
+            .expect_offense(indoc! {r#"
                 target_method(1)
                 ^^^^^^^^^^^^^^^^ TODO: offense message.
-            "#}
-        );
-    }
-
-    #[test]
-    fn does_not_flag_unrelated_call() {
-        expect_no_offenses!(
-            MyCop,
-            indoc! {r#"
-                other_method(1)
-            "#}
-        );
-    }
-
-    #[test]
-    fn does_not_flag_method_call_on_receiver() {
-        // `obj.target_method(1)` is some domain method named the same —
-        // not the bare DSL call. Must not fire.
-        expect_no_offenses!(
-            MyCop,
-            indoc! {r#"
+            "#})
+            // Method name matches but the call goes through a receiver —
+            // `obj.target_method(1)` is not the bare DSL call we mean to
+            // flag. Pinned alongside the positive case so a regression
+            // in the empty-receiver gate fails this single test.
+            .expect_no_offenses(indoc! {r#"
                 obj.target_method(1)
-            "#}
-        );
+            "#})
+            // Unrelated method names never reach the body because of
+            // the `methods = [...]` filter on `#[on_node]`.
+            .expect_no_offenses(indoc! {r#"
+                other_method(1)
+            "#});
     }
 }

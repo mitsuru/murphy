@@ -2,12 +2,14 @@
 //!
 //! Use this when porting a RuboCop cop that ships `autocorrect` /
 //! `extend AutoCorrector`. The cop emits one offense + one edit per
-//! match, and the test pins both with `expect_correction!`.
+//! match, and the test pins both via the tester builder's
+//! `expect_correction` method.
 //!
 //! Mirrors the shape of `Style/StringLiterals` and
 //! `Layout/SpaceInsideParens` (the canonical in-tree autocorrect cops).
 //! See `references/autocorrect.md` for safety rules and
-//! `references/testing.md` for the `expect_correction!` grammar.
+//! `references/testing.md` for the tester builder + caret annotation
+//! grammar.
 
 //! `Pack/MyAutocorrectCop` — rewrites single-quoted plain strings to
 //! double-quoted form, but only when the body is unambiguously safe to
@@ -63,7 +65,7 @@ impl MyAutocorrectCop {
         if body.contains('\\') || body.contains('#') || body.contains('"') {
             // Reportable style violation, but no safe rewrite — emit
             // only the offense. Tests for this branch use
-            // `expect_no_corrections!`.
+            // `Tester::expect_no_corrections`.
             cx.emit_offense(range, "Prefer double-quoted strings.", None);
             return;
         }
@@ -76,39 +78,28 @@ impl MyAutocorrectCop {
 #[cfg(test)]
 mod tests {
     use super::MyAutocorrectCop;
-    use murphy_plugin_api::test_support::{
-        expect_correction, expect_no_corrections, expect_no_offenses, indoc,
-    };
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
-    fn rewrites_safe_single_quoted_literal() {
-        // `expect_correction!` pins the offense set (via caret annotations)
-        // and the corrected source (the third argument) in one assertion.
-        expect_correction!(
-            MyAutocorrectCop,
-            indoc! {r#"
-                x = 'hello'
-                    ^^^^^^^ Prefer double-quoted strings.
-            "#},
-            "x = \"hello\"\n"
-        );
-    }
-
-    #[test]
-    fn does_not_rewrite_when_body_has_escapes() {
-        // Offense fires but no edit — `expect_no_corrections!` asserts
-        // the edit set is empty. Pair with the offense fixture above to
-        // pin both halves of the behaviour.
-        expect_no_corrections!(MyAutocorrectCop, r"x = 'line\n'");
-    }
-
-    #[test]
-    fn does_not_flag_already_double_quoted() {
-        expect_no_offenses!(
-            MyAutocorrectCop,
-            indoc! {r#"
+    fn rewrites_safe_single_quoted_literal_and_skips_unsafe() {
+        // `expect_correction` pins the offense set (via caret
+        // annotations) and the corrected source in one call.
+        // `expect_no_corrections` then asserts the unsafe branch
+        // fires an offense but emits no edit.
+        test::<MyAutocorrectCop>()
+            .expect_correction(
+                indoc! {r#"
+                    x = 'hello'
+                        ^^^^^^^ Prefer double-quoted strings.
+                "#},
+                "x = \"hello\"\n",
+            )
+            // Offense fires but no edit — the edit set is empty
+            // because the body contains a backslash escape.
+            .expect_no_corrections(r"x = 'line\n'")
+            // Already double-quoted: nothing to flag.
+            .expect_no_offenses(indoc! {r#"
                 x = "hello"
-            "#}
-        );
+            "#});
     }
 }
