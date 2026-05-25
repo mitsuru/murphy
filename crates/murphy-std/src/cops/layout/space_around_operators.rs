@@ -362,10 +362,8 @@ mod tests {
     use super::{
         SpaceAroundOperators, SpaceAroundOperatorsBinaryStyle, SpaceAroundOperatorsOptions,
     };
-    use murphy_plugin_api::NodeCop;
     use murphy_plugin_api::test_support::{
         expect_correction, expect_no_corrections, expect_no_offenses, expect_offense, indoc,
-        run_cop_with_edits,
     };
 
     // ---------- options surface (frozen v1 contract) ----------
@@ -407,36 +405,6 @@ mod tests {
                 enforced_style_for_rational_literals: SpaceAroundOperatorsBinaryStyle::Space,
             }
         );
-    }
-
-    /// Apply the cop's edits to `source` repeatedly until the result no
-    /// longer changes. Used by the multi-operator-per-line tests where
-    /// the `expect_offense!` annotation grammar's one-caret-per-line
-    /// limit blocks direct expression — we still pin the corrected
-    /// source for the canonical RuboCop case verbatim.
-    fn apply_until_stable<T: NodeCop + Default>(source: &str) -> String {
-        let mut current = source.to_string();
-        for _ in 0..16 {
-            let run = run_cop_with_edits::<T>(&current);
-            if run.edits.is_empty() {
-                return current;
-            }
-            let mut next = current.clone();
-            // Apply non-overlapping edits in reverse so byte offsets
-            // earlier in the source remain valid as we splice.
-            let mut sorted = run.edits.clone();
-            sorted.sort_by_key(|e| std::cmp::Reverse(e.range.start));
-            for edit in sorted {
-                let start = edit.range.start as usize;
-                let end = edit.range.end as usize;
-                next.replace_range(start..end, &edit.replacement);
-            }
-            if next == current {
-                return next;
-            }
-            current = next;
-        }
-        panic!("apply_until_stable: fix-point did not converge in 16 iterations");
     }
 
     // ---------- Send: binary operator method calls ----------
@@ -493,13 +461,21 @@ mod tests {
 
     #[test]
     fn corrects_run_of_missing_spaces_on_one_line() {
-        // Multi-operator single-line input — verified end-to-end via
-        // `run_cop_with_edits` and an idempotent fix-point so we can
-        // assert the corrected source while sidestepping the annotation
-        // grammar's one-caret-per-line restriction.
-        let before = "a+b-c*d/e%f\n";
-        let after = apply_until_stable::<SpaceAroundOperators>(before);
-        assert_eq!(after, "a + b - c * d / e % f\n");
+        // Multi-operator single-line — the parser now anchors every
+        // `^...` line to the nearest source line, so the five offenses
+        // on `a+b-c*d/e%f` stack directly under the source line.
+        expect_correction!(
+            SpaceAroundOperators,
+            indoc! {r#"
+                a+b-c*d/e%f
+                 ^ Surrounding space missing for operator `+`.
+                   ^ Surrounding space missing for operator `-`.
+                     ^ Surrounding space missing for operator `*`.
+                       ^ Surrounding space missing for operator `/`.
+                         ^ Surrounding space missing for operator `%`.
+            "#},
+            "a + b - c * d / e % f\n"
+        );
     }
 
     #[test]
@@ -855,12 +831,18 @@ mod tests {
 
     #[test]
     fn corrects_run_of_op_asgn_and_binary() {
-        // Same fix-point assertion shape as
-        // `corrects_run_of_missing_spaces_on_one_line` — the canonical
-        // RuboCop case `x+= a+b-c` has three operators on one line.
-        let before = "x+= a+b-c\n";
-        let after = apply_until_stable::<SpaceAroundOperators>(before);
-        assert_eq!(after, "x += a + b - c\n");
+        // The canonical RuboCop case `x+= a+b-c` has three operators on
+        // one line — annotations stack directly under it.
+        expect_correction!(
+            SpaceAroundOperators,
+            indoc! {r#"
+                x+= a+b-c
+                 ^^ Surrounding space missing for operator `+=`.
+                     ^ Surrounding space missing for operator `+`.
+                       ^ Surrounding space missing for operator `-`.
+            "#},
+            "x += a + b - c\n"
+        );
     }
 
     #[test]
