@@ -42,6 +42,12 @@ pub(crate) enum Token {
     Str(String),
     /// `:name` — a symbol literal; payload is the name without the leading `:`.
     Sym(String),
+    /// `*` — postfix quantifier (`0..`).
+    Star,
+    /// `+` — postfix quantifier (`1..`).
+    Plus,
+    /// `?` — postfix quantifier (`0..=1`).
+    Question,
 }
 
 /// A [`Token`] paired with its byte-offset span in the source string.
@@ -95,6 +101,9 @@ impl<'a> Lexer<'a> {
             b'$' => self.single(Token::Dollar),
             b'^' => self.single(Token::Caret),
             b'`' => self.single(Token::Backtick),
+            b'*' => self.single(Token::Star),
+            b'+' => self.single(Token::Plus),
+            b'?' => self.single(Token::Question),
             b'.' => self.scan_ellipsis(),
             b'#' => self.scan_predicate(),
             b':' => self.scan_symbol(),
@@ -282,10 +291,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Scan a `[a-z_][a-z0-9_]*` identifier with an optional trailing `?`/`!`.
+    /// Scan a `[a-z_][a-z0-9_]*` identifier.
     ///
-    /// `_` alone -> `Underscore`; `nil?` -> `NilQuestion`; any other bare
-    /// identifier ending in `?`/`!` is a lex error.
+    /// `_` alone -> `Underscore`; `nil?` -> `NilQuestion`; a bare identifier
+    /// ending in `!` is a lex error (`save!` style names must use the `#name`
+    /// predicate form). A trailing `?` is *not* consumed — it is left for the
+    /// parser to read as a postfix [`Token::Question`] quantifier, so
+    /// `int?` lexes to `Ident("int") Question`.
     fn scan_ident(&mut self) -> Result<Token, ParseError> {
         let start = self.pos;
         // First byte is already known to be `[a-z_]`.
@@ -293,16 +305,19 @@ impl<'a> Lexer<'a> {
         while matches!(self.peek(), Some(b'a'..=b'z' | b'0'..=b'9' | b'_')) {
             self.pos += 1;
         }
-        let has_suffix = matches!(self.peek(), Some(b'?' | b'!'));
-        if has_suffix {
+        if self.peek() == Some(&b'!') {
+            // `save!`-style names: a bare identifier ending in `!` is reserved
+            // for the `#name` predicate form. Consume the `!` so the error
+            // span covers it.
             self.pos += 1;
+            return Err(self.err_at(start, self.pos, "expected '#' before a predicate name"));
         }
         let text = self.slice_str(start, self.pos);
-        if has_suffix {
-            if text == "nil?" {
-                return Ok(Token::NilQuestion);
-            }
-            return Err(self.err_at(start, self.pos, "expected '#' before a predicate name"));
+        if self.peek() == Some(&b'?') && text == "nil" {
+            // `nil?` is the only bare identifier whose `?` is part of the
+            // token. All other idents leave the `?` to the parser.
+            self.pos += 1;
+            return Ok(Token::NilQuestion);
         }
         if text == "_" {
             return Ok(Token::Underscore);
@@ -508,9 +523,15 @@ mod tests {
     }
 
     #[test]
-    fn lex_error_on_bare_predicate_name() {
-        let e = tokenize("even?").expect_err("must reject bare predicate name");
-        assert!(e.message.contains("expected '#'"));
+    fn bare_predicate_name_lexes_as_ident_then_question() {
+        // `even?` no longer errors at the lexer — the trailing `?` is a
+        // postfix [`Token::Question`] quantifier, so this lexes as
+        // `Ident("even") Question`. (Whether `even?` is a *valid* pattern is
+        // a parser concern: `even` is not a known node kind.)
+        assert_eq!(
+            toks("even?"),
+            vec![Token::Ident("even".into()), Token::Question]
+        );
     }
 
     // --- additional coverage ----------------------------------------------
@@ -564,6 +585,78 @@ mod tests {
         // a bare identifier ending in `!` (not `nil?`) is rejected
         let e = tokenize("save!").expect_err("must reject bare identifier ending in `!`");
         assert!(e.message.contains("expected '#'"));
+    }
+
+    // --- murphy-ycx: postfix quantifier tokens (`*`, `+`, `?`) -------------
+
+    #[test]
+    fn quantifier_tokens_lex_standalone() {
+        assert_eq!(toks("*"), vec![Token::Star]);
+        assert_eq!(toks("+"), vec![Token::Plus]);
+        assert_eq!(toks("?"), vec![Token::Question]);
+    }
+
+    #[test]
+    fn ident_with_question_lexes_as_two_tokens() {
+        // `int?` -> `Ident("int") Question`. The `?` is *not* absorbed into
+        // the ident; the parser reads it as a postfix quantifier.
+        assert_eq!(
+            toks("int?"),
+            vec![Token::Ident("int".into()), Token::Question]
+        );
+        assert_eq!(
+            toks("hash?"),
+            vec![Token::Ident("hash".into()), Token::Question]
+        );
+    }
+
+    #[test]
+    fn ident_with_quantifier_suffix_lexes_as_two_tokens() {
+        assert_eq!(toks("int+"), vec![Token::Ident("int".into()), Token::Plus]);
+        assert_eq!(toks("sym*"), vec![Token::Ident("sym".into()), Token::Star]);
+    }
+
+    #[test]
+    fn quantifier_inside_node_child_list() {
+        // The whole sequence `(send _ :foo int*)` reaches the parser as a
+        // sensible token stream.
+        assert_eq!(
+            toks("(send _ :foo int*)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Underscore,
+                Token::Sym("foo".into()),
+                Token::Ident("int".into()),
+                Token::Star,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn nil_question_still_lexes_as_special_token() {
+        // The `nil?` -> `NilQuestion` carve-out must survive: the `?` is part
+        // of the ident in *this one case*, not a separate Question token.
+        assert_eq!(toks("nil?"), vec![Token::NilQuestion]);
+    }
+
+    #[test]
+    fn predicate_with_question_suffix_still_works() {
+        // `#odd?` / `#has!` are predicate forms — the `?`/`!` belong to the
+        // method name and are consumed by `scan_predicate`, not surfaced as
+        // separate tokens.
+        assert_eq!(toks("#odd?"), vec![Token::Predicate("odd?".into())]);
+        assert_eq!(toks("#has!"), vec![Token::Predicate("has!".into())]);
+    }
+
+    #[test]
+    fn symbol_with_question_or_bang_suffix_still_works() {
+        // `:foo?` / `:foo!` lex as the corresponding `Sym` — the `?`/`!`
+        // belong to the symbol name (`scan_symbol` -> `take_method_name`),
+        // not surfaced as separate tokens.
+        assert_eq!(toks(":foo?"), vec![Token::Sym("foo?".into())]);
+        assert_eq!(toks(":foo!"), vec![Token::Sym("foo!".into())]);
     }
 
     #[test]
