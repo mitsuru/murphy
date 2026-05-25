@@ -97,10 +97,6 @@ judgement required), use `expect_no_corrections`:
 test::<MyCop>().expect_no_corrections(r#""line\n""#);
 ```
 
-The legacy `expect_correction!` / `expect_no_corrections!` macros are
-not exported. Use `test::<Cop>().expect_correction(...)` and
-`test::<Cop>().expect_no_corrections(...)`.
-
 The end-to-end fix-point invariant is also asserted at the CLI level
 in `crates/murphy-cli/tests/cli.rs` — adding a cop that breaks
 idempotency will surface there even without a per-cop unit test.

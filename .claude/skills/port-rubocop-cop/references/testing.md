@@ -243,20 +243,6 @@ fn flags_two_expects() {
 Since `run_cop` only dispatches the one cop type, every emission is
 already from that cop — no per-name filter needed.
 
-## No legacy `expect_*!` macros
-
-`expect_offense!` / `expect_no_offenses!` / `expect_correction!` /
-`expect_no_corrections!` macros are not exported. Use the tester
-builder for every expectation, including one-off single-expectation
-tests.
-
-```rust
-test::<MyCop>().expect_offense(indoc! {r#"
-    x==0
-     ^^ Surrounding space missing for operator `==`.
-"#});
-```
-
 ## Test coverage checklist
 
 For a ported cop, the test set should cover at minimum:
