@@ -31,12 +31,34 @@
 //!   defaults keep these flush; v1 does not honor
 //!   `EnforcedStyleForExponentOperator` / `EnforcedStyleForRationalLiterals`
 //!   so `**` is not dispatched and `/` is treated like any other binary op.
-//! - `AllowForAlignment` — always treated as `false`; vertical alignment of
-//!   `&&` / `||` / binary ops is reported as excess space.
+//! - `AllowForAlignment` — declared as a config key (default `true`,
+//!   matching RuboCop) so the `murphy.toml` surface is frozen, but the
+//!   v1 dispatch ignores the flag and flags vertical alignment as excess
+//!   space. Tracked separately for runtime wiring.
 //! - Trailing comment alignment after the operator (`foo +  # comment`).
 //!
 //! Users who hit a false positive can disable per project via
 //! `[cops.rules."Layout/SpaceAroundOperators"] enabled = false`.
+//!
+//! ## Options (frozen v1 surface — not yet honored at runtime)
+//!
+//! The cop's option struct declares the three RuboCop keys with their
+//! upstream defaults so `murphy.toml` can already reference them. The
+//! v1 check ignores the values and behaves as if all three were at
+//! their defaults; the schema is still exported so config validation
+//! (murphy-9cr.9) fails closed on bad values:
+//!
+//! - `AllowForAlignment` (`bool`, default `true`).
+//! - `EnforcedStyleForExponentOperator` (`no_space` | `space`,
+//!   default `no_space`).
+//! - `EnforcedStyleForRationalLiterals` (`no_space` | `space`,
+//!   default `no_space`).
+//!
+//! Tracked follow-ups: option-to-logic wiring is `murphy-xszo`; hook
+//! expansion to `=` / `||=` / `&&=` / `=>` / `class<` / `class<<` /
+//! ternary / match-pattern is `murphy-dvt8`; lowering
+//! `IndexOperatorWriteNode` + `CallOperatorWriteNode` out of
+//! `NodeKind::Unknown` is `murphy-9vwq`.
 //!
 //! ## Autocorrect
 //!
@@ -46,18 +68,62 @@
 //! does not introduce a `Layout/TrailingWhitespace` offense on the next
 //! pass.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct SpaceAroundOperators;
+
+/// Cop options for [`SpaceAroundOperators`].
+///
+/// All three keys mirror RuboCop's `Layout/SpaceAroundOperators` config
+/// surface (key names and defaults included). The v1 cop body does not
+/// yet branch on these values — the struct is declared up front so
+/// `murphy.toml` users can reference the keys today without a future
+/// config rename, and so the host-side validation gate (murphy-9cr.9)
+/// can enforce the enum values via the generated schema. See the
+/// "Options" section of the file's top doc-comment.
+#[derive(CopOptions)]
+pub struct SpaceAroundOperatorsOptions {
+    #[option(
+        name = "AllowForAlignment",
+        default = true,
+        description = "Allow extra spacing if used to align operators on adjacent lines."
+    )]
+    pub allow_for_alignment: bool,
+
+    #[option(
+        name = "EnforcedStyleForExponentOperator",
+        default = "no_space",
+        description = "Spacing around the `**` operator."
+    )]
+    pub enforced_style_for_exponent_operator: SpaceAroundOperatorsBinaryStyle,
+
+    #[option(
+        name = "EnforcedStyleForRationalLiterals",
+        default = "no_space",
+        description = "Spacing around `/` when the right-hand side is a rational literal."
+    )]
+    pub enforced_style_for_rational_literals: SpaceAroundOperatorsBinaryStyle,
+}
+
+/// Shared `no_space | space` enum reused by both
+/// `EnforcedStyleForExponentOperator` and `EnforcedStyleForRationalLiterals`
+/// — RuboCop documents identical accepted values for the two keys.
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpaceAroundOperatorsBinaryStyle {
+    #[option(value = "no_space")]
+    NoSpace,
+    #[option(value = "space")]
+    Space,
+}
 
 #[cop(
     name = "Layout/SpaceAroundOperators",
     description = "Flag missing or extra whitespace around binary operators.",
     default_severity = "warning",
     default_enabled = true,
-    options = NoOptions,
+    options = SpaceAroundOperatorsOptions,
 )]
 impl SpaceAroundOperators {
     #[on_node(kind = "send", methods = [
@@ -293,12 +359,33 @@ fn is_word_char(b: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::SpaceAroundOperators;
+    use super::{
+        SpaceAroundOperators, SpaceAroundOperatorsBinaryStyle, SpaceAroundOperatorsOptions,
+    };
     use murphy_plugin_api::NodeCop;
     use murphy_plugin_api::test_support::{
         expect_correction, expect_no_corrections, expect_no_offenses, expect_offense, indoc,
         run_cop_with_edits,
     };
+
+    // ---------- options surface (frozen v1 contract) ----------
+
+    #[test]
+    fn options_defaults_match_rubocop() {
+        // Pin the public defaults — `[cops.rules."Layout/SpaceAroundOperators"]`
+        // users today must see RuboCop-compatible defaults even though the
+        // runtime check ignores the values.
+        let d = SpaceAroundOperatorsOptions::default();
+        assert!(d.allow_for_alignment);
+        assert_eq!(
+            d.enforced_style_for_exponent_operator,
+            SpaceAroundOperatorsBinaryStyle::NoSpace
+        );
+        assert_eq!(
+            d.enforced_style_for_rational_literals,
+            SpaceAroundOperatorsBinaryStyle::NoSpace
+        );
+    }
 
     /// Apply the cop's edits to `source` repeatedly until the result no
     /// longer changes. Used by the multi-operator-per-line tests where
