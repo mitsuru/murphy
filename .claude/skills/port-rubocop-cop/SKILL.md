@@ -327,12 +327,6 @@ Each `expect_*` method is `#[track_caller]` and returns `&Self`, so a
 single tester can carry many expectations through the same options.
 When tests do not share setup, one-tester-per-`#[test]` is also fine.
 
-The legacy `expect_*!` macros (`expect_offense!` etc.) remain exported
-and still work — both paths forward to the same internal helpers. Use
-the macros only when the typed-options surface is genuinely not
-needed (i.e. `Cop::Options = NoOptions`) and the test is single-call;
-otherwise prefer the tester builder.
-
 Wrap every Ruby fixture string in `indoc!` (re-exported from the
 harness) so the source can stay indented in the test body without
 affecting caret column math.
@@ -567,8 +561,7 @@ merge — proceed once CI is green.
   expectations, and the offense/edit pairing the host uses.
 - **`references/testing.md`** — `test::<T>()` tester-builder API, the
   caret annotation grammar (multi-annotation-per-line included), and
-  the `run_cop` escape hatch. Covers the legacy `expect_*!` macros as
-  the still-supported alternative.
+  the `run_cop` escape hatch.
 
 ### Example cop files in-tree
 

@@ -85,8 +85,7 @@ pub fn test<T: NodeCop + Default>() -> Tester<T> {
 }
 
 /// Cop-tester returned by [`test`]. Holds the per-test options JSON and
-/// dispatches every expectation through the same dispatch loop as the
-/// legacy `expect_*!` macros — they share the internal `assert_*_inner`
+/// dispatches every expectation through the shared internal assertion
 /// helpers.
 ///
 /// `PhantomData<fn() -> T>` makes the phantom type both covariant and
@@ -141,107 +140,23 @@ impl<T: NodeCop + Default> Tester<T> {
     }
 }
 
-/// Assert that `Cop` emits no offenses against `src`. Companion to
-/// [`expect_offense!`]; see the module docs for the annotation grammar.
-///
-/// The three-argument form drives the cop with a typed options value of
-/// `Cop::Options` — `to_config_json` is called internally so test code
-/// never has to construct raw JSON.
-#[macro_export]
-macro_rules! expect_no_offenses {
-    ($cop:ty, $src:expr) => {{
-        $crate::test_support::__assert_no_offenses::<$cop>($src);
-    }};
-    ($cop:ty, $src:expr, $opts:expr) => {{
-        $crate::test_support::__assert_no_offenses_with::<$cop>($src, $opts);
-    }};
-}
-
-pub use crate::expect_no_offenses;
-
-/// `expect_no_offenses!`'s default-options inner assertion. Not part of
-/// the public API.
-#[track_caller]
-pub fn __assert_no_offenses<T: NodeCop + Default>(src: &str) {
-    assert_no_offenses_inner::<T>(src, DEFAULT_OPTIONS_JSON);
-}
-
-/// `expect_no_offenses!(_, _, opts)` inner assertion — serializes the
-/// typed value to JSON and forwards. Not part of the public API.
-#[track_caller]
-pub fn __assert_no_offenses_with<T: NodeCop + Default>(src: &str, opts: &<T as Cop>::Options) {
-    let json = opts.to_config_json();
-    assert_no_offenses_inner::<T>(src, &json);
-}
-
 #[track_caller]
 fn assert_no_offenses_inner<T: NodeCop + Default>(src: &str, options_json: &str) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
-        panic!("expect_no_offenses! must not contain annotations; use expect_offense! instead");
+        panic!("expect_no_offenses must not contain annotations; use expect_offense instead");
     }
     let offenses = run_cop_with_options_json::<T>(src, options_json);
     if !offenses.is_empty() {
         panic!(
-            "expect_no_offenses! found {} offense(s) for {}",
+            "expect_no_offenses found {} offense(s) for {}",
             offenses.len(),
             <T as Cop>::NAME,
         );
     }
 }
 
-/// Assert that `Cop` emits exactly the set of offenses described by the
-/// caret annotations in `src`. See the module docs for the grammar.
-///
-/// The three-argument form drives the cop with a typed options value of
-/// `Cop::Options`.
-#[macro_export]
-macro_rules! expect_offense {
-    ($cop:ty, $src:expr) => {{
-        $crate::test_support::__assert_offenses_match::<$cop>($src);
-    }};
-    ($cop:ty, $src:expr, $opts:expr) => {{
-        $crate::test_support::__assert_offenses_match_with::<$cop>($src, $opts);
-    }};
-}
-
-pub use crate::expect_offense;
-
-/// Assert that `Cop` emits exactly the offenses described by the caret
-/// annotations in `src`, then that applying its emitted autocorrect edits
-/// produces `expected_after`.
-///
-/// The four-argument form drives the cop with a typed options value of
-/// `Cop::Options`.
-#[macro_export]
-macro_rules! expect_correction {
-    ($cop:ty, $src:expr, $expected_after:expr) => {{
-        $crate::test_support::__assert_correction_match::<$cop>($src, $expected_after);
-    }};
-    ($cop:ty, $src:expr, $expected_after:expr, $opts:expr) => {{
-        $crate::test_support::__assert_correction_match_with::<$cop>($src, $expected_after, $opts);
-    }};
-}
-
-pub use crate::expect_correction;
-
-/// Assert that `Cop` emits no autocorrect edits against `src`.
-///
-/// The three-argument form drives the cop with a typed options value of
-/// `Cop::Options`.
-#[macro_export]
-macro_rules! expect_no_corrections {
-    ($cop:ty, $src:expr) => {{
-        $crate::test_support::__assert_no_corrections::<$cop>($src);
-    }};
-    ($cop:ty, $src:expr, $opts:expr) => {{
-        $crate::test_support::__assert_no_corrections_with::<$cop>($src, $opts);
-    }};
-}
-
-pub use crate::expect_no_corrections;
-
-/// One annotation parsed out of an `expect_offense!` input.
+/// One annotation parsed out of an `expect_offense` input.
 #[derive(Debug, Clone)]
 struct Expected {
     range: Range,
@@ -284,7 +199,7 @@ fn parse_annotated(annotated: &str) -> (String, Vec<Expected>) {
             };
 
             let line_start = last_source_line_start
-                .expect("expect_offense!: annotation precedes any source line");
+                .expect("expect_offense: annotation precedes any source line");
             let src_line = last_source_line.unwrap();
 
             let s_byte = nth_char_byte(src_line, leading_ws);
@@ -321,35 +236,16 @@ fn nth_char_byte(line: &str, n: usize) -> usize {
         .unwrap_or(line.len())
 }
 
-/// `expect_offense!`'s default-options inner assertion. Not part of the
-/// public API — call sites go through the macro so `#[track_caller]`
-/// makes the panic point at the test line, not this helper.
-#[track_caller]
-pub fn __assert_offenses_match<T: NodeCop + Default>(annotated: &str) {
-    assert_offenses_match_inner::<T>(annotated, DEFAULT_OPTIONS_JSON);
-}
-
-/// `expect_offense!(_, _, opts)` inner assertion — serializes the typed
-/// value to JSON and forwards. Not part of the public API.
-#[track_caller]
-pub fn __assert_offenses_match_with<T: NodeCop + Default>(
-    annotated: &str,
-    opts: &<T as Cop>::Options,
-) {
-    let json = opts.to_config_json();
-    assert_offenses_match_inner::<T>(annotated, &json);
-}
-
 #[track_caller]
 fn assert_offenses_match_inner<T: NodeCop + Default>(annotated: &str, options_json: &str) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
         panic!(
-            "expect_offense! must contain at least one annotation; use expect_no_offenses! instead"
+            "expect_offense must contain at least one annotation; use expect_no_offenses instead"
         );
     }
     let actuals = run_cop_with_options_json::<T>(&cleaned, options_json);
-    assert_offenses_match("expect_offense!", &cleaned, &expected, &actuals);
+    assert_offenses_match("expect_offense", &cleaned, &expected, &actuals);
 }
 
 fn assert_offenses_match(
@@ -400,26 +296,6 @@ fn assert_offenses_match(
     }
 }
 
-/// `expect_correction!`'s default-options inner assertion. Not part of
-/// the public API — call sites go through the macro so `#[track_caller]`
-/// makes the panic point at the test line, not this helper.
-#[track_caller]
-pub fn __assert_correction_match<T: NodeCop + Default>(annotated: &str, expected_after: &str) {
-    assert_correction_match_inner::<T>(annotated, expected_after, DEFAULT_OPTIONS_JSON);
-}
-
-/// `expect_correction!(_, _, _, opts)` inner assertion — serializes the
-/// typed value to JSON and forwards. Not part of the public API.
-#[track_caller]
-pub fn __assert_correction_match_with<T: NodeCop + Default>(
-    annotated: &str,
-    expected_after: &str,
-    opts: &<T as Cop>::Options,
-) {
-    let json = opts.to_config_json();
-    assert_correction_match_inner::<T>(annotated, expected_after, &json);
-}
-
 #[track_caller]
 fn assert_correction_match_inner<T: NodeCop + Default>(
     annotated: &str,
@@ -429,56 +305,34 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
         panic!(
-            "expect_correction! must contain at least one annotation; use expect_no_offenses! instead"
+            "expect_correction must contain at least one annotation; use expect_no_offenses instead"
         );
     }
 
     let captured = run_cop_with_options_and_edits_json::<T>(&cleaned, options_json);
-    assert_offenses_match(
-        "expect_correction!",
-        &cleaned,
-        &expected,
-        &captured.offenses,
-    );
+    assert_offenses_match("expect_correction", &cleaned, &expected, &captured.offenses);
 
     let actual_after = apply_captured_edits(&cleaned, &captured.edits);
     if actual_after != expected_after {
         panic!(
-            "expect_correction! corrected source mismatch\n\nexpected:\n{}\nactual:\n{}",
+            "expect_correction corrected source mismatch\n\nexpected:\n{}\nactual:\n{}",
             indent_block(expected_after),
             indent_block(&actual_after),
         );
     }
 }
 
-/// `expect_no_corrections!`'s default-options inner assertion. Not part
-/// of the public API.
-#[track_caller]
-pub fn __assert_no_corrections<T: NodeCop + Default>(src: &str) {
-    assert_no_corrections_inner::<T>(src, DEFAULT_OPTIONS_JSON);
-}
-
-/// `expect_no_corrections!(_, _, opts)` inner assertion. Not part of the
-/// public API.
-#[track_caller]
-pub fn __assert_no_corrections_with<T: NodeCop + Default>(src: &str, opts: &<T as Cop>::Options) {
-    let json = opts.to_config_json();
-    assert_no_corrections_inner::<T>(src, &json);
-}
-
 #[track_caller]
 fn assert_no_corrections_inner<T: NodeCop + Default>(src: &str, options_json: &str) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
-        panic!(
-            "expect_no_corrections! must not contain annotations; use expect_correction! instead"
-        );
+        panic!("expect_no_corrections must not contain annotations; use expect_correction instead");
     }
 
     let captured = run_cop_with_options_and_edits_json::<T>(src, options_json);
     if !captured.edits.is_empty() {
         panic!(
-            "expect_no_corrections! found {} edit(s) for {}",
+            "expect_no_corrections found {} edit(s) for {}",
             captured.edits.len(),
             <T as Cop>::NAME,
         );
@@ -758,21 +612,18 @@ fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
         let start = edit.range.start as usize;
         let end = edit.range.end as usize;
         if start > end {
-            panic!(
-                "expect_correction!: edit has invalid range {:?}",
-                edit.range
-            );
+            panic!("expect_correction: edit has invalid range {:?}", edit.range);
         }
         if start > source.len() || end > source.len() {
             panic!(
-                "expect_correction!: edit range {:?} is outside source length {}",
+                "expect_correction: edit range {:?} is outside source length {}",
                 edit.range,
                 source.len()
             );
         }
         if !source.is_char_boundary(start) || !source.is_char_boundary(end) {
             panic!(
-                "expect_correction!: edit range {:?} does not fall on UTF-8 char boundaries",
+                "expect_correction: edit range {:?} does not fall on UTF-8 char boundaries",
                 edit.range
             );
         }
@@ -781,10 +632,7 @@ fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
             let accepted_end = accepted.range.end as usize;
             accepted_start < end && start < accepted_end
         }) {
-            panic!(
-                "expect_correction!: overlapping edit range {:?}",
-                edit.range
-            );
+            panic!("expect_correction: overlapping edit range {:?}", edit.range);
         }
         accepted.push(edit);
     }
@@ -980,13 +828,13 @@ mod tests {
 
     #[test]
     fn expect_no_offenses_passes_when_cop_emits_nothing() {
-        expect_no_offenses!(NoopCop, "x = 1\n");
+        super::test::<NoopCop>().expect_no_offenses("x = 1\n");
     }
 
     #[test]
-    #[should_panic(expected = "expect_no_offenses! found 1 offense(s)")]
+    #[should_panic(expected = "expect_no_offenses found 1 offense(s)")]
     fn expect_no_offenses_panics_when_cop_emits() {
-        expect_no_offenses!(FixedRangeCop, "abc\n");
+        super::test::<FixedRangeCop>().expect_no_offenses("abc\n");
     }
 
     #[test]
@@ -998,42 +846,39 @@ mod tests {
 
     #[test]
     fn expect_offense_matches_single_annotation() {
-        expect_offense!(
-            FixedRangeCop,
+        super::test::<FixedRangeCop>().expect_offense(
             "abc\n\
-             ^^^ fixed\n"
+             ^^^ fixed\n",
         );
     }
 
     #[test]
     fn expect_offense_empty_message_is_range_only_match() {
         // No message after the carets: range matches, message ignored.
-        expect_offense!(
-            FixedRangeCop,
+        super::test::<FixedRangeCop>().expect_offense(
             "abc\n\
-             ^^^\n"
+             ^^^\n",
         );
     }
 
     #[test]
     fn expect_correction_matches_offenses_and_corrected_source() {
-        expect_correction!(
-            CorrectingCop,
+        super::test::<CorrectingCop>().expect_correction(
             "abc\n\
              ^^^ fixed\n",
-            "xyz\n"
+            "xyz\n",
         );
     }
 
     #[test]
     fn expect_no_corrections_passes_when_cop_emits_no_edits() {
-        expect_no_corrections!(FixedRangeCop, "abc\n");
+        super::test::<FixedRangeCop>().expect_no_corrections("abc\n");
     }
 
     #[test]
-    #[should_panic(expected = "expect_no_corrections! found 1 edit(s)")]
+    #[should_panic(expected = "expect_no_corrections found 1 edit(s)")]
     fn expect_no_corrections_panics_when_cop_emits_edits() {
-        expect_no_corrections!(CorrectingCop, "abc\n");
+        super::test::<CorrectingCop>().expect_no_corrections("abc\n");
     }
 
     #[test]
@@ -1050,58 +895,53 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "expect_correction! corrected source mismatch")]
+    #[should_panic(expected = "expect_correction corrected source mismatch")]
     fn expect_correction_panics_on_corrected_source_mismatch() {
-        expect_correction!(
-            CorrectingCop,
+        super::test::<CorrectingCop>().expect_correction(
             "abc\n\
              ^^^ fixed\n",
-            "abc\n"
+            "abc\n",
         );
     }
 
     #[test]
-    #[should_panic(expected = "expect_offense! mismatch")]
+    #[should_panic(expected = "expect_offense mismatch")]
     fn expect_offense_panics_on_extra_emit() {
         // TwoEmitCop emits 2 offenses; assert only 1. The comparator's
         // count-mismatch branch fires (this case is not intercepted by
         // the zero-annotation guard because the input has 1 annotation).
-        expect_offense!(
-            TwoEmitCop,
+        super::test::<TwoEmitCop>().expect_offense(
             "abc\n\
              ^^^ one\n\
-             def\n"
+             def\n",
         );
     }
 
     #[test]
-    #[should_panic(expected = "expect_offense! mismatch")]
+    #[should_panic(expected = "expect_offense mismatch")]
     fn expect_offense_panics_on_missing_emit() {
-        expect_offense!(
-            NoopCop,
+        super::test::<NoopCop>().expect_offense(
             "abc\n\
-             ^^^ wanted\n"
+             ^^^ wanted\n",
         );
     }
 
     #[test]
-    #[should_panic(expected = "expect_offense! mismatch")]
+    #[should_panic(expected = "expect_offense mismatch")]
     fn expect_offense_panics_on_range_mismatch() {
         // FixedRangeCop emits [0, 3); test asserts [0, 2).
-        expect_offense!(
-            FixedRangeCop,
+        super::test::<FixedRangeCop>().expect_offense(
             "abc\n\
-             ^^ fixed\n"
+             ^^ fixed\n",
         );
     }
 
     #[test]
-    #[should_panic(expected = "expect_offense! mismatch")]
+    #[should_panic(expected = "expect_offense mismatch")]
     fn expect_offense_panics_on_message_mismatch() {
-        expect_offense!(
-            FixedRangeCop,
+        super::test::<FixedRangeCop>().expect_offense(
             "abc\n\
-             ^^^ wrong message\n"
+             ^^^ wrong message\n",
         );
     }
 
@@ -1124,10 +964,9 @@ mod tests {
     fn failure_panic_includes_rendered_expected_and_actual() {
         use std::panic::{AssertUnwindSafe, catch_unwind};
         let result = catch_unwind(AssertUnwindSafe(|| {
-            expect_offense!(
-                FixedRangeCop,
+            super::test::<FixedRangeCop>().expect_offense(
                 "abc\n\
-                 ^^ wrong\n"
+                 ^^ wrong\n",
             );
         }));
         let err = result.expect_err("expected a panic");
@@ -1137,7 +976,7 @@ mod tests {
             .or_else(|| err.downcast_ref::<&'static str>().map(|s| s.to_string()))
             .expect("panic payload was neither String nor &'static str");
         // Header
-        assert!(msg.contains("expect_offense! mismatch"), "msg: {msg}");
+        assert!(msg.contains("expect_offense mismatch"), "msg: {msg}");
         // Both sections rendered
         assert!(msg.contains("expected:"), "msg: {msg}");
         assert!(msg.contains("actual:"), "msg: {msg}");
@@ -1216,17 +1055,16 @@ mod tests {
     fn expect_offense_handles_multibyte_source_line() {
         // Japanese 'あ' is 3 bytes / 1 char in UTF-8. A single caret
         // (1 char) over 'あ' must map to the 3-byte range [0, 3).
-        expect_offense!(
-            FirstCharCop,
+        super::test::<FirstCharCop>().expect_offense(
             "あい\n\
-             ^ first char\n"
+             ^ first char\n",
         );
     }
 
     #[test]
     #[should_panic(expected = "annotation precedes any source line")]
     fn expect_offense_panics_when_annotation_has_no_source_above() {
-        expect_offense!(FixedRangeCop, "^^^ orphan\nabc\n");
+        super::test::<FixedRangeCop>().expect_offense("^^^ orphan\nabc\n");
     }
 
     /// Fixture: emits two offenses on the same source line — `[0, 3)`
@@ -1253,36 +1091,34 @@ mod tests {
         // anchors both to that line. This was previously rejected; it is
         // now the supported shape for cops that fire multiple offenses
         // on the same row.
-        expect_offense!(
-            SameLineTwoEmitCop,
+        super::test::<SameLineTwoEmitCop>().expect_offense(
             "abc\n\
              ^^^ first\n\
-             ^^^ second\n"
+             ^^^ second\n",
         );
     }
 
     #[test]
     #[should_panic(
-        expected = "expect_offense! must contain at least one annotation; use expect_no_offenses! instead"
+        expected = "expect_offense must contain at least one annotation; use expect_no_offenses instead"
     )]
     fn expect_offense_panics_when_input_has_no_annotations() {
         // Symmetric guard to expect_no_offenses_panics_on_caret_input:
-        // the user picked the wrong macro. Catching the typo prevents
+        // the user picked the wrong expectation. Catching the typo prevents
         // a silent pass when the cop happens to emit nothing.
-        expect_offense!(NoopCop, "abc\n");
+        super::test::<NoopCop>().expect_offense("abc\n");
     }
 
     #[test]
     #[should_panic(
-        expected = "expect_no_offenses! must not contain annotations; use expect_offense! instead"
+        expected = "expect_no_offenses must not contain annotations; use expect_offense instead"
     )]
     fn expect_no_offenses_panics_on_caret_input() {
-        // Misuse guard: annotations in expect_no_offenses! are a typo
-        // for the wrong macro. Catching this saves silent test passes.
-        expect_no_offenses!(
-            NoopCop,
+        // Misuse guard: annotations in expect_no_offenses are a typo
+        // for the wrong expectation. Catching this saves silent test passes.
+        super::test::<NoopCop>().expect_no_offenses(
             "abc\n\
-             ^^^ stray\n"
+             ^^^ stray\n",
         );
     }
 
@@ -1364,28 +1200,30 @@ mod tests {
 
     #[test]
     fn expect_no_offenses_with_typed_options_keeps_default_branch_silent() {
-        expect_no_offenses!(OptionAwareCop, "abc\n", &ToggleOptions { emit: false });
+        super::test::<OptionAwareCop>()
+            .with_options(&ToggleOptions { emit: false })
+            .expect_no_offenses("abc\n");
     }
 
     #[test]
     fn expect_offense_with_typed_options_drives_non_default_branch() {
-        expect_offense!(
-            OptionAwareCop,
-            "abc\n\
-             ^^^ toggle\n",
-            &ToggleOptions { emit: true }
-        );
+        super::test::<OptionAwareCop>()
+            .with_options(&ToggleOptions { emit: true })
+            .expect_offense(
+                "abc\n\
+                 ^^^ toggle\n",
+            );
     }
 
     #[test]
     fn expect_correction_with_typed_options_applies_non_default_edits() {
-        expect_correction!(
-            OptionAwareCop,
-            "abc\n\
-             ^^^ toggle\n",
-            "xyz\n",
-            &ToggleOptions { emit: true }
-        );
+        super::test::<OptionAwareCop>()
+            .with_options(&ToggleOptions { emit: true })
+            .expect_correction(
+                "abc\n\
+                 ^^^ toggle\n",
+                "xyz\n",
+            );
     }
 
     #[test]
@@ -1393,7 +1231,9 @@ mod tests {
         // `emit = false` -> the cop emits nothing, so the edit list is
         // empty even though the caller could have asked for the alternate
         // behaviour.
-        expect_no_corrections!(OptionAwareCop, "abc\n", &ToggleOptions { emit: false });
+        super::test::<OptionAwareCop>()
+            .with_options(&ToggleOptions { emit: false })
+            .expect_no_corrections("abc\n");
     }
 
     // ---------- tester-builder API ----------
@@ -1442,10 +1282,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "expect_offense! must contain at least one annotation")]
+    #[should_panic(expected = "expect_offense must contain at least one annotation")]
     fn tester_expect_offense_without_annotations_panics() {
-        // Mirror of the legacy macro guard so the tester can't silently
-        // pass on a malformed fixture.
+        // The tester must not silently pass on a malformed fixture.
         super::test::<OptionAwareCop>()
             .with_options(&ToggleOptions { emit: true })
             .expect_offense("abc\n");
