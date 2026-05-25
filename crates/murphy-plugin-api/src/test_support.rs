@@ -98,6 +98,16 @@ macro_rules! expect_correction {
 
 pub use crate::expect_correction;
 
+/// Assert that `Cop` emits no autocorrect edits against `src`.
+#[macro_export]
+macro_rules! expect_no_corrections {
+    ($cop:ty, $src:expr) => {{
+        $crate::test_support::__assert_no_corrections::<$cop>($src);
+    }};
+}
+
+pub use crate::expect_no_corrections;
+
 /// One annotation parsed out of an `expect_offense!` input.
 #[derive(Debug, Clone)]
 struct Expected {
@@ -239,8 +249,8 @@ fn assert_offenses_match(
         panic!(
             "{} mismatch\n\nexpected:\n{}\nactual:\n{}",
             macro_name,
-            indent_block(&render(&cleaned, &exp_items)),
-            indent_block(&render(&cleaned, &act_items)),
+            indent_block(&render(cleaned, &exp_items)),
+            indent_block(&render(cleaned, &act_items)),
         );
     }
 }
@@ -271,6 +281,26 @@ pub fn __assert_correction_match<T: NodeCop + Default>(annotated: &str, expected
             "expect_correction! corrected source mismatch\n\nexpected:\n{}\nactual:\n{}",
             indent_block(expected_after),
             indent_block(&actual_after),
+        );
+    }
+}
+
+/// `expect_no_corrections!`'s inner assertion. Not part of the public API.
+#[track_caller]
+pub fn __assert_no_corrections<T: NodeCop + Default>(src: &str) {
+    let (_cleaned, expected) = parse_annotated(src);
+    if !expected.is_empty() {
+        panic!(
+            "expect_no_corrections! must not contain annotations; use expect_correction! instead"
+        );
+    }
+
+    let captured = run_cop_with_edits::<T>(src);
+    if !captured.edits.is_empty() {
+        panic!(
+            "expect_no_corrections! found {} edit(s) for {}",
+            captured.edits.len(),
+            <T as Cop>::NAME,
         );
     }
 }
@@ -647,6 +677,17 @@ mod tests {
              ^^^ fixed\n",
             "xyz\n"
         );
+    }
+
+    #[test]
+    fn expect_no_corrections_passes_when_cop_emits_no_edits() {
+        expect_no_corrections!(FixedRangeCop, "abc\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "expect_no_corrections! found 1 edit(s)")]
+    fn expect_no_corrections_panics_when_cop_emits_edits() {
+        expect_no_corrections!(CorrectingCop, "abc\n");
     }
 
     #[test]

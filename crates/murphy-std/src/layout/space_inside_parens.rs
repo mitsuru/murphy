@@ -190,3 +190,28 @@ fn same_line_gap(cx: &Cx<'_>, start: u32, end: u32) -> bool {
 fn has_space_after(cx: &Cx<'_>, start: u32, end: u32) -> bool {
     start < end && cx.raw_source(Range { start, end }).starts_with(' ')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SpaceInsideParens;
+    use murphy_plugin_api::test_support::{expect_correction, expect_no_corrections, indoc};
+
+    #[test]
+    fn corrects_spaces_inside_parentheses() {
+        expect_correction!(
+            SpaceInsideParens,
+            indoc! {r#"
+                foo( 1)
+                    ^ Space inside parentheses detected.
+                bar(1 )
+                     ^ Space inside parentheses detected.
+            "#},
+            "foo(1)\nbar(1)\n"
+        );
+    }
+
+    #[test]
+    fn leaves_clean_parentheses_without_corrections() {
+        expect_no_corrections!(SpaceInsideParens, "foo(1, 2)\nbar()\n");
+    }
+}

@@ -591,6 +591,24 @@ The macro first checks the exact offense set, then compares the
 corrected source string. `run_cop_with_edits` is available when a test
 needs to inspect the raw captured edits directly.
 
+### `expect_no_corrections!` — assert no autocorrect edits
+
+Use `expect_no_corrections!` when a cop may emit offenses but must not
+emit any autocorrect edits for the fixture.
+
+```rust
+use murphy_plugin_api::test_support::expect_no_corrections;
+
+#[test]
+fn does_not_autocorrect_unsafe_case() {
+    expect_no_corrections!(MyCop, "dangerous_call\n");
+}
+```
+
+The macro rejects caret-bearing input as a typo guard; use
+`expect_correction!` when the fixture should assert both offenses and
+the corrected output.
+
 ### `indoc!`
 
 Re-exported from the `indoc` crate (also feature-gated). Strips the
