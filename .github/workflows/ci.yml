@@ -26,26 +26,14 @@ jobs:
       - name: Install rustfmt + clippy components
         run: rustup component add rustfmt clippy
 
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt
-        run: >
-          cargo fmt
-          -p murphy-ast
-          -p murphy-cache
-          -p murphy-cli
-          -p murphy-core
-          -p murphy-example-pack
-          -p murphy-pattern
-          -p murphy-plugin-api
-          -p murphy-plugin-macros
-          -p murphy-rails
-          -p murphy-reporting
-          -p murphy-rspec
-          -p murphy-std
-          -p murphy-translate
-          -- --check
+        run: cargo +nightly fmt --check
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
