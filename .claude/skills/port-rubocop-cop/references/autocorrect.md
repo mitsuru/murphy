@@ -68,30 +68,46 @@ whose edit re-introduces something the cop itself would flag will
 infinite-loop the fix-point (and `cargo run -p murphy-cli -- lint --fix --debug`
 will surface it).
 
-Plugin-api's `test_support` currently exposes `expect_offense!`,
-`expect_no_offenses!`, `indoc!`, and `run_cop` only — there is no
-ready-made `apply_fix` helper. To check idempotency of an edit at
-test time, apply the edit by hand on top of `run_cop`'s output and
-re-run the cop, asserting the second pass returns no offenses:
+Plugin-api's `test_support` exposes `expect_correction!` for the
+common case: pin the offense set with caret annotations *and* the
+corrected source in one assertion. The macro applies the cop's
+emitted edits to the annotation-stripped input and asserts the result
+matches `expected_after` byte-for-byte. See `references/testing.md`
+for the full grammar.
 
 ```rust
-let offenses = run_cop::<MyCop>(src);
-let edit = offenses[0]
-    .clone()
-    /* the captured edit list lives next to `CapturedOffense`; if
-       a pack needs this routinely, add an `apply_fix` helper to its
-       local `tests/test_support_ext.rs` rather than per-cop. */;
-// NOTE: `apply_edit_locally` is a placeholder — write it as a small
-// helper next to the test (or in `tests/test_support_ext.rs`) that
-// applies one edit's `(range, replacement)` to `src` and returns the
-// rewritten string. `murphy-plugin-api` does not ship this helper.
-let fixed_once = apply_edit_locally(src, edit);
-assert!(run_cop::<MyCop>(&fixed_once).is_empty(), "cop fired on its own output");
+use murphy_plugin_api::test_support::{expect_correction, indoc};
+
+#[test]
+fn corrects_spaces_inside_parentheses() {
+    expect_correction!(
+        SpaceInsideParens,
+        indoc! {r#"
+            foo( 1)
+                ^ Space inside parentheses detected.
+        "#},
+        "foo(1)\n"
+    );
+}
+```
+
+For shapes the cop reports without correcting (unsafe rewrite, judgement
+required), use `expect_no_corrections!`:
+
+```rust
+use murphy_plugin_api::test_support::expect_no_corrections;
+
+#[test]
+fn does_not_autocorrect_when_body_contains_escapes() {
+    expect_no_corrections!(MyCop, r#""line\n""#);
+}
 ```
 
 The end-to-end fix-point invariant is also asserted at the CLI level
 in `crates/murphy-cli/tests/cli.rs` — adding a cop that breaks
-idempotency will surface there even without a per-cop unit test.
+idempotency will surface there even without a per-cop unit test. Reach
+for `run_cop_with_edits` (returns `CapturedRun { offenses, edits }`)
+only when a test needs to inspect raw edits directly, which is rare.
 
 ## Idiomatic patterns
 

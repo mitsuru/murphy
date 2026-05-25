@@ -1,4 +1,4 @@
-# Testing cops — `expect_offense!` / `expect_no_offenses!` / `run_cop`
+# Testing cops — `expect_offense!` / `expect_no_offenses!` / `expect_correction!` / `expect_no_corrections!` / `run_cop`
 
 Authoritative source: infra guide §11 plus
 `crates/murphy-plugin-api/src/test_support.rs` and the design doc
@@ -17,13 +17,16 @@ murphy-plugin-api = { path = "../murphy-plugin-api", features = ["test-support"]
 (`murphy-std`, `murphy-rspec`, `murphy-rails`, `murphy-example-pack` are
 all set up; new packs must add this line.)
 
-Inside the cop file:
+Inside the cop file, import only the macros the test set actually uses:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::MyCop;
-    use murphy_plugin_api::test_support::{expect_offense, expect_no_offenses, indoc, run_cop};
+    use murphy_plugin_api::test_support::{
+        expect_correction, expect_no_corrections, expect_no_offenses, expect_offense, indoc,
+        run_cop,
+    };
 
     // tests…
 }
@@ -105,6 +108,58 @@ Companion to `expect_offense!`. Panics if the cop emits anything.
 Rejects caret-bearing input as a symmetric typo guard ("use
 `expect_offense!` instead").
 
+## `expect_correction!` — assert offenses and autocorrect output
+
+Use `expect_correction!` for cops that emit `RawEdit`s through
+`cx.emit_edit`. The first fixture uses the same caret grammar as
+`expect_offense!`; the third argument is the exact source expected
+after applying all emitted edits to the annotation-stripped input.
+
+```rust
+#[test]
+fn corrects_spaces_inside_parentheses() {
+    expect_correction!(
+        SpaceInsideParens,
+        indoc! {r#"
+            foo( 1)
+                ^ Space inside parentheses detected.
+            bar(1 )
+                 ^ Space inside parentheses detected.
+        "#},
+        "foo(1)\nbar(1)\n"
+    );
+}
+```
+
+The macro first checks the exact offense set (same grammar and
+exact-set semantics as `expect_offense!`), then compares the corrected
+source string. Use this whenever a cop ships autocorrect: it pins both
+the offense and the fix in one assertion. See
+`crates/murphy-std/src/cops/layout/space_inside_parens.rs` for the canonical
+in-tree usage.
+
+For tests that need to inspect raw edits directly, drop to
+`run_cop_with_edits` (returns `CapturedRun { offenses, edits }`).
+
+## `expect_no_corrections!` — assert no autocorrect edits
+
+Use `expect_no_corrections!` when a cop may emit offenses but must not
+emit any autocorrect edits for the fixture. Common cases: an unsafe
+shape where the cop deliberately reports without correcting, or a
+clean input that should produce neither offense nor edit.
+
+```rust
+#[test]
+fn leaves_clean_parentheses_without_corrections() {
+    expect_no_corrections!(SpaceInsideParens, "foo(1, 2)\nbar()\n");
+}
+```
+
+The macro rejects caret-bearing input as a typo guard ("use
+`expect_correction!` instead"). It only checks the edit set — it does
+not constrain offenses, so pair it with `expect_offense!` /
+`expect_no_offenses!` when the offense set also matters.
+
 ## `indoc!`
 
 Re-exported from the `indoc` crate (feature-gated). Strips the common
@@ -183,3 +238,11 @@ For a ported cop, the test set should cover at minimum:
   `max + 1`. Document the v1 default-only limitation when the test
   exercises non-default values via a hand-built struct (the live
   override path lands in murphy-9cr.9).
+- **Autocorrect parity** (when applicable). Every shape the cop fixes
+  via `cx.emit_edit` gets an `expect_correction!` test pinning the
+  corrected source. Every shape the cop deliberately reports without
+  correcting gets an `expect_no_corrections!` test. Idempotency — the
+  fixture stays clean if the cop runs again on its own output — is
+  asserted at the CLI level (`crates/murphy-cli/tests/cli.rs`), so a
+  per-cop unit test is only needed when the corrected source is
+  non-obvious.

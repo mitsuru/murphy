@@ -24,7 +24,13 @@ use murphy_plugin_api::{Cx, NodeId, NodeKind, cop};
 - `NoOptions` — marker type for cops with no configuration. Pass as
   `options = NoOptions` to `#[cop(...)]`.
 - `OptNodeId` — `Option<NodeId>` analogue with `NONE` constant. Used for
-  optional fields like `Send { receiver }` and `Block { body }`.
+  optional fields like `Send { receiver }` and `Block { body }`. Two
+  idioms:
+  - **Equality check** — `if receiver == OptNodeId::NONE { return; }`
+    gates the "bare receiver" case (no `puts` like `obj.puts`).
+  - **Get the inner `NodeId`** — `let Some(body_id) = body.get() else { return; }`
+    when the cop needs to walk the optional subtree. `OptNodeId::get()`
+    returns `Option<NodeId>` and `OptNodeId::some(id)` wraps a `NodeId`.
 - `Range` — `[start, end)` byte range into source; emitted with offenses
   and edits.
 - `Symbol` — interned identifier; resolve to text via `cx.symbol_str(sym)`.
@@ -73,8 +79,20 @@ is part of the single-surface ABI's macro half. See
 
 ```rust
 #[cfg(test)]
-use murphy_plugin_api::test_support::{expect_offense, expect_no_offenses, indoc, run_cop};
+use murphy_plugin_api::test_support::{
+    expect_correction, expect_no_corrections, expect_no_offenses, expect_offense, indoc, run_cop,
+};
 ```
+
+Pull only the macros each test file actually uses:
+
+- `expect_offense!` / `expect_no_offenses!` — offense-only assertions.
+- `expect_correction!` / `expect_no_corrections!` — autocorrect-aware
+  assertions; mandatory whenever the cop ships `cx.emit_edit`.
+- `run_cop` / `run_cop_with_edits` — escape hatch for tests the caret
+  grammar can't express (block-level multi-line ranges, parametrised
+  loops, raw-edit inspection).
+- `indoc!` — re-export of the `indoc` crate; use on every fixture.
 
 Gated behind the `test-support` cargo feature. The pack's `Cargo.toml`
 [dev-dependencies] must enable it:
