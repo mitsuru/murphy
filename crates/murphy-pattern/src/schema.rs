@@ -77,15 +77,17 @@ pub fn node_child_allows_bare_predicate(tag: murphy_ast::NodeKindTag, child_idx:
 
         // ── All Node/OptNode/Node list slots (non-Sym): all fixed children
         // plus trailing list children when present.
-        19 => child_idx <= 2,                   // block
-        22 | 23 | 24 | 27 | 28 => true,         // collection/list-like nodes
-        25 => child_idx <= 2,                   // if
-        26 => true,                             // case
-        29 => child_idx == 0,                   // return
-        30 | 31 | 47 | 48 => child_idx <= 1,    // and/or/while/until
-        32 => child_idx == 1 || child_idx == 2, // def
-        33 => child_idx <= 2,                   // class
-        34 => child_idx <= 1,                   // module
+        19 => child_idx <= 2, // block (3 fixed, no trailing list)
+        22 | 23 | 28 => true, // array / hash / begin (single trailing list)
+        24 => child_idx <= 1, // pair (2 fixed, no trailing list)
+        25 => child_idx <= 2, // if (3 fixed, no trailing list)
+        26 => true,           // case (1 fixed + trailing list)
+        27 => true,           // when (single trailing list)
+        29 => child_idx == 0, // return (1 fixed, no trailing list)
+        30 | 31 | 47 | 48 => child_idx <= 1, // and/or/while/until (2 fixed, no trailing list)
+        32 => child_idx == 1 || child_idx == 2, // def (Sym, Node, OptNode — Sym at 0)
+        33 => child_idx <= 2, // class (3 fixed, no trailing list)
+        34 => child_idx <= 1, // module (2 fixed, no trailing list)
 
         // Nothing else is supported in v1.
         _ => false,
@@ -107,6 +109,12 @@ pub enum PatChild<'a> {
     Sym(Symbol),
     /// A `NodeList` field (e.g. `Send::args`). Borrowed against the
     /// `node_lists` side table that the matcher holds.
+    ///
+    /// **Invariant (v1):** no supported `NodeKind` has a `List<Sym>` slot —
+    /// trailing lists carry `NodeId`s only. [`node_child_allows_bare_predicate`]
+    /// relies on this to allow bare predicate shorthand at every trailing-list
+    /// position. Adding a `List<Sym>`-shaped variant requires revisiting that
+    /// helper and reflecting the per-slot Sym mask there.
     List(&'a [NodeId]),
 }
 
@@ -444,6 +452,267 @@ mod tests {
             murphy_ast::NodeKindTag(57),
             0
         )); // unsupported tag: parser cannot know slot typing, so allow and defer
+    }
+
+    /// Build one representative instance of every `SUPPORTED_TAGS` variant in
+    /// a single `Ast`. Used by the exhaustive cross-check to walk every
+    /// supported kind's actual `pattern_children` output. Updating this list
+    /// is forced whenever a tag joins or leaves `SUPPORTED_TAGS` — see
+    /// `node_child_allows_bare_predicate_matches_pattern_children_slot_shape`.
+    fn build_all_supported() -> (
+        murphy_ast::Ast,
+        Vec<(murphy_ast::NodeKindTag, murphy_ast::NodeId)>,
+    ) {
+        let mut b = AstBuilder::new("supported", "t.rb");
+        // Placeholder atoms used as Node / OptNode fillers throughout.
+        let a = b.push(NodeKind::Int(1), r());
+        let bb = b.push(NodeKind::Int(2), r());
+        let args = b.push(NodeKind::Args(murphy_ast::NodeList::EMPTY), r());
+        let sym = b.intern_symbol("x");
+
+        let mut out: Vec<(murphy_ast::NodeKindTag, murphy_ast::NodeId)> = Vec::new();
+        let mut add = |b: &mut AstBuilder, tag: u8, id: murphy_ast::NodeId| {
+            out.push((murphy_ast::NodeKindTag(tag), id));
+            let _ = b; // keep the borrow lifetime explicit for clarity
+        };
+
+        let lvar = b.push(NodeKind::Lvar(sym), r());
+        add(&mut b, 9, lvar);
+        let ivar = b.push(NodeKind::Ivar(sym), r());
+        add(&mut b, 10, ivar);
+        let cvar = b.push(NodeKind::Cvar(sym), r());
+        add(&mut b, 11, cvar);
+        let gvar = b.push(NodeKind::Gvar(sym), r());
+        add(&mut b, 12, gvar);
+
+        let cst = b.push(
+            NodeKind::Const {
+                scope: OptNodeId::NONE,
+                name: sym,
+            },
+            r(),
+        );
+        add(&mut b, 13, cst);
+
+        let lvasgn = b.push(
+            NodeKind::Lvasgn {
+                name: sym,
+                value: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 14, lvasgn);
+        let ivasgn = b.push(
+            NodeKind::Ivasgn {
+                name: sym,
+                value: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 15, ivasgn);
+        let casgn = b.push(
+            NodeKind::Casgn {
+                scope: OptNodeId::NONE,
+                name: sym,
+                value: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 16, casgn);
+
+        let send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method: sym,
+                args: murphy_ast::NodeList::EMPTY,
+            },
+            r(),
+        );
+        add(&mut b, 17, send);
+        let csend = b.push(
+            NodeKind::Csend {
+                receiver: a,
+                method: sym,
+                args: murphy_ast::NodeList::EMPTY,
+            },
+            r(),
+        );
+        add(&mut b, 18, csend);
+        let block = b.push(
+            NodeKind::Block {
+                call: send,
+                args,
+                body: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 19, block);
+
+        let arr = b.push(NodeKind::Array(murphy_ast::NodeList::EMPTY), r());
+        add(&mut b, 22, arr);
+        let hash = b.push(NodeKind::Hash(murphy_ast::NodeList::EMPTY), r());
+        add(&mut b, 23, hash);
+        let pair = b.push(NodeKind::Pair { key: a, value: bb }, r());
+        add(&mut b, 24, pair);
+
+        let if_ = b.push(
+            NodeKind::If {
+                cond: a,
+                then_: OptNodeId::NONE,
+                else_: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 25, if_);
+        let case = b.push(
+            NodeKind::Case {
+                subject: OptNodeId::NONE,
+                whens: murphy_ast::NodeList::EMPTY,
+                else_: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 26, case);
+        let when_ = b.push(
+            NodeKind::When {
+                conds: murphy_ast::NodeList::EMPTY,
+                body: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 27, when_);
+        let begin = b.push(NodeKind::Begin(murphy_ast::NodeList::EMPTY), r());
+        add(&mut b, 28, begin);
+
+        let ret = b.push(NodeKind::Return(OptNodeId::NONE), r());
+        add(&mut b, 29, ret);
+        let and_ = b.push(NodeKind::And { lhs: a, rhs: bb }, r());
+        add(&mut b, 30, and_);
+        let or_ = b.push(NodeKind::Or { lhs: a, rhs: bb }, r());
+        add(&mut b, 31, or_);
+
+        let def = b.push(
+            NodeKind::Def {
+                receiver: OptNodeId::NONE,
+                name: sym,
+                args,
+                body: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 32, def);
+        let cls = b.push(
+            NodeKind::Class {
+                name: a,
+                superclass: OptNodeId::NONE,
+                body: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 33, cls);
+        let mdl = b.push(
+            NodeKind::Module {
+                name: a,
+                body: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 34, mdl);
+
+        let gvasgn = b.push(
+            NodeKind::Gvasgn {
+                name: sym,
+                value: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 38, gvasgn);
+        let cvasgn = b.push(
+            NodeKind::Cvasgn {
+                name: sym,
+                value: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 39, cvasgn);
+
+        let while_ = b.push(
+            NodeKind::While {
+                cond: a,
+                body: OptNodeId::NONE,
+                post: false,
+            },
+            r(),
+        );
+        add(&mut b, 47, while_);
+        let until_ = b.push(
+            NodeKind::Until {
+                cond: a,
+                body: OptNodeId::NONE,
+                post: false,
+            },
+            r(),
+        );
+        add(&mut b, 48, until_);
+
+        let ast = b.finish(a);
+        (ast, out)
+    }
+
+    #[test]
+    fn build_all_supported_covers_every_supported_tag() {
+        // Cheap staleness guard: if `SUPPORTED_TAGS` grows but
+        // `build_all_supported` is not updated, the exhaustive check below
+        // would silently skip the new tag — fail loudly here instead.
+        let (_, built) = build_all_supported();
+        let built_tags: std::collections::BTreeSet<u8> = built.iter().map(|(t, _)| t.0).collect();
+        let supported_tags: std::collections::BTreeSet<u8> =
+            SUPPORTED_TAGS.iter().copied().collect();
+        assert_eq!(
+            built_tags, supported_tags,
+            "build_all_supported must instantiate exactly the SUPPORTED_TAGS set",
+        );
+    }
+
+    #[test]
+    fn node_child_allows_bare_predicate_matches_pattern_children_slot_shape() {
+        // For every supported kind, the parser-time helper
+        // `node_child_allows_bare_predicate` must agree with the runtime
+        // `pattern_children` output: `false` exactly at `Sym` slot indices,
+        // `true` everywhere else (including trailing-list positions). This
+        // is the structural drift guard between the two: a future variant
+        // that reshuffles slot positions will break compilation of
+        // `pattern_children` (exhaustive match) and break this test if the
+        // helper isn't updated.
+        let (ast, built) = build_all_supported();
+        for (tag, id) in built {
+            let kids = pattern_children(ast.kind(id), ast.raw_parts().node_lists)
+                .unwrap_or_else(|| panic!("supported tag {tag:?} returned no children"));
+
+            // Fixed slot positions: parser-time helper must agree with
+            // runtime slot kind on each index.
+            for (idx, child) in kids.iter().enumerate() {
+                let actual = node_child_allows_bare_predicate(tag, idx);
+                let expected = !matches!(child, PatChild::Sym(_));
+                assert_eq!(
+                    actual, expected,
+                    "tag {tag:?} idx {idx} child {child:?}: helper={actual} expected={expected}",
+                );
+            }
+
+            // Trailing-list positions: indices past the fixed slot count
+            // continue the list. Per the `PatChild::List` invariant
+            // (Node-only lists in v1), every such index must allow bare
+            // predicates. For kinds without a trailing list, the helper
+            // must reject indices past the last fixed slot.
+            let last_is_list = matches!(kids.last(), Some(PatChild::List(_)));
+            let past = kids.len() + 3;
+            let actual_past = node_child_allows_bare_predicate(tag, past);
+            assert_eq!(
+                actual_past, last_is_list,
+                "tag {tag:?} idx {past} (past fixed slots): helper={actual_past} expected={last_is_list}",
+            );
+        }
     }
 
     #[test]

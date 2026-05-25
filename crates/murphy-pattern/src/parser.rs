@@ -572,7 +572,7 @@ impl<'a> Parser<'a> {
             Token::Predicate(name) => PatKind::Predicate(name.clone()),
             Token::Ident(name) => return self.ident_pat(name, span, allow_bare_predicate),
             Token::LParen => return self.node_match(span),
-            Token::LBrace => return self.union(span),
+            Token::LBrace => return self.union(span, allow_bare_predicate),
             Token::Ellipsis => {
                 return Err(ParseError::new(
                     "`...` is only valid inside a node child list",
@@ -665,7 +665,13 @@ impl<'a> Parser<'a> {
     /// node-type-only `{...}` head handled by [`oneof_head`]. The resulting
     /// `Pat`'s span covers `{` through the closing `}`. An empty `{}` or a
     /// stream that ends before `}` is a span-carrying error.
-    fn union(&mut self, open_span: PatSpan) -> Result<Pat, ParseError> {
+    ///
+    /// `allow_bare_predicate` flows through to each alternative so that
+    /// `(send _ :puts {odd? even?})` accepts bare predicate shorthand in
+    /// every alt — the union sits in a node-child slot, so each alternative
+    /// is at the same effective position as if it had been written without
+    /// the `{...}` wrapper.
+    fn union(&mut self, open_span: PatSpan, allow_bare_predicate: bool) -> Result<Pat, ParseError> {
         let mut alts: Vec<Pat> = Vec::new();
         loop {
             // Peek (not `next`) so we can dispatch on the token — a closing `}`
@@ -693,7 +699,7 @@ impl<'a> Parser<'a> {
                         span,
                     });
                 }
-                _ => alts.push(self.prefixed(false)?),
+                _ => alts.push(self.prefixed(allow_bare_predicate)?),
             }
         }
     }
@@ -783,7 +789,33 @@ impl<'a> Parser<'a> {
                         span: PatSpan::new(span.start as usize, suffix_span.end as usize),
                     });
                 } else {
-                    return Err(ParseError::new(format!("unknown node type `{name}`"), span));
+                    // A `?` / `!` follow on a name that isn't a node kind hints
+                    // at predicate intent — surface the `#name?` / `#name!` form
+                    // so users learn the explicit syntax, especially in
+                    // positions (root, head, Sym slot) where bare predicate
+                    // shorthand is not accepted.
+                    let suffix = match self.peek().map(|tok| &tok.tok) {
+                        Some(Token::Question) => Some('?'),
+                        Some(Token::Bang) => Some('!'),
+                        _ => None,
+                    };
+                    let msg = match suffix {
+                        Some(c) => format!(
+                            "unknown node type `{name}` — write `#{name}{c}` to call the host predicate",
+                        ),
+                        None => format!("unknown node type `{name}`"),
+                    };
+                    let span = match suffix {
+                        Some(_) => {
+                            let suffix_end = self.peek().map(|t| t.span.end).unwrap_or(span.end);
+                            PatSpan {
+                                start: span.start,
+                                end: suffix_end,
+                            }
+                        }
+                        None => span,
+                    };
+                    return Err(ParseError::new(msg, span));
                 }
             }
         };
@@ -1575,6 +1607,78 @@ mod tests {
     fn disallows_unknown_bare_predicate_in_sym_child_slot() {
         let e = parse("(send _ odd? :foo)").expect_err("unknown predicate in sym slot");
         assert!(e.message.contains("unknown node type") && e.message.contains("odd"));
+    }
+
+    #[test]
+    fn parses_bare_predicate_in_union_in_node_child_slot() {
+        // The union sits in a node-child slot, so each alt is at the same
+        // effective position — both `odd?` and `even?` parse as predicate
+        // shorthand. `allow_bare_predicate` must flow into `union`.
+        let cs = children_of("(send _ :puts {odd? even?})");
+        assert_eq!(cs.len(), 3);
+        let PatKind::Union(alts) = &cs[2].kind else {
+            panic!("expected Union, got {:?}", cs[2].kind);
+        };
+        assert_eq!(alts.len(), 2);
+        assert_eq!(alts[0].kind, PatKind::Predicate("odd?".into()));
+        assert_eq!(alts[1].kind, PatKind::Predicate("even?".into()));
+    }
+
+    #[test]
+    fn parses_bare_predicate_in_capture_body_in_node_child_slot() {
+        // `$odd?` inside a node-child slot — capture body inherits the
+        // allow-bare-predicate flag and the body parses as a `Predicate`.
+        let p = parse("(int $odd?)").expect("ok");
+        let cs = match &p.root.kind {
+            PatKind::Node { children, .. } => children,
+            other => panic!("expected Node, got {other:?}"),
+        };
+        assert_eq!(cs.len(), 1);
+        let PatKind::Capture { body, .. } = &cs[0].kind else {
+            panic!("expected Capture, got {:?}", cs[0].kind);
+        };
+        assert_eq!(body.kind, PatKind::Predicate("odd?".into()));
+    }
+
+    #[test]
+    fn parses_bang_form_bare_predicate_in_send_arg_slot() {
+        // `save!` in a node-child slot: bare predicate shorthand for `#save!`.
+        let cs = children_of("(send _ :foo save!)");
+        assert_eq!(cs.len(), 3);
+        assert_eq!(cs[2].kind, PatKind::Predicate("save!".into()));
+    }
+
+    #[test]
+    fn top_level_bare_predicate_errors_with_hint() {
+        // `save!` at top level is not in a node-child slot, so the parser
+        // can't accept it as bare predicate shorthand. The error names the
+        // explicit `#save!` form so users learn the host-predicate syntax.
+        let e = parse("save!").expect_err("must reject bare predicate at top level");
+        assert!(
+            e.message.contains("unknown node type") && e.message.contains("`#save!`"),
+            "expected hint about `#save!`, got: {}",
+            e.message,
+        );
+
+        let e = parse("save?").expect_err("must reject bare predicate at top level");
+        assert!(
+            e.message.contains("`#save?`"),
+            "expected hint about `#save?`, got: {}",
+            e.message,
+        );
+    }
+
+    #[test]
+    fn sym_slot_bare_predicate_error_includes_hint() {
+        // Symbol slots disallow bare predicates even in node-child position.
+        // The error should still surface the `#name?` hint.
+        let e =
+            parse("(send _ save?)").expect_err("bare predicate not allowed in Sym slot of send");
+        assert!(
+            e.message.contains("`#save?`"),
+            "expected hint about `#save?`, got: {}",
+            e.message,
+        );
     }
 
     // --- $pat+ / $pat* / $pat? capture slot kinds ------------------------
