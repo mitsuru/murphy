@@ -322,6 +322,83 @@ fn does_not_flag_string_interpolation_braces() {
     );
 }
 
+fn lint_run(source: &str, config: &str) -> (i32, Vec<u8>) {
+    let dir = tempdir().expect("create tempdir");
+    fs::write(dir.path().join("murphy.toml"), config).expect("write murphy.toml");
+    fs::write(dir.path().join("t.rb"), source).expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("t.rb")
+        .assert();
+    let output = assert.get_output().clone();
+    (output.status.code().unwrap_or(-1), output.stderr)
+}
+
+#[test]
+fn space_style_does_not_flag_parens_around_heredoc() {
+    // Heredoc body interleaves between the opener and its matching `)`, so
+    // emitting an inline-space offense across that boundary would produce an
+    // asymmetric `puts( <<~EOS)` autocorrect.
+    let (_code, offs) = lint_json_with_config(
+        "puts(<<~EOS)\n  hi\nEOS\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+    );
+    let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
+    assert!(
+        parens.is_empty(),
+        "space style must not flag parens around a heredoc opener; got {parens:?}",
+    );
+}
+
+#[test]
+fn space_style_does_not_panic_on_heredoc_with_parens() {
+    // Regression: prism emits the heredoc opener token with range.end past the
+    // body, so sorted_tokens().windows(2) can yield pairs where
+    // pair[0].range.end > pair[1].range.start. The space/compact paths used to
+    // pass those reversed bounds through cx.raw_source and panic.
+    let source = "def x\n  puts(<<~EOS)\n    hello (world)\n  EOS\nend\n";
+    let config = "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n";
+    let (code, stderr) = lint_run(source, config);
+    let stderr_text = String::from_utf8_lossy(&stderr);
+    assert!(
+        !stderr_text.contains("returned non-zero"),
+        "cop must not be disabled by panic; stderr: {stderr_text}",
+    );
+    assert!(
+        !stderr_text.contains("panicked"),
+        "cop must not panic on heredoc; stderr: {stderr_text}",
+    );
+    assert!(
+        matches!(code, 0 | 1),
+        "exit code should be 0 or 1; got {code}"
+    );
+}
+
+#[test]
+fn compact_style_does_not_panic_on_heredoc_with_parens() {
+    let source = "def x\n  puts(<<~EOS)\n    hello (world)\n  EOS\nend\n";
+    let config = "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"compact\"\n";
+    let (code, stderr) = lint_run(source, config);
+    let stderr_text = String::from_utf8_lossy(&stderr);
+    assert!(
+        !stderr_text.contains("returned non-zero"),
+        "cop must not be disabled by panic; stderr: {stderr_text}",
+    );
+    assert!(
+        !stderr_text.contains("panicked"),
+        "cop must not panic on heredoc; stderr: {stderr_text}",
+    );
+    assert!(
+        matches!(code, 0 | 1),
+        "exit code should be 0 or 1; got {code}"
+    );
+}
+
 #[test]
 fn config_disabled_silences_the_cop() {
     let dir = tempdir().expect("create tempdir");
