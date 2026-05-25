@@ -133,6 +133,49 @@ fn from_config_json_rejects_typed_enum_violation() {
 }
 
 #[test]
+fn to_config_json_round_trips_through_from_config_json() {
+    // Build a non-default value, encode → decode, compare. Picks every
+    // field type the derive supports so a future regression in any of
+    // {Bool, Int, Str, StrList, Enum, OptInt} fails here loudly.
+    let original = Opts {
+        max: 120,
+        style: "aligned".to_string(),
+        allowed: vec!["one".to_string(), "two".to_string()],
+        required_flag: true,
+        maybe: Some(7),
+        enforced_style: TestStyle::Space,
+    };
+    let json = original.to_config_json();
+    let decoded = Opts::from_config_json(json.as_bytes()).expect("round-trip decode succeeds");
+    assert_eq!(decoded.max, 120);
+    assert_eq!(decoded.style, "aligned");
+    assert_eq!(decoded.allowed, vec!["one".to_string(), "two".to_string()]);
+    assert!(decoded.required_flag);
+    assert_eq!(decoded.maybe, Some(7));
+    assert_eq!(decoded.enforced_style, TestStyle::Space);
+}
+
+#[test]
+fn to_config_json_encodes_none_optional_as_null() {
+    let original = Opts {
+        max: 5,
+        style: "indented".to_string(),
+        allowed: vec![],
+        required_flag: false,
+        maybe: None,
+        enforced_style: TestStyle::NoSpace,
+    };
+    let json = original.to_config_json();
+    assert!(
+        json.contains("\"maybe\":null"),
+        "None should serialize as JSON null, got: {json}"
+    );
+    // Roundtrip still works.
+    let decoded = Opts::from_config_json(json.as_bytes()).expect("round-trip decode succeeds");
+    assert_eq!(decoded.maybe, None);
+}
+
+#[test]
 fn from_config_json_rejects_missing_required() {
     let json = br#"{"max": 50}"#;
     let err = Opts::from_config_json(json).expect_err("missing required rejected");
