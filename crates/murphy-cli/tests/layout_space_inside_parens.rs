@@ -322,6 +322,122 @@ fn does_not_flag_string_interpolation_braces() {
     );
 }
 
+struct LintRun {
+    code: i32,
+    offenses: Vec<serde_json::Value>,
+    stderr: String,
+}
+
+fn lint_capture(source: &str, config: &str) -> LintRun {
+    let dir = tempdir().expect("create tempdir");
+    fs::write(dir.path().join("murphy.toml"), config).expect("write murphy.toml");
+    fs::write(dir.path().join("t.rb"), source).expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("t.rb")
+        .assert();
+    let output = assert.get_output().clone();
+    let code = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let offenses: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).unwrap_or_default();
+    LintRun {
+        code,
+        offenses,
+        stderr,
+    }
+}
+
+// Assert the cop ran cleanly: not auto-disabled by the host's catch_unwind
+// path, normal exit code, and stdout was parseable JSON. Couples to the host's
+// deterministic "disabling for this file" diagnostic (dispatch.rs) rather than
+// the Rust panic hook's free-form "panicked" text, so a future panic-hook
+// override cannot silently turn off panic detection in these tests.
+fn assert_cop_ran_cleanly(run: &LintRun) {
+    assert!(
+        !run.stderr.contains("disabling for this file"),
+        "host disabled the cop mid-run; stderr:\n{}\nstdout offenses: {:?}",
+        run.stderr,
+        run.offenses,
+    );
+    assert!(
+        !run.stderr.contains("returned non-zero"),
+        "cop reported failure to host; stderr:\n{}\nstdout offenses: {:?}",
+        run.stderr,
+        run.offenses,
+    );
+    assert!(
+        matches!(run.code, 0 | 1),
+        "exit code should be 0 (clean) or 1 (offenses); got {}\nstderr:\n{}\nstdout offenses: {:?}",
+        run.code,
+        run.stderr,
+        run.offenses,
+    );
+}
+
+#[test]
+fn space_style_does_not_flag_parens_around_heredoc() {
+    // Heredoc body interleaves between the opener and its matching `)`, so
+    // emitting an inline-space offense across that boundary would produce an
+    // asymmetric `puts( <<~EOS)` autocorrect.
+    let run = lint_capture(
+        "puts(<<~EOS)\n  hi\nEOS\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+    );
+    // Guard against vacuous pass: an empty offense list is only meaningful if
+    // the cop actually ran, not if a panic re-disabled it mid-file.
+    assert_cop_ran_cleanly(&run);
+    let parens = offenses_named(&run.offenses, "Layout/SpaceInsideParens");
+    assert!(
+        parens.is_empty(),
+        "space style must not flag parens around a heredoc opener; got {parens:?}",
+    );
+}
+
+#[test]
+fn compact_style_does_not_flag_parens_around_heredoc() {
+    // Compact style takes a different code path (`remove_single_space_between_
+    // consecutive_parens` + `add_missing_space`) than space style; pin the
+    // non-flagging contract here too.
+    let run = lint_capture(
+        "puts(<<~EOS)\n  hi\nEOS\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"compact\"\n",
+    );
+    assert_cop_ran_cleanly(&run);
+    let parens = offenses_named(&run.offenses, "Layout/SpaceInsideParens");
+    assert!(
+        parens.is_empty(),
+        "compact style must not flag parens around a heredoc opener; got {parens:?}",
+    );
+}
+
+#[test]
+fn space_style_does_not_panic_on_heredoc_with_parens() {
+    // Regression: prism emits the heredoc opener token with range.end past the
+    // body, so sorted_tokens().windows(2) can yield pairs where
+    // pair[0].range.end > pair[1].range.start. The space/compact paths used to
+    // pass those reversed bounds through cx.raw_source and panic.
+    let run = lint_capture(
+        "def x\n  puts(<<~EOS)\n    hello (world)\n  EOS\nend\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+    );
+    assert_cop_ran_cleanly(&run);
+}
+
+#[test]
+fn compact_style_does_not_panic_on_heredoc_with_parens() {
+    let run = lint_capture(
+        "def x\n  puts(<<~EOS)\n    hello (world)\n  EOS\nend\n",
+        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"compact\"\n",
+    );
+    assert_cop_ran_cleanly(&run);
+}
+
 #[test]
 fn config_disabled_silences_the_cop() {
     let dir = tempdir().expect("create tempdir");

@@ -115,6 +115,18 @@ fn add_missing_space(cx: &Cx<'_>, left: SourceToken, right: SourceToken) {
 }
 
 fn can_ignore_missing_space(cx: &Cx<'_>, left: SourceToken, right: SourceToken) -> bool {
+    // Prism reports heredoc opener tokens with range.end past the body, so
+    // sorted_tokens().windows(2) can yield reversed pairs where
+    // left.range.end > right.range.start. Also, the forward pair `(` -> heredoc
+    // opener has no meaningful inline gap because the heredoc body interleaves
+    // between the opener and the matching `)`. Skip any pair involving a
+    // heredoc boundary.
+    if left.range.end > right.range.start {
+        return true;
+    }
+    if is_heredoc_boundary(left) || is_heredoc_boundary(right) {
+        return true;
+    }
     if !parens(left, right) {
         return true;
     }
@@ -128,11 +140,22 @@ fn can_ignore_missing_space(cx: &Cx<'_>, left: SourceToken, right: SourceToken) 
         || has_space_after(cx, left.range.end, right.range.start)
 }
 
+fn is_heredoc_boundary(token: SourceToken) -> bool {
+    matches!(
+        token.kind,
+        SourceTokenKind::HeredocStart | SourceTokenKind::HeredocEnd
+    )
+}
+
 fn remove_space_in_empty_parens(cx: &Cx<'_>, left: SourceToken, right: SourceToken) {
     if left.kind != SourceTokenKind::LeftParen || right.kind != SourceTokenKind::RightParen {
         return;
     }
-    if left.range.end == right.range.start {
+    // `>=` (not `==`) so a reversed-range pair from upstream token-emission
+    // quirks (see can_ignore_missing_space) does not slice raw_source backwards
+    // and panic. The `==` form covers truly empty `()`; the `>` form covers the
+    // defensive reversed case.
+    if left.range.end >= right.range.start {
         return;
     }
 
