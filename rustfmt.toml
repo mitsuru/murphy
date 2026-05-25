@@ -1,0 +1,10 @@
+# `ignore` is an unstable rustfmt option, so workspace fmt commands must use
+# `cargo +nightly fmt`. Stable rustfmt treats `ignore` as unknown and emits a
+# warning, which means `cargo fmt --check` on the pinned 1.95.0 toolchain still
+# reports diffs against murphy-prism — always go through nightly here.
+#
+# murphy-prism is a Murphy-maintained fork of upstream ruby-prism 1.9.0; we
+# keep its formatting aligned with upstream to minimize the rebase diff.
+ignore = [
+    "crates/murphy-prism",
+]

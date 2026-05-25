@@ -51,7 +51,7 @@ cargo test --workspace                            # full suite
 cargo test -p murphy-core <name>                  # single core test
 cargo test -p murphy-cli --test cli               # CLI integration target
 cargo test -p murphy-cli --test migrate           # migration integration target
-cargo fmt --check                                 # formatting gate
+cargo +nightly fmt --check                        # formatting gate (nightly for rustfmt.toml `ignore`; CI pins nightly-2026-05-24)
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
