@@ -125,7 +125,7 @@ fn offense(node: NodeId, cx: &Cx<'_>) -> Option<DeprecatedOffense> {
     let const_name = top_level_const_name(cx, receiver)?;
     match (const_name, method) {
         ("File" | "Dir" | "FileTest", "exists?") => {
-            let selector = selector_range(cx, node, "exists?")?;
+            let selector = cx.node(node).loc.name;
             Some(DeprecatedOffense {
                 range: cx.range(node),
                 message: "Use `exist?` instead of deprecated `exists?`".to_string(),
@@ -193,30 +193,14 @@ fn socket_offense(node: NodeId, cx: &Cx<'_>, preferred: &str) -> Option<Deprecat
     })
 }
 
-fn selector_range(cx: &Cx<'_>, node: NodeId, selector: &str) -> Option<Range> {
-    let range = cx.range(node);
-    let raw = cx.raw_source(range);
-    let pos = raw.find(selector)? as u32;
-    Some(Range {
-        start: range.start + pos,
-        end: range.start + pos + selector.len() as u32,
-    })
-}
-
 fn receiver_selector_range(cx: &Cx<'_>, node: NodeId) -> Option<Range> {
-    let NodeKind::Send {
-        receiver, method, ..
-    } = *cx.kind(node)
-    else {
+    let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
         return None;
     };
     let receiver = receiver.get()?;
-    let selector = cx.symbol_str(method);
-    let receiver_range = cx.range(receiver);
-    let selector_range = selector_range(cx, node, selector)?;
     Some(Range {
-        start: receiver_range.start,
-        end: selector_range.end,
+        start: cx.range(receiver).start,
+        end: cx.node(node).loc.name.end,
     })
 }
 

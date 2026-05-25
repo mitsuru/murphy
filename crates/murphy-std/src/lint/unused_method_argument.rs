@@ -65,19 +65,7 @@ fn param_name_and_range(cx: &Cx<'_>, node: NodeId) -> Option<(Symbol, Range)> {
         NodeKind::Optarg { name, .. } | NodeKind::Kwoptarg { name, .. } => name,
         _ => return None,
     };
-    let raw = cx.raw_source(cx.range(node));
-    let text = cx.symbol_str(name);
-    let start = raw
-        .find(text)
-        .expect("parameter name must appear in parameter node source") as u32
-        + cx.range(node).start;
-    Some((
-        name,
-        Range {
-            start,
-            end: start + text.len() as u32,
-        },
-    ))
+    Some((name, cx.node(node).loc.name))
 }
 
 #[cfg(test)]
