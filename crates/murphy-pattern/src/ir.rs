@@ -262,6 +262,13 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
             let body = lower_pat(inner, ast, ir);
             push_node(ir, IrNode::Descend(body))
         }
+        PatKind::Quantifier { .. } => {
+            // PR #2 (murphy-ycx) lowers quantifiers into the C-backend IR.
+            // PR #1 only covers parse + validation, so reaching here means a
+            // quantifier-bearing pattern was handed to lowering before its
+            // PR landed.
+            todo!("PR #2: lower PatKind::Quantifier into PatternIr")
+        }
     }
 }
 

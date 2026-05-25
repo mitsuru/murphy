@@ -57,6 +57,13 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
         .map(|k| match k {
             CaptureKind::Node => quote!(::murphy_plugin_api::NodeId),
             CaptureKind::Seq => quote!(&'a [::murphy_plugin_api::NodeId]),
+            CaptureKind::OptNode => {
+                // PR #2 (murphy-ycx) wires `$pat?` lowering into the B
+                // backend. PR #1 only ships the AST/parser, so reaching this
+                // arm means a `$pat?` pattern was handed to the macro before
+                // its lowering PR landed.
+                todo!("PR #2: lower CaptureKind::OptNode into the B backend")
+            }
         })
         .collect();
     let cap_decls: Vec<TokenStream> = (0..n_caps)
@@ -1423,6 +1430,11 @@ fn lower_bool(
         PatKind::Rest => Err(syn::Error::new(
             Span::call_site(),
             "node_pattern!: `...` is not valid here",
+        )),
+        PatKind::Quantifier { .. } => Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: postfix `*` / `+` / `?` quantifier is not yet \
+             supported by the B backend (PR #4 lands it)",
         )),
     }
 }

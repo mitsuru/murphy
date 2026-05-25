@@ -27,6 +27,11 @@ pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
     // written on exactly the successful arm; `{}` / `!` / `` ` `` violate
     // this. Matches the B-backend `lower_bool` rejection (murphy-9cr.18).
     validate_capture_position(&root, false)?;
+    // A postfix `*` / `+` / `?` quantifier is only valid as a direct child
+    // of a node match (`(head c1 c2 ...)`); anywhere else the matcher has
+    // no list to iterate. The body of a quantifier is itself constrained:
+    // captures and rest-like elements are not allowed inside.
+    validate_quantifier_placement(&root, false)?;
     Ok(PatternAst {
         root,
         captures: parser.captures,
@@ -74,6 +79,20 @@ mod capture_position_tests {
     }
 }
 
+/// Resolve a capture's slot kind from its body's shape. `Rest` and the
+/// many-iteration quantifiers (`+`, `*`) produce a slice (`Seq`); the
+/// optional quantifier (`?`) produces `OptNode`; anything else binds a
+/// single node (`Node`).
+fn slot_kind_for_body(body: &Pat) -> CaptureKind {
+    match &body.kind {
+        PatKind::Rest => CaptureKind::Seq,
+        // A `?` quantifier has `max == 1`; `+` / `*` have `max == u8::MAX`.
+        PatKind::Quantifier { max: 1, .. } => CaptureKind::OptNode,
+        PatKind::Quantifier { .. } => CaptureKind::Seq,
+        _ => CaptureKind::Node,
+    }
+}
+
 /// Whether `pat` is a "rest-like" element — one that matches zero-or-more
 /// sibling nodes. There are two forms: a bare `...` ([`PatKind::Rest`]) and an
 /// anonymous seq capture `$...` (a [`PatKind::Capture`] whose `body` is
@@ -83,6 +102,99 @@ fn is_rest_like(pat: &Pat) -> bool {
         PatKind::Rest => true,
         PatKind::Capture { body, .. } => matches!(body.kind, PatKind::Rest),
         _ => false,
+    }
+}
+
+/// Post-parse walk enforcing the v1 grammar rule for quantifiers (`*` / `+` /
+/// `?`): each is valid *only* as a direct child of a node match `(...)`, and
+/// its body may not itself contain `$` captures or rest-like elements.
+///
+/// The error message names which rule was broken so the user can correct the
+/// pattern without guessing. Mirrors [`validate_rest_placement`].
+///
+/// `is_node_child` is `true` only when `pat` is being visited as a direct
+/// child of a [`PatKind::Node`]; the root, union alternatives, and the bodies
+/// of `!`/`^`/`` ` ``/`$` are all *not* node children.
+fn validate_quantifier_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseError> {
+    if let PatKind::Quantifier { .. } = &pat.kind
+        && !is_node_child
+    {
+        return Err(ParseError::new(
+            "postfix `*` / `+` / `?` is only valid as a direct child of a node match",
+            pat.span,
+        ));
+    }
+    match &pat.kind {
+        PatKind::Quantifier { body, .. } => {
+            // The body of a quantifier is itself not a node child, and it
+            // must not contain captures or rest-like elements (those would
+            // make the per-iteration semantics undefined — what slot does
+            // each iteration write into? where does `...` end?).
+            validate_quantifier_body(body)?;
+            validate_quantifier_placement(body, false)
+        }
+        PatKind::Node { children, .. } => {
+            for child in children {
+                validate_quantifier_placement(child, true)?;
+            }
+            Ok(())
+        }
+        PatKind::Union(alts) => {
+            for alt in alts {
+                validate_quantifier_placement(alt, false)?;
+            }
+            Ok(())
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            validate_quantifier_placement(b, false)
+        }
+        // A `$pat+` capture sits *as* a node child, so its quantifier body
+        // is allowed at the same position the capture itself is allowed —
+        // propagate `is_node_child` rather than reset it.
+        PatKind::Capture { body, .. } => validate_quantifier_placement(body, is_node_child),
+        PatKind::Rest
+        | PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate(_)
+        | PatKind::Kind(_) => Ok(()),
+    }
+}
+
+/// Reject patterns that may not appear inside the body of a `*`/`+`/`?`
+/// quantifier: any `$` capture (the per-iteration write would be ambiguous)
+/// and any rest-like element (chaining `...` with `*`/`+`/`?` would create
+/// an undefined match shape).
+fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
+    match &pat.kind {
+        PatKind::Capture { .. } => Err(ParseError::new(
+            "`$` capture is not allowed inside a quantifier body \
+             (use `$pat+` / `$pat*` / `$pat?` to capture the iterations)",
+            pat.span,
+        )),
+        PatKind::Rest => Err(ParseError::new(
+            "`...` is not allowed inside a quantifier body",
+            pat.span,
+        )),
+        PatKind::Node { children, .. } => {
+            for child in children {
+                validate_quantifier_body(child)?;
+            }
+            Ok(())
+        }
+        PatKind::Union(alts) => {
+            for alt in alts {
+                validate_quantifier_body(alt)?;
+            }
+            Ok(())
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => validate_quantifier_body(b),
+        PatKind::Quantifier { body, .. } => validate_quantifier_body(body),
+        PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate(_)
+        | PatKind::Kind(_) => Ok(()),
     }
 }
 
@@ -122,6 +234,7 @@ fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseErro
         }
         PatKind::Not(b) | PatKind::Descend(b) => validate_capture_position(b, true),
         PatKind::Parent(b) => validate_capture_position(b, forbidden),
+        PatKind::Quantifier { body, .. } => validate_capture_position(body, forbidden),
         PatKind::Node { children, .. } => {
             for child in children {
                 validate_capture_position(child, forbidden)?;
@@ -184,6 +297,13 @@ fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseEr
                 validate_rest_placement(body, false)?;
             }
         }
+        PatKind::Quantifier { body, .. } => {
+            // The body of a quantifier is not a node child, so a rest-like
+            // body would have been (and still is) rejected by the recursive
+            // call. `validate_quantifier_body` is the single source of truth
+            // for the stricter "no rest inside quantifier" message.
+            validate_rest_placement(body, false)?;
+        }
         PatKind::Rest
         | PatKind::Wildcard
         | PatKind::NilTest
@@ -231,10 +351,14 @@ impl<'a> Parser<'a> {
     }
 
     /// `prefixed := '!' prefixed | '^' prefixed | '`' prefixed
-    /// | '$' capture-tail | primary`.
+    /// | '$' capture-tail | postfixed`.
     ///
     /// `$` is a prefix dispatched here (see [`Parser::capture`]), not in
-    /// [`Parser::primary`].
+    /// [`Parser::primary`]. Postfix quantifiers wrap the [`primary`] that
+    /// follows a chain of `!`/`^`/`` ` `` prefixes, NOT the prefixes
+    /// themselves — `!int+` parses as `Not(Quantifier(int, +))` so that the
+    /// downstream `validate_quantifier_placement` walk can flag the
+    /// node-child-only rule on the quantifier subtree (its parent is `!`).
     fn prefixed(&mut self) -> Result<Pat, ParseError> {
         let Some(head) = self.peek() else {
             // No source byte to point at for an empty stream.
@@ -246,7 +370,7 @@ impl<'a> Parser<'a> {
             Token::Caret => PatKind::Parent,
             Token::Backtick => PatKind::Descend,
             Token::Dollar => return self.capture(prefix_span),
-            _ => return self.primary(),
+            _ => return self.postfixed(),
         };
         self.pos += 1; // consume the prefix sigil
         let inner = self.prefixed()?;
@@ -258,6 +382,58 @@ impl<'a> Parser<'a> {
             kind: wrap(Box::new(inner)),
             span,
         })
+    }
+
+    /// `postfixed := primary quantifier?`.
+    ///
+    /// Reads a [`primary`](Self::primary) and, if the next token is a
+    /// postfix quantifier (`*` / `+` / `?`), wraps it in a
+    /// [`PatKind::Quantifier`]. Chained postfixes (`int++`, `int*?`) are
+    /// rejected here — exactly one quantifier per primary.
+    ///
+    /// Placement (only valid as a node child) and body restrictions (no
+    /// captures or rest inside the body) are enforced post-parse by
+    /// [`validate_quantifier_placement`] / [`validate_quantifier_body`], so
+    /// every quantifier-bearing source position lands the same error.
+    fn postfixed(&mut self) -> Result<Pat, ParseError> {
+        let primary = self.primary()?;
+        let Some((min, max, q_span)) = self.try_quantifier() else {
+            return Ok(primary);
+        };
+        // Reject a *second* quantifier immediately after (`int++`, `int*?`).
+        if let Some((_, _, dup_span)) = self.try_quantifier() {
+            return Err(ParseError::new(
+                "postfix `*` / `+` / `?` cannot be chained — apply at most one quantifier per pattern",
+                dup_span,
+            ));
+        }
+        let span = PatSpan {
+            start: primary.span.start,
+            end: q_span.end,
+        };
+        Ok(Pat {
+            kind: PatKind::Quantifier {
+                body: Box::new(primary),
+                min,
+                max,
+            },
+            span,
+        })
+    }
+
+    /// If the cursor is at a postfix quantifier token, consume it and return
+    /// `(min, max, span)`; otherwise leave the cursor unmoved.
+    fn try_quantifier(&mut self) -> Option<(u8, u8, PatSpan)> {
+        let next = self.peek()?;
+        let (min, max) = match next.tok {
+            Token::Star => (0, u8::MAX),
+            Token::Plus => (1, u8::MAX),
+            Token::Question => (0, 1),
+            _ => return None,
+        };
+        let span = next.span;
+        self.pos += 1;
+        Some((min, max, span))
     }
 
     /// Parse a `$` capture tail. `dollar_span` is the span of the `$` token,
@@ -294,29 +470,45 @@ impl<'a> Parser<'a> {
         // a synthetic Wildcard spanning only the `$`, so the identifier token's
         // span end is tracked separately and used for the outer Capture span.
         let (name, body, capture_end) = match &next.tok {
-            Token::Ident(ident) => {
-                let name = ident.clone();
-                let ident_span = next.span;
-                self.pos += 1; // consume the ident
-                if self.capture_names.contains(&name) {
-                    return Err(ParseError::new(
-                        format!("duplicate capture name `{name}`"),
-                        ident_span,
-                    ));
+            Token::Ident(_) => {
+                // `$ident` is ambiguous on its own: it could be a named
+                // capture (`$receiver`) or an anonymous capture whose body is
+                // a kind name + quantifier (`$int+`). Look one token past the
+                // ident to decide. The `postfixed()` route handles both the
+                // bare kind case (`$int`) and the quantifier case (`$int+`)
+                // uniformly — and validation later rejects `$int` at
+                // positions where a bare-kind body is meaningless.
+                let lookahead = self.tokens.get(self.pos + 1).map(|s| &s.tok);
+                if matches!(lookahead, Some(Token::Star | Token::Plus | Token::Question)) {
+                    let body = self.postfixed()?;
+                    let end = body.span.end;
+                    (None, body, end)
+                } else {
+                    let Token::Ident(ident) = &next.tok else {
+                        unreachable!("matched outer Token::Ident");
+                    };
+                    let name = ident.clone();
+                    let ident_span = next.span;
+                    self.pos += 1; // consume the ident
+                    if self.capture_names.contains(&name) {
+                        return Err(ParseError::new(
+                            format!("duplicate capture name `{name}`"),
+                            ident_span,
+                        ));
+                    }
+                    self.capture_names.push(name.clone());
+                    // The implicit Wildcard body is synthetic; per spec it
+                    // spans the `$` token, not the identifier.
+                    let body = Pat {
+                        kind: PatKind::Wildcard,
+                        span: dollar_span,
+                    };
+                    (Some(name), body, ident_span.end)
                 }
-                self.capture_names.push(name.clone());
-                // The implicit Wildcard body is synthetic; per spec it spans
-                // the `$` token, not the identifier.
-                let body = Pat {
-                    kind: PatKind::Wildcard,
-                    span: dollar_span,
-                };
-                (Some(name), body, ident_span.end)
             }
             Token::Ellipsis => {
                 let ell_span = next.span;
                 self.pos += 1; // consume `...`
-                self.captures[slot as usize] = CaptureKind::Seq;
                 let body = Pat {
                     kind: PatKind::Rest,
                     span: ell_span,
@@ -329,6 +521,12 @@ impl<'a> Parser<'a> {
                 (None, body, end)
             }
         };
+
+        // Upgrade the slot kind based on the body's shape: `$...` and
+        // `$pat+` / `$pat*` produce a slice (`Seq`), `$pat?` produces an
+        // optional single node (`OptNode`), everything else captures one
+        // node (`Node`, the placeholder set at slot reservation).
+        self.captures[slot as usize] = slot_kind_for_body(&body);
 
         let span = PatSpan {
             start: dollar_span.start,
@@ -375,6 +573,12 @@ impl<'a> Parser<'a> {
             }
             Token::RParen => return Err(ParseError::new("unexpected `)`", span)),
             Token::RBrace => return Err(ParseError::new("unexpected `}`", span)),
+            Token::Star | Token::Plus | Token::Question => {
+                return Err(ParseError::new(
+                    "postfix `*` / `+` / `?` must follow a pattern",
+                    span,
+                ));
+            }
             Token::Bang | Token::Caret | Token::Backtick | Token::Dollar => {
                 // `prefixed` dispatches these; `primary` never sees them.
                 unreachable!("prefix sigils are handled by `prefixed`");
@@ -416,6 +620,14 @@ impl<'a> Parser<'a> {
                 Token::Ellipsis => {
                     let ell_span = tok.span;
                     self.pos += 1; // consume `...`
+                    // `...` is itself a 0+ rest, so chaining `*`/`+`/`?` on
+                    // it is meaningless and an error.
+                    if let Some((_, _, q_span)) = self.try_quantifier() {
+                        return Err(ParseError::new(
+                            "`...` cannot take a postfix `*` / `+` / `?` quantifier",
+                            q_span,
+                        ));
+                    }
                     children.push(Pat {
                         kind: PatKind::Rest,
                         span: ell_span,
@@ -1207,5 +1419,290 @@ mod tests {
         assert!(parse("(send $receiver $...)").is_ok());
         assert!(parse("(array ... _)").is_ok());
         assert!(parse("(array _ $...)").is_ok());
+    }
+
+    // --- murphy-ycx: postfix quantifier (`*`, `+`, `?`) -------------------
+
+    /// Pull the children out of a top-level `(...)` parse, panicking with the
+    /// pattern source if the root is not a `Node`. Only used by quantifier
+    /// tests below.
+    fn children_of(src: &str) -> Vec<Pat> {
+        let p = parse(src).unwrap_or_else(|e| panic!("parse `{src}`: {e:?}"));
+        match p.root.kind {
+            PatKind::Node { children, .. } => children,
+            other => panic!("`{src}` should be a Node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_plus_quantifier_on_kind() {
+        // `(array int+)` — the lone child is a quantifier wrapping `Kind(int)`.
+        let cs = children_of("(array int+)");
+        assert_eq!(cs.len(), 1);
+        match &cs[0].kind {
+            PatKind::Quantifier { body, min, max } => {
+                assert_eq!(*min, 1);
+                assert_eq!(*max, u8::MAX);
+                assert!(matches!(body.kind, PatKind::Kind(_)));
+            }
+            other => panic!("expected Quantifier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_star_quantifier_on_kind() {
+        let cs = children_of("(array int*)");
+        match &cs[0].kind {
+            PatKind::Quantifier { min, max, .. } => {
+                assert_eq!(*min, 0);
+                assert_eq!(*max, u8::MAX);
+            }
+            other => panic!("expected Quantifier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_question_quantifier_on_kind() {
+        let cs = children_of("(send _ :update_columns hash?)");
+        match &cs[2].kind {
+            PatKind::Quantifier { min, max, .. } => {
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 1);
+            }
+            other => panic!("expected Quantifier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quantifier_span_covers_body_through_postfix() {
+        // `(array int+)` — `int` at 7..10, `+` at 10..11; the Quantifier
+        // span must cover 7..11.
+        let cs = children_of("(array int+)");
+        assert_eq!((cs[0].span.start, cs[0].span.end), (7, 11));
+    }
+
+    #[test]
+    fn parses_quantifier_with_rest_in_same_child_list() {
+        // `(send _ :foo ... int+)` — `...` and a quantifier coexist in the
+        // same child list, in DESIGN's recommended mix-with-rest form.
+        let cs = children_of("(send _ :foo ... int+)");
+        assert!(matches!(cs[2].kind, PatKind::Rest));
+        assert!(matches!(cs[3].kind, PatKind::Quantifier { .. }));
+    }
+
+    #[test]
+    fn parses_quantifier_on_sym_kind() {
+        // `(send _ :pluck sym+)` — a quantifier on `Kind(sym)`.
+        let cs = children_of("(send _ :pluck sym+)");
+        match &cs[2].kind {
+            PatKind::Quantifier { body, min, .. } => {
+                assert_eq!(*min, 1);
+                assert!(matches!(body.kind, PatKind::Kind(_)));
+            }
+            other => panic!("expected Quantifier, got {other:?}"),
+        }
+    }
+
+    // --- $pat+ / $pat* / $pat? capture slot kinds ------------------------
+
+    #[test]
+    fn capture_with_plus_body_is_seq_slot() {
+        // `(send _ :pluck $sym+)` — anonymous capture with a `Quantifier` body,
+        // slot kind upgrades to `Seq` so the matcher returns a slice.
+        let p = parse("(send _ :pluck $sym+)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Seq]);
+    }
+
+    #[test]
+    fn capture_with_star_body_is_seq_slot() {
+        let p = parse("(array $int*)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Seq]);
+    }
+
+    #[test]
+    fn capture_with_question_body_is_optnode_slot() {
+        // `(send _ :update_columns $hash?)` — `?` produces `OptNode`.
+        let p = parse("(send _ :update_columns $hash?)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::OptNode]);
+    }
+
+    #[test]
+    fn named_capture_without_postfix_keeps_node_kind() {
+        // `(send $receiver _)` — no postfix; the existing named-capture
+        // behavior (body = Wildcard, slot = Node) is preserved.
+        let p = parse("(send $receiver _)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Node]);
+        match &p.root.kind {
+            PatKind::Node { children, .. } => match &children[0].kind {
+                PatKind::Capture { name, body, .. } => {
+                    assert_eq!(name.as_deref(), Some("receiver"));
+                    assert_eq!(body.kind, PatKind::Wildcard);
+                }
+                other => panic!("expected Capture, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn dollar_ident_with_postfix_is_anonymous_capture() {
+        // `(send $name?)` — `$` + ident + postfix becomes an anonymous
+        // capture whose body is `Quantifier(Kind(name), ?)`. There is no
+        // `name` *named* capture: the slot is anonymous and has no `name`.
+        let p = parse("(send $send?)").expect("ok");
+        match &p.root.kind {
+            PatKind::Node { children, .. } => match &children[0].kind {
+                PatKind::Capture { name, body, .. } => {
+                    assert!(name.is_none(), "must not be a named capture");
+                    assert!(matches!(body.kind, PatKind::Quantifier { .. }));
+                }
+                other => panic!("expected Capture, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+        assert_eq!(p.capture_kinds(), &[CaptureKind::OptNode]);
+    }
+
+    // --- error cases (the 5 DESIGN-listed parse failures) -----------------
+
+    #[test]
+    fn error_quantifier_at_top_level() {
+        // `int+` — quantifier outside a node child list.
+        let e = parse("int+").expect_err("top-level quantifier");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_quantifier_in_union_arm() {
+        // `{int+ sym}` — quantifier inside `{}` is not a node child either.
+        let e = parse("{int+ sym}").expect_err("quantifier in union arm");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_quantifier_inside_not_sigil_body() {
+        // `!int+` — `!` wraps `int+`, so the quantifier's parent is `Not`,
+        // not a node match. DESIGN writes this as `!(int+)`, but parens
+        // around `int+` start a node match (not grouping), so the
+        // single-pattern form `!int+` is the actual syntactic shape.
+        let e = parse("!int+").expect_err("quantifier under `!`");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_quantifier_inside_parent_sigil_body() {
+        // `^int+` — the body of `^` is not a node child.
+        let e = parse("^int+").expect_err("quantifier under `^`");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_quantifier_inside_descend_sigil_body() {
+        // `` `int+ `` — the body of `` ` `` is not a node child.
+        let e = parse("`int+").expect_err("quantifier under backtick");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_chained_postfix_plus_plus() {
+        // `(array int++)` — two postfixes in a row is a parser-level reject.
+        let e = parse("(array int++)").expect_err("chained ++");
+        assert!(
+            e.message.contains("chained") || e.message.contains("at most one"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_chained_postfix_star_question() {
+        let e = parse("(array int*?)").expect_err("chained *?");
+        assert!(
+            e.message.contains("chained") || e.message.contains("at most one"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_capture_inside_quantifier_body_via_parens() {
+        // `(array ($int)+)` — `($int)` parses as a Node with missing head
+        // (rejected earlier) — the message can be either "needs a head" or
+        // a capture-in-quantifier-body message depending on parse order.
+        // The acceptance criterion DESIGN names is `($int)+`; verify it
+        // errors *somehow*.
+        assert!(parse("(array ($int)+)").is_err());
+    }
+
+    #[test]
+    fn error_capture_inside_quantifier_body_via_node() {
+        // `(array (send _ $_)+)` — a quantifier wrapping a Node whose
+        // children include a `$` capture; rejected by
+        // `validate_quantifier_body`.
+        let e = parse("(array (send _ $_)+)").expect_err("capture in quantifier body");
+        assert!(
+            e.message.contains("quantifier body"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_rest_with_postfix_quantifier() {
+        // `(array ...+)` — chaining `+` on `...` is a parser-level reject.
+        let e = parse("(array ...+)").expect_err("rest with postfix");
+        assert!(
+            e.message.contains("...") && e.message.contains("quantifier"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_standalone_postfix_token() {
+        // A bare `+` with nothing before it must error at primary.
+        let e = parse("+").expect_err("bare +");
+        assert!(
+            e.message.contains("must follow a pattern"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    // --- mixing rule: at most one rest, but quantifier may coexist ----------
+
+    #[test]
+    fn allows_rest_and_quantifier_in_same_child_list() {
+        // DESIGN mixing rule: at most one rest, but a quantifier may also
+        // appear alongside it.
+        assert!(parse("(send _ :foo ... int+)").is_ok());
+        assert!(parse("(send _ :foo int+ ...)").is_ok());
+    }
+
+    #[test]
+    fn allows_multiple_quantifiers_in_same_child_list() {
+        // No "at most one quantifier" rule: a child list may have several.
+        assert!(parse("(send _ :foo int+ sym*)").is_ok());
+        assert!(parse("(send _ :foo int? str+ sym*)").is_ok());
     }
 }

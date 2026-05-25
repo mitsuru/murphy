@@ -69,6 +69,11 @@ pub enum PatKind {
     Parent(Box<Pat>),
     /// `` `x `` — descendant search: match `x` against some descendant.
     Descend(Box<Pat>),
+    /// `pat*` / `pat+` / `pat?` — postfix quantifier on a node-child element.
+    /// `min..=max`: `*` → `0..=u8::MAX`, `+` → `1..=u8::MAX`, `?` → `0..=1`.
+    /// Only valid as a direct child of a [`PatKind::Node`]; captures may
+    /// appear *around* the quantifier but not *inside* its `body`.
+    Quantifier { body: Box<Pat>, min: u8, max: u8 },
 }
 
 /// The head of a `Node` match: what the node's kind must satisfy.
@@ -99,8 +104,10 @@ pub enum Lit {
 pub enum CaptureKind {
     /// `$_`, `$(...)`, `$ident`, `$:sym`, … — binds one node.
     Node,
-    /// `$...` — binds zero or more nodes.
+    /// `$...`, `$pat+`, `$pat*` — binds zero or more nodes.
     Seq,
+    /// `$pat?` — binds an optional single node (slot present in either arm).
+    OptNode,
 }
 
 #[cfg(test)]
