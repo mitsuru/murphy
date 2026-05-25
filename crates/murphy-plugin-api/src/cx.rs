@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 
 use murphy_ast::{
-    AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken, collect_children,
+    AstNode, Comment, NodeId, NodeKind, NodeLoc, OptNodeId, Range, SourceToken, collect_children,
 };
 
 use crate::abi::CxRaw;
@@ -69,9 +69,21 @@ impl<'a> Cx<'a> {
         &self.nodes()[id.0 as usize].kind
     }
 
-    /// The source range of the node at `id`.
+    /// The source range of the node at `id` — shorthand for
+    /// `self.loc(id).expression` / `self.node(id).loc.expression`.
     pub fn range(&self, id: NodeId) -> Range {
-        self.nodes()[id.0 as usize].range
+        self.nodes()[id.0 as usize].loc.expression
+    }
+
+    /// The `node.loc` bundle for `id` — Murphy's analog of the parser
+    /// gem's `node.loc` accessor. `.expression` is the AST node's full
+    /// source range; `.name` is the identifier range (the
+    /// `node.loc.name` analog), [`Range::ZERO`] for nodes without
+    /// an identifier or for name-bearing nodes the translator did not
+    /// annotate. Equivalent to `self.node(id).loc`; provided as a
+    /// shorthand so cops can write `cx.loc(node).name`.
+    pub fn loc(&self, id: NodeId) -> NodeLoc {
+        self.nodes()[id.0 as usize].loc
     }
 
     /// The parent of `id`; `OptNodeId::NONE` for the root.

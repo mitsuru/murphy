@@ -35,10 +35,7 @@
 //! violation stands) but skips the edit so the user can hand-fix without
 //! risk of a wrong autocorrect.
 
-use murphy_plugin_api::{Cop, CopOptions, Cx, NodeCop, NodeId, NodeKindTag, Range, Severity};
-
-/// `NodeKind::Str` discriminant — declaration order is frozen by ADR 0037.
-const STR_TAG: NodeKindTag = NodeKindTag(7);
+use murphy_plugin_api::{CopOptions, Cx, NodeId, Range, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -59,19 +56,16 @@ pub struct StringLiteralsOptions {
     pub preferred_quote: String,
 }
 
-impl Cop for StringLiterals {
-    type Options = StringLiteralsOptions;
-    const NAME: &'static str = "Style/StringLiterals";
-    const DESCRIPTION: &'static str =
-        "Prefer one quote style (single / double) for plain string literals.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-impl NodeCop for StringLiterals {
-    const KINDS: &'static [NodeKindTag] = &[STR_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "Style/StringLiterals",
+    description = "Prefer one quote style (single / double) for plain string literals.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = StringLiteralsOptions
+)]
+impl StringLiterals {
+    #[on_node(kind = "str")]
+    fn check_str(&self, node: NodeId, cx: &Cx<'_>) {
         // Runtime option access (murphy-9cr.9) is not yet wired through
         // `Cx`; v1 honours the `Default` (`preferred_quote = "single"`).
         // The schema is exported regardless so the validation gate can

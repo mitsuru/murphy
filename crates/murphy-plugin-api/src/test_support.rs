@@ -473,10 +473,15 @@ pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
         cop.check(ast.root(), &cx);
     } else {
         // Per-kind dispatch — feed every node; the macro-generated
-        // `check` filters by tag.
+        // `check` filters by tag. `SEND_METHODS` mirrors the host's
+        // pre-dispatch filter so cops using `methods = [...]` see the
+        // same call pattern in tests as in production.
         let node_count = ast.raw_parts().nodes.len();
         for i in 0..node_count {
-            cop.check(NodeId(i as u32), &cx);
+            let node = NodeId(i as u32);
+            if send_method_filter_passes::<T>(node, &cx) {
+                cop.check(node, &cx);
+            }
         }
     }
 
@@ -485,6 +490,24 @@ pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
         offenses: sink.offenses,
         edits: sink.edits,
     }
+}
+
+/// Mirror the host's `Send`-method pre-dispatch filter (see
+/// `murphy-core::dispatch::send_method_passes`) so cops declared with
+/// `#[on_node(kind = "send", methods = [...])]` get the same per-node
+/// filtering in tests as they do in production. Non-`Send` nodes pass
+/// through unchanged; cops without an allow-list pass through too.
+fn send_method_filter_passes<T: NodeCop>(node: NodeId, cx: &Cx<'_>) -> bool {
+    if T::SEND_METHODS.is_empty() {
+        return true;
+    }
+    let murphy_ast::NodeKind::Send { method, .. } = *cx.kind(node) else {
+        return true;
+    };
+    let method = cx.symbol_str(method).as_bytes();
+    T::SEND_METHODS
+        .iter()
+        .any(|allowed| unsafe { allowed.as_bytes() } == method)
 }
 
 fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
@@ -574,7 +597,7 @@ fn cx_raw_for(ast: &Ast, fns: &FnTable, cop_name: RawSlice, sink: &RefCell<Sink>
 #[cfg(test)]
 mod tests {
     use super::{parse_annotated, render};
-    use crate::{Cop, Cx, NoOptions, NodeCop, NodeKindTag, Range};
+    use crate::{Cop, Cx, NoOptions, NodeCop, NodeKind, NodeKindTag, Range, RawSlice};
     use murphy_ast::NodeId;
 
     /// Fixture: emits nothing.
@@ -639,6 +662,27 @@ mod tests {
         }
     }
 
+    /// Fixture: emits one offense per visited `Send` node, gated by
+    /// `SEND_METHODS = ["target"]`. Exercises the test harness's
+    /// `send_method_filter_passes` path so dispatch in tests matches the
+    /// host pre-filter for cops authored as
+    /// `#[on_node(kind = "send", methods = [...])]`.
+    #[derive(Default)]
+    struct SendMethodFilteredCop;
+    impl Cop for SendMethodFilteredCop {
+        type Options = NoOptions;
+        const NAME: &'static str = "Test/SendMethodFiltered";
+    }
+    impl NodeCop for SendMethodFilteredCop {
+        const KINDS: &'static [NodeKindTag] = &[NodeKindTag(17)];
+        const SEND_METHODS: &'static [RawSlice] = &[RawSlice::from_str("target")];
+        fn check(&self, node: NodeId, cx: &Cx<'_>) {
+            if matches!(*cx.kind(node), NodeKind::Send { .. }) {
+                cx.emit_offense(cx.range(node), "called", None);
+            }
+        }
+    }
+
     #[test]
     fn expect_no_offenses_passes_when_cop_emits_nothing() {
         expect_no_offenses!(NoopCop, "x = 1\n");
@@ -648,6 +692,13 @@ mod tests {
     #[should_panic(expected = "expect_no_offenses! found 1 offense(s)")]
     fn expect_no_offenses_panics_when_cop_emits() {
         expect_no_offenses!(FixedRangeCop, "abc\n");
+    }
+
+    #[test]
+    fn run_cop_honors_send_method_filter() {
+        let offenses = super::run_cop::<SendMethodFilteredCop>("target\nother\n");
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 0, end: 6 });
     }
 
     #[test]

@@ -22,29 +22,22 @@
 //! and the cop is `warning` severity so the lint run does not fail on
 //! it. This matches RuboCop's `Lint/UnreachableCode` policy.
 
-use murphy_plugin_api::{
-    Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, OptNodeId, Severity,
-};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct UnreachableCode;
 
-impl Cop for UnreachableCode {
-    type Options = NoOptions;
-    const NAME: &'static str = "Lint/UnreachableCode";
-    const DESCRIPTION: &'static str = "Flag statements following a terminator (return / break / next / raise) in the same begin block.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-/// `NodeKind::Begin` discriminant — declaration order is frozen by ADR 0037.
-const BEGIN_TAG: NodeKindTag = NodeKindTag(28);
-
-impl NodeCop for UnreachableCode {
-    const KINDS: &'static [NodeKindTag] = &[BEGIN_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "Lint/UnreachableCode",
+    description = "Flag statements following a terminator (return / break / next / raise) in the same begin block.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl UnreachableCode {
+    #[on_node(kind = "begin")]
+    fn check_begin(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Begin(_) = *cx.kind(node) else {
             return;
         };

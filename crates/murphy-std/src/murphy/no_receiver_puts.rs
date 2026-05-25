@@ -16,47 +16,31 @@
 //! 0038): both the AST types and `register_cops!` are reached through
 //! the plugin-api re-export surface.
 
-use murphy_plugin_api::{
-    Cop, Cx, NoOptions, NodeCop, NodeId, NodeKind, NodeKindTag, OptNodeId, Severity,
-};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct NoReceiverPuts;
 
-impl Cop for NoReceiverPuts {
-    type Options = NoOptions;
-    const NAME: &'static str = "Murphy/NoReceiverPuts";
-    const DESCRIPTION: &'static str =
-        "Flag receiver-less `puts`/`print`/`p` calls; use a logger instead.";
-    const DEFAULT_SEVERITY: Option<Severity> = Some(Severity::Warning);
-    const DEFAULT_ENABLED: Option<bool> = Some(true);
-}
-
-/// `NodeKind::Send` tag — declaration order is frozen by ADR 0037; see
-/// `murphy_ast::KIND_PATTERN_NAMES` where `"send"` is bound to `17`.
-const SEND_TAG: NodeKindTag = NodeKindTag(17);
-
-impl NodeCop for NoReceiverPuts {
-    const KINDS: &'static [NodeKindTag] = &[SEND_TAG];
-
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+#[cop(
+    name = "Murphy/NoReceiverPuts",
+    description = "Flag receiver-less `puts`/`print`/`p` calls; use a logger instead.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = NoOptions
+)]
+impl NoReceiverPuts {
+    #[on_node(kind = "send", methods = ["puts", "print", "p"])]
+    fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         // Pattern-match defends against the dispatcher feeding us a non-Send
         // node (it should not — `KINDS = [Send]` — but the `let-else` is
         // free, and a future kind aliasing accident here would silently
         // misreport without it).
-        let NodeKind::Send {
-            receiver, method, ..
-        } = *cx.kind(node)
-        else {
+        let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
             return;
         };
         // Gate 1 (ADR 0001): an explicit receiver is intentional output.
         if receiver != OptNodeId::NONE {
-            return;
-        }
-        // Gate 2: only the three bare-output method names.
-        if !matches!(cx.symbol_str(method), "puts" | "print" | "p") {
             return;
         }
         cx.emit_offense(cx.range(node), "Use a logger instead of puts", None);

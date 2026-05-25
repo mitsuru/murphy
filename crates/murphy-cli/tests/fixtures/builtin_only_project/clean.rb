@@ -5,4 +5,5 @@
 x = 1
 y = x + 2
 logger.info 'ok'
+logger.info y
 obj.puts 'explicit receiver is fine'

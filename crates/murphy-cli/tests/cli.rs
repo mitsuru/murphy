@@ -20,8 +20,8 @@ use murphy_core::SYNTAX_COP_NAME;
 use std::fs;
 use tempfile::tempdir;
 
-const CLEAN_SOURCE: &str = "# frozen_string_literal: true\n\nx = 1\n";
-const CLEAN_SOURCE_2: &str = "# frozen_string_literal: true\n\ny = 2\n";
+const CLEAN_SOURCE: &str = "# frozen_string_literal: true\n\nx = 1\nlogger.info x\n";
+const CLEAN_SOURCE_2: &str = "# frozen_string_literal: true\n\ny = 2\nlogger.info y\n";
 const DIRTY_PUTS_SOURCE: &str = "# frozen_string_literal: true\n\nputs 'hi'\n";
 const DIRTY_PUTS_X_SOURCE: &str = "# frozen_string_literal: true\n\nputs 'x'\n";
 

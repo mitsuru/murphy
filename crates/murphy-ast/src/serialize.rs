@@ -12,8 +12,8 @@
 use crate::ast::Ast;
 use crate::interner::Interner;
 use crate::node::{
-    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceBuffer,
-    SourceToken, SourceTokenKind, StringId, Symbol,
+    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range,
+    SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
 };
 use sha2::{Digest, Sha256};
 
@@ -22,7 +22,7 @@ pub const MAGIC: &[u8; 8] = b"MURPHYAS";
 
 /// Binary format version. Bump on **any** layout change — old caches are
 /// then rejected with [`SerError::FormatVersionMismatch`].
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// Total header size in bytes. The body immediately follows. Downstream
 /// (cache, mmap) code can rely on this offset being fixed.
@@ -693,16 +693,18 @@ fn read_node_list(cur: &mut &[u8]) -> Result<NodeList, SerError> {
 fn write_ast_node(n: &AstNode, out: &mut Vec<u8>) {
     write_node_kind(&n.kind, out);
     put_u32(out, n.parent.0);
-    write_range(n.range, out);
+    write_range(n.loc.expression, out);
+    write_range(n.loc.name, out);
 }
 fn read_ast_node(cur: &mut &[u8]) -> Result<AstNode, SerError> {
     let kind = read_node_kind(cur)?;
     let parent = OptNodeId(get_u32(cur)?);
-    let range = read_range(cur)?;
+    let expression = read_range(cur)?;
+    let name = read_range(cur)?;
     Ok(AstNode {
         kind,
         parent,
-        range,
+        loc: NodeLoc { expression, name },
     })
 }
 
