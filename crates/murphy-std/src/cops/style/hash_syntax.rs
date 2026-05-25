@@ -9,10 +9,10 @@
 //!
 //! ## Known v1 limitations
 //!
-//! The option surface includes `EnforcedShorthandSyntax`, but Ruby 3.1 hash
-//! value omission (`{foo:}` / `{foo: foo}`) is not enforced yet. That needs
-//! additional call-context autocorrection to avoid changing parse semantics
-//! for argument hashes.
+//! Ruby 3.1 hash value omission (`{foo:}` / `{foo: foo}`) is not enforced
+//! yet, so this port intentionally does not expose RuboCop's
+//! `EnforcedShorthandSyntax` option. That mode needs additional call-context
+//! autocorrection to avoid changing parse semantics for argument hashes.
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
@@ -41,13 +41,6 @@ pub struct HashSyntaxOptions {
         description = "Keep hash rockets for symbols ending in non-alphanumeric punctuation."
     )]
     pub prefer_hash_rockets_for_non_alnum_ending_symbols: bool,
-
-    #[option(
-        name = "EnforcedShorthandSyntax",
-        default = "either",
-        description = "Ruby 3.1 hash value shorthand style."
-    )]
-    pub enforced_shorthand_syntax: HashSyntaxShorthandStyle,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,20 +53,6 @@ pub enum HashSyntaxStyle {
     NoMixedKeys,
     #[option(value = "ruby19_no_mixed_keys")]
     Ruby19NoMixedKeys,
-}
-
-#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum HashSyntaxShorthandStyle {
-    #[option(value = "always")]
-    Always,
-    #[option(value = "never")]
-    Never,
-    #[option(value = "either")]
-    Either,
-    #[option(value = "consistent")]
-    Consistent,
-    #[option(value = "either_consistent")]
-    EitherConsistent,
 }
 
 #[cop(
@@ -173,17 +152,6 @@ impl<'a> PairInfo<'a> {
             let op_end = op_start + 2;
             (
                 PairStyle::Rocket,
-                Range {
-                    start: op_start,
-                    end: op_end,
-                },
-                skip_inline_space(cx, op_end),
-            )
-        } else if let Some(offset) = gap_src.find(':') {
-            let op_start = gap.start + offset as u32;
-            let op_end = op_start + 1;
-            (
-                PairStyle::Colon,
                 Range {
                     start: op_start,
                     end: op_end,
@@ -349,7 +317,7 @@ fn skip_inline_space(cx: &Cx<'_>, start: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{HashSyntax, HashSyntaxOptions, HashSyntaxShorthandStyle, HashSyntaxStyle};
+    use super::{HashSyntax, HashSyntaxOptions, HashSyntaxStyle};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -358,10 +326,6 @@ mod tests {
         assert_eq!(opts.enforced_style, HashSyntaxStyle::Ruby19);
         assert!(!opts.use_hash_rockets_with_symbol_values);
         assert!(!opts.prefer_hash_rockets_for_non_alnum_ending_symbols);
-        assert_eq!(
-            opts.enforced_shorthand_syntax,
-            HashSyntaxShorthandStyle::Either
-        );
     }
 
     #[test]
@@ -439,6 +403,23 @@ mod tests {
                                     ^^^^^ Use hash rockets syntax.
                 "#},
                 "x = { :\"t o\" => 0, :'&&' => 1 }\n",
+            );
+    }
+
+    #[test]
+    fn hash_rockets_ignores_colons_in_comments_between_key_and_value() {
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_style: HashSyntaxStyle::HashRockets,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = { a: # note: keep
+                          ^^ Use hash rockets syntax.
+                      1 }
+                "#},
+                "x = { :a => # note: keep\n  1 }\n",
             );
     }
 
