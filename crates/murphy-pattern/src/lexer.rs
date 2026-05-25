@@ -293,24 +293,15 @@ impl<'a> Lexer<'a> {
 
     /// Scan a `[a-z_][a-z0-9_]*` identifier.
     ///
-    /// `_` alone -> `Underscore`; `nil?` -> `NilQuestion`; a bare identifier
-    /// ending in `!` is a lex error (`save!` style names must use the `#name`
-    /// predicate form). A trailing `?` is *not* consumed — it is left for the
-    /// parser to read as a postfix [`Token::Question`] quantifier, so
-    /// `int?` lexes to `Ident("int") Question`.
+    /// `_` alone -> `Underscore`; `nil?` -> `NilQuestion`. `!` and `?`
+    /// suffixes are *not* consumed: `int?` lexes to `Ident("int")` and
+    /// `Question`, and `save!` lexes to `Ident("save")` and `Bang`.
     fn scan_ident(&mut self) -> Result<Token, ParseError> {
         let start = self.pos;
         // First byte is already known to be `[a-z_]`.
         self.pos += 1;
         while matches!(self.peek(), Some(b'a'..=b'z' | b'0'..=b'9' | b'_')) {
             self.pos += 1;
-        }
-        if self.peek() == Some(&b'!') {
-            // `save!`-style names: a bare identifier ending in `!` is reserved
-            // for the `#name` predicate form. Consume the `!` so the error
-            // span covers it.
-            self.pos += 1;
-            return Err(self.err_at(start, self.pos, "expected '#' before a predicate name"));
         }
         let text = self.slice_str(start, self.pos);
         if self.peek() == Some(&b'?') && text == "nil" {
@@ -581,10 +572,11 @@ mod tests {
     }
 
     #[test]
-    fn bang_identifier_is_error() {
-        // a bare identifier ending in `!` (not `nil?`) is rejected
-        let e = tokenize("save!").expect_err("must reject bare identifier ending in `!`");
-        assert!(e.message.contains("expected '#'"));
+    fn bang_identifier_lexes_as_bare_ident_plus_bang() {
+        assert_eq!(
+            toks("save!"),
+            vec![Token::Ident("save".into()), Token::Bang]
+        );
     }
 
     // --- murphy-ycx: postfix quantifier tokens (`*`, `+`, `?`) -------------

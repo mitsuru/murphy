@@ -111,6 +111,23 @@ fn dotcall_three_args_ast() -> (Ast, NodeId, NodeId) {
     (ast, send, recv)
 }
 
+fn puts_int_ast(value: i64) -> (Ast, NodeId, NodeId) {
+    let mut b = AstBuilder::new("puts(1)", "t.rb");
+    let arg = b.push(NodeKind::Int(value), r());
+    let m = b.intern_symbol("puts");
+    let args = b.push_list(&[arg]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: m,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send, arg)
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Drift-guard helper: assert C's `matches` agrees with a B-side bool.
 // ────────────────────────────────────────────────────────────────────────
@@ -494,6 +511,37 @@ fn gvar_sym_slot_union_matches_any_listed_name() {
         &ast,
         g,
         b_gvar_stdout_or_stderr(g, &cx),
+    );
+}
+
+node_pattern!(b_send_puts_odd_predicate, "(send nil? :puts odd?)");
+
+#[test]
+fn bare_predicate_in_send_arg_slot_agrees() {
+    let (odd_ast, odd_send, _) = puts_int_ast(3);
+    let (even_ast, even_send, _) = puts_int_ast(4);
+    let fns = fns();
+    let odd_raw = cx_raw_for(&odd_ast, &fns);
+    let even_raw = cx_raw_for(&even_ast, &fns);
+    let odd_cx = unsafe { Cx::from_raw(&odd_raw) };
+    let even_cx = unsafe { Cx::from_raw(&even_raw) };
+
+    let mut host = PredFixture { cx: &odd_cx };
+    assert_c_matches_with(
+        "(send nil? :puts odd?)",
+        &odd_ast,
+        odd_send,
+        b_send_puts_odd_predicate(odd_send, &odd_cx),
+        &mut host,
+    );
+
+    host.cx = &even_cx;
+    assert_c_matches_with(
+        "(send nil? :puts odd?)",
+        &even_ast,
+        even_send,
+        b_send_puts_odd_predicate(even_send, &even_cx),
+        &mut host,
     );
 }
 

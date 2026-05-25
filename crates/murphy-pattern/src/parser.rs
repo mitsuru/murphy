@@ -7,6 +7,7 @@
 //! named (`$ident`), anonymous (`$<pattern>`), and seq (`$...`) forms.
 
 use crate::lexer::{Spanned, Token, tokenize};
+use crate::schema::node_child_allows_bare_predicate;
 use crate::{CaptureKind, Head, Lit, ParseError, Pat, PatKind, PatSpan, PatternAst};
 use murphy_ast::NodeKindTag;
 
@@ -17,7 +18,7 @@ use murphy_ast::NodeKindTag;
 pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
     let tokens = tokenize(src)?;
     let mut parser = Parser::new(&tokens);
-    let root = parser.prefixed()?;
+    let root = parser.prefixed(false)?;
     if let Some(extra) = parser.peek() {
         return Err(ParseError::new("unexpected trailing input", extra.span));
     }
@@ -359,7 +360,10 @@ impl<'a> Parser<'a> {
     /// themselves — `!int+` parses as `Not(Quantifier(int, +))` so that the
     /// downstream `validate_quantifier_placement` walk can flag the
     /// node-child-only rule on the quantifier subtree (its parent is `!`).
-    fn prefixed(&mut self) -> Result<Pat, ParseError> {
+    /// `allow_bare_predicate` is true when this identifier position is a node-child
+    /// slot where an unknown bare identifier may be parsed as predicate shorthand
+    /// (`foo?` / `foo!`).
+    fn prefixed(&mut self, allow_bare_predicate: bool) -> Result<Pat, ParseError> {
         let Some(head) = self.peek() else {
             // No source byte to point at for an empty stream.
             return Err(ParseError::new("empty pattern", PatSpan::new(0, 0)));
@@ -369,11 +373,11 @@ impl<'a> Parser<'a> {
             Token::Bang => PatKind::Not,
             Token::Caret => PatKind::Parent,
             Token::Backtick => PatKind::Descend,
-            Token::Dollar => return self.capture(prefix_span),
-            _ => return self.postfixed(),
+            Token::Dollar => return self.capture(prefix_span, allow_bare_predicate),
+            _ => return self.postfixed(allow_bare_predicate),
         };
         self.pos += 1; // consume the prefix sigil
-        let inner = self.prefixed()?;
+        let inner = self.prefixed(allow_bare_predicate)?;
         let span = PatSpan {
             start: prefix_span.start,
             end: inner.span.end,
@@ -395,8 +399,8 @@ impl<'a> Parser<'a> {
     /// captures or rest inside the body) are enforced post-parse by
     /// [`validate_quantifier_placement`] / [`validate_quantifier_body`], so
     /// every quantifier-bearing source position lands the same error.
-    fn postfixed(&mut self) -> Result<Pat, ParseError> {
-        let primary = self.primary()?;
+    fn postfixed(&mut self, allow_bare_predicate: bool) -> Result<Pat, ParseError> {
+        let primary = self.primary(allow_bare_predicate)?;
         let Some((min, max, q_span)) = self.try_quantifier() else {
             return Ok(primary);
         };
@@ -451,7 +455,11 @@ impl<'a> Parser<'a> {
     /// - `$<anything else>` → an anonymous capture whose `body` is a full
     ///   [`prefixed`](Self::prefixed) pattern parsed recursively.
     /// - `$` at end of input → a span-carrying error.
-    fn capture(&mut self, dollar_span: PatSpan) -> Result<Pat, ParseError> {
+    fn capture(
+        &mut self,
+        dollar_span: PatSpan,
+        allow_bare_predicate: bool,
+    ) -> Result<Pat, ParseError> {
         self.pos += 1; // consume `$`
         // Reserve the slot now — before the body — so source order holds.
         let slot = u16::try_from(self.captures.len())
@@ -480,7 +488,7 @@ impl<'a> Parser<'a> {
                 // positions where a bare-kind body is meaningless.
                 let lookahead = self.tokens.get(self.pos + 1).map(|s| &s.tok);
                 if matches!(lookahead, Some(Token::Star | Token::Plus | Token::Question)) {
-                    let body = self.postfixed()?;
+                    let body = self.postfixed(allow_bare_predicate)?;
                     let end = body.span.end;
                     (None, body, end)
                 } else {
@@ -516,7 +524,7 @@ impl<'a> Parser<'a> {
                 (None, body, ell_span.end)
             }
             _ => {
-                let body = self.prefixed()?;
+                let body = self.prefixed(allow_bare_predicate)?;
                 let end = body.span.end;
                 (None, body, end)
             }
@@ -549,7 +557,7 @@ impl<'a> Parser<'a> {
     /// [`union`]). A top-level `...` is invalid and produces a descriptive
     /// error here. Prefix sigils (`!`/`^`/`` ` ``/`$`) never reach `primary`:
     /// [`prefixed`](Self::prefixed) consumes them first.
-    fn primary(&mut self) -> Result<Pat, ParseError> {
+    fn primary(&mut self, allow_bare_predicate: bool) -> Result<Pat, ParseError> {
         let Some(spanned) = self.next() else {
             return Err(ParseError::new("empty pattern", PatSpan::new(0, 0)));
         };
@@ -562,9 +570,9 @@ impl<'a> Parser<'a> {
             Token::Str(s) => PatKind::Lit(Lit::Str(s.clone())),
             Token::Sym(s) => PatKind::Lit(Lit::Sym(s.clone())),
             Token::Predicate(name) => PatKind::Predicate(name.clone()),
-            Token::Ident(name) => return self.ident_pat(name, span),
+            Token::Ident(name) => return self.ident_pat(name, span, allow_bare_predicate),
             Token::LParen => return self.node_match(span),
-            Token::LBrace => return self.union(span),
+            Token::LBrace => return self.union(span, allow_bare_predicate),
             Token::Ellipsis => {
                 return Err(ParseError::new(
                     "`...` is only valid inside a node child list",
@@ -598,6 +606,7 @@ impl<'a> Parser<'a> {
     fn node_match(&mut self, open_span: PatSpan) -> Result<Pat, ParseError> {
         let head = self.node_head(open_span)?;
         let mut children: Vec<Pat> = Vec::new();
+        let mut child_idx = 0;
         loop {
             // Peek (not `next`) so we can dispatch on the token — closing `)`,
             // a `...`, or a child — before deciding whether to consume it.
@@ -632,8 +641,19 @@ impl<'a> Parser<'a> {
                         kind: PatKind::Rest,
                         span: ell_span,
                     });
+                    child_idx += 1;
                 }
-                _ => children.push(self.prefixed()?),
+                _ => {
+                    let allow_bare_predicate = match &head {
+                        Head::Exact(tag) => node_child_allows_bare_predicate(*tag, child_idx),
+                        Head::Any => false,
+                        Head::OneOf(tags) => tags
+                            .iter()
+                            .all(|tag| node_child_allows_bare_predicate(*tag, child_idx)),
+                    };
+                    children.push(self.prefixed(allow_bare_predicate)?);
+                    child_idx += 1;
+                }
             }
         }
     }
@@ -645,7 +665,13 @@ impl<'a> Parser<'a> {
     /// node-type-only `{...}` head handled by [`oneof_head`]. The resulting
     /// `Pat`'s span covers `{` through the closing `}`. An empty `{}` or a
     /// stream that ends before `}` is a span-carrying error.
-    fn union(&mut self, open_span: PatSpan) -> Result<Pat, ParseError> {
+    ///
+    /// `allow_bare_predicate` flows through to each alternative so that
+    /// `(send _ :puts {odd? even?})` accepts bare predicate shorthand in
+    /// every alt — the union sits in a node-child slot, so each alternative
+    /// is at the same effective position as if it had been written without
+    /// the `{...}` wrapper.
+    fn union(&mut self, open_span: PatSpan, allow_bare_predicate: bool) -> Result<Pat, ParseError> {
         let mut alts: Vec<Pat> = Vec::new();
         loop {
             // Peek (not `next`) so we can dispatch on the token — a closing `}`
@@ -673,7 +699,7 @@ impl<'a> Parser<'a> {
                         span,
                     });
                 }
-                _ => alts.push(self.prefixed()?),
+                _ => alts.push(self.prefixed(allow_bare_predicate)?),
             }
         }
     }
@@ -730,17 +756,68 @@ impl<'a> Parser<'a> {
 
     /// Classify a bare `IDENT`: the `true`/`false`/`nil` keywords become
     /// literals; any other name resolves to a node-kind tag, or errors.
-    fn ident_pat(&self, name: &str, span: PatSpan) -> Result<Pat, ParseError> {
+    fn ident_pat(
+        &mut self,
+        name: &str,
+        span: PatSpan,
+        allow_bare_predicate: bool,
+    ) -> Result<Pat, ParseError> {
         let kind = match name {
             "true" => PatKind::Lit(Lit::True),
             "false" => PatKind::Lit(Lit::False),
             "nil" => PatKind::Lit(Lit::Nil),
-            _ => match murphy_ast::tag_from_pattern_name(name) {
-                Some(tag) => PatKind::Kind(tag),
-                None => {
-                    return Err(ParseError::new(format!("unknown node type `{name}`"), span));
+            _ => {
+                if let Some(tag) = murphy_ast::tag_from_pattern_name(name) {
+                    PatKind::Kind(tag)
+                } else if allow_bare_predicate
+                    && matches!(
+                        self.peek().map(|tok| &tok.tok),
+                        Some(Token::Question) | Some(Token::Bang)
+                    )
+                {
+                    let Some(suffix_tok) = self.next() else {
+                        unreachable!("checked by matches above");
+                    };
+                    let suffix_span = suffix_tok.span;
+                    let suffix = match suffix_tok.tok {
+                        Token::Question => "?",
+                        Token::Bang => "!",
+                        _ => unreachable!("checked by the matches arm above"),
+                    };
+                    return Ok(Pat {
+                        kind: PatKind::Predicate(format!("{name}{suffix}")),
+                        span: PatSpan::new(span.start as usize, suffix_span.end as usize),
+                    });
+                } else {
+                    // A `?` / `!` follow on a name that isn't a node kind hints
+                    // at predicate intent — surface the `#name?` / `#name!` form
+                    // so users learn the explicit syntax, especially in
+                    // positions (root, head, Sym slot) where bare predicate
+                    // shorthand is not accepted.
+                    let suffix = match self.peek().map(|tok| &tok.tok) {
+                        Some(Token::Question) => Some('?'),
+                        Some(Token::Bang) => Some('!'),
+                        _ => None,
+                    };
+                    let msg = match suffix {
+                        Some(c) => format!(
+                            "unknown node type `{name}` — write `#{name}{c}` to call the host predicate",
+                        ),
+                        None => format!("unknown node type `{name}`"),
+                    };
+                    let span = match suffix {
+                        Some(_) => {
+                            let suffix_end = self.peek().map(|t| t.span.end).unwrap_or(span.end);
+                            PatSpan {
+                                start: span.start,
+                                end: suffix_end,
+                            }
+                        }
+                        None => span,
+                    };
+                    return Err(ParseError::new(msg, span));
                 }
-            },
+            }
         };
         Ok(Pat { kind, span })
     }
@@ -1501,6 +1578,107 @@ mod tests {
             }
             other => panic!("expected Quantifier, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_bare_predicate_in_node_child_slot() {
+        let cs = children_of("(int odd?)");
+        assert_eq!(cs.len(), 1);
+        assert_eq!(cs[0].kind, PatKind::Predicate("odd?".into()));
+    }
+
+    #[test]
+    fn parses_bare_predicate_with_known_kind_quantifier_in_node_children() {
+        let cs = children_of("(send _ :puts int? odd?)");
+        assert_eq!(cs.len(), 4);
+
+        match &cs[2].kind {
+            PatKind::Quantifier { body, min, .. } => {
+                assert_eq!(*min, 0);
+                assert!(matches!(body.kind, PatKind::Kind(_)));
+            }
+            other => panic!("expected Quantifier, got {other:?}"),
+        }
+
+        assert_eq!(cs[3].kind, PatKind::Predicate("odd?".into()));
+    }
+
+    #[test]
+    fn disallows_unknown_bare_predicate_in_sym_child_slot() {
+        let e = parse("(send _ odd? :foo)").expect_err("unknown predicate in sym slot");
+        assert!(e.message.contains("unknown node type") && e.message.contains("odd"));
+    }
+
+    #[test]
+    fn parses_bare_predicate_in_union_in_node_child_slot() {
+        // The union sits in a node-child slot, so each alt is at the same
+        // effective position — both `odd?` and `even?` parse as predicate
+        // shorthand. `allow_bare_predicate` must flow into `union`.
+        let cs = children_of("(send _ :puts {odd? even?})");
+        assert_eq!(cs.len(), 3);
+        let PatKind::Union(alts) = &cs[2].kind else {
+            panic!("expected Union, got {:?}", cs[2].kind);
+        };
+        assert_eq!(alts.len(), 2);
+        assert_eq!(alts[0].kind, PatKind::Predicate("odd?".into()));
+        assert_eq!(alts[1].kind, PatKind::Predicate("even?".into()));
+    }
+
+    #[test]
+    fn parses_bare_predicate_in_capture_body_in_node_child_slot() {
+        // `$odd?` inside a node-child slot — capture body inherits the
+        // allow-bare-predicate flag and the body parses as a `Predicate`.
+        let p = parse("(int $odd?)").expect("ok");
+        let cs = match &p.root.kind {
+            PatKind::Node { children, .. } => children,
+            other => panic!("expected Node, got {other:?}"),
+        };
+        assert_eq!(cs.len(), 1);
+        let PatKind::Capture { body, .. } = &cs[0].kind else {
+            panic!("expected Capture, got {:?}", cs[0].kind);
+        };
+        assert_eq!(body.kind, PatKind::Predicate("odd?".into()));
+    }
+
+    #[test]
+    fn parses_bang_form_bare_predicate_in_send_arg_slot() {
+        // `save!` in a node-child slot: bare predicate shorthand for `#save!`.
+        let cs = children_of("(send _ :foo save!)");
+        assert_eq!(cs.len(), 3);
+        assert_eq!(cs[2].kind, PatKind::Predicate("save!".into()));
+    }
+
+    #[test]
+    fn top_level_bare_predicate_errors_with_hint() {
+        // `save!` at top level is not in a node-child slot, so the parser
+        // can't accept it as bare predicate shorthand. The error names the
+        // explicit `#save!` form so users learn the host-predicate syntax.
+        let e = parse("save!").expect_err("must reject bare predicate at top level");
+        assert!(
+            e.message.contains("unknown node type") && e.message.contains("`#save!`"),
+            "expected hint about `#save!`, got: {}",
+            e.message,
+        );
+
+        let e = parse("save?").expect_err("must reject bare predicate at top level");
+        assert!(
+            e.message.contains("`#save?`"),
+            "expected hint about `#save?`, got: {}",
+            e.message,
+        );
+    }
+
+    #[test]
+    fn sym_slot_bare_predicate_error_includes_hint() {
+        // Symbol slots disallow bare predicates even in node-child position.
+        // The error should still surface the `#name?` hint.
+        let e =
+            parse("(send _ save?)").expect_err("bare predicate not allowed in Sym slot of send");
+        assert!(
+            e.message.contains("`#save?`"),
+            "expected hint about `#save?`, got: {}",
+            e.message,
+        );
     }
 
     // --- $pat+ / $pat* / $pat? capture slot kinds ------------------------
