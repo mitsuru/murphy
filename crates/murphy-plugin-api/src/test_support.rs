@@ -38,7 +38,8 @@ use std::cell::RefCell;
 use murphy_ast::Ast;
 
 use crate::{
-    Cop, Cx, CxRaw, FnTable, NodeCop, NodeId, Range, RawEdit, RawOffense, RawSlice, Severity,
+    Cop, CopOptions, Cx, CxRaw, FnTable, NodeCop, NodeId, Range, RawEdit, RawOffense, RawSlice,
+    Severity,
 };
 
 /// Re-export of [`indoc::indoc!`] so plugin packs writing
@@ -49,23 +50,44 @@ pub use indoc::indoc;
 
 /// Assert that `Cop` emits no offenses against `src`. Companion to
 /// [`expect_offense!`]; see the module docs for the annotation grammar.
+///
+/// The three-argument form drives the cop with a typed options value of
+/// `Cop::Options` — `to_config_json` is called internally so test code
+/// never has to construct raw JSON.
 #[macro_export]
 macro_rules! expect_no_offenses {
     ($cop:ty, $src:expr) => {{
         $crate::test_support::__assert_no_offenses::<$cop>($src);
     }};
+    ($cop:ty, $src:expr, $opts:expr) => {{
+        $crate::test_support::__assert_no_offenses_with::<$cop>($src, $opts);
+    }};
 }
 
 pub use crate::expect_no_offenses;
 
-/// `expect_no_offenses!`'s inner assertion. Not part of the public API.
+/// `expect_no_offenses!`'s default-options inner assertion. Not part of
+/// the public API.
 #[track_caller]
 pub fn __assert_no_offenses<T: NodeCop + Default>(src: &str) {
+    assert_no_offenses_inner::<T>(src, DEFAULT_OPTIONS_JSON);
+}
+
+/// `expect_no_offenses!(_, _, opts)` inner assertion — serializes the
+/// typed value to JSON and forwards. Not part of the public API.
+#[track_caller]
+pub fn __assert_no_offenses_with<T: NodeCop + Default>(src: &str, opts: &<T as Cop>::Options) {
+    let json = opts.to_config_json();
+    assert_no_offenses_inner::<T>(src, &json);
+}
+
+#[track_caller]
+fn assert_no_offenses_inner<T: NodeCop + Default>(src: &str, options_json: &str) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!("expect_no_offenses! must not contain annotations; use expect_offense! instead");
     }
-    let offenses = run_cop::<T>(src);
+    let offenses = run_cop_with_options_json::<T>(src, options_json);
     if !offenses.is_empty() {
         panic!(
             "expect_no_offenses! found {} offense(s) for {}",
@@ -77,10 +99,16 @@ pub fn __assert_no_offenses<T: NodeCop + Default>(src: &str) {
 
 /// Assert that `Cop` emits exactly the set of offenses described by the
 /// caret annotations in `src`. See the module docs for the grammar.
+///
+/// The three-argument form drives the cop with a typed options value of
+/// `Cop::Options`.
 #[macro_export]
 macro_rules! expect_offense {
     ($cop:ty, $src:expr) => {{
         $crate::test_support::__assert_offenses_match::<$cop>($src);
+    }};
+    ($cop:ty, $src:expr, $opts:expr) => {{
+        $crate::test_support::__assert_offenses_match_with::<$cop>($src, $opts);
     }};
 }
 
@@ -89,20 +117,32 @@ pub use crate::expect_offense;
 /// Assert that `Cop` emits exactly the offenses described by the caret
 /// annotations in `src`, then that applying its emitted autocorrect edits
 /// produces `expected_after`.
+///
+/// The four-argument form drives the cop with a typed options value of
+/// `Cop::Options`.
 #[macro_export]
 macro_rules! expect_correction {
     ($cop:ty, $src:expr, $expected_after:expr) => {{
         $crate::test_support::__assert_correction_match::<$cop>($src, $expected_after);
+    }};
+    ($cop:ty, $src:expr, $expected_after:expr, $opts:expr) => {{
+        $crate::test_support::__assert_correction_match_with::<$cop>($src, $expected_after, $opts);
     }};
 }
 
 pub use crate::expect_correction;
 
 /// Assert that `Cop` emits no autocorrect edits against `src`.
+///
+/// The three-argument form drives the cop with a typed options value of
+/// `Cop::Options`.
 #[macro_export]
 macro_rules! expect_no_corrections {
     ($cop:ty, $src:expr) => {{
         $crate::test_support::__assert_no_corrections::<$cop>($src);
+    }};
+    ($cop:ty, $src:expr, $opts:expr) => {{
+        $crate::test_support::__assert_no_corrections_with::<$cop>($src, $opts);
     }};
 }
 
@@ -192,18 +232,34 @@ fn nth_char_byte(line: &str, n: usize) -> usize {
         .unwrap_or(line.len())
 }
 
-/// `expect_offense!`'s inner assertion. Not part of the public API —
-/// call sites go through the macro so `#[track_caller]` makes the
-/// panic point at the test line, not this helper.
+/// `expect_offense!`'s default-options inner assertion. Not part of the
+/// public API — call sites go through the macro so `#[track_caller]`
+/// makes the panic point at the test line, not this helper.
 #[track_caller]
 pub fn __assert_offenses_match<T: NodeCop + Default>(annotated: &str) {
+    assert_offenses_match_inner::<T>(annotated, DEFAULT_OPTIONS_JSON);
+}
+
+/// `expect_offense!(_, _, opts)` inner assertion — serializes the typed
+/// value to JSON and forwards. Not part of the public API.
+#[track_caller]
+pub fn __assert_offenses_match_with<T: NodeCop + Default>(
+    annotated: &str,
+    opts: &<T as Cop>::Options,
+) {
+    let json = opts.to_config_json();
+    assert_offenses_match_inner::<T>(annotated, &json);
+}
+
+#[track_caller]
+fn assert_offenses_match_inner<T: NodeCop + Default>(annotated: &str, options_json: &str) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
         panic!(
             "expect_offense! must contain at least one annotation; use expect_no_offenses! instead"
         );
     }
-    let actuals = run_cop::<T>(&cleaned);
+    let actuals = run_cop_with_options_json::<T>(&cleaned, options_json);
     assert_offenses_match("expect_offense!", &cleaned, &expected, &actuals);
 }
 
@@ -255,11 +311,32 @@ fn assert_offenses_match(
     }
 }
 
-/// `expect_correction!`'s inner assertion. Not part of the public API —
-/// call sites go through the macro so `#[track_caller]` makes the
-/// panic point at the test line, not this helper.
+/// `expect_correction!`'s default-options inner assertion. Not part of
+/// the public API — call sites go through the macro so `#[track_caller]`
+/// makes the panic point at the test line, not this helper.
 #[track_caller]
 pub fn __assert_correction_match<T: NodeCop + Default>(annotated: &str, expected_after: &str) {
+    assert_correction_match_inner::<T>(annotated, expected_after, DEFAULT_OPTIONS_JSON);
+}
+
+/// `expect_correction!(_, _, _, opts)` inner assertion — serializes the
+/// typed value to JSON and forwards. Not part of the public API.
+#[track_caller]
+pub fn __assert_correction_match_with<T: NodeCop + Default>(
+    annotated: &str,
+    expected_after: &str,
+    opts: &<T as Cop>::Options,
+) {
+    let json = opts.to_config_json();
+    assert_correction_match_inner::<T>(annotated, expected_after, &json);
+}
+
+#[track_caller]
+fn assert_correction_match_inner<T: NodeCop + Default>(
+    annotated: &str,
+    expected_after: &str,
+    options_json: &str,
+) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
         panic!(
@@ -267,7 +344,7 @@ pub fn __assert_correction_match<T: NodeCop + Default>(annotated: &str, expected
         );
     }
 
-    let captured = run_cop_with_edits::<T>(&cleaned);
+    let captured = run_cop_with_options_and_edits_json::<T>(&cleaned, options_json);
     assert_offenses_match(
         "expect_correction!",
         &cleaned,
@@ -285,9 +362,23 @@ pub fn __assert_correction_match<T: NodeCop + Default>(annotated: &str, expected
     }
 }
 
-/// `expect_no_corrections!`'s inner assertion. Not part of the public API.
+/// `expect_no_corrections!`'s default-options inner assertion. Not part
+/// of the public API.
 #[track_caller]
 pub fn __assert_no_corrections<T: NodeCop + Default>(src: &str) {
+    assert_no_corrections_inner::<T>(src, DEFAULT_OPTIONS_JSON);
+}
+
+/// `expect_no_corrections!(_, _, opts)` inner assertion. Not part of the
+/// public API.
+#[track_caller]
+pub fn __assert_no_corrections_with<T: NodeCop + Default>(src: &str, opts: &<T as Cop>::Options) {
+    let json = opts.to_config_json();
+    assert_no_corrections_inner::<T>(src, &json);
+}
+
+#[track_caller]
+fn assert_no_corrections_inner<T: NodeCop + Default>(src: &str, options_json: &str) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!(
@@ -295,7 +386,7 @@ pub fn __assert_no_corrections<T: NodeCop + Default>(src: &str) {
         );
     }
 
-    let captured = run_cop_with_edits::<T>(src);
+    let captured = run_cop_with_options_and_edits_json::<T>(src, options_json);
     if !captured.edits.is_empty() {
         panic!(
             "expect_no_corrections! found {} edit(s) for {}",
@@ -442,17 +533,61 @@ unsafe extern "C" fn record_edit(sink_ptr: *mut std::ffi::c_void, e: *const RawE
 }
 
 /// Parse `source` as Ruby, drive `T::check` over every relevant node,
-/// and return the captured offenses in emission order.
+/// and return the captured offenses in emission order. The cop sees an
+/// empty options JSON blob — every field of its `Options` struct falls
+/// back to `Default::default()`. Use [`run_cop_with_options`] when a
+/// test needs to exercise a non-default `[cops.rules."…"]` value.
 ///
 /// The cop is instantiated via `T::default()` — matches the stateless
 /// `#[derive(Default)]` shape every Murphy cop uses (ADR 0035).
 pub fn run_cop<T: NodeCop + Default>(source: &str) -> Vec<CapturedOffense> {
-    run_cop_with_edits::<T>(source).offenses
+    run_cop_with_options_json::<T>(source, DEFAULT_OPTIONS_JSON)
+}
+
+/// `run_cop` companion that hands the cop a typed `Options` value
+/// instead of a raw JSON blob. Serialization to the host wire format
+/// (the `[cops.rules."Cop/Name"]` table) goes through
+/// `CopOptions::to_config_json` — test code never has to assemble JSON
+/// by hand.
+pub fn run_cop_with_options<T: NodeCop + Default>(
+    source: &str,
+    opts: &<T as Cop>::Options,
+) -> Vec<CapturedOffense> {
+    run_cop_with_options_and_edits::<T>(source, opts).offenses
 }
 
 /// Parse `source` as Ruby, drive `T::check`, and return both captured
-/// offenses and autocorrect edits in emission order.
+/// offenses and autocorrect edits in emission order. The cop sees an
+/// empty options JSON blob — see [`run_cop_with_options_and_edits`] for
+/// the non-default variant.
 pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
+    run_cop_with_options_and_edits_json::<T>(source, DEFAULT_OPTIONS_JSON)
+}
+
+/// `run_cop_with_edits` companion that hands the cop a typed `Options`
+/// value.
+pub fn run_cop_with_options_and_edits<T: NodeCop + Default>(
+    source: &str,
+    opts: &<T as Cop>::Options,
+) -> CapturedRun {
+    let json = opts.to_config_json();
+    run_cop_with_options_and_edits_json::<T>(source, &json)
+}
+
+/// Internal raw-JSON entry point shared by every other dispatcher in
+/// this module. Not exposed: production tests should go through the
+/// typed wrappers so JSON shape stays an implementation detail.
+fn run_cop_with_options_json<T: NodeCop + Default>(
+    source: &str,
+    options_json: &str,
+) -> Vec<CapturedOffense> {
+    run_cop_with_options_and_edits_json::<T>(source, options_json).offenses
+}
+
+fn run_cop_with_options_and_edits_json<T: NodeCop + Default>(
+    source: &str,
+    options_json: &str,
+) -> CapturedRun {
     let ast = murphy_translate::translate(source, "t.rb");
     let cop = T::default();
     let cop_name = RawSlice::from_str(<T as Cop>::NAME);
@@ -464,7 +599,16 @@ pub fn run_cop_with_edits<T: NodeCop + Default>(source: &str) -> CapturedRun {
         emit_offense: record_offense,
         emit_edit: record_edit,
     };
-    let raw = cx_raw_for(&ast, &fns, cop_name, &sink);
+    // The `RawSlice` borrows the caller's `&str`; we keep that borrow
+    // alive on the stack until the dispatch loop finishes below.
+    // `RawSlice::from_str` only accepts `&'static str`, but here the
+    // input is a runtime parameter — assemble the slice by hand so the
+    // pointer + length stay tethered to the caller's `&str`.
+    let options_slice = RawSlice {
+        ptr: options_json.as_ptr(),
+        len: options_json.len(),
+    };
+    let raw = cx_raw_for(&ast, &fns, cop_name, &sink, options_slice);
     let cx = unsafe { Cx::from_raw(&raw) };
 
     if T::KINDS.is_empty() {
@@ -566,10 +710,16 @@ fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
     corrected
 }
 
-/// Build a `CxRaw` borrowing from `ast`, `fns`, and `sink`. The
-/// returned value contains raw pointers; the caller keeps all three
-/// alive for the duration of the dispatch.
-fn cx_raw_for(ast: &Ast, fns: &FnTable, cop_name: RawSlice, sink: &RefCell<Sink>) -> CxRaw {
+/// Build a `CxRaw` borrowing from `ast`, `fns`, `sink`, and the caller's
+/// per-test options JSON blob. The returned value contains raw pointers;
+/// the caller keeps all four alive for the duration of the dispatch.
+fn cx_raw_for(
+    ast: &Ast,
+    fns: &FnTable,
+    cop_name: RawSlice,
+    sink: &RefCell<Sink>,
+    options_json: RawSlice,
+) -> CxRaw {
     let p = ast.raw_parts();
     CxRaw {
         nodes: p.nodes.as_ptr(),
@@ -590,9 +740,15 @@ fn cx_raw_for(ast: &Ast, fns: &FnTable, cop_name: RawSlice, sink: &RefCell<Sink>
         sink: sink as *const _ as *mut std::ffi::c_void,
         sorted_tokens: p.sorted_tokens.as_ptr(),
         sorted_tokens_len: p.sorted_tokens.len(),
-        options_json: RawSlice::from_str("{}"),
+        options_json,
     }
 }
+
+/// Default options JSON used by [`run_cop`] / [`run_cop_with_edits`] and
+/// the no-`_with_options` macro variants — the empty object causes every
+/// field of a cop's `Options` struct to fall back to its declared
+/// `Default::default()`.
+const DEFAULT_OPTIONS_JSON: &str = "{}";
 
 #[cfg(test)]
 mod tests {
@@ -1003,5 +1159,115 @@ mod tests {
             "abc\n\
              ^^^ stray\n"
         );
+    }
+
+    // ---------- per-test options JSON ----------
+    //
+    // The fixture below is the smallest cop that observably branches on
+    // its `Options` struct so the `_with_options` family can pin the
+    // end-to-end wiring: caller passes JSON → `cx_raw_for` parks it on
+    // `CxRaw::options_json` → `cx.options::<T>()` decodes via serde →
+    // cop branches.
+
+    /// Minimal options struct hand-implemented (not via
+    /// `#[derive(CopOptions)]`) because the derive emits absolute paths
+    /// like `::murphy_plugin_api::CopOptions`, which do not resolve from
+    /// inside the lib's own `#[cfg(test)]` module. Real cops are
+    /// external crates and use the derive normally.
+    #[derive(Default, Debug)]
+    struct ToggleOptions {
+        emit: bool,
+    }
+
+    impl crate::CopOptions for ToggleOptions {
+        fn from_config_json(bytes: &[u8]) -> Result<Self, crate::ConfigError> {
+            // Tiny hand-written decoder — `{"emit": true}` flips on, any
+            // other shape falls back to the default. The production path
+            // (via the derive) goes through serde_json field-by-field.
+            let v: serde_json::Value =
+                serde_json::from_slice(bytes).map_err(crate::ConfigError::parse)?;
+            let emit = v
+                .as_object()
+                .and_then(|obj| obj.get("emit"))
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            Ok(ToggleOptions { emit })
+        }
+
+        fn to_config_json(&self) -> String {
+            // Mirrors `from_config_json` — emits `{"emit": <self.emit>}`
+            // so the typed-value test path round-trips through the same
+            // wire shape the production derive would produce.
+            format!("{{\"emit\":{}}}", self.emit)
+        }
+    }
+
+    /// Fixture: emits one offense per visited node only when the
+    /// `emit = true` option is set. Default behaviour is silent so the
+    /// no-options test path stays no-offense.
+    #[derive(Default)]
+    struct OptionAwareCop;
+    impl Cop for OptionAwareCop {
+        type Options = ToggleOptions;
+        const NAME: &'static str = "Test/OptionAware";
+    }
+    impl NodeCop for OptionAwareCop {
+        const KINDS: &'static [NodeKindTag] = &[];
+        fn check(&self, _node: NodeId, cx: &Cx<'_>) {
+            let opts = cx.options::<ToggleOptions>().unwrap_or_default();
+            if opts.emit {
+                cx.emit_offense(Range { start: 0, end: 3 }, "toggle", None);
+                cx.emit_edit(Range { start: 0, end: 3 }, "xyz");
+            }
+        }
+    }
+
+    #[test]
+    fn run_cop_default_options_yields_default_behavior() {
+        let offenses = super::run_cop::<OptionAwareCop>("abc\n");
+        assert!(offenses.is_empty(), "default options must produce no emit");
+    }
+
+    #[test]
+    fn run_cop_with_options_typed_value_flips_behavior() {
+        let offenses =
+            super::run_cop_with_options::<OptionAwareCop>("abc\n", &ToggleOptions { emit: true });
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 0, end: 3 });
+        assert_eq!(offenses[0].message, "toggle");
+    }
+
+    #[test]
+    fn expect_no_offenses_with_typed_options_keeps_default_branch_silent() {
+        expect_no_offenses!(OptionAwareCop, "abc\n", &ToggleOptions { emit: false });
+    }
+
+    #[test]
+    fn expect_offense_with_typed_options_drives_non_default_branch() {
+        expect_offense!(
+            OptionAwareCop,
+            "abc\n\
+             ^^^ toggle\n",
+            &ToggleOptions { emit: true }
+        );
+    }
+
+    #[test]
+    fn expect_correction_with_typed_options_applies_non_default_edits() {
+        expect_correction!(
+            OptionAwareCop,
+            "abc\n\
+             ^^^ toggle\n",
+            "xyz\n",
+            &ToggleOptions { emit: true }
+        );
+    }
+
+    #[test]
+    fn expect_no_corrections_with_typed_options_pins_silent_default() {
+        // `emit = false` -> the cop emits nothing, so the edit list is
+        // empty even though the caller could have asked for the alternate
+        // behaviour.
+        expect_no_corrections!(OptionAwareCop, "abc\n", &ToggleOptions { emit: false });
     }
 }

@@ -388,6 +388,7 @@ fn generate_default(name: &Ident, fields: &[ParsedField]) -> TokenStream {
 fn generate_copoptions(name: &Ident, fields: &[ParsedField]) -> TokenStream {
     let schema_entries = fields.iter().map(schema_entry);
     let decoders = fields.iter().map(field_decoder);
+    let encoders = fields.iter().map(field_encoder);
 
     quote! {
         impl ::murphy_plugin_api::CopOptions for #name {
@@ -407,7 +408,90 @@ fn generate_copoptions(name: &Ident, fields: &[ParsedField]) -> TokenStream {
                     #(#decoders),*
                 })
             }
+
+            fn to_config_json(&self) -> ::std::string::String {
+                let mut __obj = ::serde_json::Map::new();
+                #(#encoders)*
+                ::serde_json::Value::Object(__obj).to_string()
+            }
         }
+    }
+}
+
+/// Encoder body for one field — mirrors `field_decoder` so a
+/// roundtrip through `to_config_json` ↦ `from_config_json` recovers
+/// the original value.
+fn field_encoder(field: &ParsedField) -> TokenStream {
+    let ident = &field.ident;
+    let key = field.external_name_string();
+    match &field.ty {
+        FieldType::Bool => quote! {
+            __obj.insert(
+                ::std::string::String::from(#key),
+                ::serde_json::Value::Bool(self.#ident),
+            );
+        },
+        FieldType::Int => quote! {
+            __obj.insert(
+                ::std::string::String::from(#key),
+                ::serde_json::Value::Number(::serde_json::Number::from(self.#ident)),
+            );
+        },
+        FieldType::Str => quote! {
+            __obj.insert(
+                ::std::string::String::from(#key),
+                ::serde_json::Value::String(self.#ident.clone()),
+            );
+        },
+        FieldType::StrList => quote! {
+            {
+                let __arr: ::std::vec::Vec<::serde_json::Value> = self.#ident
+                    .iter()
+                    .map(|__s| ::serde_json::Value::String(__s.clone()))
+                    .collect();
+                __obj.insert(
+                    ::std::string::String::from(#key),
+                    ::serde_json::Value::Array(__arr),
+                );
+            }
+        },
+        FieldType::OptBool => quote! {
+            __obj.insert(
+                ::std::string::String::from(#key),
+                match self.#ident {
+                    ::core::option::Option::Some(__v) => ::serde_json::Value::Bool(__v),
+                    ::core::option::Option::None => ::serde_json::Value::Null,
+                },
+            );
+        },
+        FieldType::OptInt => quote! {
+            __obj.insert(
+                ::std::string::String::from(#key),
+                match self.#ident {
+                    ::core::option::Option::Some(__v) => ::serde_json::Value::Number(
+                        ::serde_json::Number::from(__v),
+                    ),
+                    ::core::option::Option::None => ::serde_json::Value::Null,
+                },
+            );
+        },
+        FieldType::OptStr => quote! {
+            __obj.insert(
+                ::std::string::String::from(#key),
+                match &self.#ident {
+                    ::core::option::Option::Some(__v) => ::serde_json::Value::String(__v.clone()),
+                    ::core::option::Option::None => ::serde_json::Value::Null,
+                },
+            );
+        },
+        FieldType::Enum(path) => quote! {
+            __obj.insert(
+                ::std::string::String::from(#key),
+                ::serde_json::Value::String(::std::string::String::from(
+                    <#path as ::murphy_plugin_api::CopOptionEnum>::as_str(self.#ident),
+                )),
+            );
+        },
     }
 }
 

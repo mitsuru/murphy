@@ -9,7 +9,8 @@ use crate::config_error::ConfigError;
 /// user config. `SCHEMA` is an associated `const` so it is readable from
 /// `static` / `const fn` contexts (what `register_cops!` — murphy-9cr.21
 /// — needs). `#[derive(CopOptions)]` (murphy-9cr.21) overrides
-/// `from_config_json` with field-by-field decoding.
+/// `from_config_json` (and `to_config_json`) with field-by-field
+/// (de)coding.
 pub trait CopOptions: Default + Sized + 'static {
     /// Static schema, one entry per option. Empty for [`NoOptions`].
     const SCHEMA: &'static [OptionSpec] = &[];
@@ -19,6 +20,21 @@ pub trait CopOptions: Default + Sized + 'static {
     /// correct for cops that take no configuration.
     fn from_config_json(_bytes: &[u8]) -> Result<Self, ConfigError> {
         Ok(Self::default())
+    }
+
+    /// Encode this `Options` value back to a JSON object matching the
+    /// `[cops.rules."Name"]` wire format that `from_config_json` would
+    /// accept. The default returns the empty object `"{}"` — correct
+    /// for cops that take no configuration, and a safe fallback for
+    /// hand-implemented options that opt not to round-trip. The
+    /// `#[derive(CopOptions)]` impl walks the fields one-for-one so a
+    /// roundtrip through `to_config_json` ↦ `from_config_json` recovers
+    /// the original value.
+    ///
+    /// The test harness uses this to hand a typed `Options` value to a
+    /// cop without making test code construct raw JSON.
+    fn to_config_json(&self) -> String {
+        String::from("{}")
     }
 }
 
