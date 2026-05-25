@@ -488,15 +488,111 @@ With the feature off, `murphy-translate` (the runtime parser) is not
 pulled in and the `test_support` module is `#[cfg]`-gated out — the
 production cdylib stays parser-free.
 
-The assertion macros are the documented test-writing surface. The
-`indoc!` macro lets Ruby fixtures stay indented next to the test code.
+The preferred test-writing surface is the **tester builder**
+(`test::<T>()`). Each cop sits behind the generic parameter, options
+flow through `with_options(&T::Options)`, and one or more
+`expect_*` methods chain off the same tester. The legacy
+`expect_*!` macros are still exported and pass through to the same
+internal helpers; both APIs coexist.
 
-### `expect_offense!` — assert offenses with caret annotations
+### `test::<T>()` — the tester builder
+
+```rust
+use murphy_plugin_api::test_support::{indoc, test};
+
+#[test]
+fn flags_and_corrects_equals_equals() {
+    test::<SpaceAroundOperators>()
+        .expect_offense(indoc! {r#"
+            x==0
+             ^^ Surrounding space missing for operator `==`.
+        "#})
+        .expect_correction(
+            indoc! {r#"
+                a+b
+                 ^ Surrounding space missing for operator `+`.
+            "#},
+            "a + b\n",
+        );
+}
+```
+
+For cops with non-default options, prefix the chain with
+`with_options(&T::Options)`. The struct comes in by reference;
+`CopOptions::to_config_json` is called internally so test code never
+constructs raw JSON.
+
+```rust
+test::<SpaceAroundOperators>()
+    .with_options(&SpaceAroundOperatorsOptions {
+        allow_for_alignment: false,
+        ..Default::default()
+    })
+    .expect_offense(indoc! {r#"
+        …
+    "#});
+```
+
+Methods on `Tester<T>`:
+
+- **`with_options(self, &T::Options) -> Self`** — set the typed
+  options blob. Subsequent calls overwrite earlier values.
+- **`expect_offense(&self, annotated: &str) -> &Self`** — assert the
+  exact offense set against the caret-annotated source.
+- **`expect_no_offenses(&self, src: &str) -> &Self`** — companion
+  for the negative case.
+- **`expect_correction(&self, annotated: &str, after: &str) -> &Self`**
+  — assert offenses and the post-autocorrect source in one call.
+- **`expect_no_corrections(&self, src: &str) -> &Self`** — assert
+  the cop emits no autocorrect edits for `src` (offense set is
+  unconstrained).
+
+Each `expect_*` is `#[track_caller]` and returns `&Self`, so a single
+tester carries multiple expectations through the same setup.
+
+### Annotation grammar
 
 Caret annotations describe each offense's range and message inline.
-Each annotation line attaches to the source line immediately above;
-caret column is the **char index** of the source line (multibyte safe
-via `char_indices()`).
+Each annotation line attaches to the **nearest preceding source
+line**; multiple annotation lines can stack under one source line
+when the cop fires several offenses on the same row. Caret column is
+the **char index** of the source line (multibyte safe via
+`char_indices()`).
+
+```text
+a+b-c*d
+ ^ Surrounding space missing for operator `+`.
+   ^ Surrounding space missing for operator `-`.
+     ^ Surrounding space missing for operator `*`.
+```
+
+Rules:
+
+- A line whose first non-whitespace char is `^` is an **annotation
+  line**; everything else is a **source line**. Annotation lines are
+  stripped before the source is parsed as Ruby.
+- The caret column equals the char-index start of the offense in the
+  source line above. Number of carets = char length of the range.
+- Text after the last caret (whitespace-trimmed) is the expected
+  message. **Exact-match** comparison. Omit the message (`^^^` only)
+  to assert range only — useful for cops with dynamic message text
+  like `(6/5)`.
+- Matching is **exact-set**: any cop emission without a matching
+  annotation fails the test, any annotation without a matching
+  emission fails the test.
+- On failure, the panic renders **both** expected and actual sides
+  as caret-annotated source for a diff-style read.
+- Multi-line ranges (offense spans past a newline) get carets on the
+  first line only and `(+ N more chars)` is appended to the message.
+  Block-level cops (whole `it … end`) are awkward to annotate with
+  carets — use `run_cop` (below) for those until multi-line caret
+  support lands.
+- `expect_offense` panics with a "use `expect_no_offenses` instead"
+  message if the input has no annotations (typo guard);
+  `expect_no_offenses` panics with the symmetric message when the
+  input contains carets.
+
+### Legacy `expect_*!` macros
 
 ```rust
 use murphy_plugin_api::test_support::{expect_offense, indoc};
@@ -513,115 +609,26 @@ fn flags_two_expects_single_line_block() {
 }
 ```
 
-Annotation grammar:
-
-- A line whose first non-whitespace char is `^` is an **annotation
-  line**; everything else is a **source line**. Annotation lines are
-  stripped before the source is parsed as Ruby.
-- The caret column equals the char-index start of the offense in the
-  source line above. Number of carets = char length of the range.
-- Text after the last caret (whitespace-trimmed) is the expected
-  message. **Exact-match** comparison. Omit the message
-  (`^^^` only) to assert range only — useful for cops with dynamic
-  message text like `(6/5)`.
-- Matching is **exact-set**: any cop emission without a matching
-  annotation fails the test, any annotation without a matching emission
-  fails the test.
-- On failure, the panic renders **both** expected and actual sides as
-  caret-annotated source for a diff-style read.
-
-Limitations and escape hatches:
-
-- One annotation line per source line in MVP (parser already absorbs
-  multiple; comparator/renderer support is tracked as `murphy-swo`).
-- Multi-line ranges (offense spans past a newline) get carets on the
-  first line only and `(+ N more chars)` is appended to the message.
-  Block-level cops (whole `it … end`) are awkward to annotate with
-  carets in this MVP — use `run_cop` (below) for those until
-  multi-line caret support lands.
-- The macro panics with a "use `expect_no_offenses!` instead" message
-  if the input has no annotations (typo guard).
-
-### `expect_no_offenses!` — assert nothing fires
-
-```rust
-use murphy_plugin_api::test_support::{expect_no_offenses, indoc};
-
-#[test]
-fn does_not_flag_single_expect() {
-    expect_no_offenses!(
-        MultipleExpectations,
-        indoc! {r#"
-            it "works" do
-              expect(a).to eq(1)
-            end
-        "#}
-    );
-}
-```
-
-Companion to `expect_offense!`. Panics if the cop emits anything.
-Rejects caret-bearing input as a symmetric typo guard ("use
-`expect_offense!` instead").
-
-### `expect_correction!` — assert offenses and autocorrect output
-
-Use `expect_correction!` for cops that emit `RawEdit`s through
-`cx.emit_edit`. The first fixture uses the same caret grammar as
-`expect_offense!`; the third argument is the exact source expected
-after applying all emitted edits to the annotation-stripped input.
-
-```rust
-use murphy_plugin_api::test_support::{expect_correction, indoc};
-
-#[test]
-fn corrects_redundant_self() {
-    expect_correction!(
-        RedundantSelf,
-        indoc! {r#"
-            self.foo
-            ^^^^^^^^ Redundant self detected
-        "#},
-        "foo\n"
-    );
-}
-```
-
-The macro first checks the exact offense set, then compares the
-corrected source string. `run_cop_with_edits` is available when a test
-needs to inspect the raw captured edits directly.
-
-### `expect_no_corrections!` — assert no autocorrect edits
-
-Use `expect_no_corrections!` when a cop may emit offenses but must not
-emit any autocorrect edits for the fixture.
-
-```rust
-use murphy_plugin_api::test_support::expect_no_corrections;
-
-#[test]
-fn does_not_autocorrect_unsafe_case() {
-    expect_no_corrections!(MyCop, "dangerous_call\n");
-}
-```
-
-The macro rejects caret-bearing input as a typo guard; use
-`expect_correction!` when the fixture should assert both offenses and
-the corrected output.
+The macro form (`expect_offense!` / `expect_no_offenses!` /
+`expect_correction!` / `expect_no_corrections!`) is still exported.
+Each macro forwards to the same internal helpers the tester builder
+uses, so behavior is identical. New cop tests prefer the tester
+builder for the type-safe options story and the chain; existing
+macro callsites do not need to migrate.
 
 ### `indoc!`
 
 Re-exported from the `indoc` crate (also feature-gated). Strips the
-common ASCII-whitespace prefix from each line of a `r#"…"#` literal at
-compile time so Ruby fixtures can stay indented inside the test
+common ASCII-whitespace prefix from each line of a `r#"…"#` literal
+at compile time so Ruby fixtures can stay indented inside the test
 function without affecting parse output or caret column math. Use it
-on every fixture string the macros take.
+on every multi-line fixture string.
 
 ### Escape hatch: `run_cop`
 
-For tests the caret grammar can't express cleanly — block-level multi-line
-ranges, asserting `cop_name` / `severity`, parametrised loops over many
-inputs — drop down to `run_cop`:
+For tests the caret grammar can't express cleanly — block-level
+multi-line ranges, asserting `cop_name` / `severity`, parametrised
+loops over many inputs — drop down to `run_cop`:
 
 ```rust
 use murphy_plugin_api::test_support::run_cop;
@@ -634,16 +641,18 @@ assert_eq!(offenses[0].cop_name, "Plugin/MyCop");
 It parses `src` as Ruby, runs the cop's dispatch (per-kind or
 file-visit, mirroring host semantics), and returns
 `Vec<CapturedOffense>`. `CapturedOffense` carries `cop_name`,
-`message`, `range`, and `severity: Option<Severity>` (`None` when the
-cop didn't override — the host's default chain applies in production).
-The offense assertion macros are thin layers on top of `run_cop`.
+`message`, `range`, and `severity: Option<Severity>` (`None` when
+the cop didn't override — the host's default chain applies in
+production). The tester-builder methods are thin layers on top.
 
 For autocorrect tests, `run_cop_with_edits` returns `CapturedRun`
-with both `offenses` and `edits`.
+with both `offenses` and `edits`. For non-default options under the
+raw-JSON form, use `run_cop_with_options` /
+`run_cop_with_options_and_edits` (the tester builder forwards
+through these under the hood).
 
 Design / implementation references:
 
-- `docs/plans/2026-05-24-expect-offense-macro-design.md`
 - `crates/murphy-plugin-api/src/test_support.rs`
 
 ## 12. References

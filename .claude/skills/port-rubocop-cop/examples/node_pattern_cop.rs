@@ -51,36 +51,23 @@ impl MyPatternCop {
 #[cfg(test)]
 mod tests {
     use super::MyPatternCop;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
-    fn flags_expect_to_eq_true() {
-        expect_offense!(
-            MyPatternCop,
-            indoc! {r#"
+    fn pattern_dispatch_contract() {
+        test::<MyPatternCop>()
+            .expect_offense(indoc! {r#"
                 expect(a).to eq(true)
                 ^^^^^^^^^^^^^^^^^^^^^ Prefer `be true` over `eq(true)`.
-            "#}
-        );
-    }
-
-    #[test]
-    fn does_not_flag_eq_with_non_true_literal() {
-        expect_no_offenses!(
-            MyPatternCop,
-            indoc! {r#"
+            "#})
+            // `eq(1)` doesn't match the `node_pattern!` because the
+            // argument is not the `true` literal.
+            .expect_no_offenses(indoc! {r#"
                 expect(a).to eq(1)
-            "#}
-        );
-    }
-
-    #[test]
-    fn does_not_flag_be_true_form() {
-        expect_no_offenses!(
-            MyPatternCop,
-            indoc! {r#"
+            "#})
+            // The already-preferred form is silent.
+            .expect_no_offenses(indoc! {r#"
                 expect(a).to be true
-            "#}
-        );
+            "#});
     }
 }

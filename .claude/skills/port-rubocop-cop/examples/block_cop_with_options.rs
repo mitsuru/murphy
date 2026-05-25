@@ -91,9 +91,12 @@ fn count_things(cx: &Cx<'_>, body: NodeId) -> usize {
 #[cfg(test)]
 mod tests {
     use super::MyBlockCop;
-    use murphy_plugin_api::test_support::{expect_no_offenses, indoc, run_cop};
+    use murphy_plugin_api::test_support::{indoc, run_cop, test};
 
     fn hits(source: &str) -> usize {
+        // `run_cop` is the escape hatch for whole-block emit ranges
+        // (multi-line carets are awkward today). The tester builder is
+        // still used for shape-level negative cases below.
         run_cop::<MyBlockCop>(source).len()
     }
 
@@ -117,23 +120,18 @@ mod tests {
     }
 
     #[test]
-    fn ignores_explicit_receiver_form() {
-        let src = indoc! {r#"
-            Other.do_thing do
-              # TODO: body
-            end
-        "#};
-        assert_eq!(hits(src), 0);
-    }
-
-    #[test]
-    fn ignores_empty_body() {
-        expect_no_offenses!(
-            MyBlockCop,
-            indoc! {r#"
+    fn ignores_unsupported_shapes() {
+        // Explicit-receiver and empty-body shapes both short-circuit
+        // before the body walk, so a single tester drives both.
+        test::<MyBlockCop>()
+            .expect_no_offenses(indoc! {r#"
+                Other.do_thing do
+                  # TODO: body
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
                 do_thing do
                 end
-            "#}
-        );
+            "#});
     }
 }
