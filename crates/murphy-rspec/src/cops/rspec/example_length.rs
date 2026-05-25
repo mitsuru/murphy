@@ -108,12 +108,12 @@ fn count_lines(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{ExampleLength, count_lines};
-    use murphy_plugin_api::test_support::{expect_no_offenses, indoc, run_cop};
+    use murphy_plugin_api::test_support::{indoc, run_cop, test};
 
     /// `run_cop` only dispatches the one cop type so every emission is
     /// already a `RSpec/ExampleLength` offense — no per-name filter
     /// needed. Retained for positive-case tests whose emit range spans
-    /// multiple source lines; `expect_offense!` only annotates one line
+    /// multiple source lines; the caret grammar only annotates one line
     /// per offense today (murphy-ac6 follow-up).
     fn hits(source: &str) -> usize {
         run_cop::<ExampleLength>(source).len()
@@ -150,9 +150,7 @@ mod tests {
 
     #[test]
     fn does_not_flag_body_at_default_max() {
-        expect_no_offenses!(
-            ExampleLength,
-            indoc! {r#"
+        test::<ExampleLength>().expect_no_offenses(indoc! {r#"
                 it "works" do
                   a = 1
                   b = 2
@@ -160,8 +158,7 @@ mod tests {
                   d = 4
                   e = 5
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]

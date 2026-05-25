@@ -117,12 +117,12 @@ fn is_bare_expect_call(cx: &Cx<'_>, id: NodeId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::MultipleExpectations;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc, run_cop};
+    use murphy_plugin_api::test_support::{indoc, run_cop, test};
 
     /// `run_cop` only dispatches the one cop type so every emission is
     /// already a `RSpec/MultipleExpectations` offense — no per-name
     /// filter needed. Retained for positive-case tests whose emit range
-    /// spans multiple source lines (`expect_offense!`'s caret grammar
+    /// spans multiple source lines (the caret grammar
     /// can only annotate one line per offense; full migration of these
     /// is murphy-ac6 follow-up).
     fn hits(source: &str) -> usize {
@@ -142,14 +142,11 @@ mod tests {
 
     #[test]
     fn does_not_flag_single_expect() {
-        expect_no_offenses!(
-            MultipleExpectations,
-            indoc! {r#"
+        test::<MultipleExpectations>().expect_no_offenses(indoc! {r#"
                 it "works" do
                   expect(a).to eq(1)
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -200,9 +197,7 @@ mod tests {
         // `describe Widget do ... end` contains several `it` blocks
         // each with one expect — the describe itself is not an
         // example and must not aggregate its descendants' expects.
-        expect_no_offenses!(
-            MultipleExpectations,
-            indoc! {r#"
+        test::<MultipleExpectations>().expect_no_offenses(indoc! {r#"
                 describe Widget do
                   it "a" do
                     expect(a).to eq(1)
@@ -211,24 +206,20 @@ mod tests {
                     expect(b).to eq(1)
                   end
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_two_expects_single_line_block() {
         // Single-line `it ... end` keeps the emitted block range on one
-        // source line, which is the shape `expect_offense!` annotates
+        // source line, which is the shape the caret grammar annotates
         // cleanly (multi-line ranges land in murphy-ac6 follow-up). The
         // 52-caret span covers the whole `it ... end` block, matching
         // `cx.range(node)` on the Block.
-        expect_offense!(
-            MultipleExpectations,
-            indoc! {r#"
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
                 it "x" do expect(a).to eq(1); expect(b).to eq(2) end
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Example has too many expectations (2/1)
-            "#}
-        );
+            "#});
     }
 
     #[test]
