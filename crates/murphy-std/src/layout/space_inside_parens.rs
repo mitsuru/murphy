@@ -151,6 +151,10 @@ fn remove_space_in_empty_parens(cx: &Cx<'_>, left: SourceToken, right: SourceTok
     if left.kind != SourceTokenKind::LeftParen || right.kind != SourceTokenKind::RightParen {
         return;
     }
+    // `>=` (not `==`) so a reversed-range pair from upstream token-emission
+    // quirks (see can_ignore_missing_space) does not slice raw_source backwards
+    // and panic. The `==` form covers truly empty `()`; the `>` form covers the
+    // defensive reversed case.
     if left.range.end >= right.range.start {
         return;
     }
