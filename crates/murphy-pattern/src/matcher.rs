@@ -200,6 +200,16 @@ fn match_pat<P: PredicateHost + ?Sized>(
             }
             false
         }
+        IrNode::Quantifier { .. } => {
+            // PR #2 lands lowering only; the sibling-list backtracker that
+            // dispatches a quantifier onto a node's child list arrives in
+            // PR #3 (murphy-ycx). Until then, a quantifier-bearing pattern
+            // compiles and lowers cleanly but every match attempt against
+            // it returns `false` — a silent miss rather than a runtime
+            // panic. Patterns built before PR #3 ships should not rely on
+            // quantifiers for actual match behavior.
+            false
+        }
     }
 }
 
@@ -886,6 +896,36 @@ mod tests {
         let ir2 = lower(&parse("(send nil? :puts _)").unwrap());
         assert!(matches(&ir1, &ast, send, &mut NoPredicates).is_some());
         assert!(matches(&ir2, &ast, send, &mut NoPredicates).is_some());
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // murphy-ycx PR #2: quantifier IR is reachable but inert until PR #3
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn quantifier_pattern_compiles_and_does_not_panic_on_match() {
+        // Regression: PR #2 lowers `pat*`/`pat+`/`pat?` but the runtime
+        // backtracker is still PR #3 scope. Until then, `matches` on a
+        // quantifier-bearing pattern must NOT panic — it should fall
+        // through to a silent miss (`None`). PR #3 replaces this arm
+        // with the real backtracker.
+        let (ast, arr, _ints) = three_array_ast();
+        for src in [
+            "(array int+)",
+            "(array int*)",
+            "(send _ :update_columns hash?)",
+            "(send _ :pluck sym+)",
+            "(send _ :foo ... int+)",
+            "(array $int+)",
+            "(send _ :update_columns $hash?)",
+        ] {
+            let ir = compile(src).unwrap_or_else(|e| panic!("compile `{src}`: {e:?}"));
+            // No panic, no `todo!()` — just a silent miss.
+            assert!(
+                matches(&ir, &ast, arr, &mut NoPredicates).is_none(),
+                "`{src}` must miss until PR #3 lands, got Some(_)",
+            );
+        }
     }
 
     // Pull in unused-import suppression for ergonomics.

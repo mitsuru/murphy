@@ -82,6 +82,24 @@ pub enum IrNode {
     },
     Parent(IrNodeId),
     Descend(IrNodeId),
+    /// `pat*` / `pat+` / `pat?` — postfix quantifier on a node-child slot
+    /// (murphy-ycx). `min..=max` mirrors the AST [`PatKind::Quantifier`]
+    /// payload exactly: `*` → `0..=u8::MAX`, `+` → `1..=u8::MAX`, `?` →
+    /// `0..=1`. **A `max` of `u8::MAX` is interpreted as "unbounded"** by
+    /// the matcher; v1 patterns never approach that limit in practice.
+    ///
+    /// Placement (only valid as a direct child of an `IrNode::Node`) and
+    /// body restrictions (no captures, no rest) were enforced at parse
+    /// time by [`crate::parse`]; the IR type does not structurally
+    /// re-encode them. The runtime backtracker (PR #3) consumes this
+    /// node; PR #2 covers only the lowering.
+    ///
+    /// [`PatKind::Quantifier`]: crate::PatKind::Quantifier
+    Quantifier {
+        body: IrNodeId,
+        min: u8,
+        max: u8,
+    },
 }
 
 /// The head of an `IrNode::Node`.
@@ -262,12 +280,20 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
             let body = lower_pat(inner, ast, ir);
             push_node(ir, IrNode::Descend(body))
         }
-        PatKind::Quantifier { .. } => {
-            // PR #2 (murphy-ycx) lowers quantifiers into the C-backend IR.
-            // PR #1 only covers parse + validation, so reaching here means a
-            // quantifier-bearing pattern was handed to lowering before its
-            // PR landed.
-            todo!("PR #2: lower PatKind::Quantifier into PatternIr")
+        PatKind::Quantifier { body, min, max } => {
+            // Lower the body first (post-order), then push the Quantifier
+            // that references it. Mirrors the `Not` / `Parent` / `Descend`
+            // arms — placement and body restrictions were already enforced
+            // by the parser, so this path is structural only.
+            let body_id = lower_pat(body, ast, ir);
+            push_node(
+                ir,
+                IrNode::Quantifier {
+                    body: body_id,
+                    min: *min,
+                    max: *max,
+                },
+            )
         }
     }
 }
