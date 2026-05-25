@@ -4,7 +4,7 @@ use std::path::Path;
 #[test]
 fn space_inside_parens_uses_authoring_macros() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = Path::new(manifest_dir).join("src/layout/space_inside_parens.rs");
+    let path = Path::new(manifest_dir).join("src/cops/layout/space_inside_parens.rs");
     let source = fs::read_to_string(path).expect("read Layout/SpaceInsideParens source");
 
     assert!(

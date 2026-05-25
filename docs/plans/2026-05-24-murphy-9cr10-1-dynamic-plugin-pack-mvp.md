@@ -536,7 +536,7 @@ crate-type = [\"cdylib\", \"rlib\"] にして murphy-cli の dev-dependencies �
 
 **Step 1: 既存類似 cop (NoReceiverPuts) のパターン参照**
 
-Reference: `crates/murphy-std/src/murphy/no_receiver_puts.rs`
+Reference: `crates/murphy-std/src/cops/murphy/no_receiver_puts.rs`
 - `NodeKindTag(17)` が Send (= CallNode、prism の send)
 - `NodeKind::Send { receiver, method, .. }` で destructuring
 - `cx.symbol_str(method)` で method name 取得
@@ -681,7 +681,7 @@ emit warning。autocorrect / options なし、minimal demo cop。"
 **Step 1: 参照: TrailingWhitespace + StringLiterals**
 
 Reference:
-- file-visit: `crates/murphy-std/src/layout/trailing_whitespace.rs` (KINDS=[]、cx.source())
+- file-visit: `crates/murphy-std/src/cops/layout/trailing_whitespace.rs` (KINDS=[]、cx.source())
 - `#[derive(CopOptions)]` with default array: `crates/murphy-plugin-macros/tests/ui/pass_derive_attrs.rs` の `default = ["id"]` 形
 
 **Step 2: src/todo_format.rs を作成**
