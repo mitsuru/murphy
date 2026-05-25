@@ -67,7 +67,7 @@ pub fn node_child_allows_bare_predicate(tag: murphy_ast::NodeKindTag, child_idx:
 
     match tag.0 {
         // ── Symbol-only vars: `(:name)`
-        9 | 10 | 11 | 12 => false,
+        9..=12 => false,
 
         // ── Single `OptNode + Sym` or sym-first variants
         13 => child_idx == 0,                   // const
