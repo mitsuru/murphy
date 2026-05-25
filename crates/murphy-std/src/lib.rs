@@ -41,6 +41,7 @@ use crate::cops::lint::unused_method_argument::UnusedMethodArgument;
 use crate::cops::lint::useless_assignment::UselessAssignment;
 use crate::cops::murphy::no_receiver_puts::NoReceiverPuts;
 use crate::cops::style::hash_syntax::HashSyntax;
+use crate::cops::style::redundant_self::RedundantSelf;
 use crate::cops::style::string_literals::StringLiterals;
 
 // `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
@@ -56,6 +57,7 @@ murphy_plugin_api::register_cops!(
     UnusedMethodArgument,
     UselessAssignment,
     HashSyntax,
+    RedundantSelf,
     StringLiterals,
     TrailingWhitespace,
     SpaceInsideParens,
