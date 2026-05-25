@@ -50,6 +50,48 @@ pub fn supports_node_pattern(tag: murphy_ast::NodeKindTag) -> bool {
     SUPPORTED_TAGS.contains(&tag.0)
 }
 
+/// Whether `tag`'s child slot at `child_idx` may host a bare predicate shorthand
+/// identifier like `foo?` / `foo!` in a node-child position.
+///
+/// Symbol slots (`PatChild::Sym`) must not accept bare predicate shorthand,
+/// because they are literal symbol paths (`:name`). For all other slot kinds,
+/// including trailing list slots, bare predicates are valid in `node-match` child
+/// positions.
+pub fn node_child_allows_bare_predicate(tag: murphy_ast::NodeKindTag, child_idx: usize) -> bool {
+    if !supports_node_pattern(tag) {
+        // Unsupported node kinds have no schema table row in v1, so parser-time
+        // slot typing is unavailable. Allow bare predicates in child position
+        // and let runtime matching decide exact applicability.
+        return true;
+    }
+
+    match tag.0 {
+        // ── Symbol-only vars: `(:name)`
+        9 | 10 | 11 | 12 => false,
+
+        // ── Single `OptNode + Sym` or sym-first variants
+        13 => child_idx == 0,                   // const
+        14 | 15 | 38 | 39 => child_idx == 1,    // lvasgn / ivasgn / gvasgn / cvasgn
+        16 => child_idx == 0 || child_idx == 2, // casgn
+        17 | 18 => child_idx != 1,              // send / csend
+
+        // ── All Node/OptNode/Node list slots (non-Sym): all fixed children
+        // plus trailing list children when present.
+        19 => child_idx <= 2,                   // block
+        22 | 23 | 24 | 27 | 28 => true,         // collection/list-like nodes
+        25 => child_idx <= 2,                   // if
+        26 => true,                             // case
+        29 => child_idx == 0,                   // return
+        30 | 31 | 47 | 48 => child_idx <= 1,    // and/or/while/until
+        32 => child_idx == 1 || child_idx == 2, // def
+        33 => child_idx <= 2,                   // class
+        34 => child_idx <= 1,                   // module
+
+        // Nothing else is supported in v1.
+        _ => false,
+    }
+}
+
 /// One resolved slot value for a `NodeKind`, surfaced by [`pattern_children`].
 ///
 /// Carries the *resolved* arena value — `OptNode` is `Option<NodeId>` (with
@@ -350,6 +392,58 @@ mod tests {
         // And a known-unsupported tag fails.
         assert!(!supports_node_pattern(murphy_ast::NodeKindTag(5))); // Int
         assert!(!supports_node_pattern(murphy_ast::NodeKindTag(57))); // Rescue
+    }
+
+    #[test]
+    fn node_child_allows_bare_predicate_only_for_node_like_slots() {
+        assert!(!node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(9),
+            0
+        )); // lvar
+        assert!(!node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(13),
+            1
+        )); // const method
+        assert!(!node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(17),
+            1
+        )); // send method
+        assert!(!node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(18),
+            1
+        )); // csend method
+        assert!(node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(17),
+            0
+        )); // send receiver
+        assert!(node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(17),
+            2
+        )); // send args list
+        assert!(node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(17),
+            99
+        )); // send trailing-list child slot
+        assert!(node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(22),
+            0
+        )); // array list
+        assert!(node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(29),
+            0
+        )); // return
+        assert!(!node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(29),
+            1
+        ));
+        assert!(!node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(30),
+            99
+        )); // and no fixed slots beyond 1
+        assert!(node_child_allows_bare_predicate(
+            murphy_ast::NodeKindTag(57),
+            0
+        )); // unsupported tag: parser cannot know slot typing, so allow and defer
     }
 
     #[test]
