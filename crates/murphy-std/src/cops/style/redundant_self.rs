@@ -43,20 +43,8 @@
 //!   offense" expectation but not exercising the
 //!   `on_or_asgn` / `on_op_asgn` "allow `self` LHS" branch from
 //!   RuboCop. `foo ||= self.foo` (lvar-style LHS) is handled.
-//! - **`Kernel#open` and other `Kernel.methods(false)` names.**
-//!   RuboCop maintains a runtime list (`Kernel.methods(false)`) and
-//!   skips `self.<kernel-method>`. The v1 port does not enumerate
-//!   the Kernel surface, so `self.open` / `self.puts` / etc. are
-//!   flagged when they shouldn't be. Disable the cop or rewrite to
-//!   the receiver-free form to silence.
 //! - **`self.it` inside parameterless blocks.** Ruby 3.3+'s
 //!   `Lint/ItWithoutArgumentsInBlock` interplay is not yet wired.
-//! - **`if` / `while` / `until` body lvasgns in the condition's
-//!   scope.** RuboCop's `on_if` pre-walks the body and seeds the
-//!   condition with body-introduced names; Murphy's enumerate-on-
-//!   demand walk catches the named lvasgns via the enclosing
-//!   `Def` / `Block` / root scope, which covers the spec cases but
-//!   diverges on hypothetical scopes that escape the enclosing block.
 //! - **Pattern-matching `in`-clauses (`case .. in`).** Match-var,
 //!   array-pattern, and hash-pattern names are not collected into
 //!   scope yet, so `self.x` inside a pattern body where `x` is the
@@ -126,6 +114,66 @@ const KEYWORDS: &[&str] = &[
     "__ENCODING__",
 ];
 
+/// Non-CamelCase names in `Kernel.methods(false)`. CamelCase names
+/// (`Array`, `Complex`, `Float`, `Hash`, `Integer`, `Rational`,
+/// `String`) are already filtered by [`starts_with_uppercase`]; the
+/// backtick operator (`` ` ``) is filtered by [`is_operator_method`].
+/// Enumerated against MRI 4.0 — keep in sync with the upstream surface.
+const KERNEL_METHODS: &[&str] = &[
+    "__callee__",
+    "__dir__",
+    "__method__",
+    "abort",
+    "at_exit",
+    "autoload",
+    "autoload?",
+    "binding",
+    "block_given?",
+    "caller",
+    "caller_locations",
+    "catch",
+    "eval",
+    "exec",
+    "exit",
+    "exit!",
+    "fail",
+    "fork",
+    "format",
+    "gets",
+    "global_variables",
+    "iterator?",
+    "lambda",
+    "load",
+    "local_variables",
+    "loop",
+    "open",
+    "p",
+    "pp",
+    "print",
+    "printf",
+    "proc",
+    "putc",
+    "puts",
+    "raise",
+    "rand",
+    "readline",
+    "readlines",
+    "select",
+    "set_trace_func",
+    "sleep",
+    "spawn",
+    "sprintf",
+    "srand",
+    "syscall",
+    "system",
+    "test",
+    "throw",
+    "trace_var",
+    "trap",
+    "untrace_var",
+    "warn",
+];
+
 fn check(node: NodeId, cx: &Cx<'_>) {
     let NodeKind::Send {
         receiver, method, ..
@@ -176,6 +224,14 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    // `Kernel.methods(false)` — RuboCop intentionally skips these
+    // because the bare call may not resolve the same way as the
+    // explicit-self call (e.g. `puts` reaches Kernel#puts, but a
+    // private/protected override on the receiver could shadow it).
+    if KERNEL_METHODS.contains(&method_name) {
+        return;
+    }
+
     // Parallel-assignment LHS (`a, self.b = c, d`). RuboCop's gate is
     // `node.parent&.mlhs_type?`; we walk the immediate parent only.
     if let Some(parent) = cx.parent(node).get()
@@ -220,11 +276,14 @@ fn enclosing_scope(cx: &Cx<'_>, node: NodeId) -> Option<NodeId> {
     None
 }
 
-/// `true` when `scope` or any of its descendants introduces a local-
-/// variable name equal to `name`. Mirrors RuboCop's shared-array
-/// trick: every lvasgn / parameter inside the enclosing scope
-/// contributes to the scope's visible-names set, regardless of the
-/// descendant's source position relative to the Send under check.
+/// `true` when `scope` or any of its descendants (excluding nested
+/// `Def` / `Block` subtrees) introduces a local-variable name equal
+/// to `name`. Mirrors RuboCop's shared-array trick: every lvasgn /
+/// parameter inside the enclosing scope contributes to the scope's
+/// visible-names set, regardless of source position; but
+/// name-introductions inside a nested `Def` / `Block` belong to that
+/// inner scope, not the outer one. The walk descends children
+/// directly so it can stop at nested-scope boundaries.
 ///
 /// The scope node itself is also checked because for top-level code
 /// the fallback scope is the AST root, and the root can be the
@@ -234,10 +293,20 @@ fn scope_introduces_name(cx: &Cx<'_>, scope: NodeId, name: &str) -> bool {
     if descendant_introduces_name(cx, scope, name) {
         return true;
     }
-    for desc in cx.descendants(scope) {
-        if descendant_introduces_name(cx, desc, name) {
+    let mut stack: Vec<NodeId> = cx.children(scope);
+    stack.reverse();
+    while let Some(n) = stack.pop() {
+        if descendant_introduces_name(cx, n, name) {
             return true;
         }
+        // Nested `Def` / `Block` starts a fresh scope — its
+        // parameters and lvasgns are not visible to the outer Send.
+        if matches!(cx.kind(n), NodeKind::Def { .. } | NodeKind::Block { .. }) {
+            continue;
+        }
+        let mut kids = cx.children(n);
+        kids.reverse();
+        stack.extend(kids);
     }
     false
 }
@@ -502,6 +571,71 @@ mod tests {
             .expect_no_offenses("self.return\n")
             .expect_no_offenses("self.yield\n")
             .expect_no_offenses("self.__FILE__\n");
+    }
+
+    #[test]
+    fn flags_self_when_matching_name_is_in_nested_block_only() {
+        // Nested-scope guard: the `bar` block-arg in `proc { |bar| }`
+        // belongs to the inner block scope, not the outer def. The
+        // outer `self.bar` does not see it and must be flagged.
+        test::<RedundantSelf>().expect_correction(
+            indoc! {"
+                def outer
+                  self.bar
+                  ^^^^ Redundant `self` detected.
+                  proc { |bar| }
+                end
+            "},
+            indoc! {"
+                def outer
+                  bar
+                  proc { |bar| }
+                end
+            "},
+        );
+    }
+
+    #[test]
+    fn flags_self_when_matching_name_is_in_nested_def_only() {
+        // Same idea as the block case but with a nested `def`.
+        test::<RedundantSelf>().expect_correction(
+            indoc! {"
+                def outer
+                  self.bar
+                  ^^^^ Redundant `self` detected.
+                  def inner(bar); end
+                end
+            "},
+            indoc! {"
+                def outer
+                  bar
+                  def inner(bar); end
+                end
+            "},
+        );
+    }
+
+    #[test]
+    fn accepts_self_when_matching_block_arg_in_same_block() {
+        // Mirror case of the nested-scope guard: when the Send is
+        // *inside* the block whose arg matches, the cop must skip.
+        test::<RedundantSelf>().expect_no_offenses(indoc! {"
+            [1, 2].each do |bar|
+              self.bar
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_self_for_kernel_methods() {
+        // RuboCop's `KERNEL_METHODS = Kernel.methods(false)` exemption
+        // (`self.open`, `self.puts`, …) — bare calls may not resolve
+        // identically, so explicit-self is intentionally preserved.
+        test::<RedundantSelf>()
+            .expect_no_offenses("self.open\n")
+            .expect_no_offenses("self.puts\n")
+            .expect_no_offenses("self.lambda { }\n")
+            .expect_no_offenses("self.block_given?\n");
     }
 
     #[test]
