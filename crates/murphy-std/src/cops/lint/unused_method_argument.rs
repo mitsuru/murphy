@@ -8,6 +8,8 @@
 //!   is) a `raise <NotImplementedException>` (or `.new(...)`), where the
 //!   exception class name is in `NotImplementedExceptions`
 //!   (default `["NotImplementedError"]`). `fail` is treated identically.
+//!   Disable via `ignore_not_implemented_methods = false` to opt back
+//!   into reporting on those methods.
 //! - **`block_argument_with_yield`**: when the body uses `yield`, the
 //!   `&blk` argument is implicitly used; do not flag it.
 //!
@@ -31,6 +33,11 @@ pub struct UnusedMethodArgument;
 /// `Default` at dispatch time (`murphy-9cr.9` will wire live overrides).
 #[derive(CopOptions)]
 pub struct Options {
+    #[option(
+        default = true,
+        description = "When true, skip the cop on methods that raise a NotImplementedException."
+    )]
+    pub ignore_not_implemented_methods: bool,
     #[option(
         default = ["NotImplementedError"],
         description = "Exception classes whose `raise`/`fail` calls in a method body bypass the cop."
@@ -56,7 +63,9 @@ impl UnusedMethodArgument {
         };
 
         let opts = Options::default();
-        if is_not_implemented_body(cx, body, &opts.not_implemented_exceptions) {
+        if opts.ignore_not_implemented_methods
+            && is_not_implemented_body(cx, body, &opts.not_implemented_exceptions)
+        {
             return;
         }
 
