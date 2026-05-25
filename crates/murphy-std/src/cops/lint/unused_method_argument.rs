@@ -156,10 +156,28 @@ fn lvar_reads<'a>(cx: &Cx<'a>, body: NodeId) -> HashSet<&'a str> {
         .collect()
 }
 
+/// Whether `body` (a method body) contains a `yield` that would
+/// dispatch to *this* method's block. `yield` inside a nested method
+/// definition (`def …` or `def self.…`, both encoded as `Def` with a
+/// possible `receiver`) belongs to that inner method's block, not the
+/// outer's, so the walk stops at those boundaries. Blocks / lambdas /
+/// class / module bodies do *not* break `yield` scope, so the walk
+/// descends into them.
 fn body_contains_yield(cx: &Cx<'_>, body: NodeId) -> bool {
-    std::iter::once(body)
-        .chain(cx.descendants(body))
-        .any(|id| matches!(*cx.kind(id), NodeKind::Yield(_)))
+    let mut stack: Vec<NodeId> = vec![body];
+    while let Some(id) = stack.pop() {
+        match *cx.kind(id) {
+            NodeKind::Yield(_) => return true,
+            // Skip every nested method definition — that yield belongs
+            // to the inner method's block, not the outer's. This applies
+            // even when the outer body *is itself* a `Def` (the outer
+            // method's only statement is defining the inner one).
+            NodeKind::Def { .. } => continue,
+            _ => {}
+        }
+        stack.extend(cx.children(id));
+    }
+    false
 }
 
 /// Whether `body` is (or, for a `Begin`, ends with) a single `raise` /
@@ -372,6 +390,40 @@ mod tests {
             &edit.replacement,
         );
         assert_eq!(source, "def foo(x)\n  x\nend\n");
+    }
+
+    #[test]
+    fn yield_inside_nested_def_does_not_save_outer_blockarg() {
+        // The nested `def inner; yield; end` has its own block scope —
+        // its `yield` refers to `inner`'s block, not `outer`'s. So the
+        // outer `&blk` is still unused.
+        expect_offense!(
+            UnusedMethodArgument,
+            indoc! {r#"
+                def outer(&blk)
+                           ^^^ Unused method argument
+                  def inner
+                    yield
+                  end
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn yield_inside_block_body_still_uses_outer_blockarg() {
+        // `yield` inside a block refers to the *enclosing method's*
+        // block, so the outer `&blk` is implicitly used.
+        expect_no_offenses!(
+            UnusedMethodArgument,
+            indoc! {r#"
+                def outer(&blk)
+                  [1, 2].each do |x|
+                    yield x
+                  end
+                end
+            "#}
+        );
     }
 
     #[test]
