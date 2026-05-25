@@ -69,6 +69,25 @@ pub struct Range {
     pub end: u32,
 }
 
+impl Range {
+    /// The empty range `[0, 0)`. Used as the sentinel for "no recorded
+    /// position", notably on [`NodeLoc::name`] for nodes without an
+    /// identifier.
+    pub const ZERO: Range = Range { start: 0, end: 0 };
+}
+
+/// Per-node source-location bundle — Murphy's analog of the parser
+/// gem's `node.loc` accessor. `expression` is the AST node's full
+/// source range; `name` is the identifier source range (the
+/// `node.loc.name` analog) and is [`Range::ZERO`] for nodes without
+/// an identifier (literals, atoms, structural nodes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeLoc {
+    pub expression: Range,
+    pub name: Range,
+}
+
 /// A compact source token for RuboCop-style layout cops.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,6 +126,10 @@ impl NodeList {
 
 /// A single AST node: a fixed-size POD value. The discriminated payload
 /// lives in `kind`; `parent` is filled in by [`AstBuilder::finish`].
+///
+/// `loc.expression` is the node's full source range; `loc.name` is the
+/// identifier range when the node has one (the parser-gem `node.loc.name`
+/// analog), otherwise [`Range::ZERO`].
 #[repr(C)]
 // No `Eq`: `NodeKind` carries `Float(f64)`, and `f64` is not `Eq`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -114,7 +137,7 @@ pub struct AstNode {
     pub kind: NodeKind,
     /// Parent node. `OptNodeId::NONE` for the root.
     pub parent: OptNodeId,
-    pub range: Range,
+    pub loc: NodeLoc,
 }
 
 /// The kind of an AST node, with its inline payload.
