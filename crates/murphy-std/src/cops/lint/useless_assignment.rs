@@ -1,5 +1,6 @@
 //! `Lint/UselessAssignment` — flags local-variable writes whose result is
-//! never read inside the same lexical scope.
+//! never read, *or* whose result is overwritten by a sibling write before
+//! any read can observe it.
 //!
 //! ## Matched shapes
 //!
@@ -13,6 +14,51 @@
 //!   not flagged just because `x += 1` follows.
 //! - `Resbody.var` (`rescue => e`) — `e`'s name range, "exception
 //!   variable" message.
+//!
+//! ## Flow-sensitive dataflow (murphy-xek)
+//!
+//! The cop runs a single-pass intra-scope dataflow:
+//!
+//! 1. Collect every write (`Lvasgn`, `Masgn` target, `OpAsgn`/`OrAsgn`/
+//!    `AndAsgn`, `Resbody.var`) and every read (`Lvar`, plus the implicit
+//!    read inside `OpAsgn`/`OrAsgn`/`AndAsgn`) with byte positions.
+//! 2. For each write `w` to a variable named `n`:
+//!    a. If there is no later read of `n`, flag `w`.
+//!    b. Else find the first later read of `n` and the first later write
+//!    of `n`. If the later write happens *before* the later read **and**
+//!    lies on the same control-flow path as `w`, flag `w` as
+//!    overwrite-before-read.
+//!
+//! "Same control-flow path" is computed by walking up via `cx.parent` and
+//! collecting branch-introducing ancestors (`If` / `Case` / `When` /
+//! `While` / `Until`). `Resbody` / `Rescue` / `Ensure` are *not*
+//! barriers — exception flow carries partial begin-body writes into
+//! the rescue handler, so treating those as exclusive arms would
+//! produce false positives. Each chain entry is a pair
+//! `(barrier_node, branch_child)` — the child of the barrier on the
+//! path from the node — so two writes in different arms of the same
+//! `if` get distinct chain entries even though they share the `If`
+//! barrier.
+//!
+//! Two checks use these chains:
+//!
+//! * **Dominating overwrite** (for `w'` to *always* overwrite `w`): `w'`'s
+//!   chain must be a prefix (outermost-first) of `w`'s. Same chunk or
+//!   shallower-than-`w` qualifies; sibling sequential `if`s do not.
+//! * **Read observation** (for `r` to *possibly* observe `w`): no shared
+//!   barrier disagrees on its arm. Sequential `if`s are compatible
+//!   (both can run on `a && b`); sibling arms of the same `if` are
+//!   not (mutually exclusive at runtime).
+//!
+//! ### Known v1 limitations
+//!
+//! * Two writes in different `resbody`s of the same `Rescue` are not
+//!   recognised as mutually exclusive (we conservatively treat them as
+//!   compatible). The cop will not flag a write in one resbody as
+//!   "overwritten" by a write in a sibling resbody.
+//! * Loops are treated as a single barrier — we don't unroll. A write
+//!   inside a `while` body is in the loop's chunk; we don't reason about
+//!   iteration counts.
 //!
 //! ## Known v1 limitations (Phase 4 — escalate to extend the AST)
 //!
@@ -69,12 +115,18 @@ struct Write {
     /// Range to emit the offense on.
     range: Range,
     message: &'static str,
+    /// Node id used to compute the control-flow barrier chain when
+    /// deciding whether two writes are on the same path.
+    node: NodeId,
 }
 
 struct Read {
     name: Symbol,
     /// Byte position of the read.
     pos: u32,
+    /// Node id used to compute the read's control-flow barrier chain so
+    /// we can ask "is this read reachable from a particular write?"
+    node: NodeId,
 }
 
 fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
@@ -83,14 +135,166 @@ fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
     for id in scope_nodes(cx, root) {
         classify(cx, id, &mut writes, &mut reads);
     }
-    for write in &writes {
-        let read_after = reads
+    // Pre-compute each write's and read's branch chain so we don't pay
+    // for the `cx.parent` walk in the O(W^2) / O(W*R) loops below.
+    let write_chains: Vec<Vec<(NodeId, NodeId)>> = writes
+        .iter()
+        .map(|w| barrier_chain(cx, root, w.node))
+        .collect();
+    let read_chains: Vec<Vec<(NodeId, NodeId)>> = reads
+        .iter()
+        .map(|r| barrier_chain(cx, root, r.node))
+        .collect();
+
+    for (i, write) in writes.iter().enumerate() {
+        // Earliest later read of the same name that's actually on a
+        // control-flow path reachable from this write. A read inside
+        // an exclusive branch (e.g. the `else` arm when the write is
+        // in the `then`) can't observe the write, so it must not
+        // suppress an overwrite-before-read flag. The compatibility
+        // test is *either direction* of prefix: a read at the same
+        // level as the write or deeper-into-a-conditional (write's
+        // chain is a prefix of read's) is reachable when that branch
+        // runs; a read in a shallower chunk (read's chain is a prefix
+        // of write's) is reachable after exiting w's branches.
+        let next_read_pos = reads
             .iter()
-            .any(|r| r.name == write.name && r.pos > write.end);
-        if !read_after {
-            cx.emit_offense(write.range, write.message, None);
+            .enumerate()
+            .filter(|(_, r)| r.name == write.name && r.pos > write.end)
+            .filter(|(k, _)| paths_compatible(&read_chains[*k], &write_chains[i]))
+            .map(|(_, r)| r.pos)
+            .min();
+
+        // Earliest later write of the same name whose chain is a
+        // prefix of `write`'s — i.e. it is in the same chunk as `write`
+        // or in a shallower one that `write` *must* fall through to.
+        // Compare on `end` so the OpAsgn self-read at the same byte
+        // position as the OpAsgn's start doesn't shadow its own write.
+        //
+        // Writes inside a `begin`/`rescue`/`ensure`-protected body are
+        // not eligible dominators: an exception in the body can skip
+        // the rest of it, so we can't guarantee the candidate actually
+        // executes. This is conservative — purely-side-effect-free
+        // writes between two assignments wouldn't really raise — but
+        // it keeps us false-positive-free against exception flow.
+        let dominating_overwrite = writes
+            .iter()
+            .enumerate()
+            .filter(|(j, w)| *j != i && w.name == write.name && w.end > write.end)
+            .filter(|(j, _)| chain_is_prefix(&write_chains[*j], &write_chains[i]))
+            .filter(|(_, w)| !is_in_protected_begin_body(cx, root, w.node))
+            .min_by_key(|(_, w)| w.end);
+
+        match (next_read_pos, dominating_overwrite) {
+            (None, _) => {
+                // No later read of this name anywhere — classic useless
+                // write (whether or not an overwrite follows).
+                cx.emit_offense(write.range, write.message, None);
+            }
+            (Some(r), Some((_, w))) if w.end <= r => {
+                // Dominating overwrite reaches before any read — this
+                // write's value can never be observed.
+                cx.emit_offense(write.range, write.message, None);
+            }
+            (Some(_), _) => {
+                // A later read exists and no dominating overwrite
+                // precedes it — the value is (potentially) used.
+            }
         }
     }
+}
+
+/// Walk up from `node` via `cx.parent`, collecting `(barrier, child)`
+/// pairs at every branch-introducing ancestor up to (but not including)
+/// the scope `root`. `child` is the direct child of `barrier` on the
+/// path from `node`, so two writes in different arms of the same `if`
+/// produce distinct chains even though they share the `If` barrier.
+/// Returned chain is outermost-first so prefix comparisons read
+/// naturally ("less-nested" ↔ "shorter prefix").
+fn barrier_chain(cx: &Cx<'_>, root: NodeId, node: NodeId) -> Vec<(NodeId, NodeId)> {
+    let mut chain: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut current = node;
+    while let Some(parent) = cx.parent(current).get() {
+        if parent == root {
+            break;
+        }
+        if is_branch_barrier(cx, parent) {
+            chain.push((parent, current));
+        }
+        current = parent;
+    }
+    chain.reverse();
+    chain
+}
+
+fn is_branch_barrier(cx: &Cx<'_>, node: NodeId) -> bool {
+    // `Rescue` / `Resbody` / `Ensure` are *not* barriers. A write in
+    // the begin body can be observed by a read in the rescue handler
+    // (exception flow carries the partially-executed body state into
+    // the handler), so treating them as exclusive arms would produce
+    // false positives — the cop would flag the begin write as never
+    // observed even though the rescue read sees it. The known v1
+    // limitation is that two writes in different resbodies of the
+    // same Rescue are *not* recognised as mutually exclusive; that
+    // sits in the doc-comment so users see it.
+    matches!(
+        *cx.kind(node),
+        NodeKind::If { .. }
+            | NodeKind::Case { .. }
+            | NodeKind::When { .. }
+            | NodeKind::While { .. }
+            | NodeKind::Until { .. }
+    )
+}
+
+/// `short` is a prefix of `long` (outermost-first comparison). When
+/// `short = chain(w')` and `long = chain(w)`, this returns true iff
+/// `w'` is guaranteed to be reached after `w` — either same chunk
+/// (chains equal) or a strictly shallower chunk that `w` falls back
+/// out to.
+fn chain_is_prefix(short: &[(NodeId, NodeId)], long: &[(NodeId, NodeId)]) -> bool {
+    short.len() <= long.len() && short == &long[..short.len()]
+}
+
+/// Whether `node` is inside the `body` arm of an enclosing `Rescue` or
+/// `Ensure`. A write here can be interrupted by an exception, so we
+/// can't claim it always executes — exclude it from dominating-overwrite
+/// candidates.
+fn is_in_protected_begin_body(cx: &Cx<'_>, root: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent) = cx.parent(current).get() {
+        if parent == root {
+            return false;
+        }
+        let parent_kind = *cx.kind(parent);
+        let body = match parent_kind {
+            NodeKind::Rescue { body, .. } | NodeKind::Ensure { body, .. } => body,
+            _ => {
+                current = parent;
+                continue;
+            }
+        };
+        if body.get() == Some(current) {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// Two chains describe compatible control-flow paths iff no shared
+/// branch barrier disagrees on which arm each chain is inside.
+/// Sequential `if`s (different barriers) are compatible; sibling
+/// arms of the *same* barrier are not.
+fn paths_compatible(a: &[(NodeId, NodeId)], b: &[(NodeId, NodeId)]) -> bool {
+    for (barrier_a, arm_a) in a {
+        for (barrier_b, arm_b) in b {
+            if barrier_a == barrier_b && arm_a != arm_b {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Read>) {
@@ -110,6 +314,7 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
                 reads.push(Read {
                     name,
                     pos: cx.range(target).start,
+                    node: target,
                 });
                 if !cx.symbol_str(name).starts_with('_') {
                     writes.push(Write {
@@ -117,6 +322,7 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
                         end: cx.range(id).end,
                         range: cx.range(id),
                         message: MSG_OPERATOR,
+                        node: id,
                     });
                 }
             }
@@ -135,6 +341,7 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
                     end: cx.range(var_id).end,
                     range: cx.range(var_id),
                     message: MSG_EXCEPTION,
+                    node: var_id,
                 });
             }
         }
@@ -142,6 +349,7 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
             reads.push(Read {
                 name,
                 pos: cx.range(id).start,
+                node: id,
             });
         }
         _ => {}
@@ -185,6 +393,7 @@ fn push_local_write(
         end: asgn_end,
         range: assignment_name_range(cx, node, name_str),
         message: MSG_LOCAL,
+        node,
     });
 }
 
@@ -417,6 +626,233 @@ mod tests {
                 rescue => _err
                   :rescued
                 end
+            "#}
+        );
+    }
+
+    // murphy-xek: flow-sensitive dataflow — overwrite-before-read +
+    // branch-aware barriers.
+
+    #[test]
+    fn overwrite_before_read_flags_the_overwritten_write() {
+        // `x = 1` is overwritten by `x = 2` before any read.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 1
+                ^ Useless assignment to local variable
+                x = 2
+                x
+            "#}
+        );
+    }
+
+    #[test]
+    fn overwrite_with_no_read_flags_both_writes() {
+        let offenses =
+            murphy_plugin_api::test_support::run_cop::<UselessAssignment>("x = 1\nx = 2\n");
+        assert_eq!(
+            offenses.len(),
+            2,
+            "expected both writes flagged, got {offenses:?}"
+        );
+    }
+
+    #[test]
+    fn conditional_overwrite_does_not_flag_outer_write() {
+        // `x = 1` may survive — the `x = 2` is inside an `if`, so on
+        // the `cond == false` path the final `x` reads `1`.
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 1
+                if cond
+                  x = 2
+                end
+                x
+            "#}
+        );
+    }
+
+    #[test]
+    fn overwrite_inside_same_branch_still_flags() {
+        // Both writes live inside the same `if` body — straight-line
+        // within the branch, so the first is still overwritten.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                if cond
+                  x = 1
+                  ^ Useless assignment to local variable
+                  x = 2
+                  x
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn overwrite_separated_by_use_does_not_flag() {
+        // `x = 1; foo(x); x = 2` — the call reads `x`, so `x = 1` is
+        // used.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 1
+                foo(x)
+                x = 2
+                ^ Useless assignment to local variable
+            "#}
+        );
+    }
+
+    #[test]
+    fn shallower_overwrite_after_branch_dominates_outer_write() {
+        // `x = 1` is overwritten by `x = 3` regardless of whether the
+        // `if` body runs, because `x = 3` is in a shallower (and thus
+        // unconditionally reached) chunk. The `x = 2` inside the `if`
+        // is *also* useless for the same reason — `x = 3` dominates it
+        // through the shallower prefix of its chain. Fix for PR #70
+        // review job 1158 finding 1.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 1
+                ^ Useless assignment to local variable
+                if cond
+                  x = 2
+                  ^ Useless assignment to local variable
+                end
+                x = 3
+                x
+            "#}
+        );
+    }
+
+    #[test]
+    fn exclusive_branches_of_an_if_are_not_overwrites_of_each_other() {
+        // `x = 1` and `x = 2` live in different arms of the same `if`,
+        // so neither overwrites the other at runtime — they are
+        // mutually exclusive. The fix for PR #70 review job 1158
+        // finding 2.
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                if cond
+                  x = 1
+                else
+                  x = 2
+                end
+                x
+            "#}
+        );
+    }
+
+    #[test]
+    fn read_in_a_sibling_conditional_observes_the_outer_write() {
+        // `x = 1` is set when `a` is true; `puts x` runs when `b` is
+        // true. The path `a && b` actually observes `x = 1`. The cop
+        // must not flag `x = 1` as useless. (PR #70 review job 1163
+        // finding 1.)
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                if a
+                  x = 1
+                end
+                if b
+                  puts x
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn begin_body_write_interrupted_by_exception_is_observed_by_rescue() {
+        // `may_raise` can throw between `x = 1` and `x = 2`. On the
+        // exception path, `rescue` reads x = 1 — the value survives.
+        // The cop must not flag x = 1 as overwritten by x = 2.
+        // (PR #70 review job 1165.)
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                begin
+                  x = 1
+                  may_raise
+                  x = 2
+                rescue
+                  puts x
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn rescue_handler_read_observes_begin_body_write() {
+        // Exception flow carries the partial begin-body write into
+        // the rescue handler — `puts x` can see `x = 1`. (PR #70
+        // review job 1163 finding 2.)
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                begin
+                  x = 1
+                  raise
+                rescue
+                  puts x
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn read_inside_a_later_conditional_observes_the_outer_write() {
+        // The `puts x` runs when `cond` is true — that path observes
+        // the outer `x = 1`, so the write must not be flagged.
+        // (PR #70 review job 1162.)
+        expect_no_offenses!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 1
+                if cond
+                  puts x
+                end
+            "#}
+        );
+    }
+
+    #[test]
+    fn read_in_exclusive_branch_does_not_save_a_write_from_another_branch() {
+        // `x = 1` is in the `then` arm; `puts x` is in the `else` arm.
+        // They are mutually exclusive at runtime, so the `puts x` does
+        // *not* observe `x = 1`. The dominating `x = 2` afterward
+        // overwrites `x = 1` unconditionally → flag.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                if cond
+                  x = 1
+                  ^ Useless assignment to local variable
+                else
+                  puts x
+                end
+                x = 2
+                x
+            "#}
+        );
+    }
+
+    #[test]
+    fn op_asgn_overwriting_a_prior_write_does_not_flag_the_prior_write() {
+        // Already covered by the murphy-8k4y tests, but pin again under
+        // the dataflow framing: `x = 0; x += 1` — only the OpAsgn is
+        // useless.
+        expect_offense!(
+            UselessAssignment,
+            indoc! {r#"
+                x = 0
+                x += 1
+                ^^^^^^ Useless operator-assignment to local variable
             "#}
         );
     }
