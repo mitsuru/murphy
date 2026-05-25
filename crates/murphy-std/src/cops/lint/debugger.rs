@@ -211,13 +211,11 @@ fn receiver_signature(cx: &Cx<'_>, id: NodeId) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::Debugger;
-    use murphy_plugin_api::test_support::{expect_no_offenses, expect_offense, indoc};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
     fn flags_debugger_calls_and_requires() {
-        expect_offense!(
-            Debugger,
-            indoc! {r#"
+        test::<Debugger>().expect_offense(indoc! {r#"
             pry
             ^^^ Remove debugger entry point `pry`.
             require 'pry'
@@ -230,102 +228,80 @@ mod tests {
             ^^^^^^ Remove debugger entry point `byebug`.
             require 'debug/open'
             ^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `require 'debug/open'`.
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn ignores_non_debugger_usage_and_multibyte_source() {
-        expect_no_offenses!(Debugger, "名前 = 'pry'\nlogger.pry\nrequire name\n");
+        test::<Debugger>().expect_no_offenses("名前 = 'pry'\nlogger.pry\nrequire name\n");
     }
 
     // murphy-dma2: binding.irb / Kernel.debugger / receiver chains.
 
     #[test]
     fn flags_binding_irb() {
-        expect_offense!(
-            Debugger,
-            indoc! {r#"
+        test::<Debugger>().expect_offense(indoc! {r#"
                 binding.irb
                 ^^^^^^^^^^^ Remove debugger entry point `binding.irb`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_binding_b_and_binding_break() {
-        expect_offense!(
-            Debugger,
-            indoc! {r#"
+        test::<Debugger>().expect_offense(indoc! {r#"
                 binding.b
                 ^^^^^^^^^ Remove debugger entry point `binding.b`.
                 binding.break
                 ^^^^^^^^^^^^^ Remove debugger entry point `binding.break`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_kernel_debugger_with_const_receiver() {
-        expect_offense!(
-            Debugger,
-            indoc! {r#"
+        test::<Debugger>().expect_offense(indoc! {r#"
                 Kernel.debugger
                 ^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.debugger`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_pry_rescue() {
-        expect_offense!(
-            Debugger,
-            indoc! {r#"
+        test::<Debugger>().expect_offense(indoc! {r#"
                 Pry.rescue
                 ^^^^^^^^^^ Remove debugger entry point `Pry.rescue`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_capybara_save_and_open_helpers() {
-        expect_offense!(
-            Debugger,
-            indoc! {r#"
+        test::<Debugger>().expect_offense(indoc! {r#"
                 save_and_open_page
                 ^^^^^^^^^^^^^^^^^^ Remove debugger entry point `save_and_open_page`.
                 save_and_open_screenshot
                 ^^^^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `save_and_open_screenshot`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_jard() {
-        expect_offense!(
-            Debugger,
-            indoc! {r#"
+        test::<Debugger>().expect_offense(indoc! {r#"
                 jard
                 ^^^^ Remove debugger entry point `jard`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn flags_require_capybara_dsl() {
-        expect_offense!(
-            Debugger,
-            indoc! {r#"
+        test::<Debugger>().expect_offense(indoc! {r#"
                 require 'capybara/dsl'
                 ^^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `require 'capybara/dsl'`.
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn ignores_unrelated_receiver_with_same_method_name() {
         // `foo.b` is not `binding.b` — the receiver must literally be
         // the `binding` no-arg call.
-        expect_no_offenses!(Debugger, "foo.b\nfoo.break\nfoo.irb\n");
+        test::<Debugger>().expect_no_offenses("foo.b\nfoo.break\nfoo.irb\n");
     }
 }

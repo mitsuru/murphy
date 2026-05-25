@@ -437,75 +437,61 @@ fn assignment_name_range(cx: &Cx<'_>, node: NodeId, name: &str) -> Range {
 #[cfg(test)]
 mod tests {
     use super::UselessAssignment;
-    use murphy_plugin_api::test_support::{
-        expect_no_offenses, expect_offense, indoc, run_cop, run_cop_with_edits,
-    };
+    use murphy_plugin_api::test_support::{indoc, run_cop, run_cop_with_edits, test};
 
     #[test]
     fn flags_assignments_that_are_never_read() {
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
             used = 1
             unused = 2
             ^^^^^^ Useless assignment to local variable
             used
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn ignores_underscore_assignments_and_has_no_autocorrect() {
-        expect_no_offenses!(UselessAssignment, "名前 = 1\n名前\n_unused = 2\n");
+        test::<UselessAssignment>().expect_no_offenses("名前 = 1\n名前\n_unused = 2\n");
         let run = run_cop_with_edits::<UselessAssignment>("unused = 1\n");
         assert_eq!(run.edits.len(), 0);
     }
 
     #[test]
     fn nested_method_read_does_not_satisfy_outer_assignment() {
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
             outer = 1
             ^^^^^ Useless assignment to local variable
             def inner
               outer
             end
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn earlier_read_does_not_satisfy_later_assignment() {
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
             x = 0
             x
             x = 1
             ^ Useless assignment to local variable
-        "#}
-        );
+        "#});
     }
 
     // murphy-8k4y: cover Masgn / OpAsgn / OrAsgn / AndAsgn / Resbody shapes.
 
     #[test]
     fn masgn_flags_only_unused_targets() {
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
             a, b = 1, 2
             ^ Useless assignment to local variable
             b
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn masgn_nested_lhs_targets_are_inspected() {
         // `a, (b, c) = [1, [2, 3]]` — the inner `(b, c)` is its own
-        // `Mlhs`. `b` is used, `a` and `c` are not. The `expect_offense!`
+        // `Mlhs`. `b` is used, `a` and `c` are not. The builder-based
         // caret grammar can't annotate two offsets on one line, so check
         // via `run_cop` directly.
         let offenses = run_cop::<UselessAssignment>("a, (b, c) = [1, [2, 3]]\nb\n");
@@ -528,106 +514,82 @@ mod tests {
 
     #[test]
     fn masgn_with_all_used_targets_is_not_flagged() {
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 a, b = 1, 2
                 a + b
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn op_asgn_flags_only_the_op_asgn_when_result_unused() {
         // `x = 0` is read by `x += 1` (the operator-assignment implicitly
         // reads `x`); only the `x += 1` write is useless.
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
             x = 0
             x += 1
             ^^^^^^ Useless operator-assignment to local variable
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn or_asgn_uses_operator_message() {
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
             x = 0
             x ||= 1
             ^^^^^^^ Useless operator-assignment to local variable
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn and_asgn_uses_operator_message() {
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
             x = 0
             x &&= 1
             ^^^^^^^ Useless operator-assignment to local variable
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn op_asgn_target_counts_as_read_for_prior_assignment() {
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 x = 0
                 x += 1
                 x
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn rescue_var_flags_when_unused() {
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
             begin
               raise
             rescue => e
                       ^ Useless assignment to exception variable
               :rescued
             end
-        "#}
-        );
+        "#});
     }
 
     #[test]
     fn rescue_var_used_is_not_flagged() {
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 begin
                   raise
                 rescue => e
                   e.message
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn rescue_var_underscore_is_silenced() {
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 begin
                   raise
                 rescue => _err
                   :rescued
                 end
-            "#}
-        );
+            "#});
     }
 
     // murphy-xek: flow-sensitive dataflow — overwrite-before-read +
@@ -636,15 +598,12 @@ mod tests {
     #[test]
     fn overwrite_before_read_flags_the_overwritten_write() {
         // `x = 1` is overwritten by `x = 2` before any read.
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
                 x = 1
                 ^ Useless assignment to local variable
                 x = 2
                 x
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -662,48 +621,39 @@ mod tests {
     fn conditional_overwrite_does_not_flag_outer_write() {
         // `x = 1` may survive — the `x = 2` is inside an `if`, so on
         // the `cond == false` path the final `x` reads `1`.
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 x = 1
                 if cond
                   x = 2
                 end
                 x
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn overwrite_inside_same_branch_still_flags() {
         // Both writes live inside the same `if` body — straight-line
         // within the branch, so the first is still overwritten.
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
                 if cond
                   x = 1
                   ^ Useless assignment to local variable
                   x = 2
                   x
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
     fn overwrite_separated_by_use_does_not_flag() {
         // `x = 1; foo(x); x = 2` — the call reads `x`, so `x = 1` is
         // used.
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
                 x = 1
                 foo(x)
                 x = 2
                 ^ Useless assignment to local variable
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -714,9 +664,7 @@ mod tests {
         // is *also* useless for the same reason — `x = 3` dominates it
         // through the shallower prefix of its chain. Fix for PR #70
         // review job 1158 finding 1.
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
                 x = 1
                 ^ Useless assignment to local variable
                 if cond
@@ -725,8 +673,7 @@ mod tests {
                 end
                 x = 3
                 x
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -735,17 +682,14 @@ mod tests {
         // so neither overwrites the other at runtime — they are
         // mutually exclusive. The fix for PR #70 review job 1158
         // finding 2.
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 if cond
                   x = 1
                 else
                   x = 2
                 end
                 x
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -754,17 +698,14 @@ mod tests {
         // true. The path `a && b` actually observes `x = 1`. The cop
         // must not flag `x = 1` as useless. (PR #70 review job 1163
         // finding 1.)
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 if a
                   x = 1
                 end
                 if b
                   puts x
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -773,9 +714,7 @@ mod tests {
         // exception path, `rescue` reads x = 1 — the value survives.
         // The cop must not flag x = 1 as overwritten by x = 2.
         // (PR #70 review job 1165.)
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 begin
                   x = 1
                   may_raise
@@ -783,8 +722,7 @@ mod tests {
                 rescue
                   puts x
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -792,17 +730,14 @@ mod tests {
         // Exception flow carries the partial begin-body write into
         // the rescue handler — `puts x` can see `x = 1`. (PR #70
         // review job 1163 finding 2.)
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 begin
                   x = 1
                   raise
                 rescue
                   puts x
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -810,15 +745,12 @@ mod tests {
         // The `puts x` runs when `cond` is true — that path observes
         // the outer `x = 1`, so the write must not be flagged.
         // (PR #70 review job 1162.)
-        expect_no_offenses!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
                 x = 1
                 if cond
                   puts x
                 end
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -827,9 +759,7 @@ mod tests {
         // They are mutually exclusive at runtime, so the `puts x` does
         // *not* observe `x = 1`. The dominating `x = 2` afterward
         // overwrites `x = 1` unconditionally → flag.
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
                 if cond
                   x = 1
                   ^ Useless assignment to local variable
@@ -838,8 +768,7 @@ mod tests {
                 end
                 x = 2
                 x
-            "#}
-        );
+            "#});
     }
 
     #[test]
@@ -847,13 +776,10 @@ mod tests {
         // Already covered by the murphy-8k4y tests, but pin again under
         // the dataflow framing: `x = 0; x += 1` — only the OpAsgn is
         // useless.
-        expect_offense!(
-            UselessAssignment,
-            indoc! {r#"
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
                 x = 0
                 x += 1
                 ^^^^^^ Useless operator-assignment to local variable
-            "#}
-        );
+            "#});
     }
 }
