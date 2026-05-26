@@ -829,6 +829,35 @@ mod tests {
     }
 
     #[test]
+    fn arena_node_range_layout_pins_loc_expression() {
+        // `arena_node_range` reads `(*node_ptr).loc.expression`. Reproduce
+        // the same pointer dance from Rust so an AST layout change that
+        // moves `expression` out of `loc`, renames it, or swaps it with
+        // `loc.name` breaks here alongside the C primitive — flagging
+        // drift in this file rather than as a silently wrong value
+        // returned to user cops.
+        use murphy_ast::{AstBuilder, NodeKind, Range};
+
+        let mut b = AstBuilder::new("foo", "t.rb".to_string());
+        let expr = Range { start: 7, end: 10 };
+        let name = Range { start: 1, end: 4 };
+        let id = b.push_named(NodeKind::Nil, expr, name);
+        let ast = b.finish(id);
+        let raw = ast.raw_parts();
+        let node_ptr = raw.nodes.as_ptr();
+
+        // The exact field walk `arena_node_range` performs.
+        let range = unsafe { (*node_ptr.add(id.0 as usize)).loc.expression };
+        assert_eq!(range, expr);
+
+        // Pin separation: `loc.name` and `loc.expression` must stay
+        // independent so a future field-order swap is detectable.
+        let name_range = unsafe { (*node_ptr.add(id.0 as usize)).loc.name };
+        assert_eq!(name_range, name);
+        assert_ne!(range, name_range);
+    }
+
+    #[test]
     fn populate_and_drain_round_trip() {
         let send_tag = NodeKindTag::of(&NodeKind::Send {
             receiver: OptNodeId::NONE,

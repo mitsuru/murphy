@@ -204,6 +204,13 @@ fn match_pat<P: PredicateHost + ?Sized>(
             // Quantifiers are sequence operators, consumed by
             // `match_list_slot`. Reaching one as a scalar pattern means an
             // invalid hand-built IR or an unsupported fixed-slot shape.
+            // Debug builds trip so layout drift is caught early; release
+            // builds fall through to a silent miss to preserve the
+            // historical no-panic contract for hand-built IR.
+            debug_assert!(
+                false,
+                "quantifier IR reached scalar slot; only list slots dispatch quantifiers",
+            );
             false
         }
     }
@@ -406,7 +413,8 @@ fn match_list_from<P: PredicateHost + ?Sized>(
         for count in (repeat.min..=upper).rev() {
             let mut trial = states[count].clone();
             if let Some(slot) = repeat.capture_slot {
-                let value = if repeat.max == Some(1) {
+                let value = if repeat.is_optional {
+                    // `?` arity: count is always 0 or 1 because min=0, max=1.
                     CaptureValue::OptNode(if count == 1 { Some(elems[0]) } else { None })
                 } else {
                     CaptureValue::Seq(elems[..count].to_vec())
@@ -441,27 +449,38 @@ struct RepeatPat {
     min: usize,
     max: Option<usize>,
     capture_slot: Option<u16>,
+    /// `?` arity (`min == 0`, `max == 1`). When the repeat is captured,
+    /// `is_optional` selects `OptNode` over `Seq` so the caller sees a
+    /// single-or-missing node rather than a 0-or-1-element sequence.
+    is_optional: bool,
 }
 
+/// Classify a list-slot child as a postfix quantifier (`*` / `+` / `?`) or
+/// a `$`-captured one. The parser only emits `Quantifier` directly or
+/// wrapped in a single `Capture`; nested shapes (`Capture` inside
+/// `Quantifier`, double-`Capture`, etc.) are deliberately unsupported and
+/// fall through to `None`.
 fn repeat_kind(ctx: &MatcherCtx, pat: IrNodeId) -> Option<RepeatPat> {
-    match ctx.ir_node(pat) {
-        IrNode::Quantifier { body, min, max } => Some(RepeatPat {
-            body: *body,
-            min: *min as usize,
-            max: (*max != u8::MAX).then_some(*max as usize),
-            capture_slot: None,
-        }),
+    let (capture_slot, q) = match ctx.ir_node(pat) {
+        IrNode::Quantifier { .. } => (None, pat),
         IrNode::Capture { slot, body } => match ctx.ir_node(*body) {
-            IrNode::Quantifier { body, min, max } => Some(RepeatPat {
-                body: *body,
-                min: *min as usize,
-                max: (*max != u8::MAX).then_some(*max as usize),
-                capture_slot: Some(*slot),
-            }),
-            _ => None,
+            IrNode::Quantifier { .. } => (Some(*slot), *body),
+            _ => return None,
         },
-        _ => None,
-    }
+        _ => return None,
+    };
+    let IrNode::Quantifier { body, min, max } = ctx.ir_node(q) else {
+        unreachable!("`q` was just classified as `Quantifier`");
+    };
+    let min = *min as usize;
+    let max = (*max != u8::MAX).then_some(*max as usize);
+    Some(RepeatPat {
+        body: *body,
+        min,
+        max,
+        capture_slot,
+        is_optional: min == 0 && max == Some(1),
+    })
 }
 
 fn repeat_states<P: PredicateHost + ?Sized>(
@@ -1139,11 +1158,37 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // murphy-ycx PR #3: quantifier IR misses quietly outside list dispatch
+    // murphy-ycx PR #3: quantifier IR outside list dispatch
     // ────────────────────────────────────────────────────────────────────
+    //
+    // In debug builds the scalar-slot branch trips a `debug_assert!` so
+    // layout drift is caught early; in release builds it silently misses
+    // (`false`) to preserve the historical no-panic contract for hand-built
+    // IR. The two test arms below pin both shapes.
 
+    #[cfg(debug_assertions)]
     #[test]
-    fn quantifier_as_scalar_pattern_does_not_panic() {
+    #[should_panic(expected = "quantifier IR reached scalar slot")]
+    fn quantifier_as_scalar_pattern_panics_in_debug() {
+        let (ast, arr, _ints) = three_array_ast();
+        let ir = lower(&parse("(array int+)").unwrap());
+        let IrNode::Node { children, .. } = ir.nodes[ir.root.0 as usize] else {
+            panic!("expected node root");
+        };
+        let quantifier = ir.children[children.start as usize];
+        let mut buf = CaptureBuf::new(0);
+        let _ = match_pat(
+            &MatcherCtx { ir: &ir, ast: &ast },
+            quantifier,
+            arr,
+            &mut buf,
+            &mut NoPredicates,
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn quantifier_as_scalar_pattern_silently_misses_in_release() {
         let (ast, arr, _ints) = three_array_ast();
         let ir = lower(&parse("(array int+)").unwrap());
         let IrNode::Node { children, .. } = ir.nodes[ir.root.0 as usize] else {
