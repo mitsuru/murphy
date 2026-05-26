@@ -1477,10 +1477,18 @@ fn lower_quantifier_list(
     let attempt = gensym(ctx, "__attempt");
 
     // 1. Collect every capture slot reachable from this list's children
-    //    and redirect each to a local `Option<T>` binding. The locals are
-    //    declared outside the closure so the closure can re-assign them
-    //    across backtrack attempts. Slots register in insertion order so
-    //    the commit step is deterministic.
+    //    that isn't already redirected by an enclosing quantifier list.
+    //    Locals are declared outside the closure so the closure can
+    //    re-assign them across backtrack attempts. Slots register in
+    //    insertion order so the commit step is deterministic.
+    //
+    //    A slot owned by an outer driver must keep writing into *that*
+    //    driver's local — otherwise the outer's commit would race a
+    //    second write to the function-level `__cap{slot}` and rustc
+    //    would reject the second assignment (the binding is single-
+    //    assign). Inner `capture_assign(slot)` looks up
+    //    `ctx.local_caps[slot]` and naturally hits the outer ident, so
+    //    the outer's `__lcap{slot}` is the one that sees `Some(_)`.
     let mut slots: Vec<u16> = Vec::new();
     for child in list_children {
         collect_capture_slots(child, &mut slots);
@@ -1490,6 +1498,8 @@ fn lower_quantifier_list(
     // occurrence so we declare one local per slot.
     let mut seen = std::collections::BTreeSet::new();
     slots.retain(|s| seen.insert(*s));
+    // Drop slots an outer driver already owns — see the comment above.
+    slots.retain(|s| !ctx.local_caps.contains_key(s));
 
     // Slot id -> (local ident, capture kind, original `__cap{id}` ident).
     let mut local_specs: Vec<(u16, Ident, CaptureKind, Ident)> = Vec::with_capacity(slots.len());

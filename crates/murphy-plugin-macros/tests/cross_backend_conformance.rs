@@ -907,6 +907,14 @@ node_pattern!(b_array_cap_int_plus, "(array $int+)");
 node_pattern!(b_send_uc_cap_hash_q, "(send _ :update_columns $hash?)");
 node_pattern!(b_array_cap_int_plus_cap_1, "(array $int+ $1)");
 node_pattern!(b_send_foo_rest_int_plus, "(send _ :foo ... int+)");
+// Nested quantifier lists where an inner capture slot is also visible from
+// the outer driver's `collect_capture_slots` walk. The outer driver must
+// not double-redirect the slot or both lists race the `__cap{slot}`
+// single-assignment binding.
+node_pattern!(
+    b_nested_outer_q_inner_cap,
+    "(send _ :wrap (array $int+) int+)"
+);
 
 #[test]
 fn quantifier_capture_seq_matches_one_or_more() {
@@ -1010,6 +1018,55 @@ fn quantifier_backtracks_with_captures_into_fixed_suffix() {
             assert_eq!(b_node, id3);
         }
         other => panic!("backends disagree on $int+ $1 captures: {other:?}"),
+    }
+}
+
+#[test]
+fn quantifier_nested_inner_capture_threads_through_outer_driver() {
+    // `(send _ :wrap (array $int+) int+)` — outer driver owns slot 0 (it
+    // walks Fixed Node children too), inner driver finds slot 0 already
+    // redirected and reuses the outer's `__lcap0`. `obj.wrap([1, 2], 7,
+    // 8)` should hit: outer args = [array, int(7), int(8)] → fixed
+    // `(array $int+)` matches the array (inner $int+ = [1, 2]), trailing
+    // `int+` matches [7, 8].
+    let mut b = AstBuilder::new("obj.wrap([1, 2], 7, 8)", "t.rb");
+    let recv_sym = b.intern_symbol("obj");
+    let recv = b.push(NodeKind::Lvar(recv_sym), r());
+    let n1 = b.push(NodeKind::Int(1), r());
+    let n2 = b.push(NodeKind::Int(2), r());
+    let inner_list = b.push_list(&[n1, n2]);
+    let array = b.push(NodeKind::Array(inner_list), r());
+    let n7 = b.push(NodeKind::Int(7), r());
+    let n8 = b.push(NodeKind::Int(8), r());
+    let args = b.push_list(&[array, n7, n8]);
+    let m = b.intern_symbol("wrap");
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv),
+            method: m,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_captured: Option<(&[NodeId],)> = b_nested_outer_q_inner_cap(send, &cx);
+    let c = assert_c_matches(
+        "(send _ :wrap (array $int+) int+)",
+        &ast,
+        send,
+        b_captured.is_some(),
+    );
+    let c_seq = c.expect("C also matched").get(0).cloned();
+    match (b_captured, c_seq) {
+        (Some((bs,)), Some(CaptureValue::Seq(cs))) => {
+            assert_eq!(bs, cs.as_slice(), "nested $int+ capture disagrees");
+            assert_eq!(bs, &[n1, n2]);
+        }
+        other => panic!("backends disagree on nested capture: {other:?}"),
     }
 }
 
