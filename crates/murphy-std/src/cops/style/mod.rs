@@ -2,4 +2,5 @@
 //! counterpart.
 
 pub mod hash_syntax;
+pub mod redundant_self;
 pub mod string_literals;
