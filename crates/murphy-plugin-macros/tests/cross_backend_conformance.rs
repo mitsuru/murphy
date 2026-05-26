@@ -905,6 +905,8 @@ fn quantifier_optional_hash_arg() {
 
 node_pattern!(b_array_cap_int_plus, "(array $int+)");
 node_pattern!(b_send_uc_cap_hash_q, "(send _ :update_columns $hash?)");
+node_pattern!(b_array_cap_int_plus_cap_1, "(array $int+ $1)");
+node_pattern!(b_send_foo_rest_int_plus, "(send _ :foo ... int+)");
 
 #[test]
 fn quantifier_capture_seq_matches_one_or_more() {
@@ -970,6 +972,91 @@ fn quantifier_capture_optnode_matches_present_and_absent() {
             (Some((None,)), Some(CaptureValue::OptNode(None))) => {}
             other => panic!("backends disagree on $hash? absent-capture: {other:?}"),
         }
+    }
+}
+
+#[test]
+fn quantifier_backtracks_with_captures_into_fixed_suffix() {
+    // `(array $int+ $1)` against `[1, 2, 1]`:
+    // - greedy `$int+` would take all 3, suffix `$1` fails (no elem left)
+    // - backtrack to `$int+` = [id1, id2], suffix `$1` matches `1` against id3
+    // → captures: Seq([id1, id2]) + Node(id3).
+    let mut b = AstBuilder::new("[1, 2, 1]", "t.rb");
+    let id1 = b.push(NodeKind::Int(1), r());
+    let id2 = b.push(NodeKind::Int(2), r());
+    let id3 = b.push(NodeKind::Int(1), r());
+    let list = b.push_list(&[id1, id2, id3]);
+    let arr = b.push(NodeKind::Array(list), r());
+    let ast = b.finish(arr);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_captured: Option<(&[NodeId], NodeId)> = b_array_cap_int_plus_cap_1(arr, &cx);
+    let c = assert_c_matches("(array $int+ $1)", &ast, arr, b_captured.is_some());
+
+    let c_seq = c.as_ref().expect("C also matched").get(0).cloned();
+    let c_node = c.expect("C also matched").get(1).cloned();
+    match (b_captured, c_seq, c_node) {
+        (
+            Some((b_seq, b_node)),
+            Some(CaptureValue::Seq(c_seq)),
+            Some(CaptureValue::Node(c_node)),
+        ) => {
+            assert_eq!(b_seq, c_seq.as_slice(), "Seq capture disagrees");
+            assert_eq!(b_node, c_node, "Node capture disagrees");
+            // Sanity: backtracker really gave back the trailing `1`.
+            assert_eq!(b_seq, &[id1, id2]);
+            assert_eq!(b_node, id3);
+        }
+        other => panic!("backends disagree on $int+ $1 captures: {other:?}"),
+    }
+}
+
+#[test]
+fn quantifier_coexists_with_rest() {
+    // `(send _ :foo ... int+)` requires both `...` (zero-or-more, no
+    // capture) and a trailing `int+` quantifier. The parser allows at most
+    // one rest plus any number of quantifiers, and the backtracker must
+    // honour both: `foo(:x, 1, 2)` → `...` = [:x], `int+` = [1, 2].
+    {
+        let (ast, send) = build_send_ast("foo", |b| {
+            let sx = b.intern_symbol("x");
+            vec![
+                b.push(NodeKind::Sym(sx), r()),
+                b.push(NodeKind::Int(1), r()),
+                b.push(NodeKind::Int(2), r()),
+            ]
+        });
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :foo ... int+)",
+            &ast,
+            send,
+            b_send_foo_rest_int_plus(send, &cx),
+            true,
+            "foo(:x, 1, 2)",
+        );
+    }
+    // `foo(:x)` — no trailing int, `int+` min=1 fails.
+    {
+        let (ast, send) = build_send_ast("foo", |b| {
+            let sx = b.intern_symbol("x");
+            vec![b.push(NodeKind::Sym(sx), r())]
+        });
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :foo ... int+)",
+            &ast,
+            send,
+            b_send_foo_rest_int_plus(send, &cx),
+            false,
+            "foo(:x)",
+        );
     }
 }
 
