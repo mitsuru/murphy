@@ -6,11 +6,10 @@
 
 use murphy_plugin_api::{Cx, NodeId, NodeKind, OptNodeId};
 
-/// `true` when `call` is a bare `it` / `specify` / `example` call —
-/// the three RSpec aliases that introduce a single example. Matches
-/// the receiver shape `RSpec/ExampleLength` and
-/// `RSpec/MultipleExpectations` both police: explicit-receiver forms
-/// like `Other.it "x"` are some other DSL's `it` and are skipped.
+/// `true` when `call` is a bare RSpec example call. Matches the receiver
+/// shape `RSpec/ExampleLength` and `RSpec/MultipleExpectations` both
+/// police: explicit-receiver forms like `Other.it "x"` are some other
+/// DSL's `it` and are skipped.
 pub(crate) fn is_example_call(cx: &Cx<'_>, call: NodeId) -> bool {
     let NodeKind::Send {
         receiver, method, ..
@@ -21,5 +20,17 @@ pub(crate) fn is_example_call(cx: &Cx<'_>, call: NodeId) -> bool {
     if receiver != OptNodeId::NONE {
         return false;
     }
-    matches!(cx.symbol_str(method), "it" | "specify" | "example")
+    matches!(
+        cx.symbol_str(method),
+        "it" | "specify"
+            | "example"
+            | "fit"
+            | "fspecify"
+            | "fexample"
+            | "xit"
+            | "xspecify"
+            | "xexample"
+            | "skip"
+            | "pending"
+    )
 }
