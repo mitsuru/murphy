@@ -141,6 +141,11 @@ impl<'a> PairInfo<'a> {
         };
         let key_range = cx.range(key);
         let value_range = cx.range(value);
+        if value_range.start < key_range.end {
+            // Ruby value omission (`{ foo: }`) translates as a Pair whose key
+            // covers `foo:` and value covers the identifier `foo`.
+            return None;
+        }
         let gap = Range {
             start: key_range.end,
             end: value_range.start,
@@ -421,6 +426,11 @@ mod tests {
                 "#},
                 "x = { :a => # note: keep\n  1 }\n",
             );
+    }
+
+    #[test]
+    fn ignores_value_omission_without_slicing_gap_backwards() {
+        test::<HashSyntax>().expect_no_offenses("foo = 1\nx = { foo: }\n");
     }
 
     #[test]
