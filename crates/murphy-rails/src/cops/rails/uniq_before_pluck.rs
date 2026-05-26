@@ -8,7 +8,8 @@
 //! ## Matched shape (Send node)
 //!
 //! Outer `Send(receiver=Some(inner), method="uniq", args=[])`, where
-//! `inner` is itself `Send(receiver=_, method="pluck", args=[_, ...])`.
+//! `inner` is itself `Send(receiver=_, method="pluck", args=[_+])` —
+//! i.e. ≥1 wildcard args via the murphy-ycx postfix quantifier.
 //!
 //! Same shape as `Rails/Pick` with `:first` → `:uniq`; see that cop's
 //! module docs for the DSL semantics. `pluck` arity ≥1 (zero-arg
@@ -23,11 +24,11 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
 
-// RuboCop NodePattern equivalent: `(send (send _ :pluck _ ...) :uniq)`.
+// RuboCop NodePattern equivalent: `(send (send _ :pluck _+) :uniq)`.
 // - Outer: receiver = inner Send, method `:uniq`, exactly 0 args.
 // - Inner: receiver `_` (unconstrained), method `:pluck`, ≥1 arg
-//   (`_ ...` = one wildcard + rest).
-node_pattern!(is_pluck_uniq, "(send (send _ :pluck _ ...) :uniq)");
+//   (postfix `_+` quantifier, murphy-ycx).
+node_pattern!(is_pluck_uniq, "(send (send _ :pluck _+) :uniq)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]

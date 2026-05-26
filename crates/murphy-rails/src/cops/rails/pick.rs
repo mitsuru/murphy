@@ -37,11 +37,11 @@
 //! ## Implementation
 //!
 //! Expressed declaratively with [`node_pattern!`] (RuboCop NodePattern
-//! grammar). `_ ...` in the inner Send's argument list means "one
-//! wildcard followed by zero-or-more rest" — i.e. ≥1 arg — which
-//! rules out the zero-arg `pluck.first` shape. Trailing argument
-//! placeholders are omitted on the outer Send (it must take exactly
-//! zero args, ruling out `.first(5)`).
+//! grammar). Postfix `_+` in the inner Send's argument list means
+//! "one-or-more wildcard children" (murphy-ycx) — which rules out the
+//! zero-arg `pluck.first` shape. Trailing argument placeholders are
+//! omitted on the outer Send (it must take exactly zero args, ruling
+//! out `.first(5)`).
 //!
 //! ## No autocorrect
 //!
@@ -51,11 +51,12 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
 
-// RuboCop NodePattern equivalent: `(send (send _ :pluck _ ...) :first)`.
+// RuboCop NodePattern equivalent: `(send (send _ :pluck _+) :first)`.
 // - Outer: receiver = inner Send, method `:first`, exactly 0 args.
 // - Inner: receiver `_` (unconstrained), method `:pluck`, ≥1 arg
-//   (`_ ...` = one wildcard + rest, excludes zero-arg `pluck.first`).
-node_pattern!(is_pluck_first, "(send (send _ :pluck _ ...) :first)");
+//   (postfix `_+` quantifier, murphy-ycx; excludes zero-arg
+//   `pluck.first`).
+node_pattern!(is_pluck_first, "(send (send _ :pluck _+) :first)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
