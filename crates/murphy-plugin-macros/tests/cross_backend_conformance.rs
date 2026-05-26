@@ -651,3 +651,383 @@ fn predicate_suffix_inside_union_agrees() {
         &mut host,
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// 10. Sequence quantifiers — `pat*` / `pat+` / `pat?` in node child lists
+// (murphy-ycx). The B backend emits a compile-time backtracker; the C
+// backend uses the runtime backtracker landed in PR #76. Both must agree
+// on hit/miss and on the captured slot shape (`Seq` for `*`/`+`,
+// `OptNode` for `?`).
+// ────────────────────────────────────────────────────────────────────────
+
+/// `[1, 2, 3]` — an array of three ints.
+fn array_three_ints_ast() -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("[1, 2, 3]", "t.rb");
+    let ints: Vec<NodeId> = (1..=3)
+        .map(|i| b.push(NodeKind::Int(i as i64), r()))
+        .collect();
+    let list = b.push_list(&ints);
+    let arr = b.push(NodeKind::Array(list), r());
+    let ast = b.finish(arr);
+    (ast, arr)
+}
+
+/// `[]` — an empty array.
+fn array_empty_ast() -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("[]", "t.rb");
+    let list = b.push_list(&[]);
+    let arr = b.push(NodeKind::Array(list), r());
+    let ast = b.finish(arr);
+    (ast, arr)
+}
+
+node_pattern!(b_array_int_plus, "(array int+)");
+node_pattern!(b_array_int_star, "(array int*)");
+node_pattern!(b_array_int_plus_int, "(array int+ int)");
+node_pattern!(b_send_pluck_sym_plus, "(send _ :pluck sym+)");
+node_pattern!(b_send_uc_hash_q, "(send _ :update_columns hash?)");
+node_pattern!(b_send_foo_int_star_str, "(send _ :foo int* str)");
+
+/// Build an `obj.<method>(<args>)` send AST. The closure produces the arg
+/// node ids in call order. Receiver is an `Lvar(:obj)` so that an OptNode
+/// slot pattern of `_` (which requires `Some`) matches.
+fn build_send_ast<F>(method: &str, push_args: F) -> (Ast, NodeId)
+where
+    F: FnOnce(&mut AstBuilder) -> Vec<NodeId>,
+{
+    let mut b = AstBuilder::new("", "t.rb");
+    let recv_sym = b.intern_symbol("obj");
+    let recv = b.push(NodeKind::Lvar(recv_sym), r());
+    let args = push_args(&mut b);
+    let arg_list = b.push_list(&args);
+    let m = b.intern_symbol(method);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv),
+            method: m,
+            args: arg_list,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send)
+}
+
+fn run_pair(src: &str, ast: &Ast, node: NodeId, b_matched: bool, expect_match: bool, case: &str) {
+    let c = assert_c_matches(src, ast, node, b_matched);
+    assert_eq!(
+        b_matched, expect_match,
+        "case `{case}` against `{src}`: expected match={expect_match}, got B={b_matched}"
+    );
+    let _ = c;
+}
+
+#[test]
+fn quantifier_plus_matches_one_or_more() {
+    {
+        let (ast, arr) = array_three_ints_ast();
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(array int+)",
+            &ast,
+            arr,
+            b_array_int_plus(arr, &cx),
+            true,
+            "[1,2,3]",
+        );
+    }
+    {
+        let (ast, arr) = array_empty_ast();
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(array int+)",
+            &ast,
+            arr,
+            b_array_int_plus(arr, &cx),
+            false,
+            "[]",
+        );
+    }
+}
+
+#[test]
+fn quantifier_star_matches_zero_or_more() {
+    // Both `[1,2,3]` and `[]` hit `(array int*)`.
+    {
+        let (ast, arr) = array_three_ints_ast();
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(array int*)",
+            &ast,
+            arr,
+            b_array_int_star(arr, &cx),
+            true,
+            "[1,2,3]",
+        );
+    }
+    {
+        let (ast, arr) = array_empty_ast();
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(array int*)",
+            &ast,
+            arr,
+            b_array_int_star(arr, &cx),
+            true,
+            "[]",
+        );
+    }
+}
+
+#[test]
+fn quantifier_backtracks_to_give_back_to_fixed_suffix() {
+    // `(array int+ int)` against `[1,2,3]`: greedy int+ takes all 3, suffix
+    // `int` fails, backtrack to int+ = [1,2], suffix `int` = 3 → hit.
+    let (ast, arr) = array_three_ints_ast();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    run_pair(
+        "(array int+ int)",
+        &ast,
+        arr,
+        b_array_int_plus_int(arr, &cx),
+        true,
+        "[1,2,3]",
+    );
+}
+
+#[test]
+fn quantifier_pluck_sym_plus() {
+    // pluck(:a) — hit.
+    {
+        let (ast, send) = build_send_ast("pluck", |b| {
+            let s = b.intern_symbol("a");
+            vec![b.push(NodeKind::Sym(s), r())]
+        });
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :pluck sym+)",
+            &ast,
+            send,
+            b_send_pluck_sym_plus(send, &cx),
+            true,
+            "pluck(:a)",
+        );
+    }
+    // pluck(:a, :b) — hit.
+    {
+        let (ast, send) = build_send_ast("pluck", |b| {
+            let sa = b.intern_symbol("a");
+            let sb = b.intern_symbol("b");
+            vec![
+                b.push(NodeKind::Sym(sa), r()),
+                b.push(NodeKind::Sym(sb), r()),
+            ]
+        });
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :pluck sym+)",
+            &ast,
+            send,
+            b_send_pluck_sym_plus(send, &cx),
+            true,
+            "pluck(:a,:b)",
+        );
+    }
+    // pluck() — miss (min 1).
+    {
+        let (ast, send) = build_send_ast("pluck", |_| Vec::new());
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :pluck sym+)",
+            &ast,
+            send,
+            b_send_pluck_sym_plus(send, &cx),
+            false,
+            "pluck()",
+        );
+    }
+}
+
+#[test]
+fn quantifier_optional_hash_arg() {
+    use murphy_ast::NodeList;
+    // update_columns({}) — hit (one hash arg).
+    {
+        let (ast, send) = build_send_ast("update_columns", |b| {
+            vec![b.push(NodeKind::Hash(NodeList::EMPTY), r())]
+        });
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :update_columns hash?)",
+            &ast,
+            send,
+            b_send_uc_hash_q(send, &cx),
+            true,
+            "update_columns({})",
+        );
+    }
+    // update_columns() — hit (optional absent).
+    {
+        let (ast, send) = build_send_ast("update_columns", |_| Vec::new());
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :update_columns hash?)",
+            &ast,
+            send,
+            b_send_uc_hash_q(send, &cx),
+            true,
+            "update_columns()",
+        );
+    }
+}
+
+// ─── Capture-bearing quantifier cases (`$int+`, `$str?`, $-backreffed). ───
+
+node_pattern!(b_array_cap_int_plus, "(array $int+)");
+node_pattern!(b_send_uc_cap_hash_q, "(send _ :update_columns $hash?)");
+
+#[test]
+fn quantifier_capture_seq_matches_one_or_more() {
+    // `(array $int+)` against `[1,2,3]` — captures Seq([1,2,3]).
+    let (ast, arr) = array_three_ints_ast();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_captured: Option<(&[NodeId],)> = b_array_cap_int_plus(arr, &cx);
+    let c = assert_c_matches("(array $int+)", &ast, arr, b_captured.is_some());
+
+    let c_seq = c.expect("C also matched").get(0).cloned();
+    match (b_captured, c_seq) {
+        (Some((bs,)), Some(CaptureValue::Seq(cs))) => assert_eq!(bs, cs.as_slice()),
+        other => panic!("backends disagree on $int+ capture: {other:?}"),
+    }
+}
+
+#[test]
+fn quantifier_capture_optnode_matches_present_and_absent() {
+    use murphy_ast::NodeList;
+    // `update_columns({})` — `$hash?` captures `Some(hash_node)`.
+    {
+        let (ast, send) = build_send_ast("update_columns", |b| {
+            vec![b.push(NodeKind::Hash(NodeList::EMPTY), r())]
+        });
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let b_captured: Option<(Option<NodeId>,)> = b_send_uc_cap_hash_q(send, &cx);
+        let c = assert_c_matches(
+            "(send _ :update_columns $hash?)",
+            &ast,
+            send,
+            b_captured.is_some(),
+        );
+        let c_optnode = c.expect("C also matched").get(0).cloned();
+        match (b_captured, c_optnode) {
+            (Some((Some(b_id),)), Some(CaptureValue::OptNode(Some(c_id)))) => {
+                assert_eq!(b_id, c_id, "OptNode-Some id disagrees");
+            }
+            other => panic!("backends disagree on $hash? present-capture: {other:?}"),
+        }
+    }
+    // `update_columns()` — `$hash?` captures `None` (optional absent).
+    {
+        let (ast, send) = build_send_ast("update_columns", |_| Vec::new());
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let b_captured: Option<(Option<NodeId>,)> = b_send_uc_cap_hash_q(send, &cx);
+        let c = assert_c_matches(
+            "(send _ :update_columns $hash?)",
+            &ast,
+            send,
+            b_captured.is_some(),
+        );
+        let c_optnode = c.expect("C also matched").get(0).cloned();
+        match (b_captured, c_optnode) {
+            (Some((None,)), Some(CaptureValue::OptNode(None))) => {}
+            other => panic!("backends disagree on $hash? absent-capture: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn quantifier_star_with_fixed_suffix() {
+    // foo(1, 2, "x") — hit: int* = [1,2], str = "x".
+    {
+        let (ast, send) = build_send_ast("foo", |b| {
+            let s = b.intern_string("x");
+            vec![
+                b.push(NodeKind::Int(1), r()),
+                b.push(NodeKind::Int(2), r()),
+                b.push(NodeKind::Str(s), r()),
+            ]
+        });
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :foo int* str)",
+            &ast,
+            send,
+            b_send_foo_int_star_str(send, &cx),
+            true,
+            "foo(1,2,\"x\")",
+        );
+    }
+    // foo("x") — hit: int* = [], str = "x".
+    {
+        let (ast, send) = build_send_ast("foo", |b| {
+            let s = b.intern_string("x");
+            vec![b.push(NodeKind::Str(s), r())]
+        });
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :foo int* str)",
+            &ast,
+            send,
+            b_send_foo_int_star_str(send, &cx),
+            true,
+            "foo(\"x\")",
+        );
+    }
+    // foo() — miss (no str).
+    {
+        let (ast, send) = build_send_ast("foo", |_| Vec::new());
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        run_pair(
+            "(send _ :foo int* str)",
+            &ast,
+            send,
+            b_send_foo_int_star_str(send, &cx),
+            false,
+            "foo()",
+        );
+    }
+}
