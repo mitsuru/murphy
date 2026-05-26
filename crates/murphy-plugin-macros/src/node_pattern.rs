@@ -8,6 +8,8 @@ use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, LitStr, Token};
 
+use std::collections::HashMap;
+
 use murphy_pattern::{CaptureKind, PatternAst};
 
 /// Parsed `node_pattern!(name, "pattern")` invocation.
@@ -58,11 +60,7 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
             CaptureKind::Node => quote!(::murphy_plugin_api::NodeId),
             CaptureKind::Seq => quote!(&'a [::murphy_plugin_api::NodeId]),
             CaptureKind::OptNode => {
-                // PR #2 (murphy-ycx) wires `$pat?` lowering into the B
-                // backend. PR #1 only ships the AST/parser, so reaching this
-                // arm means a `$pat?` pattern was handed to the macro before
-                // its lowering PR landed.
-                todo!("PR #2: lower CaptureKind::OptNode into the B backend")
+                quote!(::core::option::Option<::murphy_plugin_api::NodeId>)
             }
         })
         .collect();
@@ -88,6 +86,8 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
     let mut ctx = Lower {
         fail: fail.clone(),
         next: 0,
+        capture_kinds: ast.capture_kinds().to_vec(),
+        local_caps: HashMap::new(),
     };
     let body = lower_pat(&ast.root, &quote!(node), &mut ctx)?;
 
@@ -113,6 +113,20 @@ fn cap_ident(i: usize) -> Ident {
     Ident::new(&format!("__cap{i}"), proc_macro2::Span::call_site())
 }
 
+/// Emit the assignment statement for capture `slot`. Consults
+/// `ctx.local_caps`: if the slot was redirected to a local
+/// `Option<T>` binding by a backtracking scope (murphy-ycx
+/// [`lower_quantifier_list`]), emit `<local> = Some(value);`; otherwise
+/// emit `__cap{slot} = value;` to the function-level binding.
+fn capture_assign(slot: u16, value: TokenStream, ctx: &Lower) -> TokenStream {
+    if let Some(local) = ctx.local_caps.get(&slot) {
+        quote!(#local = ::core::option::Option::Some(#value);)
+    } else {
+        let cap = cap_ident(slot as usize);
+        quote!(#cap = #value;)
+    }
+}
+
 /// Mutable state threaded through the recursive lowering.
 struct Lower {
     /// The expression a failed guard returns (`false` or `None`).
@@ -121,6 +135,18 @@ struct Lower {
     /// identifiers across recursion depth so nested `(send (send ...) ...)`
     /// matches do not shadow each other's `__b*` / `__n*` / `__list*`.
     next: usize,
+    /// Per-capture-slot kinds (indexed by slot id). Populated from
+    /// `PatternAst::capture_kinds()` at entry to [`lower_matcher`] so the
+    /// quantifier driver can declare a typed `__lcap{slot}: Option<T>`
+    /// without re-deriving the type from the pattern.
+    capture_kinds: Vec<CaptureKind>,
+    /// Captures redirected to local `Option<T>` bindings inside a
+    /// backtracking scope (murphy-ycx). When a slot is present here,
+    /// [`capture_assign_tokens`] writes `<ident> = Some(value);` instead
+    /// of `__cap{slot} = value;`. The quantifier driver pops the entry
+    /// on exit and commits the local Options to the outer captures on
+    /// the successful path.
+    local_caps: HashMap<u16, Ident>,
 }
 
 /// Allocate a fresh, collision-free binding identifier `#{prefix}#{n}`.
@@ -900,8 +926,8 @@ fn lower_pat(
             // returns `ctx.fail` before the slot is written), then assign
             // the captured node id into the deferred-init capture variable.
             let body_guards = lower_pat(body, subject, ctx)?;
-            let cap = cap_ident(*slot as usize);
-            Ok(quote!(#body_guards #cap = #subject;))
+            let assign = capture_assign(*slot, quote!(#subject), ctx);
+            Ok(quote!(#body_guards #assign))
         }
         PatKind::Predicate(name) => {
             // `#name` calls a free fn `name(node, cx) -> bool` in scope at the
@@ -1262,11 +1288,18 @@ fn rest_kind(pat: &murphy_pattern::Pat) -> Option<RestKind> {
 /// prefix and a `k - 1 - r`-element suffix: the prefix matches the leading
 /// elements, the suffix matches the *trailing* elements, and the span between
 /// them is the rest. A `$...` binds that span; a bare `...` binds nothing.
+///
+/// When any child is a postfix `*` / `+` / `?` quantifier (murphy-ycx), the
+/// list switches to a backtracking driver that mirrors the C matcher's
+/// `match_list_from` (PR #3 / #76). See [`lower_quantifier_list`].
 fn lower_trailing_list(
     list_bind: &Ident,
     list_children: &[murphy_pattern::Pat],
     ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
+    if has_quantifier_child(list_children) {
+        return lower_quantifier_list(list_bind, list_children, ctx);
+    }
     let fail = fail_stmt(ctx);
     let list_val = gensym(ctx, "__list");
 
@@ -1343,7 +1376,6 @@ fn lower_trailing_list(
     // Middle: the rest span `list[r .. len - suffix_count]`. Only a `$...`
     // capture needs it bound; a bare `...` matches nothing here.
     if let RestKind::Capture(slot) = rest {
-        let cap = cap_ident(slot as usize);
         // Shape the slice expression to avoid `len - 0` / `[0..]` lints.
         // The `_, _` arms only fire when `suffix_count > 0`, so `len_val`
         // is `Some` whenever it is interpolated.
@@ -1353,10 +1385,385 @@ fn lower_trailing_list(
             (_, 0) => quote!(&#list_val[#r..]),
             (_, _) => quote!(&#list_val[#r..#len_val - #suffix_count]),
         };
-        guards.push(quote!(#cap = #span;));
+        guards.push(capture_assign(slot, span, ctx));
     }
 
     Ok(quote!(#(#guards)*))
+}
+
+/// True iff any child carries a postfix `*` / `+` / `?` quantifier — directly
+/// or wrapped by a single `$` capture (`$pat+` etc.). The parser forbids any
+/// other nesting (`($pat)+`, double-`Capture`, `Quantifier` inside
+/// `Quantifier` body), so the classification is unambiguous.
+fn has_quantifier_child(children: &[murphy_pattern::Pat]) -> bool {
+    use murphy_pattern::PatKind;
+    children.iter().any(|c| {
+        let inner = match &c.kind {
+            PatKind::Capture { body, .. } => &body.kind,
+            other => other,
+        };
+        matches!(inner, PatKind::Quantifier { .. })
+    })
+}
+
+/// A pattern child classified into the three list-element shapes the
+/// backtracker drives: a Fixed element (one-elem-one-pat), a Rest span
+/// (`...` or `$...`, zero-or-more), or a Quantifier (`pat*` / `pat+` /
+/// `pat?` with optional `$` capture).
+enum ListKid<'a> {
+    Fixed(&'a murphy_pattern::Pat),
+    Rest(RestKind),
+    Quantifier(QuantifierPat<'a>),
+}
+
+/// A classified quantifier child: its body, arity bounds, and optional
+/// capture slot. `is_optional` mirrors the C matcher's interpretation —
+/// `min == 0 && max == Some(1)` selects the `OptNode` capture shape over
+/// `Seq`.
+struct QuantifierPat<'a> {
+    body: &'a murphy_pattern::Pat,
+    min: u8,
+    /// `None` for the unbounded `*` / `+` arity (`u8::MAX` in the AST).
+    max: Option<u8>,
+    capture_slot: Option<u16>,
+    is_optional: bool,
+}
+
+fn classify_list_kid(pat: &murphy_pattern::Pat) -> ListKid<'_> {
+    use murphy_pattern::PatKind;
+    if let Some(r) = rest_kind(pat) {
+        return ListKid::Rest(r);
+    }
+    let (cap_slot, q_pat) = match &pat.kind {
+        PatKind::Quantifier { .. } => (None, pat),
+        PatKind::Capture { slot, body, .. } if matches!(body.kind, PatKind::Quantifier { .. }) => {
+            (Some(*slot), body.as_ref())
+        }
+        _ => return ListKid::Fixed(pat),
+    };
+    let PatKind::Quantifier { body, min, max } = &q_pat.kind else {
+        unreachable!("classified as Quantifier above")
+    };
+    let max_opt = (*max != u8::MAX).then_some(*max);
+    let is_optional = *min == 0 && max_opt == Some(1);
+    ListKid::Quantifier(QuantifierPat {
+        body: body.as_ref(),
+        min: *min,
+        max: max_opt,
+        capture_slot: cap_slot,
+        is_optional,
+    })
+}
+
+/// Lower a trailing `List` slot whose children include at least one
+/// quantifier. Emits a closure-wrapped backtracking driver that mirrors
+/// `murphy_pattern::matcher::match_list_from` (PR #3 / #76).
+///
+/// - The driver returns `Some(())` on a full match, `None` on exhaustion.
+/// - On failure the outer guard returns the caller's `ctx.fail` (so `bool` /
+///   `Option<(..)>` matchers both bail correctly).
+/// - Every capture bound *within* the list is redirected to a local
+///   `Option<T>` binding (re-assignable across backtrack attempts) via
+///   `ctx.local_caps`. On the successful path the locals are unwrapped into
+///   the function-level `__cap{slot}` variables.
+fn lower_quantifier_list(
+    list_bind: &Ident,
+    list_children: &[murphy_pattern::Pat],
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    let outer_fail = fail_stmt(ctx);
+    let list_val = gensym(ctx, "__list");
+    let len_val = gensym(ctx, "__len");
+    let attempt = gensym(ctx, "__attempt");
+
+    // 1. Collect every capture slot reachable from this list's children
+    //    that isn't already redirected by an enclosing quantifier list.
+    //    Locals are declared outside the closure so the closure can
+    //    re-assign them across backtrack attempts. Slots register in
+    //    insertion order so the commit step is deterministic.
+    //
+    //    A slot owned by an outer driver must keep writing into *that*
+    //    driver's local — otherwise the outer's commit would race a
+    //    second write to the function-level `__cap{slot}` and rustc
+    //    would reject the second assignment (the binding is single-
+    //    assign). Inner `capture_assign(slot)` looks up
+    //    `ctx.local_caps[slot]` and naturally hits the outer ident, so
+    //    the outer's `__lcap{slot}` is the one that sees `Some(_)`.
+    let mut slots: Vec<u16> = Vec::new();
+    for child in list_children {
+        collect_capture_slots(child, &mut slots);
+    }
+    // Each slot ID may legitimately repeat across positions in the parser
+    // surface (the parser deduplicates them later); keep only the first
+    // occurrence so we declare one local per slot.
+    let mut seen = std::collections::BTreeSet::new();
+    slots.retain(|s| seen.insert(*s));
+    // Drop slots an outer driver already owns — see the comment above.
+    slots.retain(|s| !ctx.local_caps.contains_key(s));
+
+    // Slot id -> (local ident, capture kind, original `__cap{id}` ident).
+    let mut local_specs: Vec<(u16, Ident, CaptureKind, Ident)> = Vec::with_capacity(slots.len());
+    let mut local_decls: Vec<TokenStream> = Vec::with_capacity(slots.len());
+    for slot in &slots {
+        let kind = ctx
+            .capture_kinds
+            .get(*slot as usize)
+            .copied()
+            .expect("slot id within capture_kinds range");
+        let ty = capture_kind_ty(kind);
+        let local = Ident::new(&format!("__lcap{slot}"), proc_macro2::Span::call_site());
+        local_decls.push(
+            quote!(let mut #local: ::core::option::Option<#ty> = ::core::option::Option::None;),
+        );
+        local_specs.push((*slot, local, kind, cap_ident(*slot as usize)));
+    }
+
+    // 2. Register the redirects, swap `ctx.fail` for the closure scope,
+    //    emit the recursive driver, then restore.
+    for (slot, local, _, _) in &local_specs {
+        ctx.local_caps.insert(*slot, local.clone());
+    }
+    let saved_fail = std::mem::replace(&mut ctx.fail, quote!(::core::option::Option::None));
+    let body = emit_list_step(list_children, &quote!(0usize), &list_val, &len_val, ctx);
+    ctx.fail = saved_fail;
+    for slot in &slots {
+        ctx.local_caps.remove(slot);
+    }
+    let body = body?;
+
+    // 3. On the successful path, unwrap each local into the function-level
+    //    capture. The locals are `Some` because every successful path
+    //    inside the driver wrote them before returning `Some(())`.
+    let commits: Vec<TokenStream> = local_specs
+        .iter()
+        .map(|(_, local, _, outer)| {
+            quote!(#outer = #local.expect("capture written on successful match path");)
+        })
+        .collect();
+
+    Ok(quote! {
+        let #list_val = cx.list(#list_bind);
+        let #len_val: usize = #list_val.len();
+        #(#local_decls)*
+        let #attempt: ::core::option::Option<()> = (|| -> ::core::option::Option<()> {
+            #body
+        })();
+        if #attempt.is_none() {
+            #outer_fail
+        }
+        #(#commits)*
+    })
+}
+
+/// Map a [`CaptureKind`] to the Rust type the matcher binds the capture
+/// variable to (matches the type emitted by [`lower_matcher`]). Used by
+/// [`lower_quantifier_list`] to declare each local `Option<T>` shadow.
+fn capture_kind_ty(kind: CaptureKind) -> TokenStream {
+    match kind {
+        CaptureKind::Node => quote!(::murphy_plugin_api::NodeId),
+        CaptureKind::Seq => quote!(&'a [::murphy_plugin_api::NodeId]),
+        CaptureKind::OptNode => {
+            quote!(::core::option::Option<::murphy_plugin_api::NodeId>)
+        }
+    }
+}
+
+/// Walk `pat` and push every capture slot id reached (including captures
+/// nested inside `Capture` bodies — the slot of an outer `$pat` and any
+/// inner `$inner` are both written on a successful path).
+fn collect_capture_slots(pat: &murphy_pattern::Pat, out: &mut Vec<u16>) {
+    use murphy_pattern::PatKind;
+    match &pat.kind {
+        PatKind::Capture { slot, body, .. } => {
+            out.push(*slot);
+            collect_capture_slots(body, out);
+        }
+        PatKind::Node { children, .. } => {
+            for c in children {
+                collect_capture_slots(c, out);
+            }
+        }
+        PatKind::Union(alts) => {
+            for a in alts {
+                collect_capture_slots(a, out);
+            }
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            collect_capture_slots(b, out);
+        }
+        PatKind::Quantifier { body, .. } => collect_capture_slots(body, out),
+        PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate(_)
+        | PatKind::Kind(_)
+        | PatKind::Rest => {}
+    }
+}
+
+/// Recursively emit the backtracker for the remaining list children at
+/// `cursor_expr` (an expression of type `usize` naming the current
+/// position in `list_val`). Returns a token stream that, inside an
+/// `Option<()>`-returning closure, either falls through to the next step
+/// or `return`s `Some(())` / `None`.
+fn emit_list_step(
+    kids: &[murphy_pattern::Pat],
+    cursor_expr: &TokenStream,
+    list_val: &Ident,
+    len_val: &Ident,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    let Some((first, rest_kids)) = kids.split_first() else {
+        // Base case: every kid placed. The list must be fully consumed.
+        return Ok(quote! {
+            if (#cursor_expr) == #len_val {
+                return ::core::option::Option::Some(());
+            }
+            return ::core::option::Option::None;
+        });
+    };
+
+    match classify_list_kid(first) {
+        ListKid::Fixed(pat) => emit_fixed_step(pat, rest_kids, cursor_expr, list_val, len_val, ctx),
+        ListKid::Rest(rk) => emit_rest_step(rk, rest_kids, cursor_expr, list_val, len_val, ctx),
+        ListKid::Quantifier(q) => {
+            emit_quantifier_step(q, rest_kids, cursor_expr, list_val, len_val, ctx)
+        }
+    }
+}
+
+/// Emit a fixed-element step: bind `list[cursor]`, run the per-element
+/// guards via [`lower_pat`] (whose failures route to `ctx.fail = None`),
+/// then recurse with `cursor + 1`.
+fn emit_fixed_step(
+    pat: &murphy_pattern::Pat,
+    rest_kids: &[murphy_pattern::Pat],
+    cursor_expr: &TokenStream,
+    list_val: &Ident,
+    len_val: &Ident,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    let cur = gensym(ctx, "__cur");
+    let elem = gensym(ctx, "__elem");
+    let guards = lower_pat(pat, &quote!(#elem), ctx)?;
+    let next = emit_list_step(rest_kids, &quote!(#cur + 1), list_val, len_val, ctx)?;
+    Ok(quote! {
+        let #cur: usize = #cursor_expr;
+        if #cur >= #len_val {
+            return ::core::option::Option::None;
+        }
+        let #elem = #list_val[#cur];
+        #guards
+        #next
+    })
+}
+
+/// Emit a rest step (`...` / `$...`): greedily try every span length from
+/// the remaining tail down to `0`, attempting the suffix per length. A
+/// `$...` commits its captured slice on the first successful attempt.
+fn emit_rest_step(
+    rest: RestKind,
+    rest_kids: &[murphy_pattern::Pat],
+    cursor_expr: &TokenStream,
+    list_val: &Ident,
+    len_val: &Ident,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    let cur = gensym(ctx, "__cur");
+    let cnt = gensym(ctx, "__cnt");
+    let sub = gensym(ctx, "__sub");
+    let suffix_cursor = quote!(#cur + #cnt);
+    let suffix = emit_list_step(rest_kids, &suffix_cursor, list_val, len_val, ctx)?;
+    let commit = match rest {
+        RestKind::Bare => quote!(),
+        RestKind::Capture(slot) => capture_assign(slot, quote!(&#list_val[#cur..#cur + #cnt]), ctx),
+    };
+    Ok(quote! {
+        let #cur: usize = #cursor_expr;
+        let __remaining: usize = #len_val - #cur;
+        for #cnt in (0..=__remaining).rev() {
+            let #sub: ::core::option::Option<()> = (|| -> ::core::option::Option<()> {
+                #suffix
+            })();
+            if #sub.is_some() {
+                #commit
+                return ::core::option::Option::Some(());
+            }
+        }
+        return ::core::option::Option::None;
+    })
+}
+
+/// Emit a quantifier step: greedily count how many leading elements
+/// satisfy the body (as a `lower_bool` expression — captures and rest are
+/// parser-forbidden inside a quantifier body), then iterate counts from
+/// the greedy max down to `min`, attempting the suffix per count. On the
+/// first successful attempt, commit the optional capture (`Seq` for
+/// `*`/`+`, `OptNode` for `?`).
+fn emit_quantifier_step(
+    q: QuantifierPat<'_>,
+    rest_kids: &[murphy_pattern::Pat],
+    cursor_expr: &TokenStream,
+    list_val: &Ident,
+    len_val: &Ident,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    let cur = gensym(ctx, "__cur");
+    let greedy = gensym(ctx, "__greedy");
+    let count = gensym(ctx, "__count");
+    let sub = gensym(ctx, "__sub");
+    let elem = gensym(ctx, "__elem");
+    let body_bool = lower_bool(q.body, &quote!(#elem), ctx)?;
+    let suffix_cursor = quote!(#cur + #count);
+    let suffix = emit_list_step(rest_kids, &suffix_cursor, list_val, len_val, ctx)?;
+    let min = q.min as usize;
+    let max_break = match q.max {
+        Some(m) => {
+            let m = m as usize;
+            quote!(if #greedy >= #m { break; })
+        }
+        None => quote!(),
+    };
+    let commit = match q.capture_slot {
+        Some(slot) => {
+            if q.is_optional {
+                let value = quote! {
+                    if #count == 1 {
+                        ::core::option::Option::Some(#list_val[#cur])
+                    } else {
+                        ::core::option::Option::None
+                    }
+                };
+                capture_assign(slot, value, ctx)
+            } else {
+                capture_assign(slot, quote!(&#list_val[#cur..#cur + #count]), ctx)
+            }
+        }
+        None => quote!(),
+    };
+    Ok(quote! {
+        let #cur: usize = #cursor_expr;
+        let mut #greedy: usize = 0;
+        while #cur + #greedy < #len_val {
+            let #elem = #list_val[#cur + #greedy];
+            if !(#body_bool) { break; }
+            #greedy += 1;
+            #max_break
+        }
+        if #greedy < #min {
+            return ::core::option::Option::None;
+        }
+        for #count in (#min..=#greedy).rev() {
+            let #sub: ::core::option::Option<()> = (|| -> ::core::option::Option<()> {
+                #suffix
+            })();
+            if #sub.is_some() {
+                #commit
+                return ::core::option::Option::Some(());
+            }
+        }
+        return ::core::option::Option::None;
+    })
 }
 
 /// Lower one `Pat` against `subject` (a `NodeId`-typed expression) into a
@@ -1433,8 +1840,9 @@ fn lower_bool(
         )),
         PatKind::Quantifier { .. } => Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: postfix `*` / `+` / `?` quantifier is not yet \
-             supported by the B backend (PR #4 lands it)",
+            "node_pattern!: postfix `*` / `+` / `?` quantifier is only legal \
+             as a direct child of a node match (parser-enforced; reaching \
+             this arm is an internal invariant violation)",
         )),
     }
 }
