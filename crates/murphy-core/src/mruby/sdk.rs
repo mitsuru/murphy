@@ -1179,6 +1179,57 @@ mod tests {
     }
 
     #[test]
+    fn prelude_def_node_matcher_wraps_optional_capture_as_node_or_nil() {
+        let _guard = lock_reports();
+        let ctx = AstContext::new(b"puts \"x\"\nputs\n".to_vec());
+        let send_ids: Vec<_> = (0..ctx.arena_ast().len())
+            .map(|i| murphy_ast::NodeId(i as u32))
+            .filter(|&id| matches!(ctx.arena_ast().kind(id), murphy_ast::NodeKind::Send { .. }))
+            .collect();
+        assert_eq!(send_ids.len(), 2, "fixture should have two sends");
+
+        let worker = std::sync::Arc::clone(&ctx);
+        let cop_run = CopRun::for_test(std::sync::Arc::clone(&worker));
+        {
+            let mut st = MrubyState::open();
+            st.set_cop_run(&cop_run);
+            // SAFETY: valid mrb state; registration only defines functions/classes.
+            unsafe {
+                crate::mruby::primitives::register(st.raw());
+                register_sdk(st.raw());
+                register_test_report(st.raw());
+            }
+            assert!(
+                !st.eval_checked(PRELUDE),
+                "prelude must load without raising"
+            );
+            let script = format!(
+                r##"
+                class OptionalCaptureCop < Murphy::Cop
+                  def_node_matcher :puts_str, "(send nil? :puts $str?)"
+                end
+                cop = OptionalCaptureCop.new
+                some = cop.puts_str(Murphy::Node.new({some_id}))[0]
+                none = cop.puts_str(Murphy::Node.new({none_id}))[0]
+                Murphy.__test_report("#{{some.class}}|#{{some.kind}}")
+                Murphy.__test_report(none.inspect)
+                "##,
+                some_id = send_ids[0].0,
+                none_id = send_ids[1].0,
+            );
+            assert!(
+                !st.eval_checked(&script),
+                "optional capture wrapper script must run without raising"
+            );
+        }
+        drop(cop_run);
+        drop(worker);
+        drop(ctx);
+
+        assert_eq!(drain_reports(), vec!["Murphy::Node|str", "nil"]);
+    }
+
+    #[test]
     fn prelude_def_node_search_defines_an_instance_method() {
         let _guard = lock_reports();
         let mut st = MrubyState::open();
