@@ -1,44 +1,69 @@
 //! `Rails/NegateInclude` — flag `!x.include?(y)` and recommend
 //! `x.exclude?(y)` (an ActiveSupport monkey-patch on Enumerable that
-//! reads better than the negation).
+//! reads better than the negation), autocorrecting the rewrite.
 //!
 //! ## Matched shape (Send node)
 //!
-//! `Send(receiver=Send(receiver=_, method=:include?, args=[_, ...]), method=:!, args=[])`.
+//! `Send(receiver=Send(receiver=Some(_), method=:include?, args=[_]), method=:!, args=[])`.
 //!
 //! - Outer Send is the unary bang: `method=:!`, receiver is the inner
-//!   `include?` Send, no args. (Recall from `Rails/AssertNot` that
-//!   `!x` and `not x` both parse as `Send(receiver=Some(x), :!, [])`
-//!   — `Not` is not its own `NodeKind` variant.)
-//! - Inner Send is the include-check: any receiver (`_`), method
-//!   exactly `:include?`, and ≥1 argument (`_ ...`). Mirrors upstream
-//!   RuboCop-rails which doesn't gate on the receiver kind — any
-//!   `include?` call counts (Array, Hash, Set, custom Enumerable).
+//!   `include?` Send, no args. Recall from `Rails/AssertNot` that
+//!   `!x` and `not x` both parse as `Send(Some(x), :!, [])` — `Not`
+//!   is not its own `NodeKind` variant — so this also flags the
+//!   `not x.include?(y)` form, correctly.
+//! - Inner Send: non-nil receiver (`!nil?`), method exactly
+//!   `:include?`, and **exactly one** positional argument. The arity
+//!   gate mirrors RuboCop-rails's `(send $!nil? :include? $_)` — bare
+//!   `include?(a, b)` is a custom method on something that isn't
+//!   `Enumerable#include?`, and `exclude?` does not accept multiple
+//!   args, so we don't flag it and we don't autocorrect it.
 //!
 //! ## False-positive note
 //!
 //! `!x.include?(y)` on a custom (non-Enumerable) class that defines
 //! its own `include?` still hits. Upstream RuboCop-rails accepts the
-//! same risk — the `exclude?` rewrite assumes the receiver implements
-//! the Enumerable monkey-patch ActiveSupport ships. Real-world false
-//! positives are rare in Rails codebases, where the dominant
-//! `include?` callers are AR scopes and basic Enumerable collections.
+//! same risk (`Safe: false` in `config/default.yml`) — the `exclude?`
+//! rewrite assumes the receiver implements the Enumerable monkey-patch
+//! ActiveSupport ships. Real-world false positives are rare in Rails
+//! codebases, where the dominant `include?` callers are AR scopes and
+//! basic Enumerable collections.
 //!
-//! ## No autocorrect
+//! ## Default-on
 //!
-//! Mechanical `!x.include?(y)` → `x.exclude?(y)` is safe in Rails apps
-//! (ActiveSupport defines `exclude?` on Enumerable), but ADR 0006
-//! requires a deliberate fix block per cop and this v1 ships
-//! detect-only.
+//! Upstream ships this cop as `Enabled: pending`, which means "off
+//! until explicitly enabled, with a warning otherwise". Murphy doesn't
+//! model `pending` — we default to `default_enabled = true`, matching
+//! the project convention used for the other upstream-`pending` cops
+//! that Murphy ports (e.g. `Rails/I18nLocaleAssignment`).
+//!
+//! ## Autocorrect (unsafe upstream)
+//!
+//! `!x.include?(y)` rewrites to `x.exclude?(y)` via two surgical
+//! edits:
+//!
+//! 1. Delete the leading negation token — the slice
+//!    `[outer.start, inner.start)`, which covers `!` (and any
+//!    whitespace) or the `not ` keyword form.
+//! 2. Rename the inner Send's selector — `cx.node(inner).loc.name` —
+//!    from `include?` to `exclude?`.
+//!
+//! The two edits don't overlap, so the receiver and argument source
+//! pass through untouched (no whitespace or parenthesisation drift).
+//!
+//! This is `Safe: false` upstream because the receiver might not
+//! implement `exclude?` (e.g. `IPAddr`). Murphy doesn't currently
+//! distinguish safe/unsafe autocorrect — users opt in by running
+//! `--fix`, so we ship the rewrite.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, node_pattern};
 
 // RuboCop NodePattern equivalent:
-//   `(send (send _ :include? _ ...) :!)`
+//   `(send (send $!nil? :include? $_) :!)`
 //
 // - Outer: `:!` send, exactly 0 args (the unary `!` shape).
-// - Inner: `:include?` send, ≥1 args (`_ ...`), receiver unconstrained.
-node_pattern!(is_negate_include, "(send (send _ :include? _ ...) :!)");
+// - Inner: receiver non-None (`!nil?`), method `:include?`, exactly
+//   one positional arg.
+node_pattern!(is_negate_include, "(send (send !nil? :include? _) :!)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -46,29 +71,66 @@ pub struct NegateInclude;
 
 #[cop(
     name = "Rails/NegateInclude",
-    description = "Use `exclude?` instead of `!include?`.",
+    description = "Prefer `collection.exclude?(obj)` over `!collection.include?(obj)`.",
     default_severity = "warning",
     default_enabled = true,
     options = NoOptions,
 )]
 impl NegateInclude {
-    #[on_node(kind = "send")]
+    // `methods = ["!"]` mirrors upstream `RESTRICT_ON_SEND = %i[!]` —
+    // dispatch only on bang sends. The pattern already gates on `:!`;
+    // the filter is the parity surface.
+    #[on_node(kind = "send", methods = ["!"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         if !is_negate_include(node, cx) {
             return;
         }
         cx.emit_offense(
             cx.range(node),
-            "Use `exclude?` instead of `!include?`.",
+            "Use `.exclude?` and remove the negation part.",
             None,
         );
+        emit_correction(node, cx);
     }
+}
+
+/// Emit the two non-overlapping edits that rewrite `!x.include?(y)` to
+/// `x.exclude?(y)` in place. Bails on shape mismatches — the pattern
+/// already validated them, so this is defensive against a future AST
+/// refactor (no panic on a malformed Send).
+fn emit_correction(node: NodeId, cx: &Cx<'_>) {
+    let NodeKind::Send {
+        receiver: outer_receiver,
+        ..
+    } = *cx.kind(node)
+    else {
+        return;
+    };
+    let Some(inner) = outer_receiver.get() else {
+        return;
+    };
+
+    // Strip `!`/`not ` (and any whitespace between the negation token
+    // and the inner Send). The outer range begins at the negation
+    // token; the inner range begins at the first byte of the
+    // `include?` call's receiver — everything in between is the
+    // negation prefix.
+    let negation_prefix = Range {
+        start: cx.range(node).start,
+        end: cx.range(inner).start,
+    };
+    cx.emit_edit(negation_prefix, "");
+
+    // Rename the inner Send's selector: `include?` -> `exclude?`.
+    // `loc.name` is the parser-gem-style selector range, so this is
+    // exactly the eight bytes we need to overwrite.
+    cx.emit_edit(cx.node(inner).loc.name, "exclude?");
 }
 
 #[cfg(test)]
 mod tests {
     use super::NegateInclude;
-    use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::test_support::{indoc, run_cop_with_edits, test};
 
     // === hit cases ===
 
@@ -76,7 +138,7 @@ mod tests {
     fn flags_negate_array_include() {
         test::<NegateInclude>().expect_offense(indoc! {r#"
                 !arr.include?(x)
-                ^^^^^^^^^^^^^^^^ Use `exclude?` instead of `!include?`.
+                ^^^^^^^^^^^^^^^^ Use `.exclude?` and remove the negation part.
             "#});
     }
 
@@ -91,7 +153,7 @@ mod tests {
         // can extend the DSL with a `begin`-stripping helper.
         test::<NegateInclude>().expect_offense(indoc! {r#"
                 !hash.include?(:key)
-                ^^^^^^^^^^^^^^^^^^^^ Use `exclude?` instead of `!include?`.
+                ^^^^^^^^^^^^^^^^^^^^ Use `.exclude?` and remove the negation part.
             "#});
     }
 
@@ -100,7 +162,7 @@ mod tests {
         // Receiver is itself a chain — still hits.
         test::<NegateInclude>().expect_offense(indoc! {r#"
                 !user.tags.include?("admin")
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `exclude?` instead of `!include?`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `.exclude?` and remove the negation part.
             "#});
     }
 
@@ -108,7 +170,7 @@ mod tests {
     fn flags_negate_include_with_literal_arg() {
         test::<NegateInclude>().expect_offense(indoc! {r#"
                 !arr.include?("foo")
-                ^^^^^^^^^^^^^^^^^^^^ Use `exclude?` instead of `!include?`.
+                ^^^^^^^^^^^^^^^^^^^^ Use `.exclude?` and remove the negation part.
             "#});
     }
 
@@ -135,23 +197,101 @@ mod tests {
     #[test]
     fn does_not_flag_bare_include() {
         // `!include?(x)` (bare include?) has receiver = None on the
-        // inner Send. The DSL's `_` for receiver requires a receiver
-        // (it accepts any node, but None has no node) — so this
-        // does NOT match. Bare `include?` is also semantically
-        // different (it's a class-level Module#include?, e.g.).
+        // inner Send. The pattern's `!nil?` requires a present, non-nil
+        // receiver — so this does NOT match. Bare `include?` is also
+        // semantically different (it's a class-level `Module#include?`,
+        // e.g.).
         test::<NegateInclude>().expect_no_offenses("!include?(x)\n");
     }
 
     #[test]
     fn does_not_flag_negate_include_no_args() {
-        // `!arr.include?` (zero args) is ill-formed call; the DSL's
-        // `_ ...` arity-≥1 gate excludes it.
+        // `!arr.include?` (zero args) is ill-formed `Enumerable#include?`;
+        // the pattern's exactly-one-arg gate excludes it.
         test::<NegateInclude>().expect_no_offenses("!arr.include?\n");
+    }
+
+    #[test]
+    fn does_not_flag_negate_include_multi_arg() {
+        // `!arr.include?(x, y)` — multi-arg `include?` is a custom
+        // method, not `Enumerable#include?`. RuboCop's pattern uses
+        // `$_` (exactly one capture), and our pattern mirrors that
+        // arity gate — no offense, no autocorrect. Pinning this as a
+        // contract: a future loosening of the arity gate would silently
+        // start rewriting unrelated `include?` callers to broken
+        // `exclude?(x, y)` calls.
+        test::<NegateInclude>().expect_no_offenses("!arr.include?(x, y)\n");
     }
 
     #[test]
     fn does_not_flag_other_negation_target() {
         // `!arr.size.zero?` — outer `!` on `zero?`, not `include?`.
         test::<NegateInclude>().expect_no_offenses("!arr.size.zero?\n");
+    }
+
+    // === autocorrect ===
+
+    #[test]
+    fn corrects_negate_array_include() {
+        test::<NegateInclude>().expect_correction(
+            indoc! {r#"
+                !arr.include?(x)
+                ^^^^^^^^^^^^^^^^ Use `.exclude?` and remove the negation part.
+            "#},
+            "arr.exclude?(x)\n",
+        );
+    }
+
+    #[test]
+    fn corrects_negate_hash_include_symbol_arg() {
+        // Symbol arg source is preserved byte-for-byte (`:key`).
+        test::<NegateInclude>().expect_correction(
+            indoc! {r#"
+                !hash.include?(:key)
+                ^^^^^^^^^^^^^^^^^^^^ Use `.exclude?` and remove the negation part.
+            "#},
+            "hash.exclude?(:key)\n",
+        );
+    }
+
+    #[test]
+    fn corrects_negate_chain_include() {
+        // Multi-segment receiver source is reproduced verbatim.
+        test::<NegateInclude>().expect_correction(
+            indoc! {r#"
+                !user.tags.include?("admin")
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `.exclude?` and remove the negation part.
+            "#},
+            "user.tags.exclude?(\"admin\")\n",
+        );
+    }
+
+    #[test]
+    fn corrects_not_keyword_form() {
+        // Ruby's `not foo` parses identically to `!foo` — same Send
+        // shape, same rewrite. Pinning this so a future parser change
+        // (or a DSL `not`-specific branch) can't silently regress.
+        test::<NegateInclude>().expect_correction(
+            indoc! {r#"
+                not arr.include?(x)
+                ^^^^^^^^^^^^^^^^^^^ Use `.exclude?` and remove the negation part.
+            "#},
+            "arr.exclude?(x)\n",
+        );
+    }
+
+    #[test]
+    fn correction_reaches_fixpoint() {
+        // Apply both edits, then re-run the cop on the result: zero
+        // offenses. This pins idempotence — the rewrite must not
+        // produce something the cop would flag again. Two edits:
+        // delete `!` and rename `include?` -> `exclude?`.
+        let run = run_cop_with_edits::<NegateInclude>("!arr.include?(x)\n");
+        assert_eq!(run.edits.len(), 2);
+        let mut replacements: Vec<&str> =
+            run.edits.iter().map(|e| e.replacement.as_str()).collect();
+        replacements.sort();
+        assert_eq!(replacements, ["", "exclude?"]);
+        test::<NegateInclude>().expect_no_offenses("arr.exclude?(x)\n");
     }
 }
