@@ -6,35 +6,41 @@
 //!
 //! Dispatched on `NodeKind::Block` and gates on
 //! [`is_example_call`](crate::helpers::is_example_call) — the block's
-//! call must be a bare `it` / `specify` / `example`. Hook blocks
+//! call must be a bare RSpec example alias such as `it`, `specify`,
+//! `example`, `fit`, `xit`, `skip`, or `pending`. Hook blocks
 //! (`before`, `after`, …) and grouping blocks (`describe`, `context`)
 //! are skipped.
 //!
 //! ## What counts as an expectation
 //!
-//! Walks the body's descendants and counts `Send` nodes whose
-//! `method` is `expect` AND whose receiver is empty
-//! (`OptNodeId::NONE`). The receiver gate is load-bearing:
+//! Recursively walks the body and counts bare RSpec expectation
+//! entrypoints (`expect`, `expect_any_instance_of`, `is_expected`,
+//! `are_expected`, `should`, `should_not`, `should_receive`, and
+//! `should_not_receive`). The receiver gate is load-bearing:
 //! `obj.expect(x)` is a domain method on `obj`, not RSpec's matcher
 //! entry point, and must not be counted (false positive territory).
 //!
-//! `aggregate_failures do ... end` (RuboCop's "count these as one")
-//! and `expect_any_instance_of(...)` are intentionally out of scope
-//! for v1; revisit when the rule sees real-world false positives.
+//! `aggregate_failures do ... end` counts as one expectation and its
+//! body is not searched. Examples marked with `:aggregate_failures` or
+//! `aggregate_failures: true` are ignored; explicit
+//! `aggregate_failures: false` leaves normal counting enabled.
+//! Degenerate nested blocks inside an example are still traversed, so
+//! `it { it { expect(...) } }` attributes the inner expectation to the
+//! outer example; this preserves the previous tolerated false positive.
 //!
 //! ## Option
 //!
-//! `max` (default `1`, matching RuboCop) — examples whose `expect`
-//! count exceeds `max` are flagged. Runtime option wiring
-//! (murphy-9cr.9) is not yet plumbed through `Cx`; v1 honours the
-//! `Default` (same staging as `Style/StringLiterals`).
+//! `max` (default `1`, matching RuboCop) — examples whose expectation
+//! count exceeds `max` are flagged. Runtime option wiring is provided
+//! by `Cx::options_or_default`, so tests and host config can exercise
+//! non-default `Max` values.
 //!
 //! ## No autocorrect
 //!
 //! Splitting an example into multiple `it` blocks is a refactor that
 //! needs human judgement about isolation and shared setup.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, cop};
 
 use super::helpers::is_example_call;
 
@@ -42,10 +48,7 @@ use super::helpers::is_example_call;
 #[derive(Default)]
 pub struct MultipleExpectations;
 
-/// Cop options for [`MultipleExpectations`]. Schema is exported via
-/// `#[derive(CopOptions)]`; runtime option access (murphy-9cr.9) is
-/// not yet wired through `Cx`, so the `Default` (Max = 1) is what
-/// fires at runtime today.
+/// Cop options for [`MultipleExpectations`].
 #[derive(CopOptions)]
 pub struct MultipleExpectationsOptions {
     #[option(
@@ -75,16 +78,20 @@ impl MultipleExpectations {
             return;
         };
 
-        let opts = MultipleExpectationsOptions::default();
-        let count = count_bare_expects(cx, body_id);
+        if example_or_ancestor_with_aggregate_failures(cx, call) {
+            return;
+        }
+
+        let opts = cx.options_or_default::<MultipleExpectationsOptions>();
+        let count = count_expectations(cx, body_id);
         if count <= opts.max as usize {
             return;
         }
 
         cx.emit_offense(
-            cx.range(node),
+            example_call_range(cx, call, body_id),
             &format!(
-                "Example has too many expectations ({count}/{max})",
+                "Example has too many expectations [{count}/{max}].",
                 max = opts.max
             ),
             None,
@@ -92,52 +99,165 @@ impl MultipleExpectations {
     }
 }
 
-/// Walk every descendant of `body` and count `Send` nodes whose
-/// `method` is `expect` and whose receiver is empty. Nested example
-/// blocks (`it { it { expect(…) } }`) attribute their inner expects
-/// to the outer example — a tolerated false positive for v1 since the
-/// shape is degenerate.
-fn count_bare_expects(cx: &Cx<'_>, body: NodeId) -> usize {
-    cx.descendants(body)
+/// Count expectation entrypoints below `node`. A nested
+/// `aggregate_failures` block counts as one expectation and its body is
+/// not searched, matching RuboCop-RSpec's aggregation semantics.
+fn count_expectations(cx: &Cx<'_>, node: NodeId) -> usize {
+    if is_aggregate_failures_block(cx, node) {
+        return 1;
+    }
+
+    let own = usize::from(is_expectation_call(cx, node));
+    own + cx
+        .children(node)
         .into_iter()
-        .filter(|d| is_bare_expect_call(cx, *d))
-        .count()
+        .map(|child| count_expectations(cx, child))
+        .sum::<usize>()
 }
 
-fn is_bare_expect_call(cx: &Cx<'_>, id: NodeId) -> bool {
+fn is_expectation_call(cx: &Cx<'_>, id: NodeId) -> bool {
     let NodeKind::Send {
         receiver, method, ..
     } = *cx.kind(id)
     else {
         return false;
     };
-    receiver == OptNodeId::NONE && cx.symbol_str(method) == "expect"
+    let method = cx.symbol_str(method);
+    if is_receiver_based_expectation_method(method) {
+        return true;
+    }
+    receiver == OptNodeId::NONE && is_bare_expectation_method(method)
+}
+
+fn is_bare_expectation_method(method: &str) -> bool {
+    matches!(
+        method,
+        "are_expected" | "expect" | "expect_any_instance_of" | "is_expected"
+    )
+}
+
+fn is_receiver_based_expectation_method(method: &str) -> bool {
+    matches!(
+        method,
+        "should" | "should_not" | "should_receive" | "should_not_receive"
+    )
+}
+
+fn is_aggregate_failures_block(cx: &Cx<'_>, id: NodeId) -> bool {
+    let NodeKind::Block { call, .. } = *cx.kind(id) else {
+        return false;
+    };
+    is_bare_send_named(cx, call, "aggregate_failures")
+}
+
+fn example_or_ancestor_with_aggregate_failures(cx: &Cx<'_>, call: NodeId) -> bool {
+    cx.ancestors(call)
+        .filter(|ancestor| matches!(cx.kind(*ancestor), NodeKind::Block { .. }))
+        .find_map(|block| {
+            let NodeKind::Block { call, .. } = *cx.kind(block) else {
+                return None;
+            };
+            send_aggregate_failures_setting(cx, call)
+        })
+        .unwrap_or(false)
+}
+
+fn send_aggregate_failures_setting(cx: &Cx<'_>, id: NodeId) -> Option<bool> {
+    let NodeKind::Send { args, .. } = *cx.kind(id) else {
+        return None;
+    };
+
+    let mut setting = None;
+    for arg in cx.list(args).iter().copied() {
+        match arg_aggregate_failures_setting(cx, arg) {
+            Some(true) => return Some(true),
+            Some(false) => setting = Some(false),
+            None => {}
+        }
+    }
+    setting
+}
+
+fn arg_aggregate_failures_setting(cx: &Cx<'_>, id: NodeId) -> Option<bool> {
+    match *cx.kind(id) {
+        NodeKind::Sym(sym) if cx.symbol_str(sym) == "aggregate_failures" => Some(true),
+        NodeKind::Hash(pairs) => {
+            let mut setting = None;
+            for pair in cx.list(pairs).iter().copied() {
+                if pair_is_aggregate_failures_true(cx, pair) {
+                    return Some(true);
+                }
+                if pair_is_aggregate_failures_false(cx, pair) {
+                    setting = Some(false);
+                }
+            }
+            setting
+        }
+        _ => None,
+    }
+}
+
+fn pair_is_aggregate_failures_true(cx: &Cx<'_>, id: NodeId) -> bool {
+    let NodeKind::Pair { key, value } = *cx.kind(id) else {
+        return false;
+    };
+    matches!(*cx.kind(key), NodeKind::Sym(sym) if cx.symbol_str(sym) == "aggregate_failures")
+        && matches!(*cx.kind(value), NodeKind::True_)
+}
+
+fn pair_is_aggregate_failures_false(cx: &Cx<'_>, id: NodeId) -> bool {
+    let NodeKind::Pair { key, value } = *cx.kind(id) else {
+        return false;
+    };
+    matches!(*cx.kind(key), NodeKind::Sym(sym) if cx.symbol_str(sym) == "aggregate_failures")
+        && matches!(*cx.kind(value), NodeKind::False_)
+}
+
+fn is_bare_send_named(cx: &Cx<'_>, id: NodeId, name: &str) -> bool {
+    let NodeKind::Send {
+        receiver, method, ..
+    } = *cx.kind(id)
+    else {
+        return false;
+    };
+    receiver == OptNodeId::NONE && cx.symbol_str(method) == name
+}
+
+fn example_call_range(cx: &Cx<'_>, call: NodeId, body: NodeId) -> Range {
+    let mut range = cx.range(call);
+    let body_range = cx.range(body);
+    if body_range.start <= range.start {
+        return range;
+    }
+
+    range.end = body_range.start;
+    let mut text = cx.raw_source(range).trim_end();
+    if let Some(stripped) = text.strip_suffix("do") {
+        text = stripped.trim_end();
+    } else if let Some(stripped) = text.strip_suffix('{') {
+        text = stripped.trim_end();
+    }
+
+    Range {
+        start: range.start,
+        end: range.start + text.len() as u32,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::MultipleExpectations;
-    use murphy_plugin_api::test_support::{indoc, run_cop, test};
-
-    /// `run_cop` only dispatches the one cop type so every emission is
-    /// already a `RSpec/MultipleExpectations` offense — no per-name
-    /// filter needed. Retained for positive-case tests whose emit range
-    /// spans multiple source lines (the caret grammar
-    /// can only annotate one line per offense; full migration of these
-    /// is murphy-ac6 follow-up).
-    fn hits(source: &str) -> usize {
-        run_cop::<MultipleExpectations>(source).len()
-    }
+    use super::{MultipleExpectations, MultipleExpectationsOptions};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
     fn flags_two_expects() {
-        let src = indoc! {r#"
-            it "works" do
-              expect(a).to eq(1)
-              expect(b).to eq(2)
-            end
-        "#};
-        assert_eq!(hits(src), 1);
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it "works" do
+                ^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
     }
 
     #[test]
@@ -151,17 +271,141 @@ mod tests {
 
     #[test]
     fn handles_specify_and_example_aliases() {
-        let src = indoc! {r#"
-            specify "x" do
-              expect(a).to eq(1)
-              expect(b).to eq(2)
-            end
-            example "y" do
-              expect(a).to eq(1)
-              expect(b).to eq(2)
-            end
-        "#};
-        assert_eq!(hits(src), 2);
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                specify "x" do
+                ^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+                example "y" do
+                ^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
+    }
+
+    #[test]
+    fn handles_focused_skipped_and_pending_example_aliases() {
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                fit "focused" do
+                ^^^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+                xit "skipped" do
+                ^^^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+                pending "pending" do
+                ^^^^^^^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
+    }
+
+    #[test]
+    fn counts_rspec_expectation_aliases() {
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it "works" do
+                ^^^^^^^^^^ Example has too many expectations [7/1].
+                  expect_any_instance_of(User).to receive(:save)
+                  is_expected.to be_valid
+                  are_expected.to contain_exactly(1, 2)
+                  should be_valid
+                  should_not be_nil
+                  should_receive(:save)
+                  should_not_receive(:destroy)
+                end
+            "#});
+    }
+
+    #[test]
+    fn counts_receiver_based_should_expectations() {
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it "works" do
+                ^^^^^^^^^^ Example has too many expectations [4/1].
+                  user.should be_valid
+                  user.should_not be_nil
+                  user.should_receive(:save)
+                  user.should_not_receive(:destroy)
+                end
+            "#});
+    }
+
+    #[test]
+    fn honors_max_option() {
+        test::<MultipleExpectations>()
+            .with_options(&MultipleExpectationsOptions { max: 2 })
+            .expect_no_offenses(indoc! {r#"
+                    it "works" do
+                      expect(a).to eq(1)
+                      expect(b).to eq(2)
+                    end
+                "#});
+    }
+
+    #[test]
+    fn aggregate_failures_block_counts_as_one_expectation() {
+        test::<MultipleExpectations>().expect_no_offenses(indoc! {r#"
+                it "works" do
+                  aggregate_failures do
+                    expect(a).to eq(1)
+                    expect(b).to eq(2)
+                  end
+                end
+            "#});
+    }
+
+    #[test]
+    fn example_metadata_aggregate_failures_true_is_ignored() {
+        test::<MultipleExpectations>().expect_no_offenses(indoc! {r#"
+                it "works", :aggregate_failures do
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+
+                it "also works", aggregate_failures: true do
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
+    }
+
+    #[test]
+    fn example_metadata_aggregate_failures_symbol_wins_after_false_hash() {
+        test::<MultipleExpectations>().expect_no_offenses(indoc! {r#"
+                it "works", { aggregate_failures: false }, :aggregate_failures do
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
+    }
+
+    #[test]
+    fn example_metadata_aggregate_failures_false_still_counts() {
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it "works", aggregate_failures: false do
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
+    }
+
+    #[test]
+    fn example_metadata_aggregate_failures_false_overrides_parent_true() {
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                describe User, :aggregate_failures do
+                  it "works", aggregate_failures: false do
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Example has too many expectations [2/1].
+                    expect(a).to eq(1)
+                    expect(b).to eq(2)
+                  end
+                end
+            "#});
     }
 
     #[test]
@@ -169,27 +413,25 @@ mod tests {
         // `obj.expect(x)` is some domain method named `expect` — not
         // RSpec's matcher entry point. Only the bare `expect(c)` would
         // count, and there's just one, so no offense.
-        let src = indoc! {r#"
-            it "works" do
-              obj.expect(a)
-              obj.expect(b)
-              expect(c).to eq(1)
-            end
-        "#};
-        assert_eq!(hits(src), 0);
+        test::<MultipleExpectations>().expect_no_offenses(indoc! {r#"
+                it "works" do
+                  obj.expect(a)
+                  obj.expect(b)
+                  expect(c).to eq(1)
+                end
+            "#});
     }
 
     #[test]
     fn ignores_hook_blocks() {
         // `before { ... }` is a hook, not an example; this rule does
         // not police hook bodies.
-        let src = indoc! {r#"
-            before do
-              expect(setup).to eq(true)
-              expect(other).to eq(true)
-            end
-        "#};
-        assert_eq!(hits(src), 0);
+        test::<MultipleExpectations>().expect_no_offenses(indoc! {r#"
+                before do
+                  expect(setup).to eq(true)
+                  expect(other).to eq(true)
+                end
+            "#});
     }
 
     #[test]
@@ -211,14 +453,11 @@ mod tests {
 
     #[test]
     fn flags_two_expects_single_line_block() {
-        // Single-line `it ... end` keeps the emitted block range on one
-        // source line, which is the shape the caret grammar annotates
-        // cleanly (multi-line ranges land in murphy-ac6 follow-up). The
-        // 52-caret span covers the whole `it ... end` block, matching
-        // `cx.range(node)` on the Block.
+        // The offense follows RuboCop-RSpec and points at the example
+        // call, not the full block body.
         test::<MultipleExpectations>().expect_offense(indoc! {r#"
                 it "x" do expect(a).to eq(1); expect(b).to eq(2) end
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Example has too many expectations (2/1)
+                ^^^^^^ Example has too many expectations [2/1].
             "#});
     }
 
@@ -227,12 +466,12 @@ mod tests {
         // `it { ... }` parses to `NodeKind::Block` the same way as
         // `it do ... end`; the cop must count expects inside either
         // form.
-        let src = indoc! {r#"
-            it "works" {
-              expect(a).to eq(1)
-              expect(b).to eq(2)
-            }
-        "#};
-        assert_eq!(hits(src), 1);
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it "works" {
+                ^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                }
+            "#});
     }
 }
