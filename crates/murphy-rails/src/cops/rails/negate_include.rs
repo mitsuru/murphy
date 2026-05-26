@@ -38,14 +38,24 @@
 //!
 //! ## Autocorrect (unsafe upstream)
 //!
-//! `!x.include?(y)` rewrites to `x.exclude?(y)` by replacing the outer
-//! Send's range with the inner receiver source + `.exclude?(` + arg
-//! source + `)`. This is `Safe: false` upstream because the receiver
-//! might not implement `exclude?` (e.g. `IPAddr`). Murphy doesn't
-//! currently distinguish safe/unsafe autocorrect — users opt in by
-//! running `--fix`, so we ship the rewrite.
+//! `!x.include?(y)` rewrites to `x.exclude?(y)` via two surgical
+//! edits:
+//!
+//! 1. Delete the leading negation token — the slice
+//!    `[outer.start, inner.start)`, which covers `!` (and any
+//!    whitespace) or the `not ` keyword form.
+//! 2. Rename the inner Send's selector — `cx.node(inner).loc.name` —
+//!    from `include?` to `exclude?`.
+//!
+//! The two edits don't overlap, so the receiver and argument source
+//! pass through untouched (no whitespace or parenthesisation drift).
+//!
+//! This is `Safe: false` upstream because the receiver might not
+//! implement `exclude?` (e.g. `IPAddr`). Murphy doesn't currently
+//! distinguish safe/unsafe autocorrect — users opt in by running
+//! `--fix`, so we ship the rewrite.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, node_pattern};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, node_pattern};
 
 // RuboCop NodePattern equivalent:
 //   `(send (send $!nil? :include? $_) :!)`
@@ -80,38 +90,41 @@ impl NegateInclude {
             "Use `.exclude?` and remove the negation part.",
             None,
         );
-        if let Some(replacement) = build_replacement(node, cx) {
-            cx.emit_edit(cx.range(node), &replacement);
-        }
+        emit_correction(node, cx);
     }
 }
 
-/// Build `<receiver>.exclude?(<arg>)` from the inner `include?` Send.
-/// Returns `None` if the shape doesn't decompose cleanly — the pattern
-/// already validated it, so `None` only fires on internal-invariant
-/// breaks (kept defensive so a future AST refactor can't panic here).
-fn build_replacement(node: NodeId, cx: &Cx<'_>) -> Option<String> {
+/// Emit the two non-overlapping edits that rewrite `!x.include?(y)` to
+/// `x.exclude?(y)` in place. Bails on shape mismatches — the pattern
+/// already validated them, so this is defensive against a future AST
+/// refactor (no panic on a malformed Send).
+fn emit_correction(node: NodeId, cx: &Cx<'_>) {
     let NodeKind::Send {
         receiver: outer_receiver,
         ..
     } = *cx.kind(node)
     else {
-        return None;
+        return;
     };
-    let inner = outer_receiver.get()?;
-    let NodeKind::Send {
-        receiver: inner_receiver,
-        args,
-        ..
-    } = *cx.kind(inner)
-    else {
-        return None;
+    let Some(inner) = outer_receiver.get() else {
+        return;
     };
-    let inner_receiver = inner_receiver.get()?;
-    let arg = cx.list(args).first().copied()?;
-    let receiver_src = cx.raw_source(cx.range(inner_receiver));
-    let arg_src = cx.raw_source(cx.range(arg));
-    Some(format!("{receiver_src}.exclude?({arg_src})"))
+
+    // Strip `!`/`not ` (and any whitespace between the negation token
+    // and the inner Send). The outer range begins at the negation
+    // token; the inner range begins at the first byte of the
+    // `include?` call's receiver — everything in between is the
+    // negation prefix.
+    let negation_prefix = Range {
+        start: cx.range(node).start,
+        end: cx.range(inner).start,
+    };
+    cx.emit_edit(negation_prefix, "");
+
+    // Rename the inner Send's selector: `include?` -> `exclude?`.
+    // `loc.name` is the parser-gem-style selector range, so this is
+    // exactly the eight bytes we need to overwrite.
+    cx.emit_edit(cx.node(inner).loc.name, "exclude?");
 }
 
 #[cfg(test)]
@@ -269,12 +282,16 @@ mod tests {
 
     #[test]
     fn correction_reaches_fixpoint() {
-        // Apply the edit, then re-run the cop on the result: zero
+        // Apply both edits, then re-run the cop on the result: zero
         // offenses. This pins idempotence — the rewrite must not
-        // produce something the cop would flag again.
+        // produce something the cop would flag again. Two edits:
+        // delete `!` and rename `include?` -> `exclude?`.
         let run = run_cop_with_edits::<NegateInclude>("!arr.include?(x)\n");
-        assert_eq!(run.edits.len(), 1);
-        assert_eq!(run.edits[0].replacement, "arr.exclude?(x)");
+        assert_eq!(run.edits.len(), 2);
+        let mut replacements: Vec<&str> =
+            run.edits.iter().map(|e| e.replacement.as_str()).collect();
+        replacements.sort();
+        assert_eq!(replacements, ["", "exclude?"]);
         test::<NegateInclude>().expect_no_offenses("arr.exclude?(x)\n");
     }
 }
