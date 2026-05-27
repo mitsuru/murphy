@@ -592,6 +592,23 @@ mod tests {
     }
 
     #[test]
+    fn flags_describe_with_positional_symbol_metadata_only() {
+        // `describe "x", :feature` — RSpec treats positional symbol
+        // metadata as `feature: true`, NOT as `type: :feature`. Upstream
+        // RuboCop-RSpec's matcher pattern is `... (hash <#ignored_metadata? ...>)`
+        // which requires a trailing Hash; bare symbol args do not qualify
+        // for the IgnoredMetadata exception. Pinning this so a future
+        // change can't silently start accepting `:feature` shorthand as
+        // equivalent to `type: :feature` (a divergence from upstream
+        // and from RSpec's own semantics).
+        test::<DescribeClass>().expect_offense(indoc! {r#"
+                describe 'my new feature', :feature do
+                         ^^^^^^^^^^^^^^^^ The first argument to describe should be the class or module being tested.
+                end
+            "#});
+    }
+
+    #[test]
     fn flags_non_ignored_type_metadata_value() {
         // `type: :wow` — `wow` is not in the default `type` set.
         test::<DescribeClass>().expect_offense(indoc! {r#"
