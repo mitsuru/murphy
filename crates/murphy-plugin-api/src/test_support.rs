@@ -35,6 +35,8 @@
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
+use std::{fs, vec::Vec};
 
 use murphy_ast::Ast;
 
@@ -48,6 +50,59 @@ use crate::{
 /// the surrounding Rust indentation without re-declaring the dep. The
 /// macro strips the common leading whitespace at compile time.
 pub use indoc::indoc;
+
+/// Assert that every `#[cop(name = "...")]` registration in a plugin
+/// pack's `src/` tree has a matching source-near `murphy-parity` block.
+///
+/// The block must name the cop exactly with either `upstream_cop: ...`
+/// for RuboCop-derived cops or `cop: ...` for Murphy-native/custom cops.
+/// RuboCop-derived blocks must include upstream identity/version fields,
+/// and non-verified statuses must keep an explicit gap issue list.
+#[track_caller]
+pub fn assert_cop_parity_metadata_for_crate(manifest_dir: impl AsRef<Path>) {
+    let manifest_dir = manifest_dir.as_ref();
+    let mut failures = Vec::new();
+
+    for file in cop_source_files(manifest_dir) {
+        let source = fs::read_to_string(&file)
+            .unwrap_or_else(|err| panic!("read {}: {err}", file.display()));
+        let cop_names = cop_names_in_source(&source);
+        if cop_names.is_empty() {
+            continue;
+        }
+        let parity_blocks = parity_blocks_in_source(&source);
+
+        for name in cop_names {
+            let Some(block) = parity_blocks
+                .iter()
+                .find(|block| block_matches_cop(block, &name))
+            else {
+                failures.push(format!(
+                    "{}: missing murphy-parity block for {name}",
+                    file.strip_prefix(manifest_dir).unwrap_or(&file).display()
+                ));
+                continue;
+            };
+
+            validate_parity_block(
+                block,
+                &name,
+                &file
+                    .strip_prefix(manifest_dir)
+                    .unwrap_or(&file)
+                    .display()
+                    .to_string(),
+                &mut failures,
+            );
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "missing parity metadata:\n{}",
+        failures.join("\n")
+    );
+}
 
 /// Entry point for the tester-builder API. Cop type comes in as a
 /// generic parameter, options are added via `with_options`, and one or
@@ -679,6 +734,146 @@ fn cx_raw_for(
         sorted_tokens_len: p.sorted_tokens.len(),
         options_json,
     }
+}
+
+fn cop_source_files(manifest_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_rs_files(&manifest_dir.join("src"), &mut files);
+    files.sort();
+    files
+}
+
+fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let entries =
+        fs::read_dir(dir).unwrap_or_else(|err| panic!("read_dir {}: {err}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_rs_files(&path, files);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
+        }
+    }
+}
+
+fn cop_names_in_source(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_cop_attr = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("#[cop(") {
+            in_cop_attr = true;
+            continue;
+        }
+        if !in_cop_attr {
+            continue;
+        }
+        if let Some(name) = parse_name_literal(trimmed) {
+            names.push(name.to_string());
+        }
+        if trimmed == ")]" || trimmed == ")" || trimmed.ends_with(")]") {
+            in_cop_attr = false;
+        }
+    }
+
+    names
+}
+
+fn parse_name_literal(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("name = \"")?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+fn parity_blocks_in_source(source: &str) -> Vec<&str> {
+    let mut blocks = Vec::new();
+    let mut rest = source;
+
+    while let Some(start) = rest.find("```murphy-parity") {
+        rest = &rest[start + "```murphy-parity".len()..];
+        let Some(end) = rest.find("```") else {
+            blocks.push(rest);
+            break;
+        };
+        blocks.push(&rest[..end]);
+        rest = &rest[end + "```".len()..];
+    }
+
+    blocks
+}
+
+fn block_matches_cop(block: &str, name: &str) -> bool {
+    value_after_key(block, "upstream_cop") == Some(name)
+        || value_after_key(block, "cop") == Some(name)
+}
+
+fn validate_parity_block(block: &str, name: &str, file: &str, failures: &mut Vec<String>) {
+    let Some(status) = value_after_key(block, "status") else {
+        failures.push(format!(
+            "{file}: murphy-parity block for {name} is missing status"
+        ));
+        return;
+    };
+
+    if !matches!(status, "custom" | "partial" | "stub" | "verified") {
+        failures.push(format!(
+            "{file}: murphy-parity block for {name} has unknown status {status:?}"
+        ));
+    }
+
+    if value_after_key(block, "cop") == Some(name) {
+        if status != "custom" {
+            failures.push(format!(
+                "{file}: custom murphy-parity block for {name} must use status: custom"
+            ));
+        }
+        return;
+    }
+
+    for key in ["upstream", "upstream_cop", "upstream_version_checked"] {
+        if value_after_key(block, key).is_none() {
+            failures.push(format!(
+                "{file}: murphy-parity block for {name} is missing {key}"
+            ));
+        }
+    }
+
+    if matches!(status, "partial" | "stub") && !block.contains("gap_issues:") {
+        failures.push(format!(
+            "{file}: {status} murphy-parity block for {name} must list gap_issues"
+        ));
+    }
+
+    if status == "verified" && !block.contains("gap_issues: []") {
+        failures.push(format!(
+            "{file}: verified murphy-parity block for {name} must use gap_issues: []"
+        ));
+    }
+
+    if block.contains("Arena-migration stub registered") && status != "stub" {
+        failures.push(format!(
+            "{file}: Arena-migration registration for {name} must use status: stub"
+        ));
+    }
+}
+
+fn value_after_key<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}:");
+    block.lines().find_map(|line| {
+        metadata_line(line)
+            .strip_prefix(&prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn metadata_line(line: &str) -> &str {
+    line.trim()
+        .strip_prefix("//!")
+        .or_else(|| line.trim().strip_prefix("///"))
+        .unwrap_or_else(|| line.trim())
+        .trim()
 }
 
 /// Default options JSON used by [`run_cop`] / [`run_cop_with_edits`] and

@@ -27,3 +27,6 @@ serde_json = "1"
 [dev-dependencies]
 # Used by tests/dep_boundary.rs to parse `cargo metadata` JSON.
 serde_json = "1"
+# Enables the shared parity metadata and parser-driven cop test helpers
+# for integration tests only.
+murphy-plugin-api = { path = "../murphy-plugin-api", features = ["test-support"] }
