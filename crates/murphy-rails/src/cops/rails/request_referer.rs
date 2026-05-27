@@ -133,13 +133,15 @@ mod tests {
 
     #[test]
     fn corrects_request_referrer_by_default() {
-        test::<RequestReferer>().expect_correction(
-            indoc! {r#"
-                request.referrer
-                ^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
-            "#},
-            "request.referer\n",
-        );
+        test::<RequestReferer>()
+            .expect_correction(
+                indoc! {r#"
+                    request.referrer
+                    ^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
+                "#},
+                "request.referer\n",
+            )
+            .expect_no_offenses("request.referer\n");
     }
 
     #[test]
@@ -197,7 +199,8 @@ mod tests {
                     ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
                 "#},
                 "request.referrer\n",
-            );
+            )
+            .expect_no_offenses("request.referrer\n");
     }
 
     #[test]
