@@ -17,10 +17,12 @@ crate-type = ["cdylib", "rlib"]
 # runtime Murphy dependency — boundary asserted by
 # tests/dep_boundary.rs.
 murphy-plugin-api = { path = "../murphy-plugin-api" }
+# `#[derive(CopOptions)]`-expanded code references `::serde_json`
+# directly in this crate, matching murphy-std/murphy-rspec. Also used
+# by tests/dep_boundary.rs to parse `cargo metadata` JSON.
+serde_json = "1"
 
 [dev-dependencies]
-# Used by tests/dep_boundary.rs to parse `cargo metadata` JSON.
-serde_json = "1"
 # Parser-driven cop tests live in each cop file's `#[cfg(test)] mod
 # tests` and use `murphy_plugin_api::test_support::{indoc, test}`.
 # Enabling the feature here pulls `murphy-translate` into plugin-api at
