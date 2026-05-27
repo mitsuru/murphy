@@ -1,4 +1,17 @@
 //! `Rails/UniqBeforePluck` — flag the `pluck(:col).uniq` idiom and
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rails
+//! upstream_cop: Rails/UniqBeforePluck
+//! upstream_version_checked: 2.35.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-h8ke
+//! notes: >
+//!   Backfilled metadata; full upstream parity audit still needs to confirm no remaining behavior gaps.
+//! ```
+//!
 //! recommend `distinct.pluck(:col)`. `uniq` materialises the entire
 //! pluck result in Ruby memory and then de-duplicates client-side;
 //! `distinct` pushes the dedup to the database, which is dramatically

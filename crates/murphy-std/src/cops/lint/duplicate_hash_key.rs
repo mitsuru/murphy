@@ -1,4 +1,17 @@
 //! `Lint/DuplicateHashKey` — flag a hash literal that has the same key
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Lint/DuplicateHashKey
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-m7lp
+//! notes: >
+//!   Main literal-key behavior is implemented; inner-hash canonicalization follow-up remains.
+//! ```
+//!
 //! twice (the second binding wins, so the first is dead).
 //!
 //! ## Keys covered

@@ -1,4 +1,17 @@
 //! `Style/StringLiterals` — enforces a single quote style for plain
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/StringLiterals
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-j59g
+//! notes: >
+//!   Known gaps remain around EnforcedStyle naming, runtime config, dstr handling, message parity, and autocorrect breadth.
+//! ```
+//!
 //! string literals. Mirrors RuboCop's same-named cop.
 //!
 //! Subscribes to `NodeKind::Str` (plain literal). Interpolated strings

@@ -1,4 +1,13 @@
 //! `Example/TodoFormat` — flags TODO/FIXME comments. Demo of:
+//! ## Murphy catalog
+//!
+//! ```murphy-parity
+//! cop: Example/TodoFormat
+//! status: custom
+//! notes: >
+//!   Demo cop for plugin authors; no RuboCop upstream target.
+//! ```
+//!
 //!
 //! - `#[on_new_investigation]` — the macro's per-file investigation
 //!   hook (RuboCop's `on_new_investigation` lookalike). Lowered to

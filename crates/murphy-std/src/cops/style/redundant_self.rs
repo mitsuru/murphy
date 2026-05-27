@@ -1,4 +1,17 @@
 //! `Style/RedundantSelf` — flags `self.foo` calls where the `self`
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/RedundantSelf
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-tpet
+//! notes: >
+//!   Known gaps remain around pattern-matching scope and Ruby 3.3 self.it handling.
+//! ```
+//!
 //! receiver is not needed for disambiguation. Mirrors RuboCop's
 //! same-named cop (autocorrect-equivalent).
 //!

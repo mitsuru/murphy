@@ -1,4 +1,17 @@
 //! `Lint/UselessAssignment` — flags local-variable writes whose result is
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Lint/UselessAssignment
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-ev4p
+//! notes: >
+//!   Known gaps remain around VariableForce-equivalent coverage and RuboCop parity details.
+//! ```
+//!
 //! never read, *or* whose result is overwritten by a sibling write before
 //! any read can observe it.
 //!

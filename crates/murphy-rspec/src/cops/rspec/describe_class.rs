@@ -1,4 +1,17 @@
 //! `RSpec/DescribeClass` — the first argument of a **top-level**
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rspec
+//! upstream_cop: RSpec/DescribeClass
+//! upstream_version_checked: 3.7.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-h8ke
+//! notes: >
+//!   Backfilled metadata; full upstream parity audit still needs to confirm remaining file-gating and behavior differences.
+//! ```
+//!
 //! `RSpec.describe`/`describe` block should be the class or module
 //! under test, not a string or symbol. Mirrors RuboCop-RSpec's cop of
 //! the same name.

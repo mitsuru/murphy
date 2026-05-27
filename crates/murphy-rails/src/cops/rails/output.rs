@@ -1,4 +1,17 @@
 //! `Rails/Output` — flag receiver-less debug-output method calls
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rails
+//! upstream_cop: Rails/Output
+//! upstream_version_checked: 2.35.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-hfcg
+//! notes: >
+//!   Known gaps remain around guards, STDOUT/STDERR coverage, autocorrect, and file gating.
+//! ```
+//!
 //! (`puts`/`p`/`pp`/`print`/`pretty_print`/`ap`/`binwrite`/`syswrite`/
 //! `write`/`write_nonblock`). Rails apps should route debug output
 //! through `Rails.logger` so it ends up in the configured log sink

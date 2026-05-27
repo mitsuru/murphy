@@ -1,4 +1,17 @@
 //! `Lint/Debugger` — flag calls that drop into a debugger / REPL or
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Lint/Debugger
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-rjwo
+//! notes: >
+//!   Known gaps remain around RuboCop configuration shape and false-positive guards.
+//! ```
+//!
 //! `require`s that load one. Defaults mirror RuboCop's `DebuggerMethods`
 //! and `DebuggerRequires` so a `.rubocop.yml`-aware Ruby developer
 //! sees the same set of offenses.

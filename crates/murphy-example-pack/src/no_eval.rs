@@ -1,4 +1,13 @@
 //! `Example/NoEval` — flags `eval` calls. Demo cop for the
+//! ## Murphy catalog
+//!
+//! ```murphy-parity
+//! cop: Example/NoEval
+//! status: custom
+//! notes: >
+//!   Demo cop for plugin authors; no RuboCop upstream target.
+//! ```
+//!
 //! `murphy-example-pack` distribution.
 //!
 //! Matches the following receiver shapes:

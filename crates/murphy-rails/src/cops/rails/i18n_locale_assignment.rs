@@ -1,4 +1,17 @@
 //! `Rails/I18nLocaleAssignment` — flag direct assignment to the
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rails
+//! upstream_cop: Rails/I18nLocaleAssignment
+//! upstream_version_checked: 2.35.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-l5v2
+//! notes: >
+//!   Known gaps remain around ::I18n, message text, pending default, and path behavior.
+//! ```
+//!
 //! `I18n.locale` attribute (`I18n.locale = "ja"`). Direct assignment
 //! is process-global and leaks across requests / threads in
 //! environments without per-request isolation; the

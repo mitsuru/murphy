@@ -1,4 +1,17 @@
 //! `Rails/RequestReferer` — enforce one spelling for the Rails
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rails
+//! upstream_cop: Rails/RequestReferer
+//! upstream_version_checked: 2.35.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-h8ke
+//! notes: >
+//!   Backfilled metadata; full upstream parity audit still needs to confirm no remaining behavior gaps.
+//! ```
+//!
 //! `request.referer` / `request.referrer` accessors. Rails exposes both
 //! as aliases; RuboCop defaults to the HTTP-standard misspelling
 //! `referer`, but lets projects opt into `referrer`.

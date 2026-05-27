@@ -1,4 +1,17 @@
 //! `Layout/DotPosition` — flags misplaced `.` / `&.` operators in
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Layout/DotPosition
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-6udc
+//! notes: >
+//!   Known gap remains for selector-less implicit call shapes.
+//! ```
+//!
 //! multi-line method chains. Mirrors RuboCop's same-named cop;
 //! `EnforcedStyle: leading | trailing` (default `leading`) selects
 //! which side of the chain the operator should sit on.
