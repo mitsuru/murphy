@@ -559,6 +559,47 @@ fn bad_usage_exits_2() {
     );
 }
 
+#[test]
+fn top_level_help_lists_primary_subcommands() {
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("--help")
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for expected in ["lint", "migrate", "ast", "cops", "lsp"] {
+        assert!(
+            stdout.contains(expected),
+            "top-level help should mention {expected:?}, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn lint_help_describes_key_flags() {
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--help")
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for expected in ["--fix", "-a", "--debug", "--no-cache", "--format"] {
+        assert!(
+            stdout.contains(expected),
+            "lint help should mention {expected:?}, got:\n{stdout}"
+        );
+    }
+    for expected in ["human", "json", "progress"] {
+        assert!(
+            stdout.contains(expected),
+            "lint help should mention format {expected:?}, got:\n{stdout}"
+        );
+    }
+}
+
 // --- Phase 2 Task 6: directory / zero-arg discovery ---
 
 /// `murphy lint <dir>` discovers `.rb` files under the dir (default

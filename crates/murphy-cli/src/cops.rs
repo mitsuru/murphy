@@ -57,33 +57,12 @@ impl std::fmt::Display for Status {
 
 /// Output shape selected by `--format=`. Default is `table`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Format {
+pub enum Format {
     Table,
     Json,
 }
 
-/// Entry point for `murphy cops …`.
-pub fn run(args: &[String]) -> Result<u8, AppError> {
-    let (sub, rest) = match args.split_first() {
-        Some((s, r)) => (s.as_str(), r),
-        None => {
-            return Err(AppError::setup(
-                "usage: murphy cops list [--format=table|json]",
-            ));
-        }
-    };
-    match sub {
-        "list" => list(rest),
-        other => Err(AppError::setup(format!(
-            "unknown subcommand `murphy cops {other}` (usage: murphy cops list \
-             [--format=table|json])"
-        ))),
-    }
-}
-
-fn list(args: &[String]) -> Result<u8, AppError> {
-    let format = parse_format(args)?;
-
+pub fn list_with_format(format: Format) -> Result<u8, AppError> {
     let config = MurphyConfig::load(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))?;
 
     // Build the same registry the lint flow uses (builtin pack +
@@ -152,43 +131,6 @@ fn list(args: &[String]) -> Result<u8, AppError> {
     }
 
     Ok(0)
-}
-
-fn parse_format(args: &[String]) -> Result<Format, AppError> {
-    let mut format = Format::Table;
-    let mut i = 0;
-    while i < args.len() {
-        let arg = args[i].as_str();
-        if let Some(value) = arg.strip_prefix("--format=") {
-            format = parse_format_value(value)?;
-            i += 1;
-            continue;
-        }
-        if arg == "--format" {
-            let Some(value) = args.get(i + 1) else {
-                return Err(AppError::setup(
-                    "`--format` requires a value (table|json)".to_owned(),
-                ));
-            };
-            format = parse_format_value(value)?;
-            i += 2;
-            continue;
-        }
-        return Err(AppError::setup(format!(
-            "unknown flag {arg:?} for `murphy cops list` (supported: --format=table|json)"
-        )));
-    }
-    Ok(format)
-}
-
-fn parse_format_value(value: &str) -> Result<Format, AppError> {
-    match value {
-        "table" => Ok(Format::Table),
-        "json" => Ok(Format::Json),
-        other => Err(AppError::setup(format!(
-            "unknown --format value {other:?} (supported: table, json)"
-        ))),
-    }
 }
 
 /// Everything before the first `/` is the namespace; cop names without a
