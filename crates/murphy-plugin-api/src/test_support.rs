@@ -764,7 +764,6 @@ fn cop_names_in_source(source: &str) -> Vec<String> {
         let trimmed = line.trim();
         if trimmed.starts_with("#[cop(") {
             in_cop_attr = true;
-            continue;
         }
         if !in_cop_attr {
             continue;
@@ -781,7 +780,8 @@ fn cop_names_in_source(source: &str) -> Vec<String> {
 }
 
 fn parse_name_literal(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("name = \"")?;
+    let start = line.find("name = \"")?;
+    let rest = &line[start + "name = \"".len()..];
     let end = rest.find('"')?;
     Some(&rest[..end])
 }
@@ -884,9 +884,19 @@ const DEFAULT_OPTIONS_JSON: &str = "{}";
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_annotated, render};
+    use super::{cop_names_in_source, parse_annotated, render};
     use crate::{Cop, Cx, NoOptions, NodeCop, NodeKind, NodeKindTag, Range, RawSlice};
     use murphy_ast::NodeId;
+
+    #[test]
+    fn cop_names_in_source_reads_single_line_cop_attribute() {
+        let source = r#"
+            #[cop(name = "Example/Inline", severity = "warning")]
+            pub struct Inline;
+        "#;
+
+        assert_eq!(cop_names_in_source(source), ["Example/Inline"]);
+    }
 
     /// Fixture: emits nothing.
     #[derive(Default)]
