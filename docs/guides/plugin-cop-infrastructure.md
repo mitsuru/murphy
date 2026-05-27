@@ -74,7 +74,7 @@ pub struct DescribeClass;
 
 #[cop(
     name = "RSpec/DescribeClass",
-    description = "The first argument to `describe` should be the class or module under test, not a string.",
+    description = "Check that the first argument to the top-level describe is a constant.",
     default_severity = "warning",
     default_enabled = true,
     options = NoOptions,

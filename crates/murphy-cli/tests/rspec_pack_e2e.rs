@@ -95,9 +95,11 @@ fn offenses_named<'a>(offenses: &'a [serde_json::Value], cop: &str) -> Vec<&'a s
 
 #[test]
 fn flags_rspec_describe_with_string_first_arg() {
-    // `RSpec.describe "Widget" do ... end` — string-keyed describe is
-    // exactly what RSpec/DescribeClass forbids.
-    let (code, offs) = run_with_pack("RSpec.describe \"Widget\" do\nend\n");
+    // `RSpec.describe "bad describe" do ... end` — the string isn't a
+    // constant path, so the cop fires. (Class-name-shaped strings like
+    // `"Widget"` are accepted via the `string_constant?` exception that
+    // mirrors upstream RuboCop-RSpec.)
+    let (code, offs) = run_with_pack("RSpec.describe \"bad describe\" do\nend\n");
     assert_eq!(code, 1, "offense → exit 1; got offenses {offs:?}");
     let hits = offenses_named(&offs, "RSpec/DescribeClass");
     assert_eq!(
@@ -109,10 +111,10 @@ fn flags_rspec_describe_with_string_first_arg() {
 
 #[test]
 fn flags_bare_describe_with_string_first_arg() {
-    // RSpec's top-level monkey-patch: `describe "Widget" do ... end`
-    // (no `RSpec.` receiver). RuboCop's RSpec/DescribeClass flags this
-    // form too and so do we.
-    let (_code, offs) = run_with_pack("describe \"Widget\" do\nend\n");
+    // RSpec's top-level monkey-patch: `describe "bad describe" do ... end`
+    // (no `RSpec.` receiver). The non-constant-shaped string fires the
+    // cop in both bare and explicit-receiver forms.
+    let (_code, offs) = run_with_pack("describe \"bad describe\" do\nend\n");
     let hits = offenses_named(&offs, "RSpec/DescribeClass");
     assert_eq!(
         hits.len(),
