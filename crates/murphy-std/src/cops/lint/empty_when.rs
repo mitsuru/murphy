@@ -1,4 +1,17 @@
 //! `Lint/EmptyWhen` — flag a `when` branch whose body is empty.
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Lint/EmptyWhen
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-vf0q
+//! notes: >
+//!   Known gaps remain around comments, disable comments, runtime options, and message parity.
+//! ```
+//!
 //!
 //! ## Defaults that mirror RuboCop
 //!

@@ -1,4 +1,17 @@
 //! `Rails/EnvironmentVariableAccess` — flag direct access to
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rails
+//! upstream_cop: Rails/EnvironmentVariableAccess
+//! upstream_version_checked: 2.35.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-dls6
+//! notes: >
+//!   Known gaps remain around AllowReads/AllowWrites, ::ENV, read/write messages, ranges, and file gating.
+//! ```
+//!
 //! environment variables through the top-level `ENV` constant
 //! (`ENV[key]`, `ENV.fetch(key)`, `ENV["A"] = "B"`, `ENV.store(...)`,
 //! `ENV.to_h`, …). Rails projects typically prefer a settings layer

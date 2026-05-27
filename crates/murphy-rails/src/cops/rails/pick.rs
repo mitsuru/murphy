@@ -1,4 +1,17 @@
 //! `Rails/Pick` — flag the `pluck(:col).first` idiom in favour of the
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rails
+//! upstream_cop: Rails/Pick
+//! upstream_version_checked: 2.35.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-gu5d
+//! notes: >
+//!   Known gaps remain around safe navigation, target Rails version behavior, autocorrect, and message parity.
+//! ```
+//!
 //! Rails 6+ `pick(:col)` shorthand. `pick` materialises only the first
 //! row at the SQL level (it tacks on a `LIMIT 1`), whereas
 //! `pluck(:col).first` loads the entire column into Ruby first and then

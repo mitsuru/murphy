@@ -1,4 +1,17 @@
 //! `Layout/TrailingWhitespace` — flags space / tab characters between
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Layout/TrailingWhitespace
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-wapy
+//! notes: >
+//!   Known gaps remain around AllowInHeredoc, heredoc autocorrect behavior, and message punctuation.
+//! ```
+//!
 //! the last non-whitespace character on a line and the line's terminator.
 //! Mirrors RuboCop's same-named cop.
 //!

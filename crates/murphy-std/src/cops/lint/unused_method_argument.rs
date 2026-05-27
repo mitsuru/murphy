@@ -1,4 +1,17 @@
 //! `Lint/UnusedMethodArgument` — flag method parameters that are never
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Lint/UnusedMethodArgument
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-qaio
+//! notes: >
+//!   Known gaps remain around option parity, message text, and autocorrect behavior.
+//! ```
+//!
 //! read inside the method body.
 //!
 //! ## Defaults that mirror RuboCop

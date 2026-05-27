@@ -32,6 +32,19 @@ use cops::rails::{
     RequestReferer, UniqBeforePluck,
 };
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ActionControllerFlashBeforeRender
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ActionControllerFlashBeforeRender;
 
@@ -46,6 +59,19 @@ impl ActionControllerFlashBeforeRender {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ActionControllerTestCase
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ActionControllerTestCase;
 
@@ -60,6 +86,19 @@ impl ActionControllerTestCase {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ActionFilter
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ActionFilter;
 
@@ -74,6 +113,19 @@ impl ActionFilter {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ActionOrder
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ActionOrder;
 
@@ -88,6 +140,19 @@ impl ActionOrder {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ActiveRecordAliases
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ActiveRecordAliases;
 
@@ -102,6 +167,19 @@ impl ActiveRecordAliases {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ActiveRecordCallbacksOrder
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ActiveRecordCallbacksOrder;
 
@@ -116,6 +194,19 @@ impl ActiveRecordCallbacksOrder {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ActiveRecordOverride
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ActiveRecordOverride;
 
@@ -130,6 +221,19 @@ impl ActiveRecordOverride {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ActiveSupportAliases
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ActiveSupportAliases;
 
@@ -144,6 +248,19 @@ impl ActiveSupportAliases {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ActiveSupportOnLoad
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ActiveSupportOnLoad;
 
@@ -158,6 +275,19 @@ impl ActiveSupportOnLoad {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/AddColumnIndex
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct AddColumnIndex;
 
@@ -172,6 +302,19 @@ impl AddColumnIndex {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/AfterCommitOverride
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct AfterCommitOverride;
 
@@ -186,6 +329,19 @@ impl AfterCommitOverride {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ApplicationController
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ApplicationController;
 
@@ -200,6 +356,19 @@ impl ApplicationController {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ApplicationJob
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ApplicationJob;
 
@@ -214,6 +383,19 @@ impl ApplicationJob {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ApplicationMailer
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ApplicationMailer;
 
@@ -228,6 +410,19 @@ impl ApplicationMailer {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ApplicationRecord
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ApplicationRecord;
 
@@ -242,6 +437,19 @@ impl ApplicationRecord {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ArelStar
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ArelStar;
 
@@ -256,6 +464,19 @@ impl ArelStar {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/AttributeDefaultBlockValue
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct AttributeDefaultBlockValue;
 
@@ -270,6 +491,19 @@ impl AttributeDefaultBlockValue {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/BelongsTo
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct BelongsTo;
 
@@ -284,6 +518,19 @@ impl BelongsTo {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Blank
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Blank;
 
@@ -298,6 +545,19 @@ impl Blank {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/BulkChangeTable
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct BulkChangeTable;
 
@@ -312,6 +572,19 @@ impl BulkChangeTable {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/CompactBlank
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct CompactBlank;
 
@@ -326,6 +599,19 @@ impl CompactBlank {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ContentTag
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ContentTag;
 
@@ -340,6 +626,19 @@ impl ContentTag {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/CreateTableWithTimestamps
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct CreateTableWithTimestamps;
 
@@ -354,6 +653,19 @@ impl CreateTableWithTimestamps {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/DangerousColumnNames
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct DangerousColumnNames;
 
@@ -368,6 +680,19 @@ impl DangerousColumnNames {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Date
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Date;
 
@@ -382,6 +707,19 @@ impl Date {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/DefaultScope
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct DefaultScope;
 
@@ -396,6 +734,19 @@ impl DefaultScope {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Delegate
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Delegate;
 
@@ -410,6 +761,19 @@ impl Delegate {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/DelegateAllowBlank
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct DelegateAllowBlank;
 
@@ -424,6 +788,19 @@ impl DelegateAllowBlank {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/DeprecatedActiveModelErrorsMethods
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct DeprecatedActiveModelErrorsMethods;
 
@@ -438,6 +815,19 @@ impl DeprecatedActiveModelErrorsMethods {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/DotSeparatedKeys
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct DotSeparatedKeys;
 
@@ -452,6 +842,19 @@ impl DotSeparatedKeys {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/DuplicateAssociation
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct DuplicateAssociation;
 
@@ -466,6 +869,19 @@ impl DuplicateAssociation {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/DuplicateScope
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct DuplicateScope;
 
@@ -480,6 +896,19 @@ impl DuplicateScope {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/DurationArithmetic
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct DurationArithmetic;
 
@@ -494,6 +923,19 @@ impl DurationArithmetic {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/DynamicFindBy
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct DynamicFindBy;
 
@@ -508,6 +950,19 @@ impl DynamicFindBy {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/EagerEvaluationLogMessage
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct EagerEvaluationLogMessage;
 
@@ -522,6 +977,19 @@ impl EagerEvaluationLogMessage {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/EnumHash
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct EnumHash;
 
@@ -536,6 +1004,19 @@ impl EnumHash {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/EnumSyntax
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct EnumSyntax;
 
@@ -550,6 +1031,19 @@ impl EnumSyntax {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/EnumUniqueness
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct EnumUniqueness;
 
@@ -564,6 +1058,19 @@ impl EnumUniqueness {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Env
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Env;
 
@@ -578,6 +1085,19 @@ impl Env {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/EnvLocal
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct EnvLocal;
 
@@ -592,6 +1112,19 @@ impl EnvLocal {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/EnvironmentComparison
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct EnvironmentComparison;
 
@@ -609,6 +1142,19 @@ impl EnvironmentComparison {
 // `EnvironmentVariableAccess` promoted to real cop in
 // `cops::rails::environment_variable_access`.
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Exit
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Exit;
 
@@ -623,6 +1169,19 @@ impl Exit {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ExpandedDateRange
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ExpandedDateRange;
 
@@ -637,6 +1196,19 @@ impl ExpandedDateRange {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/FilePath
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct FilePath;
 
@@ -651,6 +1223,19 @@ impl FilePath {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/FindBy
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct FindBy;
 
@@ -665,6 +1250,19 @@ impl FindBy {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/FindById
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct FindById;
 
@@ -679,6 +1277,19 @@ impl FindById {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/FindByOrAssignmentMemoization
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct FindByOrAssignmentMemoization;
 
@@ -693,6 +1304,19 @@ impl FindByOrAssignmentMemoization {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/FindEach
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct FindEach;
 
@@ -707,6 +1331,19 @@ impl FindEach {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/FreezeTime
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct FreezeTime;
 
@@ -721,6 +1358,19 @@ impl FreezeTime {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/HasAndBelongsToMany
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct HasAndBelongsToMany;
 
@@ -735,6 +1385,19 @@ impl HasAndBelongsToMany {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/HasManyOrHasOneDependent
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct HasManyOrHasOneDependent;
 
@@ -749,6 +1412,19 @@ impl HasManyOrHasOneDependent {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/HelperInstanceVariable
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct HelperInstanceVariable;
 
@@ -763,6 +1439,19 @@ impl HelperInstanceVariable {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/HttpPositionalArguments
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct HttpPositionalArguments;
 
@@ -777,6 +1466,19 @@ impl HttpPositionalArguments {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/HttpStatus
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct HttpStatus;
 
@@ -791,6 +1493,19 @@ impl HttpStatus {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/HttpStatusNameConsistency
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct HttpStatusNameConsistency;
 
@@ -805,6 +1520,19 @@ impl HttpStatusNameConsistency {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/I18nLazyLookup
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct I18nLazyLookup;
 
@@ -822,6 +1550,19 @@ impl I18nLazyLookup {
 // `I18nLocaleAssignment` promoted to real cop in
 // `cops::rails::i18n_locale_assignment`.
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/I18nLocaleTexts
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct I18nLocaleTexts;
 
@@ -836,6 +1577,19 @@ impl I18nLocaleTexts {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/IgnoredColumnsAssignment
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct IgnoredColumnsAssignment;
 
@@ -850,6 +1604,19 @@ impl IgnoredColumnsAssignment {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/IgnoredSkipActionFilterOption
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct IgnoredSkipActionFilterOption;
 
@@ -864,6 +1631,19 @@ impl IgnoredSkipActionFilterOption {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/IndexBy
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct IndexBy;
 
@@ -878,6 +1658,19 @@ impl IndexBy {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/IndexWith
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct IndexWith;
 
@@ -892,6 +1685,19 @@ impl IndexWith {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Inquiry
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Inquiry;
 
@@ -906,6 +1712,19 @@ impl Inquiry {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/InverseOf
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct InverseOf;
 
@@ -920,6 +1739,19 @@ impl InverseOf {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/LexicallyScopedActionFilter
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct LexicallyScopedActionFilter;
 
@@ -934,6 +1766,19 @@ impl LexicallyScopedActionFilter {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/LinkToBlank
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct LinkToBlank;
 
@@ -948,6 +1793,19 @@ impl LinkToBlank {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/MailerName
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct MailerName;
 
@@ -962,6 +1820,19 @@ impl MailerName {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/MatchRoute
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct MatchRoute;
 
@@ -976,6 +1847,19 @@ impl MatchRoute {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/MigrationClassName
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct MigrationClassName;
 
@@ -990,6 +1874,19 @@ impl MigrationClassName {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/MultipleRoutePaths
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct MultipleRoutePaths;
 
@@ -1007,6 +1904,19 @@ impl MultipleRoutePaths {
 // `NegateInclude` promoted to real cop in
 // `cops::rails::negate_include`.
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/NotNullColumn
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct NotNullColumn;
 
@@ -1021,6 +1931,19 @@ impl NotNullColumn {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/OrderArguments
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct OrderArguments;
 
@@ -1035,6 +1958,19 @@ impl OrderArguments {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/OrderById
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct OrderById;
 
@@ -1053,6 +1989,19 @@ impl OrderById {
 // the crate root via the `use cops::rails::Output;` above so the
 // `register_cops!` ident below resolves unchanged.
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/OutputSafety
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct OutputSafety;
 
@@ -1072,6 +2021,19 @@ impl OutputSafety {
 // RequestReferer};` above so the `register_cops!` ident below resolves
 // unchanged.
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Pluck
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Pluck;
 
@@ -1086,6 +2048,19 @@ impl Pluck {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/PluckId
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct PluckId;
 
@@ -1100,6 +2075,19 @@ impl PluckId {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/PluckInWhere
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct PluckInWhere;
 
@@ -1114,6 +2102,19 @@ impl PluckInWhere {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/PluralizationGrammar
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct PluralizationGrammar;
 
@@ -1128,6 +2129,19 @@ impl PluralizationGrammar {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Presence
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Presence;
 
@@ -1142,6 +2156,19 @@ impl Presence {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Present
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Present;
 
@@ -1156,6 +2183,19 @@ impl Present {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RakeEnvironment
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RakeEnvironment;
 
@@ -1170,6 +2210,19 @@ impl RakeEnvironment {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ReadWriteAttribute
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ReadWriteAttribute;
 
@@ -1184,6 +2237,19 @@ impl ReadWriteAttribute {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RedirectBackOrTo
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RedirectBackOrTo;
 
@@ -1198,6 +2264,19 @@ impl RedirectBackOrTo {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RedundantActiveRecordAllMethod
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RedundantActiveRecordAllMethod;
 
@@ -1212,6 +2291,19 @@ impl RedundantActiveRecordAllMethod {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RedundantAllowNil
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RedundantAllowNil;
 
@@ -1226,6 +2318,19 @@ impl RedundantAllowNil {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RedundantForeignKey
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RedundantForeignKey;
 
@@ -1240,6 +2345,19 @@ impl RedundantForeignKey {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RedundantPresenceValidationOnBelongsTo
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RedundantPresenceValidationOnBelongsTo;
 
@@ -1254,6 +2372,19 @@ impl RedundantPresenceValidationOnBelongsTo {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RedundantReceiverInWithOptions
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RedundantReceiverInWithOptions;
 
@@ -1268,6 +2399,19 @@ impl RedundantReceiverInWithOptions {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RedundantTravelBack
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RedundantTravelBack;
 
@@ -1282,6 +2426,19 @@ impl RedundantTravelBack {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ReflectionClassName
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ReflectionClassName;
 
@@ -1296,6 +2453,19 @@ impl ReflectionClassName {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RefuteMethods
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RefuteMethods;
 
@@ -1310,6 +2480,19 @@ impl RefuteMethods {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RelativeDateConstant
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RelativeDateConstant;
 
@@ -1324,6 +2507,19 @@ impl RelativeDateConstant {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RenderInline
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RenderInline;
 
@@ -1338,6 +2534,19 @@ impl RenderInline {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RenderPlainText
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RenderPlainText;
 
@@ -1357,6 +2566,19 @@ impl RenderPlainText {
 // RequestReferer};` above so the `register_cops!` ident below resolves
 // unchanged.
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RequireDependency
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RequireDependency;
 
@@ -1371,6 +2593,19 @@ impl RequireDependency {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ResponseParsedBody
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ResponseParsedBody;
 
@@ -1385,6 +2620,19 @@ impl ResponseParsedBody {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ReversibleMigration
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ReversibleMigration;
 
@@ -1399,6 +2647,19 @@ impl ReversibleMigration {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ReversibleMigrationMethodDefinition
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ReversibleMigrationMethodDefinition;
 
@@ -1413,6 +2674,19 @@ impl ReversibleMigrationMethodDefinition {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RootJoinChain
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RootJoinChain;
 
@@ -1427,6 +2701,19 @@ impl RootJoinChain {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RootPathnameMethods
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RootPathnameMethods;
 
@@ -1441,6 +2728,19 @@ impl RootPathnameMethods {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/RootPublicPath
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct RootPublicPath;
 
@@ -1455,6 +2755,19 @@ impl RootPublicPath {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/SafeNavigation
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct SafeNavigation;
 
@@ -1469,6 +2782,19 @@ impl SafeNavigation {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/SafeNavigationWithBlank
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct SafeNavigationWithBlank;
 
@@ -1483,6 +2809,19 @@ impl SafeNavigationWithBlank {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/SaveBang
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct SaveBang;
 
@@ -1497,6 +2836,19 @@ impl SaveBang {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/SchemaComment
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct SchemaComment;
 
@@ -1511,6 +2863,19 @@ impl SchemaComment {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ScopeArgs
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ScopeArgs;
 
@@ -1525,6 +2890,19 @@ impl ScopeArgs {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/SelectMap
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct SelectMap;
 
@@ -1539,6 +2917,19 @@ impl SelectMap {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ShortI18n
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ShortI18n;
 
@@ -1553,6 +2944,19 @@ impl ShortI18n {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/SkipsModelValidations
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct SkipsModelValidations;
 
@@ -1567,6 +2971,19 @@ impl SkipsModelValidations {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/SquishedSQLHeredocs
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct SquishedSQLHeredocs;
 
@@ -1581,6 +2998,19 @@ impl SquishedSQLHeredocs {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/StripHeredoc
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct StripHeredoc;
 
@@ -1595,6 +3025,19 @@ impl StripHeredoc {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/StrongParametersExpect
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct StrongParametersExpect;
 
@@ -1609,6 +3052,19 @@ impl StrongParametersExpect {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/TableNameAssignment
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct TableNameAssignment;
 
@@ -1623,6 +3079,19 @@ impl TableNameAssignment {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ThreeStateBooleanColumn
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ThreeStateBooleanColumn;
 
@@ -1637,6 +3106,19 @@ impl ThreeStateBooleanColumn {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/TimeZone
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct TimeZone;
 
@@ -1651,6 +3133,19 @@ impl TimeZone {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/TimeZoneAssignment
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct TimeZoneAssignment;
 
@@ -1665,6 +3160,19 @@ impl TimeZoneAssignment {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ToFormattedS
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ToFormattedS;
 
@@ -1679,6 +3187,19 @@ impl ToFormattedS {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/ToSWithArgument
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct ToSWithArgument;
 
@@ -1693,6 +3214,19 @@ impl ToSWithArgument {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/TopLevelHashWithIndifferentAccess
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct TopLevelHashWithIndifferentAccess;
 
@@ -1707,6 +3241,19 @@ impl TopLevelHashWithIndifferentAccess {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/TransactionExitStatement
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct TransactionExitStatement;
 
@@ -1724,6 +3271,19 @@ impl TransactionExitStatement {
 // `UniqBeforePluck` promoted to real cop in
 // `cops::rails::uniq_before_pluck`.
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/UniqueValidationWithoutIndex
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct UniqueValidationWithoutIndex;
 
@@ -1738,6 +3298,19 @@ impl UniqueValidationWithoutIndex {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/UnknownEnv
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct UnknownEnv;
 
@@ -1752,6 +3325,19 @@ impl UnknownEnv {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/UnusedIgnoredColumns
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct UnusedIgnoredColumns;
 
@@ -1766,6 +3352,19 @@ impl UnusedIgnoredColumns {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/UnusedRenderContent
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct UnusedRenderContent;
 
@@ -1780,6 +3379,19 @@ impl UnusedRenderContent {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/Validation
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct Validation;
 
@@ -1794,6 +3406,19 @@ impl Validation {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/WhereEquals
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct WhereEquals;
 
@@ -1808,6 +3433,19 @@ impl WhereEquals {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/WhereExists
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct WhereExists;
 
@@ -1822,6 +3460,19 @@ impl WhereExists {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/WhereMissing
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct WhereMissing;
 
@@ -1836,6 +3487,19 @@ impl WhereMissing {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/WhereNot
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct WhereNot;
 
@@ -1850,6 +3514,19 @@ impl WhereNot {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/WhereNotWithMultipleConditions
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct WhereNotWithMultipleConditions;
 
@@ -1864,6 +3541,19 @@ impl WhereNotWithMultipleConditions {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
+/// ## RuboCop parity
+///
+/// ```murphy-parity
+/// upstream: rubocop-rails
+/// upstream_cop: Rails/WhereRange
+/// upstream_version_checked: 2.35.0
+/// status: stub
+/// gap_issues:
+///   - murphy-4gd.1
+/// notes: >
+///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
+/// ```
+///
 #[derive(Default)]
 pub struct WhereRange;
 

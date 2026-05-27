@@ -1,3 +1,16 @@
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Lint/DeprecatedClassMethods
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-uo3u
+//! notes: >
+//!   Known gaps remain around FileTest handling and RuboCop message parity.
+//! ```
+//!
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, node_pattern};
 
 node_pattern!(

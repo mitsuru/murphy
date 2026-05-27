@@ -1,4 +1,17 @@
 //! `RSpec/MultipleExpectations` — caps the number of bare `expect(...)`
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rspec
+//! upstream_cop: RSpec/MultipleExpectations
+//! upstream_version_checked: 3.7.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-ipxn
+//! notes: >
+//!   Known follow-up remains for token-based example call offense ranges.
+//! ```
+//!
 //! calls inside one example. Mirrors RuboCop-RSpec's cop of the same
 //! name.
 //!

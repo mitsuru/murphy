@@ -1,4 +1,13 @@
 //! `Murphy/NoReceiverPuts` — flags `puts` / `print` / `p` calls with no
+//! ## Murphy catalog
+//!
+//! ```murphy-parity
+//! cop: Murphy/NoReceiverPuts
+//! status: custom
+//! notes: >
+//!   Murphy-specific bootstrap cop; no RuboCop upstream target.
+//! ```
+//!
 //! explicit receiver. Ruby's bare debug-output methods almost always
 //! belong on a logger; an explicit receiver (`logger.info "x"`,
 //! `obj.puts "x"`) is fine and is filtered out by Gate 1 below.

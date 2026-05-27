@@ -1,4 +1,18 @@
 //! `RSpec/ExampleLength` — caps the line count of an example block's
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rspec
+//! upstream_cop: RSpec/ExampleLength
+//! upstream_version_checked: 3.7.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-fgcu
+//!   - murphy-ttzm
+//! notes: >
+//!   Known gaps remain around CodeLength behavior, CountAsOne/CountComments, message/range parity, and alias coverage.
+//! ```
+//!
 //! body. Mirrors RuboCop-RSpec's cop of the same name.
 //!
 //! ## Matched shapes

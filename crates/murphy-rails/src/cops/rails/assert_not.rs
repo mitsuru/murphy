@@ -1,4 +1,17 @@
 //! `Rails/AssertNot` — flag `assert(!x)` (the receiver-less minitest
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rails
+//! upstream_cop: Rails/AssertNot
+//! upstream_version_checked: 2.35.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-juee
+//! notes: >
+//!   Known gaps remain around message-arg forms, autocorrect, and test-file gating.
+//! ```
+//!
 //! `assert` with a single negated argument) and recommend the
 //! semantically-equivalent `assert_not(x)` form. Rails ships both in
 //! its `ActiveSupport::TestCase`; the cop nudges projects toward the

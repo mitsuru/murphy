@@ -1,4 +1,17 @@
 //! `Lint/UnreachableCode` — flags sibling statements that follow a
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Lint/UnreachableCode
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-py6a
+//! notes: >
+//!   Known gaps remain around RuboCop terminator coverage, branch flow, and message parity.
+//! ```
+//!
 //! flow-terminator inside the *same* `Begin(NodeList)` container.
 //!
 //! A statement is unreachable when its **direct** sibling earlier in the

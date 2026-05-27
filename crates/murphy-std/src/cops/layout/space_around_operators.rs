@@ -1,4 +1,17 @@
 //! `Layout/SpaceAroundOperators` — flags binary operators that lack
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Layout/SpaceAroundOperators
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-lfn4
+//! notes: >
+//!   Known gaps remain around broad RuboCop shape coverage and related options.
+//! ```
+//!
 //! surrounding whitespace or have more than one space on either side,
 //! and autocorrects them to ` <op> `. Mirrors the missing-/extra-space
 //! halves of RuboCop's same-named cop.

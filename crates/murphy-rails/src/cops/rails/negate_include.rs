@@ -1,4 +1,17 @@
 //! `Rails/NegateInclude` — flag `!x.include?(y)` and recommend
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rails
+//! upstream_cop: Rails/NegateInclude
+//! upstream_version_checked: 2.35.0
+//! status: partial
+//! gap_issues:
+//!   - murphy-h8ke
+//! notes: >
+//!   Backfilled metadata; full upstream parity audit still needs to confirm no remaining behavior gaps.
+//! ```
+//!
 //! `x.exclude?(y)` (an ActiveSupport monkey-patch on Enumerable that
 //! reads better than the negation), autocorrecting the rewrite.
 //!

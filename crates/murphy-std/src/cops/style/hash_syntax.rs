@@ -1,4 +1,17 @@
 //! `Style/HashSyntax` — checks hash literal key syntax, mirroring
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/HashSyntax
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-90zo
+//! notes: >
+//!   Known gaps remain around shorthand syntax, target Ruby version behavior, and call-context autocorrect.
+//! ```
+//!
 //! RuboCop's same-named cop for the core hash-rocket / Ruby 1.9 styles.
 //!
 //! ## Matched shapes

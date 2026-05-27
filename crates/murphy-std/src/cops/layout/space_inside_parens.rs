@@ -1,4 +1,17 @@
 //! `Layout/SpaceInsideParens` — flags extra spaces immediately inside
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Layout/SpaceInsideParens
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues:
+//!   - murphy-pvyl
+//! notes: >
+//!   Implementation appears broadly aligned, but expanded RuboCop spec parity coverage remains open.
+//! ```
+//!
 //! parentheses. Mirrors RuboCop's same-named cop.
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, Range, SourceToken, SourceTokenKind, cop};
