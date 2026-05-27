@@ -41,7 +41,7 @@
 //! a selector-only edit over `cx.loc(node).name`, preserving receiver,
 //! chaining, and surrounding whitespace.
 
-use murphy_plugin_api::{cop, node_pattern, CopOptionEnum, CopOptions, Cx, NodeId};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, cop, node_pattern};
 
 // RuboCop NodePattern equivalent: `(send (send nil? :request) :referer)`.
 // See module docs for the `nil?` vs `nil` distinction and why zero-arg
