@@ -55,6 +55,17 @@ cargo +nightly fmt --check                        # formatting gate (nightly for
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## AST Shape Inspection
+
+Use `murphy ast --format sexp <path|->` to dump the arena AST as an S-expression. Read from stdin with `-` for ad-hoc snippets (`echo '...' | murphy ast --format sexp -`). Do NOT write throwaway test files with `panic!()` to probe shape — the subcommand exists for exactly this. Implementation: `crates/murphy-cli/src/main.rs` (`run_ast`) + `ast_to_sexp` re-exported via `murphy_core`.
+
+## Cop-Authoring Rules
+
+Topic-scoped guides under `.claude/rules/` (read on demand, not loaded into context by default):
+
+- `.claude/rules/autocorrect-pattern.md` — when emitting an autocorrect, prefer two non-overlapping surgical `cx.emit_edit` calls over `raw_source` + `format!` whole-node replacement.
+- `.claude/rules/cop-options-hand-rolled.md` — hand-rolled `CopOptions::from_config_json` must mirror the derive's `ConfigError` shape (no silent default-fallback on shape mismatch).
+
 ## Shell Command Safety
 
 `cp`/`mv`/`rm` may be aliased to interactive (`-i`) mode and hang the agent. Always use non-interactive forms: `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`. Also use `ssh`/`scp` with `-o BatchMode=yes`, and `apt-get -y`.
