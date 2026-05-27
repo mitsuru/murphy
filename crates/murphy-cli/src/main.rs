@@ -24,6 +24,7 @@
 mod cops;
 mod lsp;
 
+use clap::{Parser, Subcommand, ValueEnum};
 use murphy_cache::Cache;
 #[cfg(feature = "mruby-user-cops")]
 use murphy_core::{AstContext, run_mruby_cop_isolated};
@@ -100,8 +101,134 @@ const MAX_FIX_ITERATIONS: u32 = 10;
 /// Global monotonic counter for unique sibling-temp filenames.
 static FIX_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-const LINT_USAGE: &str =
-    "murphy lint [--fix|-a] [--debug] [--no-cache] [--format human|json|progress] [--] [path]...";
+#[derive(Debug, Parser)]
+#[command(
+    name = "murphy",
+    about = "Fast Ruby linting with Murphy cops",
+    subcommand_required = true,
+    arg_required_else_help = false
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: CliCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    /// Lint Ruby files or discover files from the current directory.
+    Lint(LintArgs),
+    /// Convert a .rubocop.yml file to Murphy TOML.
+    Migrate(MigrateArgs),
+    /// Inspect Murphy's arena AST.
+    Ast(AstArgs),
+    /// Inspect available cops.
+    Cops(CopsArgs),
+    /// Run the JSON-RPC language server.
+    Lsp(LspArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct LintArgs {
+    /// Apply safe autocorrections and write files back.
+    #[arg(short = 'a', long = "fix")]
+    fix: bool,
+    /// Print developer timing and pipeline diagnostics to stderr.
+    #[arg(long)]
+    debug: bool,
+    /// Disable the arena AST binary cache for this run.
+    #[arg(long)]
+    no_cache: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value = "human")]
+    format: LintOutputFormatArg,
+    /// Files or directories to lint. With no paths, Murphy discovers from cwd.
+    #[arg(value_name = "PATH", num_args = 0.., trailing_var_arg = true)]
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LintOutputFormatArg {
+    Human,
+    Json,
+    Progress,
+}
+
+impl From<LintOutputFormatArg> for OutputFormat {
+    fn from(format: LintOutputFormatArg) -> Self {
+        match format {
+            LintOutputFormatArg::Human => OutputFormat::Human,
+            LintOutputFormatArg::Json => OutputFormat::Json,
+            LintOutputFormatArg::Progress => OutputFormat::Progress,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct MigrateArgs {
+    /// RuboCop YAML configuration file to migrate.
+    #[arg(value_name = ".rubocop.yml")]
+    path: String,
+}
+
+#[derive(Debug, clap::Args)]
+struct AstArgs {
+    /// AST output format.
+    #[arg(long, value_enum)]
+    format: AstFormatArg,
+    /// Ruby source path, or '-' to read from stdin.
+    #[arg(value_name = "path|-")]
+    path: String,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AstFormatArg {
+    Sexp,
+}
+
+#[derive(Debug, clap::Args)]
+struct CopsArgs {
+    #[command(subcommand)]
+    command: CopsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CopsCommand {
+    /// List all known cops and their status.
+    List(CopsListArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct CopsListArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value = "table")]
+    format: CopsFormatArg,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CopsFormatArg {
+    Table,
+    Json,
+}
+
+impl From<CopsFormatArg> for cops::Format {
+    fn from(format: CopsFormatArg) -> Self {
+        match format {
+            CopsFormatArg::Table => cops::Format::Table,
+            CopsFormatArg::Json => cops::Format::Json,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+struct LspArgs {
+    /// Arguments forwarded to the LSP server.
+    #[arg(
+        value_name = "ARG",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    args: Vec<String>,
+}
 
 #[cfg_attr(not(feature = "mruby-user-cops"), allow(dead_code))]
 struct MrubyCopSource {
@@ -627,13 +754,12 @@ fn lint_files_memoized_debug(
 /// A parse failure exits `EXIT_OFFENSES` (1, to mirror the lint convention
 /// that syntax errors are a kind of finding); IO or bad-usage errors exit
 /// `EXIT_SETUP_ERROR` (2). `BrokenPipe` on stdout collapses to `EXIT_OK`.
-fn run_ast(post_subcommand: &[String]) -> Result<u8, AppError> {
-    let path = match post_subcommand {
-        [format, kind, path] if format == "--format" && kind == "sexp" => path,
-        _ => return Err(AppError::setup("usage: murphy ast --format sexp <path|->")),
-    };
-    let source = read_ast_source(path)?;
-    let ast = parse(&source, path).map_err(|err| AppError {
+fn run_ast(args: &AstArgs) -> Result<u8, AppError> {
+    match args.format {
+        AstFormatArg::Sexp => {}
+    }
+    let source = read_ast_source(&args.path)?;
+    let ast = parse(&source, &args.path).map_err(|err| AppError {
         code: EXIT_OFFENSES,
         message: err.message,
     })?;
@@ -649,105 +775,51 @@ fn run_ast(post_subcommand: &[String]) -> Result<u8, AppError> {
 }
 
 fn run(args: &[String]) -> Result<u8, AppError> {
-    let rest = args.get(1..).unwrap_or(&[]);
-    let (subcommand, post_subcommand) = match rest {
-        [subcommand, rest @ ..] => (subcommand.as_str(), rest),
-        [] => {
-            return Err(AppError::setup(
-                "usage: murphy lint [flags] [path]... | \
-                 murphy migrate <.rubocop.yml> | \
-                 murphy ast --format sexp <path|-> | murphy lsp",
-            ));
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(err) => {
+            let code = err.exit_code() as u8;
+            let _ = err.print();
+            return Ok(code);
         }
     };
 
-    if subcommand == "migrate" {
-        let path = match post_subcommand {
-            [path] => path,
-            _ => return Err(AppError::setup("usage: murphy migrate <.rubocop.yml>")),
-        };
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| AppError::setup(format!("cannot read {path:?}: {e}")))?;
-        let toml = migrate_rubocop_yml_to_murphy_toml(&text)
-            .map_err(|e| AppError::setup(e.to_string()))?;
-        let mut stdout = std::io::stdout().lock();
-        if let Err(e) = write!(stdout, "{toml}") {
-            if e.kind() == std::io::ErrorKind::BrokenPipe {
-                return Ok(EXIT_OK);
-            }
-            return Err(AppError::setup(format!("failed to write stdout: {e}")));
+    match cli.command {
+        CliCommand::Lint(lint_args) => run_lint(&lint_args),
+        CliCommand::Migrate(migrate_args) => run_migrate(&migrate_args),
+        CliCommand::Ast(ast_args) => run_ast(&ast_args),
+        CliCommand::Cops(cops_args) => run_cops(&cops_args),
+        CliCommand::Lsp(lsp_args) => lsp::run(&lsp_args.args),
+    }
+}
+
+fn run_migrate(args: &MigrateArgs) -> Result<u8, AppError> {
+    let text = std::fs::read_to_string(&args.path)
+        .map_err(|e| AppError::setup(format!("cannot read {:?}: {e}", args.path)))?;
+    let toml =
+        migrate_rubocop_yml_to_murphy_toml(&text).map_err(|e| AppError::setup(e.to_string()))?;
+    let mut stdout = std::io::stdout().lock();
+    if let Err(e) = write!(stdout, "{toml}") {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            return Ok(EXIT_OK);
         }
-        return Ok(EXIT_OK);
+        return Err(AppError::setup(format!("failed to write stdout: {e}")));
     }
+    Ok(EXIT_OK)
+}
 
-    if subcommand == "lsp" {
-        return lsp::run(post_subcommand);
+fn run_cops(args: &CopsArgs) -> Result<u8, AppError> {
+    match &args.command {
+        CopsCommand::List(list_args) => cops::list_with_format(list_args.format.into()),
     }
+}
 
-    if subcommand == "cops" {
-        return cops::run(post_subcommand);
-    }
-
-    if subcommand == "ast" {
-        return run_ast(post_subcommand);
-    }
-
-    if subcommand != "lint" {
-        return Err(AppError::setup(format!(
-            "unknown subcommand {subcommand:?} (usage: {LINT_USAGE} | \
-             murphy migrate <.rubocop.yml> | \
-             murphy ast --format sexp <path|-> | \
-             murphy cops list [--format=table|json] | murphy lsp)"
-        )));
-    }
-
-    // ── flag extraction ────────────────────────────────────────────────────
-    let mut fix = false;
-    let mut debug = false;
-    let mut no_cache = false;
-    let mut output_format = OutputFormat::Human;
-    let mut path_args: Vec<&str> = Vec::new();
-    let mut flags_done = false;
-    let mut pending_format = false;
-
-    for token in post_subcommand {
-        if flags_done {
-            path_args.push(token.as_str());
-            continue;
-        }
-        if pending_format {
-            output_format = match token.as_str() {
-                "human" => OutputFormat::Human,
-                "json" => OutputFormat::Json,
-                "progress" => OutputFormat::Progress,
-                value => {
-                    return Err(AppError::setup(format!(
-                        "unknown format {value:?} (supported: human, json, progress)"
-                    )));
-                }
-            };
-            pending_format = false;
-            continue;
-        }
-        match token.as_str() {
-            "--" => flags_done = true,
-            "--fix" | "-a" => fix = true,
-            "--debug" => debug = true,
-            "--no-cache" => no_cache = true,
-            "--format" => pending_format = true,
-            flag if flag.starts_with('-') => {
-                return Err(AppError::setup(format!(
-                    "unknown flag {flag:?} (usage: {LINT_USAGE}; use `--` before a path starting with `-`)"
-                )));
-            }
-            path => path_args.push(path),
-        }
-    }
-    if pending_format {
-        return Err(AppError::setup(
-            "missing value for --format (supported: human, json, progress)",
-        ));
-    }
+fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
+    let fix = args.fix;
+    let debug = args.debug;
+    let no_cache = args.no_cache;
+    let output_format = OutputFormat::from(args.format);
+    let path_args: Vec<&str> = args.paths.iter().map(String::as_str).collect();
 
     let run_started = Instant::now();
     if debug {

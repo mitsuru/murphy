@@ -214,6 +214,28 @@ fn cops_list_rejects_unknown_format_value() {
 }
 
 #[test]
+fn cops_list_help_describes_format() {
+    let dir = tempdir().expect("create tempdir");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("cops")
+        .arg("list")
+        .arg("--help")
+        .assert()
+        .code(0);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    for expected in ["--format", "table", "json"] {
+        assert!(
+            stdout.contains(expected),
+            "cops list help should mention {expected:?}, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn cops_subcommand_requires_a_subcommand() {
     let dir = tempdir().expect("create tempdir");
 
