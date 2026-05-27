@@ -1,6 +1,17 @@
 ---
 name: port-rubocop-cop
-description: This skill should be used when the user asks to "port a RuboCop cop", "move RuboCop's X cop to Murphy", "add an RSpec/Rails/Style/Layout cop to murphy-*", "RuboCop の cop を移植", "X cop を移植して", or otherwise wants to translate a RuboCop (or RuboCop-RSpec / RuboCop-Rails) rule into a Murphy plugin cop using the single-surface ABI from `docs/guides/plugin-cop-infrastructure.md`. Runs the full porting workflow end-to-end: read the RuboCop source, implement against the guide (target pack, `#[on_node]` dispatch including `methods = […]` and `node_pattern!`, `#[derive(CopOptions)]`, `register_cops!`, `test::<T>()` tester-builder tests covering offense / correction / no-correction shapes), analyse the gap to the RuboCop original, escalate gaps the guide cannot cover (AST mismatches, missing hooks, ABI extensions), iterate through `roborev-refine` review until passing, then open a PR and merge after CI is green.
+description: >-
+  This skill should be used when the user asks to "port a RuboCop cop",
+  "move RuboCop's X cop to Murphy", "add an RSpec/Rails/Style/Layout cop to
+  murphy-*", "RuboCop の cop を移植", "X cop を移植して", or otherwise wants to
+  translate a RuboCop, RuboCop-RSpec, or RuboCop-Rails rule into a Murphy
+  plugin cop using the single-surface ABI from
+  docs/guides/plugin-cop-infrastructure.md. Runs the full porting workflow
+  end-to-end: read the RuboCop source, implement against the guide, add and
+  maintain the cop's source-near murphy-parity metadata block, analyse the gap
+  to the RuboCop original, escalate gaps the guide cannot cover, iterate
+  through roborev-refine review until passing, then open a PR and merge after
+  CI is green.
 ---
 
 # Porting a RuboCop cop to Murphy
@@ -36,8 +47,8 @@ and review loop catch the kinds of regressions that block merge later.
 1. **Phase 1 — read the RuboCop source.** Capture the exact spec the port
    must mirror.
 2. **Phase 2 — implement to the guide.** Pick the target pack, decide the
-   dispatch shape, scaffold the file, register it, write tests, verify
-   the build.
+   dispatch shape, scaffold the file including its `murphy-parity` block,
+   register it, write tests, verify the build.
 3. **Phase 3 — analyse the gap to RuboCop.** Diff the implementation
    against the RuboCop original; surface every shape / option /
    autocorrect / test case the port does not cover.
@@ -75,6 +86,10 @@ implementation against this list, so keep it explicit:
 - **Autocorrect.** Whether the cop ships `autocorrect` /
   `extend AutoCorrector`, and whether RuboCop marks it `Safe: false`.
   The Murphy port should match RuboCop's safety stance.
+- **Catalog metadata.** Capture RuboCop's `VersionAdded`,
+  `VersionChanged`, `Safe`, and `SupportsAutocorrection` / correction
+  support when the upstream docs or `config/default.yml` expose them.
+  These become the source-near `murphy-parity` block in Phase 2.3.
 - **`Include` / `Exclude` patterns.** RuboCop's `RSpec/*` cops fire only
   on `*_spec.rb`; Rails cops on `app/**/*.rb`. Murphy has no per-cop
   file-pattern gating yet (Phase 4 candidate if the cop strictly needs
@@ -164,8 +179,23 @@ shape.
 
 The minimum skeleton, with no options:
 
-```rust
+````rust
 //! `Pack/CopName` — one-line summary of what the cop policies.
+//!
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Pack/CopName
+//! upstream_version_checked: 1.86.2
+//! version_added: "0.0"
+//! safe: true
+//! supports_autocorrect: false
+//! status: partial
+//! gap_issues: []
+//! notes: >
+//!   Initial port. Update this block after Phase 3 gap analysis.
+//! ```
 //!
 //! ## Matched shapes
 //! …
@@ -196,13 +226,63 @@ impl CopName {
         cx.emit_offense(cx.range(node), "Message here.", None);
     }
 }
-```
+````
 
 Cops with options follow `references/options.md` (and the
 `ExampleLengthOptions` example shipped in `murphy-rspec`).
 
 Cops with autocorrect add `cx.emit_edit(range, replacement)` calls
 alongside `emit_offense`; see `references/autocorrect.md`.
+
+### Phase 2.3a: add the `murphy-parity` metadata block
+
+Every RuboCop-derived cop file must keep a machine-readable
+`murphy-parity` fenced block in its top module doc comment. This block
+is the source of truth for AI agents, reviewers, future validation
+tests, and debug listing (`murphy cops list --format=json` once wired).
+It is documentation/catalog metadata only: do not add these fields to
+`#[cop(...)]`, do not extend the plugin ABI for them, and do not let
+parity metadata affect lint behavior.
+
+Use the schema from
+`docs/superpowers/specs/2026-05-28-cop-parity-metadata-blocks-design.md`:
+
+````rust
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop-rails
+//! upstream_cop: Rails/Pick
+//! upstream_version_checked: 2.35.0
+//! version_added: "2.6"
+//! safe: true
+//! supports_autocorrect: true
+//! status: partial
+//! gap_issues:
+//!   - murphy-gu5d
+//! notes: >
+//!   Safe-navigation, target-Rails-version behavior, and autocorrect parity
+//!   are not yet complete.
+//! ```
+````
+
+Status meanings:
+
+- `stub` — registered for config/listing compatibility but intentionally
+  inert.
+- `partial` — implemented and dispatched, but known RuboCop parity gaps
+  remain.
+- `verified` — audited against `upstream_version_checked` with no known
+  gaps; `gap_issues` must be empty.
+- `custom` — Murphy-specific cop with no RuboCop ancestor. Use this for
+  greenfield cops and explain the policy in `notes`.
+
+During Phase 2, start new ports as `partial` unless the Phase 3 audit is
+already complete. During Phase 3, update `status`, `gap_issues`, and
+`notes` to match the final gap report. If you create a beads issue for a
+known gap, add its id to `gap_issues` in the same change. If there are no
+known gaps after the audit, set `status: verified` and keep
+`gap_issues: []`.
 
 ### Phase 2.4: register the cop with the pack
 
@@ -362,8 +442,8 @@ cdylib loads correctly and the host's plugin loader sees the new cop.
 After Phase 2.6 is green, do not yet open a PR. Diff the implementation
 against the Phase 1 spec list and produce a short gap report. The report
 drives Phase 4 (escalation), and any "tolerated" gaps get a note in the
-cop file's top-doc comment so users running against a RuboCop baseline
-are not surprised.
+cop file's `murphy-parity` block so users, reviewers, and future agents
+running against a RuboCop baseline are not surprised.
 
 Walk each axis explicitly:
 
@@ -393,10 +473,15 @@ Walk each axis explicitly:
   text deliberately diverges, note why.
 - **Severity / default-enabled.** Match RuboCop unless there is a
   stated reason to differ.
+- **Parity metadata.** Compare the `murphy-parity` block against the
+  audit result. `verified` requires no known gaps and an empty
+  `gap_issues` list. `partial` should name every open beads gap issue
+  created for this port. `stub` is only for inert registered cops.
 
 Output of Phase 3 is one of:
 
-- **No gaps.** Continue to Phase 5.
+- **No gaps.** Set `status: verified` in the `murphy-parity` block,
+  keep `gap_issues: []`, then continue to Phase 5.
 - **Gaps closable with more Phase 2 work.** Return to the relevant
   Phase 2.x and finish, then re-run Phase 3.
 - **Gaps the guide / ABI cannot cover.** Go to Phase 4.
@@ -442,9 +527,10 @@ Escalation format — bring this to the user in one short report:
    `node_pattern!` grammar item — name the surface to extend.
 
 If the user agrees to degrade and ship with the limitation, document
-it in the cop file's top-doc comment and continue to Phase 5. If the
-user agrees to extend the ABI, file a bd issue for the extension and
-pause the port until that work lands.
+it in the cop file's `murphy-parity` block (`status: partial`, gap issue
+id in `gap_issues`, concise `notes`) and continue to Phase 5. If the user
+agrees to extend the ABI, file a bd issue for the extension, add that
+issue id to `gap_issues`, and pause the port until that work lands.
 
 ## Phase 5: pass `roborev-refine` review
 
@@ -535,7 +621,12 @@ merge — proceed once CI is green.
    ported faithfully. The gap analysis is what catches `on_csend`-class
    misses, dropped options, and message divergence — all of which
    reviewers will catch later if you do not.
-8. **Quiet workarounds for Phase 4 gaps.** Reaching into `murphy-ast` /
+8. **Leaving parity metadata stale.** If Phase 3 finds a gap, the
+   `murphy-parity` block must move to `partial` and reference the beads
+   issue. If Phase 3 closes every known gap, the block must move to
+   `verified`. A stale `partial` / `verified` marker is worse than no
+   marker because future agents will trust it.
+9. **Quiet workarounds for Phase 4 gaps.** Reaching into `murphy-ast` /
    `murphy-translate` to dodge a missing `Cx` method, or hand-rolling
    a parser to substitute for an unsupported `node_pattern!` predicate,
    bypasses the single-surface boundary and the dep-boundary test will
