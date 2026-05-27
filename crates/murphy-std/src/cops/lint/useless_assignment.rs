@@ -4,16 +4,15 @@
 //!
 //! ## Matched shapes
 //!
-//! - Plain `Lvasgn` (`x = 1`) — name range, "local variable" message.
+//! - Plain `Lvasgn` (`x = 1`) — name range, RuboCop-compatible message.
 //! - `Masgn` (`a, b = 1, 2`) — each LHS target is treated as its own
-//!   `Lvasgn`-style write, name range, "local variable" message.
+//!   `Lvasgn`-style write, name range, with RuboCop's underscore guidance.
 //! - `OpAsgn` / `OrAsgn` / `AndAsgn` (`x += 1`, `x ||= 1`, `x &&= 1`) —
-//!   the whole operator-assignment range, "operator-assignment" message.
+//!   the variable-name range, with RuboCop's operator guidance.
 //!   The value-less `Lvasgn` *target* inside `OpAsgn`/`OrAsgn`/`AndAsgn`
 //!   also counts as a read of the variable, so a preceding `x = 0` is
 //!   not flagged just because `x += 1` follows.
-//! - `Resbody.var` (`rescue => e`) — `e`'s name range, "exception
-//!   variable" message.
+//! - `Resbody.var` (`rescue => e`) — `e`'s name range.
 //!
 //! ## Flow-sensitive dataflow (murphy-xek)
 //!
@@ -71,11 +70,14 @@
 //!
 //! ## Autocorrect
 //!
-//! None. Removing or rewriting a dead assignment can change behaviour
-//! when the RHS has side effects; the safe-removal heuristic lives in a
-//! separate epic.
+//! The cop mirrors RuboCop's safe local rewrites for exposed AST shapes:
+//! plain local assignments drop the `name =` prefix, multiple-assignment
+//! targets are renamed to `_`, and local `op=` assignments drop the `=`.
+//! `||=` / `&&=` and sequential assignments remain report-only because the
+//! rewrite can change local-variable declaration semantics or produce
+//! invalid Ruby.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
 
 #[derive(Default)]
 pub struct UselessAssignment;
@@ -103,9 +105,7 @@ fn visit_scope(cx: &Cx<'_>, root: NodeId) {
     }
 }
 
-const MSG_LOCAL: &str = "Useless assignment to local variable";
-const MSG_OPERATOR: &str = "Useless operator-assignment to local variable";
-const MSG_EXCEPTION: &str = "Useless assignment to exception variable";
+const MSG_PREFIX: &str = "Useless assignment to variable";
 
 struct Write {
     name: Symbol,
@@ -114,10 +114,18 @@ struct Write {
     end: u32,
     /// Range to emit the offense on.
     range: Range,
-    message: &'static str,
+    kind: WriteKind,
     /// Node id used to compute the control-flow barrier chain when
     /// deciding whether two writes are on the same path.
     node: NodeId,
+}
+
+#[derive(Clone, Copy)]
+enum WriteKind {
+    Local { value: OptNodeId },
+    Multiple,
+    Operator { op: &'static str, autocorrect: bool },
+    Exception,
 }
 
 struct Read {
@@ -129,11 +137,16 @@ struct Read {
     node: NodeId,
 }
 
+struct Candidate {
+    name: Symbol,
+}
+
 fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
     let mut writes: Vec<Write> = Vec::new();
     let mut reads: Vec<Read> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
     for id in scope_nodes(cx, root) {
-        classify(cx, id, &mut writes, &mut reads);
+        classify(cx, id, &mut writes, &mut reads, &mut candidates);
     }
     // Pre-compute each write's and read's branch chain so we don't pay
     // for the `cx.parent` walk in the O(W^2) / O(W*R) loops below.
@@ -189,12 +202,12 @@ fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
             (None, _) => {
                 // No later read of this name anywhere — classic useless
                 // write (whether or not an overwrite follows).
-                cx.emit_offense(write.range, write.message, None);
+                emit_useless_assignment(cx, write, &writes, &reads, &candidates);
             }
             (Some(r), Some((_, w))) if w.end <= r => {
                 // Dominating overwrite reaches before any read — this
                 // write's value can never be observed.
-                cx.emit_offense(write.range, write.message, None);
+                emit_useless_assignment(cx, write, &writes, &reads, &candidates);
             }
             (Some(_), _) => {
                 // A later read exists and no dominating overwrite
@@ -202,6 +215,157 @@ fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
             }
         }
     }
+}
+
+fn emit_useless_assignment(
+    cx: &Cx<'_>,
+    write: &Write,
+    writes: &[Write],
+    reads: &[Read],
+    candidates: &[Candidate],
+) {
+    let name = cx.symbol_str(write.name);
+    let mut message = format!("{MSG_PREFIX} - `{name}`.");
+    match write.kind {
+        WriteKind::Multiple => {
+            message.push_str(&format!(
+                " Use `_` or `_{name}` as a variable name to indicate that it won't be used."
+            ));
+        }
+        WriteKind::Operator { op, .. } => {
+            message.push_str(&format!(" Use `{op}` instead of `{op}=`."));
+        }
+        WriteKind::Local { .. } | WriteKind::Exception => {
+            if let Some(similar) = similar_name(cx, name, writes, reads, candidates) {
+                message.push_str(&format!(" Did you mean `{similar}`?"));
+            }
+        }
+    }
+
+    cx.emit_offense(write.range, &message, None);
+    emit_autocorrect(cx, write);
+}
+
+fn emit_autocorrect(cx: &Cx<'_>, write: &Write) {
+    match write.kind {
+        WriteKind::Local { value } => {
+            let Some(value) = value.get() else {
+                return;
+            };
+            if contains_assignment(cx, value) || is_part_of_sequential_assignment(cx, write.node) {
+                return;
+            }
+            cx.emit_edit(
+                Range {
+                    start: write.range.start,
+                    end: cx.range(value).start,
+                },
+                "",
+            );
+        }
+        WriteKind::Multiple => {
+            cx.emit_edit(write.range, "_");
+        }
+        WriteKind::Operator {
+            autocorrect: true, ..
+        } => {
+            if let Some(eq) = operator_equals_range(cx, write) {
+                cx.emit_edit(eq, "");
+            }
+        }
+        WriteKind::Operator {
+            autocorrect: false, ..
+        }
+        | WriteKind::Exception => {}
+    }
+}
+
+fn is_part_of_sequential_assignment(cx: &Cx<'_>, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent) = cx.parent(current).get() {
+        match *cx.kind(parent) {
+            NodeKind::Lvasgn { value, .. } if value.get() == Some(current) => return true,
+            NodeKind::Array(_) => {
+                current = parent;
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn operator_equals_range(cx: &Cx<'_>, write: &Write) -> Option<Range> {
+    let src = cx.source().as_bytes();
+    let start = write.range.end as usize;
+    let end = write.end as usize;
+    let rel = src.get(start..end)?.iter().position(|b| *b == b'=')?;
+    let pos = (start + rel) as u32;
+    Some(Range {
+        start: pos,
+        end: pos + 1,
+    })
+}
+
+fn contains_assignment(cx: &Cx<'_>, node: NodeId) -> bool {
+    let mut stack = vec![node];
+    while let Some(id) = stack.pop() {
+        if matches!(
+            *cx.kind(id),
+            NodeKind::Lvasgn { .. }
+                | NodeKind::Masgn { .. }
+                | NodeKind::OpAsgn { .. }
+                | NodeKind::OrAsgn { .. }
+                | NodeKind::AndAsgn { .. }
+        ) {
+            return true;
+        }
+        stack.extend(cx.children(id));
+    }
+    false
+}
+
+fn similar_name<'a>(
+    cx: &'a Cx<'_>,
+    name: &str,
+    writes: &'a [Write],
+    reads: &'a [Read],
+    candidates: &'a [Candidate],
+) -> Option<&'a str> {
+    let mut best: Option<(&str, usize)> = None;
+    for candidate in writes
+        .iter()
+        .map(|w| cx.symbol_str(w.name))
+        .chain(reads.iter().map(|r| cx.symbol_str(r.name)))
+        .chain(candidates.iter().map(|c| cx.symbol_str(c.name)))
+    {
+        if candidate == name
+            || candidate.starts_with('_')
+            || candidate.contains(name)
+            || name.contains(candidate)
+        {
+            continue;
+        }
+        let dist = levenshtein(name, candidate);
+        if dist <= 2 && best.is_none_or(|(_, best_dist)| dist < best_dist) {
+            best = Some((candidate, dist));
+        }
+    }
+    best.map(|(candidate, _)| candidate)
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut curr = vec![0; b_chars.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b_chars.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_chars.len()]
 }
 
 /// Walk up from `node` via `cx.parent`, collecting `(barrier, child)`
@@ -297,19 +461,25 @@ fn paths_compatible(a: &[(NodeId, NodeId)], b: &[(NodeId, NodeId)]) -> bool {
     true
 }
 
-fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Read>) {
+fn classify(
+    cx: &Cx<'_>,
+    id: NodeId,
+    writes: &mut Vec<Write>,
+    reads: &mut Vec<Read>,
+    candidates: &mut Vec<Candidate>,
+) {
     match *cx.kind(id) {
         NodeKind::Lvasgn { name, value } if value.get().is_some() => {
             // Plain `x = 1` (and the per-target `Lvasgn` nodes inside an
             // `Mlhs`, since `translate_target` emits a value-less form
             // for those — they are picked up in the `Masgn` arm).
-            push_local_write(cx, id, name, cx.range(id).end, writes);
+            push_local_write(cx, id, name, value, cx.range(id).end, writes);
         }
         NodeKind::OpAsgn { target, .. }
         | NodeKind::OrAsgn { target, .. }
         | NodeKind::AndAsgn { target, .. } => {
             // `x op= rhs` is semantically `x = x op rhs`: record the read
-            // of `x` and a write whose offense range is the whole op-asgn.
+            // of `x` and a write whose offense range is the variable name.
             if let NodeKind::Lvasgn { name, .. } = *cx.kind(target) {
                 reads.push(Read {
                     name,
@@ -320,8 +490,11 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
                     writes.push(Write {
                         name,
                         end: cx.range(id).end,
-                        range: cx.range(id),
-                        message: MSG_OPERATOR,
+                        range: cx.range(target),
+                        kind: WriteKind::Operator {
+                            op: operator_text(cx, id),
+                            autocorrect: matches!(*cx.kind(id), NodeKind::OpAsgn { .. }),
+                        },
                         node: id,
                     });
                 }
@@ -340,7 +513,7 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
                     name,
                     end: cx.range(var_id).end,
                     range: cx.range(var_id),
-                    message: MSG_EXCEPTION,
+                    kind: WriteKind::Exception,
                     node: var_id,
                 });
             }
@@ -351,6 +524,13 @@ fn classify(cx: &Cx<'_>, id: NodeId, writes: &mut Vec<Write>, reads: &mut Vec<Re
                 pos: cx.range(id).start,
                 node: id,
             });
+        }
+        NodeKind::Send {
+            receiver,
+            method,
+            args,
+        } if receiver == OptNodeId::NONE && cx.list(args).is_empty() => {
+            candidates.push(Candidate { name: method });
         }
         _ => {}
     }
@@ -368,7 +548,7 @@ fn collect_mlhs_targets(cx: &Cx<'_>, lhs: NodeId, asgn_end: u32, writes: &mut Ve
             }
         }
         NodeKind::Lvasgn { name, .. } => {
-            push_local_write(cx, lhs, name, asgn_end, writes);
+            push_multiple_write(cx, lhs, name, asgn_end, writes);
         }
         _ => {
             // Other target kinds (`Ivasgn`, `Casgn`, …) are not local
@@ -378,6 +558,27 @@ fn collect_mlhs_targets(cx: &Cx<'_>, lhs: NodeId, asgn_end: u32, writes: &mut Ve
 }
 
 fn push_local_write(
+    cx: &Cx<'_>,
+    node: NodeId,
+    name: Symbol,
+    value: OptNodeId,
+    asgn_end: u32,
+    writes: &mut Vec<Write>,
+) {
+    let name_str = cx.symbol_str(name);
+    if name_str.starts_with('_') {
+        return;
+    }
+    writes.push(Write {
+        name,
+        end: asgn_end,
+        range: assignment_name_range(cx, node, name_str),
+        kind: WriteKind::Local { value },
+        node,
+    });
+}
+
+fn push_multiple_write(
     cx: &Cx<'_>,
     node: NodeId,
     name: Symbol,
@@ -392,9 +593,31 @@ fn push_local_write(
         name,
         end: asgn_end,
         range: assignment_name_range(cx, node, name_str),
-        message: MSG_LOCAL,
+        kind: WriteKind::Multiple,
         node,
     });
+}
+
+fn operator_text(cx: &Cx<'_>, node: NodeId) -> &'static str {
+    match *cx.kind(node) {
+        NodeKind::OpAsgn { op, .. } => match cx.symbol_str(op) {
+            "+" => "+",
+            "-" => "-",
+            "*" => "*",
+            "/" => "/",
+            "%" => "%",
+            "**" => "**",
+            "&" => "&",
+            "|" => "|",
+            "^" => "^",
+            "<<" => "<<",
+            ">>" => ">>",
+            _ => "operator",
+        },
+        NodeKind::OrAsgn { .. } => "||",
+        NodeKind::AndAsgn { .. } => "&&",
+        _ => "operator",
+    }
 }
 
 fn scope_nodes(cx: &Cx<'_>, root: NodeId) -> Vec<NodeId> {
@@ -444,23 +667,70 @@ mod tests {
         test::<UselessAssignment>().expect_offense(indoc! {r#"
             used = 1
             unused = 2
-            ^^^^^^ Useless assignment to local variable
+            ^^^^^^ Useless assignment to variable - `unused`.
             used
         "#});
     }
 
     #[test]
-    fn ignores_underscore_assignments_and_has_no_autocorrect() {
+    fn ignores_underscore_assignments() {
         test::<UselessAssignment>().expect_no_offenses("名前 = 1\n名前\n_unused = 2\n");
-        let run = run_cop_with_edits::<UselessAssignment>("unused = 1\n");
+    }
+
+    #[test]
+    fn autocorrects_plain_assignment_by_removing_lhs() {
+        test::<UselessAssignment>().expect_correction(
+            indoc! {r#"
+                unused = 1
+                ^^^^^^ Useless assignment to variable - `unused`.
+            "#},
+            "1\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_assignment_inside_call_arguments() {
+        test::<UselessAssignment>().expect_correction(
+            indoc! {r#"
+                some_method(unused = 1) do
+                            ^^^^^^ Useless assignment to variable - `unused`.
+                end
+            "#},
+            "some_method(1) do\nend\n",
+        );
+    }
+
+    #[test]
+    fn skips_autocorrect_for_sequential_assignment() {
+        let run = run_cop_with_edits::<UselessAssignment>("foo = 1, bar = 2\n");
         assert_eq!(run.edits.len(), 0);
+    }
+
+    #[test]
+    fn suggests_similar_variable_like_names() {
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            environment = nil
+            enviromnent = {}
+            ^^^^^^^^^^^ Useless assignment to variable - `enviromnent`. Did you mean `environment`?
+            puts environment
+        "#});
+    }
+
+    #[test]
+    fn suggests_similar_bare_method_names() {
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            enviromnent = {}
+            ^^^^^^^^^^^ Useless assignment to variable - `enviromnent`. Did you mean `environment`?
+            another_symbol
+            puts environment
+        "#});
     }
 
     #[test]
     fn nested_method_read_does_not_satisfy_outer_assignment() {
         test::<UselessAssignment>().expect_offense(indoc! {r#"
             outer = 1
-            ^^^^^ Useless assignment to local variable
+            ^^^^^ Useless assignment to variable - `outer`.
             def inner
               outer
             end
@@ -473,7 +743,7 @@ mod tests {
             x = 0
             x
             x = 1
-            ^ Useless assignment to local variable
+            ^ Useless assignment to variable - `x`.
         "#});
     }
 
@@ -481,11 +751,14 @@ mod tests {
 
     #[test]
     fn masgn_flags_only_unused_targets() {
-        test::<UselessAssignment>().expect_offense(indoc! {r#"
-            a, b = 1, 2
-            ^ Useless assignment to local variable
-            b
-        "#});
+        test::<UselessAssignment>().expect_correction(
+            indoc! {r#"
+                a, b = 1, 2
+                ^ Useless assignment to variable - `a`. Use `_` or `_a` as a variable name to indicate that it won't be used.
+                b
+            "#},
+            "_, b = 1, 2\nb\n",
+        );
     }
 
     #[test]
@@ -508,7 +781,13 @@ mod tests {
             "expected only `a` and `c` flagged, got {names:?} (offenses={offenses:?})",
         );
         for offense in &offenses {
-            assert_eq!(offense.message, "Useless assignment to local variable");
+            assert!(
+                offense
+                    .message
+                    .starts_with("Useless assignment to variable - `"),
+                "unexpected message: {}",
+                offense.message
+            );
         }
     }
 
@@ -524,11 +803,14 @@ mod tests {
     fn op_asgn_flags_only_the_op_asgn_when_result_unused() {
         // `x = 0` is read by `x += 1` (the operator-assignment implicitly
         // reads `x`); only the `x += 1` write is useless.
-        test::<UselessAssignment>().expect_offense(indoc! {r#"
-            x = 0
-            x += 1
-            ^^^^^^ Useless operator-assignment to local variable
-        "#});
+        test::<UselessAssignment>().expect_correction(
+            indoc! {r#"
+                x = 0
+                x += 1
+                ^ Useless assignment to variable - `x`. Use `+` instead of `+=`.
+            "#},
+            "x = 0\nx + 1\n",
+        );
     }
 
     #[test]
@@ -536,8 +818,10 @@ mod tests {
         test::<UselessAssignment>().expect_offense(indoc! {r#"
             x = 0
             x ||= 1
-            ^^^^^^^ Useless operator-assignment to local variable
+            ^ Useless assignment to variable - `x`. Use `||` instead of `||=`.
         "#});
+        let run = run_cop_with_edits::<UselessAssignment>("x = 0\nx ||= 1\n");
+        assert_eq!(run.edits.len(), 0);
     }
 
     #[test]
@@ -545,7 +829,7 @@ mod tests {
         test::<UselessAssignment>().expect_offense(indoc! {r#"
             x = 0
             x &&= 1
-            ^^^^^^^ Useless operator-assignment to local variable
+            ^ Useless assignment to variable - `x`. Use `&&` instead of `&&=`.
         "#});
     }
 
@@ -564,7 +848,7 @@ mod tests {
             begin
               raise
             rescue => e
-                      ^ Useless assignment to exception variable
+                      ^ Useless assignment to variable - `e`.
               :rescued
             end
         "#});
@@ -600,7 +884,7 @@ mod tests {
         // `x = 1` is overwritten by `x = 2` before any read.
         test::<UselessAssignment>().expect_offense(indoc! {r#"
                 x = 1
-                ^ Useless assignment to local variable
+                ^ Useless assignment to variable - `x`.
                 x = 2
                 x
             "#});
@@ -637,7 +921,7 @@ mod tests {
         test::<UselessAssignment>().expect_offense(indoc! {r#"
                 if cond
                   x = 1
-                  ^ Useless assignment to local variable
+                  ^ Useless assignment to variable - `x`.
                   x = 2
                   x
                 end
@@ -652,7 +936,7 @@ mod tests {
                 x = 1
                 foo(x)
                 x = 2
-                ^ Useless assignment to local variable
+                ^ Useless assignment to variable - `x`.
             "#});
     }
 
@@ -666,10 +950,10 @@ mod tests {
         // review job 1158 finding 1.
         test::<UselessAssignment>().expect_offense(indoc! {r#"
                 x = 1
-                ^ Useless assignment to local variable
+                ^ Useless assignment to variable - `x`.
                 if cond
                   x = 2
-                  ^ Useless assignment to local variable
+                  ^ Useless assignment to variable - `x`.
                 end
                 x = 3
                 x
@@ -762,7 +1046,7 @@ mod tests {
         test::<UselessAssignment>().expect_offense(indoc! {r#"
                 if cond
                   x = 1
-                  ^ Useless assignment to local variable
+                  ^ Useless assignment to variable - `x`.
                 else
                   puts x
                 end
@@ -779,7 +1063,7 @@ mod tests {
         test::<UselessAssignment>().expect_offense(indoc! {r#"
                 x = 0
                 x += 1
-                ^^^^^^ Useless operator-assignment to local variable
+                ^ Useless assignment to variable - `x`. Use `+` instead of `+=`.
             "#});
     }
 }
