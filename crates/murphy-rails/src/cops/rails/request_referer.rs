@@ -1,14 +1,14 @@
-//! `Rails/RequestReferer` — flag the misspelled `request.referer`
-//! accessor, recommending the HTTP-standard `request.referrer` spelling
-//! instead. Rails exposes both as aliases, but the historical typo
-//! survives in many codebases; this cop nudges projects toward the
-//! canonical name.
+//! `Rails/RequestReferer` — enforce one spelling for the Rails
+//! `request.referer` / `request.referrer` accessors. Rails exposes both
+//! as aliases; RuboCop defaults to the HTTP-standard misspelling
+//! `referer`, but lets projects opt into `referrer`.
 //!
 //! ## Matched shape (Send node)
 //!
-//! `Send(receiver=Send(receiver=None, method="request"), method="referer", args=[])`.
+//! `Send(receiver=Send(receiver=None, method="request"), method=<configured spelling>, args=[])`.
 //!
-//! - **method == `referer`** on the outer Send.
+//! - **method == the spelling opposite the configured style** on the
+//!   outer Send.
 //! - **receiver is the bare `request` send** — i.e. a Send whose
 //!   receiver is `OptNodeId::NONE` (the implicit-self `request` reader
 //!   you get inside controllers / views) and whose method symbol is
@@ -34,90 +34,188 @@
 //! roborev review job 1122; retained here by the DSL's strict-arity
 //! semantics).
 //!
-//! ## No autocorrect
+//! ## Autocorrect
 //!
-//! Mechanically rewriting `referer` → `referrer` is technically safe
-//! (Rails aliases both names to the same value), but ADR 0006 still
-//! requires a deliberate fix block per cop, and this v1 implementation
-//! is detect-only. Tracked as a follow-up if dogfood demand surfaces.
+//! Mechanically rewriting between `referer` and `referrer` is safe
+//! because Rails aliases both names to the same value. Matching RuboCop,
+//! the correction replaces the whole send node with `request.<style>`,
+//! normalising odd whitespace around the dot.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, cop, node_pattern};
 
 // RuboCop NodePattern equivalent: `(send (send nil? :request) :referer)`.
 // See module docs for the `nil?` vs `nil` distinction and why zero-arg
 // strictness is load-bearing.
 node_pattern!(is_request_referer, "(send (send nil? :request) :referer)");
+node_pattern!(is_request_referrer, "(send (send nil? :request) :referrer)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct RequestReferer;
 
+#[derive(CopOptions)]
+pub struct RequestRefererOptions {
+    #[option(
+        name = "EnforcedStyle",
+        default = "referer",
+        description = "Which request accessor spelling to enforce."
+    )]
+    pub enforced_style: RequestRefererStyle,
+}
+
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
+pub enum RequestRefererStyle {
+    #[option(value = "referer")]
+    Referer,
+    #[option(value = "referrer")]
+    Referrer,
+}
+
 #[cop(
     name = "Rails/RequestReferer",
-    description = "Use `request.referrer` instead of `request.referer`.",
+    description = "Enforce a consistent request referer accessor spelling.",
     default_severity = "warning",
     default_enabled = true,
-    options = NoOptions,
+    options = RequestRefererOptions,
 )]
 impl RequestReferer {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        if !is_request_referer(node, cx) {
+        let opts = cx.options_or_default::<RequestRefererOptions>();
+        let Some((preferred, actual)) = offending_spelling(node, cx, opts.enforced_style) else {
             return;
-        }
+        };
         cx.emit_offense(
             cx.range(node),
-            "Use `request.referrer` instead of `request.referer`.",
+            &format!("Use `request.{preferred}` instead of `request.{actual}`."),
             None,
         );
+        cx.emit_edit(cx.range(node), &format!("request.{preferred}"));
+    }
+}
+
+fn offending_spelling(
+    node: NodeId,
+    cx: &Cx<'_>,
+    style: RequestRefererStyle,
+) -> Option<(&'static str, &'static str)> {
+    match style {
+        RequestRefererStyle::Referer if is_request_referrer(node, cx) => {
+            Some(("referer", "referrer"))
+        }
+        RequestRefererStyle::Referrer if is_request_referer(node, cx) => {
+            Some(("referrer", "referer"))
+        }
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::RequestReferer;
+    use super::{RequestReferer, RequestRefererOptions, RequestRefererStyle};
     use murphy_plugin_api::test_support::{indoc, test};
+
+    fn referrer_style() -> RequestRefererOptions {
+        RequestRefererOptions {
+            enforced_style: RequestRefererStyle::Referrer,
+        }
+    }
 
     // === hit cases ===
 
     #[test]
-    fn flags_request_referer() {
+    fn flags_request_referrer_by_default() {
         test::<RequestReferer>().expect_offense(indoc! {r#"
+                request.referrer
+                ^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
+            "#});
+    }
+
+    #[test]
+    fn corrects_request_referrer_by_default() {
+        test::<RequestReferer>()
+            .expect_correction(
+                indoc! {r#"
+                    request.referrer
+                    ^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
+                "#},
+                "request.referer\n",
+            )
+            .expect_no_offenses("request.referer\n");
+    }
+
+    #[test]
+    fn corrects_whitespace_around_dot_like_rubocop() {
+        test::<RequestReferer>().expect_correction(
+            indoc! {r#"
+                request . referrer
+                ^^^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
+            "#},
+            "request.referer\n",
+        );
+    }
+
+    #[test]
+    fn flags_request_referrer_in_conditional_by_default() {
+        // Two hits — one on each `request.referrer` Send. The
+        // dispatcher visits every Send node, so both fire
+        // independently.
+        test::<RequestReferer>().expect_offense(indoc! {r#"
+                if request.referrer.present?
+                   ^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
+                  redirect_to request.referrer
+                              ^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_request_referrer_chained_by_default() {
+        // `request.referrer.present?` — the inner Send `request.referrer`
+        // is the outer Send's receiver and still hits on its own.
+        test::<RequestReferer>().expect_offense(indoc! {r#"
+                request.referrer.present?
+                ^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
+            "#});
+    }
+
+    #[test]
+    fn referrer_style_flags_request_referer() {
+        test::<RequestReferer>()
+            .with_options(&referrer_style())
+            .expect_offense(indoc! {r#"
                 request.referer
                 ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
             "#});
     }
 
     #[test]
-    fn flags_request_referer_in_conditional() {
-        // Two hits — one on each `request.referer` Send. The
-        // dispatcher visits every Send node, so both fire
-        // independently.
-        test::<RequestReferer>().expect_offense(indoc! {r#"
-                if request.referer.present?
-                   ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
-                  redirect_to request.referer
-                              ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
-                end
-            "#});
+    fn referrer_style_corrects_request_referer() {
+        test::<RequestReferer>()
+            .with_options(&referrer_style())
+            .expect_correction(
+                indoc! {r#"
+                    request.referer
+                    ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
+                "#},
+                "request.referrer\n",
+            )
+            .expect_no_offenses("request.referrer\n");
     }
 
     #[test]
-    fn flags_request_referer_chained() {
-        // `request.referer.present?` — the inner Send `request.referer`
-        // is the outer Send's receiver and still hits on its own.
-        test::<RequestReferer>().expect_offense(indoc! {r#"
-                request.referer.present?
-                ^^^^^^^^^^^^^^^ Use `request.referrer` instead of `request.referer`.
-            "#});
+    fn referrer_style_does_not_flag_request_referrer() {
+        test::<RequestReferer>()
+            .with_options(&referrer_style())
+            .expect_no_offenses("request.referrer\n");
     }
 
     // === no-hit cases ===
 
     #[test]
-    fn does_not_flag_request_referrer() {
-        // Correct spelling — leave alone.
-        test::<RequestReferer>().expect_no_offenses("request.referrer\n");
+    fn does_not_flag_request_referer_by_default() {
+        // Default EnforcedStyle is RuboCop's `referer`.
+        test::<RequestReferer>().expect_no_offenses("request.referer\n");
     }
 
     #[test]
