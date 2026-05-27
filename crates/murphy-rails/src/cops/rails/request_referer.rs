@@ -37,9 +37,9 @@
 //! ## Autocorrect
 //!
 //! Mechanically rewriting between `referer` and `referrer` is safe
-//! because Rails aliases both names to the same value. The correction is
-//! a selector-only edit over `cx.loc(node).name`, preserving receiver,
-//! chaining, and surrounding whitespace.
+//! because Rails aliases both names to the same value. Matching RuboCop,
+//! the correction replaces the whole send node with `request.<style>`,
+//! normalising odd whitespace around the dot.
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, cop, node_pattern};
 
@@ -90,7 +90,7 @@ impl RequestReferer {
             &format!("Use `request.{preferred}` instead of `request.{actual}`."),
             None,
         );
-        cx.emit_edit(cx.loc(node).name, preferred);
+        cx.emit_edit(cx.range(node), &format!("request.{preferred}"));
     }
 }
 
@@ -137,6 +137,17 @@ mod tests {
             indoc! {r#"
                 request.referrer
                 ^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
+            "#},
+            "request.referer\n",
+        );
+    }
+
+    #[test]
+    fn corrects_whitespace_around_dot_like_rubocop() {
+        test::<RequestReferer>().expect_correction(
+            indoc! {r#"
+                request . referrer
+                ^^^^^^^^^^^^^^^^^^ Use `request.referer` instead of `request.referrer`.
             "#},
             "request.referer\n",
         );
