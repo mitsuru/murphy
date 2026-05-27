@@ -140,24 +140,35 @@ impl Default for DescribeClassOptions {
 
 impl CopOptions for DescribeClassOptions {
     fn from_config_json(bytes: &[u8]) -> Result<Self, ConfigError> {
+        // Error surface mirrors `#[derive(CopOptions)]`: non-object
+        // root → `not_an_object`; per-field shape mismatches →
+        // `type_mismatch` with a path-qualified field name. Silently
+        // falling back to `Default` would let typos go unnoticed.
         let value: serde_json::Value = serde_json::from_slice(bytes).map_err(ConfigError::parse)?;
-        let Some(obj) = value.as_object() else {
+        let obj = value.as_object().ok_or_else(ConfigError::not_an_object)?;
+
+        // Missing `IgnoredMetadata` → defaults, consistent with how the
+        // derive treats absent fields.
+        let Some(metadata_value) = obj.get("IgnoredMetadata") else {
             return Ok(Self::default());
         };
-        let Some(serde_json::Value::Object(map)) = obj.get("IgnoredMetadata") else {
-            return Ok(Self::default());
-        };
+        let metadata_obj = metadata_value
+            .as_object()
+            .ok_or_else(|| ConfigError::type_mismatch("IgnoredMetadata", "object"))?;
+
         let mut ignored: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (k, vs) in map {
+        for (key, values) in metadata_obj {
+            let array = values.as_array().ok_or_else(|| {
+                ConfigError::type_mismatch(format!("IgnoredMetadata.{key}"), "array of strings")
+            })?;
             let mut set = BTreeSet::new();
-            if let Some(arr) = vs.as_array() {
-                for elem in arr {
-                    if let Some(s) = elem.as_str() {
-                        set.insert(s.to_string());
-                    }
-                }
+            for (i, elem) in array.iter().enumerate() {
+                let s = elem.as_str().ok_or_else(|| {
+                    ConfigError::type_mismatch(format!("IgnoredMetadata.{key}[{i}]"), "string")
+                })?;
+                set.insert(s.to_string());
             }
-            ignored.insert(k.clone(), set);
+            ignored.insert(key.clone(), set);
         }
         Ok(Self {
             ignored_metadata: ignored,
@@ -754,6 +765,77 @@ mod tests {
         assert!(flag_set.contains("b"));
         // User config REPLACES defaults — `type` is no longer present.
         assert!(!opts.ignored_metadata.contains_key("type"));
+    }
+
+    #[test]
+    fn options_root_not_an_object_returns_not_an_object_error() {
+        // Mirrors `#[derive(CopOptions)]` — non-object root is a
+        // shape error, not a "use defaults" condition.
+        let err = <DescribeClassOptions as murphy_plugin_api::CopOptions>::from_config_json(b"[]")
+            .expect_err("array root is not an object");
+        assert!(matches!(
+            err.kind(),
+            murphy_plugin_api::ConfigErrorKind::NotAnObject
+        ));
+    }
+
+    #[test]
+    fn options_missing_ignored_metadata_uses_defaults() {
+        // Absent field falls back to defaults, the same way the derive
+        // treats omitted fields.
+        let opts: DescribeClassOptions =
+            <DescribeClassOptions as murphy_plugin_api::CopOptions>::from_config_json(b"{}")
+                .expect("empty object decodes");
+        assert!(
+            opts.ignored_metadata
+                .get("type")
+                .expect("default type set present")
+                .contains("feature")
+        );
+    }
+
+    #[test]
+    fn options_ignored_metadata_not_an_object_errors() {
+        // `IgnoredMetadata` must be a map. A bare string is invalid.
+        let json = br#"{"IgnoredMetadata": "wrong"}"#;
+        let err = <DescribeClassOptions as murphy_plugin_api::CopOptions>::from_config_json(json)
+            .expect_err("string-valued IgnoredMetadata is invalid");
+        let murphy_plugin_api::ConfigErrorKind::TypeMismatch { field, expected } = err.kind()
+        else {
+            panic!("expected TypeMismatch, got {:?}", err.kind());
+        };
+        assert_eq!(field, "IgnoredMetadata");
+        assert_eq!(*expected, "object");
+    }
+
+    #[test]
+    fn options_ignored_metadata_value_not_array_errors() {
+        // Inner value must be an array; the upstream YAML shape is
+        // `{ key => [values...] }`, not `{ key => value }`.
+        let json = br#"{"IgnoredMetadata": {"type": "request"}}"#;
+        let err = <DescribeClassOptions as murphy_plugin_api::CopOptions>::from_config_json(json)
+            .expect_err("non-array IgnoredMetadata value is invalid");
+        let murphy_plugin_api::ConfigErrorKind::TypeMismatch { field, expected } = err.kind()
+        else {
+            panic!("expected TypeMismatch, got {:?}", err.kind());
+        };
+        assert_eq!(field, "IgnoredMetadata.type");
+        assert_eq!(*expected, "array of strings");
+    }
+
+    #[test]
+    fn options_ignored_metadata_array_element_not_string_errors() {
+        // Each element must be a string. A non-string element is a
+        // shape error tagged with the index for actionable diagnostics.
+        let json = br#"{"IgnoredMetadata": {"type": ["request", 42]}}"#;
+        let err = <DescribeClassOptions as murphy_plugin_api::CopOptions>::from_config_json(json)
+            .expect_err("non-string element is invalid");
+        let murphy_plugin_api::ConfigErrorKind::TypeMismatch { field, expected } = err.kind()
+        else {
+            panic!("expected TypeMismatch, got {:?}", err.kind());
+        };
+        assert_eq!(field, "IgnoredMetadata.type[1]");
+        assert_eq!(*expected, "string");
     }
 
     #[test]
