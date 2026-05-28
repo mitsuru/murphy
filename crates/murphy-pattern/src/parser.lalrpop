@@ -1,0 +1,79 @@
+// LALRPOP grammar for the Murphy NodePattern S-expression DSL.
+//
+// See beads issue murphy-qpf9. This file is the *target* of the parser
+// migration from `parser.rs` (hand-written recursive descent) to a LALRPOP-
+// generated LR table.
+//
+// === Round split (orchestrator) ============================================
+// Round 1 (this commit): infrastructure only — Cargo build-dep wiring, this
+//   stub grammar, and the `lalrpop_mod!` include in `lib.rs`. The existing
+//   `parser.rs` is the live parser and remains untouched. All ~200 parser
+//   tests pass via `parser.rs`.
+// Round 2: port the full grammar from `parser.rs` rule-by-rule (see the
+//   skeleton below). Capture-slot assignment becomes a post-pass walk over
+//   the parsed AST so the grammar itself stays context-free. The following
+//   features are deferred and remain `parser.rs`-only until Phase D:
+//     * intersection `[...]`
+//     * union pipe form `{a | b | c}`
+//     * `tPARAM_*`  (named/const/positional parameter atoms)
+//     * `tUNIFY`    (unification atom)
+//     * `tREGEXP`   (regexp atom)
+// Round 3: error-message parity — match `parser.rs`'s diagnostic text
+//   byte-for-byte using error productions / a custom error type, then flip
+//   the public `parse` entry point to this grammar and retire `parser.rs`.
+//
+// === Rule-by-rule porting plan (Round 2 skeleton) ==========================
+// RuboCop parser.y rule              -> LALRPOP nonterminal (planned)
+// -----------------------------------------------------------------------
+// node_pattern                       -> Pattern              [Round 2]
+// node_pattern_no_union              -> PatternNoUnion       [Round 2]
+//   '(' variadic_pattern_list ')'    -> NodeSequence         [Round 2]
+//   '[' node_pattern_list ']'        -> Intersection         [Phase D]
+//   '!' node_pattern                 -> NegationPat          [Round 2]
+//   '^' node_pattern                 -> AscendPat            [Round 2]
+//   '`' node_pattern                 -> DescendPat           [Round 2]
+//   '$' node_pattern                 -> CapturePat           [Round 2]
+//   tFUNCTION_CALL args              -> FunctionCall         [Round 2]
+//   tPREDICATE args                  -> PredicateCall        [Round 2]
+//   tNODE_TYPE                       -> NodeTypeAtom         [Round 2]
+//   atom                             -> Atom                 [Round 2]
+// atom                               -> Atom                 [Round 2]
+//   tSYMBOL / tNUMBER / tSTRING      -> LitAtom              [Round 2]
+//   tPARAM_*                         -> ParamAtom            [Phase D]
+//   tREGEXP                          -> RegexpAtom           [Phase D]
+//   tWILDCARD                        -> WildcardAtom         [Round 2]
+//   tUNIFY                           -> UnifyAtom            [Phase D]
+// union                              -> Union                [Round 2]
+// variadic_pattern{,_list}           -> VariadicPattern{,List}[Round 2]
+// rest / opt_capture / repetition    -> Rest / OptCapture / Repetition [Round 2]
+//
+// === Round 1 stub ==========================================================
+// The grammar below is intentionally trivial. It exposes a single
+// nonterminal that accepts one integer literal and returns it. Its only job
+// is to make the LALRPOP table generator and the lalrpop-util runtime link
+// cleanly so that downstream rounds can replace this body without touching
+// build wiring.
+
+use crate::lexer::Token;
+use crate::ParseError;
+
+grammar;
+
+// Round 1: a stub parser that accepts exactly one integer literal.
+// (`tokenize` already validates the literal, so this rule cannot fail
+// post-lex; LALRPOP-level error handling lands in Round 3.)
+pub StubInt: i64 = {
+    <i:"int"> => i,
+};
+
+extern {
+    type Location = usize;
+    type Error = ParseError;
+
+    enum Token {
+        // Round 1 stub: only the integer literal is exposed. Round 2 will
+        // expand this enum to cover the whole token alphabet (see lexer.rs
+        // `Token` for the canonical list).
+        "int" => Token::Int(<i64>),
+    }
+}
