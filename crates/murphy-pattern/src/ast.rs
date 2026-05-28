@@ -87,6 +87,21 @@ pub enum PatKind {
     /// `node_pattern_no_union: '[' node_pattern_list ']'`. At least one child
     /// is required (the grammar enforces `Pat+` inside `[...]`).
     Intersection { children: Vec<Pat> },
+    /// `_name` — named unification atom (tUNIFY, D4 — murphy-nnr8).
+    ///
+    /// The first occurrence of `_name` in the pattern binds the current
+    /// subject's [`NodeId`]; subsequent occurrences require the subject's
+    /// `NodeId` to be **equal** to the bound value. This implements
+    /// structural same-node constraints, e.g. `(send _x _ _x)` matches only
+    /// when the receiver and the sole argument are the **same AST node**.
+    ///
+    /// **Semantic difference from RuboCop**: RuboCop uses structural equality
+    /// (`==` on `RuboCop::AST::Node`), not object identity. Murphy uses
+    /// [`NodeId`] equality (same arena slot) as a pragmatic simplification;
+    /// in practice, receiver/argument aliasing is detected by identity anyway.
+    ///
+    /// [`NodeId`]: murphy_ast::NodeId
+    Unify { name: String },
 }
 
 /// The head of a `Node` match: what the node's kind must satisfy.
