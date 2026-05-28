@@ -792,7 +792,8 @@ fn convert_named_captures(pat: &mut Pat) {
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Unify { .. } => {}
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
     }
 }
 
@@ -923,7 +924,8 @@ fn validate_bare_predicate_position(pat: &mut Pat, pos: BarePos<'_>) -> Result<(
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Unify { .. } => {}
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
     }
     Ok(())
 }
@@ -1054,7 +1056,8 @@ fn walk_assign(pat: &mut Pat, state: &mut SlotState) -> Result<(), ParseError> {
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Unify { .. } => {}
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
     }
     Ok(())
 }
@@ -1140,7 +1143,8 @@ fn resolve_pred_capture_refs(
         | PatKind::Rest
         | PatKind::Lit(_)
         | PatKind::Kind(_)
-        | PatKind::Unify { .. } => {}
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
     }
     Ok(())
 }
@@ -1227,7 +1231,8 @@ fn validate_quantifier_placement(pat: &Pat, is_node_child: bool) -> Result<(), P
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Unify { .. } => Ok(()),
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => Ok(()),
     }
 }
 
@@ -1275,7 +1280,8 @@ fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Unify { .. } => Ok(()),
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => Ok(()),
     }
 }
 
@@ -1353,7 +1359,8 @@ fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseErro
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Unify { .. } => Ok(()),
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => Ok(()),
     }
 }
 
@@ -1418,7 +1425,8 @@ fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseEr
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Unify { .. } => {}
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
     }
     Ok(())
 }
@@ -3203,5 +3211,51 @@ mod unify_tests {
             0,
             "unify atoms must not create capture slots"
         );
+    }
+}
+
+// ============================================================================
+// D5 (murphy-t8km): tREGEXP — `/.../[imxo]*` regex atom.
+// ============================================================================
+
+#[cfg(test)]
+mod regex_tests {
+    use crate::{PatKind, parse};
+
+    #[test]
+    fn bare_regex_parses() {
+        let p = parse("/^to_/").expect("`/^to_/` must parse");
+        match &p.root.kind {
+            PatKind::Regex { pattern, flags } => {
+                assert_eq!(pattern, "^to_");
+                assert_eq!(flags, "");
+            }
+            other => panic!("expected PatKind::Regex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regex_with_flags_parses() {
+        let p = parse("/abc/im").expect("`/abc/im` must parse");
+        match &p.root.kind {
+            PatKind::Regex { pattern, flags } => {
+                assert_eq!(pattern, "abc");
+                assert_eq!(flags, "im");
+            }
+            other => panic!("expected PatKind::Regex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regex_in_node_pattern_parses() {
+        // `(send _ /^to_/ ...)` must parse successfully.
+        let p = parse("(send _ /^to_/ ...)").expect("`(send _ /^to_/ ...)` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Node { .. }));
+    }
+
+    #[test]
+    fn regex_has_no_captures() {
+        let p = parse("(send _ /^to_/ ...)").expect("ok");
+        assert_eq!(p.n_captures(), 0, "regex must not create capture slots");
     }
 }

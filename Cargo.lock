@@ -876,6 +876,7 @@ dependencies = [
  "lalrpop",
  "lalrpop-util",
  "murphy-ast",
+ "regex",
 ]
 
 [[package]]
@@ -886,6 +887,7 @@ dependencies = [
  "murphy-ast",
  "murphy-plugin-macros",
  "murphy-translate",
+ "regex",
  "serde_json",
 ]
 
