@@ -2596,3 +2596,89 @@ fn intersection_with_predicate_agrees_across_backends() {
     );
     assert!(b_miss.is_none(), "B: [$_ #even?] must miss Int(3)");
 }
+
+// Union `|` pipe separator (murphy-wsep) ─────────────────────────────────
+//
+// `|` is treated as whitespace-equivalent in D2 (minimal scope).
+// `{(send _ :a) | (send _ :b)}` behaves identically to `{(send _ :a) (send _ :b)}`.
+//
+// NOTE: the `node_pattern!` macro (B-backend) compiles at proc-macro time
+// from the same `murphy-pattern::parse` grammar, so both backends see the
+// same 2-alt Union after the pipe is absorbed at the grammar level.
+
+// Union-arm send patterns must not use variable-length lists (rest/quantifier)
+// since the B-backend rejects them in v1. Use nil?-receiver + no trailing args.
+node_pattern!(
+    b_union_pipe_send_a_or_b,
+    "{(send nil? :a) | (send nil? :b)}"
+);
+
+#[test]
+fn union_pipe_separator_agrees_across_backends() {
+    // `a()` → should match arm `:a`
+    // `b()` → should match arm `:b`
+    // `c()` → should miss (neither `:a` nor `:b`)
+    let fns = fns();
+
+    // a() — bare send (no receiver), selector :a, no args
+    let mut b = AstBuilder::new("a()", "t.rb");
+    let sym_a = b.intern_symbol("a");
+    let args_a = b.push_list(&[]);
+    let send_a = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: sym_a,
+            args: args_a,
+        },
+        r(),
+    );
+    let ast_a = b.finish(send_a);
+    let raw_a = cx_raw_for(&ast_a, &fns);
+    let cx_a = unsafe { Cx::from_raw(&raw_a) };
+    let b_hit_a: bool = b_union_pipe_send_a_or_b(send_a, &cx_a);
+    assert_c_matches("{(send nil? :a) | (send nil? :b)}", &ast_a, send_a, b_hit_a);
+    assert!(b_hit_a, "B: pipe union must match a()");
+
+    // b() — bare send (no receiver), selector :b, no args
+    let mut b2 = AstBuilder::new("b()", "t.rb");
+    let sym_b = b2.intern_symbol("b");
+    let args_b = b2.push_list(&[]);
+    let send_b = b2.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: sym_b,
+            args: args_b,
+        },
+        r(),
+    );
+    let ast_b = b2.finish(send_b);
+    let raw_b = cx_raw_for(&ast_b, &fns);
+    let cx_b = unsafe { Cx::from_raw(&raw_b) };
+    let b_hit_b: bool = b_union_pipe_send_a_or_b(send_b, &cx_b);
+    assert_c_matches("{(send nil? :a) | (send nil? :b)}", &ast_b, send_b, b_hit_b);
+    assert!(b_hit_b, "B: pipe union must match b()");
+
+    // c() — bare send (no receiver), selector :c → must miss both backends
+    let mut b3 = AstBuilder::new("c()", "t.rb");
+    let sym_c = b3.intern_symbol("c");
+    let args_c = b3.push_list(&[]);
+    let send_c = b3.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: sym_c,
+            args: args_c,
+        },
+        r(),
+    );
+    let ast_c = b3.finish(send_c);
+    let raw_c = cx_raw_for(&ast_c, &fns);
+    let cx_c = unsafe { Cx::from_raw(&raw_c) };
+    let b_miss_c: bool = b_union_pipe_send_a_or_b(send_c, &cx_c);
+    assert_c_matches(
+        "{(send nil? :a) | (send nil? :b)}",
+        &ast_c,
+        send_c,
+        b_miss_c,
+    );
+    assert!(!b_miss_c, "B: pipe union must miss c()");
+}

@@ -2030,6 +2030,47 @@ mod tests {
         assert_eq!((p.root.span.start, p.root.span.end), (0, 12));
     }
 
+    // --- murphy-wsep: union `|` pipe separator ----------------------------
+
+    #[test]
+    fn parses_union_with_pipe_separator_two_alts() {
+        // `{(send _ :a) | (send _ :b)}` — two alternatives separated by `|`.
+        // The pipe is whitespace-equivalent, so this produces a Union with 2 alts.
+        let p = parse("{(send _ :a) | (send _ :b)}").expect("ok");
+        match p.root.kind {
+            PatKind::Union(alts) => assert_eq!(alts.len(), 2, "expected 2 alts"),
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_union_with_pipe_separator_four_alts() {
+        // `{int send | sym str}` — pipe is whitespace-equivalent; produces 4 alts.
+        // All identifiers are known node types so no unknown-ident error.
+        let p = parse("{int send | sym str}").expect("ok");
+        match p.root.kind {
+            PatKind::Union(alts) => {
+                assert_eq!(alts.len(), 4, "expected 4 alts (pipe = whitespace)")
+            }
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_union_with_only_pipe() {
+        // `{|}` — the pipe must be followed by at least one pattern.
+        let e = parse("{|}").expect_err("trailing pipe not accepted in minimum scope");
+        // Must be an error (exact message depends on grammar, not asserted).
+        let _ = e;
+    }
+
+    #[test]
+    fn rejects_union_with_trailing_pipe() {
+        // `{a |}` — trailing pipe is rejected (pipe requires a following pat).
+        let e = parse("{a |}").expect_err("trailing pipe not accepted in minimum scope");
+        let _ = e;
+    }
+
     // --- Task 8: `$` captures --------------------------------------------
 
     #[test]
@@ -2880,6 +2921,28 @@ mod intersection_tests {
                 matches!(children[1].kind, PatKind::Intersection { .. }),
                 "second child must be Intersection"
             );
+        }
+    }
+
+    #[test]
+    fn anonymous_capture_wrapping_intersection() {
+        // `$[int !nil?]` — an anonymous capture whose body is an intersection.
+        // The CapturePrimary alternative for IntersectionPrimary must be
+        // reachable so the `$` prefix can wrap the AND-pattern.
+        let p = parse("$[int !nil?]").expect("$[int !nil?] must parse");
+        assert_eq!(p.n_captures(), 1);
+        assert_eq!(p.captures[0], CaptureKind::Node);
+        match &p.root.kind {
+            PatKind::Capture { slot, name, body } => {
+                assert_eq!(*slot, 0);
+                assert!(name.is_none(), "anonymous capture");
+                assert!(
+                    matches!(body.kind, PatKind::Intersection { .. }),
+                    "capture body must be Intersection, got {:?}",
+                    body.kind
+                );
+            }
+            other => panic!("expected Capture, got {other:?}"),
         }
     }
 }

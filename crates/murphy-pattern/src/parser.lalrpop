@@ -36,7 +36,15 @@
 // ---------------------------------|-------------------------------------------
 // union (with '|' separator)       | UnionPrimary (brace form only);
 //                                  |   '|' pipe separator between alternatives
-//                                  |   (deferred — beads murphy-wsep)
+//                                  |   implemented in D2 (murphy-wsep), minimal
+//                                  |   scope: `|` treated as whitespace-equivalent
+//                                  |   separator (i.e. `{a b | c d}` = 4 alts).
+//                                  |   Multi-pat-per-arm sequence semantics are
+//                                  |   deferred to a future epic.
+//                                  |   NOTE: `${a | b}` is NOT supported by this
+//                                  |   change — the Capture rule uses a separate
+//                                  |   `${...}` production that would need its own
+//                                  |   update in a future epic.
 // variadic_pattern                 | NodeChild (child of NodeMatch)
 //   node_pattern repetition        | Postfixed / CapturePostfixed + Quantifier
 //   opt_capture '<' … opt_rest '>' | AnyOrder rule; note: opt_capture (i.e.
@@ -49,7 +57,6 @@
 //                                  |   fold_predicate_args in parser.rs
 // ---------------------------------|-------------------------------------------
 // D-phase deferred (not added here):
-//   union pipe `|`                 — beads murphy-wsep
 //   tPARAM_CONST                   — beads murphy-kq57
 //   tUNIFY                         — beads murphy-nnr8
 //   tREGEXP                        — beads murphy-t8km
@@ -156,6 +163,7 @@ CapturePrimary: Pat = {
     },
     <l:@L> <name:"ident"> <r:@R> => crate::parser::kind_or_unknown_ident(&name, PatSpan::new(l, r)),
     <m:NodeMatch> => m,
+    <i:IntersectionPrimary> => i,
 };
 
 Postfixed: Pat = {
@@ -273,6 +281,15 @@ AnyOrderChild: Pat = {
     <p:Prefixed> => p,
 };
 
+// `{ pat (pat | "|" pat)* }` — union of alternatives.
+//
+// `|` is treated as whitespace-equivalent: `{a b | c d}` produces 4 alts,
+// the same as `{a b c d}`. This is the minimal scope for D2 (murphy-wsep).
+// Full RuboCop sequence-group semantics (where each `|`-separated section
+// is an ordered sub-sequence) are deferred to a future epic.
+//
+// Trailing pipes are rejected by this grammar: `{a |}` does not parse because
+// `UnionRest` requires a `Prefixed` after `|`.
 UnionPrimary: Pat = {
     <l:@L> "{" "}" <r:@R> =>? {
         Err(lalrpop_util::ParseError::User {
@@ -282,10 +299,21 @@ UnionPrimary: Pat = {
             ),
         })
     },
-    <l:@L> "{" <alts:Prefixed+> "}" <r:@R> => Pat {
-        kind: PatKind::Union(alts),
-        span: PatSpan::new(l, r),
+    <l:@L> "{" <first:Prefixed> <rest:UnionRest*> "}" <r:@R> => {
+        let mut alts = vec![first];
+        alts.extend(rest);
+        Pat {
+            kind: PatKind::Union(alts),
+            span: PatSpan::new(l, r),
+        }
     },
+};
+
+// A single alternative in a union, optionally preceded by a `|` separator.
+// `|` is whitespace-equivalent: it contributes no grouping, only separates.
+UnionRest: Pat = {
+    <p:Prefixed> => p,
+    "|" <p:Prefixed> => p,
 };
 
 // `[ pat+ ]` — intersection AND-pattern (D1, murphy-l448).
@@ -334,5 +362,6 @@ extern {
         "*" => Token::Star,
         "+" => Token::Plus,
         "?" => Token::Question,
+        "|" => Token::Pipe,
     }
 }
