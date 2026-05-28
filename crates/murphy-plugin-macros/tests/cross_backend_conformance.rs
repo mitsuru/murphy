@@ -2185,3 +2185,93 @@ fn anyorder_capture_ref_pred_arg_agrees_across_backends() {
         other => panic!("C: slot 0 expected Node, got {other:?}"),
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// 14. murphy-iqv: `$!body` — capture wrapping Not.
+//
+// `$!send` matches any non-send node and captures the subject id.
+// Both backends must agree on hit/miss and on the captured node id.
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_capture_not_send, "$!send");
+node_pattern!(b_capture_not_send_receiver, "(send $!array :foo)");
+
+#[test]
+fn capture_wrapping_not_agrees_across_backends() {
+    // Int(2) is not a send — should match and capture.
+    let mut b = AstBuilder::new("2", "t.rb");
+    let two = b.push(NodeKind::Int(2), r());
+    let ast = b.finish(two);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // B backend must match and capture `two`.
+    let b_caps: Option<(NodeId,)> = b_capture_not_send(two, &cx);
+    let c = assert_c_matches("$!send", &ast, two, b_caps.is_some());
+
+    assert!(b_caps.is_some(), "B: $!send must match a non-send node");
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, two, "B: $!send must capture the Int(2) subject");
+
+    let c_caps = c.expect("C must also match");
+    match c_caps.get(0).cloned() {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: $!send capture id disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+}
+
+#[test]
+fn capture_wrapping_not_misses_on_matching_body_agrees_across_backends() {
+    // A send node — $!send must NOT match.
+    let (ast, send, _arg) = puts_one_ast();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_caps: Option<(NodeId,)> = b_capture_not_send(send, &cx);
+    assert_c_matches("$!send", &ast, send, b_caps.is_some());
+    assert!(b_caps.is_none(), "B: $!send must NOT match a send node");
+}
+
+#[test]
+fn capture_wrapping_not_in_receiver_position_agrees_across_backends() {
+    // `(send $!array :foo)` with an Int(2) receiver — should match and
+    // capture the receiver.
+    let mut b = AstBuilder::new("2.foo", "t.rb");
+    let two = b.push(NodeKind::Int(2), r());
+    let m = b.intern_symbol("foo");
+    let args = b.push_list(&[]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: murphy_ast::OptNodeId::some(two),
+            method: m,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_caps: Option<(NodeId,)> = b_capture_not_send_receiver(send, &cx);
+    let c = assert_c_matches("(send $!array :foo)", &ast, send, b_caps.is_some());
+
+    assert!(
+        b_caps.is_some(),
+        "B: (send $!array :foo) must match when receiver is not array"
+    );
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, two, "B: captured receiver must be Int(2)");
+
+    let c_caps = c.expect("C must also match");
+    match c_caps.get(0).cloned() {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: receiver capture id disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+}
