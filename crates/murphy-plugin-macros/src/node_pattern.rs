@@ -92,6 +92,18 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
     };
     let body = lower_pat(&ast.root, &quote!(node), &mut ctx)?;
 
+    // D4 (murphy-nnr8): declare one `Option<NodeId>` variable per unique `_name`
+    // unification atom. These are initialized to `None` at function entry and
+    // read/written by the `lower_pat`/`lower_bool` arms for `PatKind::Unify`.
+    let unify_names = collect_unify_names(&ast.root);
+    let unify_decls: Vec<TokenStream> = unify_names
+        .iter()
+        .map(|n| {
+            let var = unify_var(n);
+            quote!(let mut #var: ::core::option::Option<::murphy_plugin_api::NodeId> = ::core::option::Option::None;)
+        })
+        .collect();
+
     Ok(quote! {
         // A capture matcher's `OptNode`-slot lowering emits `let Some(n) =
         // slot.get() else { return None; }`, which clippy wants rewritten
@@ -103,10 +115,66 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
             cx: &::murphy_plugin_api::Cx<'a>,
         ) -> #ret_ty {
             #(#cap_decls)*
+            #(#unify_decls)*
             #body
             #success
         }
     })
+}
+
+/// The gensym'd variable identifier for the unification variable of `name`.
+///
+/// `_x` → `__unify_x`, `_foo` → `__unify_foo`. The name is the post-`_`
+/// portion stored in [`murphy_pattern::PatKind::Unify`].
+fn unify_var(name: &str) -> Ident {
+    Ident::new(&format!("__unify_{name}"), Span::call_site())
+}
+
+/// Collect all distinct unify names from the pattern tree.
+///
+/// Returns names in first-occurrence order (depth-first, left-to-right)
+/// so the generated declarations are deterministic across compiler runs.
+fn collect_unify_names(pat: &murphy_pattern::Pat) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    collect_unify_names_inner(pat, &mut names);
+    names
+}
+
+fn collect_unify_names_inner(pat: &murphy_pattern::Pat, names: &mut Vec<String>) {
+    use murphy_pattern::PatKind;
+    match &pat.kind {
+        PatKind::Unify { name } => {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.clone());
+            }
+        }
+        PatKind::Node { children, .. } => {
+            for c in children {
+                collect_unify_names_inner(c, names);
+            }
+        }
+        PatKind::Union(alts) => {
+            for a in alts {
+                collect_unify_names_inner(a, names);
+            }
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            collect_unify_names_inner(b, names);
+        }
+        PatKind::Capture { body, .. } => collect_unify_names_inner(body, names),
+        PatKind::Quantifier { body, .. } => collect_unify_names_inner(body, names),
+        PatKind::AnyOrder { children } | PatKind::Intersection { children } => {
+            for c in children {
+                collect_unify_names_inner(c, names);
+            }
+        }
+        PatKind::Wildcard
+        | PatKind::Rest
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_) => {}
+    }
 }
 
 /// The capture binding identifier for slot `i`.
@@ -1115,6 +1183,33 @@ fn lower_pat(
                 .collect::<syn::Result<_>>()?;
             Ok(quote!(#(#guards)*))
         }
+        PatKind::Unify { name } => {
+            // D4 (murphy-nnr8): `_name` unification.
+            //
+            // Each unique name gets one `let mut __unify_{name}: Option<NodeId> = None;`
+            // variable at the top of the generated function (see `lower_matcher`,
+            // which collects them via `collect_unify_names`). Here we emit the
+            // runtime binding/check logic:
+            //
+            //   match __unify_{name} {
+            //     None => { __unify_{name} = Some(#subject); }   // first occurrence: bind
+            //     Some(__u) => { if __u != #subject { return fail; } }  // check
+            //   }
+            let var = unify_var(name);
+            let fail = fail_stmt(ctx);
+            Ok(quote! {
+                match #var {
+                    ::core::option::Option::None => {
+                        #var = ::core::option::Option::Some(#subject);
+                    }
+                    ::core::option::Option::Some(__u) => {
+                        if __u != #subject {
+                            #fail
+                        }
+                    }
+                }
+            })
+        }
         other => Err(syn::Error::new(
             Span::call_site(),
             format!("node_pattern!: pattern feature not yet supported: {other:?}"),
@@ -1760,7 +1855,8 @@ fn collect_capture_slots(pat: &murphy_pattern::Pat, out: &mut Vec<u16>) {
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Rest => {}
+        | PatKind::Rest
+        | PatKind::Unify { .. } => {}
     }
 }
 
@@ -2584,6 +2680,22 @@ fn lower_bool(
                 .map(|child| lower_bool(child, subject, ctx))
                 .collect::<syn::Result<_>>()?;
             Ok(quote!( ( #(#child_bools)&&* ) ))
+        }
+        PatKind::Unify { name } => {
+            // D4 (murphy-nnr8): `_name` unification in bool context.
+            // Uses the same `__unify_{name}` variable declared at function scope.
+            let var = unify_var(name);
+            Ok(quote! {
+                ({
+                    match #var {
+                        ::core::option::Option::None => {
+                            #var = ::core::option::Option::Some(#subject);
+                            true
+                        }
+                        ::core::option::Option::Some(__u) => __u == #subject,
+                    }
+                })
+            })
         }
     }
 }
