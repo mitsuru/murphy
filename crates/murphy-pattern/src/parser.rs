@@ -113,7 +113,16 @@ pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
 /// into our `ParseError` shape; Round 2 messages are deliberately terse —
 /// Round 3 owns full diagnostic parity.
 fn run_lalrpop(tokens: &[Spanned]) -> Result<Pat, ParseError> {
-    let folded = fold_predicate_args(tokens)?;
+    // Fold `Ident(name) Question|Bang` (where `name` is NOT a known kind)
+    // into a single `Predicate("name?"/"name!")` token. This implements the
+    // bare-predicate shorthand at the iterator level — the grammar always
+    // sees a normal Predicate token, sidestepping the position-context
+    // problem that bare predicates create at the grammar level.
+    let merged = fold_bare_predicate_shorthand(tokens);
+    // Pre-fold `Predicate(name) LParen <args> RParen` into one synthetic
+    // Predicate token (see `fold_predicate_args` for the encoding) to dodge
+    // an LR(1) local ambiguity at `#name (`.
+    let folded = fold_predicate_args(&merged)?;
     let iter = folded.into_iter().map(|s| {
         Ok::<_, ParseError>((
             s.span.start as usize,
@@ -124,6 +133,59 @@ fn run_lalrpop(tokens: &[Spanned]) -> Result<Pat, ParseError> {
     crate::lalrpop_parser_inner::lalrpop_parser::PatternParser::new()
         .parse(iter)
         .map_err(lalrpop_to_parse_error)
+}
+
+/// Walk the token stream and fold `Ident(name) Question` / `Ident(name) Bang`
+/// pairs where `name` is NOT a known node-kind name into a single
+/// `Predicate(name + "?"|"!")` token. Known-kind idents are left alone so
+/// they still parse as Kind/Quantifier (e.g. `int?` stays `Quantifier(Kind(int), ?)`).
+///
+/// This implements bare-predicate shorthand at the lexer-adapter level —
+/// the position-validity check (`node_child_allows_bare_predicate`) runs in
+/// a later post-pass over the AST, so the grammar itself stays oblivious
+/// to whether a Predicate originated from `#name?` (always valid) or the
+/// shorthand `name?` (position-restricted).
+fn fold_bare_predicate_shorthand(tokens: &[Spanned]) -> Vec<Spanned> {
+    let mut out: Vec<Spanned> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let merged = (|| -> Option<Spanned> {
+            let Token::Ident(name) = &tokens[i].tok else { return None };
+            // Known-kind names and true/false/nil keep their normal parse.
+            if murphy_ast::tag_from_pattern_name(name).is_some() {
+                return None;
+            }
+            if name == "true" || name == "false" || name == "nil" {
+                return None;
+            }
+            let next = tokens.get(i + 1)?;
+            let suffix = match next.tok {
+                Token::Question => '?',
+                Token::Bang => '!',
+                _ => return None,
+            };
+            // Tag with BARE_IDENT_MARKER so `validate_bare_predicate_position`
+            // can apply the position check; an explicit `#name?` is tagged
+            // without the marker and accepted anywhere a Predicate is.
+            let combined_name = format!("{BARE_IDENT_MARKER}{name}{suffix}");
+            let span = PatSpan::new(
+                tokens[i].span.start as usize,
+                next.span.end as usize,
+            );
+            Some(Spanned {
+                tok: Token::Predicate(combined_name),
+                span,
+            })
+        })();
+        if let Some(m) = merged {
+            out.push(m);
+            i += 2;
+        } else {
+            out.push(tokens[i].clone());
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Pre-fold `Predicate(name) LParen <args> RParen` sequences into a single
@@ -474,9 +536,15 @@ fn convert_named_captures(pat: &mut Pat) {
                 murphy_ast::pattern_name(*tag).map(|s| s.to_string())
             }
             PatKind::Predicate { name: pred_name, args } if args.is_empty() => {
-                // Bare-ident Predicate (tagged with BARE_IDENT_MARKER).
-                // Treat as a named capture; strip the marker.
-                pred_name.strip_prefix(BARE_IDENT_MARKER).map(|s| s.to_string())
+                // Only the marker-tagged form is a candidate for named-
+                // capture rewriting. Even then, a bare-ident with a `?`/`!`
+                // suffix (`$odd?`) is intentionally a bare-predicate-shorthand
+                // capture, not a named capture — keep it as-is so the post-
+                // pass `validate_bare_predicate_position` decides what to do.
+                pred_name
+                    .strip_prefix(BARE_IDENT_MARKER)
+                    .filter(|stripped| !stripped.ends_with('?') && !stripped.ends_with('!'))
+                    .map(|s| s.to_string())
             }
             _ => None,
         };
@@ -1102,32 +1170,44 @@ mod capture_position_tests {
 
     #[test]
     fn captures_in_union_arms_diff_slot_rejected() {
+        // `{$a $b}` — arms have different capture names (different slots);
+        // the parser must reject this because the losing arm's slot would
+        // be unwritten at the matcher's `finish` step.
         let e = parse("{$a $b}").expect_err("must reject differing captures in union");
         assert!(e.message.contains('$'));
     }
 
     #[test]
     fn capture_in_union_one_sided_rejected() {
+        // `{$_ int}` — only one arm has a capture; must be rejected.
         let e = parse("{$_ int}").expect_err("must reject one-sided capture in union");
         assert!(e.message.contains('$'));
     }
 
     #[test]
     fn capture_sugar_nested_capture_in_body_rejected() {
+        // `${int $float}` — the sugar produces a union where one arm's
+        // body is itself a `$` capture (the body of `$float`). Must be rejected.
         let e = parse("${int $float}").expect_err("must reject nested capture in sugar union body");
         assert!(e.message.contains('$'));
     }
 
     #[test]
     fn capture_union_sugar_parses_and_has_single_slot() {
+        // `${int float}` — the sugar `${ ... }` produces exactly one slot
+        // shared across all arms. The result is a Union of Captures
+        // (each arm Capture{slot:0, body:Kind(...)}).
         let p = parse("${int float}").expect("${int float} must parse");
+        // Exactly one capture slot (slot 0) of kind Node.
         assert_eq!(p.n_captures(), 1, "expected 1 capture slot");
         assert_eq!(p.captures[0], CaptureKind::Node);
+        // Root node must be a Union.
         assert!(
             matches!(p.root.kind, PatKind::Union(_)),
             "root must be Union, got {:?}",
             p.root.kind
         );
+        // Both arms must be Capture with slot 0.
         if let PatKind::Union(alts) = &p.root.kind {
             assert_eq!(alts.len(), 2, "expected 2 union arms");
             for (i, arm) in alts.iter().enumerate() {
@@ -1144,6 +1224,7 @@ mod capture_position_tests {
 
     #[test]
     fn capture_union_sugar_three_arms_each_share_slot() {
+        // `${int float sym}` — 3-arm sugar also uses a single slot 0.
         let p = parse("${int float sym}").expect("${int float sym} must parse");
         assert_eq!(p.n_captures(), 1, "expected 1 capture slot for 3-arm sugar");
         assert!(
@@ -1167,8 +1248,11 @@ mod capture_position_tests {
         assert!(e.message.contains('$'));
     }
 
+    // murphy-iqv: $!body — capture wrapping Not is allowed
     #[test]
     fn capture_wrapping_not_is_allowed() {
+        // `$!(int 1)` — outer Capture, inner Not — definite-assignment because
+        // the Capture always writes on success.
         let p = parse("$!(int 1)").expect("capture wrapping not must parse");
         assert_eq!(p.n_captures(), 1);
         assert!(
@@ -1179,6 +1263,8 @@ mod capture_position_tests {
 
     #[test]
     fn capture_wrapping_not_in_node_child_is_allowed() {
+        // `(send $!(int 1) :foo)` — receiver is captured only when it is not
+        // the integer `1`.
         let p =
             parse("(send $!(int 1) :foo)").expect("capture wrapping not in node child must parse");
         assert_eq!(p.n_captures(), 1);
@@ -1186,6 +1272,8 @@ mod capture_position_tests {
 
     #[test]
     fn inner_capture_inside_negation_remains_rejected() {
+        // `!$body` — Not wrapping Capture — is still forbidden: "what does it
+        // mean to capture a node that didn't match?".
         let e = parse("!$(int 1)").expect_err("must reject capture inside not");
         assert!(e.message.contains('$'));
     }
@@ -1198,18 +1286,23 @@ mod capture_position_tests {
 
     #[test]
     fn captures_under_parent_are_allowed() {
+        // `^x` is definite — the parent direction is unique. Captures are
+        // OK in that subtree (mirrors B's `lower_pat` route).
         let p = parse("^$_").expect("parent capture should parse");
         assert_eq!(p.n_captures(), 1);
     }
 
     #[test]
     fn captures_inside_capture_body_are_allowed() {
+        // The body of an outer `$(...)` is a definite-assignment subtree.
         let p = parse("$(send $_ :foo)").expect("nested capture should parse");
         assert_eq!(p.n_captures(), 2);
     }
 
     #[test]
     fn node_child_outside_union_capture_unaffected() {
+        // `({send csend} $...)` — the `$...` is outside the union, in the
+        // node's child list. This must still parse without error.
         let p = parse("({send csend} $...)").expect("({send csend} $...) must parse");
         assert_eq!(p.n_captures(), 1);
         assert_eq!(p.captures[0], CaptureKind::Seq);
@@ -1217,18 +1310,27 @@ mod capture_position_tests {
 
     #[test]
     fn not_over_uniform_capture_sugar_rejected() {
+        // `!${int float}` — the sugar union is inside a `!` negation, which
+        // is a forbidden position. Even though all arms share the same slot,
+        // the outer `!` means assignment is not guaranteed on the happy path.
         let e = parse("!${int float}").expect_err("must reject sugar union inside negation");
         assert!(e.message.contains('$'));
     }
 
     #[test]
     fn descend_over_uniform_capture_sugar_rejected() {
+        // `` `${int float} `` — same reasoning as the `!` case: the descend
+        // prefix makes the inner union sit on a non-definite-assignment path.
         let e = parse("`${int float}").expect_err("must reject sugar union inside descend");
         assert!(e.message.contains('$'));
     }
 
     #[test]
     fn capture_inside_non_uniform_outer_union_rejected() {
+        // `{int ${int float}}` — outer union has one arm without a capture
+        // (`int`) and one arm that is uniform-capture sugar (`${int float}`).
+        // This is not a uniform union at the outer level, so the inner sugar
+        // is walked with forbidden=true and the capture inside it is rejected.
         let e = parse("{int ${int float}}")
             .expect_err("must reject capture in non-uniform outer union");
         assert!(e.message.contains('$'));
@@ -1236,6 +1338,9 @@ mod capture_position_tests {
 
     #[test]
     fn capture_sugar_nested_capture_in_arm_body_node_rejected() {
+        // `${(send $recv :foo) int}` — uniform sugar where one arm's body is
+        // a Node containing a nested `$recv` capture. If the `int` arm wins,
+        // `$recv`'s slot is never written. The validator must reject this.
         let e = parse("${(send $recv :foo) int}")
             .expect_err("must reject nested capture inside sugar arm body subtree");
         assert!(e.message.contains('$'));
@@ -1243,6 +1348,12 @@ mod capture_position_tests {
 
     #[test]
     fn capture_sugar_nested_capture_in_both_arm_bodies_rejected() {
+        // `${(send $_ :foo) (send $_ :bar)}` — both arms contain an
+        // anonymous `$_` nested inside the arm body's Node. Even though
+        // every arm carries a capture, each is in a *different* slot (1
+        // and 2), so the losing arm's slot is unwritten. The validator
+        // is conservative: nested captures inside sugar arm bodies are
+        // forbidden regardless of whether all arms happen to have them.
         let e = parse("${(send $_ :foo) (send $_ :bar)}")
             .expect_err("must reject nested capture in sugar arm bodies");
         assert!(
@@ -1252,7 +1363,6 @@ mod capture_position_tests {
         );
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1281,6 +1391,8 @@ mod tests {
 
     #[test]
     fn parses_operator_and_uppercase_symbols() {
+        // murphy-ke0: operator-method and uppercase symbols flow through to
+        // `Lit::Sym` unchanged.
         assert_eq!(k(":+"), PatKind::Lit(Lit::Sym("+".into())));
         assert_eq!(k(":[]="), PatKind::Lit(Lit::Sym("[]=".into())));
         assert_eq!(k(":<=>"), PatKind::Lit(Lit::Sym("<=>".into())));
@@ -1289,6 +1401,10 @@ mod tests {
 
     #[test]
     fn parses_variable_symbols_in_node_match() {
+        // murphy-afl: `:@x`/`:@@x`/`:$x` flow through the lexer with the
+        // sigil preserved, so RuboCop-style patterns matching the first
+        // child of `(ivar :@foo)` / `(cvar :@@foo)` / `(gvar :$foo)` parse
+        // end-to-end.
         for (src, name) in [
             ("(ivar :@foo)", "@foo"),
             ("(cvar :@@foo)", "@@foo"),
@@ -1348,8 +1464,11 @@ mod tests {
         assert!(parse("...").is_err());
     }
 
+    // --- additional coverage --------------------------------------------
+
     #[test]
     fn nested_prefixes_compose() {
+        // `!!_` is Not(Not(Wildcard)).
         let p = parse("!!_").expect("parse ok").root;
         let PatKind::Not(inner) = &p.kind else {
             panic!("outer should be Not, was {:?}", p.kind);
@@ -1362,6 +1481,7 @@ mod tests {
 
     #[test]
     fn prefixed_span_spans_prefix_through_inner() {
+        // `!_` — `!` at 0, `_` at 1; the Not span must cover 0..2.
         let p = parse("!_").expect("parse ok").root;
         assert_eq!((p.span.start, p.span.end), (0, 2));
     }
@@ -1378,6 +1498,7 @@ mod tests {
 
     #[test]
     fn leftover_tokens_are_error() {
+        // Two top-level patterns: the second `_` is leftover.
         let e = parse("_ _").expect_err("leftover tokens");
         assert_eq!((e.span.start, e.span.end), (2, 3));
     }
@@ -1390,15 +1511,21 @@ mod tests {
 
     #[test]
     fn dangling_prefix_is_error() {
+        // A prefix with nothing to apply to.
         assert!(parse("!").is_err());
     }
 
     #[test]
     fn non_capture_patterns_have_zero_captures() {
+        // A pattern containing no `$` reserves no capture slots, so
+        // `n_captures()` must report zero. `parse` threads the real capture
+        // list, so this pins that a capture-free pattern stays capture-free.
         assert_eq!(parse("_").unwrap().n_captures(), 0);
         assert_eq!(parse("!send").unwrap().n_captures(), 0);
         assert_eq!(parse(":sym").unwrap().n_captures(), 0);
     }
+
+    // --- Task 6: node match `(...)` --------------------------------------
 
     #[test]
     fn parses_node_with_children() {
@@ -1462,6 +1589,7 @@ mod tests {
     #[test]
     fn rejects_unbalanced_paren() {
         let e = parse("(send").expect_err("unclosed");
+        // An unclosed `(` must not surface as the generic empty-pattern error.
         assert!(
             !e.message.contains("empty pattern"),
             "message was: {}",
@@ -1471,6 +1599,7 @@ mod tests {
 
     #[test]
     fn rejects_unclosed_paren_after_open() {
+        // `(` alone runs out of input while parsing the head.
         let e = parse("(").expect_err("unclosed");
         assert!(
             !e.message.contains("empty pattern"),
@@ -1481,6 +1610,7 @@ mod tests {
 
     #[test]
     fn rejects_unclosed_oneof_head() {
+        // `({send` runs out of input inside the `{...}` head scan.
         let e = parse("({send").expect_err("unclosed");
         assert!(
             !e.message.contains("empty pattern"),
@@ -1491,11 +1621,15 @@ mod tests {
 
     #[test]
     fn rejects_empty_node() {
+        // `()` has no head.
         assert!(parse("()").is_err());
     }
 
+    // --- additional Task 6 coverage --------------------------------------
+
     #[test]
     fn parses_nested_node() {
+        // `(send (send nil :a) :b)` — the first child is itself a node match.
         let p = parse("(send (send nil :a) :b)").expect("ok");
         match p.root.kind {
             PatKind::Node { head, children } => {
@@ -1510,6 +1644,7 @@ mod tests {
 
     #[test]
     fn parses_rest_last_in_child_list() {
+        // `Rest` may also be the final child.
         let p = parse("(array _ ...)").expect("ok");
         match p.root.kind {
             PatKind::Node { children, .. } => {
@@ -1522,6 +1657,7 @@ mod tests {
 
     #[test]
     fn parses_node_with_no_children() {
+        // A head with no children is still a valid node match.
         let p = parse("(send)").expect("ok");
         match p.root.kind {
             PatKind::Node { head, children } => {
@@ -1554,22 +1690,23 @@ mod tests {
 
     #[test]
     fn rejects_empty_oneof_head() {
+        // `{}` as a head has no alternatives.
         assert!(parse("({} _)").is_err());
     }
 
     #[test]
     fn rejects_non_ident_in_oneof_head() {
+        // A `{...}` head may only contain node-type names, not literals or `_`.
+        // Exercises the "may only contain node types" arm of `oneof_head`.
         let e = parse("({send :sym} _)").expect_err("symbol in OneOf head");
         assert!(
-            e.message.contains("may only contain node types")
-                || e.message.contains("unexpected"),
+            e.message.contains("may only contain node types"),
             "message was: {}",
             e.message
         );
         let e = parse("({send _} _)").expect_err("wildcard in OneOf head");
         assert!(
-            e.message.contains("may only contain node types")
-                || e.message.contains("unexpected"),
+            e.message.contains("may only contain node types"),
             "message was: {}",
             e.message
         );
@@ -1577,12 +1714,14 @@ mod tests {
 
     #[test]
     fn node_span_covers_open_through_close() {
+        // `(send)` — `(` at 0, `)` at 5; the Node span must cover 0..6.
         let p = parse("(send)").expect("ok");
         assert_eq!((p.root.span.start, p.root.span.end), (0, 6));
     }
 
     #[test]
     fn rejects_rparen_as_head() {
+        // `()` reports a missing-head error, not an empty-pattern one.
         let e = parse("()").expect_err("no head");
         assert!(
             !e.message.contains("empty pattern"),
@@ -1590,6 +1729,8 @@ mod tests {
             e.message
         );
     }
+
+    // --- Task 7: union `{}` ----------------------------------------------
 
     #[test]
     fn parses_union() {
@@ -1609,12 +1750,14 @@ mod tests {
     #[test]
     fn rejects_empty_union() {
         let e = parse("{}").expect_err("empty union");
-        // Round 3 owns the precise message; structurally the parse must fail.
-        let _ = e;
+        assert!(e.message.to_lowercase().contains("union"));
     }
+
+    // --- additional Task 7 coverage --------------------------------------
 
     #[test]
     fn parses_single_alternative_union() {
+        // A `{...}` with one alternative is still a union.
         let p = parse("{send}").expect("ok");
         match p.root.kind {
             PatKind::Union(alts) => assert_eq!(alts.len(), 1),
@@ -1624,6 +1767,7 @@ mod tests {
 
     #[test]
     fn parses_nested_union() {
+        // `{{send csend} array}` — the first alternative is itself a union.
         let p = parse("{{send csend} array}").expect("ok");
         match p.root.kind {
             PatKind::Union(alts) => {
@@ -1637,6 +1781,7 @@ mod tests {
 
     #[test]
     fn parses_union_with_prefixed_alternative() {
+        // Alternatives are full `prefixed` patterns, so `!_` is allowed.
         let p = parse("{!send _}").expect("ok");
         match p.root.kind {
             PatKind::Union(alts) => {
@@ -1650,7 +1795,9 @@ mod tests {
 
     #[test]
     fn rejects_unclosed_union() {
+        // `{send` runs out of input before the closing `}`.
         let e = parse("{send").expect_err("unclosed");
+        // An unclosed `{` must not surface as the generic empty-pattern error.
         assert!(
             !e.message.contains("empty pattern"),
             "message was: {}",
@@ -1660,6 +1807,7 @@ mod tests {
 
     #[test]
     fn rejects_unclosed_empty_union() {
+        // `{` alone runs out of input immediately.
         let e = parse("{").expect_err("unclosed");
         assert!(
             !e.message.contains("empty pattern"),
@@ -1670,9 +1818,12 @@ mod tests {
 
     #[test]
     fn union_span_covers_open_through_close() {
+        // `{send csend}` — `{` at 0, `}` at 11; the Union span must cover 0..12.
         let p = parse("{send csend}").expect("ok");
         assert_eq!((p.root.span.start, p.root.span.end), (0, 12));
     }
+
+    // --- Task 8: `$` captures --------------------------------------------
 
     #[test]
     fn parses_anonymous_capture() {
@@ -1706,6 +1857,9 @@ mod tests {
 
     #[test]
     fn capture_of_subpattern_uses_parens() {
+        // `:Foo` exercises the uppercase symbol grammar (murphy-ke0); the test
+        // asserts only that the capture body is a `Node`, so the symbol payload
+        // is incidental.
         let p = parse("$(const _ :Foo)").expect("ok");
         match p.root.kind {
             PatKind::Capture { slot, name, body } => {
@@ -1717,15 +1871,263 @@ mod tests {
         }
     }
 
-    // The remaining tests are imported from the pre-LALRPOP suite below;
-    // see the trailing `mod inherited_tests` for the full set.
+    #[test]
+    fn capture_slots_are_left_to_right() {
+        let p = parse("(send $_ $...)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Node, CaptureKind::Seq]);
+    }
 
+    #[test]
+    fn nested_captures_are_source_order() {
+        // outer `$(...)` = slot 0, inner `$inner` = slot 1 — source order,
+        // NOT post-order. Guards the nested-capture slot-numbering bug.
+        let p = parse("$(send $inner _)").expect("ok");
+        assert_eq!(p.n_captures(), 2);
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Node, CaptureKind::Node]);
+        match &p.root.kind {
+            PatKind::Capture { slot, body, .. } => {
+                assert_eq!(*slot, 0, "outer capture is slot 0");
+                match &body.kind {
+                    PatKind::Node { children, .. } => match &children[0].kind {
+                        PatKind::Capture { slot, name, .. } => {
+                            assert_eq!(*slot, 1, "inner capture is slot 1");
+                            assert_eq!(name.as_deref(), Some("inner"));
+                        }
+                        other => panic!("expected inner Capture, got {other:?}"),
+                    },
+                    _ => unreachable!(),
+                }
+            }
+            other => panic!("expected outer Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_capture_name() {
+        let e = parse("(send $x $x)").expect_err("dup name");
+        assert!(e.message.contains('x'));
+    }
+
+    // --- additional Task 8 coverage --------------------------------------
+
+    #[test]
+    fn dollar_at_end_of_input_is_error() {
+        // A `$` with nothing to capture.
+        let e = parse("$").expect_err("dangling `$`");
+        assert!(
+            !e.message.contains("empty pattern"),
+            "message was: {}",
+            e.message
+        );
+        // The error span points at the `$` token (byte 0..1).
+        assert_eq!((e.span.start, e.span.end), (0, 1));
+    }
+
+    #[test]
+    fn double_capture_nests() {
+        // `$$_` — the outer `$` is anonymous and its body is recursively
+        // parsed via `prefixed`, which sees the inner `$_`. Two captures,
+        // outer is slot 0, inner is slot 1.
+        let p = parse("$$_").expect("ok");
+        assert_eq!(p.n_captures(), 2);
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Node, CaptureKind::Node]);
+        match p.root.kind {
+            PatKind::Capture { slot, name, body } => {
+                assert_eq!(slot, 0);
+                assert!(name.is_none());
+                match body.kind {
+                    PatKind::Capture {
+                        slot: inner_slot,
+                        body: inner_body,
+                        ..
+                    } => {
+                        assert_eq!(inner_slot, 1);
+                        assert_eq!(inner_body.kind, PatKind::Wildcard);
+                    }
+                    other => panic!("expected inner Capture, got {other:?}"),
+                }
+            }
+            other => panic!("expected outer Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_span_covers_dollar_through_body() {
+        // `$_` — `$` at 0, `_` at 1; the Capture span must cover 0..2.
+        let p = parse("$_").expect("ok");
+        assert_eq!((p.root.span.start, p.root.span.end), (0, 2));
+    }
+
+    #[test]
+    fn named_capture_span_covers_dollar_through_ident() {
+        // `$x` — `$` at 0, `x` at 1; the Capture span must cover `$` through
+        // the identifier (0..2). The implicit Wildcard body is synthetic and,
+        // per spec, spans only the `$` token (0..1).
+        let p = parse("$x").expect("ok");
+        assert_eq!((p.root.span.start, p.root.span.end), (0, 2));
+        match p.root.kind {
+            PatKind::Capture { body, .. } => {
+                assert_eq!((body.span.start, body.span.end), (0, 1));
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_of_prefixed_pattern() {
+        // `$!_` — the outer `$`'s body is recursively parsed via `prefixed`,
+        // so a prefix like `!` is allowed in the body.
+        let p = parse("$!_").expect("ok");
+        match p.root.kind {
+            PatKind::Capture { slot, name, body } => {
+                assert_eq!(slot, 0);
+                assert!(name.is_none());
+                assert!(matches!(body.kind, PatKind::Not(_)));
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distinct_capture_names_are_allowed() {
+        // Sibling captures with different names are fine.
+        let p = parse("(send $recv $arg)").expect("ok");
+        assert_eq!(p.n_captures(), 2);
+    }
+
+    #[test]
+    fn duplicate_name_message_names_the_duplicate() {
+        let e = parse("(send $dup $dup)").expect_err("dup name");
+        assert!(
+            e.message.contains("dup"),
+            "message should name the duplicate, was: {}",
+            e.message
+        );
+    }
+
+    // --- rest / seq-capture placement validation -------------------------
+
+    #[test]
+    fn rejects_two_seq_captures_in_child_list() {
+        assert!(parse("(send $... $...)").is_err());
+    }
+
+    #[test]
+    fn rejects_bare_rest_and_seq_capture_mixed() {
+        assert!(parse("(send ... $...)").is_err());
+        assert!(parse("(send $... ...)").is_err());
+    }
+
+    #[test]
+    fn rejects_seq_capture_at_top_level() {
+        assert!(parse("$...").is_err());
+    }
+
+    #[test]
+    fn rejects_seq_capture_in_union() {
+        assert!(parse("{$... _}").is_err());
+    }
+
+    #[test]
+    fn allows_single_seq_capture_in_child_list() {
+        assert!(parse("(send $receiver $...)").is_ok());
+        assert!(parse("(array ... _)").is_ok());
+        assert!(parse("(array _ $...)").is_ok());
+    }
+
+    // --- murphy-ycx: postfix quantifier (`*`, `+`, `?`) -------------------
+
+    /// Pull the children out of a top-level `(...)` parse, panicking with the
+    /// pattern source if the root is not a `Node`. Only used by quantifier
+    /// tests below.
     fn children_of(src: &str) -> Vec<Pat> {
-        let p = parse(src).expect("ok");
+        let p = parse(src).unwrap_or_else(|e| panic!("parse `{src}`: {e:?}"));
         match p.root.kind {
             PatKind::Node { children, .. } => children,
-            other => panic!("expected Node, got {other:?}"),
+            other => panic!("`{src}` should be a Node, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_plus_quantifier_on_kind() {
+        // `(array int+)` — the lone child is a quantifier wrapping `Kind(int)`.
+        let cs = children_of("(array int+)");
+        assert_eq!(cs.len(), 1);
+        match &cs[0].kind {
+            PatKind::Quantifier { body, min, max } => {
+                assert_eq!(*min, 1);
+                assert_eq!(*max, u8::MAX);
+                assert!(matches!(body.kind, PatKind::Kind(_)));
+            }
+            other => panic!("expected Quantifier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_star_quantifier_on_kind() {
+        let cs = children_of("(array int*)");
+        match &cs[0].kind {
+            PatKind::Quantifier { min, max, .. } => {
+                assert_eq!(*min, 0);
+                assert_eq!(*max, u8::MAX);
+            }
+            other => panic!("expected Quantifier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_question_quantifier_on_kind() {
+        let cs = children_of("(send _ :update_columns hash?)");
+        match &cs[2].kind {
+            PatKind::Quantifier { min, max, .. } => {
+                assert_eq!(*min, 0);
+                assert_eq!(*max, 1);
+            }
+            other => panic!("expected Quantifier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quantifier_span_covers_body_through_postfix() {
+        // `(array int+)` — `int` at 7..10, `+` at 10..11; the Quantifier
+        // span must cover 7..11.
+        let cs = children_of("(array int+)");
+        assert_eq!((cs[0].span.start, cs[0].span.end), (7, 11));
+    }
+
+    #[test]
+    fn parses_quantifier_with_rest_in_same_child_list() {
+        // `(send _ :foo ... int+)` — `...` and a quantifier coexist in the
+        // same child list, in DESIGN's recommended mix-with-rest form.
+        let cs = children_of("(send _ :foo ... int+)");
+        assert!(matches!(cs[2].kind, PatKind::Rest));
+        assert!(matches!(cs[3].kind, PatKind::Quantifier { .. }));
+    }
+
+    #[test]
+    fn parses_quantifier_on_sym_kind() {
+        // `(send _ :pluck sym+)` — a quantifier on `Kind(sym)`.
+        let cs = children_of("(send _ :pluck sym+)");
+        match &cs[2].kind {
+            PatKind::Quantifier { body, min, .. } => {
+                assert_eq!(*min, 1);
+                assert!(matches!(body.kind, PatKind::Kind(_)));
+            }
+            other => panic!("expected Quantifier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_bare_predicate_in_node_child_slot() {
+        let cs = children_of("(int odd?)");
+        assert_eq!(cs.len(), 1);
+        assert_eq!(
+            cs[0].kind,
+            PatKind::Predicate {
+                name: "odd?".into(),
+                args: vec![]
+            }
+        );
     }
 
     #[test]
@@ -1741,21 +2143,321 @@ mod tests {
             other => panic!("expected Quantifier, got {other:?}"),
         }
 
-        // `odd?` is a bare-predicate shorthand. Round 2 emits `Predicate`
-        // for an unknown ident WITHOUT a `?`/`!` suffix because the LR
-        // grammar pulls the `?` into a Quantifier wrapper. The post-pass
-        // for "ident? as predicate shorthand" lands in Round 3; here we
-        // just check structural shape.
-        match &cs[3].kind {
-            PatKind::Quantifier { body, .. } => {
-                // `odd` is unknown -> Predicate("odd"); wrapped in Quantifier.
-                assert!(matches!(body.kind, PatKind::Predicate { .. }));
+        assert_eq!(
+            cs[3].kind,
+            PatKind::Predicate {
+                name: "odd?".into(),
+                args: vec![]
             }
-            // Round 3 may collapse this to PatKind::Predicate { name:"odd?" }.
-            PatKind::Predicate { name, .. } if name == "odd?" => {}
-            other => panic!("expected Quantifier or Predicate, got {other:?}"),
+        );
+    }
+
+    #[test]
+    fn disallows_unknown_bare_predicate_in_sym_child_slot() {
+        let e = parse("(send _ odd? :foo)").expect_err("unknown predicate in sym slot");
+        assert!(e.message.contains("unknown node type") && e.message.contains("odd"));
+    }
+
+    #[test]
+    fn parses_bare_predicate_in_union_in_node_child_slot() {
+        // The union sits in a node-child slot, so each alt is at the same
+        // effective position — both `odd?` and `even?` parse as predicate
+        // shorthand. `allow_bare_predicate` must flow into `union`.
+        let cs = children_of("(send _ :puts {odd? even?})");
+        assert_eq!(cs.len(), 3);
+        let PatKind::Union(alts) = &cs[2].kind else {
+            panic!("expected Union, got {:?}", cs[2].kind);
+        };
+        assert_eq!(alts.len(), 2);
+        assert_eq!(
+            alts[0].kind,
+            PatKind::Predicate {
+                name: "odd?".into(),
+                args: vec![]
+            }
+        );
+        assert_eq!(
+            alts[1].kind,
+            PatKind::Predicate {
+                name: "even?".into(),
+                args: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn parses_bare_predicate_in_capture_body_in_node_child_slot() {
+        // `$odd?` inside a node-child slot — capture body inherits the
+        // allow-bare-predicate flag and the body parses as a `Predicate`.
+        let p = parse("(int $odd?)").expect("ok");
+        let cs = match &p.root.kind {
+            PatKind::Node { children, .. } => children,
+            other => panic!("expected Node, got {other:?}"),
+        };
+        assert_eq!(cs.len(), 1);
+        let PatKind::Capture { body, .. } = &cs[0].kind else {
+            panic!("expected Capture, got {:?}", cs[0].kind);
+        };
+        assert_eq!(
+            body.kind,
+            PatKind::Predicate {
+                name: "odd?".into(),
+                args: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn parses_bang_form_bare_predicate_in_send_arg_slot() {
+        // `save!` in a node-child slot: bare predicate shorthand for `#save!`.
+        let cs = children_of("(send _ :foo save!)");
+        assert_eq!(cs.len(), 3);
+        assert_eq!(
+            cs[2].kind,
+            PatKind::Predicate {
+                name: "save!".into(),
+                args: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn top_level_bare_predicate_errors_with_hint() {
+        // `save!` at top level is not in a node-child slot, so the parser
+        // can't accept it as bare predicate shorthand. The error names the
+        // explicit `#save!` form so users learn the host-predicate syntax.
+        let e = parse("save!").expect_err("must reject bare predicate at top level");
+        assert!(
+            e.message.contains("unknown node type") && e.message.contains("`#save!`"),
+            "expected hint about `#save!`, got: {}",
+            e.message,
+        );
+
+        let e = parse("save?").expect_err("must reject bare predicate at top level");
+        assert!(
+            e.message.contains("`#save?`"),
+            "expected hint about `#save?`, got: {}",
+            e.message,
+        );
+    }
+
+    #[test]
+    fn sym_slot_bare_predicate_error_includes_hint() {
+        // Symbol slots disallow bare predicates even in node-child position.
+        // The error should still surface the `#name?` hint.
+        let e =
+            parse("(send _ save?)").expect_err("bare predicate not allowed in Sym slot of send");
+        assert!(
+            e.message.contains("`#save?`"),
+            "expected hint about `#save?`, got: {}",
+            e.message,
+        );
+    }
+
+    // --- $pat+ / $pat* / $pat? capture slot kinds ------------------------
+
+    #[test]
+    fn capture_with_plus_body_is_seq_slot() {
+        // `(send _ :pluck $sym+)` — anonymous capture with a `Quantifier` body,
+        // slot kind upgrades to `Seq` so the matcher returns a slice.
+        let p = parse("(send _ :pluck $sym+)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Seq]);
+    }
+
+    #[test]
+    fn capture_with_star_body_is_seq_slot() {
+        let p = parse("(array $int*)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Seq]);
+    }
+
+    #[test]
+    fn capture_with_question_body_is_optnode_slot() {
+        // `(send _ :update_columns $hash?)` — `?` produces `OptNode`.
+        let p = parse("(send _ :update_columns $hash?)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::OptNode]);
+    }
+
+    #[test]
+    fn named_capture_without_postfix_keeps_node_kind() {
+        // `(send $receiver _)` — no postfix; the existing named-capture
+        // behavior (body = Wildcard, slot = Node) is preserved.
+        let p = parse("(send $receiver _)").expect("ok");
+        assert_eq!(p.capture_kinds(), &[CaptureKind::Node]);
+        match &p.root.kind {
+            PatKind::Node { children, .. } => match &children[0].kind {
+                PatKind::Capture { name, body, .. } => {
+                    assert_eq!(name.as_deref(), Some("receiver"));
+                    assert_eq!(body.kind, PatKind::Wildcard);
+                }
+                other => panic!("expected Capture, got {other:?}"),
+            },
+            _ => unreachable!(),
         }
     }
+
+    #[test]
+    fn dollar_ident_with_postfix_is_anonymous_capture() {
+        // `(send $name?)` — `$` + ident + postfix becomes an anonymous
+        // capture whose body is `Quantifier(Kind(name), ?)`. There is no
+        // `name` *named* capture: the slot is anonymous and has no `name`.
+        let p = parse("(send $send?)").expect("ok");
+        match &p.root.kind {
+            PatKind::Node { children, .. } => match &children[0].kind {
+                PatKind::Capture { name, body, .. } => {
+                    assert!(name.is_none(), "must not be a named capture");
+                    assert!(matches!(body.kind, PatKind::Quantifier { .. }));
+                }
+                other => panic!("expected Capture, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+        assert_eq!(p.capture_kinds(), &[CaptureKind::OptNode]);
+    }
+
+    // --- error cases (the 5 DESIGN-listed parse failures) -----------------
+
+    #[test]
+    fn error_quantifier_at_top_level() {
+        // `int+` — quantifier outside a node child list.
+        let e = parse("int+").expect_err("top-level quantifier");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_quantifier_in_union_arm() {
+        // `{int+ sym}` — quantifier inside `{}` is not a node child either.
+        let e = parse("{int+ sym}").expect_err("quantifier in union arm");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_quantifier_inside_not_sigil_body() {
+        // `!int+` — `!` wraps `int+`, so the quantifier's parent is `Not`,
+        // not a node match. DESIGN writes this as `!(int+)`, but parens
+        // around `int+` start a node match (not grouping), so the
+        // single-pattern form `!int+` is the actual syntactic shape.
+        let e = parse("!int+").expect_err("quantifier under `!`");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_quantifier_inside_parent_sigil_body() {
+        // `^int+` — the body of `^` is not a node child.
+        let e = parse("^int+").expect_err("quantifier under `^`");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_quantifier_inside_descend_sigil_body() {
+        // `` `int+ `` — the body of `` ` `` is not a node child.
+        let e = parse("`int+").expect_err("quantifier under backtick");
+        assert!(
+            e.message.contains("direct child of a node match"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_chained_postfix_plus_plus() {
+        // `(array int++)` — two postfixes in a row is a parser-level reject.
+        let e = parse("(array int++)").expect_err("chained ++");
+        assert!(
+            e.message.contains("chained") || e.message.contains("at most one"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_chained_postfix_star_question() {
+        let e = parse("(array int*?)").expect_err("chained *?");
+        assert!(
+            e.message.contains("chained") || e.message.contains("at most one"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_capture_inside_quantifier_body_via_parens() {
+        // `(array ($int)+)` — `($int)` parses as a Node with missing head
+        // (rejected earlier) — the message can be either "needs a head" or
+        // a capture-in-quantifier-body message depending on parse order.
+        // The acceptance criterion DESIGN names is `($int)+`; verify it
+        // errors *somehow*.
+        assert!(parse("(array ($int)+)").is_err());
+    }
+
+    #[test]
+    fn error_capture_inside_quantifier_body_via_node() {
+        // `(array (send _ $_)+)` — a quantifier wrapping a Node whose
+        // children include a `$` capture; rejected by
+        // `validate_quantifier_body`.
+        let e = parse("(array (send _ $_)+)").expect_err("capture in quantifier body");
+        assert!(
+            e.message.contains("quantifier body"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_rest_with_postfix_quantifier() {
+        // `(array ...+)` — chaining `+` on `...` is a parser-level reject.
+        let e = parse("(array ...+)").expect_err("rest with postfix");
+        assert!(
+            e.message.contains("...") && e.message.contains("quantifier"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn error_standalone_postfix_token() {
+        // A bare `+` with nothing before it must error at primary.
+        let e = parse("+").expect_err("bare +");
+        assert!(
+            e.message.contains("must follow a pattern"),
+            "message was: {}",
+            e.message
+        );
+    }
+
+    // --- mixing rule: at most one rest, but quantifier may coexist ----------
+
+    #[test]
+    fn allows_rest_and_quantifier_in_same_child_list() {
+        // DESIGN mixing rule: at most one rest, but a quantifier may also
+        // appear alongside it.
+        assert!(parse("(send _ :foo ... int+)").is_ok());
+        assert!(parse("(send _ :foo int+ ...)").is_ok());
+    }
+
+    #[test]
+    fn allows_multiple_quantifiers_in_same_child_list() {
+        // No "at most one quantifier" rule: a child list may have several.
+        assert!(parse("(send _ :foo int+ sym*)").is_ok());
+        assert!(parse("(send _ :foo int? str+ sym*)").is_ok());
+    }
+
+    // --- murphy-jyi: predicate args (#name(arg1 arg2 ...)) ----------------
 
     #[test]
     fn parses_predicate_with_int_arg() {
@@ -1798,10 +2500,12 @@ mod tests {
 
     #[test]
     fn parses_predicate_with_capture_ref_arg() {
+        // `(send $val #contains?($val))` — `$val` is slot 0, capture back-ref
         let pat = parse("(send $val #contains?($val))").expect("parse ok");
         let PatKind::Node { children, .. } = &pat.root.kind else {
             panic!("expected Node");
         };
+        // children: [Capture(slot=0), Predicate{name, args:[Capture(0)]}]
         match &children[1].kind {
             PatKind::Predicate { name, args } => {
                 assert_eq!(name, "contains?");
@@ -1814,186 +2518,39 @@ mod tests {
 
     #[test]
     fn parse_predicate_pattern_arg_is_rejected() {
+        // Pattern args are v1 scope-out; the parser must reject them.
         let e = parse("#g?({:A :B})").expect_err("must reject pattern arg");
         assert!(
-            e.message.contains("pattern args in v1: literal/capture only")
-                || e.message.contains("unexpected"),
-            "got: {}",
+            e.message
+                .contains("pattern args in v1: literal/capture only"),
+            "expected 'pattern args in v1: literal/capture only', got: {}",
             e.message
         );
     }
 
     #[test]
     fn parse_predicate_unknown_capture_ref_is_rejected() {
+        // Forward/unknown capture refs in predicate args must error.
         let e = parse("#pred?($unknown)").expect_err("must reject unknown capture ref");
         assert!(
             e.message.contains("unknown or forward capture reference"),
-            "got: {}",
+            "expected 'unknown or forward capture reference', got: {}",
             e.message
         );
     }
 
     #[test]
     fn parse_predicate_nil_arg_is_rejected() {
+        // `nil` has no Rust-side counterpart for a cop method signature; the
+        // B backend can't lower it and the C matcher's `PredCallArg::Nil`
+        // would have to be paired with an invented B-side representation.
+        // Reject in the parser so both backends stay in sync for v1.
         let e = parse("#p?(nil)").expect_err("must reject `nil` predicate arg");
         assert!(
             e.message
                 .contains("`nil` is not supported as a predicate argument in v1"),
-            "got: {}",
+            "expected the v1-unsupported nil-arg message, got: {}",
             e.message
         );
-    }
-
-    #[test]
-    fn allows_rest_and_quantifier_in_same_child_list() {
-        assert!(parse("(send _ :foo ... int+)").is_ok());
-        assert!(parse("(send _ :foo int+ ...)").is_ok());
-    }
-
-    #[test]
-    fn allows_multiple_quantifiers_in_same_child_list() {
-        assert!(parse("(send _ :foo int+ sym*)").is_ok());
-        assert!(parse("(send _ :foo int? str+ sym*)").is_ok());
-    }
-
-    #[test]
-    fn capture_with_plus_body_is_seq_slot() {
-        let p = parse("(send _ :pluck $sym+)").expect("ok");
-        assert_eq!(p.capture_kinds(), &[CaptureKind::Seq]);
-    }
-
-    #[test]
-    fn capture_with_star_body_is_seq_slot() {
-        let p = parse("(array $int*)").expect("ok");
-        assert_eq!(p.capture_kinds(), &[CaptureKind::Seq]);
-    }
-
-    #[test]
-    fn capture_with_question_body_is_optnode_slot() {
-        let p = parse("(send _ :update_columns $hash?)").expect("ok");
-        assert_eq!(p.capture_kinds(), &[CaptureKind::OptNode]);
-    }
-
-    #[test]
-    fn named_capture_without_postfix_keeps_node_kind() {
-        let p = parse("(send $receiver _)").expect("ok");
-        assert_eq!(p.capture_kinds(), &[CaptureKind::Node]);
-        match &p.root.kind {
-            PatKind::Node { children, .. } => match &children[0].kind {
-                PatKind::Capture { name, body, .. } => {
-                    assert_eq!(name.as_deref(), Some("receiver"));
-                    assert_eq!(body.kind, PatKind::Wildcard);
-                }
-                other => panic!("expected Capture, got {other:?}"),
-            },
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn dollar_ident_with_postfix_is_anonymous_capture() {
-        let p = parse("(send $send?)").expect("ok");
-        match &p.root.kind {
-            PatKind::Node { children, .. } => match &children[0].kind {
-                PatKind::Capture { name, body, .. } => {
-                    assert!(name.is_none(), "must not be a named capture");
-                    assert!(matches!(body.kind, PatKind::Quantifier { .. }));
-                }
-                other => panic!("expected Capture, got {other:?}"),
-            },
-            _ => unreachable!(),
-        }
-        assert_eq!(p.capture_kinds(), &[CaptureKind::OptNode]);
-    }
-
-    #[test]
-    fn error_quantifier_at_top_level() {
-        let e = parse("int+").expect_err("top-level quantifier");
-        assert!(
-            e.message.contains("direct child of a node match"),
-            "message was: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn error_quantifier_in_union_arm() {
-        let e = parse("{int+ sym}").expect_err("quantifier in union arm");
-        assert!(
-            e.message.contains("direct child of a node match"),
-            "message was: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn error_quantifier_inside_not_sigil_body() {
-        let e = parse("!int+").expect_err("quantifier under `!`");
-        assert!(
-            e.message.contains("direct child of a node match"),
-            "message was: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn error_quantifier_inside_parent_sigil_body() {
-        let e = parse("^int+").expect_err("quantifier under `^`");
-        assert!(
-            e.message.contains("direct child of a node match"),
-            "message was: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn error_quantifier_inside_descend_sigil_body() {
-        let e = parse("`int+").expect_err("quantifier under backtick");
-        assert!(
-            e.message.contains("direct child of a node match"),
-            "message was: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn error_chained_postfix_plus_plus() {
-        let e = parse("(array int++)").expect_err("chained ++");
-        // Round 3 owns the precise message; structurally must fail.
-        let _ = e;
-    }
-
-    #[test]
-    fn error_chained_postfix_star_question() {
-        let e = parse("(array int*?)").expect_err("chained *?");
-        let _ = e;
-    }
-
-    #[test]
-    fn error_capture_inside_quantifier_body_via_parens() {
-        assert!(parse("(array ($int)+)").is_err());
-    }
-
-    #[test]
-    fn error_capture_inside_quantifier_body_via_node() {
-        let e = parse("(array (send _ $_)+)").expect_err("capture in quantifier body");
-        assert!(
-            e.message.contains("quantifier body"),
-            "message was: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn error_rest_with_postfix_quantifier() {
-        let e = parse("(array ...+)").expect_err("rest with postfix");
-        // Round 3 owns precise message; structurally must fail.
-        let _ = e;
-    }
-
-    #[test]
-    fn error_standalone_postfix_token() {
-        let e = parse("+").expect_err("bare +");
-        let _ = e;
     }
 }
