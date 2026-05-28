@@ -93,8 +93,10 @@ pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
     // Source-order slot assignment, sugar-Union detection.
     let captures = assign_capture_slots(&mut root)?;
     // Resolve predicate-arg back-references (`$name`) to slot indices.
-    let name_table: Vec<Option<String>> = collect_capture_names(&root);
-    resolve_pred_capture_refs(&mut root, &name_table)?;
+    // Source-order walk; only captures registered before the predicate are
+    // in scope (forward references are rejected).
+    let mut name_table: Vec<Option<String>> = Vec::new();
+    resolve_pred_capture_refs(&mut root, &mut name_table)?;
     // Reject `...` and `$...` outside a direct node-child slot, and
     // duplicate rest within a single child list.
     validate_rest_placement(&root, false)?;
@@ -969,53 +971,17 @@ fn walk_assign(pat: &mut Pat, state: &mut SlotState) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// Collect the names-by-slot table after `assign_capture_slots` has finished.
-/// Used by `resolve_pred_capture_refs` to map a `$ident` back-reference to
-/// its slot index.
-fn collect_capture_names(pat: &Pat) -> Vec<Option<String>> {
-    let mut out: Vec<(u16, Option<String>)> = Vec::new();
-    fn walk(p: &Pat, out: &mut Vec<(u16, Option<String>)>) {
-        if let PatKind::Capture { slot, name, body } = &p.kind {
-            // Defensive: skip placeholder slots (shouldn't happen post-assign).
-            if *slot != u16::MAX {
-                out.push((*slot, name.clone()));
-            }
-            walk(body, out);
-            return;
-        }
-        match &p.kind {
-            PatKind::Node { children, .. } => children.iter().for_each(|c| walk(c, out)),
-            PatKind::Union(alts) => alts.iter().for_each(|a| walk(a, out)),
-            PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => walk(b, out),
-            PatKind::Quantifier { body, .. } => walk(body, out),
-            PatKind::AnyOrder { children } => children.iter().for_each(|c| walk(c, out)),
-            _ => {}
-        }
-    }
-    walk(pat, &mut out);
-    // Each slot appears at most once for named captures (duplicates already
-    // rejected); but sugar slots appear multiple times with `name = None`.
-    // Build a Vec<Option<String>> indexed by slot.
-    let max_slot = out
-        .iter()
-        .map(|(s, _)| *s)
-        .max()
-        .map(|s| s as usize + 1)
-        .unwrap_or(0);
-    let mut table: Vec<Option<String>> = vec![None; max_slot];
-    for (s, n) in out {
-        if let Some(name) = n {
-            table[s as usize] = Some(name);
-        }
-    }
-    table
-}
-
-/// Walk the AST and replace `\0capref:NAME` sentinel `Lit::Sym` predicate
-/// args with `PredArg::Capture(slot)`. Errors on forward/unknown names.
+/// Walk the AST in source order, building a name-by-slot table incrementally
+/// as `$name` captures are encountered. Within a `Predicate`'s args, only
+/// captures registered earlier in the traversal are visible — forward
+/// references are rejected, matching the old hand-written parser which
+/// resolved at parse time.
+///
+/// Replaces `\0capref:NAME` sentinel `Lit::Sym` predicate args with
+/// `PredArg::Capture(slot)`. Errors on unknown or forward names.
 fn resolve_pred_capture_refs(
     pat: &mut Pat,
-    name_table: &[Option<String>],
+    name_table: &mut Vec<Option<String>>,
 ) -> Result<(), ParseError> {
     match &mut pat.kind {
         PatKind::Predicate { args, .. } => {
@@ -1038,12 +1004,31 @@ fn resolve_pred_capture_refs(
                 }
             }
         }
+        PatKind::Capture { slot, name, body } => {
+            // Register this capture's name (if any) before walking its body,
+            // so the capture is visible to predicates inside its own body.
+            if *slot != u16::MAX {
+                let idx = *slot as usize;
+                if name_table.len() <= idx {
+                    name_table.resize(idx + 1, None);
+                }
+                if let Some(n) = name {
+                    name_table[idx] = Some(n.clone());
+                }
+            }
+            resolve_pred_capture_refs(body, name_table)?;
+        }
         PatKind::Node { children, .. } => {
             for c in children.iter_mut() {
                 resolve_pred_capture_refs(c, name_table)?;
             }
         }
         PatKind::Union(alts) => {
+            // Source-order walk: matches the old hand-written parser, which
+            // resolved capture refs at parse time as it consumed tokens. Note
+            // that the `validate_capture_position` pass rejects captures
+            // inside non-sugar unions, so the only captures seen here are
+            // sugar slots (same slot across all alts).
             for a in alts.iter_mut() {
                 resolve_pred_capture_refs(a, name_table)?;
             }
@@ -1052,7 +1037,6 @@ fn resolve_pred_capture_refs(
             resolve_pred_capture_refs(b, name_table)?;
         }
         PatKind::Quantifier { body, .. } => resolve_pred_capture_refs(body, name_table)?,
-        PatKind::Capture { body, .. } => resolve_pred_capture_refs(body, name_table)?,
         PatKind::AnyOrder { children } => {
             for c in children.iter_mut() {
                 resolve_pred_capture_refs(c, name_table)?;
@@ -2686,6 +2670,23 @@ mod tests {
     fn parse_predicate_unknown_capture_ref_is_rejected() {
         // Forward/unknown capture refs in predicate args must error.
         let e = parse("#pred?($unknown)").expect_err("must reject unknown capture ref");
+        assert!(
+            e.message.contains("unknown or forward capture reference"),
+            "expected 'unknown or forward capture reference', got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn parse_predicate_forward_capture_ref_is_rejected() {
+        // `(send #pred?($recv) $recv)` — the predicate references `$recv`
+        // before the capture appears in source order. The old hand-written
+        // parser resolved capture refs at parse time, so only backward
+        // references (captures already declared) were in scope. The LALRPOP
+        // port must preserve that visibility rule even though name table
+        // construction is a post-pass.
+        let e = parse("(send #pred?($recv) $recv)")
+            .expect_err("must reject forward capture ref in predicate arg");
         assert!(
             e.message.contains("unknown or forward capture reference"),
             "expected 'unknown or forward capture reference', got: {}",
