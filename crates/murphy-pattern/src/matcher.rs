@@ -286,6 +286,26 @@ fn match_pat<P: PredicateHost + ?Sized>(
             *buf = trial;
             true
         }
+
+        IrNode::Unify { name } => {
+            // D4 (murphy-nnr8): `_name` unification.
+            // First occurrence of this name → bind the current NodeId.
+            // Subsequent occurrences → check that the NodeId equals the bound
+            // value. The unification table lives in `buf.unify`; it is
+            // snapshot/restored via `Clone` by every Union/Not/Descend/
+            // Intersection arm that already clones `buf`.
+            let pool_name = ctx.pool(*name);
+            if let Some(entry) = buf.unify.iter().find(|(r, _)| {
+                &ctx.ir.str_pool[r.start as usize..(r.start + r.len) as usize] == pool_name
+            }) {
+                // Already bound — NodeId must match.
+                entry.1 == node
+            } else {
+                // First occurrence — bind.
+                buf.unify.push((*name, node));
+                true
+            }
+        }
     }
 }
 
@@ -1776,5 +1796,113 @@ mod tests {
         let ast2 = b2.finish(t);
         let caps = matches(&ir, &ast2, t, &mut NoPredicates);
         assert!(caps.is_some(), "[$_ !int] must match True_");
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // D4 (murphy-nnr8): tUNIFY — `_name` NodeId unification.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Build `obj.foo(obj)` where receiver and arg are the *same* NodeId.
+    fn same_receiver_and_arg_ast() -> (Ast, NodeId, NodeId) {
+        // Receiver and the single arg share the same node id.
+        let mut b = AstBuilder::new("obj.foo(obj)", "t.rb");
+        let obj_sym = b.intern_symbol("obj");
+        let obj = b.push(NodeKind::Lvar(obj_sym), r());
+        let m = b.intern_symbol("foo");
+        let args = b.push_list(&[obj]);
+        let send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::some(obj),
+                method: m,
+                args,
+            },
+            r(),
+        );
+        let ast = b.finish(send);
+        (ast, send, obj)
+    }
+
+    /// Build `obj.foo(other)` where receiver and arg are different NodeIds.
+    fn different_receiver_and_arg_ast() -> (Ast, NodeId) {
+        let mut b = AstBuilder::new("obj.foo(other)", "t.rb");
+        let obj_sym = b.intern_symbol("obj");
+        let other_sym = b.intern_symbol("other");
+        let obj = b.push(NodeKind::Lvar(obj_sym), r());
+        let other = b.push(NodeKind::Lvar(other_sym), r());
+        let m = b.intern_symbol("foo");
+        let args = b.push_list(&[other]);
+        let send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::some(obj),
+                method: m,
+                args,
+            },
+            r(),
+        );
+        let ast = b.finish(send);
+        (ast, send)
+    }
+
+    #[test]
+    fn unify_same_node_hits() {
+        // `(send _x _ _x)` must match when receiver == arg (same NodeId).
+        let (ast, send, _) = same_receiver_and_arg_ast();
+        let ir = compile("(send _x _ _x)").unwrap();
+        assert!(
+            matches(&ir, &ast, send, &mut NoPredicates).is_some(),
+            "(send _x _ _x) must hit when receiver == arg NodeId"
+        );
+    }
+
+    #[test]
+    fn unify_different_nodes_misses() {
+        // `(send _x _ _x)` must miss when receiver != arg (different NodeIds).
+        let (ast, send) = different_receiver_and_arg_ast();
+        let ir = compile("(send _x _ _x)").unwrap();
+        assert!(
+            matches(&ir, &ast, send, &mut NoPredicates).is_none(),
+            "(send _x _ _x) must miss when receiver != arg NodeId"
+        );
+    }
+
+    #[test]
+    fn unify_two_distinct_names_are_independent() {
+        // `(send _x _ _y)` — `_x` and `_y` are independent bindings.
+        // Both `obj.foo(obj)` and `obj.foo(other)` must match because
+        // `_x` binds receiver and `_y` binds arg with no equality constraint.
+        let (ast, send, _) = same_receiver_and_arg_ast();
+        let ir = compile("(send _x _ _y)").unwrap();
+        assert!(
+            matches(&ir, &ast, send, &mut NoPredicates).is_some(),
+            "(send _x _ _y) must hit (independent bindings)"
+        );
+        let (ast2, send2) = different_receiver_and_arg_ast();
+        assert!(
+            matches(&ir, &ast2, send2, &mut NoPredicates).is_some(),
+            "(send _x _ _y) must also hit with different nodes (independent bindings)"
+        );
+    }
+
+    #[test]
+    fn unify_rollback_across_union_arms() {
+        // `{ (send _x _ _x) (send _x _ !_x) }` — first arm requires same
+        // NodeId, second arm requires different. For `obj.foo(obj)` (same),
+        // first arm should win; for `obj.foo(other)` (different), second arm.
+        // The key is that `_x` binding from the first arm must NOT leak into
+        // the second arm (rollback via clone).
+        let pat = "{ (send _x _ _x) (send _x _ !_x) }";
+        let ir = compile(pat).unwrap();
+
+        let (ast, send, _) = same_receiver_and_arg_ast();
+        assert!(
+            matches(&ir, &ast, send, &mut NoPredicates).is_some(),
+            "first union arm (same) must hit for obj.foo(obj)"
+        );
+
+        let (ast2, send2) = different_receiver_and_arg_ast();
+        assert!(
+            matches(&ir, &ast2, send2, &mut NoPredicates).is_some(),
+            "second union arm (different) must hit for obj.foo(other)"
+        );
     }
 }
