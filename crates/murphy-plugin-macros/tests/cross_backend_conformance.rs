@@ -2535,3 +2535,64 @@ fn intersection_capture_agrees_across_backends() {
     assert!(b_miss.is_none(), "B: [$v int] must miss Sym");
     assert!(c_miss.is_none(), "C: [$v int] must miss Sym");
 }
+
+/// Free fn for `#even?` in B-backend scope.
+fn even_p(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(*cx.kind(node), NodeKind::Int(v) if v % 2 == 0)
+}
+
+/// A minimal predicate host that implements `#even?` — returns `true` iff the
+/// node is an `Int` with an even value.
+struct EvenPredicate<'a> {
+    ast: &'a Ast,
+}
+
+impl<'a> PredicateHost for EvenPredicate<'a> {
+    fn call(&mut self, name: &str, node: NodeId, _args: &[PredCallArg<'_>]) -> bool {
+        if name != "even?" {
+            return false;
+        }
+        matches!(*self.ast.kind(node), murphy_ast::NodeKind::Int(v) if v % 2 == 0)
+    }
+}
+
+node_pattern!(b_wildcard_and_even, "[$_ #even?]");
+
+#[test]
+fn intersection_with_predicate_agrees_across_backends() {
+    // `[$_ #even?]` — matches any Int with an even value.
+    // Int(4): hit. Int(3): miss. True_: miss (predicate returns false).
+    let fns = fns();
+
+    // Int(4) — even int → should match.
+    let mut b = AstBuilder::new("4", "t.rb");
+    let four = b.push(NodeKind::Int(4), r());
+    let ast_four = b.finish(four);
+    let raw = cx_raw_for(&ast_four, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let b_hit: Option<(NodeId,)> = b_wildcard_and_even(four, &cx);
+    assert_c_matches_with(
+        "[$_ #even?]",
+        &ast_four,
+        four,
+        b_hit.is_some(),
+        &mut EvenPredicate { ast: &ast_four },
+    );
+    assert!(b_hit.is_some(), "B: [$_ #even?] must match Int(4)");
+
+    // Int(3) — odd int → should miss.
+    let mut b2 = AstBuilder::new("3", "t.rb");
+    let three = b2.push(NodeKind::Int(3), r());
+    let ast_three = b2.finish(three);
+    let raw2 = cx_raw_for(&ast_three, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let b_miss: Option<(NodeId,)> = b_wildcard_and_even(three, &cx2);
+    assert_c_matches_with(
+        "[$_ #even?]",
+        &ast_three,
+        three,
+        b_miss.is_some(),
+        &mut EvenPredicate { ast: &ast_three },
+    );
+    assert!(b_miss.is_none(), "B: [$_ #even?] must miss Int(3)");
+}
