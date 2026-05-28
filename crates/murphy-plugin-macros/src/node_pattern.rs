@@ -879,8 +879,48 @@ fn lower_pat(
         }
         PatKind::Node { head, children } => lower_node(head, children, subject, ctx),
         PatKind::Union(alts) => {
-            // Each alternative lowers to a `return`-free bool expression; the
-            // node matches the union iff any arm's expression is true.
+            // Detect uniform-capture sugar `${alt1 alt2 ...}` — every arm is
+            // `Capture{slot:S, body:b}` with the same S. The parser guarantees
+            // this is the normalised form for the `${ }` sugar. Lower each
+            // arm's body via `lower_bool` (no capture write per-arm), then
+            // emit the capture assignment once, unconditionally, after the OR
+            // succeeds. This is safe because every arm fires the same slot S
+            // on the winning path.
+            if let Some(shared_slot) = alts.first().and_then(|a| {
+                if let PatKind::Capture { slot, .. } = &a.kind {
+                    Some(*slot)
+                } else {
+                    None
+                }
+            }) {
+                let all_same_capture = alts.iter().all(
+                    |a| matches!(&a.kind, PatKind::Capture { slot, .. } if *slot == shared_slot),
+                );
+                if all_same_capture {
+                    // Lower each arm's body to a bool expression, then OR them.
+                    let arm_bools: Vec<TokenStream> = alts
+                        .iter()
+                        .map(|alt| {
+                            let PatKind::Capture { body, .. } = &alt.kind else {
+                                unreachable!("all_same_capture guarantees Capture");
+                            };
+                            lower_bool(body, subject, ctx)
+                        })
+                        .collect::<syn::Result<_>>()?;
+                    let fail = fail_stmt(ctx);
+                    let ok = gensym(ctx, "__ok");
+                    let assign = capture_assign(shared_slot, quote!(#subject), ctx);
+                    return Ok(quote! {
+                        let #ok: bool = ( #(#arm_bools)||* );
+                        if !#ok {
+                            #fail
+                        }
+                        #assign
+                    });
+                }
+            }
+            // Normal union (no uniform captures): each alternative lowers to a
+            // `return`-free bool expression; the node matches iff any arm is true.
             let alt_bools: Vec<TokenStream> = alts
                 .iter()
                 .map(|alt| lower_bool(alt, subject, ctx))

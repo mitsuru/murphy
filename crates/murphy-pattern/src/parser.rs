@@ -42,14 +42,80 @@ pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
 #[cfg(test)]
 mod capture_position_tests {
     use crate::parse;
+    use crate::{CaptureKind, PatKind};
 
     #[test]
-    fn captures_in_union_arms_are_rejected() {
-        // `{$a $b}` — both arms declare captures; the losing arm's slot
-        // would be unwritten at the matcher's `finish` step (it would
-        // panic at runtime). The parser must reject this up front.
-        let e = parse("{$a $b}").expect_err("must reject capture in union");
+    fn captures_in_union_arms_diff_slot_rejected() {
+        // `{$a $b}` — arms have different capture names (different slots);
+        // the parser must reject this because the losing arm's slot would
+        // be unwritten at the matcher's `finish` step.
+        let e = parse("{$a $b}").expect_err("must reject differing captures in union");
         assert!(e.message.contains('$'));
+    }
+
+    #[test]
+    fn capture_in_union_one_sided_rejected() {
+        // `{$_ int}` — only one arm has a capture; must be rejected.
+        let e = parse("{$_ int}").expect_err("must reject one-sided capture in union");
+        assert!(e.message.contains('$'));
+    }
+
+    #[test]
+    fn capture_sugar_nested_capture_in_body_rejected() {
+        // `${int $float}` — the sugar produces a union where one arm's
+        // body is itself a `$` capture (the body of `$float`). Must be rejected.
+        let e = parse("${int $float}").expect_err("must reject nested capture in sugar union body");
+        assert!(e.message.contains('$'));
+    }
+
+    #[test]
+    fn capture_union_sugar_parses_and_has_single_slot() {
+        // `${int float}` — the sugar `${ ... }` produces exactly one slot
+        // shared across all arms. The result is a Union of Captures
+        // (each arm Capture{slot:0, body:Kind(...)}).
+        let p = parse("${int float}").expect("${int float} must parse");
+        // Exactly one capture slot (slot 0) of kind Node.
+        assert_eq!(p.n_captures(), 1, "expected 1 capture slot");
+        assert_eq!(p.captures[0], CaptureKind::Node);
+        // Root node must be a Union.
+        assert!(
+            matches!(p.root.kind, PatKind::Union(_)),
+            "root must be Union, got {:?}",
+            p.root.kind
+        );
+        // Both arms must be Capture with slot 0.
+        if let PatKind::Union(alts) = &p.root.kind {
+            assert_eq!(alts.len(), 2, "expected 2 union arms");
+            for (i, arm) in alts.iter().enumerate() {
+                match &arm.kind {
+                    PatKind::Capture { slot, name, .. } => {
+                        assert_eq!(*slot, 0, "arm {i} must use slot 0");
+                        assert!(name.is_none(), "arm {i} must be anonymous");
+                    }
+                    _ => panic!("arm {i} must be a Capture, got {:?}", arm.kind),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn capture_union_sugar_three_arms_each_share_slot() {
+        // `${int float sym}` — 3-arm sugar also uses a single slot 0.
+        let p = parse("${int float sym}").expect("${int float sym} must parse");
+        assert_eq!(p.n_captures(), 1, "expected 1 capture slot for 3-arm sugar");
+        assert!(
+            matches!(p.root.kind, PatKind::Union(_)),
+            "root must be Union for 3-arm sugar"
+        );
+        if let PatKind::Union(alts) = &p.root.kind {
+            assert_eq!(alts.len(), 3);
+            for (i, arm) in alts.iter().enumerate() {
+                let PatKind::Capture { slot, .. } = &arm.kind else {
+                    panic!("arm {i} must be Capture, got {:?}", arm.kind);
+                };
+                assert_eq!(*slot, 0, "arm {i} must use slot 0");
+            }
+        }
     }
 
     #[test]
@@ -77,6 +143,43 @@ mod capture_position_tests {
         // The body of an outer `$(...)` is a definite-assignment subtree.
         let p = parse("$(send $_ :foo)").expect("nested capture should parse");
         assert_eq!(p.n_captures(), 2);
+    }
+
+    #[test]
+    fn node_child_outside_union_capture_unaffected() {
+        // `({send csend} $...)` — the `$...` is outside the union, in the
+        // node's child list. This must still parse without error.
+        let p = parse("({send csend} $...)").expect("({send csend} $...) must parse");
+        assert_eq!(p.n_captures(), 1);
+        assert_eq!(p.captures[0], CaptureKind::Seq);
+    }
+
+    #[test]
+    fn not_over_uniform_capture_sugar_rejected() {
+        // `!${int float}` — the sugar union is inside a `!` negation, which
+        // is a forbidden position. Even though all arms share the same slot,
+        // the outer `!` means assignment is not guaranteed on the happy path.
+        let e = parse("!${int float}").expect_err("must reject sugar union inside negation");
+        assert!(e.message.contains('$'));
+    }
+
+    #[test]
+    fn descend_over_uniform_capture_sugar_rejected() {
+        // `` `${int float} `` — same reasoning as the `!` case: the descend
+        // prefix makes the inner union sit on a non-definite-assignment path.
+        let e = parse("`${int float}").expect_err("must reject sugar union inside descend");
+        assert!(e.message.contains('$'));
+    }
+
+    #[test]
+    fn capture_inside_non_uniform_outer_union_rejected() {
+        // `{int ${int float}}` — outer union has one arm without a capture
+        // (`int`) and one arm that is uniform-capture sugar (`${int float}`).
+        // This is not a uniform union at the outer level, so the inner sugar
+        // is walked with forbidden=true and the capture inside it is rejected.
+        let e = parse("{int ${int float}}")
+            .expect_err("must reject capture in non-uniform outer union");
+        assert!(e.message.contains('$'));
     }
 }
 
@@ -211,9 +314,16 @@ fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
 /// are all definite-assignment positions and recurse with `forbidden =
 /// false`.
 ///
+/// One exception to the union rule: `${alt1 alt2 ...}` sugar desugars to a
+/// `Union` whose every arm is `Capture{slot:S, body:b}` with a shared slot S.
+/// This is safe because every arm writes slot S, so the winning arm's write
+/// always happens. Validation accepts this form and recurses into each body
+/// with `forbidden = false` (the body itself is a definite-assignment point
+/// inside that arm).
+///
 /// `forbidden` is `true` only while traversing the subtree of a union /
 /// not / descend node. A `Capture` reached with `forbidden = true` is the
-/// error case.
+/// error case, unless it is inside a uniform-capture union as above.
 fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseError> {
     match &pat.kind {
         PatKind::Capture { body, .. } => {
@@ -228,6 +338,57 @@ fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseErro
             validate_capture_position(body, false)
         }
         PatKind::Union(alts) => {
+            // If every arm is a Capture sharing the same (slot, name) —
+            // i.e. this is a desugared `${alt1 alt2 ...}` — then the union
+            // is safe: whichever arm wins will write slot S. Validate each
+            // arm's body normally (forbidden = false) and accept.
+            //
+            // Any other arrangement (only some arms capture, or arms use
+            // different slots/names) is rejected because the losing arm's
+            // slot would be unwritten.
+            if let Some(first_cap) = alts.first().and_then(|a| {
+                if let PatKind::Capture { slot, name, .. } = &a.kind {
+                    Some((*slot, name.as_deref()))
+                } else {
+                    None
+                }
+            }) {
+                let (first_slot, first_name) = first_cap;
+                // Check: ALL arms are Capture with the same (slot, name).
+                let all_same = alts.iter().all(|alt| {
+                    matches!(&alt.kind,
+                        PatKind::Capture { slot, name, .. }
+                        if *slot == first_slot && name.as_deref() == first_name
+                    )
+                });
+                if all_same && !forbidden {
+                    // Validate each arm's body. The body of a sugar arm must
+                    // not itself be a `$` capture — `${int $float}` would
+                    // produce a nested slot that is never written on the
+                    // non-winning arm. Treat a bare `Capture` body as if it
+                    // were in a forbidden position.
+                    for alt in alts {
+                        let PatKind::Capture { body, .. } = &alt.kind else {
+                            unreachable!("all_same guarantees Capture");
+                        };
+                        // A body that is directly a Capture is forbidden
+                        // (would create an unwritten nested slot).
+                        if matches!(body.kind, PatKind::Capture { .. }) {
+                            return Err(ParseError::new(
+                                "`$` capture is not allowed inside `{}` / `!` / `` ` `` \
+                                 (the body has no definite-assignment path)",
+                                body.span,
+                            ));
+                        }
+                        validate_capture_position(body, false)?;
+                    }
+                    return Ok(());
+                }
+                // Not all arms match — fall through to individual rejection.
+            }
+            // Either some arms lack Capture, or arms use different slots/names.
+            // Walk each arm with forbidden=true so the first Capture found
+            // produces the right error.
             for alt in alts {
                 validate_capture_position(alt, true)?;
             }
@@ -522,6 +683,77 @@ impl<'a> Parser<'a> {
                     span: ell_span,
                 };
                 (None, body, ell_span.end)
+            }
+            Token::LBrace => {
+                // Sugar form `${ alt1 alt2 ... }`:
+                // `$` immediately before `{` means "capture whichever union
+                // arm matches, into slot `S`". This desugars at parse time
+                // to `{ Capture{slot:S, body:alt1} Capture{slot:S, body:alt2}
+                // ... }` — a Union whose every arm carries the same Capture
+                // slot. The capture kind is always `Node` (arms may not be
+                // rest-like or quantified inside the sugar).
+                //
+                // Slot S is already reserved above as `CaptureKind::Node`
+                // (the kind appropriate for a per-arm node capture). Do NOT
+                // push another entry — reuse `slot` for every arm.
+                let open_span = next.span;
+                self.pos += 1; // consume `{`
+                let mut alts: Vec<Pat> = Vec::new();
+                loop {
+                    let Some(tok) = self.peek() else {
+                        return Err(ParseError::new("unclosed `{`: expected `}`", open_span));
+                    };
+                    match tok.tok {
+                        Token::RBrace => {
+                            let close_span = tok.span;
+                            self.pos += 1; // consume `}`
+                            let union_span = PatSpan {
+                                start: open_span.start,
+                                end: close_span.end,
+                            };
+                            if alts.is_empty() {
+                                return Err(ParseError::new(
+                                    "empty union `{}` needs at least one alternative",
+                                    union_span,
+                                ));
+                            }
+                            // Build `Union[Capture{slot, body:arm} ...]` where
+                            // each arm is already wrapped. The outer span covers
+                            // `$` through the closing `}`.
+                            let outer_span = PatSpan {
+                                start: dollar_span.start,
+                                end: close_span.end,
+                            };
+                            // `captures[slot]` was set to `Node` at reservation
+                            // — no kind upgrade needed (arms cannot be Rest or
+                            // Quantifier inside the sugar body).
+                            return Ok(Pat {
+                                kind: PatKind::Union(alts),
+                                span: outer_span,
+                            });
+                        }
+                        _ => {
+                            // Parse one arm body (not `prefixed` — the arm does
+                            // not get its own `$`, `!`, etc. prefix). We call
+                            // `prefixed` here so that arms may be node patterns
+                            // or unions themselves, but we then wrap the result
+                            // in a Capture for slot S.
+                            let arm_body = self.prefixed(allow_bare_predicate)?;
+                            let arm_span = PatSpan {
+                                start: dollar_span.start,
+                                end: arm_body.span.end,
+                            };
+                            alts.push(Pat {
+                                kind: PatKind::Capture {
+                                    slot,
+                                    name: None,
+                                    body: Box::new(arm_body),
+                                },
+                                span: arm_span,
+                            });
+                        }
+                    }
+                }
             }
             _ => {
                 let body = self.prefixed(allow_bare_predicate)?;

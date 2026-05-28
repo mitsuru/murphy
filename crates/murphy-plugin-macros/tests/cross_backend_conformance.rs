@@ -1175,3 +1175,74 @@ fn quantifier_star_with_fixed_suffix() {
         );
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// 11. Union-capture sugar `${int float}` (murphy-6ba). A `$` immediately
+// before `{...}` desugars to a Union whose every arm is a Capture sharing
+// slot 0. Both backends must agree on hit/miss AND return the same NodeId
+// for the capture.
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_sugar_int_or_float, "${int float}");
+
+#[test]
+fn union_capture_sugar_returns_same_node_id_for_both_arms() {
+    let fns = fns();
+
+    // An Int(42) subject — must hit via the `int` arm and capture itself.
+    {
+        let mut b = AstBuilder::new("42", "t.rb");
+        let int_node = b.push(NodeKind::Int(42), r());
+        let ast = b.finish(int_node);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let b_captured: Option<(NodeId,)> = b_sugar_int_or_float(int_node, &cx);
+        let c = assert_c_matches("${int float}", &ast, int_node, b_captured.is_some());
+        let c_captured = c.expect("C also matched on Int(42)").get(0).cloned();
+        match (b_captured, c_captured) {
+            (Some((bi,)), Some(CaptureValue::Node(ci))) => {
+                assert_eq!(bi, ci, "Int arm: capture id disagrees (B={bi:?}, C={ci:?})");
+                assert_eq!(bi, int_node, "Int arm: captured wrong node");
+            }
+            other => panic!("backends disagree on ${{int float}} / Int(42): {other:?}"),
+        }
+    }
+
+    // A Float(1.5) subject — must hit via the `float` arm and capture itself.
+    {
+        let mut b = AstBuilder::new("1.5", "t.rb");
+        let float_node = b.push(NodeKind::Float(1.5), r());
+        let ast = b.finish(float_node);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let b_captured: Option<(NodeId,)> = b_sugar_int_or_float(float_node, &cx);
+        let c = assert_c_matches("${int float}", &ast, float_node, b_captured.is_some());
+        let c_captured = c.expect("C also matched on Float(1.5)").get(0).cloned();
+        match (b_captured, c_captured) {
+            (Some((bi,)), Some(CaptureValue::Node(ci))) => {
+                assert_eq!(
+                    bi, ci,
+                    "Float arm: capture id disagrees (B={bi:?}, C={ci:?})"
+                );
+                assert_eq!(bi, float_node, "Float arm: captured wrong node");
+            }
+            other => panic!("backends disagree on ${{int float}} / Float(1.5): {other:?}"),
+        }
+    }
+
+    // A Sym subject — must miss (neither int nor float).
+    {
+        let mut b = AstBuilder::new(":foo", "t.rb");
+        let sym = b.intern_symbol("foo");
+        let sym_node = b.push(NodeKind::Sym(sym), r());
+        let ast = b.finish(sym_node);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let b_matched: Option<(NodeId,)> = b_sugar_int_or_float(sym_node, &cx);
+        assert_c_matches("${int float}", &ast, sym_node, b_matched.is_some());
+        assert!(b_matched.is_none(), "Sym must not match ${{int float}}");
+    }
+}
