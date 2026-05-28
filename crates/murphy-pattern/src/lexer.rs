@@ -56,6 +56,8 @@ pub(crate) enum Token {
     LBracket,
     /// `]` — closing bracket for intersection AND-pattern `[...]`.
     RBracket,
+    /// `|` — pipe separator between union alternatives in `{...}`.
+    Pipe,
 }
 
 /// A [`Token`] paired with its byte-offset span in the source string.
@@ -123,6 +125,7 @@ impl<'a> Lexer<'a> {
             b'>' => self.single(Token::RAngle),
             b'[' => self.single(Token::LBracket),
             b']' => self.single(Token::RBracket),
+            b'|' => self.single(Token::Pipe),
             b'%' => {
                 let (ch, len) = self.char_at_cursor();
                 Err(self.err_at(
@@ -680,6 +683,29 @@ mod tests {
         // not surfaced as separate tokens.
         assert_eq!(toks(":foo?"), vec![Token::Sym("foo?".into())]);
         assert_eq!(toks(":foo!"), vec![Token::Sym("foo!".into())]);
+    }
+
+    // --- murphy-wsep: pipe `|` as union group separator --------------------
+
+    #[test]
+    fn pipe_token_lexes_standalone() {
+        // `|` is now a valid Token::Pipe — no longer an "unexpected character".
+        assert_eq!(toks("|"), vec![Token::Pipe]);
+    }
+
+    #[test]
+    fn pipe_token_in_union_context() {
+        // `{a | b}` produces LBrace Ident(a) Pipe Ident(b) RBrace.
+        assert_eq!(
+            toks("{a | b}"),
+            vec![
+                Token::LBrace,
+                Token::Ident("a".into()),
+                Token::Pipe,
+                Token::Ident("b".into()),
+                Token::RBrace,
+            ]
+        );
     }
 
     #[test]
