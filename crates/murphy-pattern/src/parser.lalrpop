@@ -11,7 +11,7 @@
 // node_pattern                     | Pattern → Prefixed
 // node_pattern_no_union            | Prefixed (!, ^, `, $, Postfixed)
 //   '(' variadic_pattern_list ')'  | NodeMatch (children: NodeChild*)
-//   '[' node_pattern_list ']'      | (deferred — beads murphy-l448: intersection)
+//   '[' node_pattern_list ']'      | Intersection rule — implemented in D1 (murphy-l448)
 //   '!' node_pattern               | Prefixed "!" <inner:Prefixed>
 //   '^' node_pattern               | Prefixed "^" <inner:Prefixed>
 //   '`' node_pattern               | Prefixed "`" <inner:Prefixed>
@@ -49,7 +49,6 @@
 //                                  |   fold_predicate_args in parser.rs
 // ---------------------------------|-------------------------------------------
 // D-phase deferred (not added here):
-//   intersection `[...]`           — beads murphy-l448
 //   union pipe `|`                 — beads murphy-wsep
 //   tPARAM_CONST                   — beads murphy-kq57
 //   tUNIFY                         — beads murphy-nnr8
@@ -192,6 +191,7 @@ Primary: Pat = {
     <l:@L> <name:"ident"> <r:@R> => crate::parser::kind_or_unknown_ident(&name, PatSpan::new(l, r)),
     <m:NodeMatch> => m,
     <u:UnionPrimary> => u,
+    <i:IntersectionPrimary> => i,
 };
 
 
@@ -288,6 +288,17 @@ UnionPrimary: Pat = {
     },
 };
 
+// `[ pat+ ]` — intersection AND-pattern (D1, murphy-l448).
+// All children must match the same subject node. The `Pat+` macro
+// rejects an empty `[]` by construction; the diagnostic scan in
+// `diagnose_shape_errors` emits a friendly message for that case.
+IntersectionPrimary: Pat = {
+    <l:@L> "[" <children:Prefixed+> "]" <r:@R> => Pat {
+        kind: PatKind::Intersection { children },
+        span: PatSpan::new(l, r),
+    },
+};
+
 Quantifier: (u8, u8) = {
     "*" => (0, u8::MAX),
     "+" => (1, u8::MAX),
@@ -305,6 +316,8 @@ extern {
         "}" => Token::RBrace,
         "<" => Token::LAngle,
         ">" => Token::RAngle,
+        "[" => Token::LBracket,
+        "]" => Token::RBracket,
         "$" => Token::Dollar,
         "predicate" => Token::Predicate(<String>),
         "..." => Token::Ellipsis,

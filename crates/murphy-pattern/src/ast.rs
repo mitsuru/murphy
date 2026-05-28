@@ -82,6 +82,11 @@ pub enum PatKind {
     /// the top level, not inside Union/Not/Descend/Quantifier body).
     /// v1 limit: at most 10 non-rest children.
     AnyOrder { children: Vec<Pat> },
+    /// `[a b c]` — intersection AND-pattern: matches subject if **all**
+    /// `children` patterns match the same subject. Equivalent to RuboCop's
+    /// `node_pattern_no_union: '[' node_pattern_list ']'`. At least one child
+    /// is required (the grammar enforces `Pat+` inside `[...]`).
+    Intersection { children: Vec<Pat> },
 }
 
 /// The head of a `Node` match: what the node's kind must satisfy.

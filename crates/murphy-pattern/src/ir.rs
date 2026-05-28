@@ -135,6 +135,11 @@ pub enum IrNode {
     AnyOrder {
         children: IrSlice,
     },
+    /// `[a b c]` — intersection AND-pattern: all `children` must match the
+    /// same subject. Mirrors [`crate::PatKind::Intersection`].
+    Intersection {
+        children: IrSlice,
+    },
 }
 
 /// The head of an `IrNode::Node`.
@@ -367,6 +372,15 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
             push_node(
                 ir,
                 IrNode::AnyOrder {
+                    children: child_slice,
+                },
+            )
+        }
+        PatKind::Intersection { children } => {
+            let child_slice = lower_children(children, ast, ir);
+            push_node(
+                ir,
+                IrNode::Intersection {
                     children: child_slice,
                 },
             )

@@ -292,6 +292,16 @@ fn diagnose_shape_errors(tokens: &[Spanned]) -> Result<(), ParseError> {
         ));
     }
 
+    // 7) Empty `[...]` intersection: `[` immediately followed by `]`.
+    for win in tokens.windows(2) {
+        if matches!(win[0].tok, Token::LBracket) && matches!(win[1].tok, Token::RBracket) {
+            return Err(ParseError::new(
+                "empty intersection `[]`: must contain at least one child pattern",
+                PatSpan::new(win[0].span.start as usize, win[1].span.end as usize),
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -721,6 +731,11 @@ fn convert_named_captures(pat: &mut Pat) {
                 convert_named_captures(c);
             }
         }
+        PatKind::Intersection { children } => {
+            for c in children {
+                convert_named_captures(c);
+            }
+        }
         PatKind::Rest
         | PatKind::Wildcard
         | PatKind::NilTest
@@ -839,6 +854,16 @@ fn validate_bare_predicate_position(pat: &mut Pat, pos: BarePos<'_>) -> Result<(
             // conversion is rejected here as well.
             for child in children {
                 validate_bare_predicate_position(child, BarePos::Root)?;
+            }
+        }
+        PatKind::Intersection { children } => {
+            // All children of `[...]` operate on the same subject, so they
+            // inherit the enclosing slot's bare-predicate permission. This
+            // matches RuboCop's behaviour, where a bare-predicate shorthand
+            // inside `[...]` is allowed wherever the enclosing node slot
+            // permits it.
+            for child in children {
+                validate_bare_predicate_position(child, pos.clone())?;
             }
         }
         PatKind::Rest
@@ -966,6 +991,11 @@ fn walk_assign(pat: &mut Pat, state: &mut SlotState) -> Result<(), ParseError> {
                 walk_assign(c, state)?;
             }
         }
+        PatKind::Intersection { children } => {
+            for c in children.iter_mut() {
+                walk_assign(c, state)?;
+            }
+        }
         PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Rest
@@ -1047,6 +1077,11 @@ fn resolve_pred_capture_refs(
                 resolve_pred_capture_refs(c, name_table)?;
             }
         }
+        PatKind::Intersection { children } => {
+            for c in children.iter_mut() {
+                resolve_pred_capture_refs(c, name_table)?;
+            }
+        }
         PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Rest
@@ -1124,6 +1159,14 @@ fn validate_quantifier_placement(pat: &Pat, is_node_child: bool) -> Result<(), P
             }
             Ok(())
         }
+        PatKind::Intersection { children } => {
+            // `[...]` children all match the same subject, not a list slot, so
+            // quantifiers inside them are not valid as node-list children.
+            for child in children {
+                validate_quantifier_placement(child, false)?;
+            }
+            Ok(())
+        }
         PatKind::Rest
         | PatKind::Wildcard
         | PatKind::NilTest
@@ -1161,6 +1204,12 @@ fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
         PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => validate_quantifier_body(b),
         PatKind::Quantifier { body, .. } => validate_quantifier_body(body),
         PatKind::AnyOrder { children } => {
+            for child in children {
+                validate_quantifier_body(child)?;
+            }
+            Ok(())
+        }
+        PatKind::Intersection { children } => {
             for child in children {
                 validate_quantifier_body(child)?;
             }
@@ -1234,6 +1283,14 @@ fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseErro
             }
             Ok(())
         }
+        PatKind::Intersection { children } => {
+            // All children match the same subject, so any capture is on a
+            // definite-assignment path. Pass `forbidden` through unchanged.
+            for child in children {
+                validate_capture_position(child, forbidden)?;
+            }
+            Ok(())
+        }
         PatKind::Rest
         | PatKind::Wildcard
         | PatKind::NilTest
@@ -1290,6 +1347,13 @@ fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseEr
         }
         PatKind::Quantifier { body, .. } => {
             validate_rest_placement(body, false)?;
+        }
+        PatKind::Intersection { children } => {
+            // `[...]` children each match the same scalar subject; `...` / `$...`
+            // inside an intersection is not valid (same restriction as Union).
+            for child in children {
+                validate_rest_placement(child, false)?;
+            }
         }
         PatKind::Rest
         | PatKind::Wildcard
@@ -2736,5 +2800,86 @@ mod tests {
             "expected the v1-unsupported nil-arg message, got: {}",
             e.message
         );
+    }
+}
+
+// ============================================================================
+// Intersection tests (murphy-l448)
+// ============================================================================
+
+#[cfg(test)]
+mod intersection_tests {
+    use crate::parse;
+    use crate::{CaptureKind, PatKind};
+
+    #[test]
+    fn parses_simple_intersection() {
+        let p = parse("[!nil? int]").expect("[!nil? int] must parse");
+        assert!(
+            matches!(p.root.kind, PatKind::Intersection { .. }),
+            "root must be Intersection, got {:?}",
+            p.root.kind
+        );
+        if let PatKind::Intersection { children } = &p.root.kind {
+            assert_eq!(children.len(), 2, "expected 2 children");
+        }
+    }
+
+    #[test]
+    fn parses_single_child_intersection() {
+        // Single-child intersection is semantically equivalent to the child.
+        let p = parse("[int]").expect("[int] must parse");
+        assert!(
+            matches!(p.root.kind, PatKind::Intersection { .. }),
+            "root must be Intersection, got {:?}",
+            p.root.kind
+        );
+        if let PatKind::Intersection { children } = &p.root.kind {
+            assert_eq!(children.len(), 1);
+        }
+    }
+
+    #[test]
+    fn parses_intersection_with_capture() {
+        // `[$val int]` — capture is allowed (definite-assignment path: all
+        // children match same subject, so `$val` always writes on success).
+        let p = parse("[$val int]").expect("[$val int] must parse");
+        assert_eq!(p.n_captures(), 1);
+        assert_eq!(p.captures[0], CaptureKind::Node);
+    }
+
+    #[test]
+    fn empty_intersection_is_rejected() {
+        let e = parse("[]").expect_err("[] must be rejected");
+        assert!(
+            e.message.contains("empty intersection") || e.message.contains("[]"),
+            "expected empty-intersection error, got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn intersection_rest_inside_rejected() {
+        // `...` inside `[...]` is invalid — the grammar only accepts `Prefixed`
+        // patterns (not `...` / NodeChild) as intersection children, so this
+        // parse errors out before any semantic validation runs.
+        let e = parse("[...]").expect_err("[...] must reject rest inside intersection");
+        // The error may be a grammar "unexpected token" (the LALRPOP grammar
+        // does not include Ellipsis in `Prefixed`) or a semantic rest-placement
+        // diagnostic. Either way the parse must fail.
+        let _ = e; // any error is acceptable
+    }
+
+    #[test]
+    fn intersection_nested_in_node_child() {
+        // `(send nil? [!nil? :puts] _)` — intersection as a node child.
+        let p = parse("(send nil? [!nil? :puts] _)").expect("must parse");
+        assert!(matches!(p.root.kind, PatKind::Node { .. }));
+        if let PatKind::Node { children, .. } = &p.root.kind {
+            assert!(
+                matches!(children[1].kind, PatKind::Intersection { .. }),
+                "second child must be Intersection"
+            );
+        }
     }
 }

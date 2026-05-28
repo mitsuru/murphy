@@ -270,6 +270,22 @@ fn match_pat<P: PredicateHost + ?Sized>(
             debug_assert!(false, "AnyOrder IR reached scalar slot");
             false
         }
+        IrNode::Intersection { children } => {
+            // All children must match the same subject node. Route through a
+            // trial buffer so a failing child rolls back any partial captures
+            // written by earlier children.
+            let child_ids: Vec<IrNodeId> = ctx.ir.children
+                [children.start as usize..(children.start + children.len) as usize]
+                .to_vec();
+            let mut trial = buf.clone();
+            for child in child_ids {
+                if !match_pat(ctx, child, node, &mut trial, predicates) {
+                    return false;
+                }
+            }
+            *buf = trial;
+            true
+        }
     }
 }
 
@@ -1664,5 +1680,101 @@ mod tests {
     #[allow(dead_code)]
     fn _force_use_symbol(s: Symbol, l: NodeList) {
         let _ = (s, l);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Intersection (murphy-l448)
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn intersection_matches_when_all_children_match() {
+        // `[!nil? int]` — subject must not be nil AND must be an int.
+        // Use Int(1): not-nil and is int → hit.
+        let mut b = AstBuilder::new("1", "t.rb");
+        let one = b.push(NodeKind::Int(1), r());
+        let ast = b.finish(one);
+        let ir = compile("[!nil? int]").unwrap();
+        assert!(
+            matches(&ir, &ast, one, &mut NoPredicates).is_some(),
+            "[!nil? int] must match Int(1)"
+        );
+    }
+
+    #[test]
+    fn intersection_misses_when_any_child_fails() {
+        // `[!nil? int]` — subject is Nil: fails the `!nil?` guard.
+        let mut b = AstBuilder::new("nil", "t.rb");
+        let nil = b.push(NodeKind::Nil, r());
+        let ast = b.finish(nil);
+        let ir = compile("[!nil? int]").unwrap();
+        assert!(
+            matches(&ir, &ast, nil, &mut NoPredicates).is_none(),
+            "[!nil? int] must miss Nil"
+        );
+        // Also fail on a node that IS not-nil but is NOT an int (e.g. True_).
+        let mut b2 = AstBuilder::new("true", "t.rb");
+        let t = b2.push(NodeKind::True_, r());
+        let ast2 = b2.finish(t);
+        assert!(
+            matches(&ir, &ast2, t, &mut NoPredicates).is_none(),
+            "[!nil? int] must miss True"
+        );
+    }
+
+    #[test]
+    fn intersection_single_child_behaves_like_child() {
+        // `[int]` — equivalent to bare `int`; matches Int, misses Sym.
+        let mut b = AstBuilder::new("42", "t.rb");
+        let n = b.push(NodeKind::Int(42), r());
+        let ast = b.finish(n);
+        let ir = compile("[int]").unwrap();
+        assert!(
+            matches(&ir, &ast, n, &mut NoPredicates).is_some(),
+            "[int] must match Int"
+        );
+        let mut b2 = AstBuilder::new(":x", "t.rb");
+        let s = b2.intern_symbol("x");
+        let sym = b2.push(NodeKind::Sym(s), r());
+        let ast2 = b2.finish(sym);
+        assert!(
+            matches(&ir, &ast2, sym, &mut NoPredicates).is_none(),
+            "[int] must miss Sym"
+        );
+    }
+
+    #[test]
+    fn intersection_capture_writes_slot_when_all_match() {
+        // `[$v int]` — capture writes `v` iff Int matches.
+        let mut b = AstBuilder::new("7", "t.rb");
+        let n = b.push(NodeKind::Int(7), r());
+        let ast = b.finish(n);
+        let ir = compile("[$v int]").unwrap();
+        let caps = matches(&ir, &ast, n, &mut NoPredicates).expect("must match");
+        let CaptureValue::Node(id) = caps.get(0).unwrap() else {
+            panic!("expected Node capture");
+        };
+        assert_eq!(*id, n, "captured node must be Int(7)");
+    }
+
+    #[test]
+    fn intersection_capture_does_not_write_when_later_child_fails() {
+        // `[!1 $_ !int]` — subject is Int(1): passes `!1`? No, Int(1) fails `!1`.
+        // Use: `[$_ !int]` — subject is Int(3): passes `$_` but fails `!int`.
+        // The whole intersection must miss; no captures should be returned.
+        let mut b = AstBuilder::new("3", "t.rb");
+        let n = b.push(NodeKind::Int(3), r());
+        let ast = b.finish(n);
+        // `[$_ !int]`: capture wildcard but NOT int. Int(3) is int so `!int` fails.
+        let ir = compile("[$_ !int]").unwrap();
+        assert!(
+            matches(&ir, &ast, n, &mut NoPredicates).is_none(),
+            "[$_ !int] must miss Int(3) (fails second child !int)"
+        );
+        // True_ satisfies !int → both children pass → match + capture.
+        let mut b2 = AstBuilder::new("true", "t.rb");
+        let t = b2.push(NodeKind::True_, r());
+        let ast2 = b2.finish(t);
+        let caps = matches(&ir, &ast2, t, &mut NoPredicates);
+        assert!(caps.is_some(), "[$_ !int] must match True_");
     }
 }
