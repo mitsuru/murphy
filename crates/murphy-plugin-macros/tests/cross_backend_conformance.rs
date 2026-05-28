@@ -3148,6 +3148,11 @@ struct TestOpts {
     threshold: i64,
     active: bool,
     opt_method: Option<String>,
+    // Phase E (murphy-aow): cop authors may have a raw-ident field that
+    // collides with a Rust keyword (`type`, `loop`, `match`, …). The macro
+    // must lower `%type` to `__opts.r#type` without panicking — see
+    // `parse_field_ident` in node_pattern.rs.
+    r#type: String,
 }
 
 node_pattern!(b_pn_str, "%method", opts: TestOpts);
@@ -3155,6 +3160,7 @@ node_pattern!(b_pn_strset, "%methods", opts: TestOpts);
 node_pattern!(b_pn_int, "%threshold", opts: TestOpts);
 node_pattern!(b_pn_bool, "%active", opts: TestOpts);
 node_pattern!(b_pn_opt, "%opt_method", opts: TestOpts);
+node_pattern!(b_pn_keyword, "%type", opts: TestOpts);
 node_pattern!(b_positional1, "%1");
 
 fn true_node_ast() -> (Ast, NodeId) {
@@ -3376,6 +3382,33 @@ fn param_positional_agrees() {
     let b2 = b_positional1(node, &cx, &pos_b_empty);
     assert!(!b2, "B must miss when positional is empty");
     assert_c_matches_with_params("%1", &ast, node, b2, &params_empty);
+}
+
+#[test]
+fn param_named_keyword_field_agrees() {
+    // `%type` references the `r#type: String` field on TestOpts. The macro
+    // must emit `__opts.r#type` (not `__opts.type`, which would not compile);
+    // this test exercises that the macro reaches that field at runtime and
+    // both backends produce the same result.
+    let fns = fns();
+    let (ast, node) = sym_node_ast("Foo");
+    let opts = TestOpts {
+        r#type: "Foo".into(),
+        ..Default::default()
+    };
+    let json = opts.to_config_json();
+    let raw = cx_raw_for_with_options_json(&ast, &fns, &json);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let mut params = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params
+        .named
+        .insert("type".into(), ParamOwn::Str("Foo".into()));
+    let b = b_pn_keyword(node, &cx, &[]);
+    assert!(b, "B must hit %type=Foo on :Foo (raw-ident field name)");
+    assert_c_matches_with_params("%type", &ast, node, b, &params);
 }
 
 #[test]

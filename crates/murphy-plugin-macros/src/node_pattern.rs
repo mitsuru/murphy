@@ -192,7 +192,12 @@ fn lower_matcher(
         .iter()
         .map(|n| {
             let local = param_named_local(n);
-            let field = Ident::new(n, Span::call_site());
+            // `Ident::new("type", _)` panics for Rust keywords. Cop authors
+            // can legitimately have a `r#type: String` field on their
+            // `CopOptions` struct, so route the name through `syn::parse_str`
+            // which emits a raw identifier (`r#type`) for keywords and a
+            // plain identifier for everything else.
+            let field = parse_field_ident(n);
             quote! {
                 let #local: ::murphy_plugin_api::Param<'_> =
                     ::murphy_plugin_api::IntoParam::into_param(&__opts.#field);
@@ -257,6 +262,19 @@ fn param_named_local(name: &str) -> Ident {
     Ident::new(&format!("__pn_{name}"), Span::call_site())
 }
 
+/// Build an `Ident` for a `CopOptions` struct field name. Plain idents use
+/// `Ident::new`; Rust keywords (`type`, `loop`, `match`, …) fall back to raw
+/// identifiers (`r#type`, …) via `syn::parse_str` so cop authors can write
+/// `%type` and the macro can lower it to `__opts.r#type` without panicking
+/// at expansion time.
+fn parse_field_ident(name: &str) -> Ident {
+    syn::parse_str::<Ident>(name).unwrap_or_else(|_| {
+        // `syn::parse_str` rejects Rust keywords; fall back to a raw ident.
+        syn::parse_str::<Ident>(&format!("r#{name}"))
+            .unwrap_or_else(|e| panic!("node_pattern!: cannot turn `{name}` into an ident: {e}"))
+    })
+}
+
 /// Collect distinct `%name` (named runtime parameter) names from the pattern
 /// tree in first-occurrence order. Stable across recompilations so the
 /// emitted pre-resolve declarations are deterministic.
@@ -270,7 +288,7 @@ fn collect_param_named_names_inner(pat: &murphy_pattern::Pat, out: &mut Vec<Stri
     use murphy_pattern::PatKind;
     match &pat.kind {
         PatKind::ParamNamed { name } => {
-            if !out.iter().any(|n| n == name) {
+            if !out.contains(name) {
                 out.push(name.clone());
             }
         }
@@ -3077,13 +3095,22 @@ fn lower_bool_param_named(
 /// Lower a `%N` positional runtime-parameter atom to a bool expression that
 /// looks up `positional[index - 1]` (with out-of-bounds collapsing to
 /// `Param::None` → miss).
+///
+/// The lexer rejects `%0` at parse time, so a well-formed pattern never lands
+/// here with `index == 0`. Still, refuse to emit `0usize - 1` (panic in debug)
+/// for a programmatically constructed AST — surface the malformed input as a
+/// macro-time error instead.
 fn lower_bool_param_number(
     index: u16,
     subject: &TokenStream,
     _ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
-    // The lexer rejects `%0`, so subtracting 1 is always safe.
-    let idx = (index as usize) - 1;
+    let Some(idx) = (index as usize).checked_sub(1) else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: internal — `%0` positional parameter reached the macro lowering; the lexer should have rejected this. Likely a programmatically constructed AST.",
+        ));
+    };
     let lit_view = lit_view_expr(subject);
     Ok(quote! {
         ::murphy_plugin_api::match_lit_against_param(

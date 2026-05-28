@@ -404,9 +404,15 @@ fn match_pat<P: PredicateHost + ?Sized>(
         }
 
         IrNode::ParamNumber { index } => {
-            // Phase E (murphy-aow): %N positional parameter (1-based in source,
-            // 0-based here — the lexer rejects %0 so subtraction is safe).
-            let Some(param) = ctx.params.positional(*index as usize - 1) else {
+            // Phase E (murphy-aow): %N positional parameter. The lexer rejects
+            // %0 at parse time, so a well-formed IR never sees `index == 0` —
+            // but a programmatically constructed IR could, and the panic on
+            // `0usize - 1` is not worth saving a cycle. `checked_sub` returns
+            // `None` for the malformed case and collapses to a match miss.
+            let Some(zero_based) = (*index as usize).checked_sub(1) else {
+                return false;
+            };
+            let Some(param) = ctx.params.positional(zero_based) else {
                 return false;
             };
             crate::match_lit_against_param(subject_lit_view(ctx, node), &param)
