@@ -16,17 +16,13 @@ mod parser;
 
 pub use parser::parse;
 
-// LALRPOP-generated parser module (murphy-qpf9 Round 1: infra-only stub).
-//
-// The active parser is still `parser::parse` above; this module is wired in
-// so the build script and lalrpop-util runtime link cleanly. Round 2 will
-// port the grammar rule-by-rule, and Round 3 will flip the public `parse`
-// to this module once error-message parity is achieved.
+// LALRPOP-generated parser module (grammar: `src/parser.lalrpop`).
 //
 // `lalrpop_mod!` expands to:
 //   `mod lalrpop_parser { include!(concat!(env!("OUT_DIR"), "/parser.rs")); }`
 // — so the included file is `src/parser.lalrpop` compiled into `$OUT_DIR/parser.rs`.
-#[allow(unused, clippy::all, dead_code)]
+// The inner `#![allow]` suppresses lints in LALRPOP's generated code, which
+// contains patterns that trip clippy even in active, correct grammars.
 mod lalrpop_parser_inner {
     #![allow(unused, clippy::all, dead_code)]
     lalrpop_util::lalrpop_mod!(pub lalrpop_parser, "/parser.rs");
