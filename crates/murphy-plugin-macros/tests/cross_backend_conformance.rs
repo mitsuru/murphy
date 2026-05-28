@@ -2187,6 +2187,103 @@ fn anyorder_capture_ref_pred_arg_agrees_across_backends() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// 12f. AnyOrder nested-capture predicate arg:
+//      `(array <(send $recv :foo) #expects?($recv)>)`.
+//
+// The capture `$recv` is nested *inside* a Node child `(send $recv :foo)`,
+// not a direct Capture arm of the AnyOrder child.  The B-backend probe
+// phase must walk into Node children to write the probe-scope binding
+// `__pcap{slot}`, so that the subsequent `#expects?($recv)` predicate can
+// read the just-tried element as its argument.
+//
+// Without the fix, `lower_bool_anyorder_probe` delegates the Node arm to
+// `lower_bool`, which rejects `Capture` with a compile error (or in a
+// future codegen path, produces an uninitialized binding).
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(
+    b_anyorder_nested_cap_pred_arg,
+    "(array <(send $recv :foo) #expects?($recv)>)"
+);
+
+#[test]
+fn anyorder_nested_capture_ref_pred_arg_agrees_across_backends() {
+    // Build `[recv.foo, other.foo]` — two send nodes.
+    //   recv_node = Int(1) (stand-in for the receiver)
+    //   other_node = Int(2)
+    //   send1 = (send recv_node :foo [])
+    //   send2 = (send other_node :foo [])
+    //   arr   = Array([send1, send2])
+    //
+    // The host fires `expects?` only when the subject is `send2` AND the
+    // captured `$recv` is `recv_node` (i.e. send1's receiver).  The only
+    // valid assignment is:
+    //   (send $recv :foo) → send1  ($recv = recv_node)
+    //   #expects?($recv)  → send2  (predicate: send2 != recv_node ✓)
+    let mut b = AstBuilder::new("a.foo; b.foo", "t.rb");
+    let recv_node = b.push(NodeKind::Int(1), r());
+    let other_node = b.push(NodeKind::Int(2), r());
+    let foo_sym = b.intern_symbol("foo");
+    let args_empty = b.push_list(&[]);
+    let send1 = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv_node),
+            method: foo_sym,
+            args: args_empty,
+        },
+        r(),
+    );
+    let send2 = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(other_node),
+            method: foo_sym,
+            args: args_empty,
+        },
+        r(),
+    );
+    let elems = b.push_list(&[send1, send2]);
+    let arr = b.push(NodeKind::Array(elems), r());
+    let ast = b.finish(arr);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // B backend: expect match with $recv = recv_node.
+    let b_caps: Option<(NodeId,)> = b_anyorder_nested_cap_pred_arg(arr, &cx);
+
+    // C backend with a host that fires `expects?` on send2 with arg recv_node.
+    let mut host = ExpectsHost {
+        want_node: send2,
+        want_arg: recv_node,
+    };
+    let c = assert_c_matches_with(
+        "(array <(send $recv :foo) #expects?($recv)>)",
+        &ast,
+        arr,
+        b_caps.is_some(),
+        &mut host,
+    );
+
+    // B must match and capture recv_node into $recv.
+    assert!(
+        b_caps.is_some(),
+        "B must match [send1, send2] with <(send $recv :foo) #expects?($recv)>"
+    );
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, recv_node, "B: $recv must capture recv_node (Int(1))");
+
+    // B and C captures must agree.
+    let c_caps = c.expect("C also matched");
+    let c_cap0 = c_caps.get(0).cloned();
+    match c_cap0 {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: $recv capture disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // 14. murphy-iqv: `$!body` — capture wrapping Not.
 //
 // `$!send` matches any non-send node and captures the subject id.
