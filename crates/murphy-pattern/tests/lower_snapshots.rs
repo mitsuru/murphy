@@ -437,3 +437,27 @@ fn snapshot_named_capture_and_predicate() {
         "receiver"
     );
 }
+
+// =====================================================================
+// AnyOrder lowering snapshot tests — murphy-ejd
+// =====================================================================
+
+#[test]
+fn anyorder_lowers_to_ir_anyorder_node() {
+    // `(array <int sym>)` must produce an IR tree containing AnyOrder.
+    let ir = murphy_pattern::compile("(array <int sym>)").expect("compile ok");
+    let ir_str = format!("{ir:#?}");
+    assert!(
+        ir_str.contains("AnyOrder"),
+        "expected AnyOrder in IR, got:\n{ir_str}"
+    );
+}
+
+#[test]
+fn anyorder_with_captures_lowers_correctly() {
+    // `(array <$int $sym>)` — 2 Node captures in declaration order.
+    let ir = murphy_pattern::compile("(array <$int $sym>)").expect("compile ok");
+    assert_eq!(ir.captures.len(), 2);
+    assert_eq!(ir.captures[0].kind, murphy_pattern::CaptureKind::Node);
+    assert_eq!(ir.captures[1].kind, murphy_pattern::CaptureKind::Node);
+}

@@ -100,6 +100,14 @@ pub enum IrNode {
         min: u8,
         max: u8,
     },
+    /// `<child*>` — any-order sequence. All non-rest children must each match
+    /// exactly one input element in any permutation. An optional trailing
+    /// [`IrNode::Rest`] element absorbs leftover input elements. Only valid
+    /// as a direct child of an [`IrNode::Node`]; enforced at parse time.
+    /// v1 limit: at most 10 non-rest children (enforced at parse time).
+    AnyOrder {
+        children: IrSlice,
+    },
 }
 
 /// The head of an `IrNode::Node`.
@@ -292,6 +300,15 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
                     body: body_id,
                     min: *min,
                     max: *max,
+                },
+            )
+        }
+        PatKind::AnyOrder { children } => {
+            let child_slice = lower_children(children, ast, ir);
+            push_node(
+                ir,
+                IrNode::AnyOrder {
+                    children: child_slice,
                 },
             )
         }

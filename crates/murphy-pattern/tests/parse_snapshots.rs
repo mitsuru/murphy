@@ -6,7 +6,7 @@
 //! span and a message substring. The expected literals were blessed from a
 //! real `cargo test` run — do not hand-edit them.
 
-use murphy_pattern::{CaptureKind, parse};
+use murphy_pattern::{CaptureKind, PatKind, parse};
 
 // =====================================================================
 // (A) Positive snapshot tests
@@ -812,4 +812,129 @@ fn error_unclosed_paren() {
         "message was: {}",
         err.message
     );
+}
+
+// =====================================================================
+// (C) AnyOrder `<...>` parse tests — murphy-ejd
+// =====================================================================
+
+#[test]
+fn snapshot_anyorder_basic() {
+    // `(array <int sym>)` — any-order match of int and sym children.
+    let ast = parse("(array <int sym>)").unwrap();
+    // AnyOrder variant should be present in the tree.
+    let root_kind = format!("{:#?}", ast.root.kind);
+    assert!(
+        root_kind.contains("AnyOrder"),
+        "expected AnyOrder in tree, got: {root_kind}"
+    );
+    assert_eq!(ast.n_captures(), 0);
+}
+
+#[test]
+fn snapshot_anyorder_with_captures() {
+    // `(array <$int $sym>)` — captures in declaration order (slot 0 = int, slot 1 = sym).
+    let ast = parse("(array <$int $sym>)").unwrap();
+    assert_eq!(ast.n_captures(), 2);
+    assert_eq!(ast.capture_kinds()[0], CaptureKind::Node);
+    assert_eq!(ast.capture_kinds()[1], CaptureKind::Node);
+}
+
+#[test]
+fn snapshot_anyorder_with_rest() {
+    // `(array <int sym ...>)` — rest allowed inside any-order.
+    let ast = parse("(array <int sym ...>)").unwrap();
+    let root_kind = format!("{:#?}", ast.root.kind);
+    assert!(
+        root_kind.contains("AnyOrder"),
+        "expected AnyOrder in tree, got: {root_kind}"
+    );
+}
+
+#[test]
+fn error_anyorder_empty() {
+    // `<>` — empty any-order is rejected.
+    let err = parse("(array <>)").unwrap_err();
+    assert!(
+        err.message.contains("empty"),
+        "expected 'empty' error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn error_anyorder_at_top_level() {
+    // `<int sym>` at top-level is rejected (only valid as a node child).
+    let err = parse("<int sym>").unwrap_err();
+    assert!(
+        err.message.contains("node child") || err.message.contains("direct child"),
+        "expected position error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn error_anyorder_too_many_elements() {
+    // 11 elements exceeds the max-10 limit.
+    let eleven = "(array <int int int int int int int int int int int>)";
+    let err = parse(eleven).unwrap_err();
+    assert!(
+        err.message
+            .contains("too many elements in <...>: max 10 in v1"),
+        "expected too-many-elements error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn error_anyorder_duplicate_rest() {
+    // Two `...` inside one `<...>` is rejected.
+    let err = parse("(array <int ... sym ...>)").unwrap_err();
+    assert!(
+        err.message.contains("..."),
+        "expected duplicate rest error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn snapshot_anyorder_sibling_anyorders() {
+    // Two `<...>` blocks as siblings in the same node's child list are
+    // both parsed as AnyOrder nodes.  This exercises the parser path where
+    // node_match encounters two `LAngle` tokens in a row.
+    let ast = parse("(array <int sym> <str nil>)").unwrap();
+    let root_kind = format!("{:#?}", ast.root.kind);
+    // Both AnyOrder nodes must be present — count occurrences of the tag.
+    let count = root_kind.matches("AnyOrder").count();
+    assert_eq!(
+        count, 2,
+        "expected 2 AnyOrder nodes in tree, got {count}: {root_kind}"
+    );
+    assert_eq!(ast.n_captures(), 0);
+}
+
+#[test]
+fn snapshot_anyorder_with_suffix_fixed() {
+    // `(array <int sym> str)` — AnyOrder followed by a fixed element.
+    // The node must have two children: one AnyOrder and one Kind (str suffix).
+    let ast = parse("(array <int sym> str)").unwrap();
+    let PatKind::Node { ref children, .. } = ast.root.kind else {
+        panic!("expected Node, got {:?}", ast.root.kind);
+    };
+    assert_eq!(
+        children.len(),
+        2,
+        "expected 2 node children (AnyOrder + suffix)"
+    );
+    assert!(
+        matches!(children[0].kind, PatKind::AnyOrder { .. }),
+        "first child must be AnyOrder, got {:?}",
+        children[0].kind
+    );
+    assert!(
+        matches!(children[1].kind, PatKind::Kind(_)),
+        "second child must be Kind (str), got {:?}",
+        children[1].kind
+    );
+    assert_eq!(ast.n_captures(), 0);
 }

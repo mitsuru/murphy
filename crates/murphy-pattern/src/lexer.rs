@@ -48,6 +48,10 @@ pub(crate) enum Token {
     Plus,
     /// `?` — postfix quantifier (`0..=1`).
     Question,
+    /// `<` — opening angle bracket for any-order sequence `<...>`.
+    LAngle,
+    /// `>` — closing angle bracket for any-order sequence `<...>`.
+    RAngle,
 }
 
 /// A [`Token`] paired with its byte-offset span in the source string.
@@ -111,7 +115,9 @@ impl<'a> Lexer<'a> {
             b'-' => self.scan_number(),
             b'0'..=b'9' => self.scan_number(),
             b'a'..=b'z' | b'_' => self.scan_ident(),
-            b'%' | b'[' | b'<' => {
+            b'<' => self.single(Token::LAngle),
+            b'>' => self.single(Token::RAngle),
+            b'%' | b'[' => {
                 let (ch, len) = self.char_at_cursor();
                 Err(self.err_at(
                     self.pos,
@@ -487,8 +493,8 @@ mod tests {
 
     #[test]
     fn lex_error_on_unsupported_sigil() {
-        // `%`, `[`, `<` are one error class: not supported in v1.
-        for sigil in ['%', '[', '<'] {
+        // `%`, `[` are not supported in v1 (`<` is now LAngle for any-order).
+        for sigil in ['%', '['] {
             let src = format!("(send {sigil}1)");
             let e = tokenize(&src).expect_err("must reject unsupported sigil");
             assert!(
@@ -499,6 +505,16 @@ mod tests {
             // span points at the sigil
             assert_eq!(e.span.start, 6);
         }
+    }
+
+    #[test]
+    fn lex_angle_brackets() {
+        // `<` → LAngle, `>` → RAngle; no error.
+        let t = tokenize("<int>").expect("angle brackets must lex ok");
+        assert_eq!(t[0].tok, Token::LAngle);
+        assert_eq!((t[0].span.start, t[0].span.end), (0, 1));
+        assert_eq!(t[2].tok, Token::RAngle);
+        assert_eq!((t[2].span.start, t[2].span.end), (4, 5));
     }
 
     #[test]
