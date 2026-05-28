@@ -836,7 +836,13 @@ fn predicate_arg_exprs(
                 // `lower_bool_anyorder_probe` wrote `Some(elem)` before the
                 // predicate expression is evaluated in the same search path).
                 if let Some(pcap) = ctx.probe_caps.get(slot) {
-                    return Ok(quote!(#pcap.unwrap()));
+                    let expr = quote!(#pcap.unwrap());
+                    return Ok(match ctx.capture_kinds.get(*slot as usize) {
+                        Some(CaptureKind::OptNode) => {
+                            quote!(::core::option::Option::Some(#expr))
+                        }
+                        _ => expr,
+                    });
                 }
                 // If we are inside a backtracking commit scope (AnyOrder
                 // phase-2 or quantifier), captures are written to a local
