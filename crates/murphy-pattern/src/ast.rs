@@ -44,8 +44,9 @@ pub enum PatKind {
     NilTest,
     /// A literal: matches the corresponding atom node.
     Lit(Lit),
-    /// `#name` — predicate call. Resolved by each backend, not here.
-    Predicate(String),
+    /// `#name` / `#name(arg1 arg2 ...)` — predicate call. Resolved by each
+    /// backend, not here. `args` is empty for the no-arg form.
+    Predicate { name: String, args: Vec<PredArg> },
     /// A bare node-type name (`send`) — matches kind only, children free.
     Kind(NodeKindTag),
     /// `(head child...)` — node match with an ordered child sequence.
@@ -104,6 +105,19 @@ pub enum Lit {
     True,
     False,
     Nil,
+}
+
+/// An argument to a predicate call (v1: literal or back-reference to a
+/// previously-declared `$capture` slot).
+///
+/// Pattern-arg form (`#pred?({:A :B})`) is v1 scope-out and produces a parse
+/// error; only `Lit` and `Capture` are valid at runtime.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PredArg {
+    /// A literal value (int / float / string / symbol / bool / nil).
+    Lit(Lit),
+    /// A back-reference to an already-declared `$capture` slot (by slot index).
+    Capture(u16),
 }
 
 /// Whether a capture binds a single node or a slice of nodes.

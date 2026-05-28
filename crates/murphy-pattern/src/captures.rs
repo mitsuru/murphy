@@ -97,6 +97,14 @@ impl CaptureBuf {
         self.slots[slot as usize] = Some(value);
     }
 
+    /// Read the current value of `slot`, if written.
+    pub(crate) fn get(&self, slot: u16) -> Option<NodeId> {
+        match self.slots.get(slot as usize)?.as_ref()? {
+            CaptureValue::Node(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     /// Finish: unwrap every slot into the public [`Captures`]. Returns
     /// `None` if any slot is unwritten — defense in depth against an
     /// IR shape the parser's `validate_capture_position` should have

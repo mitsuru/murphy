@@ -776,6 +776,54 @@ fn predicate_ident(name: &str) -> syn::Result<Ident> {
     })
 }
 
+/// Turn `PredArg` elements into token-stream expressions to be passed as
+/// extra arguments in the generated predicate call.
+///
+/// - `Lit::Int(v)` → `v_i64` literal
+/// - `Lit::Float(v)` → `v_f64` literal
+/// - `Lit::Str(s)` → `"s"` string literal
+/// - `Lit::Sym(s)` → `"s"` string literal (cop methods receive `&str`)
+/// - `Lit::True` / `Lit::False` → `true` / `false`
+/// - `Lit::Nil` → compile error (nil args are not meaningful in Rust)
+/// - `PredArg::Capture(slot)` → the capture slot's variable, resolved by the
+///   generated code as the bound variable `__c{slot}`.
+fn predicate_arg_exprs(
+    args: &[murphy_pattern::PredArg],
+    _ctx: &Lower,
+) -> syn::Result<Vec<TokenStream>> {
+    use murphy_pattern::{Lit, PredArg};
+    args.iter()
+        .map(|arg| match arg {
+            PredArg::Lit(lit) => Ok(match lit {
+                Lit::Int(v) => quote!(#v),
+                Lit::Float(v) => quote!(#v),
+                Lit::Str(s) => {
+                    let s = s.as_str();
+                    quote!(#s)
+                }
+                Lit::Sym(s) => {
+                    let s = s.as_str();
+                    quote!(#s)
+                }
+                Lit::True => quote!(true),
+                Lit::False => quote!(false),
+                Lit::Nil => {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        "node_pattern!: `nil` predicate arg has no Rust counterpart",
+                    ));
+                }
+            }),
+            PredArg::Capture(slot) => {
+                // Capture slots are bound as `__cap{slot}` by the generated
+                // match function. Forward-references are rejected at parse time.
+                let var = cap_ident(*slot as usize);
+                Ok(quote!(#var))
+            }
+        })
+        .collect()
+}
+
 /// Lower one `Pat` against `subject` (a `NodeId`-typed expression) into a
 /// block of guard statements that `return ctx.fail` on mismatch.
 fn lower_pat(
@@ -969,13 +1017,14 @@ fn lower_pat(
             let assign = capture_assign(*slot, quote!(#subject), ctx);
             Ok(quote!(#body_guards #assign))
         }
-        PatKind::Predicate(name) => {
-            // `#name` calls a free fn `name(node, cx) -> bool` in scope at the
+        PatKind::Predicate { name, args } => {
+            // `#name` / `#name(args...)` calls a free fn in scope at the
             // call site. Fail the guard when the predicate returns `false`.
             let ident = predicate_ident(name)?;
             let fail = fail_stmt(ctx);
+            let arg_exprs = predicate_arg_exprs(args, ctx)?;
             Ok(quote! {
-                if !#ident(#subject, cx) {
+                if !#ident(#subject, cx #(, #arg_exprs)*) {
                     #fail
                 }
             })
@@ -1655,7 +1704,7 @@ fn collect_capture_slots(pat: &murphy_pattern::Pat, out: &mut Vec<u16>) {
         PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
-        | PatKind::Predicate(_)
+        | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Rest => {}
     }
@@ -2111,11 +2160,12 @@ fn lower_bool(
             let inner_bool = lower_bool(inner, subject, ctx)?;
             Ok(quote!( ( !#inner_bool ) ))
         }
-        PatKind::Predicate(name) => {
-            // `#name` calls a free fn `name(node, cx) -> bool` in scope at the
+        PatKind::Predicate { name, args } => {
+            // `#name` / `#name(args...)` calls a free fn in scope at the
             // call site; in value form it is simply that bool expression.
             let ident = predicate_ident(name)?;
-            Ok(quote!( ( #ident(#subject, cx) ) ))
+            let arg_exprs = predicate_arg_exprs(args, ctx)?;
+            Ok(quote!( ( #ident(#subject, cx #(, #arg_exprs)*) ) ))
         }
         PatKind::Parent(inner) => {
             let p = gensym(ctx, "__p");

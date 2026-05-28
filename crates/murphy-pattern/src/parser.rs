@@ -6,6 +6,7 @@
 //! heads. Task 7 adds union `{a b ...}`. Task 8 implements `$` captures —
 //! named (`$ident`), anonymous (`$<pattern>`), and seq (`$...`) forms.
 
+use crate::ast::PredArg;
 use crate::lexer::{Spanned, Token, tokenize};
 use crate::schema::node_child_allows_bare_predicate;
 use crate::{CaptureKind, Head, Lit, ParseError, Pat, PatKind, PatSpan, PatternAst};
@@ -294,7 +295,7 @@ fn validate_quantifier_placement(pat: &Pat, is_node_child: bool) -> Result<(), P
         | PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
-        | PatKind::Predicate(_)
+        | PatKind::Predicate { .. }
         | PatKind::Kind(_) => Ok(()),
     }
 }
@@ -337,7 +338,7 @@ fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
         PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
-        | PatKind::Predicate(_)
+        | PatKind::Predicate { .. }
         | PatKind::Kind(_) => Ok(()),
     }
 }
@@ -449,7 +450,7 @@ fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseErro
         | PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
-        | PatKind::Predicate(_)
+        | PatKind::Predicate { .. }
         | PatKind::Kind(_) => Ok(()),
     }
 }
@@ -524,7 +525,7 @@ fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseEr
         | PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
-        | PatKind::Predicate(_)
+        | PatKind::Predicate { .. }
         | PatKind::Kind(_) => {}
     }
     Ok(())
@@ -855,7 +856,18 @@ impl<'a> Parser<'a> {
             Token::Float(v) => PatKind::Lit(Lit::Float(*v)),
             Token::Str(s) => PatKind::Lit(Lit::Str(s.clone())),
             Token::Sym(s) => PatKind::Lit(Lit::Sym(s.clone())),
-            Token::Predicate(name) => PatKind::Predicate(name.clone()),
+            Token::Predicate(name) => {
+                let name = name.clone();
+                // Peek to see if predicate args follow: `#name(arg1 arg2 ...)`.
+                let args = if matches!(self.peek().map(|t| &t.tok), Some(Token::LParen)) {
+                    let lparen_span = self.peek().unwrap().span;
+                    self.pos += 1; // consume `(`
+                    self.predicate_args(lparen_span)?
+                } else {
+                    vec![]
+                };
+                PatKind::Predicate { name, args }
+            }
             Token::Ident(name) => return self.ident_pat(name, span, allow_bare_predicate),
             Token::LParen => return self.node_match(span),
             Token::LBrace => return self.union(span, allow_bare_predicate),
@@ -1146,8 +1158,20 @@ impl<'a> Parser<'a> {
                         Token::Bang => "!",
                         _ => unreachable!("checked by the matches arm above"),
                     };
+                    let pred_name = format!("{name}{suffix}");
+                    // Bare predicate shorthand also supports args: `foo?(42)`.
+                    let args = if matches!(self.peek().map(|t| &t.tok), Some(Token::LParen)) {
+                        let lparen_span = self.peek().unwrap().span;
+                        self.pos += 1; // consume `(`
+                        self.predicate_args(lparen_span)?
+                    } else {
+                        vec![]
+                    };
                     return Ok(Pat {
-                        kind: PatKind::Predicate(format!("{name}{suffix}")),
+                        kind: PatKind::Predicate {
+                            name: pred_name,
+                            args,
+                        },
                         span: PatSpan::new(span.start as usize, suffix_span.end as usize),
                     });
                 } else {
@@ -1182,6 +1206,122 @@ impl<'a> Parser<'a> {
             }
         };
         Ok(Pat { kind, span })
+    }
+
+    /// Parse a predicate argument list that starts after the `(` has been
+    /// consumed. Reads space-separated args until `)`.
+    ///
+    /// Valid arg forms (v1): integer literal, float literal, string literal,
+    /// symbol literal, `$ident` back-reference capture.
+    ///
+    /// Pattern args (`#pred?({:A :B})`) are v1 scope-out and produce an error
+    /// with the message `"pattern args in v1: literal/capture only"`.
+    fn predicate_args(&mut self, lparen_span: PatSpan) -> Result<Vec<PredArg>, ParseError> {
+        let mut args: Vec<PredArg> = Vec::new();
+        loop {
+            let Some(next) = self.peek() else {
+                return Err(ParseError::new(
+                    "unclosed `(` in predicate argument list",
+                    lparen_span,
+                ));
+            };
+            match &next.tok {
+                Token::RParen => {
+                    self.pos += 1; // consume `)`
+                    break;
+                }
+                Token::Int(v) => {
+                    let v = *v;
+                    self.pos += 1;
+                    args.push(PredArg::Lit(Lit::Int(v)));
+                }
+                Token::Float(v) => {
+                    let v = *v;
+                    self.pos += 1;
+                    args.push(PredArg::Lit(Lit::Float(v)));
+                }
+                Token::Str(s) => {
+                    let s = s.clone();
+                    self.pos += 1;
+                    args.push(PredArg::Lit(Lit::Str(s)));
+                }
+                Token::Sym(s) => {
+                    let s = s.clone();
+                    self.pos += 1;
+                    args.push(PredArg::Lit(Lit::Sym(s)));
+                }
+                Token::Ident(name) if name == "true" => {
+                    self.pos += 1;
+                    args.push(PredArg::Lit(Lit::True));
+                }
+                Token::Ident(name) if name == "false" => {
+                    self.pos += 1;
+                    args.push(PredArg::Lit(Lit::False));
+                }
+                Token::Ident(name) if name == "nil" => {
+                    self.pos += 1;
+                    args.push(PredArg::Lit(Lit::Nil));
+                }
+                Token::Dollar => {
+                    // `$ident` back-reference to an already-declared capture slot.
+                    let dollar_span = next.span;
+                    self.pos += 1; // consume `$`
+                    let Some(ident_tok) = self.peek() else {
+                        return Err(ParseError::new(
+                            "expected capture name after `$` in predicate arg",
+                            dollar_span,
+                        ));
+                    };
+                    let Token::Ident(capture_name) = &ident_tok.tok else {
+                        let err_span = ident_tok.span;
+                        return Err(ParseError::new(
+                            "expected identifier after `$` in predicate arg",
+                            err_span,
+                        ));
+                    };
+                    let capture_name = capture_name.clone();
+                    let ident_span = ident_tok.span;
+                    self.pos += 1; // consume the ident
+                    // Resolve the name to an existing capture slot (back-reference only).
+                    let slot = self
+                        .capture_names
+                        .iter()
+                        .position(|n| n == &capture_name)
+                        .map(|i| i as u16)
+                        .ok_or_else(|| {
+                            ParseError::new(
+                                format!(
+                                    "unknown or forward capture reference `${capture_name}` in predicate arg"
+                                ),
+                                ident_span,
+                            )
+                        })?;
+                    args.push(PredArg::Capture(slot));
+                }
+                Token::LBrace => {
+                    // Pattern arg: v1 scope-out.
+                    return Err(ParseError::new(
+                        "pattern args in v1: literal/capture only",
+                        next.span,
+                    ));
+                }
+                Token::LParen => {
+                    // Nested pattern arg: v1 scope-out.
+                    return Err(ParseError::new(
+                        "pattern args in v1: literal/capture only",
+                        next.span,
+                    ));
+                }
+                _ => {
+                    let err_span = next.span;
+                    return Err(ParseError::new(
+                        "pattern args in v1: literal/capture only",
+                        err_span,
+                    ));
+                }
+            }
+        }
+        Ok(args)
     }
 }
 
@@ -1267,7 +1407,13 @@ mod tests {
 
     #[test]
     fn parses_predicate() {
-        assert_eq!(k("#odd?"), PatKind::Predicate("odd?".into()));
+        assert_eq!(
+            k("#odd?"),
+            PatKind::Predicate {
+                name: "odd?".into(),
+                args: vec![]
+            }
+        );
     }
 
     #[test]
@@ -1946,7 +2092,13 @@ mod tests {
     fn parses_bare_predicate_in_node_child_slot() {
         let cs = children_of("(int odd?)");
         assert_eq!(cs.len(), 1);
-        assert_eq!(cs[0].kind, PatKind::Predicate("odd?".into()));
+        assert_eq!(
+            cs[0].kind,
+            PatKind::Predicate {
+                name: "odd?".into(),
+                args: vec![]
+            }
+        );
     }
 
     #[test]
@@ -1962,7 +2114,13 @@ mod tests {
             other => panic!("expected Quantifier, got {other:?}"),
         }
 
-        assert_eq!(cs[3].kind, PatKind::Predicate("odd?".into()));
+        assert_eq!(
+            cs[3].kind,
+            PatKind::Predicate {
+                name: "odd?".into(),
+                args: vec![]
+            }
+        );
     }
 
     #[test]
@@ -1982,8 +2140,20 @@ mod tests {
             panic!("expected Union, got {:?}", cs[2].kind);
         };
         assert_eq!(alts.len(), 2);
-        assert_eq!(alts[0].kind, PatKind::Predicate("odd?".into()));
-        assert_eq!(alts[1].kind, PatKind::Predicate("even?".into()));
+        assert_eq!(
+            alts[0].kind,
+            PatKind::Predicate {
+                name: "odd?".into(),
+                args: vec![]
+            }
+        );
+        assert_eq!(
+            alts[1].kind,
+            PatKind::Predicate {
+                name: "even?".into(),
+                args: vec![]
+            }
+        );
     }
 
     #[test]
@@ -1999,7 +2169,13 @@ mod tests {
         let PatKind::Capture { body, .. } = &cs[0].kind else {
             panic!("expected Capture, got {:?}", cs[0].kind);
         };
-        assert_eq!(body.kind, PatKind::Predicate("odd?".into()));
+        assert_eq!(
+            body.kind,
+            PatKind::Predicate {
+                name: "odd?".into(),
+                args: vec![]
+            }
+        );
     }
 
     #[test]
@@ -2007,7 +2183,13 @@ mod tests {
         // `save!` in a node-child slot: bare predicate shorthand for `#save!`.
         let cs = children_of("(send _ :foo save!)");
         assert_eq!(cs.len(), 3);
-        assert_eq!(cs[2].kind, PatKind::Predicate("save!".into()));
+        assert_eq!(
+            cs[2].kind,
+            PatKind::Predicate {
+                name: "save!".into(),
+                args: vec![]
+            }
+        );
     }
 
     #[test]
@@ -2244,5 +2426,87 @@ mod tests {
         // No "at most one quantifier" rule: a child list may have several.
         assert!(parse("(send _ :foo int+ sym*)").is_ok());
         assert!(parse("(send _ :foo int? str+ sym*)").is_ok());
+    }
+
+    // --- murphy-jyi: predicate args (#name(arg1 arg2 ...)) ----------------
+
+    #[test]
+    fn parses_predicate_with_int_arg() {
+        let pat = parse("#divisible_by?(42)").expect("parse ok");
+        match &pat.root.kind {
+            PatKind::Predicate { name, args } => {
+                assert_eq!(name, "divisible_by?");
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], crate::ast::PredArg::Lit(Lit::Int(42)));
+            }
+            other => panic!("expected Predicate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_predicate_with_str_arg() {
+        let pat = parse("#starts_with?(\"foo\")").expect("parse ok");
+        match &pat.root.kind {
+            PatKind::Predicate { name, args } => {
+                assert_eq!(name, "starts_with?");
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], crate::ast::PredArg::Lit(Lit::Str("foo".into())));
+            }
+            other => panic!("expected Predicate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_predicate_with_sym_arg() {
+        let pat = parse("#sym_eq?(:foo)").expect("parse ok");
+        match &pat.root.kind {
+            PatKind::Predicate { name, args } => {
+                assert_eq!(name, "sym_eq?");
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], crate::ast::PredArg::Lit(Lit::Sym("foo".into())));
+            }
+            other => panic!("expected Predicate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_predicate_with_capture_ref_arg() {
+        // `(send $val #contains?($val))` — `$val` is slot 0, capture back-ref
+        let pat = parse("(send $val #contains?($val))").expect("parse ok");
+        let PatKind::Node { children, .. } = &pat.root.kind else {
+            panic!("expected Node");
+        };
+        // children: [Capture(slot=0), Predicate{name, args:[Capture(0)]}]
+        match &children[1].kind {
+            PatKind::Predicate { name, args } => {
+                assert_eq!(name, "contains?");
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0], crate::ast::PredArg::Capture(0));
+            }
+            other => panic!("expected Predicate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_predicate_pattern_arg_is_rejected() {
+        // Pattern args are v1 scope-out; the parser must reject them.
+        let e = parse("#g?({:A :B})").expect_err("must reject pattern arg");
+        assert!(
+            e.message
+                .contains("pattern args in v1: literal/capture only"),
+            "expected 'pattern args in v1: literal/capture only', got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn parse_predicate_unknown_capture_ref_is_rejected() {
+        // Forward/unknown capture refs in predicate args must error.
+        let e = parse("#pred?($unknown)").expect_err("must reject unknown capture ref");
+        assert!(
+            e.message.contains("unknown or forward capture reference"),
+            "expected 'unknown or forward capture reference', got: {}",
+            e.message
+        );
     }
 }

@@ -419,9 +419,10 @@ fn snapshot_named_capture_and_predicate() {
                     },
                 },
                 Pat {
-                    kind: Predicate(
-                        "pred?",
-                    ),
+                    kind: Predicate {
+                        name: "pred?",
+                        args: [],
+                    },
                     span: PatSpan {
                         start: 16,
                         end: 22,

@@ -8,7 +8,7 @@ pub use error::{ParseError, PatSpan};
 
 mod ast;
 
-pub use ast::{CaptureKind, Head, Lit, Pat, PatKind, PatternAst};
+pub use ast::{CaptureKind, Head, Lit, Pat, PatKind, PatternAst, PredArg};
 
 mod lexer;
 
@@ -18,7 +18,7 @@ pub use parser::parse;
 
 mod ir;
 
-pub use ir::{CaptureMeta, IrHead, IrNode, IrNodeId, IrSlice, PatternIr, StrRef, lower};
+pub use ir::{CaptureMeta, IrHead, IrNode, IrNodeId, IrPredArg, IrSlice, PatternIr, StrRef, lower};
 
 mod captures;
 
@@ -30,7 +30,7 @@ pub use schema::{PatChild, pattern_children};
 
 mod matcher;
 
-pub use matcher::{NoPredicates, PredicateHost, matches};
+pub use matcher::{NoPredicates, PredCallArg, PredicateHost, matches};
 
 /// Parse and lower a pattern source string to `PatternIr` in one step.
 /// For the C backend (murphy-9cr.19). All errors are parse errors —
