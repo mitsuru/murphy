@@ -123,16 +123,156 @@ fn run_lalrpop(tokens: &[Spanned]) -> Result<Pat, ParseError> {
     // Predicate token (see `fold_predicate_args` for the encoding) to dodge
     // an LR(1) local ambiguity at `#name (`.
     let folded = fold_predicate_args(&merged)?;
-    let iter = folded.into_iter().map(|s| {
-        Ok::<_, ParseError>((
-            s.span.start as usize,
-            s.tok.clone(),
-            s.span.end as usize,
-        ))
-    });
+    // Pre-scan the (folded) token stream for shape errors whose messages and
+    // spans the bare lalrpop "unexpected token" generic does not preserve:
+    // chained postfix, `...+`, standalone postfix, dangling `$`, top-level
+    // `<...>`, non-ident OneOf head members, and unclosed `(`. Pre-emitting
+    // here keeps the grammar lean — each check carries the exact token span
+    // demanded by the parity tests.
+    diagnose_shape_errors(&folded)?;
+    let iter = folded
+        .into_iter()
+        .map(|s| Ok::<_, ParseError>((s.span.start as usize, s.tok.clone(), s.span.end as usize)));
     crate::lalrpop_parser_inner::lalrpop_parser::PatternParser::new()
         .parse(iter)
         .map_err(lalrpop_to_parse_error)
+}
+
+/// Pre-scan the folded token stream and pre-emit error parity messages whose
+/// (span, text) the lalrpop generic "unexpected token" cannot reproduce.
+///
+/// Each branch matches a shape the grammar would also reject — but with a
+/// less specific message — and emits the message + span the parity tests
+/// expect. The grammar itself remains the source of truth for *whether*
+/// these inputs are valid; this scan only refines the diagnostic.
+fn diagnose_shape_errors(tokens: &[Spanned]) -> Result<(), ParseError> {
+    // 1) Top-level `<...>` (AnyOrder outside a node child) — the grammar only
+    //    accepts `<...>` as a NodeChild, so `<int sym>` at top level falls
+    //    through to a generic "unexpected token". Pre-emit a positional msg.
+    if let Some(first) = tokens.first()
+        && matches!(first.tok, Token::LAngle)
+    {
+        return Err(ParseError::new(
+            "`<...>` AnyOrder is only valid as a direct child of a node match",
+            first.span,
+        ));
+    }
+
+    // 2) Standalone postfix token at start: `+`, `*`, `?` with nothing before.
+    if let Some(first) = tokens.first()
+        && matches!(first.tok, Token::Plus | Token::Star | Token::Question)
+    {
+        return Err(ParseError::new(
+            "postfix quantifier must follow a pattern",
+            first.span,
+        ));
+    }
+
+    // 3) `$` at end of input.
+    if let Some(last) = tokens.last()
+        && matches!(last.tok, Token::Dollar)
+    {
+        return Err(ParseError::new(
+            "unexpected end of input after `$`",
+            last.span,
+        ));
+    }
+
+    // 4) Chained postfix (`++`, `**`, `*?`, `+?`, etc.) and `...+`.
+    for win in tokens.windows(2) {
+        let (a, b) = (&win[0], &win[1]);
+        let a_is_postfix = matches!(a.tok, Token::Plus | Token::Star | Token::Question);
+        let b_is_postfix = matches!(b.tok, Token::Plus | Token::Star | Token::Question);
+        if a_is_postfix && b_is_postfix {
+            // Span and wording match the original hand-written parser
+            // (preserved by murphy-plugin-macros trybuild fixtures): point
+            // at the second postfix only, not the chained pair.
+            return Err(ParseError::new(
+                "postfix `*` / `+` / `?` cannot be chained — apply at most one quantifier per pattern",
+                b.span,
+            ));
+        }
+        if matches!(a.tok, Token::Ellipsis) && b_is_postfix {
+            return Err(ParseError::new(
+                "`...` may not carry a postfix quantifier",
+                PatSpan::new(a.span.start as usize, b.span.end as usize),
+            ));
+        }
+    }
+
+    // 4b) Bad head: `(` immediately followed by a token that can't begin
+    //     a Head — only `Ident`, `Underscore`, or `LBrace` are valid. The
+    //     message and span mirror the hand-written parser's diagnostic.
+    for win in tokens.windows(2) {
+        if matches!(win[0].tok, Token::LParen) {
+            let next = &win[1];
+            let valid_head_start = matches!(
+                next.tok,
+                Token::Ident(_) | Token::Underscore | Token::LBrace
+            );
+            if !valid_head_start {
+                return Err(ParseError::new(
+                    "a node match needs a head: a node type, `_`, or `{...}`",
+                    next.span,
+                ));
+            }
+        }
+    }
+
+    // 5) Non-ident in `{...}` head (immediately following `(`). Walks all
+    //    `(` `{` adjacencies; anything inside that brace that isn't an
+    //    `Ident` or the matching `}` is rejected with a head-specific msg.
+    let mut i = 0;
+    while i + 1 < tokens.len() {
+        if matches!(tokens[i].tok, Token::LParen) && matches!(tokens[i + 1].tok, Token::LBrace) {
+            // Walk inside the `{...}` head until matching `}` (depth=0).
+            let mut depth: i32 = 1;
+            let mut j = i + 2;
+            while j < tokens.len() {
+                match &tokens[j].tok {
+                    Token::LBrace => depth += 1,
+                    Token::RBrace => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    Token::Ident(_) => {}
+                    _ => {
+                        return Err(ParseError::new(
+                            "`{...}` head may only contain node types",
+                            tokens[j].span,
+                        ));
+                    }
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+
+    // 6) Unclosed `(` — track open-paren stack across the stream. If we exit
+    //    with anything on the stack, the innermost unmatched `(` is the
+    //    offending span. The grammar will also error (UnrecognizedEof), but
+    //    its span points at EOF, not the open paren.
+    let mut paren_stack: Vec<PatSpan> = Vec::new();
+    for t in tokens {
+        match t.tok {
+            Token::LParen => paren_stack.push(t.span),
+            Token::RParen => {
+                paren_stack.pop();
+            }
+            _ => {}
+        }
+    }
+    if let Some(open) = paren_stack.pop() {
+        return Err(ParseError::new(
+            "unclosed `(`: expected `)`",
+            PatSpan::new(open.start as usize, (open.start + 1) as usize),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Walk the token stream and fold `Ident(name) Question` / `Ident(name) Bang`
@@ -150,7 +290,9 @@ fn fold_bare_predicate_shorthand(tokens: &[Spanned]) -> Vec<Spanned> {
     let mut i = 0;
     while i < tokens.len() {
         let merged = (|| -> Option<Spanned> {
-            let Token::Ident(name) = &tokens[i].tok else { return None };
+            let Token::Ident(name) = &tokens[i].tok else {
+                return None;
+            };
             // Known-kind names and true/false/nil keep their normal parse.
             if murphy_ast::tag_from_pattern_name(name).is_some() {
                 return None;
@@ -168,10 +310,7 @@ fn fold_bare_predicate_shorthand(tokens: &[Spanned]) -> Vec<Spanned> {
             // can apply the position check; an explicit `#name?` is tagged
             // without the marker and accepted anywhere a Predicate is.
             let combined_name = format!("{BARE_IDENT_MARKER}{name}{suffix}");
-            let span = PatSpan::new(
-                tokens[i].span.start as usize,
-                next.span.end as usize,
-            );
+            let span = PatSpan::new(tokens[i].span.start as usize, next.span.end as usize);
             Some(Spanned {
                 tok: Token::Predicate(combined_name),
                 span,
@@ -198,27 +337,22 @@ fn fold_predicate_args(tokens: &[Spanned]) -> Result<Vec<Spanned>, ParseError> {
     let mut i = 0;
     while i < tokens.len() {
         let tok = &tokens[i];
-        if let Token::Predicate(name) = &tok.tok {
-            if let Some(next) = tokens.get(i + 1) {
-                if matches!(next.tok, Token::LParen) {
-                    // Parse args from i+2 up to matching RParen.
-                    let lparen_span = next.span;
-                    let (args, end_idx, end_span) =
-                        parse_pred_args(tokens, i + 2, lparen_span)?;
-                    let mut combined = name.clone();
-                    combined.push_str(ARGS_SEP);
-                    combined.push_str(&serialise_pred_args(&args));
-                    out.push(Spanned {
-                        tok: Token::Predicate(combined),
-                        span: PatSpan::new(
-                            tok.span.start as usize,
-                            end_span.end as usize,
-                        ),
-                    });
-                    i = end_idx + 1;
-                    continue;
-                }
-            }
+        if let Token::Predicate(name) = &tok.tok
+            && let Some(next) = tokens.get(i + 1)
+            && matches!(next.tok, Token::LParen)
+        {
+            // Parse args from i+2 up to matching RParen.
+            let lparen_span = next.span;
+            let (args, end_idx, end_span) = parse_pred_args(tokens, i + 2, lparen_span)?;
+            let mut combined = name.clone();
+            combined.push_str(ARGS_SEP);
+            combined.push_str(&serialise_pred_args(&args));
+            out.push(Spanned {
+                tok: Token::Predicate(combined),
+                span: PatSpan::new(tok.span.start as usize, end_span.end as usize),
+            });
+            i = end_idx + 1;
+            continue;
         }
         out.push(tok.clone());
         i += 1;
@@ -292,9 +426,7 @@ fn parse_pred_args(
                 };
                 // Stash as a sentinel `Lit::Sym` — the AST post-pass resolves
                 // the name to a slot via `resolve_pred_capture_refs`.
-                args.push(PredArg::Lit(Lit::Sym(format!(
-                    "{CAPREF_MARKER}{name}"
-                ))));
+                args.push(PredArg::Lit(Lit::Sym(format!("{CAPREF_MARKER}{name}"))));
                 i += 1;
             }
             Token::LBrace | Token::LParen => {
@@ -374,17 +506,21 @@ pub(crate) fn split_predicate_name(
 
 fn decode_pred_arg(field: &str, span: PatSpan) -> Result<PredArg, ParseError> {
     let mut chars = field.chars();
-    let tag = chars.next().ok_or_else(|| {
-        ParseError::new("internal: empty predicate-arg record", span)
-    })?;
+    let tag = chars
+        .next()
+        .ok_or_else(|| ParseError::new("internal: empty predicate-arg record", span))?;
     let rest = &field[tag.len_utf8()..];
     Ok(match tag {
-        'i' => PredArg::Lit(Lit::Int(rest.parse::<i64>().map_err(|_| {
-            ParseError::new("internal: bad serialised int", span)
-        })?)),
-        'f' => PredArg::Lit(Lit::Float(rest.parse::<f64>().map_err(|_| {
-            ParseError::new("internal: bad serialised float", span)
-        })?)),
+        'i' => {
+            PredArg::Lit(Lit::Int(rest.parse::<i64>().map_err(|_| {
+                ParseError::new("internal: bad serialised int", span)
+            })?))
+        }
+        'f' => {
+            PredArg::Lit(Lit::Float(rest.parse::<f64>().map_err(|_| {
+                ParseError::new("internal: bad serialised float", span)
+            })?))
+        }
         's' => PredArg::Lit(Lit::Str(rest.to_string())),
         'y' => PredArg::Lit(Lit::Sym(rest.to_string())),
         't' => PredArg::Lit(Lit::True),
@@ -399,28 +535,22 @@ fn decode_pred_arg(field: &str, span: PatSpan) -> Result<PredArg, ParseError> {
 }
 
 /// Translate `lalrpop_util::ParseError` into our `ParseError` shape.
-fn lalrpop_to_parse_error(
-    err: lalrpop_util::ParseError<usize, Token, ParseError>,
-) -> ParseError {
+fn lalrpop_to_parse_error(err: lalrpop_util::ParseError<usize, Token, ParseError>) -> ParseError {
     use lalrpop_util::ParseError as LP;
     match err {
         LP::User { error } => error,
-        LP::InvalidToken { location } => ParseError::new(
-            "invalid token",
-            PatSpan::new(location, location),
-        ),
-        LP::UnrecognizedEof { location, .. } => ParseError::new(
-            "unexpected end of input",
-            PatSpan::new(location, location),
-        ),
-        LP::UnrecognizedToken { token: (l, _, r), .. } => ParseError::new(
-            "unexpected token",
-            PatSpan::new(l, r),
-        ),
-        LP::ExtraToken { token: (l, _, r) } => ParseError::new(
-            "unexpected trailing input",
-            PatSpan::new(l, r),
-        ),
+        LP::InvalidToken { location } => {
+            ParseError::new("invalid token", PatSpan::new(location, location))
+        }
+        LP::UnrecognizedEof { location, .. } => {
+            ParseError::new("unexpected end of input", PatSpan::new(location, location))
+        }
+        LP::UnrecognizedToken {
+            token: (l, _, r), ..
+        } => ParseError::new("unexpected token", PatSpan::new(l, r)),
+        LP::ExtraToken { token: (l, _, r) } => {
+            ParseError::new("unexpected trailing input", PatSpan::new(l, r))
+        }
     }
 }
 
@@ -532,10 +662,11 @@ fn convert_named_captures(pat: &mut Pat) {
         && name.is_none()
     {
         let new_name: Option<String> = match &body.kind {
-            PatKind::Kind(tag) => {
-                murphy_ast::pattern_name(*tag).map(|s| s.to_string())
-            }
-            PatKind::Predicate { name: pred_name, args } if args.is_empty() => {
+            PatKind::Kind(tag) => murphy_ast::pattern_name(*tag).map(|s| s.to_string()),
+            PatKind::Predicate {
+                name: pred_name,
+                args,
+            } if args.is_empty() => {
                 // Only the marker-tagged form is a candidate for named-
                 // capture rewriting. Even then, a bare-ident with a `?`/`!`
                 // suffix (`$odd?`) is intentionally a bare-predicate-shorthand
@@ -640,17 +771,26 @@ impl BarePos<'_> {
 
 fn validate_bare_predicate_position(pat: &mut Pat, pos: BarePos<'_>) -> Result<(), ParseError> {
     // Examine `pat`'s top-level shape first.
-    if let PatKind::Predicate { name, .. } = &mut pat.kind {
-        if let Some(stripped) = name.strip_prefix(BARE_IDENT_MARKER) {
-            if !pos.allows_bare() {
-                return Err(ParseError::new(
-                    format!("unknown node type `{stripped}`"),
-                    pat.span,
-                ));
-            }
-            // Accept: strip the marker so downstream sees a normal Predicate.
-            *name = stripped.to_string();
+    if let PatKind::Predicate { name, .. } = &mut pat.kind
+        && let Some(stripped) = name.strip_prefix(BARE_IDENT_MARKER)
+    {
+        if !pos.allows_bare() {
+            // For `?` / `!` suffixed bare idents, append a hint pointing
+            // at the explicit `#name` host-predicate syntax. Tests assert
+            // on both `unknown node type` and the backticked `\`#save!\``
+            // hint, so include both verbatim.
+            let hint = if stripped.ends_with('?') || stripped.ends_with('!') {
+                format!(": did you mean `#{stripped}` to call a host predicate?")
+            } else {
+                String::new()
+            };
+            return Err(ParseError::new(
+                format!("unknown node type `{stripped}`{hint}"),
+                pat.span,
+            ));
         }
+        // Accept: strip the marker so downstream sees a normal Predicate.
+        *name = stripped.to_string();
     }
     // Recurse into child positions with the appropriate context.
     // We split `&mut pat.kind` into matches that don't co-borrow `head`.
@@ -665,7 +805,10 @@ fn validate_bare_predicate_position(pat: &mut Pat, pos: BarePos<'_>) -> Result<(
             // immutable borrow.
             let head_ref: &Head = head;
             for (idx, child) in children.iter_mut().enumerate() {
-                let child_pos = BarePos::NodeChild { parent: head_ref, child_idx: idx };
+                let child_pos = BarePos::NodeChild {
+                    parent: head_ref,
+                    child_idx: idx,
+                };
                 validate_bare_predicate_position(child, child_pos)?;
             }
         }
@@ -746,10 +889,12 @@ fn walk_assign(pat: &mut Pat, state: &mut SlotState) -> Result<(), ParseError> {
     // into each arm body.
     if let PatKind::Union(alts) = &pat.kind {
         let all_sugar = !alts.is_empty()
-            && alts.iter().all(|a| matches!(
-                &a.kind,
-                PatKind::Capture { name: Some(n), .. } if n == SUGAR_MARKER
-            ));
+            && alts.iter().all(|a| {
+                matches!(
+                    &a.kind,
+                    PatKind::Capture { name: Some(n), .. } if n == SUGAR_MARKER
+                )
+            });
         if all_sugar {
             // Allocate one shared slot. Slot kind is `Node` — sugar arms
             // are full Prefixed patterns, which don't admit rest/quantifier
@@ -779,7 +924,11 @@ fn walk_assign(pat: &mut Pat, state: &mut SlotState) -> Result<(), ParseError> {
                 // which is (outer_start + 1) .. outer_end for the named-capture
                 // shape produced by `convert_named_captures` (the outer Capture
                 // spans `$ident` and the body Wildcard spans only the `$`).
-                if state.names.iter().any(|nm| nm.as_deref() == Some(n.as_str())) {
+                if state
+                    .names
+                    .iter()
+                    .any(|nm| nm.as_deref() == Some(n.as_str()))
+                {
                     let ident_span = PatSpan {
                         start: pat.span.start + 1,
                         end: pat.span.end,
@@ -847,7 +996,12 @@ fn collect_capture_names(pat: &Pat) -> Vec<Option<String>> {
     // Each slot appears at most once for named captures (duplicates already
     // rejected); but sugar slots appear multiple times with `name = None`.
     // Build a Vec<Option<String>> indexed by slot.
-    let max_slot = out.iter().map(|(s, _)| *s).max().map(|s| s as usize + 1).unwrap_or(0);
+    let max_slot = out
+        .iter()
+        .map(|(s, _)| *s)
+        .max()
+        .map(|s| s as usize + 1)
+        .unwrap_or(0);
     let mut table: Vec<Option<String>> = vec![None; max_slot];
     for (s, n) in out {
         if let Some(name) = n {
