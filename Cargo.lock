@@ -900,7 +900,6 @@ dependencies = [
  "murphy-plugin-api",
  "proc-macro2",
  "quote",
- "regex",
  "serde_json",
  "syn",
  "trybuild",

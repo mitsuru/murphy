@@ -31,8 +31,12 @@
 //   tPARAM_NAMED                   | (not in v1 scope — Ruby-side $name params)
 //   tPARAM_NUMBER                  | (not in v1 scope — Ruby-side $1/$2 params)
 //   tPARAM_CONST                   | implemented in D3 (murphy-kq57): `Foo`/`%Foo`
-//   tREGEXP                        | (deferred — beads murphy-t8km)
-//   tUNIFY                         | (deferred — beads murphy-nnr8)
+//   tREGEXP                        | implemented in D5 (murphy-t8km): `/.../[imxo]*`
+//                                  |   — Rust `regex` crate (RE2 family);
+//                                  |   `o` flag is silently ignored
+//   tUNIFY                         | implemented in D4 (murphy-nnr8): `_name`
+//                                  |   — NodeId equality (not RuboCop's
+//                                  |   structural equality) — see ast.rs
 // ---------------------------------|-------------------------------------------
 // union (with '|' separator)       | UnionPrimary (brace form only);
 //                                  |   '|' pipe separator between alternatives
@@ -56,8 +60,8 @@
 // args (tARG_LIST …)               | not in grammar; pre-folded by
 //                                  |   fold_predicate_args in parser.rs
 // ---------------------------------|-------------------------------------------
-// D-phase implemented:
-//   tREGEXP                        — implemented in D5 (murphy-t8km)
+// All D-phase atoms (intersection, union pipe, tPARAM_CONST, tUNIFY, tREGEXP)
+// are now implemented; see the per-atom rows above for the owning beads issue.
 
 use crate::lexer::Token;
 use crate::{Head, Lit, ParseError, Pat, PatKind, PatSpan};
