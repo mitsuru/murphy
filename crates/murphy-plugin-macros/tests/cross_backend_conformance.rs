@@ -2284,6 +2284,63 @@ fn anyorder_nested_capture_ref_pred_arg_agrees_across_backends() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// 12g. AnyOrder uniform-capture sugar inside `<...>`: `(array <${int sym}>)`.
+//
+// `${int sym}` parses as a Union of two Captures sharing slot 0. The B
+// backend's `lower_bool_anyorder_probe` must recurse into Union arms
+// (rather than delegating to `lower_bool`) so the probe-bool expression
+// has type `bool` (one bool per arm, OR-chained), not the `()` of a
+// capture-write block.
+//
+// Without the fix, `lower_bool` for the union emits
+// `{ __cap0 = subject; }` (statement block, type `()`), which the
+// surrounding `if #probe { ... }` rejects with a Rust compile error.
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_anyorder_union_cap_sugar, "(array <${int sym}>)");
+
+#[test]
+fn anyorder_union_capture_sugar_agrees_across_backends() {
+    // `[42, :foo]` — array of two elements, one `int` one `sym`. The
+    // uniform-capture sugar matches whichever element happens to land
+    // in the AnyOrder slot and captures it into slot 0.
+    //
+    // Since the AnyOrder has a single non-rest child, the matched
+    // element must be either int or sym; the array is consumed in full
+    // (no `...`, so consume == 1 must equal block length 1 — but the
+    // array has 2 elems, so this won't match). Use a 1-element array
+    // to make the match succeed.
+    let mut b = AstBuilder::new("[42]", "t.rb");
+    let int_node = b.push(NodeKind::Int(42), r());
+    let elems = b.push_list(&[int_node]);
+    let arr = b.push(NodeKind::Array(elems), r());
+    let ast = b.finish(arr);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // B backend: must compile (was an E0308 `expected bool, found ()`
+    // pre-fix) and capture the int into slot 0.
+    let b_caps: Option<(NodeId,)> = b_anyorder_union_cap_sugar(arr, &cx);
+    assert!(
+        b_caps.is_some(),
+        "B: `(array <${{int sym}}>)` must match [42] and capture the int"
+    );
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, int_node, "B: captured slot 0 must be the int node");
+
+    // C backend: same match outcome and same captured id.
+    let c = assert_c_matches("(array <${int sym}>)", &ast, arr, b_caps.is_some());
+    let c_caps = c.expect("C must also match");
+    match c_caps.get(0).cloned() {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: capture id disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // 14. murphy-iqv: `$!body` — capture wrapping Not.
 //
 // `$!send` matches any non-send node and captures the subject id.

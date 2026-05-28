@@ -2094,7 +2094,23 @@ fn lower_bool_anyorder_probe(
                 ( cx.parent(#subject).get().map_or(false, |#p| #inner_probe) )
             })
         }
-        // All other arms (Wildcard, Lit, Kind, NilTest, Union, Not, Predicate,
+        PatKind::Union(alts) => {
+            // Uniform-capture sugar `${a b ...}` parses as a Union whose every
+            // arm is a Capture with the same slot. Delegating to `lower_bool`
+            // would (a) emit a `__cap{slot} = subject;` statement-block of type
+            // `()` — which `if #probe { ... }` rejects — and (b) skip writing
+            // the probe-scope binding `__pcap{slot}`, so a later predicate in
+            // the same AnyOrder block referencing that slot would read None.
+            // Recurse into each arm with the probe lowering and OR-chain the
+            // resulting bool expressions: the arm that matches writes its
+            // probe binding and yields `true`; the others short-circuit.
+            let alt_bools: Vec<TokenStream> = alts
+                .iter()
+                .map(|alt| lower_bool_anyorder_probe(alt, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            Ok(quote!( ( #(#alt_bools)||* ) ))
+        }
+        // All other arms (Wildcard, Lit, Kind, NilTest, Not, Predicate,
         // Descend) cannot legally contain a Capture (parser-enforced), so
         // lower_bool is a correct and complete delegate.
         _ => lower_bool(pat, subject, ctx),
