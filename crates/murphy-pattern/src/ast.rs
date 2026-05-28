@@ -87,6 +87,24 @@ pub enum PatKind {
     /// `node_pattern_no_union: '[' node_pattern_list ']'`. At least one child
     /// is required (the grammar enforces `Pat+` inside `[...]`).
     Intersection { children: Vec<Pat> },
+    /// `%name` — named runtime parameter (tPARAM_NAMED, Phase E — murphy-aow).
+    ///
+    /// At match time the caller supplies a `Params` struct; the matcher looks up
+    /// `name` in `Params::named` and compares the subject's `Sym` value against
+    /// the resolved symbol string.
+    ///
+    /// **Scope**: Symbol comparisons only. `Set`/`Array` type support and
+    /// `CopOptions` type ↔ `%var` integration are future work.
+    ParamNamed { name: String },
+    /// `%1`, `%2`, … — positional runtime parameter (tPARAM_NUMBER, Phase E — murphy-aow).
+    ///
+    /// `index` is 1-based. At match time the caller supplies a `Params` struct;
+    /// the matcher looks up `Params::positional[index - 1]` and compares the
+    /// subject's `Sym` value against the resolved symbol string.
+    ///
+    /// **Scope**: Symbol comparisons only. `Set`/`Array` type support and
+    /// `CopOptions` type ↔ `%N` integration are future work.
+    ParamNumber { index: u16 },
     /// `_name` — named unification atom (tUNIFY, D4 — murphy-nnr8).
     ///
     /// The first occurrence of `_name` in the pattern binds the current

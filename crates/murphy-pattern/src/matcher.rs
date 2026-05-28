@@ -56,20 +56,78 @@ impl PredicateHost for NoPredicates {
     }
 }
 
+/// Hook used by the matcher to resolve `%name` / `%N` runtime parameters
+/// (Phase E, murphy-aow).
+///
+/// `named` is consulted for every `IrNode::ParamNamed { name }`; `positional`
+/// for every `IrNode::ParamNumber { index }` (the `index` passed here is
+/// already 0-based — the lexer rejects `%0` so a 1-based source `%N` maps to
+/// `positional(N - 1)`). A `None` return collapses to a match miss.
+///
+/// The production implementation lives in the mruby bridge (`murphy-9cr.24`)
+/// where Ruby cop authors supply param values via `def_node_matcher` keyword
+/// args; tests use the in-memory [`NoParams`] or a `HashMap`-backed host.
+pub trait ParamHost {
+    fn named(&self, name: &str) -> Option<crate::Param<'_>>;
+    fn positional(&self, index: usize) -> Option<crate::Param<'_>>;
+}
+
+/// Param host that never resolves anything — every `%var` / `%N` becomes a
+/// match miss. The default used by [`matches`] (the 4-arg API) and tests that
+/// don't exercise runtime params.
+pub struct NoParams;
+
+impl ParamHost for NoParams {
+    fn named(&self, _name: &str) -> Option<crate::Param<'_>> {
+        None
+    }
+    fn positional(&self, _index: usize) -> Option<crate::Param<'_>> {
+        None
+    }
+}
+
 /// Match `ir` against `node` in `ast`. Returns `Some(captures)` on a
 /// successful match (with one [`CaptureValue`] per `$` capture, slot-indexed)
 /// or `None` if the pattern does not match.
 ///
 /// `predicates` is invoked for every `#name` predicate node reached during
 /// the walk. Pass [`NoPredicates`] if the pattern has none.
+///
+/// **Phase E (murphy-aow) note**: this 4-arg API plugs in [`NoParams`] for
+/// runtime parameters — every `%var` / `%N` collapses to a miss. Patterns
+/// that use those atoms should call [`matches_with_params`] instead.
 pub fn matches<P: PredicateHost + ?Sized>(
     ir: &PatternIr,
     ast: &Ast,
     node: NodeId,
     predicates: &mut P,
 ) -> Option<Captures> {
+    matches_with_params(ir, ast, node, predicates, &NoParams)
+}
+
+/// Match `ir` against `node` in `ast`, with runtime parameter resolution
+/// supplied by `params` (Phase E, murphy-aow).
+///
+/// Behaves identically to [`matches`] except that `%var` / `%N` atoms in the
+/// pattern delegate to `params.named()` / `params.positional()` to obtain the
+/// runtime value to compare against the subject literal.
+pub fn matches_with_params<P, Q>(
+    ir: &PatternIr,
+    ast: &Ast,
+    node: NodeId,
+    predicates: &mut P,
+    params: &Q,
+) -> Option<Captures>
+where
+    P: PredicateHost + ?Sized,
+    Q: ParamHost,
+{
     let mut buf = CaptureBuf::new(ir.captures.len());
-    let ctx = MatcherCtx { ir, ast };
+    let ctx = MatcherCtx {
+        ir,
+        ast,
+        params: params as &dyn ParamHost,
+    };
     if match_pat(&ctx, ir.root, node, &mut buf, predicates) {
         // `finish` may return `None` only if a capture slot was left
         // unwritten — the parser rejects every IR shape that can do
@@ -88,6 +146,7 @@ pub fn matches<P: PredicateHost + ?Sized>(
 struct MatcherCtx<'a> {
     ir: &'a PatternIr,
     ast: &'a Ast,
+    params: &'a dyn ParamHost,
 }
 
 impl<'a> MatcherCtx<'a> {
@@ -331,6 +390,43 @@ fn match_pat<P: PredicateHost + ?Sized>(
                 true
             }
         }
+
+        IrNode::ParamNamed { name } => {
+            // Phase E (murphy-aow): %name runtime parameter. Resolve via
+            // ParamHost, then compare the resolved value against the subject's
+            // literal shape. Any failure (unknown name, type mismatch, no
+            // literal in the subject) collapses to a miss — never a panic.
+            let pool_name = ctx.pool(*name);
+            let Some(param) = ctx.params.named(pool_name) else {
+                return false;
+            };
+            crate::match_lit_against_param(subject_lit_view(ctx, node), &param)
+        }
+
+        IrNode::ParamNumber { index } => {
+            // Phase E (murphy-aow): %N positional parameter (1-based in source,
+            // 0-based here — the lexer rejects %0 so subtraction is safe).
+            let Some(param) = ctx.params.positional(*index as usize - 1) else {
+                return false;
+            };
+            crate::match_lit_against_param(subject_lit_view(ctx, node), &param)
+        }
+    }
+}
+
+/// Convert a subject `NodeId`'s `NodeKind` into a `LitView` suitable for
+/// [`crate::match_lit_against_param`]. Returns `None` for kinds that don't
+/// correspond to a literal atom — those always miss a `%var` / `%N`.
+fn subject_lit_view<'a>(ctx: &MatcherCtx<'a>, node: NodeId) -> Option<crate::LitView<'a>> {
+    use crate::LitView;
+    match *ctx.ast.kind(node) {
+        NodeKind::Sym(s) => Some(LitView::Sym(ctx.ast.interner().resolve(s.0))),
+        NodeKind::Str(s) => Some(LitView::Str(ctx.ast.interner().resolve(s.0))),
+        NodeKind::Int(n) => Some(LitView::Int(n)),
+        NodeKind::True_ => Some(LitView::True),
+        NodeKind::False_ => Some(LitView::False),
+        NodeKind::Nil => Some(LitView::Nil),
+        _ => None,
     }
 }
 
@@ -1694,7 +1790,11 @@ mod tests {
         let quantifier = ir.children[children.start as usize];
         let mut buf = CaptureBuf::new(0);
         let _ = match_pat(
-            &MatcherCtx { ir: &ir, ast: &ast },
+            &MatcherCtx {
+                ir: &ir,
+                ast: &ast,
+                params: &NoParams,
+            },
             quantifier,
             arr,
             &mut buf,
@@ -2030,6 +2130,225 @@ mod tests {
         assert!(
             matches(&ir, &ast2, node2, &mut NoPredicates).is_none(),
             "/\\d+/ must NOT match :abc"
+        );
+    }
+
+    // =========================================================================
+    // Phase E (murphy-aow): %var / %N runtime parameters
+    // =========================================================================
+
+    use std::collections::HashMap;
+
+    /// HashMap-backed ParamHost used by tests. Owns the Param storage so the
+    /// references handed back stay valid for the duration of the matcher call.
+    struct MapParams {
+        named: HashMap<String, ParamOwn>,
+        positional: Vec<ParamOwn>,
+    }
+
+    /// Owned counterpart of `Param<'a>` — converts to a borrowed `Param<'_>`
+    /// on demand so the test host can yield short-lived references.
+    enum ParamOwn {
+        Str(String),
+        StrSet(Vec<String>),
+        Int(i64),
+        IntSet(Vec<i64>),
+        Bool(bool),
+        None,
+    }
+
+    impl ParamOwn {
+        fn borrow(&self) -> crate::Param<'_> {
+            match self {
+                ParamOwn::Str(s) => crate::Param::Str(s.as_str()),
+                ParamOwn::StrSet(v) => crate::Param::StrSet(v.as_slice()),
+                ParamOwn::Int(n) => crate::Param::Int(*n),
+                ParamOwn::IntSet(v) => crate::Param::IntSet(v.as_slice()),
+                ParamOwn::Bool(b) => crate::Param::Bool(*b),
+                ParamOwn::None => crate::Param::None,
+            }
+        }
+    }
+
+    impl ParamHost for MapParams {
+        fn named(&self, name: &str) -> Option<crate::Param<'_>> {
+            self.named.get(name).map(|p| p.borrow())
+        }
+        fn positional(&self, index: usize) -> Option<crate::Param<'_>> {
+            self.positional.get(index).map(|p| p.borrow())
+        }
+    }
+
+    fn map_params() -> MapParams {
+        MapParams {
+            named: HashMap::new(),
+            positional: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn param_named_str_hit_and_miss() {
+        let ir = compile("%method").expect("compile ok");
+        let (ast, node) = sym_ast("foo");
+        let mut p = map_params();
+        p.named.insert("method".into(), ParamOwn::Str("foo".into()));
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p).is_some(),
+            "%method=Str(\"foo\") must match :foo"
+        );
+        let mut p2 = map_params();
+        p2.named
+            .insert("method".into(), ParamOwn::Str("bar".into()));
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p2).is_none(),
+            "%method=Str(\"bar\") must miss :foo"
+        );
+    }
+
+    #[test]
+    fn param_named_strset_membership() {
+        let ir = compile("%method").expect("compile ok");
+        let (ast, node) = sym_ast("foo");
+        let mut p = map_params();
+        p.named.insert(
+            "method".into(),
+            ParamOwn::StrSet(vec!["foo".into(), "bar".into()]),
+        );
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p).is_some(),
+            "%method=StrSet([\"foo\", \"bar\"]) must match :foo"
+        );
+        let mut p2 = map_params();
+        p2.named
+            .insert("method".into(), ParamOwn::StrSet(vec!["bar".into()]));
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p2).is_none(),
+            "%method=StrSet([\"bar\"]) must miss :foo"
+        );
+    }
+
+    #[test]
+    fn param_named_type_mismatch_is_miss() {
+        // %method bound to Int(42) but subject is Sym → miss, not panic.
+        let ir = compile("%method").expect("compile ok");
+        let (ast, node) = sym_ast("foo");
+        let mut p = map_params();
+        p.named.insert("method".into(), ParamOwn::Int(42));
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p).is_none(),
+            "type-mismatch must be a soft miss"
+        );
+    }
+
+    #[test]
+    fn param_named_unknown_is_miss() {
+        // %unknown with no entry in named table → ParamHost returns None → miss.
+        let ir = compile("%unknown").expect("compile ok");
+        let (ast, node) = sym_ast("foo");
+        let p = map_params();
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p).is_none(),
+            "unknown %name must miss"
+        );
+    }
+
+    #[test]
+    fn param_number_positional_hit_and_miss() {
+        let ir = compile("%1").expect("compile ok");
+        let (ast, node) = int_ast(42);
+        let mut p = map_params();
+        p.positional.push(ParamOwn::Int(42));
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p).is_some(),
+            "%1 with positional[0]=Int(42) must match Int(42)"
+        );
+        let mut p2 = map_params();
+        p2.positional.push(ParamOwn::Int(7));
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p2).is_none(),
+            "%1 with positional[0]=Int(7) must miss Int(42)"
+        );
+    }
+
+    #[test]
+    fn param_number_out_of_bounds_is_miss() {
+        // %2 with only one positional → ParamHost returns None → miss.
+        let ir = compile("%2").expect("compile ok");
+        let (ast, node) = int_ast(42);
+        let mut p = map_params();
+        p.positional.push(ParamOwn::Int(42));
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p).is_none(),
+            "%2 out-of-bounds must miss"
+        );
+    }
+
+    #[test]
+    fn matches_4arg_api_misses_on_any_param_atom() {
+        // The classic 4-arg matches() plugs in NoParams, so any %var / %N
+        // pattern collapses to a miss when called via that API.
+        let ir = compile("%method").expect("compile ok");
+        let (ast, node) = sym_ast("foo");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_none(),
+            "matches() (NoParams) must miss for any %name"
+        );
+    }
+
+    #[test]
+    fn param_none_always_misses() {
+        // Param::None is the IntoParam mapping for Option::None — should
+        // never match anything.
+        let ir = compile("%method").expect("compile ok");
+        let (ast, node) = sym_ast("foo");
+        let mut p = map_params();
+        p.named.insert("method".into(), ParamOwn::None);
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p).is_none(),
+            "Param::None must miss any subject"
+        );
+    }
+
+    #[test]
+    fn param_int_set_membership_at_runtime() {
+        // Exercise ParamOwn::IntSet (otherwise clippy flags it as unused).
+        let ir = compile("%threshold").expect("compile ok");
+        let (ast, node) = int_ast(2);
+        let mut p = map_params();
+        p.named
+            .insert("threshold".into(), ParamOwn::IntSet(vec![1, 2, 3]));
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p).is_some(),
+            "Int(2) must be in [1,2,3]"
+        );
+        let (ast2, node2) = int_ast(99);
+        assert!(
+            matches_with_params(&ir, &ast2, node2, &mut NoPredicates, &p).is_none(),
+            "Int(99) must miss [1,2,3]"
+        );
+    }
+
+    #[test]
+    fn param_bool_at_runtime() {
+        // Exercise ParamOwn::Bool (otherwise clippy flags it as unused).
+        let ir = compile("%active").expect("compile ok");
+        let mut p = map_params();
+        p.named.insert("active".into(), ParamOwn::Bool(true));
+        // Subject: True_ node.
+        let mut b = AstBuilder::new("true", "t.rb");
+        let node = b.push(NodeKind::True_, r());
+        let ast = b.finish(node);
+        assert!(
+            matches_with_params(&ir, &ast, node, &mut NoPredicates, &p).is_some(),
+            "Bool(true) must match True_"
+        );
+        // Subject: False_ node — should miss when bound to true.
+        let mut b2 = AstBuilder::new("false", "t.rb");
+        let node2 = b2.push(NodeKind::False_, r());
+        let ast2 = b2.finish(node2);
+        assert!(
+            matches_with_params(&ir, &ast2, node2, &mut NoPredicates, &p).is_none(),
+            "Bool(true) must miss False_"
         );
     }
 }

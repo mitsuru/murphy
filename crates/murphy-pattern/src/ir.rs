@@ -164,6 +164,19 @@ pub enum IrNode {
         pattern: StrRef,
         flags: StrRef,
     },
+    /// `%name` — named runtime parameter (Phase E, murphy-aow). At match
+    /// time the `ParamHost` is asked for `Param::named(name)`; the resolved
+    /// value is compared against the current subject's `Lit` shape via
+    /// `match_lit_against_param`. Missing name → match miss.
+    ParamNamed {
+        name: StrRef,
+    },
+    /// `%N` (1-based) — positional runtime parameter (Phase E, murphy-aow).
+    /// At match time the `ParamHost` is asked for `Param::positional(index-1)`.
+    /// Out-of-bounds index → match miss.
+    ParamNumber {
+        index: u16,
+    },
 }
 
 /// The head of an `IrNode::Node`.
@@ -424,6 +437,11 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
                 },
             )
         }
+        PatKind::ParamNamed { name } => {
+            let name_ref = intern(ir, name);
+            push_node(ir, IrNode::ParamNamed { name: name_ref })
+        }
+        PatKind::ParamNumber { index } => push_node(ir, IrNode::ParamNumber { index: *index }),
     }
 }
 

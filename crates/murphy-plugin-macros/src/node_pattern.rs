@@ -175,7 +175,9 @@ fn collect_unify_names_inner(pat: &murphy_pattern::Pat, names: &mut Vec<String>)
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Regex { .. } => {}
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => {}
     }
 }
 
@@ -1929,7 +1931,9 @@ fn collect_capture_slots(pat: &murphy_pattern::Pat, out: &mut Vec<u16>) {
         | PatKind::Kind(_)
         | PatKind::Rest
         | PatKind::Unify { .. }
-        | PatKind::Regex { .. } => {}
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => {}
     }
 }
 
@@ -2784,7 +2788,52 @@ fn lower_bool(
             // in `lower_pat`.
             lower_bool_regex(pattern, flags, subject, ctx)
         }
+        PatKind::ParamNamed { name } => {
+            // Phase E (murphy-aow): %name. The pre-resolve pass at the top of
+            // the generated function decoded options and bound a local
+            // `__p_<name>: Param<'_>`. Compare subject literal against it.
+            lower_bool_param_named(name, subject, ctx)
+        }
+        PatKind::ParamNumber { index } => {
+            // Phase E (murphy-aow): %N (1-based source, 0-based index here).
+            lower_bool_param_number(*index, subject, ctx)
+        }
     }
+}
+
+/// Lower a `%name` runtime-parameter atom to a bool expression. Phase E
+/// (murphy-aow) currently exposes runtime params via the C-backend matcher
+/// only; the B-backend macro pipeline is wired up in a follow-up commit.
+fn lower_bool_param_named(
+    name: &str,
+    _subject: &TokenStream,
+    _ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    Err(syn::Error::new(
+        proc_macro2::Span::call_site(),
+        format!(
+            "node_pattern!: `%{name}` runtime parameter (Phase E, murphy-aow) is not yet \
+             supported by the B-backend macro — use the C-backend matcher (matches_with_params) \
+             or wait for the follow-up B-backend wiring",
+        ),
+    ))
+}
+
+/// Lower a `%N` positional runtime-parameter atom to a bool expression. See
+/// [`lower_bool_param_named`] for the staging plan.
+fn lower_bool_param_number(
+    index: u16,
+    _subject: &TokenStream,
+    _ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    Err(syn::Error::new(
+        proc_macro2::Span::call_site(),
+        format!(
+            "node_pattern!: `%{index}` positional runtime parameter (Phase E, murphy-aow) is not \
+             yet supported by the B-backend macro — use the C-backend matcher \
+             (matches_with_params) or wait for the follow-up B-backend wiring",
+        ),
+    ))
 }
 
 /// Lower a `Lit` into a `return`-free bool expression — the value-form
