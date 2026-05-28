@@ -135,6 +135,35 @@ pub enum IrNode {
     AnyOrder {
         children: IrSlice,
     },
+    /// `[a b c]` — intersection AND-pattern: all `children` must match the
+    /// same subject. Mirrors [`crate::PatKind::Intersection`].
+    Intersection {
+        children: IrSlice,
+    },
+    /// `_name` — named unification atom (D4, murphy-nnr8). The first
+    /// occurrence of `name` in a match binds the current subject's `NodeId`;
+    /// subsequent occurrences require the subject's `NodeId` to be equal.
+    /// The unification table lives in [`CaptureBuf`] alongside `$` captures
+    /// and is snapshot/restored by the same clone discipline.
+    ///
+    /// Semantic note: Murphy uses [`NodeId`] equality, not structural
+    /// equality; see [`crate::PatKind::Unify`] for rationale.
+    ///
+    /// [`NodeId`]: murphy_ast::NodeId
+    Unify {
+        name: StrRef,
+    },
+    /// `/.../[imxo]*` — regex match on a Symbol or String slot (D5,
+    /// murphy-t8km). Matches when the subject is a `Sym` or `Str` atom whose
+    /// string value satisfies the compiled regex. Any other kind → no-match.
+    ///
+    /// `pattern` and `flags` are interned into the IR string pool; at match
+    /// time the regex is compiled on the fly (or via a cached static in the B
+    /// backend).
+    Regex {
+        pattern: StrRef,
+        flags: StrRef,
+    },
 }
 
 /// The head of an `IrNode::Node`.
@@ -368,6 +397,30 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
                 ir,
                 IrNode::AnyOrder {
                     children: child_slice,
+                },
+            )
+        }
+        PatKind::Intersection { children } => {
+            let child_slice = lower_children(children, ast, ir);
+            push_node(
+                ir,
+                IrNode::Intersection {
+                    children: child_slice,
+                },
+            )
+        }
+        PatKind::Unify { name } => {
+            let name_ref = intern(ir, name);
+            push_node(ir, IrNode::Unify { name: name_ref })
+        }
+        PatKind::Regex { pattern, flags } => {
+            let pattern_ref = intern(ir, pattern);
+            let flags_ref = intern(ir, flags);
+            push_node(
+                ir,
+                IrNode::Regex {
+                    pattern: pattern_ref,
+                    flags: flags_ref,
                 },
             )
         }

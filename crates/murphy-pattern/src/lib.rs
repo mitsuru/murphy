@@ -16,6 +16,18 @@ mod parser;
 
 pub use parser::parse;
 
+// LALRPOP-generated parser module (grammar: `src/parser.lalrpop`).
+//
+// `lalrpop_mod!` expands to:
+//   `mod lalrpop_parser { include!(concat!(env!("OUT_DIR"), "/parser.rs")); }`
+// — so the included file is `src/parser.lalrpop` compiled into `$OUT_DIR/parser.rs`.
+// The inner `#![allow]` suppresses lints in LALRPOP's generated code, which
+// contains patterns that trip clippy even in active, correct grammars.
+mod lalrpop_parser_inner {
+    #![allow(unused, clippy::all, dead_code)]
+    lalrpop_util::lalrpop_mod!(pub lalrpop_parser, "/parser.rs");
+}
+
 mod ir;
 
 pub use ir::{CaptureMeta, IrHead, IrNode, IrNodeId, IrPredArg, IrSlice, PatternIr, StrRef, lower};

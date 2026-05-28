@@ -2429,3 +2429,605 @@ fn capture_wrapping_not_in_receiver_position_agrees_across_backends() {
         other => panic!("C: slot 0 expected Node, got {other:?}"),
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Intersection `[...]` AND-pattern (murphy-l448)
+// ────────────────────────────────────────────────────────────────────────
+
+// B-backend helpers for intersection tests.
+node_pattern!(b_not_nil_and_int, "[!nil? int]");
+node_pattern!(b_int_not_one, "[int !1]");
+node_pattern!(b_intersection_capture, "[$v int]");
+
+#[test]
+fn intersection_not_nil_int_matches_int_agrees_across_backends() {
+    // `[!nil? int]` must match Int(1), miss Nil, miss True_.
+    let mut b = AstBuilder::new("1", "t.rb");
+    let one = b.push(NodeKind::Int(1), r());
+    let ast = b.finish(one);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_hit: bool = b_not_nil_and_int(one, &cx);
+    let c_hit = assert_c_matches("[!nil? int]", &ast, one, b_hit);
+    assert!(b_hit, "B: [!nil? int] must match Int(1)");
+    assert!(c_hit.is_some(), "C: [!nil? int] must match Int(1)");
+}
+
+#[test]
+fn intersection_not_nil_int_misses_nil_agrees_across_backends() {
+    // `[!nil? int]` must miss Nil (fails `!nil?`).
+    let mut b = AstBuilder::new("nil", "t.rb");
+    let nil = b.push(NodeKind::Nil, r());
+    let ast = b.finish(nil);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_miss: bool = b_not_nil_and_int(nil, &cx);
+    let c_miss = assert_c_matches("[!nil? int]", &ast, nil, b_miss);
+    assert!(!b_miss, "B: [!nil? int] must miss Nil");
+    assert!(c_miss.is_none(), "C: [!nil? int] must miss Nil");
+}
+
+#[test]
+fn intersection_int_not_one_matches_two_agrees_across_backends() {
+    // `[int !1]` must match Int(2) (is int, not the literal 1), miss Int(1).
+    let mut b = AstBuilder::new("2", "t.rb");
+    let two = b.push(NodeKind::Int(2), r());
+    let ast = b.finish(two);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_hit: bool = b_int_not_one(two, &cx);
+    let c_hit = assert_c_matches("[int !1]", &ast, two, b_hit);
+    assert!(b_hit, "B: [int !1] must match Int(2)");
+    assert!(c_hit.is_some(), "C: [int !1] must match Int(2)");
+
+    // Int(1) must miss.
+    let mut b2 = AstBuilder::new("1", "t.rb");
+    let one = b2.push(NodeKind::Int(1), r());
+    let ast2 = b2.finish(one);
+    let raw2 = cx_raw_for(&ast2, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let b_miss: bool = b_int_not_one(one, &cx2);
+    let c_miss = assert_c_matches("[int !1]", &ast2, one, b_miss);
+    assert!(!b_miss, "B: [int !1] must miss Int(1)");
+    assert!(c_miss.is_none(), "C: [int !1] must miss Int(1)");
+}
+
+#[test]
+fn intersection_capture_agrees_across_backends() {
+    // `[$v int]` — captures the int node in slot 0 on success.
+    let mut b = AstBuilder::new("5", "t.rb");
+    let five = b.push(NodeKind::Int(5), r());
+    let ast = b.finish(five);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_caps: Option<(NodeId,)> = b_intersection_capture(five, &cx);
+    let c = assert_c_matches("[$v int]", &ast, five, b_caps.is_some());
+
+    assert!(b_caps.is_some(), "B: [$v int] must match Int(5)");
+    let (b_id,) = b_caps.unwrap();
+    assert_eq!(b_id, five, "B: captured node must be Int(5)");
+
+    let c_caps = c.expect("C: [$v int] must match Int(5)");
+    match c_caps.get(0).cloned() {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_id, c_id, "B↔C: [$v int] capture id disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+
+    // Sym(x) must miss in both backends.
+    let mut b2 = AstBuilder::new(":x", "t.rb");
+    let sx = b2.intern_symbol("x");
+    let sym = b2.push(NodeKind::Sym(sx), r());
+    let ast2 = b2.finish(sym);
+    let raw2 = cx_raw_for(&ast2, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let b_miss: Option<(NodeId,)> = b_intersection_capture(sym, &cx2);
+    let c_miss = assert_c_matches("[$v int]", &ast2, sym, b_miss.is_some());
+    assert!(b_miss.is_none(), "B: [$v int] must miss Sym");
+    assert!(c_miss.is_none(), "C: [$v int] must miss Sym");
+}
+
+/// Free fn for `#even?` in B-backend scope.
+fn even_p(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(*cx.kind(node), NodeKind::Int(v) if v % 2 == 0)
+}
+
+/// A minimal predicate host that implements `#even?` — returns `true` iff the
+/// node is an `Int` with an even value.
+struct EvenPredicate<'a> {
+    ast: &'a Ast,
+}
+
+impl<'a> PredicateHost for EvenPredicate<'a> {
+    fn call(&mut self, name: &str, node: NodeId, _args: &[PredCallArg<'_>]) -> bool {
+        if name != "even?" {
+            return false;
+        }
+        matches!(*self.ast.kind(node), murphy_ast::NodeKind::Int(v) if v % 2 == 0)
+    }
+}
+
+node_pattern!(b_wildcard_and_even, "[$_ #even?]");
+
+#[test]
+fn intersection_with_predicate_agrees_across_backends() {
+    // `[$_ #even?]` — matches any Int with an even value.
+    // Int(4): hit. Int(3): miss. True_: miss (predicate returns false).
+    let fns = fns();
+
+    // Int(4) — even int → should match.
+    let mut b = AstBuilder::new("4", "t.rb");
+    let four = b.push(NodeKind::Int(4), r());
+    let ast_four = b.finish(four);
+    let raw = cx_raw_for(&ast_four, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let b_hit: Option<(NodeId,)> = b_wildcard_and_even(four, &cx);
+    assert_c_matches_with(
+        "[$_ #even?]",
+        &ast_four,
+        four,
+        b_hit.is_some(),
+        &mut EvenPredicate { ast: &ast_four },
+    );
+    assert!(b_hit.is_some(), "B: [$_ #even?] must match Int(4)");
+
+    // Int(3) — odd int → should miss.
+    let mut b2 = AstBuilder::new("3", "t.rb");
+    let three = b2.push(NodeKind::Int(3), r());
+    let ast_three = b2.finish(three);
+    let raw2 = cx_raw_for(&ast_three, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let b_miss: Option<(NodeId,)> = b_wildcard_and_even(three, &cx2);
+    assert_c_matches_with(
+        "[$_ #even?]",
+        &ast_three,
+        three,
+        b_miss.is_some(),
+        &mut EvenPredicate { ast: &ast_three },
+    );
+    assert!(b_miss.is_none(), "B: [$_ #even?] must miss Int(3)");
+}
+
+// Union `|` pipe separator (murphy-wsep) ─────────────────────────────────
+//
+// `|` is treated as whitespace-equivalent in D2 (minimal scope).
+// `{(send _ :a) | (send _ :b)}` behaves identically to `{(send _ :a) (send _ :b)}`.
+//
+// NOTE: the `node_pattern!` macro (B-backend) compiles at proc-macro time
+// from the same `murphy-pattern::parse` grammar, so both backends see the
+// same 2-alt Union after the pipe is absorbed at the grammar level.
+
+// Union-arm send patterns must not use variable-length lists (rest/quantifier)
+// since the B-backend rejects them in v1. Use nil?-receiver + no trailing args.
+node_pattern!(
+    b_union_pipe_send_a_or_b,
+    "{(send nil? :a) | (send nil? :b)}"
+);
+
+#[test]
+fn union_pipe_separator_agrees_across_backends() {
+    // `a()` → should match arm `:a`
+    // `b()` → should match arm `:b`
+    // `c()` → should miss (neither `:a` nor `:b`)
+    let fns = fns();
+
+    // a() — bare send (no receiver), selector :a, no args
+    let mut b = AstBuilder::new("a()", "t.rb");
+    let sym_a = b.intern_symbol("a");
+    let args_a = b.push_list(&[]);
+    let send_a = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: sym_a,
+            args: args_a,
+        },
+        r(),
+    );
+    let ast_a = b.finish(send_a);
+    let raw_a = cx_raw_for(&ast_a, &fns);
+    let cx_a = unsafe { Cx::from_raw(&raw_a) };
+    let b_hit_a: bool = b_union_pipe_send_a_or_b(send_a, &cx_a);
+    assert_c_matches("{(send nil? :a) | (send nil? :b)}", &ast_a, send_a, b_hit_a);
+    assert!(b_hit_a, "B: pipe union must match a()");
+
+    // b() — bare send (no receiver), selector :b, no args
+    let mut b2 = AstBuilder::new("b()", "t.rb");
+    let sym_b = b2.intern_symbol("b");
+    let args_b = b2.push_list(&[]);
+    let send_b = b2.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: sym_b,
+            args: args_b,
+        },
+        r(),
+    );
+    let ast_b = b2.finish(send_b);
+    let raw_b = cx_raw_for(&ast_b, &fns);
+    let cx_b = unsafe { Cx::from_raw(&raw_b) };
+    let b_hit_b: bool = b_union_pipe_send_a_or_b(send_b, &cx_b);
+    assert_c_matches("{(send nil? :a) | (send nil? :b)}", &ast_b, send_b, b_hit_b);
+    assert!(b_hit_b, "B: pipe union must match b()");
+
+    // c() — bare send (no receiver), selector :c → must miss both backends
+    let mut b3 = AstBuilder::new("c()", "t.rb");
+    let sym_c = b3.intern_symbol("c");
+    let args_c = b3.push_list(&[]);
+    let send_c = b3.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: sym_c,
+            args: args_c,
+        },
+        r(),
+    );
+    let ast_c = b3.finish(send_c);
+    let raw_c = cx_raw_for(&ast_c, &fns);
+    let cx_c = unsafe { Cx::from_raw(&raw_c) };
+    let b_miss_c: bool = b_union_pipe_send_a_or_b(send_c, &cx_c);
+    assert_c_matches(
+        "{(send nil? :a) | (send nil? :b)}",
+        &ast_c,
+        send_c,
+        b_miss_c,
+    );
+    assert!(!b_miss_c, "B: pipe union must miss c()");
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// D3 (murphy-kq57): tPARAM_CONST — `Foo` uppercase-start atom.
+//
+// `Foo` / `%Foo` are expanded to `(const _ :Foo)` at parse time.
+// The pattern `(send _ :raise Foo)` matches `raise(Foo)` but not
+// `raise(Bar)` (different name) or `raise(:foo)` (Sym kind, not Const).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Build `raise(Foo)` — a send with a Const arg: `(send nil? :raise (const nil :Foo))`.
+fn raise_const_ast(const_name: &str) -> (Ast, NodeId, NodeId) {
+    let mut b = AstBuilder::new("raise(Foo)", "t.rb");
+    let name_sym = b.intern_symbol(const_name);
+    let const_node = b.push(
+        NodeKind::Const {
+            scope: OptNodeId::NONE,
+            name: name_sym,
+        },
+        r(),
+    );
+    let method_sym = b.intern_symbol("raise");
+    let args = b.push_list(&[const_node]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: method_sym,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send, const_node)
+}
+
+/// Build `raise(:foo)` — a send with a Sym literal arg (not a Const node).
+fn raise_sym_ast(sym_name: &str) -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("raise(:foo)", "t.rb");
+    let sym = b.intern_symbol(sym_name);
+    let sym_node = b.push(NodeKind::Sym(sym), r());
+    let method_sym = b.intern_symbol("raise");
+    let args = b.push_list(&[sym_node]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: method_sym,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send)
+}
+
+// D3: `Foo` expands to `(const nil? :Foo)` at parse time.
+// `nil?` is used for the receiver slot (not `_`) because Murphy's `_` in an
+// OptNode slot rejects `None` — see the note in `const_or_kind_or_unknown_ident`.
+node_pattern!(b_send_raise_foo, "(send nil? :raise Foo)");
+node_pattern!(
+    b_send_raise_explicit_const,
+    "(send nil? :raise (const nil? :Foo))"
+);
+
+#[test]
+fn d3_tparam_const_raise_foo_hits_and_misses() {
+    let fns = fns();
+    // Pattern: `(send nil? :raise Foo)` — `Foo` is expanded to `(const nil? :Foo)`.
+    // We use `nil?` for the receiver so we accept `raise(Foo)` (no receiver).
+
+    // ── hit: `raise(Foo)` ──────────────────────────────────────────────
+    let (ast_foo, send_foo, _const_foo) = raise_const_ast("Foo");
+    let raw_foo = cx_raw_for(&ast_foo, &fns);
+    let cx_foo = unsafe { Cx::from_raw(&raw_foo) };
+    let b_hit: bool = b_send_raise_foo(send_foo, &cx_foo);
+    assert!(b_hit, "B: `(send nil? :raise Foo)` must hit on raise(Foo)");
+    assert_c_matches("(send nil? :raise Foo)", &ast_foo, send_foo, b_hit);
+
+    // ── miss: `raise(Bar)` — different constant name ───────────────────
+    let (ast_bar, send_bar, _) = raise_const_ast("Bar");
+    let raw_bar = cx_raw_for(&ast_bar, &fns);
+    let cx_bar = unsafe { Cx::from_raw(&raw_bar) };
+    let b_miss_bar: bool = b_send_raise_foo(send_bar, &cx_bar);
+    assert!(
+        !b_miss_bar,
+        "B: `(send nil? :raise Foo)` must miss on raise(Bar)"
+    );
+    assert_c_matches("(send nil? :raise Foo)", &ast_bar, send_bar, b_miss_bar);
+
+    // ── miss: `raise(:foo)` — Sym node, not Const ──────────────────────
+    let (ast_sym, send_sym) = raise_sym_ast("foo");
+    let raw_sym = cx_raw_for(&ast_sym, &fns);
+    let cx_sym = unsafe { Cx::from_raw(&raw_sym) };
+    let b_miss_sym: bool = b_send_raise_foo(send_sym, &cx_sym);
+    assert!(
+        !b_miss_sym,
+        "B: `(send nil? :raise Foo)` must miss on raise(:foo)"
+    );
+    assert_c_matches("(send nil? :raise Foo)", &ast_sym, send_sym, b_miss_sym);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 14. D4 (murphy-nnr8): tUNIFY — `_name` NodeId unification.
+//
+// B↔C conformance: both backends must agree on hit/miss for patterns
+// containing `_name` unification atoms. The key semantic is that the
+// **first** occurrence of `_name` binds the subject's NodeId; subsequent
+// occurrences require equality.
+// ────────────────────────────────────────────────────────────────────────
+
+/// `obj.foo(obj)` — receiver and sole arg share the *same* NodeId.
+fn same_recv_arg_ast() -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("obj.foo(obj)", "t.rb");
+    let sym = b.intern_symbol("obj");
+    let obj = b.push(NodeKind::Lvar(sym), r());
+    let m = b.intern_symbol("foo");
+    let args = b.push_list(&[obj]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(obj),
+            method: m,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send)
+}
+
+/// `obj.foo(other)` — receiver and arg are *different* NodeIds.
+fn diff_recv_arg_ast() -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("obj.foo(other)", "t.rb");
+    let obj_sym = b.intern_symbol("obj");
+    let other_sym = b.intern_symbol("other");
+    let obj = b.push(NodeKind::Lvar(obj_sym), r());
+    let other = b.push(NodeKind::Lvar(other_sym), r());
+    let m = b.intern_symbol("foo");
+    let args = b.push_list(&[other]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(obj),
+            method: m,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send)
+}
+
+node_pattern!(b_send_x_any_x, "(send _x _ _x)");
+node_pattern!(b_send_x_any_y, "(send _x _ _y)");
+
+#[test]
+fn unify_same_node_hits_both_backends() {
+    // `(send _x _ _x)` with obj.foo(obj) (same NodeId) → hit in both B and C.
+    let fns = fns();
+    let (ast, send) = same_recv_arg_ast();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_hit: bool = b_send_x_any_x(send, &cx);
+    assert!(b_hit, "B: (send _x _ _x) must hit when recv == arg NodeId");
+    assert_c_matches("(send _x _ _x)", &ast, send, b_hit);
+}
+
+#[test]
+fn unify_different_nodes_misses_both_backends() {
+    // `(send _x _ _x)` with obj.foo(other) (different NodeIds) → miss in both.
+    let fns = fns();
+    let (ast, send) = diff_recv_arg_ast();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_miss: bool = b_send_x_any_x(send, &cx);
+    assert!(
+        !b_miss,
+        "B: (send _x _ _x) must miss when recv != arg NodeId"
+    );
+    assert_c_matches("(send _x _ _x)", &ast, send, b_miss);
+}
+
+#[test]
+fn unify_two_distinct_names_independent_both_backends() {
+    // `(send _x _ _y)` — `_x` and `_y` are independent; must hit for both
+    // same-node and different-node subjects.
+    let fns = fns();
+
+    let (ast, send) = same_recv_arg_ast();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let b_same: bool = b_send_x_any_y(send, &cx);
+    assert!(b_same, "B: (send _x _ _y) must hit for same-node subject");
+    assert_c_matches("(send _x _ _y)", &ast, send, b_same);
+
+    let (ast2, send2) = diff_recv_arg_ast();
+    let raw2 = cx_raw_for(&ast2, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let b_diff: bool = b_send_x_any_y(send2, &cx2);
+    assert!(
+        b_diff,
+        "B: (send _x _ _y) must hit for different-node subject"
+    );
+    assert_c_matches("(send _x _ _y)", &ast2, send2, b_diff);
+}
+
+// For the rollback test we use `(pair _x _x)` / `(pair _ _x)` — `Pair`
+// has two fixed Node slots and no List slot, so it works inside `{}` in
+// the B-backend. The pattern `{(pair _x _x) (pair _ _x)}` against a Pair
+// where key ≠ value exercises the same rollback path.
+node_pattern!(b_union_unify_rollback, "{ (pair _x _x) (pair _ _x) }");
+
+#[test]
+fn unify_rollback_across_union_arms_both_backends() {
+    // Discriminating test for B-backend unify rollback.
+    //
+    // Pattern `{ (pair _x _x) (pair _ _x) }` against Pair(key=Int(1), value=Int(2)):
+    //   - Arm 1 `(pair _x _x)`: binds `_x=Int(1)` at key, fails at value
+    //     (Int(2) ≠ Int(1)). Without rollback, `_x=Int(1)` leaks.
+    //   - Arm 2 `(pair _ _x)`: with rollback, `_x` is None → binds `_x=Int(2)`.
+    //     Without rollback, checks Int(2) == Int(1) → false → miss.
+    //
+    // Both backends must HIT on this input.
+    let fns = fns();
+    let mut b = AstBuilder::new("1 => 2", "t.rb");
+    let k = b.push(NodeKind::Int(1), r());
+    let v = b.push(NodeKind::Int(2), r());
+    let pair = b.push(NodeKind::Pair { key: k, value: v }, r());
+    let ast = b.finish(pair);
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_hit: bool = b_union_unify_rollback(pair, &cx);
+    assert!(
+        b_hit,
+        "B: union arm-1 failure must roll back _x binding so arm-2 can bind fresh"
+    );
+    assert_c_matches("{ (pair _x _x) (pair _ _x) }", &ast, pair, b_hit);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 15. tREGEXP — `/.../[imxo]*` regex atom (D5, murphy-t8km).
+//
+// B↔C conformance: both backends must agree on hit/miss for a regex pattern
+// against Sym and Str atoms, and on slot-type mismatch (Int → no-match).
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_regex_to_prefix, "/^to_/");
+node_pattern!(b_regex_abc_insensitive, "/abc/i");
+
+fn sym_node_ast(name: &str) -> (Ast, NodeId) {
+    let mut b = AstBuilder::new(name, "t.rb");
+    let s = b.intern_symbol(name);
+    let n = b.push(NodeKind::Sym(s), r());
+    let ast = b.finish(n);
+    (ast, n)
+}
+
+fn str_node_ast(value: &str) -> (Ast, NodeId) {
+    let mut b = AstBuilder::new(value, "t.rb");
+    let s = b.intern_string(value);
+    let n = b.push(NodeKind::Str(s), r());
+    let ast = b.finish(n);
+    (ast, n)
+}
+
+fn int_node_ast(v: i64) -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("0", "t.rb");
+    let n = b.push(NodeKind::Int(v), r());
+    let ast = b.finish(n);
+    (ast, n)
+}
+
+#[test]
+fn regex_sym_hit_and_miss_agrees() {
+    let fns = fns();
+
+    // `:to_s` — must hit `/^to_/`.
+    {
+        let (ast, node) = sym_node_ast("to_s");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/^to_/", &ast, node, b_regex_to_prefix(node, &cx));
+    }
+
+    // `:other` — must miss `/^to_/`.
+    {
+        let (ast, node) = sym_node_ast("other");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/^to_/", &ast, node, b_regex_to_prefix(node, &cx));
+    }
+}
+
+#[test]
+fn regex_int_slot_type_mismatch_agrees() {
+    // `Int(1)` against `/^to_/` — slot-type mismatch, both backends must miss.
+    let fns = fns();
+    let (ast, node) = int_node_ast(1);
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert_c_matches("/^to_/", &ast, node, b_regex_to_prefix(node, &cx));
+}
+
+#[test]
+fn regex_case_insensitive_flag_agrees() {
+    let fns = fns();
+
+    // `:ABC` must hit `/abc/i`.
+    {
+        let (ast, node) = sym_node_ast("ABC");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/abc/i", &ast, node, b_regex_abc_insensitive(node, &cx));
+    }
+
+    // `:xyz` must miss `/abc/i`.
+    {
+        let (ast, node) = sym_node_ast("xyz");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/abc/i", &ast, node, b_regex_abc_insensitive(node, &cx));
+    }
+
+    // `:abc` (exact lowercase) must also hit.
+    {
+        let (ast, node) = sym_node_ast("abc");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/abc/i", &ast, node, b_regex_abc_insensitive(node, &cx));
+    }
+}
+
+node_pattern!(b_regex_str_match, "/^to_/");
+
+#[test]
+fn regex_str_node_match_agrees() {
+    // A bare `Str("to_s")` node against `/^to_/` — tests regex on Str atoms.
+    let fns = fns();
+    let (ast, node) = str_node_ast("to_s");
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches("/^to_/", &ast, node, b_regex_str_match(node, &cx));
+
+    // A non-matching Str.
+    let (ast2, node2) = str_node_ast("other");
+    let raw2 = cx_raw_for(&ast2, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    assert_c_matches("/^to_/", &ast2, node2, b_regex_str_match(node2, &cx2));
+}

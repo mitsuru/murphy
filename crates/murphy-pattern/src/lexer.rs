@@ -42,6 +42,22 @@ pub(crate) enum Token {
     Str(String),
     /// `:name` — a symbol literal; payload is the name without the leading `:`.
     Sym(String),
+    /// `_name` — a unification atom; payload is the name **without** the
+    /// leading `_` (e.g. `_x` → `Unify("x")`). Only matches `_` + one or
+    /// more lowercase-letter-starting `[a-z][a-zA-Z0-9_]*` names. A bare `_`
+    /// stays [`Token::Underscore`]; `_X` (uppercase after `_`) is left as an
+    /// `Ident("_X")` (tPARAM_CONST is uppercase-start only, not `_`-start).
+    ///
+    /// D4 (murphy-nnr8): NodeId-equality unification.
+    Unify(String),
+    /// `/.../[imxo]*` — a regex literal (tREGEXP, D5 — murphy-t8km).
+    ///
+    /// The `pattern` payload is the raw body between the `/` delimiters,
+    /// with `\/` unescaped to `/` and all other bytes passed through verbatim.
+    /// `flags` contains only the flag characters that appeared after the
+    /// closing `/` (subset of `imxo`). Flag `o` (once-compile) is accepted
+    /// lexically but carries no meaning at runtime.
+    Regex(String, String),
     /// `*` — postfix quantifier (`0..`).
     Star,
     /// `+` — postfix quantifier (`1..`).
@@ -52,6 +68,12 @@ pub(crate) enum Token {
     LAngle,
     /// `>` — closing angle bracket for any-order sequence `<...>`.
     RAngle,
+    /// `[` — opening bracket for intersection AND-pattern `[...]`.
+    LBracket,
+    /// `]` — closing bracket for intersection AND-pattern `[...]`.
+    RBracket,
+    /// `|` — pipe separator between union alternatives in `{...}`.
+    Pipe,
 }
 
 /// A [`Token`] paired with its byte-offset span in the source string.
@@ -114,16 +136,28 @@ impl<'a> Lexer<'a> {
             b'"' => self.scan_string(),
             b'-' => self.scan_number(),
             b'0'..=b'9' => self.scan_number(),
-            b'a'..=b'z' | b'_' => self.scan_ident(),
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.scan_ident(),
             b'<' => self.single(Token::LAngle),
             b'>' => self.single(Token::RAngle),
-            b'%' | b'[' => {
-                let (ch, len) = self.char_at_cursor();
-                Err(self.err_at(
-                    self.pos,
-                    self.pos + len,
-                    format!("`{ch}` is not supported in v1"),
-                ))
+            b'[' => self.single(Token::LBracket),
+            b']' => self.single(Token::RBracket),
+            b'|' => self.single(Token::Pipe),
+            b'/' => self.scan_regex(),
+            b'%' => {
+                // `%Foo` (uppercase-start) is tPARAM_CONST sugar — consume the
+                // `%` prefix and lex the rest as a normal uppercase ident.
+                // Lowercase-start `%var` (tPARAM_NAMED) is out of v1 scope.
+                if matches!(self.src.get(self.pos + 1), Some(b'A'..=b'Z')) {
+                    self.pos += 1; // consume `%`
+                    self.scan_ident()
+                } else {
+                    let (ch, len) = self.char_at_cursor();
+                    Err(self.err_at(
+                        self.pos,
+                        self.pos + len,
+                        format!("`{ch}` is not supported in v1"),
+                    ))
+                }
             }
             _ => {
                 let (ch, len) = self.char_at_cursor();
@@ -170,6 +204,101 @@ impl<'a> Lexer<'a> {
             self.pos = end;
             Err(self.err_at(start, end, "expected `...`"))
         }
+    }
+
+    /// Scan `/.../[imxo]*` — a regex literal (tREGEXP, D5 — murphy-t8km).
+    ///
+    /// The opening `/` has already been identified as the first byte (it is
+    /// consumed here). The body is read until the first unescaped `/`:
+    ///
+    /// - `\/` inside the body → literal `/` in the pattern (unescaped).
+    /// - Any other `\X` pair → kept verbatim as `\X` so that regex `\d`,
+    ///   `\w`, etc. survive the lexer unchanged and are interpreted by the
+    ///   `regex` crate at compile/match time. This is option A from the
+    ///   design notes: only `\/` is consumed by the lexer; all other
+    ///   backslash sequences pass through.
+    /// - An unescaped `/` terminates the body.
+    ///
+    /// After the closing `/`, zero or more of the flag characters `imxo` are
+    /// consumed and returned verbatim in `flags`.
+    fn scan_regex(&mut self) -> Result<Token, ParseError> {
+        let open = self.pos;
+        self.pos += 1; // consume opening `/`
+        let mut pattern = String::new();
+        loop {
+            let Some(&b) = self.peek() else {
+                return Err(self.err_at(open, self.pos, "unterminated regex literal"));
+            };
+            match b {
+                b'/' => {
+                    // Closing delimiter.
+                    self.pos += 1;
+                    break;
+                }
+                b'\\' => {
+                    // Look at the next byte.
+                    self.pos += 1; // consume `\`
+                    match self.peek() {
+                        Some(&b'/') => {
+                            // `\/` — unescape to `/`.
+                            pattern.push('/');
+                            self.pos += 1;
+                        }
+                        Some(_) => {
+                            // Any other `\X` — pass through verbatim so that
+                            // regex metacharacters like `\d`, `\w`, `\s` reach
+                            // the `regex` crate unmodified.
+                            pattern.push('\\');
+                            // The next byte will be picked up on the next loop
+                            // iteration (we do NOT consume it here, letting the
+                            // raw-byte-append path below handle it).
+                        }
+                        None => {
+                            return Err(self.err_at(open, self.pos, "unterminated regex literal"));
+                        }
+                    }
+                }
+                _ => {
+                    // Raw bytes: append contiguous run up to next `\` or `/`.
+                    let chunk_start = self.pos;
+                    while let Some(&c) = self.peek() {
+                        if c == b'/' || c == b'\\' {
+                            break;
+                        }
+                        self.pos += 1;
+                    }
+                    pattern.push_str(
+                        std::str::from_utf8(&self.src[chunk_start..self.pos])
+                            .expect("source is valid UTF-8"),
+                    );
+                }
+            }
+        }
+        // Consume flag characters `[imxo]*`. Any other ASCII alphabetic byte
+        // immediately after the closing `/` is rejected — without this guard
+        // `/foo/z` would lex as `Regex("foo","")` followed by `Ident("z")`,
+        // silently mis-parsing.
+        let mut flags = String::new();
+        loop {
+            match self.peek() {
+                Some(&b @ (b'i' | b'm' | b'x' | b'o')) => {
+                    flags.push(b as char);
+                    self.pos += 1;
+                }
+                Some(&b) if b.is_ascii_alphabetic() => {
+                    return Err(self.err_at(
+                        self.pos,
+                        self.pos + 1,
+                        format!(
+                            "unknown regex flag `{}` (allowed flags: i, m, x, o)",
+                            b as char
+                        ),
+                    ));
+                }
+                _ => break,
+            }
+        }
+        Ok(Token::Regex(pattern, flags))
     }
 
     /// Scan `#name` where `name` is `[A-Za-z_][A-Za-z0-9_]*[?!=]?`.
@@ -297,16 +426,21 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Scan a `[a-z_][a-z0-9_]*` identifier.
+    /// Scan a `[A-Za-z_][A-Za-z0-9_]*` identifier.
     ///
+    /// Uppercase-start names (e.g. `Foo`, `MyClass`) are valid here and are
+    /// translated to `(const _ :Name)` at the parser level (D3, murphy-kq57).
     /// `_` alone -> `Underscore`; `nil?` -> `NilQuestion`. `!` and `?`
     /// suffixes are *not* consumed: `int?` lexes to `Ident("int")` and
     /// `Question`, and `save!` lexes to `Ident("save")` and `Bang`.
     fn scan_ident(&mut self) -> Result<Token, ParseError> {
         let start = self.pos;
-        // First byte is already known to be `[a-z_]`.
+        // First byte is already known to be `[A-Za-z_]`.
         self.pos += 1;
-        while matches!(self.peek(), Some(b'a'..=b'z' | b'0'..=b'9' | b'_')) {
+        while matches!(
+            self.peek(),
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+        ) {
             self.pos += 1;
         }
         let text = self.slice_str(start, self.pos);
@@ -318,6 +452,14 @@ impl<'a> Lexer<'a> {
         }
         if text == "_" {
             return Ok(Token::Underscore);
+        }
+        // D4 (murphy-nnr8): `_name` where `name` starts with a lowercase
+        // letter → `Token::Unify(name)`. The payload excludes the leading `_`.
+        // `_X` (uppercase after `_`) stays `Ident("_X")` — it is not tUNIFY.
+        if let Some(rest) = text.strip_prefix('_')
+            && rest.starts_with(|c: char| c.is_ascii_lowercase())
+        {
+            return Ok(Token::Unify(rest.to_string()));
         }
         Ok(Token::Ident(text.to_string()))
     }
@@ -444,6 +586,10 @@ mod tests {
             .collect()
     }
 
+    fn run_err(src: &str) -> ParseError {
+        tokenize(src).expect_err("lex must fail")
+    }
+
     #[test]
     fn lexes_node_match() {
         assert_eq!(
@@ -493,18 +639,27 @@ mod tests {
 
     #[test]
     fn lex_error_on_unsupported_sigil() {
-        // `%`, `[` are not supported in v1 (`<` is now LAngle for any-order).
-        for sigil in ['%', '['] {
-            let src = format!("(send {sigil}1)");
-            let e = tokenize(&src).expect_err("must reject unsupported sigil");
-            assert!(
-                e.message.contains(sigil) && e.message.contains("not supported in v1"),
-                "message for `{sigil}` was: {}",
-                e.message
-            );
-            // span points at the sigil
-            assert_eq!(e.span.start, 6);
-        }
+        // `%` is not supported in v1 (`<` is now LAngle for any-order,
+        // `[` / `]` are LBracket / RBracket for intersection).
+        let src = "(send %1)";
+        let e = tokenize(src).expect_err("must reject `%`");
+        assert!(
+            e.message.contains('%') && e.message.contains("not supported in v1"),
+            "message for `%` was: {}",
+            e.message
+        );
+        // span points at `%` which is at byte offset 6.
+        assert_eq!(e.span.start, 6);
+    }
+
+    #[test]
+    fn lex_bracket_tokens() {
+        // `[` → LBracket, `]` → RBracket; no error.
+        let t = tokenize("[int]").expect("bracket tokens must lex ok");
+        assert_eq!(t[0].tok, Token::LBracket);
+        assert_eq!((t[0].span.start, t[0].span.end), (0, 1));
+        assert_eq!(t[2].tok, Token::RBracket);
+        assert_eq!((t[2].span.start, t[2].span.end), (4, 5));
     }
 
     #[test]
@@ -578,7 +733,47 @@ mod tests {
     fn underscore_alone_versus_in_ident() {
         assert_eq!(toks("_"), vec![Token::Underscore]);
         assert_eq!(toks("block_pass"), vec![Token::Ident("block_pass".into())]);
-        assert_eq!(toks("_x"), vec![Token::Ident("_x".into())]);
+        // D4 (murphy-nnr8): `_x` lexes as `Token::Unify("x")`, not `Ident`.
+        assert_eq!(toks("_x"), vec![Token::Unify("x".into())]);
+    }
+
+    // --- D4 (murphy-nnr8): tUNIFY — `_name` named wildcard ----------------
+
+    #[test]
+    fn unify_token_lexes_for_underscore_lowercase_ident() {
+        // `_x`, `_foo`, `_a1` → Token::Unify (name without leading `_`).
+        assert_eq!(toks("_x"), vec![Token::Unify("x".into())]);
+        assert_eq!(toks("_foo"), vec![Token::Unify("foo".into())]);
+        assert_eq!(toks("_a1"), vec![Token::Unify("a1".into())]);
+        assert_eq!(toks("_my_var"), vec![Token::Unify("my_var".into())]);
+    }
+
+    #[test]
+    fn underscore_alone_stays_underscore_not_unify() {
+        assert_eq!(toks("_"), vec![Token::Underscore]);
+    }
+
+    #[test]
+    fn underscore_uppercase_stays_ident_not_unify() {
+        // `_X` is NOT tUNIFY — uppercase after `_` remains Ident.
+        assert_eq!(toks("_X"), vec![Token::Ident("_X".into())]);
+        assert_eq!(toks("_Foo"), vec![Token::Ident("_Foo".into())]);
+    }
+
+    #[test]
+    fn unify_in_node_pattern_context() {
+        // `(send _x _ _x)` — unification example.
+        assert_eq!(
+            toks("(send _x _ _x)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Unify("x".into()),
+                Token::Underscore,
+                Token::Unify("x".into()),
+                Token::RParen,
+            ]
+        );
     }
 
     #[test]
@@ -665,6 +860,29 @@ mod tests {
         // not surfaced as separate tokens.
         assert_eq!(toks(":foo?"), vec![Token::Sym("foo?".into())]);
         assert_eq!(toks(":foo!"), vec![Token::Sym("foo!".into())]);
+    }
+
+    // --- murphy-wsep: pipe `|` as union group separator --------------------
+
+    #[test]
+    fn pipe_token_lexes_standalone() {
+        // `|` is now a valid Token::Pipe — no longer an "unexpected character".
+        assert_eq!(toks("|"), vec![Token::Pipe]);
+    }
+
+    #[test]
+    fn pipe_token_in_union_context() {
+        // `{a | b}` produces LBrace Ident(a) Pipe Ident(b) RBrace.
+        assert_eq!(
+            toks("{a | b}"),
+            vec![
+                Token::LBrace,
+                Token::Ident("a".into()),
+                Token::Pipe,
+                Token::Ident("b".into()),
+                Token::RBrace,
+            ]
+        );
     }
 
     #[test]
@@ -921,5 +1139,127 @@ mod tests {
         assert!(e.message.contains("expected a symbol name"));
         let e = tokenize(":$1").expect_err("must reject `:$1`");
         assert!(e.message.contains("expected a symbol name"));
+    }
+
+    // --- D3 (murphy-kq57): tPARAM_CONST — uppercase-start ident ---------------
+
+    #[test]
+    fn lexes_uppercase_ident_as_ident_token() {
+        // Bare `Foo` (no `%`) lexes as `Ident("Foo")`.
+        assert_eq!(toks("Foo"), vec![Token::Ident("Foo".into())]);
+        assert_eq!(toks("MyClass"), vec![Token::Ident("MyClass".into())]);
+        assert_eq!(toks("FOO"), vec![Token::Ident("FOO".into())]);
+    }
+
+    #[test]
+    fn percent_uppercase_lexes_as_ident_without_percent() {
+        // `%Foo` — tPARAM_CONST sugar: `%` is consumed and the name lexes as
+        // `Ident("Foo")`, identical to the bare `Foo` form.
+        assert_eq!(toks("%Foo"), vec![Token::Ident("Foo".into())]);
+        assert_eq!(toks("%MyClass"), vec![Token::Ident("MyClass".into())]);
+    }
+
+    #[test]
+    fn percent_lowercase_is_still_rejected() {
+        // `%var` (tPARAM_NAMED) remains out of v1 scope — must error.
+        let e = tokenize("%var").expect_err("must reject `%var`");
+        assert!(
+            e.message.contains('%') && e.message.contains("not supported in v1"),
+            "message for `%var` was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn uppercase_ident_in_node_pattern() {
+        // `(send _ :raise Foo)` produces correct token stream.
+        assert_eq!(
+            toks("(send _ :raise Foo)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Underscore,
+                Token::Sym("raise".into()),
+                Token::Ident("Foo".into()),
+                Token::RParen,
+            ]
+        );
+    }
+
+    // --- D5 (murphy-t8km): tREGEXP — `/.../[imxo]*` regex literal -----------
+
+    #[test]
+    fn regex_basic() {
+        // `/^to_/` → Token::Regex with empty flags.
+        assert_eq!(toks("/^to_/"), vec![Token::Regex("^to_".into(), "".into())]);
+    }
+
+    #[test]
+    fn regex_with_flags() {
+        // `/abc/im` → pattern "abc", flags "im".
+        assert_eq!(
+            toks("/abc/im"),
+            vec![Token::Regex("abc".into(), "im".into())]
+        );
+    }
+
+    #[test]
+    fn regex_escape_slash() {
+        // `/a\/b/` → pattern "a/b" (the `\/` is unescaped to `/`).
+        assert_eq!(toks("/a\\/b/"), vec![Token::Regex("a/b".into(), "".into())]);
+    }
+
+    #[test]
+    fn regex_other_backslash_passthrough() {
+        // `/\d+/` — the `\d` passes through verbatim so the `regex` crate
+        // can interpret it as a digit class. Option A semantics: only `\/`
+        // is consumed; all other `\X` are passed through.
+        assert_eq!(toks("/\\d+/"), vec![Token::Regex("\\d+".into(), "".into())]);
+    }
+
+    #[test]
+    fn regex_flag_o_accepted() {
+        // `/abc/o` — `o` (once-compile) is accepted lexically and stored in
+        // the flags string, even though it has no runtime effect.
+        assert_eq!(toks("/abc/o"), vec![Token::Regex("abc".into(), "o".into())]);
+    }
+
+    #[test]
+    fn regex_unknown_flag_is_rejected() {
+        // `/foo/z` must error rather than lex as `Regex("foo","")` + `Ident("z")`.
+        // The lexer rejects any ASCII alphabetic byte immediately after the
+        // closing `/` that isn't one of `i`/`m`/`x`/`o`.
+        let e = run_err("/foo/z");
+        assert!(
+            e.message.contains("unknown regex flag"),
+            "expected unknown-regex-flag diagnostic, got: {}",
+            e.message
+        );
+        // Non-alphabetic neighbours stay valid:
+        assert_eq!(toks("/foo/ "), vec![Token::Regex("foo".into(), "".into())]);
+    }
+
+    #[test]
+    fn regex_in_node_pattern_context() {
+        // `(send _ /^to_/ ...)` produces a sensible token stream.
+        assert_eq!(
+            toks("(send _ /^to_/ ...)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Underscore,
+                Token::Regex("^to_".into(), "".into()),
+                Token::Ellipsis,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn colon_slash_still_lexes_as_operator_symbol() {
+        // `:/` is an operator-symbol (division); scan_symbol's take_operator_name
+        // consumes it before `scan_token` could dispatch on `/`. Ensure it
+        // still produces `Token::Sym("/")` and does NOT produce a Regex token.
+        assert_eq!(toks(":/"), vec![Token::Sym("/".into())]);
     }
 }

@@ -82,6 +82,46 @@ pub enum PatKind {
     /// the top level, not inside Union/Not/Descend/Quantifier body).
     /// v1 limit: at most 10 non-rest children.
     AnyOrder { children: Vec<Pat> },
+    /// `[a b c]` — intersection AND-pattern: matches subject if **all**
+    /// `children` patterns match the same subject. Equivalent to RuboCop's
+    /// `node_pattern_no_union: '[' node_pattern_list ']'`. At least one child
+    /// is required (the grammar enforces `Pat+` inside `[...]`).
+    Intersection { children: Vec<Pat> },
+    /// `_name` — named unification atom (tUNIFY, D4 — murphy-nnr8).
+    ///
+    /// The first occurrence of `_name` in the pattern binds the current
+    /// subject's [`NodeId`]; subsequent occurrences require the subject's
+    /// `NodeId` to be **equal** to the bound value. This implements
+    /// structural same-node constraints, e.g. `(send _x _ _x)` matches only
+    /// when the receiver and the sole argument are the **same AST node**.
+    ///
+    /// **Semantic difference from RuboCop**: RuboCop uses structural equality
+    /// (`==` on `RuboCop::AST::Node`), not object identity. Murphy uses
+    /// [`NodeId`] equality (same arena slot) as a pragmatic simplification;
+    /// in practice, receiver/argument aliasing is detected by identity anyway.
+    ///
+    /// [`NodeId`]: murphy_ast::NodeId
+    Unify { name: String },
+    /// `/.../[imxo]*` — regex match on a Symbol or String slot (tREGEXP,
+    /// D5 — murphy-t8km).
+    ///
+    /// Matches when the subject node is a [`Lit::Sym`] or [`Lit::Str`] atom
+    /// whose string value matches the regex. Any other literal kind (Int,
+    /// Float, Bool, Nil) is a runtime slot-type mismatch and returns `false`.
+    ///
+    /// **Regex engine**: Rust's [`regex`](https://docs.rs/regex) crate (RE2
+    /// semantics). Behaviour differences from Ruby's Onigmo are documented in
+    /// the crate itself (look-around and backreferences are not supported).
+    ///
+    /// **Flags** (`[imxo]*`):
+    /// - `i` — case-insensitive match.
+    /// - `m` — multi-line mode (`^`/`$` match line boundaries; `.` does
+    ///   NOT match `\n` in the `regex` crate's multi-line mode; use `(?s)` for
+    ///   dot-matches-all).
+    /// - `x` — extended/verbose mode (whitespace and `#` comments ignored).
+    /// - `o` — once-compile (Ruby-only; has no meaning in Rust — silently
+    ///   ignored).
+    Regex { pattern: String, flags: String },
 }
 
 /// The head of a `Node` match: what the node's kind must satisfy.

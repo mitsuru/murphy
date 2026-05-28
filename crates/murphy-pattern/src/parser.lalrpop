@@ -1,0 +1,379 @@
+// LALRPOP grammar for Murphy's S-expression pattern language.
+//
+// Grammar–to–parser.y correspondence
+// ====================================
+// The reference grammar is RuboCop's node_pattern parser.y (103 lines).
+// The table below maps each parser.y production to the LALRPOP rule(s)
+// that implement it.  Productions deferred to later phases are noted.
+//
+// parser.y production              | LALRPOP rule(s)
+// ---------------------------------|-------------------------------------------
+// node_pattern                     | Pattern → Prefixed
+// node_pattern_no_union            | Prefixed (!, ^, `, $, Postfixed)
+//   '(' variadic_pattern_list ')'  | NodeMatch (children: NodeChild*)
+//   '[' node_pattern_list ']'      | Intersection rule — implemented in D1 (murphy-l448)
+//   '!' node_pattern               | Prefixed "!" <inner:Prefixed>
+//   '^' node_pattern               | Prefixed "^" <inner:Prefixed>
+//   '`' node_pattern               | Prefixed "`" <inner:Prefixed>
+//   '$' node_pattern               | Capture rule (also CaptureBody)
+//   tFUNCTION_CALL args            | (not in v1 scope — subset of predicate)
+//   tPREDICATE args                | Primary/CapturePrimary "predicate" arm;
+//                                  |   args pre-folded by fold_predicate_args
+//   tNODE_TYPE                     | Primary/CapturePrimary "ident" arm
+//                                  |   → kind_or_unknown_ident → PatKind::Kind
+//   atom                           | (see atom table below)
+// ---------------------------------|-------------------------------------------
+// atom                             | Primary / CapturePrimary literals
+//   tSYMBOL                        | "sym" token → PatKind::Lit(Sym)
+//   tNUMBER                        | "int" / "float" tokens → PatKind::Lit
+//   tSTRING                        | "str" token → PatKind::Lit(Str)
+//   tWILDCARD                      | "_" → PatKind::Wildcard
+//   tPARAM_NAMED                   | (not in v1 scope — Ruby-side $name params)
+//   tPARAM_NUMBER                  | (not in v1 scope — Ruby-side $1/$2 params)
+//   tPARAM_CONST                   | implemented in D3 (murphy-kq57): `Foo`/`%Foo`
+//   tREGEXP                        | implemented in D5 (murphy-t8km): `/.../[imxo]*`
+//                                  |   — Rust `regex` crate (RE2 family);
+//                                  |   `o` flag is silently ignored
+//   tUNIFY                         | implemented in D4 (murphy-nnr8): `_name`
+//                                  |   — NodeId equality (not RuboCop's
+//                                  |   structural equality) — see ast.rs
+// ---------------------------------|-------------------------------------------
+// union (with '|' separator)       | UnionPrimary (brace form only);
+//                                  |   '|' pipe separator between alternatives
+//                                  |   implemented in D2 (murphy-wsep), minimal
+//                                  |   scope: `|` treated as whitespace-equivalent
+//                                  |   separator (i.e. `{a b | c d}` = 4 alts).
+//                                  |   Multi-pat-per-arm sequence semantics are
+//                                  |   deferred to a future epic.
+//                                  |   NOTE: `${a | b}` is NOT supported by this
+//                                  |   change — the Capture rule uses a separate
+//                                  |   `${...}` production that would need its own
+//                                  |   update in a future epic.
+// variadic_pattern                 | NodeChild (child of NodeMatch)
+//   node_pattern repetition        | Postfixed / CapturePostfixed + Quantifier
+//   opt_capture '<' … opt_rest '>' | AnyOrder rule; note: opt_capture (i.e.
+//                                  |   $<...> capture-of-any-order) is not in v1
+//   rest                           | NodeChild / AnyOrderChild "..." arm
+// repetition (?, *, +)             | Quantifier rule
+// opt_capture                      | handled inline in Capture + AnyOrder rules
+// rest (with opt_capture)          | NodeChild "..." + Capture "$" "..."
+// args (tARG_LIST …)               | not in grammar; pre-folded by
+//                                  |   fold_predicate_args in parser.rs
+// ---------------------------------|-------------------------------------------
+// All D-phase atoms (intersection, union pipe, tPARAM_CONST, tUNIFY, tREGEXP)
+// are now implemented; see the per-atom rows above for the owning beads issue.
+
+use crate::lexer::Token;
+use crate::{Head, Lit, ParseError, Pat, PatKind, PatSpan};
+use crate::parser::{make_capture_placeholder, resolve_kind};
+use murphy_ast::NodeKindTag;
+
+grammar;
+
+pub Pattern: Pat = {
+    <p:Prefixed> => p,
+};
+
+Prefixed: Pat = {
+    <l:@L> "!" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Not(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <l:@L> "^" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Parent(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <l:@L> "`" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Descend(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <c:Capture> => c,
+    <p:Postfixed> => p,
+};
+
+Capture: Pat = {
+    <l:@L> "$" <r0:@R> "..." <r:@R> => {
+        let body = Pat { kind: PatKind::Rest, span: PatSpan::new(r0, r) };
+        Pat {
+            kind: make_capture_placeholder(None, body),
+            span: PatSpan::new(l, r),
+        }
+    },
+    <l:@L> "$" "{" <arms:Prefixed+> "}" <r:@R> => {
+        let union_arms: Vec<Pat> = arms.into_iter().map(|arm| Pat {
+            kind: PatKind::Capture {
+                slot: u16::MAX,
+                name: Some(crate::parser::SUGAR_MARKER.to_string()),
+                body: Box::new(arm),
+            },
+            span: PatSpan::new(l, r),
+        }).collect();
+        Pat {
+            kind: PatKind::Union(union_arms),
+            span: PatSpan::new(l, r),
+        }
+    },
+    <l:@L> "$" <body:CaptureBody> <r:@R> => Pat {
+        kind: make_capture_placeholder(None, body),
+        span: PatSpan::new(l, r),
+    },
+};
+
+// A capture body, excluding the dedicated arms (`$...`, `${...}`). Allows
+// nested `!`/`^`/`` ` ``/`$` prefixes, plus any non-brace-starting Postfixed.
+CaptureBody: Pat = {
+    <l:@L> "!" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Not(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <l:@L> "^" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Parent(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <l:@L> "`" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Descend(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <c:Capture> => c,
+    <p:CapturePostfixed> => p,
+};
+
+CapturePostfixed: Pat = {
+    <p:CapturePrimary> => p,
+    <l:@L> <p:CapturePrimary> <q:Quantifier> <r:@R> => Pat {
+        kind: PatKind::Quantifier { body: Box::new(p), min: q.0, max: q.1 },
+        span: PatSpan::new(l, r),
+    },
+};
+
+// `Primary` minus `UnionPrimary` (the `{`-starting form) — `${...}` is
+// always the sugar Capture form, never an anonymous capture over a Union.
+CapturePrimary: Pat = {
+    <l:@L> "_" <r:@R> => Pat { kind: PatKind::Wildcard, span: PatSpan::new(l, r) },
+    <l:@L> "nil?" <r:@R> => Pat { kind: PatKind::NilTest, span: PatSpan::new(l, r) },
+    <l:@L> <v:"int"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Int(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"float"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Float(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"str"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Str(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"sym"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Sym(v)), span: PatSpan::new(l, r) },
+    <l:@L> <name:"predicate"> <r:@R> =>? {
+        crate::parser::split_predicate_name(name, PatSpan::new(l, r))
+            .map(|(name, args)| Pat {
+                kind: PatKind::Predicate { name, args },
+                span: PatSpan::new(l, r),
+            })
+            .map_err(|e| lalrpop_util::ParseError::User { error: e })
+    },
+    <l:@L> <name:"ident"> <r:@R> => crate::parser::const_or_kind_or_unknown_ident(&name, PatSpan::new(l, r)),
+    // D4 (murphy-nnr8): tUNIFY — `_name` unification in capture body position.
+    <l:@L> <name:"unify"> <r:@R> => Pat { kind: PatKind::Unify { name }, span: PatSpan::new(l, r) },
+    // D5 (murphy-t8km): tREGEXP — `/.../[imxo]*` regex atom in capture body position.
+    <l:@L> <rx:"regex"> <r:@R> => Pat { kind: PatKind::Regex { pattern: rx.0, flags: rx.1 }, span: PatSpan::new(l, r) },
+    <m:NodeMatch> => m,
+    <i:IntersectionPrimary> => i,
+};
+
+Postfixed: Pat = {
+    <p:Primary> => p,
+    <l:@L> <p:Primary> <q:Quantifier> <r:@R> => Pat {
+        kind: PatKind::Quantifier { body: Box::new(p), min: q.0, max: q.1 },
+        span: PatSpan::new(l, r),
+    },
+};
+
+Primary: Pat = {
+    <l:@L> "_" <r:@R> => Pat { kind: PatKind::Wildcard, span: PatSpan::new(l, r) },
+    <l:@L> "nil?" <r:@R> => Pat { kind: PatKind::NilTest, span: PatSpan::new(l, r) },
+    <l:@L> <v:"int"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Int(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"float"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Float(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"str"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Str(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"sym"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Sym(v)), span: PatSpan::new(l, r) },
+    // `#name` and `#name(args)` — args are pre-parsed by the token-stream
+    // adapter (`parser::preprocess_tokens`) to dodge an LR(1) local ambiguity
+    // at `#name (`. When the adapter encounters `Predicate(name)` immediately
+    // followed by `LParen`, it consumes through the matching `RParen`,
+    // serialises the args into a sentinel string, and stuffs them into the
+    // Predicate's name field as `name\0args_serialized`. The action below
+    // splits the name back into the real name and decoded args.
+    <l:@L> <name:"predicate"> <r:@R> =>? {
+        crate::parser::split_predicate_name(name, PatSpan::new(l, r))
+            .map(|(name, args)| Pat {
+                kind: PatKind::Predicate { name, args },
+                span: PatSpan::new(l, r),
+            })
+            .map_err(|e| lalrpop_util::ParseError::User { error: e })
+    },
+    <l:@L> <name:"ident"> <r:@R> => crate::parser::const_or_kind_or_unknown_ident(&name, PatSpan::new(l, r)),
+    // D4 (murphy-nnr8): tUNIFY — `_name` named wildcard with NodeId unification.
+    <l:@L> <name:"unify"> <r:@R> => Pat { kind: PatKind::Unify { name }, span: PatSpan::new(l, r) },
+    // D5 (murphy-t8km): tREGEXP — `/.../[imxo]*` regex atom.
+    <l:@L> <rx:"regex"> <r:@R> => Pat { kind: PatKind::Regex { pattern: rx.0, flags: rx.1 }, span: PatSpan::new(l, r) },
+    <m:NodeMatch> => m,
+    <u:UnionPrimary> => u,
+    <i:IntersectionPrimary> => i,
+};
+
+
+NodeMatch: Pat = {
+    <l:@L> "(" <head:Head> <children:NodeChild*> ")" <r:@R> => Pat {
+        kind: PatKind::Node { head, children },
+        span: PatSpan::new(l, r),
+    },
+};
+
+Head: Head = {
+    <l:@L> <name:"ident"> <r:@R> =>? {
+        resolve_kind(&name, PatSpan::new(l, r))
+            .map(Head::Exact)
+            .map_err(|e| lalrpop_util::ParseError::User { error: e })
+    },
+    "_" => Head::Any,
+    "{" <tags:OneOfHeadTag+> "}" => Head::OneOf(tags),
+};
+
+OneOfHeadTag: NodeKindTag = {
+    <l:@L> <name:"ident"> <r:@R> =>? {
+        resolve_kind(&name, PatSpan::new(l, r))
+            .map_err(|e| lalrpop_util::ParseError::User { error: e })
+    },
+};
+
+NodeChild: Pat = {
+    <l:@L> "..." <r:@R> => Pat { kind: PatKind::Rest, span: PatSpan::new(l, r) },
+    <a:AnyOrder> => a,
+    <p:Prefixed> => p,
+};
+
+AnyOrder: Pat = {
+    <l:@L> "<" ">" <r:@R> =>? {
+        Err(lalrpop_util::ParseError::User {
+            error: ParseError::new(
+                "empty `<>` any-order: must contain at least one child pattern",
+                PatSpan::new(l, r),
+            ),
+        })
+    },
+    <l:@L> "<" <children:AnyOrderChild+> ">" <r:@R> =>? {
+        // The "$... inside <...>" rejection lives here so the error span
+        // points at the offending child, matching the hand-written parser.
+        for child in &children {
+            if let PatKind::Capture { body, .. } = &child.kind {
+                if matches!(body.kind, PatKind::Rest) {
+                    return Err(lalrpop_util::ParseError::User {
+                        error: ParseError::new(
+                            "`$...` inside `<...>` is not supported in v1: \
+                             leftover-element captures require a runtime \
+                             allocator not yet plumbed through `Cx`",
+                            child.span,
+                        ),
+                    });
+                }
+            }
+        }
+        // v1 limit: at most 10 non-rest children.
+        let non_rest = children.iter().filter(|c| !matches!(c.kind, PatKind::Rest)).count();
+        if non_rest > 10 {
+            return Err(lalrpop_util::ParseError::User {
+                error: ParseError::new(
+                    "too many elements in <...>: max 10 in v1",
+                    PatSpan::new(l, r),
+                ),
+            });
+        }
+        Ok(Pat {
+            kind: PatKind::AnyOrder { children },
+            span: PatSpan::new(l, r),
+        })
+    },
+};
+
+AnyOrderChild: Pat = {
+    <l:@L> "..." <r:@R> => Pat { kind: PatKind::Rest, span: PatSpan::new(l, r) },
+    <p:Prefixed> => p,
+};
+
+// `{ pat (pat | "|" pat)* }` — union of alternatives.
+//
+// `|` is treated as whitespace-equivalent: `{a b | c d}` produces 4 alts,
+// the same as `{a b c d}`. This is the minimal scope for D2 (murphy-wsep).
+// Full RuboCop sequence-group semantics (where each `|`-separated section
+// is an ordered sub-sequence) are deferred to a future epic.
+//
+// Trailing pipes are rejected by this grammar: `{a |}` does not parse because
+// `UnionRest` requires a `Prefixed` after `|`.
+UnionPrimary: Pat = {
+    <l:@L> "{" "}" <r:@R> =>? {
+        Err(lalrpop_util::ParseError::User {
+            error: ParseError::new(
+                "empty union `{}`: must contain at least one alternative",
+                PatSpan::new(l, r),
+            ),
+        })
+    },
+    <l:@L> "{" <first:Prefixed> <rest:UnionRest*> "}" <r:@R> => {
+        let mut alts = vec![first];
+        alts.extend(rest);
+        Pat {
+            kind: PatKind::Union(alts),
+            span: PatSpan::new(l, r),
+        }
+    },
+};
+
+// A single alternative in a union, optionally preceded by a `|` separator.
+// `|` is whitespace-equivalent: it contributes no grouping, only separates.
+UnionRest: Pat = {
+    <p:Prefixed> => p,
+    "|" <p:Prefixed> => p,
+};
+
+// `[ pat+ ]` — intersection AND-pattern (D1, murphy-l448).
+// All children must match the same subject node. The `Pat+` macro
+// rejects an empty `[]` by construction; the diagnostic scan in
+// `diagnose_shape_errors` emits a friendly message for that case.
+IntersectionPrimary: Pat = {
+    <l:@L> "[" <children:Prefixed+> "]" <r:@R> => Pat {
+        kind: PatKind::Intersection { children },
+        span: PatSpan::new(l, r),
+    },
+};
+
+Quantifier: (u8, u8) = {
+    "*" => (0, u8::MAX),
+    "+" => (1, u8::MAX),
+    "?" => (0, 1),
+};
+
+extern {
+    type Location = usize;
+    type Error = ParseError;
+
+    enum Token {
+        "(" => Token::LParen,
+        ")" => Token::RParen,
+        "{" => Token::LBrace,
+        "}" => Token::RBrace,
+        "<" => Token::LAngle,
+        ">" => Token::RAngle,
+        "[" => Token::LBracket,
+        "]" => Token::RBracket,
+        "$" => Token::Dollar,
+        "predicate" => Token::Predicate(<String>),
+        "..." => Token::Ellipsis,
+        "_" => Token::Underscore,
+        "!" => Token::Bang,
+        "^" => Token::Caret,
+        "`" => Token::Backtick,
+        "nil?" => Token::NilQuestion,
+        "ident" => Token::Ident(<String>),
+        "int" => Token::Int(<i64>),
+        "float" => Token::Float(<f64>),
+        "str" => Token::Str(<String>),
+        "sym" => Token::Sym(<String>),
+        "unify" => Token::Unify(<String>),
+        "regex" => Token::Regex(<String>, <String>),
+        "*" => Token::Star,
+        "+" => Token::Plus,
+        "?" => Token::Question,
+        "|" => Token::Pipe,
+    }
+}

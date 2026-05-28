@@ -59,3 +59,8 @@ pub use murphy_ast::{
 pub use murphy_plugin_macros::{
     CopOptionEnum, CopOptions, cop, node_pattern, on_new_investigation, on_node, register_cops,
 };
+// Re-export `regex` so that `node_pattern!`-generated code referencing
+// `::regex::RegexBuilder` / `::regex::Regex` resolves without the caller
+// crate needing its own `regex` dependency (D5, murphy-t8km).
+#[doc(hidden)]
+pub use regex;

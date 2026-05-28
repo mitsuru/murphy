@@ -1,44 +1,1440 @@
-//! Recursive-descent parser: token stream -> `PatternAst`.
+//! Pattern parser entry point and post-parse passes.
 //!
-//! Task 5 (murphy-9cr.17) implements the atom/prefix skeleton: `_`,
-//! literals, `nil?`, bare kind names, `#predicate`, and the `!`/`^`/backtick
-//! prefixes. Task 6 adds node match `(head child*)` with `Exact`/`Any`/`OneOf`
-//! heads. Task 7 adds union `{a b ...}`. Task 8 implements `$` captures —
-//! named (`$ident`), anonymous (`$<pattern>`), and seq (`$...`) forms.
+//! The grammar itself lives in `src/parser.lalrpop` (compiled at build time
+//! into `crate::lalrpop_parser_inner::lalrpop_parser`).  This file provides:
+//!
+//! * **Entry point** — `pub fn parse` tokenises the source, runs the token
+//!   pre-passes, invokes the LALRPOP-generated parser, then applies the
+//!   post-passes below in order.
+//!
+//! * **Token preprocessing** — `fold_bare_predicate_shorthand` and
+//!   `fold_predicate_args` transform the flat token stream before it reaches
+//!   the grammar, sidestepping LR(1) conflicts that would otherwise require
+//!   grammar-level lookahead into argument lists.
+//!
+//! * **Diagnostic pre-scan** — `diagnose_shape_errors` walks the folded token
+//!   stream and emits span-precise messages for errors whose location the
+//!   LALRPOP generic "unexpected token" diagnostic cannot reproduce.
+//!
+//! * **Grammar-action helpers** — small `pub(crate)` functions called from
+//!   `parser.lalrpop` action bodies: `make_capture_placeholder`,
+//!   `kind_or_unknown_ident`, `resolve_kind`, `split_predicate_name`.
+//!
+//! * **Post-passes** (applied in order after the grammar returns):
+//!   1. `convert_named_captures` — rewrites `$ident` anonymous-capture nodes
+//!      back to the `Capture { name: Some(ident), body: Wildcard }` shape.
+//!   2. `validate_bare_predicate_position` — enforces that bare-predicate
+//!      shorthand (e.g. `even?` without `#`) only appears in node-child slots
+//!      where the schema permits it.
+//!   3. `assign_capture_slots` — assigns dense slot indices in source order,
+//!      detecting the `${...}` uniform-capture sugar shape.
+//!   4. `resolve_pred_capture_refs` — resolves `$name` back-references inside
+//!      predicate arg lists to slot indices; forward references are rejected.
+//!   5. `validate_rest_placement` — rejects `...`/`$...` outside direct node
+//!      children and duplicate rests in one child list.
+//!   6. `validate_capture_position` — rejects captures on non-definite-
+//!      assignment paths (inside `!`/`` ` ``/non-uniform unions).
+//!   7. `validate_quantifier_placement` — rejects quantifiers outside direct
+//!      node children and captures/rests inside quantifier bodies.
 
 use crate::ast::PredArg;
 use crate::lexer::{Spanned, Token, tokenize};
-use crate::schema::node_child_allows_bare_predicate;
 use crate::{CaptureKind, Head, Lit, ParseError, Pat, PatKind, PatSpan, PatternAst};
 use murphy_ast::NodeKindTag;
 
+/// Sentinel string used in `Capture::name` to mark arms produced by the
+/// `${...}` sugar form. The post-pass `assign_capture_slots` looks for a
+/// Union whose every arm is `Capture { name: Some(SUGAR_MARKER), .. }` and
+/// allocates a single shared slot for the group, then clears the marker so
+/// the post-pass leaves no trace.
+pub(crate) const SUGAR_MARKER: &str = "\0sugar";
+
+/// Sentinel prefix used by the grammar to stash a `$ident` predicate-arg
+/// back-reference as a `Lit::Sym`. The post-pass `resolve_pred_capture_refs`
+/// detects the prefix, resolves the name to a slot, and replaces the arg
+/// with `PredArg::Capture(slot)`.
+pub(crate) const CAPREF_MARKER: &str = "\0capref:";
+
+/// Separator placed between a predicate's name and its serialised args when
+/// the token-stream preprocessor folds `Predicate(name) LParen args RParen`
+/// into a single `Predicate(name + ARGS_SEP + serialised_args)` token. The
+/// grammar action `split_predicate_name` splits the payload back.
+///
+/// Records inside the args payload are length-prefixed (`LEN:RECORD`
+/// concatenated, no inter-record separator) so the payload can contain
+/// arbitrary bytes — including bytes the lexer admits inside string or
+/// symbol literals — without colliding with a delimiter. Each record is one
+/// of:
+///
+/// - `iINT` — integer literal (i64)
+/// - `fFLOAT` — float literal (f64; `{:?}`-formatted for lossless round-trip)
+/// - `sSTRING` — string literal (raw UTF-8, length-counted)
+/// - `ySYM` — symbol literal (raw UTF-8, length-counted)
+/// - `cNAME` — `$NAME` capture back-reference (post-pass resolves to slot)
+/// - `t` — boolean true
+/// - `x` — boolean false
+const ARGS_SEP: &str = "\0args:";
+
+/// Sentinel prefix tagging a `PatKind::Predicate` produced from a bare
+/// identifier (e.g. `even?` in node-child position, or `sned` at the root).
+/// `convert_named_captures` strips the marker for Captures whose body is a
+/// bare-ident Predicate (turning `$even?` into a named capture). The
+/// remaining marked Predicates are real bare-predicate-shorthand candidates,
+/// validated by `validate_bare_predicate_position`.
+const BARE_IDENT_MARKER: &str = "\0bare:";
+
 /// Parse a pattern source string into a [`PatternAst`].
 ///
-/// Tokenizes `src`, parses exactly one top-level pattern, and requires the
-/// token stream to be fully consumed — leftover tokens are an error.
+/// Tokenises `src`, hands the stream to the LALRPOP-generated parser, then:
+/// 1. assigns dense capture-slot indices in source order,
+/// 2. resolves predicate-arg back-references to slot indices,
+/// 3. runs the v1-grammar structural validations.
 pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
     let tokens = tokenize(src)?;
-    let mut parser = Parser::new(&tokens);
-    let root = parser.prefixed(false)?;
-    if let Some(extra) = parser.peek() {
-        return Err(ParseError::new("unexpected trailing input", extra.span));
+    if tokens.is_empty() {
+        return Err(ParseError::new("empty pattern", PatSpan::new(0, 0)));
     }
-    // The root is not a node child, so a rest-like root is correctly rejected.
+    let mut root = run_lalrpop(&tokens)?;
+    // Restore `$ident` named-capture semantics: the grammar parses every
+    // `$ident` uniformly as `Capture { name: None, body: Kind(tag) }` (or
+    // `Predicate(name)` for unknown idents) to dodge an LR(1) shift-reduce
+    // conflict at the `$ident vs $ident postfix` boundary. The post-pass
+    // here rewrites those forms back to the expected `Capture { name:
+    // Some(ident), body: Wildcard }` shape. `$send?` and friends stay as
+    // anonymous-with-Quantifier — only bare-ident bodies are touched.
+    convert_named_captures(&mut root);
+    // Reject bare-predicate shorthand at positions that don't allow it
+    // (root, Sym-slot node children, Union-of-non-uniform-sugar arms, etc.)
+    // and strip the BARE_IDENT_MARKER from accepted ones. Round 2 enforces
+    // the root rejection and the schema-driven node-child-slot check.
+    validate_bare_predicate_position(&mut root, BarePos::Root)?;
+    // Source-order slot assignment, sugar-Union detection.
+    let captures = assign_capture_slots(&mut root)?;
+    // Resolve predicate-arg back-references (`$name`) to slot indices.
+    // Source-order walk; only captures registered before the predicate are
+    // in scope (forward references are rejected).
+    let mut name_table: Vec<Option<String>> = Vec::new();
+    resolve_pred_capture_refs(&mut root, &mut name_table)?;
+    // Reject `...` and `$...` outside a direct node-child slot, and
+    // duplicate rest within a single child list.
     validate_rest_placement(&root, false)?;
-    // Every `$` capture must sit on a definite-assignment path so it is
-    // written on exactly the successful arm; `{}` / `!` / `` ` `` violate
-    // this. Matches the B-backend `lower_bool` rejection (murphy-9cr.18).
+    // `$` captures must sit on a definite-assignment path.
     validate_capture_position(&root, false)?;
-    // A postfix `*` / `+` / `?` quantifier is only valid as a direct child
-    // of a node match (`(head c1 c2 ...)`); anywhere else the matcher has
-    // no list to iterate. The body of a quantifier is itself constrained:
-    // captures and rest-like elements are not allowed inside.
+    // `*` / `+` / `?` quantifiers are only valid as direct children of a
+    // node match, and their body must not contain captures or rests.
     validate_quantifier_placement(&root, false)?;
-    Ok(PatternAst {
-        root,
-        captures: parser.captures,
+    Ok(PatternAst { root, captures })
+}
+
+/// Drive the LALRPOP-generated parser over the token stream produced by
+/// `lexer::tokenize`. Pre-folds `Predicate(name) LParen args RParen` into a
+/// single synthetic `Predicate(name + ARGS_SEP + serialised)` token to dodge
+/// an LR(1) local ambiguity at `#name (`. Converts `lalrpop_util::ParseError`
+/// into our `ParseError` shape; Round 2 messages are deliberately terse —
+/// Round 3 owns full diagnostic parity.
+fn run_lalrpop(tokens: &[Spanned]) -> Result<Pat, ParseError> {
+    // Fold `Ident(name) Question|Bang` (where `name` is NOT a known kind)
+    // into a single `Predicate("name?"/"name!")` token. This implements the
+    // bare-predicate shorthand at the iterator level — the grammar always
+    // sees a normal Predicate token, sidestepping the position-context
+    // problem that bare predicates create at the grammar level.
+    let merged = fold_bare_predicate_shorthand(tokens);
+    // Pre-fold `Predicate(name) LParen <args> RParen` into one synthetic
+    // Predicate token (see `fold_predicate_args` for the encoding) to dodge
+    // an LR(1) local ambiguity at `#name (`.
+    let folded = fold_predicate_args(&merged)?;
+    // Pre-scan the (folded) token stream for shape errors whose messages and
+    // spans the bare lalrpop "unexpected token" generic does not preserve:
+    // chained postfix, `...+`, standalone postfix, dangling `$`, top-level
+    // `<...>`, non-ident OneOf head members, and unclosed `(`. Pre-emitting
+    // here keeps the grammar lean — each check carries the exact token span
+    // demanded by the parity tests.
+    diagnose_shape_errors(&folded)?;
+    let iter = folded
+        .into_iter()
+        .map(|s| Ok::<_, ParseError>((s.span.start as usize, s.tok.clone(), s.span.end as usize)));
+    crate::lalrpop_parser_inner::lalrpop_parser::PatternParser::new()
+        .parse(iter)
+        .map_err(lalrpop_to_parse_error)
+}
+
+/// Pre-scan the folded token stream and pre-emit error parity messages whose
+/// (span, text) the lalrpop generic "unexpected token" cannot reproduce.
+///
+/// Each branch matches a shape the grammar would also reject — but with a
+/// less specific message — and emits the message + span the parity tests
+/// expect. The grammar itself remains the source of truth for *whether*
+/// these inputs are valid; this scan only refines the diagnostic.
+fn diagnose_shape_errors(tokens: &[Spanned]) -> Result<(), ParseError> {
+    // 1) Top-level `<...>` (AnyOrder outside a node child) — the grammar only
+    //    accepts `<...>` as a NodeChild, so `<int sym>` at top level falls
+    //    through to a generic "unexpected token". Pre-emit a positional msg.
+    if let Some(first) = tokens.first()
+        && matches!(first.tok, Token::LAngle)
+    {
+        return Err(ParseError::new(
+            "`<...>` AnyOrder is only valid as a direct child of a node match",
+            first.span,
+        ));
+    }
+
+    // 2) Standalone postfix token at start: `+`, `*`, `?` with nothing before.
+    if let Some(first) = tokens.first()
+        && matches!(first.tok, Token::Plus | Token::Star | Token::Question)
+    {
+        return Err(ParseError::new(
+            "postfix quantifier must follow a pattern",
+            first.span,
+        ));
+    }
+
+    // 3) `$` at end of input.
+    if let Some(last) = tokens.last()
+        && matches!(last.tok, Token::Dollar)
+    {
+        return Err(ParseError::new(
+            "unexpected end of input after `$`",
+            last.span,
+        ));
+    }
+
+    // 4) Chained postfix (`++`, `**`, `*?`, `+?`, etc.) and `...+`.
+    for win in tokens.windows(2) {
+        let (a, b) = (&win[0], &win[1]);
+        let a_is_postfix = matches!(a.tok, Token::Plus | Token::Star | Token::Question);
+        let b_is_postfix = matches!(b.tok, Token::Plus | Token::Star | Token::Question);
+        if a_is_postfix && b_is_postfix {
+            // Span and wording match the original hand-written parser
+            // (preserved by murphy-plugin-macros trybuild fixtures): point
+            // at the second postfix only, not the chained pair.
+            return Err(ParseError::new(
+                "postfix `*` / `+` / `?` cannot be chained — apply at most one quantifier per pattern",
+                b.span,
+            ));
+        }
+        if matches!(a.tok, Token::Ellipsis) && b_is_postfix {
+            return Err(ParseError::new(
+                "`...` may not carry a postfix quantifier",
+                PatSpan::new(a.span.start as usize, b.span.end as usize),
+            ));
+        }
+    }
+
+    // 4b) Bad head: `(` immediately followed by a token that can't begin
+    //     a Head — only `Ident`, `Underscore`, or `LBrace` are valid. The
+    //     message and span mirror the hand-written parser's diagnostic.
+    for win in tokens.windows(2) {
+        if matches!(win[0].tok, Token::LParen) {
+            let next = &win[1];
+            let valid_head_start = matches!(
+                next.tok,
+                Token::Ident(_) | Token::Underscore | Token::LBrace
+            );
+            if !valid_head_start {
+                return Err(ParseError::new(
+                    "a node match needs a head: a node type, `_`, or `{...}`",
+                    next.span,
+                ));
+            }
+        }
+    }
+
+    // 5) Non-ident in `{...}` head (immediately following `(`). Walks all
+    //    `(` `{` adjacencies; anything inside that brace that isn't an
+    //    `Ident` or the matching `}` is rejected with a head-specific msg.
+    let mut i = 0;
+    while i + 1 < tokens.len() {
+        if matches!(tokens[i].tok, Token::LParen) && matches!(tokens[i + 1].tok, Token::LBrace) {
+            // Walk inside the `{...}` head until matching `}` (depth=0).
+            let mut depth: i32 = 1;
+            let mut j = i + 2;
+            while j < tokens.len() {
+                match &tokens[j].tok {
+                    Token::LBrace => depth += 1,
+                    Token::RBrace => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    Token::Ident(_) => {}
+                    _ => {
+                        return Err(ParseError::new(
+                            "`{...}` head may only contain node types",
+                            tokens[j].span,
+                        ));
+                    }
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+
+    // 6) Unclosed `(` — track open-paren stack across the stream. If we exit
+    //    with anything on the stack, the innermost unmatched `(` is the
+    //    offending span. The grammar will also error (UnrecognizedEof), but
+    //    its span points at EOF, not the open paren.
+    let mut paren_stack: Vec<PatSpan> = Vec::new();
+    for t in tokens {
+        match t.tok {
+            Token::LParen => paren_stack.push(t.span),
+            Token::RParen => {
+                paren_stack.pop();
+            }
+            _ => {}
+        }
+    }
+    if let Some(open) = paren_stack.pop() {
+        return Err(ParseError::new(
+            "unclosed `(`: expected `)`",
+            PatSpan::new(open.start as usize, (open.start + 1) as usize),
+        ));
+    }
+
+    // 7) Empty `[...]` intersection: `[` immediately followed by `]`.
+    for win in tokens.windows(2) {
+        if matches!(win[0].tok, Token::LBracket) && matches!(win[1].tok, Token::RBracket) {
+            return Err(ParseError::new(
+                "empty intersection `[]`: must contain at least one child pattern",
+                PatSpan::new(win[0].span.start as usize, win[1].span.end as usize),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Walk the token stream and fold `Ident(name) Question` / `Ident(name) Bang`
+/// pairs where `name` is NOT a known node-kind name into a single
+/// `Predicate(name + "?"|"!")` token. Known-kind idents are left alone so
+/// they still parse as Kind/Quantifier (e.g. `int?` stays `Quantifier(Kind(int), ?)`).
+///
+/// This implements bare-predicate shorthand at the lexer-adapter level —
+/// the position-validity check (`node_child_allows_bare_predicate`) runs in
+/// a later post-pass over the AST, so the grammar itself stays oblivious
+/// to whether a Predicate originated from `#name?` (always valid) or the
+/// shorthand `name?` (position-restricted).
+fn fold_bare_predicate_shorthand(tokens: &[Spanned]) -> Vec<Spanned> {
+    let mut out: Vec<Spanned> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let merged = (|| -> Option<Spanned> {
+            let Token::Ident(name) = &tokens[i].tok else {
+                return None;
+            };
+            // Known-kind names and true/false/nil keep their normal parse.
+            if murphy_ast::tag_from_pattern_name(name).is_some() {
+                return None;
+            }
+            if name == "true" || name == "false" || name == "nil" {
+                return None;
+            }
+            // Uppercase-start names are tPARAM_CONST (D3, murphy-kq57) and are
+            // expanded to `(const _ :Name)` by `const_or_kind_or_unknown_ident`.
+            // `Foo?` must NOT be folded into a bare-predicate: let it reach the
+            // grammar as `Ident("Foo") Question`, where `Postfixed` will wrap the
+            // expanded const node in a Quantifier — and then
+            // `validate_quantifier_placement` rejects the root-level form.
+            if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                return None;
+            }
+            let next = tokens.get(i + 1)?;
+            let suffix = match next.tok {
+                Token::Question => '?',
+                Token::Bang => '!',
+                _ => return None,
+            };
+            // Tag with BARE_IDENT_MARKER so `validate_bare_predicate_position`
+            // can apply the position check; an explicit `#name?` is tagged
+            // without the marker and accepted anywhere a Predicate is.
+            let combined_name = format!("{BARE_IDENT_MARKER}{name}{suffix}");
+            let span = PatSpan::new(tokens[i].span.start as usize, next.span.end as usize);
+            Some(Spanned {
+                tok: Token::Predicate(combined_name),
+                span,
+            })
+        })();
+        if let Some(m) = merged {
+            out.push(m);
+            i += 2;
+        } else {
+            out.push(tokens[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Pre-fold `Predicate(name) LParen <args> RParen` sequences into a single
+/// `Predicate(name + ARGS_SEP + serialised)` token. Args are parsed strictly
+/// (integer / float / string / symbol / true / false / `$ident` capref);
+/// `nil` and pattern-form args are rejected with the same diagnostics the
+/// hand-written parser produced.
+fn fold_predicate_args(tokens: &[Spanned]) -> Result<Vec<Spanned>, ParseError> {
+    let mut out: Vec<Spanned> = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = &tokens[i];
+        if let Token::Predicate(name) = &tok.tok
+            && let Some(next) = tokens.get(i + 1)
+            && matches!(next.tok, Token::LParen)
+        {
+            // Parse args from i+2 up to matching RParen.
+            let lparen_span = next.span;
+            let (args, end_idx, end_span) = parse_pred_args(tokens, i + 2, lparen_span)?;
+            let mut combined = name.clone();
+            combined.push_str(ARGS_SEP);
+            combined.push_str(&serialise_pred_args(&args));
+            out.push(Spanned {
+                tok: Token::Predicate(combined),
+                span: PatSpan::new(tok.span.start as usize, end_span.end as usize),
+            });
+            i = end_idx + 1;
+            continue;
+        }
+        out.push(tok.clone());
+        i += 1;
+    }
+    Ok(out)
+}
+
+/// Parse predicate args starting at `start` (one past the `(`). Returns
+/// `(args, end_idx, end_span)` where `end_idx` is the index of the closing
+/// `)` token.
+fn parse_pred_args(
+    tokens: &[Spanned],
+    mut i: usize,
+    lparen_span: PatSpan,
+) -> Result<(Vec<PredArg>, usize, PatSpan), ParseError> {
+    let mut args: Vec<PredArg> = Vec::new();
+    loop {
+        let Some(t) = tokens.get(i) else {
+            return Err(ParseError::new(
+                "unclosed `(` in predicate argument list",
+                lparen_span,
+            ));
+        };
+        match &t.tok {
+            Token::RParen => return Ok((args, i, t.span)),
+            Token::Int(v) => {
+                args.push(PredArg::Lit(Lit::Int(*v)));
+                i += 1;
+            }
+            Token::Float(v) => {
+                args.push(PredArg::Lit(Lit::Float(*v)));
+                i += 1;
+            }
+            Token::Str(s) => {
+                args.push(PredArg::Lit(Lit::Str(s.clone())));
+                i += 1;
+            }
+            Token::Sym(s) => {
+                args.push(PredArg::Lit(Lit::Sym(s.clone())));
+                i += 1;
+            }
+            Token::Ident(name) if name == "true" => {
+                args.push(PredArg::Lit(Lit::True));
+                i += 1;
+            }
+            Token::Ident(name) if name == "false" => {
+                args.push(PredArg::Lit(Lit::False));
+                i += 1;
+            }
+            Token::Ident(name) if name == "nil" => {
+                return Err(ParseError::new(
+                    "`nil` is not supported as a predicate argument in v1: \
+                     `nil` has no Rust-side counterpart for the cop method signature",
+                    t.span,
+                ));
+            }
+            Token::Dollar => {
+                let dollar_span = t.span;
+                i += 1;
+                let Some(name_tok) = tokens.get(i) else {
+                    return Err(ParseError::new(
+                        "expected capture name after `$` in predicate arg",
+                        dollar_span,
+                    ));
+                };
+                let Token::Ident(name) = &name_tok.tok else {
+                    return Err(ParseError::new(
+                        "expected identifier after `$` in predicate arg",
+                        name_tok.span,
+                    ));
+                };
+                // Stash as a sentinel `Lit::Sym` — the AST post-pass resolves
+                // the name to a slot via `resolve_pred_capture_refs`.
+                args.push(PredArg::Lit(Lit::Sym(format!("{CAPREF_MARKER}{name}"))));
+                i += 1;
+            }
+            Token::LBrace | Token::LParen => {
+                return Err(ParseError::new(
+                    "pattern args in v1: literal/capture only",
+                    t.span,
+                ));
+            }
+            _ => {
+                return Err(ParseError::new(
+                    "pattern args in v1: literal/capture only",
+                    t.span,
+                ));
+            }
+        }
+    }
+}
+
+/// Serialise a `PredArg` list to a compact, parseable string with each
+/// record length-prefixed as `LEN:RECORD`. Records concatenate with no
+/// inter-record separator, so payloads (string/symbol literals, capture
+/// names) may contain arbitrary bytes without escaping. The grammar action
+/// `split_predicate_name` inverts this.
+fn serialise_pred_args(args: &[PredArg]) -> String {
+    let mut out = String::new();
+    for arg in args {
+        let record = match arg {
+            PredArg::Lit(Lit::Int(v)) => format!("i{v}"),
+            PredArg::Lit(Lit::Float(v)) => format!("f{v:?}"),
+            PredArg::Lit(Lit::Str(s)) => format!("s{s}"),
+            PredArg::Lit(Lit::Sym(s)) => format!("y{s}"),
+            PredArg::Lit(Lit::True) => "t".to_string(),
+            PredArg::Lit(Lit::False) => "x".to_string(),
+            PredArg::Lit(Lit::Nil) => unreachable!("Nil is rejected at parse time"),
+            // PredArg::Capture should not appear yet — back-refs are stashed
+            // as Lit::Sym via CAPREF_MARKER until the post-pass resolves them.
+            PredArg::Capture(_) => unreachable!("Capture refs are stashed as Lit::Sym"),
+        };
+        out.push_str(&record.len().to_string());
+        out.push(':');
+        out.push_str(&record);
+    }
+    out
+}
+
+/// Split a folded predicate name back into the original name and decoded
+/// args. If the input doesn't contain `ARGS_SEP`, returns `(name, vec![])`.
+pub(crate) fn split_predicate_name(
+    combined: String,
+    span: PatSpan,
+) -> Result<(String, Vec<PredArg>), ParseError> {
+    if let Some(sep_idx) = combined.find(ARGS_SEP) {
+        let name = combined[..sep_idx].to_string();
+        let rest = &combined[sep_idx + ARGS_SEP.len()..];
+        let args = decode_pred_args(rest, span)?;
+        Ok((name, args))
+    } else {
+        Ok((combined, vec![]))
+    }
+}
+
+/// Decode length-prefixed records (`LEN:RECORD` concatenated) back to a
+/// `Vec<PredArg>`. The byte length is decimal-encoded and ends at the first
+/// `:`; the next LEN bytes are the record payload (tag + value).
+fn decode_pred_args(rest: &str, span: PatSpan) -> Result<Vec<PredArg>, ParseError> {
+    let mut out = Vec::new();
+    let bytes = rest.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let colon = bytes[pos..]
+            .iter()
+            .position(|&b| b == b':')
+            .ok_or_else(|| ParseError::new("internal: missing record length delimiter", span))?;
+        let len: usize = rest[pos..pos + colon]
+            .parse()
+            .map_err(|_| ParseError::new("internal: bad record length", span))?;
+        let record_start = pos + colon + 1;
+        let record_end = record_start
+            .checked_add(len)
+            .filter(|&end| end <= bytes.len())
+            .ok_or_else(|| ParseError::new("internal: record truncated", span))?;
+        out.push(decode_pred_arg(&rest[record_start..record_end], span)?);
+        pos = record_end;
+    }
+    Ok(out)
+}
+
+fn decode_pred_arg(field: &str, span: PatSpan) -> Result<PredArg, ParseError> {
+    let mut chars = field.chars();
+    let tag = chars
+        .next()
+        .ok_or_else(|| ParseError::new("internal: empty predicate-arg record", span))?;
+    let rest = &field[tag.len_utf8()..];
+    Ok(match tag {
+        'i' => {
+            PredArg::Lit(Lit::Int(rest.parse::<i64>().map_err(|_| {
+                ParseError::new("internal: bad serialised int", span)
+            })?))
+        }
+        'f' => {
+            PredArg::Lit(Lit::Float(rest.parse::<f64>().map_err(|_| {
+                ParseError::new("internal: bad serialised float", span)
+            })?))
+        }
+        's' => PredArg::Lit(Lit::Str(rest.to_string())),
+        'y' => PredArg::Lit(Lit::Sym(rest.to_string())),
+        't' => PredArg::Lit(Lit::True),
+        'x' => PredArg::Lit(Lit::False),
+        _ => {
+            return Err(ParseError::new(
+                "internal: unknown predicate-arg record tag",
+                span,
+            ));
+        }
     })
 }
+
+/// Translate `lalrpop_util::ParseError` into our `ParseError` shape.
+fn lalrpop_to_parse_error(err: lalrpop_util::ParseError<usize, Token, ParseError>) -> ParseError {
+    use lalrpop_util::ParseError as LP;
+    match err {
+        LP::User { error } => error,
+        LP::InvalidToken { location } => {
+            ParseError::new("invalid token", PatSpan::new(location, location))
+        }
+        LP::UnrecognizedEof { location, .. } => {
+            ParseError::new("unexpected end of input", PatSpan::new(location, location))
+        }
+        LP::UnrecognizedToken {
+            token: (l, _, r), ..
+        } => ParseError::new("unexpected token", PatSpan::new(l, r)),
+        LP::ExtraToken { token: (l, _, r) } => {
+            ParseError::new("unexpected trailing input", PatSpan::new(l, r))
+        }
+    }
+}
+
+// ============================================================================
+// Helpers exposed to the LALRPOP grammar's actions.
+// ============================================================================
+
+/// Construct a `PatKind::Capture` with a placeholder `slot = u16::MAX`.
+/// The real slot index is assigned by the post-pass `assign_capture_slots`.
+pub(crate) fn make_capture_placeholder(name: Option<String>, body: Pat) -> PatKind {
+    PatKind::Capture {
+        slot: u16::MAX,
+        name,
+        body: Box::new(body),
+    }
+}
+
+/// Resolve a node-type `name` to its [`NodeKindTag`], or a span-carrying
+/// error naming the unknown type. Shared by the `Head::Exact` / `Head::OneOf`
+/// paths.
+pub(crate) fn resolve_kind(name: &str, span: PatSpan) -> Result<NodeKindTag, ParseError> {
+    murphy_ast::tag_from_pattern_name(name)
+        .ok_or_else(|| ParseError::new(format!("unknown node type `{name}`"), span))
+}
+
+/// Resolve a bare ident at primary position, expanding uppercase-start names
+/// (tPARAM_CONST, D3 — murphy-kq57) to `(const _ :Name)` node patterns.
+///
+/// * `Foo` / `%Foo` (uppercase-start after `%` is stripped by the lexer) →
+///   `PatKind::Node { head: Exact(const), children: [Wildcard, Lit(Sym("Foo"))] }`
+///   mirrors the RuboCop semantics where a bare constant reference in a pattern
+///   matches any `(const _ :Foo)` node.
+/// * lowercase / `_` / `true` / `false` / `nil` → delegated to
+///   `kind_or_unknown_ident` as before.
+pub(crate) fn const_or_kind_or_unknown_ident(name: &str, span: PatSpan) -> Pat {
+    if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+        // Expand `Foo` → `(const nil? :Foo)`.
+        // `Const` is tag 13 (ADR 0037, frozen layout; see murphy-ast::kinds).
+        //
+        // NOTE: we use `nil?` (NilTest), not `_` (Wildcard), for the scope slot
+        // because Murphy's `_` in an OptNode slot rejects `None` (it requires the
+        // slot to be present). `nil?` accepts both `None` (absent scope = top-level
+        // constant, the common case) and a Nil node. RuboCop's `Foo` also matches
+        // `Module::Foo`; supporting a scoped constant requires a future extension.
+        let const_tag = murphy_ast::NodeKindTag(13);
+        Pat {
+            kind: PatKind::Node {
+                head: Head::Exact(const_tag),
+                children: vec![
+                    Pat {
+                        kind: PatKind::NilTest,
+                        span,
+                    },
+                    Pat {
+                        kind: PatKind::Lit(Lit::Sym(name.to_string())),
+                        span,
+                    },
+                ],
+            },
+            span,
+        }
+    } else {
+        kind_or_unknown_ident(name, span)
+    }
+}
+
+/// Resolve a bare ident at primary position to a `Pat`:
+/// * `true` / `false` / `nil` -> the corresponding literal,
+/// * a known node-kind name -> `PatKind::Kind(tag)`,
+/// * otherwise -> `PatKind::Predicate { name, args: vec![] }` tagged with
+///   `BARE_IDENT_MARKER` (bare-predicate shorthand). The position-validity
+///   check (`validate_bare_predicate_position`) runs in a post-pass and
+///   rejects bare predicates that appear outside a permitted node-child slot.
+pub(crate) fn kind_or_unknown_ident(name: &str, span: PatSpan) -> Pat {
+    let kind = match name {
+        "true" => PatKind::Lit(Lit::True),
+        "false" => PatKind::Lit(Lit::False),
+        "nil" => PatKind::Lit(Lit::Nil),
+        _ => {
+            if let Some(tag) = murphy_ast::tag_from_pattern_name(name) {
+                PatKind::Kind(tag)
+            } else {
+                // Unknown ident. Tag the predicate name with `BARE_IDENT_MARKER`
+                // so the post-pass `validate_bare_predicate_position` can tell
+                // bare-ident shorthand apart from explicit `#name` predicates.
+                // After `convert_named_captures` rewrites `Capture { body:
+                // Predicate(bare-ident) }` to the named-capture shape, the
+                // remaining bare-ident Predicates are real bare-predicate
+                // shorthand candidates — at the root they're rejected; in
+                // node-child slots `validate_bare_predicate_position` decides.
+                PatKind::Predicate {
+                    name: format!("{BARE_IDENT_MARKER}{name}"),
+                    args: vec![],
+                }
+            }
+        }
+    };
+    Pat { kind, span }
+}
+
+// ============================================================================
+// Post-pass: restore `$ident` named-capture semantics.
+//
+// The grammar parses `$ident` uniformly as `Capture { name: None, body:
+// Pat { kind: Kind(tag) | Predicate(name) } }` to keep the LR grammar
+// context-free (see `parser.lalrpop`). The pre-LALRPOP parser produced
+// `Capture { name: Some(ident), body: Wildcard }` for that source shape.
+// This walk reconstructs that shape after parsing.
+//
+// Rules:
+// * `Capture { name: None, body: Kind(tag) }` -> name = pattern_name(tag),
+//   body becomes Wildcard. The body span stays as-is — span the `$`.
+// * `Capture { name: None, body: Predicate { name, args: [] } }` (unknown
+//   ident) -> same rewrite with the original ident as the name.
+// * Anything else (Quantifier, Lit, Node, Union, etc.) is untouched —
+//   `$send?` stays an anonymous capture wrapping a Quantifier, `$(send)`
+//   stays an anonymous capture wrapping a Node, etc.
+// ============================================================================
+
+fn convert_named_captures(pat: &mut Pat) {
+    if let PatKind::Capture { name, body, .. } = &mut pat.kind
+        && name.is_none()
+    {
+        let new_name: Option<String> = match &body.kind {
+            PatKind::Kind(tag) => murphy_ast::pattern_name(*tag).map(|s| s.to_string()),
+            PatKind::Predicate {
+                name: pred_name,
+                args,
+            } if args.is_empty() => {
+                // Only the marker-tagged form is a candidate for named-
+                // capture rewriting. Even then, a bare-ident with a `?`/`!`
+                // suffix (`$odd?`) is intentionally a bare-predicate-shorthand
+                // capture, not a named capture — keep it as-is so the post-
+                // pass `validate_bare_predicate_position` decides what to do.
+                pred_name
+                    .strip_prefix(BARE_IDENT_MARKER)
+                    .filter(|stripped| !stripped.ends_with('?') && !stripped.ends_with('!'))
+                    .map(|s| s.to_string())
+            }
+            _ => None,
+        };
+        if let Some(n) = new_name {
+            *name = Some(n);
+            // The hand-written parser made the synthetic Wildcard body span
+            // only the `$` token. Preserve that for snapshot parity. The
+            // ident span (needed for duplicate-name diagnostics) is stashed
+            // separately via the outer Capture's span — see
+            // `assign_capture_slots` which derives the error span as
+            // `pat.span` minus the leading `$` byte.
+            let dollar_span = PatSpan {
+                start: pat.span.start,
+                end: pat.span.start + 1,
+            };
+            **body = Pat {
+                kind: PatKind::Wildcard,
+                span: dollar_span,
+            };
+        }
+    }
+    // Recurse into all child positions.
+    match &mut pat.kind {
+        PatKind::Node { children, .. } => {
+            for c in children {
+                convert_named_captures(c);
+            }
+        }
+        PatKind::Union(alts) => {
+            for a in alts {
+                convert_named_captures(a);
+            }
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            convert_named_captures(b);
+        }
+        PatKind::Quantifier { body, .. } => convert_named_captures(body),
+        PatKind::Capture { body, .. } => convert_named_captures(body),
+        PatKind::AnyOrder { children } => {
+            for c in children {
+                convert_named_captures(c);
+            }
+        }
+        PatKind::Intersection { children } => {
+            for c in children {
+                convert_named_captures(c);
+            }
+        }
+        PatKind::Rest
+        | PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
+    }
+}
+
+// ============================================================================
+// Post-pass: bare-predicate-shorthand position check.
+//
+// `kind_or_unknown_ident` tags every unknown-ident Predicate with
+// `BARE_IDENT_MARKER`. After `convert_named_captures` rewrites the
+// bare-ident-as-named-capture path, the remaining marked Predicates are
+// real bare-predicate-shorthand candidates. They are valid only in
+// node-child slots where `node_child_allows_bare_predicate(parent_kind,
+// child_idx)` says so (matches the hand-written parser's `allow_bare_predicate`
+// flag).
+//
+// `BarePos` tracks the parser's "where am I" context as the walk descends.
+// ============================================================================
+
+#[derive(Clone)]
+enum BarePos<'a> {
+    /// Top-level / inside a `!`/`^`/`` ` ``/Quantifier body — bare predicate
+    /// is forbidden.
+    Root,
+    /// Direct node-child slot of a Node with known parent kind and child
+    /// index. The schema decides whether bare predicate is allowed.
+    NodeChild { parent: &'a Head, child_idx: usize },
+}
+
+impl BarePos<'_> {
+    fn allows_bare(&self) -> bool {
+        match self {
+            BarePos::Root => false,
+            BarePos::NodeChild { parent, child_idx } => match parent {
+                Head::Exact(tag) => {
+                    crate::schema::node_child_allows_bare_predicate(*tag, *child_idx)
+                }
+                Head::Any => false,
+                Head::OneOf(tags) => tags
+                    .iter()
+                    .all(|t| crate::schema::node_child_allows_bare_predicate(*t, *child_idx)),
+            },
+        }
+    }
+}
+
+fn validate_bare_predicate_position(pat: &mut Pat, pos: BarePos<'_>) -> Result<(), ParseError> {
+    // Examine `pat`'s top-level shape first.
+    if let PatKind::Predicate { name, .. } = &mut pat.kind
+        && let Some(stripped) = name.strip_prefix(BARE_IDENT_MARKER)
+    {
+        if !pos.allows_bare() {
+            // For `?` / `!` suffixed bare idents, append a hint pointing
+            // at the explicit `#name` host-predicate syntax. Tests assert
+            // on both `unknown node type` and the backticked `\`#save!\``
+            // hint, so include both verbatim.
+            let hint = if stripped.ends_with('?') || stripped.ends_with('!') {
+                format!(": did you mean `#{stripped}` to call a host predicate?")
+            } else {
+                String::new()
+            };
+            return Err(ParseError::new(
+                format!("unknown node type `{stripped}`{hint}"),
+                pat.span,
+            ));
+        }
+        // Accept: strip the marker so downstream sees a normal Predicate.
+        *name = stripped.to_string();
+    }
+    // Recurse into child positions with the appropriate context.
+    // We split `&mut pat.kind` into matches that don't co-borrow `head`.
+    match &mut pat.kind {
+        PatKind::Node { .. } => {
+            // Extract `head` and `children` via a temporary unborrow.
+            let PatKind::Node { head, children } = &mut pat.kind else {
+                unreachable!()
+            };
+            // We need an immutable borrow of `head` and a mutable iteration
+            // of `children` — split via a raw split. Use `&*head` for an
+            // immutable borrow.
+            let head_ref: &Head = head;
+            for (idx, child) in children.iter_mut().enumerate() {
+                let child_pos = BarePos::NodeChild {
+                    parent: head_ref,
+                    child_idx: idx,
+                };
+                validate_bare_predicate_position(child, child_pos)?;
+            }
+        }
+        PatKind::Union(alts) => {
+            for alt in alts {
+                validate_bare_predicate_position(alt, pos.clone())?;
+            }
+        }
+        PatKind::Not(b) | PatKind::Descend(b) => {
+            validate_bare_predicate_position(b, BarePos::Root)?;
+        }
+        PatKind::Parent(b) => {
+            validate_bare_predicate_position(b, pos)?;
+        }
+        PatKind::Quantifier { body, .. } => {
+            validate_bare_predicate_position(body, pos)?;
+        }
+        PatKind::Capture { body, .. } => {
+            validate_bare_predicate_position(body, pos)?;
+        }
+        PatKind::AnyOrder { children } => {
+            // `<...>` children were parsed with `prefixed(false)` in the
+            // hand-written parser, which forbade bare-predicate shorthand
+            // even when the enclosing node slot allowed it. Treat each child
+            // as if it were a root pattern so unknown-ident → bare-predicate
+            // conversion is rejected here as well.
+            for child in children {
+                validate_bare_predicate_position(child, BarePos::Root)?;
+            }
+        }
+        PatKind::Intersection { children } => {
+            // All children of `[...]` operate on the same subject, so they
+            // inherit the enclosing slot's bare-predicate permission. This
+            // matches RuboCop's behaviour, where a bare-predicate shorthand
+            // inside `[...]` is allowed wherever the enclosing node slot
+            // permits it.
+            for child in children {
+                validate_bare_predicate_position(child, pos.clone())?;
+            }
+        }
+        PatKind::Rest
+        | PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Post-pass: assign capture slots in source order; detect sugar Unions.
+// ============================================================================
+
+/// Walk `pat` in source order, replacing every `Capture { slot: u16::MAX }`
+/// placeholder with a dense slot index (0..n). Returns the per-slot
+/// `CaptureKind` vector. Detects the `${...}` sugar shape — a Union whose
+/// every arm is `Capture { name: Some(SUGAR_MARKER) }` — and allocates one
+/// shared slot for the group, then clears the marker so downstream sees
+/// `name = None` on each arm.
+///
+/// Duplicate named captures (`$foo` more than once) error here, mirroring
+/// the hand-written parser.
+fn assign_capture_slots(pat: &mut Pat) -> Result<Vec<CaptureKind>, ParseError> {
+    let mut state = SlotState {
+        kinds: Vec::new(),
+        names: Vec::new(),
+    };
+    walk_assign(pat, &mut state)?;
+    Ok(state.kinds)
+}
+
+struct SlotState {
+    kinds: Vec<CaptureKind>,
+    /// Captured names seen so far. `None` for anonymous captures.
+    names: Vec<Option<String>>,
+}
+
+impl SlotState {
+    fn alloc_slot(&mut self, kind: CaptureKind, name: Option<String>) -> Result<u16, ParseError> {
+        let slot = u16::try_from(self.kinds.len())
+            .map_err(|_| ParseError::new("too many captures in one pattern", PatSpan::new(0, 0)))?;
+        self.kinds.push(kind);
+        self.names.push(name);
+        Ok(slot)
+    }
+}
+
+fn walk_assign(pat: &mut Pat, state: &mut SlotState) -> Result<(), ParseError> {
+    // Detect the sugar Union shape and short-circuit: if every arm is a
+    // Capture with `name = Some(SUGAR_MARKER)`, allocate a single shared
+    // slot for the whole group, clear the marker on each arm, and recurse
+    // into each arm body.
+    if let PatKind::Union(alts) = &pat.kind {
+        let all_sugar = !alts.is_empty()
+            && alts.iter().all(|a| {
+                matches!(
+                    &a.kind,
+                    PatKind::Capture { name: Some(n), .. } if n == SUGAR_MARKER
+                )
+            });
+        if all_sugar {
+            // Allocate one shared slot. Slot kind is `Node` — sugar arms
+            // are full Prefixed patterns, which don't admit rest/quantifier
+            // bodies at the arm level. (A Quantifier inside an arm gets its
+            // own slot if it has a `$`, but the sugar slot itself is Node.)
+            let shared_slot = state.alloc_slot(CaptureKind::Node, None)?;
+            if let PatKind::Union(alts) = &mut pat.kind {
+                for arm in alts.iter_mut() {
+                    if let PatKind::Capture { slot, name, body } = &mut arm.kind {
+                        *slot = shared_slot;
+                        *name = None; // strip the sugar marker
+                        walk_assign(body, state)?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    match &mut pat.kind {
+        PatKind::Capture { slot, name, body } => {
+            // Allocate THIS slot before recursing into the body so that
+            // outer captures get lower slot indices than nested ones.
+            let kind = slot_kind_for_body(body);
+            if let Some(n) = name.as_ref() {
+                // Duplicate-name check. Point the error at the ident's span,
+                // which is (outer_start + 1) .. outer_end for the named-capture
+                // shape produced by `convert_named_captures` (the outer Capture
+                // spans `$ident` and the body Wildcard spans only the `$`).
+                if state
+                    .names
+                    .iter()
+                    .any(|nm| nm.as_deref() == Some(n.as_str()))
+                {
+                    let ident_span = PatSpan {
+                        start: pat.span.start + 1,
+                        end: pat.span.end,
+                    };
+                    return Err(ParseError::new(
+                        format!("duplicate capture name `{n}`"),
+                        ident_span,
+                    ));
+                }
+            }
+            *slot = state.alloc_slot(kind, name.clone())?;
+            walk_assign(body, state)?;
+        }
+        PatKind::Node { children, .. } => {
+            for c in children.iter_mut() {
+                walk_assign(c, state)?;
+            }
+        }
+        PatKind::Union(alts) => {
+            for a in alts.iter_mut() {
+                walk_assign(a, state)?;
+            }
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => walk_assign(b, state)?,
+        PatKind::Quantifier { body, .. } => walk_assign(body, state)?,
+        PatKind::AnyOrder { children } => {
+            for c in children.iter_mut() {
+                walk_assign(c, state)?;
+            }
+        }
+        PatKind::Intersection { children } => {
+            for c in children.iter_mut() {
+                walk_assign(c, state)?;
+            }
+        }
+        PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Rest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
+    }
+    Ok(())
+}
+
+/// Walk the AST in source order, building a name-by-slot table incrementally
+/// as `$name` captures are encountered. Within a `Predicate`'s args, only
+/// captures registered earlier in the traversal are visible — forward
+/// references are rejected, matching the old hand-written parser which
+/// resolved at parse time.
+///
+/// Replaces `\0capref:NAME` sentinel `Lit::Sym` predicate args with
+/// `PredArg::Capture(slot)`. Errors on unknown or forward names.
+fn resolve_pred_capture_refs(
+    pat: &mut Pat,
+    name_table: &mut Vec<Option<String>>,
+) -> Result<(), ParseError> {
+    match &mut pat.kind {
+        PatKind::Predicate { args, .. } => {
+            for arg in args.iter_mut() {
+                if let PredArg::Lit(Lit::Sym(s)) = arg
+                    && let Some(rest) = s.strip_prefix(CAPREF_MARKER)
+                {
+                    let slot = name_table
+                        .iter()
+                        .position(|n| n.as_deref() == Some(rest))
+                        .ok_or_else(|| {
+                            ParseError::new(
+                                format!(
+                                    "unknown or forward capture reference `${rest}` in predicate arg"
+                                ),
+                                pat.span,
+                            )
+                        })?;
+                    *arg = PredArg::Capture(slot as u16);
+                }
+            }
+        }
+        PatKind::Capture { slot, name, body } => {
+            // Register this capture's name (if any) before walking its body,
+            // so the capture is visible to predicates inside its own body.
+            if *slot != u16::MAX {
+                let idx = *slot as usize;
+                if name_table.len() <= idx {
+                    name_table.resize(idx + 1, None);
+                }
+                if let Some(n) = name {
+                    name_table[idx] = Some(n.clone());
+                }
+            }
+            resolve_pred_capture_refs(body, name_table)?;
+        }
+        PatKind::Node { children, .. } => {
+            for c in children.iter_mut() {
+                resolve_pred_capture_refs(c, name_table)?;
+            }
+        }
+        PatKind::Union(alts) => {
+            // Source-order walk: matches the old hand-written parser, which
+            // resolved capture refs at parse time as it consumed tokens. Note
+            // that the `validate_capture_position` pass rejects captures
+            // inside non-sugar unions, so the only captures seen here are
+            // sugar slots (same slot across all alts).
+            for a in alts.iter_mut() {
+                resolve_pred_capture_refs(a, name_table)?;
+            }
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            resolve_pred_capture_refs(b, name_table)?;
+        }
+        PatKind::Quantifier { body, .. } => resolve_pred_capture_refs(body, name_table)?,
+        PatKind::AnyOrder { children } => {
+            for c in children.iter_mut() {
+                resolve_pred_capture_refs(c, name_table)?;
+            }
+        }
+        PatKind::Intersection { children } => {
+            for c in children.iter_mut() {
+                resolve_pred_capture_refs(c, name_table)?;
+            }
+        }
+        PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Rest
+        | PatKind::Lit(_)
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
+    }
+    Ok(())
+}
+
+// ============================================================================
+// `validate_*` walks — unchanged from the pre-LALRPOP parser.
+// ============================================================================
+
+/// Resolve a capture's slot kind from its body's shape. `Rest` and the
+/// many-iteration quantifiers (`+`, `*`) produce a slice (`Seq`); the
+/// optional quantifier (`?`) produces `OptNode`; anything else binds a
+/// single node (`Node`).
+fn slot_kind_for_body(body: &Pat) -> CaptureKind {
+    match &body.kind {
+        PatKind::Rest => CaptureKind::Seq,
+        PatKind::Quantifier { max: 1, .. } => CaptureKind::OptNode,
+        PatKind::Quantifier { .. } => CaptureKind::Seq,
+        _ => CaptureKind::Node,
+    }
+}
+
+/// Whether `pat` is a "rest-like" element — one that matches zero-or-more
+/// sibling nodes. There are two forms: a bare `...` ([`PatKind::Rest`]) and an
+/// anonymous seq capture `$...` (a [`PatKind::Capture`] whose `body` is
+/// [`PatKind::Rest`]).
+fn is_rest_like(pat: &Pat) -> bool {
+    match &pat.kind {
+        PatKind::Rest => true,
+        PatKind::Capture { body, .. } => matches!(body.kind, PatKind::Rest),
+        _ => false,
+    }
+}
+
+/// Post-parse walk enforcing the v1 grammar rule for quantifiers (`*` / `+` /
+/// `?`): each is valid *only* as a direct child of a node match `(...)`, and
+/// its body may not itself contain `$` captures or rest-like elements.
+fn validate_quantifier_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseError> {
+    if let PatKind::Quantifier { .. } = &pat.kind
+        && !is_node_child
+    {
+        return Err(ParseError::new(
+            "postfix `*` / `+` / `?` is only valid as a direct child of a node match",
+            pat.span,
+        ));
+    }
+    match &pat.kind {
+        PatKind::Quantifier { body, .. } => {
+            validate_quantifier_body(body)?;
+            validate_quantifier_placement(body, false)
+        }
+        PatKind::Node { children, .. } => {
+            for child in children {
+                validate_quantifier_placement(child, true)?;
+            }
+            Ok(())
+        }
+        PatKind::Union(alts) => {
+            for alt in alts {
+                validate_quantifier_placement(alt, false)?;
+            }
+            Ok(())
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            validate_quantifier_placement(b, false)
+        }
+        PatKind::Capture { body, .. } => validate_quantifier_placement(body, is_node_child),
+        PatKind::AnyOrder { children } => {
+            for child in children {
+                validate_quantifier_placement(child, true)?;
+            }
+            Ok(())
+        }
+        PatKind::Intersection { children } => {
+            // `[...]` children all match the same subject, not a list slot, so
+            // quantifiers inside them are not valid as node-list children.
+            for child in children {
+                validate_quantifier_placement(child, false)?;
+            }
+            Ok(())
+        }
+        PatKind::Rest
+        | PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => Ok(()),
+    }
+}
+
+/// Reject patterns that may not appear inside the body of a `*`/`+`/`?`
+/// quantifier: any `$` capture and any rest-like element.
+fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
+    match &pat.kind {
+        PatKind::Capture { .. } => Err(ParseError::new(
+            "`$` capture is not allowed inside a quantifier body \
+             (use `$pat+` / `$pat*` / `$pat?` to capture the iterations)",
+            pat.span,
+        )),
+        PatKind::Rest => Err(ParseError::new(
+            "`...` is not allowed inside a quantifier body",
+            pat.span,
+        )),
+        PatKind::Node { children, .. } => {
+            for child in children {
+                validate_quantifier_body(child)?;
+            }
+            Ok(())
+        }
+        PatKind::Union(alts) => {
+            for alt in alts {
+                validate_quantifier_body(alt)?;
+            }
+            Ok(())
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => validate_quantifier_body(b),
+        PatKind::Quantifier { body, .. } => validate_quantifier_body(body),
+        PatKind::AnyOrder { children } => {
+            for child in children {
+                validate_quantifier_body(child)?;
+            }
+            Ok(())
+        }
+        PatKind::Intersection { children } => {
+            for child in children {
+                validate_quantifier_body(child)?;
+            }
+            Ok(())
+        }
+        PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => Ok(()),
+    }
+}
+
+/// Post-parse walk enforcing the "captures live on a definite-assignment
+/// path" rule. See module-level docs and the pre-LALRPOP parser for the
+/// full reasoning.
+fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseError> {
+    match &pat.kind {
+        PatKind::Capture { body, .. } => {
+            if forbidden {
+                return Err(ParseError::new(
+                    "`$` capture is not allowed inside `{}` / `!` / `` ` `` \
+                     (the body has no definite-assignment path)",
+                    pat.span,
+                ));
+            }
+            validate_capture_position(body, false)
+        }
+        PatKind::Union(alts) => {
+            if let Some(first_cap) = alts.first().and_then(|a| {
+                if let PatKind::Capture { slot, name, .. } = &a.kind {
+                    Some((*slot, name.as_deref()))
+                } else {
+                    None
+                }
+            }) {
+                let (first_slot, first_name) = first_cap;
+                let all_same = alts.iter().all(|alt| {
+                    matches!(&alt.kind,
+                        PatKind::Capture { slot, name, .. }
+                        if *slot == first_slot && name.as_deref() == first_name
+                    )
+                });
+                if all_same && !forbidden {
+                    for alt in alts {
+                        let PatKind::Capture { body, .. } = &alt.kind else {
+                            unreachable!("all_same guarantees Capture");
+                        };
+                        validate_capture_position(body, true)?;
+                    }
+                    return Ok(());
+                }
+            }
+            for alt in alts {
+                validate_capture_position(alt, true)?;
+            }
+            Ok(())
+        }
+        PatKind::Not(b) | PatKind::Descend(b) => validate_capture_position(b, true),
+        PatKind::Parent(b) => validate_capture_position(b, forbidden),
+        PatKind::Quantifier { body, .. } => validate_capture_position(body, forbidden),
+        PatKind::Node { children, .. } => {
+            for child in children {
+                validate_capture_position(child, forbidden)?;
+            }
+            Ok(())
+        }
+        PatKind::AnyOrder { children } => {
+            for child in children {
+                validate_capture_position(child, false)?;
+            }
+            Ok(())
+        }
+        PatKind::Intersection { children } => {
+            // All children match the same subject, so any capture is on a
+            // definite-assignment path. Pass `forbidden` through unchanged.
+            for child in children {
+                validate_capture_position(child, forbidden)?;
+            }
+            Ok(())
+        }
+        PatKind::Rest
+        | PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => Ok(()),
+    }
+}
+
+/// Post-parse walk enforcing the v1 grammar rule for rest-like elements
+/// (`...` and `$...`).
+fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseError> {
+    if is_rest_like(pat) && !is_node_child {
+        return Err(ParseError::new(
+            "`...` / `$...` is only valid as a direct child of a node match",
+            pat.span,
+        ));
+    }
+    match &pat.kind {
+        PatKind::Node { children, .. } => {
+            if let Some(second) = children.iter().filter(|c| is_rest_like(c)).nth(1) {
+                return Err(ParseError::new(
+                    "at most one `...` / `$...` per node child list",
+                    second.span,
+                ));
+            }
+            for child in children {
+                validate_rest_placement(child, true)?;
+            }
+        }
+        PatKind::Union(alts) => {
+            for alt in alts {
+                validate_rest_placement(alt, false)?;
+            }
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            validate_rest_placement(b, false)?;
+        }
+        PatKind::Capture { body, .. } => {
+            if !is_rest_like(pat) {
+                validate_rest_placement(body, false)?;
+            }
+        }
+        PatKind::AnyOrder { children } => {
+            if let Some(second) = children.iter().filter(|c| is_rest_like(c)).nth(1) {
+                return Err(ParseError::new(
+                    "at most one `...` / `$...` per `<...>` child list",
+                    second.span,
+                ));
+            }
+            for child in children {
+                validate_rest_placement(child, true)?;
+            }
+        }
+        PatKind::Quantifier { body, .. } => {
+            validate_rest_placement(body, false)?;
+        }
+        PatKind::Intersection { children } => {
+            // `[...]` children each match the same scalar subject; `...` / `$...`
+            // inside an intersection is not valid (same restriction as Union).
+            for child in children {
+                validate_rest_placement(child, false)?;
+            }
+        }
+        PatKind::Rest
+        | PatKind::Wildcard
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Tests — unchanged from the pre-LALRPOP parser. Each test calls the public
+// `parse` entry, so the LALRPOP migration is invisible to them.
+// ============================================================================
 
 #[cfg(test)]
 mod capture_position_tests {
@@ -240,1160 +1636,6 @@ mod capture_position_tests {
         );
     }
 }
-
-/// Resolve a capture's slot kind from its body's shape. `Rest` and the
-/// many-iteration quantifiers (`+`, `*`) produce a slice (`Seq`); the
-/// optional quantifier (`?`) produces `OptNode`; anything else binds a
-/// single node (`Node`).
-fn slot_kind_for_body(body: &Pat) -> CaptureKind {
-    match &body.kind {
-        PatKind::Rest => CaptureKind::Seq,
-        // A `?` quantifier has `max == 1`; `+` / `*` have `max == u8::MAX`.
-        PatKind::Quantifier { max: 1, .. } => CaptureKind::OptNode,
-        PatKind::Quantifier { .. } => CaptureKind::Seq,
-        _ => CaptureKind::Node,
-    }
-}
-
-/// Whether `pat` is a "rest-like" element — one that matches zero-or-more
-/// sibling nodes. There are two forms: a bare `...` ([`PatKind::Rest`]) and an
-/// anonymous seq capture `$...` (a [`PatKind::Capture`] whose `body` is
-/// [`PatKind::Rest`]).
-fn is_rest_like(pat: &Pat) -> bool {
-    match &pat.kind {
-        PatKind::Rest => true,
-        PatKind::Capture { body, .. } => matches!(body.kind, PatKind::Rest),
-        _ => false,
-    }
-}
-
-/// Post-parse walk enforcing the v1 grammar rule for quantifiers (`*` / `+` /
-/// `?`): each is valid *only* as a direct child of a node match `(...)`, and
-/// its body may not itself contain `$` captures or rest-like elements.
-///
-/// The error message names which rule was broken so the user can correct the
-/// pattern without guessing. Mirrors [`validate_rest_placement`].
-///
-/// `is_node_child` is `true` only when `pat` is being visited as a direct
-/// child of a [`PatKind::Node`]; the root, union alternatives, and the bodies
-/// of `!`/`^`/`` ` ``/`$` are all *not* node children.
-fn validate_quantifier_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseError> {
-    if let PatKind::Quantifier { .. } = &pat.kind
-        && !is_node_child
-    {
-        return Err(ParseError::new(
-            "postfix `*` / `+` / `?` is only valid as a direct child of a node match",
-            pat.span,
-        ));
-    }
-    match &pat.kind {
-        PatKind::Quantifier { body, .. } => {
-            // The body of a quantifier is itself not a node child, and it
-            // must not contain captures or rest-like elements (those would
-            // make the per-iteration semantics undefined — what slot does
-            // each iteration write into? where does `...` end?).
-            validate_quantifier_body(body)?;
-            validate_quantifier_placement(body, false)
-        }
-        PatKind::Node { children, .. } => {
-            for child in children {
-                validate_quantifier_placement(child, true)?;
-            }
-            Ok(())
-        }
-        PatKind::Union(alts) => {
-            for alt in alts {
-                validate_quantifier_placement(alt, false)?;
-            }
-            Ok(())
-        }
-        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
-            validate_quantifier_placement(b, false)
-        }
-        // A `$pat+` capture sits *as* a node child, so its quantifier body
-        // is allowed at the same position the capture itself is allowed —
-        // propagate `is_node_child` rather than reset it.
-        PatKind::Capture { body, .. } => validate_quantifier_placement(body, is_node_child),
-        PatKind::AnyOrder { children } => {
-            // AnyOrder children behave like node children for quantifier purposes.
-            for child in children {
-                validate_quantifier_placement(child, true)?;
-            }
-            Ok(())
-        }
-        PatKind::Rest
-        | PatKind::Wildcard
-        | PatKind::NilTest
-        | PatKind::Lit(_)
-        | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => Ok(()),
-    }
-}
-
-/// Reject patterns that may not appear inside the body of a `*`/`+`/`?`
-/// quantifier: any `$` capture (the per-iteration write would be ambiguous)
-/// and any rest-like element (chaining `...` with `*`/`+`/`?` would create
-/// an undefined match shape).
-fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
-    match &pat.kind {
-        PatKind::Capture { .. } => Err(ParseError::new(
-            "`$` capture is not allowed inside a quantifier body \
-             (use `$pat+` / `$pat*` / `$pat?` to capture the iterations)",
-            pat.span,
-        )),
-        PatKind::Rest => Err(ParseError::new(
-            "`...` is not allowed inside a quantifier body",
-            pat.span,
-        )),
-        PatKind::Node { children, .. } => {
-            for child in children {
-                validate_quantifier_body(child)?;
-            }
-            Ok(())
-        }
-        PatKind::Union(alts) => {
-            for alt in alts {
-                validate_quantifier_body(alt)?;
-            }
-            Ok(())
-        }
-        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => validate_quantifier_body(b),
-        PatKind::Quantifier { body, .. } => validate_quantifier_body(body),
-        PatKind::AnyOrder { children } => {
-            for child in children {
-                validate_quantifier_body(child)?;
-            }
-            Ok(())
-        }
-        PatKind::Wildcard
-        | PatKind::NilTest
-        | PatKind::Lit(_)
-        | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => Ok(()),
-    }
-}
-
-/// Post-parse walk enforcing the "captures live on a definite-assignment
-/// path" rule. A `$` capture must always be written by the matcher's
-/// successful arm — if it could be missed, the runtime would surface an
-/// unwritten slot.
-///
-/// The forbidden positions are exactly those the B-backend's `lower_bool`
-/// route rejects at compile time: `{}` union, `!` negation, `` ` ``
-/// descend. `^` parent is fine — it has a unique parent. The body of an
-/// outer capture, the body of a node-pattern's slots, and the top level
-/// are all definite-assignment positions and recurse with `forbidden =
-/// false`.
-///
-/// One exception to the union rule: `${alt1 alt2 ...}` sugar desugars to a
-/// `Union` whose every arm is `Capture{slot:S, body:b}` with a shared slot S.
-/// This is safe because every arm writes slot S, so the winning arm's write
-/// always happens. Validation accepts this form and recurses into each body
-/// with `forbidden = false` (the body itself is a definite-assignment point
-/// inside that arm).
-///
-/// `forbidden` is `true` only while traversing the subtree of a union /
-/// not / descend node. A `Capture` reached with `forbidden = true` is the
-/// error case, unless it is inside a uniform-capture union as above.
-fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseError> {
-    match &pat.kind {
-        PatKind::Capture { body, .. } => {
-            if forbidden {
-                return Err(ParseError::new(
-                    "`$` capture is not allowed inside `{}` / `!` / `` ` `` \
-                     (the body has no definite-assignment path)",
-                    pat.span,
-                ));
-            }
-            // The body of a capture is itself a definite-assignment subtree.
-            validate_capture_position(body, false)
-        }
-        PatKind::Union(alts) => {
-            // If every arm is a Capture sharing the same (slot, name) —
-            // i.e. this is a desugared `${alt1 alt2 ...}` — then the union
-            // is safe: whichever arm wins will write slot S. Validate each
-            // arm's body normally (forbidden = false) and accept.
-            //
-            // Any other arrangement (only some arms capture, or arms use
-            // different slots/names) is rejected because the losing arm's
-            // slot would be unwritten.
-            if let Some(first_cap) = alts.first().and_then(|a| {
-                if let PatKind::Capture { slot, name, .. } = &a.kind {
-                    Some((*slot, name.as_deref()))
-                } else {
-                    None
-                }
-            }) {
-                let (first_slot, first_name) = first_cap;
-                // Check: ALL arms are Capture with the same (slot, name).
-                let all_same = alts.iter().all(|alt| {
-                    matches!(&alt.kind,
-                        PatKind::Capture { slot, name, .. }
-                        if *slot == first_slot && name.as_deref() == first_name
-                    )
-                });
-                if all_same && !forbidden {
-                    // Validate each arm's body with `forbidden = true`. Only
-                    // the outer sugar slot is guaranteed to be written by the
-                    // winning arm — any *nested* `$` capture inside an arm
-                    // body would have its slot unwritten on the losing arms.
-                    // The recursive call rejects:
-                    //   - bare Capture body, e.g. `${int $float}`
-                    //   - Capture inside Node body, e.g. `${(send $recv :foo) int}`
-                    //   - Capture inside any other forbidden-propagating shape.
-                    for alt in alts {
-                        let PatKind::Capture { body, .. } = &alt.kind else {
-                            unreachable!("all_same guarantees Capture");
-                        };
-                        validate_capture_position(body, true)?;
-                    }
-                    return Ok(());
-                }
-                // Not all arms match — fall through to individual rejection.
-            }
-            // Either some arms lack Capture, or arms use different slots/names.
-            // Walk each arm with forbidden=true so the first Capture found
-            // produces the right error.
-            for alt in alts {
-                validate_capture_position(alt, true)?;
-            }
-            Ok(())
-        }
-        PatKind::Not(b) | PatKind::Descend(b) => validate_capture_position(b, true),
-        PatKind::Parent(b) => validate_capture_position(b, forbidden),
-        PatKind::Quantifier { body, .. } => validate_capture_position(body, forbidden),
-        PatKind::Node { children, .. } => {
-            for child in children {
-                validate_capture_position(child, forbidden)?;
-            }
-            Ok(())
-        }
-        // AnyOrder children are definite-assignment (every permutation writes
-        // all non-rest slots), so recurse with forbidden=false.
-        PatKind::AnyOrder { children } => {
-            for child in children {
-                validate_capture_position(child, false)?;
-            }
-            Ok(())
-        }
-        PatKind::Rest
-        | PatKind::Wildcard
-        | PatKind::NilTest
-        | PatKind::Lit(_)
-        | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => Ok(()),
-    }
-}
-
-/// Post-parse walk enforcing the v1 grammar rule for rest-like elements
-/// (`...` and `$...`): each is valid *only* as a direct child of a node match
-/// `(...)`, and *at most one* per node child list.
-///
-/// This is the single source of truth for both invariants — `node_match`
-/// parses `...` into [`PatKind::Rest`] but does not itself reject duplicates.
-///
-/// `is_node_child` is `true` only when `pat` is being visited as a direct
-/// child of a [`PatKind::Node`]. The root, union alternatives, and the bodies
-/// of `!`/`^`/`` ` ``/`$` are all *not* node children.
-fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseError> {
-    if is_rest_like(pat) && !is_node_child {
-        return Err(ParseError::new(
-            "`...` / `$...` is only valid as a direct child of a node match",
-            pat.span,
-        ));
-    }
-    match &pat.kind {
-        PatKind::Node { children, .. } => {
-            // At most one rest-like element per child list. Point the error at
-            // the SECOND such child.
-            if let Some(second) = children.iter().filter(|c| is_rest_like(c)).nth(1) {
-                return Err(ParseError::new(
-                    "at most one `...` / `$...` per node child list",
-                    second.span,
-                ));
-            }
-            for child in children {
-                validate_rest_placement(child, true)?;
-            }
-        }
-        PatKind::Union(alts) => {
-            for alt in alts {
-                validate_rest_placement(alt, false)?;
-            }
-        }
-        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
-            validate_rest_placement(b, false)?;
-        }
-        PatKind::Capture { body, .. } => {
-            // A `$...` seq capture is one rest-like unit: the inner `Rest` is
-            // not an independently-validated element, so do not recurse into
-            // it. Any other capture (`$_`, `$(...)`, `$name`, …) recurses.
-            if !is_rest_like(pat) {
-                validate_rest_placement(body, false)?;
-            }
-        }
-        PatKind::AnyOrder { children } => {
-            // AnyOrder: at most one rest-like child, recurse with is_node_child=true.
-            if let Some(second) = children.iter().filter(|c| is_rest_like(c)).nth(1) {
-                return Err(ParseError::new(
-                    "at most one `...` / `$...` per `<...>` child list",
-                    second.span,
-                ));
-            }
-            for child in children {
-                validate_rest_placement(child, true)?;
-            }
-        }
-        PatKind::Quantifier { body, .. } => {
-            // The body of a quantifier is not a node child, so a rest-like
-            // body would have been (and still is) rejected by the recursive
-            // call. `validate_quantifier_body` is the single source of truth
-            // for the stricter "no rest inside quantifier" message.
-            validate_rest_placement(body, false)?;
-        }
-        PatKind::Rest
-        | PatKind::Wildcard
-        | PatKind::NilTest
-        | PatKind::Lit(_)
-        | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => {}
-    }
-    Ok(())
-}
-
-/// A cursor over a token slice for recursive-descent parsing.
-struct Parser<'a> {
-    tokens: &'a [Spanned],
-    pos: usize,
-    /// One entry per `$` capture, indexed by slot. A slot is reserved (with a
-    /// placeholder `CaptureKind::Node`) the instant its `$` token is consumed,
-    /// so slots are assigned in source order — left-to-right, outer-before-inner.
-    captures: Vec<CaptureKind>,
-    /// Names of `$ident` captures seen so far, used to reject duplicates.
-    capture_names: Vec<String>,
-}
-
-impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Spanned]) -> Parser<'a> {
-        Parser {
-            tokens,
-            pos: 0,
-            captures: Vec::new(),
-            capture_names: Vec::new(),
-        }
-    }
-
-    /// The token at the cursor, if any.
-    fn peek(&self) -> Option<&'a Spanned> {
-        self.tokens.get(self.pos)
-    }
-
-    /// Consume and return the token at the cursor, advancing the cursor.
-    fn next(&mut self) -> Option<&'a Spanned> {
-        let tok = self.tokens.get(self.pos);
-        if tok.is_some() {
-            self.pos += 1;
-        }
-        tok
-    }
-
-    /// `prefixed := '!' prefixed | '^' prefixed | '`' prefixed
-    /// | '$' capture-tail | postfixed`.
-    ///
-    /// `$` is a prefix dispatched here (see [`Parser::capture`]), not in
-    /// [`Parser::primary`]. Postfix quantifiers wrap the [`primary`] that
-    /// follows a chain of `!`/`^`/`` ` `` prefixes, NOT the prefixes
-    /// themselves — `!int+` parses as `Not(Quantifier(int, +))` so that the
-    /// downstream `validate_quantifier_placement` walk can flag the
-    /// node-child-only rule on the quantifier subtree (its parent is `!`).
-    /// `allow_bare_predicate` is true when this identifier position is a node-child
-    /// slot where an unknown bare identifier may be parsed as predicate shorthand
-    /// (`foo?` / `foo!`).
-    fn prefixed(&mut self, allow_bare_predicate: bool) -> Result<Pat, ParseError> {
-        let Some(head) = self.peek() else {
-            // No source byte to point at for an empty stream.
-            return Err(ParseError::new("empty pattern", PatSpan::new(0, 0)));
-        };
-        let prefix_span = head.span;
-        let wrap: fn(Box<Pat>) -> PatKind = match head.tok {
-            Token::Bang => PatKind::Not,
-            Token::Caret => PatKind::Parent,
-            Token::Backtick => PatKind::Descend,
-            Token::Dollar => return self.capture(prefix_span, allow_bare_predicate),
-            _ => return self.postfixed(allow_bare_predicate),
-        };
-        self.pos += 1; // consume the prefix sigil
-        let inner = self.prefixed(allow_bare_predicate)?;
-        let span = PatSpan {
-            start: prefix_span.start,
-            end: inner.span.end,
-        };
-        Ok(Pat {
-            kind: wrap(Box::new(inner)),
-            span,
-        })
-    }
-
-    /// `postfixed := primary quantifier?`.
-    ///
-    /// Reads a [`primary`](Self::primary) and, if the next token is a
-    /// postfix quantifier (`*` / `+` / `?`), wraps it in a
-    /// [`PatKind::Quantifier`]. Chained postfixes (`int++`, `int*?`) are
-    /// rejected here — exactly one quantifier per primary.
-    ///
-    /// Placement (only valid as a node child) and body restrictions (no
-    /// captures or rest inside the body) are enforced post-parse by
-    /// [`validate_quantifier_placement`] / [`validate_quantifier_body`], so
-    /// every quantifier-bearing source position lands the same error.
-    fn postfixed(&mut self, allow_bare_predicate: bool) -> Result<Pat, ParseError> {
-        let primary = self.primary(allow_bare_predicate)?;
-        let Some((min, max, q_span)) = self.try_quantifier() else {
-            return Ok(primary);
-        };
-        // Reject a *second* quantifier immediately after (`int++`, `int*?`).
-        if let Some((_, _, dup_span)) = self.try_quantifier() {
-            return Err(ParseError::new(
-                "postfix `*` / `+` / `?` cannot be chained — apply at most one quantifier per pattern",
-                dup_span,
-            ));
-        }
-        let span = PatSpan {
-            start: primary.span.start,
-            end: q_span.end,
-        };
-        Ok(Pat {
-            kind: PatKind::Quantifier {
-                body: Box::new(primary),
-                min,
-                max,
-            },
-            span,
-        })
-    }
-
-    /// If the cursor is at a postfix quantifier token, consume it and return
-    /// `(min, max, span)`; otherwise leave the cursor unmoved.
-    fn try_quantifier(&mut self) -> Option<(u8, u8, PatSpan)> {
-        let next = self.peek()?;
-        let (min, max) = match next.tok {
-            Token::Star => (0, u8::MAX),
-            Token::Plus => (1, u8::MAX),
-            Token::Question => (0, 1),
-            _ => return None,
-        };
-        let span = next.span;
-        self.pos += 1;
-        Some((min, max, span))
-    }
-
-    /// Parse a `$` capture tail. `dollar_span` is the span of the `$` token,
-    /// still at the cursor.
-    ///
-    /// The capture's `slot` is reserved — appended to `self.captures` with a
-    /// placeholder [`CaptureKind::Node`] — the instant the `$` is consumed,
-    /// *before* the body is parsed, so slots follow source order
-    /// (left-to-right, outer-before-inner) even for nested captures.
-    ///
-    /// - `$ident` → a named capture; `name` is `Some`, `body` is an implicit
-    ///   [`PatKind::Wildcard`] spanning the `$`. Duplicate names are rejected.
-    /// - `$...` → an anonymous seq capture; `body` is [`PatKind::Rest`] and the
-    ///   slot's kind is upgraded to [`CaptureKind::Seq`].
-    /// - `$<anything else>` → an anonymous capture whose `body` is a full
-    ///   [`prefixed`](Self::prefixed) pattern parsed recursively.
-    /// - `$` at end of input → a span-carrying error.
-    fn capture(
-        &mut self,
-        dollar_span: PatSpan,
-        allow_bare_predicate: bool,
-    ) -> Result<Pat, ParseError> {
-        self.pos += 1; // consume `$`
-        // Reserve the slot now — before the body — so source order holds.
-        let slot = u16::try_from(self.captures.len())
-            .map_err(|_| ParseError::new("too many captures in one pattern", dollar_span))?;
-        self.captures.push(CaptureKind::Node);
-
-        let Some(next) = self.peek() else {
-            return Err(ParseError::new(
-                "dangling `$`: nothing to capture",
-                dollar_span,
-            ));
-        };
-
-        // The Capture node spans `$` through the end of whatever names it.
-        // For most forms that is `body.span.end`, but for `$ident` the body is
-        // a synthetic Wildcard spanning only the `$`, so the identifier token's
-        // span end is tracked separately and used for the outer Capture span.
-        let (name, body, capture_end) = match &next.tok {
-            Token::Ident(_) => {
-                // `$ident` is ambiguous on its own: it could be a named
-                // capture (`$receiver`) or an anonymous capture whose body is
-                // a kind name + quantifier (`$int+`). Look one token past the
-                // ident to decide. The `postfixed()` route handles both the
-                // bare kind case (`$int`) and the quantifier case (`$int+`)
-                // uniformly — and validation later rejects `$int` at
-                // positions where a bare-kind body is meaningless.
-                let lookahead = self.tokens.get(self.pos + 1).map(|s| &s.tok);
-                if matches!(lookahead, Some(Token::Star | Token::Plus | Token::Question)) {
-                    let body = self.postfixed(allow_bare_predicate)?;
-                    let end = body.span.end;
-                    (None, body, end)
-                } else {
-                    let Token::Ident(ident) = &next.tok else {
-                        unreachable!("matched outer Token::Ident");
-                    };
-                    let name = ident.clone();
-                    let ident_span = next.span;
-                    self.pos += 1; // consume the ident
-                    if self.capture_names.contains(&name) {
-                        return Err(ParseError::new(
-                            format!("duplicate capture name `{name}`"),
-                            ident_span,
-                        ));
-                    }
-                    self.capture_names.push(name.clone());
-                    // The implicit Wildcard body is synthetic; per spec it
-                    // spans the `$` token, not the identifier.
-                    let body = Pat {
-                        kind: PatKind::Wildcard,
-                        span: dollar_span,
-                    };
-                    (Some(name), body, ident_span.end)
-                }
-            }
-            Token::Ellipsis => {
-                let ell_span = next.span;
-                self.pos += 1; // consume `...`
-                let body = Pat {
-                    kind: PatKind::Rest,
-                    span: ell_span,
-                };
-                (None, body, ell_span.end)
-            }
-            Token::LBrace => {
-                // Sugar form `${ alt1 alt2 ... }`:
-                // `$` immediately before `{` means "capture whichever union
-                // arm matches, into slot `S`". This desugars at parse time
-                // to `{ Capture{slot:S, body:alt1} Capture{slot:S, body:alt2}
-                // ... }` — a Union whose every arm carries the same Capture
-                // slot. The capture kind is always `Node` (arms may not be
-                // rest-like or quantified inside the sugar).
-                //
-                // Slot S is already reserved above as `CaptureKind::Node`
-                // (the kind appropriate for a per-arm node capture). Do NOT
-                // push another entry — reuse `slot` for every arm.
-                let open_span = next.span;
-                self.pos += 1; // consume `{`
-                let mut alts: Vec<Pat> = Vec::new();
-                loop {
-                    let Some(tok) = self.peek() else {
-                        return Err(ParseError::new("unclosed `{`: expected `}`", open_span));
-                    };
-                    match tok.tok {
-                        Token::RBrace => {
-                            let close_span = tok.span;
-                            self.pos += 1; // consume `}`
-                            let union_span = PatSpan {
-                                start: open_span.start,
-                                end: close_span.end,
-                            };
-                            if alts.is_empty() {
-                                return Err(ParseError::new(
-                                    "empty union `{}` needs at least one alternative",
-                                    union_span,
-                                ));
-                            }
-                            // Build `Union[Capture{slot, body:arm} ...]` where
-                            // each arm is already wrapped. The outer span covers
-                            // `$` through the closing `}`.
-                            let outer_span = PatSpan {
-                                start: dollar_span.start,
-                                end: close_span.end,
-                            };
-                            // `captures[slot]` was set to `Node` at reservation
-                            // — no kind upgrade needed (arms cannot be Rest or
-                            // Quantifier inside the sugar body).
-                            return Ok(Pat {
-                                kind: PatKind::Union(alts),
-                                span: outer_span,
-                            });
-                        }
-                        _ => {
-                            // Parse one arm body (not `prefixed` — the arm does
-                            // not get its own `$`, `!`, etc. prefix). We call
-                            // `prefixed` here so that arms may be node patterns
-                            // or unions themselves, but we then wrap the result
-                            // in a Capture for slot S.
-                            let arm_body = self.prefixed(allow_bare_predicate)?;
-                            let arm_span = PatSpan {
-                                start: dollar_span.start,
-                                end: arm_body.span.end,
-                            };
-                            alts.push(Pat {
-                                kind: PatKind::Capture {
-                                    slot,
-                                    name: None,
-                                    body: Box::new(arm_body),
-                                },
-                                span: arm_span,
-                            });
-                        }
-                    }
-                }
-            }
-            _ => {
-                let body = self.prefixed(allow_bare_predicate)?;
-                let end = body.span.end;
-                (None, body, end)
-            }
-        };
-
-        // Upgrade the slot kind based on the body's shape: `$...` and
-        // `$pat+` / `$pat*` produce a slice (`Seq`), `$pat?` produces an
-        // optional single node (`OptNode`), everything else captures one
-        // node (`Node`, the placeholder set at slot reservation).
-        self.captures[slot as usize] = slot_kind_for_body(&body);
-
-        let span = PatSpan {
-            start: dollar_span.start,
-            end: capture_end,
-        };
-        Ok(Pat {
-            kind: PatKind::Capture {
-                slot,
-                name,
-                body: Box::new(body),
-            },
-            span,
-        })
-    }
-
-    /// `primary := '_' | 'nil?' | literal | '#' name | IDENT | node-match
-    /// | union`.
-    ///
-    /// `(` parses a node match (see [`node_match`]); `{` parses a union (see
-    /// [`union`]). A top-level `...` is invalid and produces a descriptive
-    /// error here. Prefix sigils (`!`/`^`/`` ` ``/`$`) never reach `primary`:
-    /// [`prefixed`](Self::prefixed) consumes them first.
-    fn primary(&mut self, allow_bare_predicate: bool) -> Result<Pat, ParseError> {
-        let Some(spanned) = self.next() else {
-            return Err(ParseError::new("empty pattern", PatSpan::new(0, 0)));
-        };
-        let span = spanned.span;
-        let kind = match &spanned.tok {
-            Token::Underscore => PatKind::Wildcard,
-            Token::NilQuestion => PatKind::NilTest,
-            Token::Int(v) => PatKind::Lit(Lit::Int(*v)),
-            Token::Float(v) => PatKind::Lit(Lit::Float(*v)),
-            Token::Str(s) => PatKind::Lit(Lit::Str(s.clone())),
-            Token::Sym(s) => PatKind::Lit(Lit::Sym(s.clone())),
-            Token::Predicate(name) => {
-                let name = name.clone();
-                // Peek to see if predicate args follow: `#name(arg1 arg2 ...)`.
-                let args = if matches!(self.peek().map(|t| &t.tok), Some(Token::LParen)) {
-                    let lparen_span = self.peek().unwrap().span;
-                    self.pos += 1; // consume `(`
-                    self.predicate_args(lparen_span)?
-                } else {
-                    vec![]
-                };
-                PatKind::Predicate { name, args }
-            }
-            Token::Ident(name) => return self.ident_pat(name, span, allow_bare_predicate),
-            Token::LParen => return self.node_match(span),
-            Token::LBrace => return self.union(span, allow_bare_predicate),
-            Token::Ellipsis => {
-                return Err(ParseError::new(
-                    "`...` is only valid inside a node child list",
-                    span,
-                ));
-            }
-            Token::RParen => return Err(ParseError::new("unexpected `)`", span)),
-            Token::RBrace => return Err(ParseError::new("unexpected `}`", span)),
-            Token::Star | Token::Plus | Token::Question => {
-                return Err(ParseError::new(
-                    "postfix `*` / `+` / `?` must follow a pattern",
-                    span,
-                ));
-            }
-            Token::LAngle => {
-                return Err(ParseError::new(
-                    "`<...>` any-order sequence is only valid as a direct child of a node match",
-                    span,
-                ));
-            }
-            Token::RAngle => return Err(ParseError::new("unexpected `>`", span)),
-            Token::Bang | Token::Caret | Token::Backtick | Token::Dollar => {
-                // `prefixed` dispatches these; `primary` never sees them.
-                unreachable!("prefix sigils are handled by `prefixed`");
-            }
-        };
-        Ok(Pat { kind, span })
-    }
-
-    /// `node_match := '(' head child* ')'`.
-    ///
-    /// `open_span` is the span of the already-consumed `(`. The resulting
-    /// `Pat`'s span covers `(` through the closing `)`. Children are parsed
-    /// with [`prefixed`], except a `...` in a child slot becomes [`PatKind::Rest`].
-    /// `node_match` only *builds* the child list — the "at most one rest-like
-    /// element per child list" and placement rules are enforced afterward by
-    /// the [`validate_rest_placement`] walk, the single source of truth.
-    fn node_match(&mut self, open_span: PatSpan) -> Result<Pat, ParseError> {
-        let head = self.node_head(open_span)?;
-        let mut children: Vec<Pat> = Vec::new();
-        let mut child_idx = 0;
-        loop {
-            // Peek (not `next`) so we can dispatch on the token — closing `)`,
-            // a `...`, or a child — before deciding whether to consume it.
-            let Some(tok) = self.peek() else {
-                // Ran out of input before the closing `)`.
-                return Err(ParseError::new("unclosed `(`: expected `)`", open_span));
-            };
-            match tok.tok {
-                Token::RParen => {
-                    let close_span = tok.span;
-                    self.pos += 1; // consume `)`
-                    return Ok(Pat {
-                        kind: PatKind::Node { head, children },
-                        span: PatSpan {
-                            start: open_span.start,
-                            end: close_span.end,
-                        },
-                    });
-                }
-                Token::Ellipsis => {
-                    let ell_span = tok.span;
-                    self.pos += 1; // consume `...`
-                    // `...` is itself a 0+ rest, so chaining `*`/`+`/`?` on
-                    // it is meaningless and an error.
-                    if let Some((_, _, q_span)) = self.try_quantifier() {
-                        return Err(ParseError::new(
-                            "`...` cannot take a postfix `*` / `+` / `?` quantifier",
-                            q_span,
-                        ));
-                    }
-                    children.push(Pat {
-                        kind: PatKind::Rest,
-                        span: ell_span,
-                    });
-                    child_idx += 1;
-                }
-                Token::LAngle => {
-                    let open_span = tok.span;
-                    self.pos += 1; // consume `<`
-                    children.push(self.any_order(open_span)?);
-                    child_idx += 1;
-                }
-                _ => {
-                    let allow_bare_predicate = match &head {
-                        Head::Exact(tag) => node_child_allows_bare_predicate(*tag, child_idx),
-                        Head::Any => false,
-                        Head::OneOf(tags) => tags
-                            .iter()
-                            .all(|tag| node_child_allows_bare_predicate(*tag, child_idx)),
-                    };
-                    children.push(self.prefixed(allow_bare_predicate)?);
-                    child_idx += 1;
-                }
-            }
-        }
-    }
-
-    /// `union := '{' prefixed+ '}'`.
-    ///
-    /// `open_span` is the span of the already-consumed `{`. Each alternative is
-    /// a full [`prefixed`] pattern — arbitrary patterns are allowed, unlike the
-    /// node-type-only `{...}` head handled by [`oneof_head`]. The resulting
-    /// `Pat`'s span covers `{` through the closing `}`. An empty `{}` or a
-    /// stream that ends before `}` is a span-carrying error.
-    ///
-    /// `allow_bare_predicate` flows through to each alternative so that
-    /// `(send _ :puts {odd? even?})` accepts bare predicate shorthand in
-    /// every alt — the union sits in a node-child slot, so each alternative
-    /// is at the same effective position as if it had been written without
-    /// the `{...}` wrapper.
-    fn union(&mut self, open_span: PatSpan, allow_bare_predicate: bool) -> Result<Pat, ParseError> {
-        let mut alts: Vec<Pat> = Vec::new();
-        loop {
-            // Peek (not `next`) so we can dispatch on the token — a closing `}`
-            // or an alternative — before deciding whether to consume it.
-            let Some(tok) = self.peek() else {
-                // Ran out of input before the closing `}`.
-                return Err(ParseError::new("unclosed `{`: expected `}`", open_span));
-            };
-            match tok.tok {
-                Token::RBrace => {
-                    let close_span = tok.span;
-                    self.pos += 1; // consume `}`
-                    let span = PatSpan {
-                        start: open_span.start,
-                        end: close_span.end,
-                    };
-                    if alts.is_empty() {
-                        return Err(ParseError::new(
-                            "empty union `{}` needs at least one alternative",
-                            span,
-                        ));
-                    }
-                    return Ok(Pat {
-                        kind: PatKind::Union(alts),
-                        span,
-                    });
-                }
-                _ => alts.push(self.prefixed(allow_bare_predicate)?),
-            }
-        }
-    }
-
-    /// `any_order := '<' child+ '>'`
-    ///
-    /// `open_span` is the span of the already-consumed `<`. Children are parsed
-    /// with [`prefixed`]; `...` is converted to [`PatKind::Rest`] as in
-    /// `node_match`. The resulting `Pat`'s span covers `<` through the closing
-    /// `>`. Rules enforced here:
-    ///   - at least one child (empty `<>` → error)
-    ///   - at most 10 non-rest children (v1 limit)
-    ///   - at most one `...` (duplicate rest → error; position validated later)
-    fn any_order(&mut self, open_span: PatSpan) -> Result<Pat, ParseError> {
-        let mut children: Vec<Pat> = Vec::new();
-        loop {
-            let Some(tok) = self.peek() else {
-                return Err(ParseError::new("unclosed `<`: expected `>`", open_span));
-            };
-            match tok.tok {
-                Token::RAngle => {
-                    let close_span = tok.span;
-                    self.pos += 1; // consume `>`
-                    let span = PatSpan {
-                        start: open_span.start,
-                        end: close_span.end,
-                    };
-                    if children.is_empty() {
-                        return Err(ParseError::new(
-                            "empty `<>` needs at least one child pattern",
-                            span,
-                        ));
-                    }
-                    // Count non-rest children and check the v1 limit.
-                    let non_rest = children.iter().filter(|c| !is_rest_like(c)).count();
-                    if non_rest > 10 {
-                        return Err(ParseError::new(
-                            "too many elements in <...>: max 10 in v1",
-                            span,
-                        ));
-                    }
-                    return Ok(Pat {
-                        kind: PatKind::AnyOrder { children },
-                        span,
-                    });
-                }
-                Token::Ellipsis => {
-                    let ell_span = tok.span;
-                    self.pos += 1; // consume `...`
-                    if let Some((_, _, q_span)) = self.try_quantifier() {
-                        return Err(ParseError::new(
-                            "`...` cannot take a postfix `*` / `+` / `?` quantifier",
-                            q_span,
-                        ));
-                    }
-                    children.push(Pat {
-                        kind: PatKind::Rest,
-                        span: ell_span,
-                    });
-                }
-                _ => {
-                    let child = self.prefixed(false)?;
-                    // `$...` (captured rest) inside `<...>` is not supported in
-                    // v1: matching it requires writing a slice of *non-contiguous*
-                    // elements (the bits unassigned by the AnyOrder permutation
-                    // search) into a `Seq` capture slot. The C backend can do
-                    // that by allocating a `Vec<NodeId>` into `CaptureValue::Seq`,
-                    // but the B backend returns borrowed `&'a [NodeId]` slices
-                    // and has no `'a`-lifetime allocator plumbed through `Cx`,
-                    // so the only ways to produce one are `Box::leak` (leaks per
-                    // match) or an ABI-breaking arena addition. Until one of
-                    // those lands, keep the two backends consistent by rejecting
-                    // the construct at parse time.
-                    if let PatKind::Capture { body, .. } = &child.kind
-                        && matches!(body.kind, PatKind::Rest)
-                    {
-                        return Err(ParseError::new(
-                            "`$...` inside `<...>` is not supported in v1: leftover-element \
-                             captures require a runtime allocator not yet plumbed through `Cx`",
-                            child.span,
-                        ));
-                    }
-                    children.push(child);
-                }
-            }
-        }
-    }
-
-    /// Parse the head of a node match: `IDENT` -> [`Head::Exact`], `_` ->
-    /// [`Head::Any`], `{ IDENT+ }` -> [`Head::OneOf`]. `open_span` is the span
-    /// of the node's `(`, used when the stream ends before a head is seen.
-    fn node_head(&mut self, open_span: PatSpan) -> Result<Head, ParseError> {
-        let Some(spanned) = self.next() else {
-            return Err(ParseError::new("unclosed `(`: expected `)`", open_span));
-        };
-        match &spanned.tok {
-            Token::Ident(name) => Ok(Head::Exact(resolve_kind(name, spanned.span)?)),
-            Token::Underscore => Ok(Head::Any),
-            Token::LBrace => self.oneof_head(spanned.span),
-            _ => Err(ParseError::new(
-                "a node match needs a head: a node type, `_`, or `{...}`",
-                spanned.span,
-            )),
-        }
-    }
-
-    /// Parse a `{ IDENT+ }` head into [`Head::OneOf`]. `open_span` is the span
-    /// of the `{`. An empty `{}` or a non-`IDENT` token inside is an error.
-    fn oneof_head(&mut self, open_span: PatSpan) -> Result<Head, ParseError> {
-        let mut tags: Vec<NodeKindTag> = Vec::new();
-        loop {
-            let Some(spanned) = self.next() else {
-                return Err(ParseError::new("unclosed `{`: expected `}`", open_span));
-            };
-            match &spanned.tok {
-                Token::RBrace => {
-                    if tags.is_empty() {
-                        return Err(ParseError::new(
-                            "`{...}` head needs at least one node type",
-                            PatSpan {
-                                start: open_span.start,
-                                end: spanned.span.end,
-                            },
-                        ));
-                    }
-                    return Ok(Head::OneOf(tags));
-                }
-                Token::Ident(name) => tags.push(resolve_kind(name, spanned.span)?),
-                _ => {
-                    return Err(ParseError::new(
-                        "a `{...}` head may only contain node types",
-                        spanned.span,
-                    ));
-                }
-            }
-        }
-    }
-
-    /// Classify a bare `IDENT`: the `true`/`false`/`nil` keywords become
-    /// literals; any other name resolves to a node-kind tag, or errors.
-    fn ident_pat(
-        &mut self,
-        name: &str,
-        span: PatSpan,
-        allow_bare_predicate: bool,
-    ) -> Result<Pat, ParseError> {
-        let kind = match name {
-            "true" => PatKind::Lit(Lit::True),
-            "false" => PatKind::Lit(Lit::False),
-            "nil" => PatKind::Lit(Lit::Nil),
-            _ => {
-                if let Some(tag) = murphy_ast::tag_from_pattern_name(name) {
-                    PatKind::Kind(tag)
-                } else if allow_bare_predicate
-                    && matches!(
-                        self.peek().map(|tok| &tok.tok),
-                        Some(Token::Question) | Some(Token::Bang)
-                    )
-                {
-                    let Some(suffix_tok) = self.next() else {
-                        unreachable!("checked by matches above");
-                    };
-                    let suffix_span = suffix_tok.span;
-                    let suffix = match suffix_tok.tok {
-                        Token::Question => "?",
-                        Token::Bang => "!",
-                        _ => unreachable!("checked by the matches arm above"),
-                    };
-                    let pred_name = format!("{name}{suffix}");
-                    // Bare predicate shorthand also supports args: `foo?(42)`.
-                    let args = if matches!(self.peek().map(|t| &t.tok), Some(Token::LParen)) {
-                        let lparen_span = self.peek().unwrap().span;
-                        self.pos += 1; // consume `(`
-                        self.predicate_args(lparen_span)?
-                    } else {
-                        vec![]
-                    };
-                    return Ok(Pat {
-                        kind: PatKind::Predicate {
-                            name: pred_name,
-                            args,
-                        },
-                        span: PatSpan::new(span.start as usize, suffix_span.end as usize),
-                    });
-                } else {
-                    // A `?` / `!` follow on a name that isn't a node kind hints
-                    // at predicate intent — surface the `#name?` / `#name!` form
-                    // so users learn the explicit syntax, especially in
-                    // positions (root, head, Sym slot) where bare predicate
-                    // shorthand is not accepted.
-                    let suffix = match self.peek().map(|tok| &tok.tok) {
-                        Some(Token::Question) => Some('?'),
-                        Some(Token::Bang) => Some('!'),
-                        _ => None,
-                    };
-                    let msg = match suffix {
-                        Some(c) => format!(
-                            "unknown node type `{name}` — write `#{name}{c}` to call the host predicate",
-                        ),
-                        None => format!("unknown node type `{name}`"),
-                    };
-                    let span = match suffix {
-                        Some(_) => {
-                            let suffix_end = self.peek().map(|t| t.span.end).unwrap_or(span.end);
-                            PatSpan {
-                                start: span.start,
-                                end: suffix_end,
-                            }
-                        }
-                        None => span,
-                    };
-                    return Err(ParseError::new(msg, span));
-                }
-            }
-        };
-        Ok(Pat { kind, span })
-    }
-
-    /// Parse a predicate argument list that starts after the `(` has been
-    /// consumed. Reads space-separated args until `)`.
-    ///
-    /// Valid arg forms (v1): integer literal, float literal, string literal,
-    /// symbol literal, `$ident` back-reference capture.
-    ///
-    /// Pattern args (`#pred?({:A :B})`) are v1 scope-out and produce an error
-    /// with the message `"pattern args in v1: literal/capture only"`.
-    fn predicate_args(&mut self, lparen_span: PatSpan) -> Result<Vec<PredArg>, ParseError> {
-        let mut args: Vec<PredArg> = Vec::new();
-        loop {
-            let Some(next) = self.peek() else {
-                return Err(ParseError::new(
-                    "unclosed `(` in predicate argument list",
-                    lparen_span,
-                ));
-            };
-            match &next.tok {
-                Token::RParen => {
-                    self.pos += 1; // consume `)`
-                    break;
-                }
-                Token::Int(v) => {
-                    let v = *v;
-                    self.pos += 1;
-                    args.push(PredArg::Lit(Lit::Int(v)));
-                }
-                Token::Float(v) => {
-                    let v = *v;
-                    self.pos += 1;
-                    args.push(PredArg::Lit(Lit::Float(v)));
-                }
-                Token::Str(s) => {
-                    let s = s.clone();
-                    self.pos += 1;
-                    args.push(PredArg::Lit(Lit::Str(s)));
-                }
-                Token::Sym(s) => {
-                    let s = s.clone();
-                    self.pos += 1;
-                    args.push(PredArg::Lit(Lit::Sym(s)));
-                }
-                Token::Ident(name) if name == "true" => {
-                    self.pos += 1;
-                    args.push(PredArg::Lit(Lit::True));
-                }
-                Token::Ident(name) if name == "false" => {
-                    self.pos += 1;
-                    args.push(PredArg::Lit(Lit::False));
-                }
-                Token::Ident(name) if name == "nil" => {
-                    // `nil` has no Rust-side counterpart for a cop method
-                    // signature: the B backend would have to invent a type
-                    // (unit? `Option<NodeId>` with None?) and the choice
-                    // would diverge from the C matcher's `PredCallArg::Nil`.
-                    // Reject at parse time so both backends agree.
-                    let nil_span = next.span;
-                    return Err(ParseError::new(
-                        "`nil` is not supported as a predicate argument in v1: \
-                         `nil` has no Rust-side counterpart for the cop method signature",
-                        nil_span,
-                    ));
-                }
-                Token::Dollar => {
-                    // `$ident` back-reference to an already-declared capture slot.
-                    let dollar_span = next.span;
-                    self.pos += 1; // consume `$`
-                    let Some(ident_tok) = self.peek() else {
-                        return Err(ParseError::new(
-                            "expected capture name after `$` in predicate arg",
-                            dollar_span,
-                        ));
-                    };
-                    let Token::Ident(capture_name) = &ident_tok.tok else {
-                        let err_span = ident_tok.span;
-                        return Err(ParseError::new(
-                            "expected identifier after `$` in predicate arg",
-                            err_span,
-                        ));
-                    };
-                    let capture_name = capture_name.clone();
-                    let ident_span = ident_tok.span;
-                    self.pos += 1; // consume the ident
-                    // Resolve the name to an existing capture slot (back-reference only).
-                    let slot = self
-                        .capture_names
-                        .iter()
-                        .position(|n| n == &capture_name)
-                        .map(|i| i as u16)
-                        .ok_or_else(|| {
-                            ParseError::new(
-                                format!(
-                                    "unknown or forward capture reference `${capture_name}` in predicate arg"
-                                ),
-                                ident_span,
-                            )
-                        })?;
-                    args.push(PredArg::Capture(slot));
-                }
-                Token::LBrace => {
-                    // Pattern arg: v1 scope-out.
-                    return Err(ParseError::new(
-                        "pattern args in v1: literal/capture only",
-                        next.span,
-                    ));
-                }
-                Token::LParen => {
-                    // Nested pattern arg: v1 scope-out.
-                    return Err(ParseError::new(
-                        "pattern args in v1: literal/capture only",
-                        next.span,
-                    ));
-                }
-                _ => {
-                    let err_span = next.span;
-                    return Err(ParseError::new(
-                        "pattern args in v1: literal/capture only",
-                        err_span,
-                    ));
-                }
-            }
-        }
-        Ok(args)
-    }
-}
-
-/// Resolve a node-type `name` to its [`NodeKindTag`], or a span-carrying
-/// error naming the unknown type. Shared by the `Head::Exact`/`Head::OneOf`
-/// paths. Unlike [`Parser::ident_pat`], `true`/`false`/`nil` are *not* special
-/// here: a node head must name a real node type.
-fn resolve_kind(name: &str, span: PatSpan) -> Result<NodeKindTag, ParseError> {
-    murphy_ast::tag_from_pattern_name(name)
-        .ok_or_else(|| ParseError::new(format!("unknown node type `{name}`"), span))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1852,6 +2094,47 @@ mod tests {
         // `{send csend}` — `{` at 0, `}` at 11; the Union span must cover 0..12.
         let p = parse("{send csend}").expect("ok");
         assert_eq!((p.root.span.start, p.root.span.end), (0, 12));
+    }
+
+    // --- murphy-wsep: union `|` pipe separator ----------------------------
+
+    #[test]
+    fn parses_union_with_pipe_separator_two_alts() {
+        // `{(send _ :a) | (send _ :b)}` — two alternatives separated by `|`.
+        // The pipe is whitespace-equivalent, so this produces a Union with 2 alts.
+        let p = parse("{(send _ :a) | (send _ :b)}").expect("ok");
+        match p.root.kind {
+            PatKind::Union(alts) => assert_eq!(alts.len(), 2, "expected 2 alts"),
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_union_with_pipe_separator_four_alts() {
+        // `{int send | sym str}` — pipe is whitespace-equivalent; produces 4 alts.
+        // All identifiers are known node types so no unknown-ident error.
+        let p = parse("{int send | sym str}").expect("ok");
+        match p.root.kind {
+            PatKind::Union(alts) => {
+                assert_eq!(alts.len(), 4, "expected 4 alts (pipe = whitespace)")
+            }
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_union_with_only_pipe() {
+        // `{|}` — the pipe must be followed by at least one pattern.
+        let e = parse("{|}").expect_err("trailing pipe not accepted in minimum scope");
+        // Must be an error (exact message depends on grammar, not asserted).
+        let _ = e;
+    }
+
+    #[test]
+    fn rejects_union_with_trailing_pipe() {
+        // `{a |}` — trailing pipe is rejected (pipe requires a following pat).
+        let e = parse("{a |}").expect_err("trailing pipe not accepted in minimum scope");
+        let _ = e;
     }
 
     // --- Task 8: `$` captures --------------------------------------------
@@ -2571,6 +2854,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_predicate_str_arg_with_raw_low_byte_round_trips() {
+        // The old separator-based serialisation broke when a string payload
+        // contained the `\x01` byte that delimited records — it would split
+        // one argument into two and fail to decode. With length-prefix
+        // records, raw bytes pass through verbatim.
+        use crate::ast::PredArg;
+        let src = "#p?(\"a\x01b\")";
+        let pat = parse(src).expect("string arg with `\\x01` byte must parse");
+        match &pat.root.kind {
+            PatKind::Predicate { name, args } => {
+                assert_eq!(name, "p?");
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    PredArg::Lit(crate::ast::Lit::Str(s)) => {
+                        assert_eq!(s, "a\x01b", "payload must round-trip verbatim");
+                    }
+                    other => panic!("expected Str arg, got {other:?}"),
+                }
+            }
+            other => panic!("expected Predicate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_predicate_forward_capture_ref_is_rejected() {
+        // `(send #pred?($recv) $recv)` — the predicate references `$recv`
+        // before the capture appears in source order. The old hand-written
+        // parser resolved capture refs at parse time, so only backward
+        // references (captures already declared) were in scope. The LALRPOP
+        // port must preserve that visibility rule even though name table
+        // construction is a post-pass.
+        let e = parse("(send #pred?($recv) $recv)")
+            .expect_err("must reject forward capture ref in predicate arg");
+        assert!(
+            e.message.contains("unknown or forward capture reference"),
+            "expected 'unknown or forward capture reference', got: {}",
+            e.message
+        );
+    }
+
+    #[test]
     fn parse_predicate_nil_arg_is_rejected() {
         // `nil` has no Rust-side counterpart for a cop method signature; the
         // B backend can't lower it and the C matcher's `PredCallArg::Nil`
@@ -2583,5 +2907,355 @@ mod tests {
             "expected the v1-unsupported nil-arg message, got: {}",
             e.message
         );
+    }
+}
+
+// ============================================================================
+// Intersection tests (murphy-l448)
+// ============================================================================
+
+#[cfg(test)]
+mod intersection_tests {
+    use crate::parse;
+    use crate::{CaptureKind, PatKind};
+
+    #[test]
+    fn parses_simple_intersection() {
+        let p = parse("[!nil? int]").expect("[!nil? int] must parse");
+        assert!(
+            matches!(p.root.kind, PatKind::Intersection { .. }),
+            "root must be Intersection, got {:?}",
+            p.root.kind
+        );
+        if let PatKind::Intersection { children } = &p.root.kind {
+            assert_eq!(children.len(), 2, "expected 2 children");
+        }
+    }
+
+    #[test]
+    fn parses_single_child_intersection() {
+        // Single-child intersection is semantically equivalent to the child.
+        let p = parse("[int]").expect("[int] must parse");
+        assert!(
+            matches!(p.root.kind, PatKind::Intersection { .. }),
+            "root must be Intersection, got {:?}",
+            p.root.kind
+        );
+        if let PatKind::Intersection { children } = &p.root.kind {
+            assert_eq!(children.len(), 1);
+        }
+    }
+
+    #[test]
+    fn parses_intersection_with_capture() {
+        // `[$val int]` — capture is allowed (definite-assignment path: all
+        // children match same subject, so `$val` always writes on success).
+        let p = parse("[$val int]").expect("[$val int] must parse");
+        assert_eq!(p.n_captures(), 1);
+        assert_eq!(p.captures[0], CaptureKind::Node);
+    }
+
+    #[test]
+    fn empty_intersection_is_rejected() {
+        let e = parse("[]").expect_err("[] must be rejected");
+        assert!(
+            e.message.contains("empty intersection") || e.message.contains("[]"),
+            "expected empty-intersection error, got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn intersection_rest_inside_rejected() {
+        // `...` inside `[...]` is invalid — the grammar only accepts `Prefixed`
+        // patterns (not `...` / NodeChild) as intersection children, so this
+        // parse errors out before any semantic validation runs.
+        let e = parse("[...]").expect_err("[...] must reject rest inside intersection");
+        // The error may be a grammar "unexpected token" (the LALRPOP grammar
+        // does not include Ellipsis in `Prefixed`) or a semantic rest-placement
+        // diagnostic. Either way the parse must fail.
+        let _ = e; // any error is acceptable
+    }
+
+    #[test]
+    fn intersection_nested_in_node_child() {
+        // `(send nil? [!nil? :puts] _)` — intersection as a node child.
+        let p = parse("(send nil? [!nil? :puts] _)").expect("must parse");
+        assert!(matches!(p.root.kind, PatKind::Node { .. }));
+        if let PatKind::Node { children, .. } = &p.root.kind {
+            assert!(
+                matches!(children[1].kind, PatKind::Intersection { .. }),
+                "second child must be Intersection"
+            );
+        }
+    }
+
+    #[test]
+    fn anonymous_capture_wrapping_intersection() {
+        // `$[int !nil?]` — an anonymous capture whose body is an intersection.
+        // The CapturePrimary alternative for IntersectionPrimary must be
+        // reachable so the `$` prefix can wrap the AND-pattern.
+        let p = parse("$[int !nil?]").expect("$[int !nil?] must parse");
+        assert_eq!(p.n_captures(), 1);
+        assert_eq!(p.captures[0], CaptureKind::Node);
+        match &p.root.kind {
+            PatKind::Capture { slot, name, body } => {
+                assert_eq!(*slot, 0);
+                assert!(name.is_none(), "anonymous capture");
+                assert!(
+                    matches!(body.kind, PatKind::Intersection { .. }),
+                    "capture body must be Intersection, got {:?}",
+                    body.kind
+                );
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+}
+
+// ============================================================================
+// Tests — D3 (murphy-kq57): tPARAM_CONST — `Foo` uppercase-start atom.
+// ============================================================================
+
+#[cfg(test)]
+mod tparam_const_tests {
+    use super::*;
+    use crate::{Lit, PatKind};
+    use murphy_ast::NodeKindTag;
+
+    const CONST_TAG: NodeKindTag = NodeKindTag(13); // Const — ADR 0037 frozen
+
+    /// Helper: assert `pat`'s root is `(const nil? :Name)` with the given name.
+    ///
+    /// The scope slot uses `nil?` (NilTest), not `_` (Wildcard), so that the
+    /// pattern accepts top-level constants (scope = absent) without requiring the
+    /// scope to be a present node — see `const_or_kind_or_unknown_ident` for the
+    /// rationale.
+    fn assert_const_node(pat: &crate::PatternAst, expected_name: &str) {
+        match &pat.root.kind {
+            PatKind::Node { head, children } => {
+                assert_eq!(
+                    *head,
+                    crate::Head::Exact(CONST_TAG),
+                    "head must be Exact(Const)"
+                );
+                assert_eq!(children.len(), 2, "must have 2 children (scope + name)");
+                assert!(
+                    matches!(children[0].kind, PatKind::NilTest),
+                    "first child (scope) must be NilTest (nil?), got {:?}",
+                    children[0].kind
+                );
+                assert_eq!(
+                    children[1].kind,
+                    PatKind::Lit(Lit::Sym(expected_name.to_string())),
+                    "second child (name) must be Lit(Sym({expected_name:?}))"
+                );
+            }
+            other => panic!("expected Node (const), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_uppercase_ident_parses_as_const_node() {
+        // `Foo` → (const _ :Foo)
+        let p = parse("Foo").expect("`Foo` must parse");
+        assert_const_node(&p, "Foo");
+    }
+
+    #[test]
+    fn percent_prefix_uppercase_parses_as_const_node() {
+        // `%Foo` — tPARAM_CONST sugar with `%` prefix: same AST as bare `Foo`.
+        let p = parse("%Foo").expect("`%Foo` must parse");
+        assert_const_node(&p, "Foo");
+    }
+
+    #[test]
+    fn percent_prefix_and_bare_produce_same_ast() {
+        // `Foo` and `%Foo` are the same token (tPARAM_CONST) and must produce
+        // the same (const _ :Foo) expansion. Spans differ (source lengths differ)
+        // so we compare by calling `assert_const_node` on both.
+        let bare = parse("Foo").expect("`Foo` must parse");
+        let pct = parse("%Foo").expect("`%Foo` must parse");
+        assert_const_node(&bare, "Foo");
+        assert_const_node(&pct, "Foo");
+    }
+
+    #[test]
+    fn uppercase_ident_inside_node_pattern() {
+        // `(send _ :raise Foo)` — Foo as a child of a node pattern.
+        let p = parse("(send _ :raise Foo)").expect("`(send _ :raise Foo)` must parse");
+        assert!(
+            matches!(p.root.kind, PatKind::Node { .. }),
+            "root must be Node (send), got {:?}",
+            p.root.kind
+        );
+        if let PatKind::Node { children, .. } = &p.root.kind {
+            // children: [_, :raise, Foo-expansion]
+            assert_eq!(children.len(), 3, "send node must have 3 children");
+            // Third child (index 2) must be the (const nil? :Foo) expansion.
+            match &children[2].kind {
+                PatKind::Node {
+                    head,
+                    children: inner,
+                } => {
+                    assert_eq!(*head, crate::Head::Exact(CONST_TAG));
+                    assert_eq!(inner.len(), 2);
+                    assert!(matches!(inner[0].kind, PatKind::NilTest));
+                    assert_eq!(inner[1].kind, PatKind::Lit(Lit::Sym("Foo".to_string())));
+                }
+                other => panic!("third child must be const-expansion, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn lowercase_ident_keeps_existing_behavior() {
+        // `foo` (lowercase, no `?`/`!` suffix, unknown kind) is a bare
+        // predicate at the root level — rejected as an unknown node type.
+        let e = parse("foo").expect_err("`foo` must be rejected at root");
+        assert!(
+            e.message.contains("unknown node type"),
+            "expected unknown-node-type error for `foo`, got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn lowercase_known_kind_keeps_existing_behavior() {
+        // `send` is a known node kind — stays as PatKind::Kind, not a const expansion.
+        let p = parse("send").expect("`send` must parse as Kind");
+        assert!(
+            matches!(p.root.kind, PatKind::Kind(_)),
+            "root must be Kind for known lowercase name, got {:?}",
+            p.root.kind
+        );
+    }
+
+    #[test]
+    fn uppercase_ident_in_capture() {
+        // `$Foo` — anonymous capture wrapping the (const _ :Foo) expansion.
+        // Unlike `$send` (which becomes named capture), `$Foo` stays anonymous
+        // because `convert_named_captures` only rewrites `Kind` / bare-ident
+        // Predicate bodies, not `Node` bodies.
+        let p = parse("$Foo").expect("`$Foo` must parse");
+        assert_eq!(p.n_captures(), 1);
+        match &p.root.kind {
+            PatKind::Capture { body, .. } => {
+                assert!(
+                    matches!(body.kind, PatKind::Node { .. }),
+                    "capture body must be Node (const expansion), got {:?}",
+                    body.kind
+                );
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+}
+
+// ============================================================================
+// D4 (murphy-nnr8): tUNIFY — `_name` named wildcard with unification.
+// ============================================================================
+
+#[cfg(test)]
+mod unify_tests {
+    use crate::{PatKind, parse};
+
+    #[test]
+    fn bare_unify_parses_as_unify_kind_with_name_without_underscore() {
+        // `_x` → PatKind::Unify { name: "x" } (no leading `_` in name).
+        let p = parse("_x").expect("`_x` must parse");
+        match &p.root.kind {
+            PatKind::Unify { name } => {
+                assert_eq!(name, "x", "unify name should be without leading `_`");
+            }
+            other => panic!("expected PatKind::Unify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unify_with_longer_name_parses_correctly() {
+        let p = parse("_foo").expect("`_foo` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Unify { name } if name == "foo"));
+
+        let p = parse("_my_var").expect("`_my_var` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Unify { name } if name == "my_var"));
+    }
+
+    #[test]
+    fn wildcard_is_distinct_from_unify() {
+        // `_` alone stays Wildcard, not Unify.
+        let p = parse("_").expect("`_` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Wildcard));
+    }
+
+    #[test]
+    fn node_pattern_with_two_unify_atoms_parses() {
+        // `(send _x _ _x)` — unification example; must parse without error.
+        let p = parse("(send _x _ _x)").expect("`(send _x _ _x)` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Node { .. }));
+    }
+
+    #[test]
+    fn unify_and_wildcard_together_parse() {
+        // `(send _x _ _y)` — two distinct unify names.
+        let p = parse("(send _x _ _y)").expect("`(send _x _ _y)` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Node { .. }));
+    }
+
+    #[test]
+    fn unify_has_no_captures() {
+        // Unify is NOT a `$` capture — slot count must be 0.
+        let p = parse("(send _x _ _x)").expect("ok");
+        assert_eq!(
+            p.n_captures(),
+            0,
+            "unify atoms must not create capture slots"
+        );
+    }
+}
+
+// ============================================================================
+// D5 (murphy-t8km): tREGEXP — `/.../[imxo]*` regex atom.
+// ============================================================================
+
+#[cfg(test)]
+mod regex_tests {
+    use crate::{PatKind, parse};
+
+    #[test]
+    fn bare_regex_parses() {
+        let p = parse("/^to_/").expect("`/^to_/` must parse");
+        match &p.root.kind {
+            PatKind::Regex { pattern, flags } => {
+                assert_eq!(pattern, "^to_");
+                assert_eq!(flags, "");
+            }
+            other => panic!("expected PatKind::Regex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regex_with_flags_parses() {
+        let p = parse("/abc/im").expect("`/abc/im` must parse");
+        match &p.root.kind {
+            PatKind::Regex { pattern, flags } => {
+                assert_eq!(pattern, "abc");
+                assert_eq!(flags, "im");
+            }
+            other => panic!("expected PatKind::Regex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regex_in_node_pattern_parses() {
+        // `(send _ /^to_/ ...)` must parse successfully.
+        let p = parse("(send _ /^to_/ ...)").expect("`(send _ /^to_/ ...)` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Node { .. }));
+    }
+
+    #[test]
+    fn regex_has_no_captures() {
+        let p = parse("(send _ /^to_/ ...)").expect("ok");
+        assert_eq!(p.n_captures(), 0, "regex must not create capture slots");
     }
 }

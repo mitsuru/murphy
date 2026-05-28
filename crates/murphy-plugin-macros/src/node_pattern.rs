@@ -83,14 +83,27 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
         )
     };
 
+    let unify_names = collect_unify_names(&ast.root);
     let mut ctx = Lower {
         fail: fail.clone(),
         next: 0,
         capture_kinds: ast.capture_kinds().to_vec(),
         local_caps: HashMap::new(),
         probe_caps: HashMap::new(),
+        unify_names: unify_names.clone(),
     };
     let body = lower_pat(&ast.root, &quote!(node), &mut ctx)?;
+
+    // D4 (murphy-nnr8): declare one `Option<NodeId>` variable per unique `_name`
+    // unification atom. These are initialized to `None` at function entry and
+    // read/written by the `lower_pat`/`lower_bool` arms for `PatKind::Unify`.
+    let unify_decls: Vec<TokenStream> = ctx.unify_names
+        .iter()
+        .map(|n| {
+            let var = unify_var(n);
+            quote!(let mut #var: ::core::option::Option<::murphy_plugin_api::NodeId> = ::core::option::Option::None;)
+        })
+        .collect();
 
     Ok(quote! {
         // A capture matcher's `OptNode`-slot lowering emits `let Some(n) =
@@ -103,10 +116,67 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
             cx: &::murphy_plugin_api::Cx<'a>,
         ) -> #ret_ty {
             #(#cap_decls)*
+            #(#unify_decls)*
             #body
             #success
         }
     })
+}
+
+/// The gensym'd variable identifier for the unification variable of `name`.
+///
+/// `_x` → `__unify_x`, `_foo` → `__unify_foo`. The name is the post-`_`
+/// portion stored in [`murphy_pattern::PatKind::Unify`].
+fn unify_var(name: &str) -> Ident {
+    Ident::new(&format!("__unify_{name}"), Span::call_site())
+}
+
+/// Collect all distinct unify names from the pattern tree.
+///
+/// Returns names in first-occurrence order (depth-first, left-to-right)
+/// so the generated declarations are deterministic across compiler runs.
+fn collect_unify_names(pat: &murphy_pattern::Pat) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    collect_unify_names_inner(pat, &mut names);
+    names
+}
+
+fn collect_unify_names_inner(pat: &murphy_pattern::Pat, names: &mut Vec<String>) {
+    use murphy_pattern::PatKind;
+    match &pat.kind {
+        PatKind::Unify { name } => {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.clone());
+            }
+        }
+        PatKind::Node { children, .. } => {
+            for c in children {
+                collect_unify_names_inner(c, names);
+            }
+        }
+        PatKind::Union(alts) => {
+            for a in alts {
+                collect_unify_names_inner(a, names);
+            }
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            collect_unify_names_inner(b, names);
+        }
+        PatKind::Capture { body, .. } => collect_unify_names_inner(body, names),
+        PatKind::Quantifier { body, .. } => collect_unify_names_inner(body, names),
+        PatKind::AnyOrder { children } | PatKind::Intersection { children } => {
+            for c in children {
+                collect_unify_names_inner(c, names);
+            }
+        }
+        PatKind::Wildcard
+        | PatKind::Rest
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_)
+        | PatKind::Regex { .. } => {}
+    }
 }
 
 /// The capture binding identifier for slot `i`.
@@ -159,6 +229,56 @@ struct Lower {
     /// AnyOrder probe scope it is always empty, so [`predicate_arg_exprs`]
     /// falls back to the function-level `__cap{slot}` binding.
     probe_caps: HashMap<u16, Ident>,
+    /// All distinct `_name` unification variable names collected from the
+    /// pattern tree. Used by `emit_unify_snapshot` / `emit_unify_restore`
+    /// to generate snapshot/restore code at each backtracking site (Union,
+    /// Not body, Descend iteration). Populated once in `lower_matcher`.
+    unify_names: Vec<String>,
+}
+
+/// Emit a wrapped bool expression with snapshot/restore for unify variables.
+///
+/// For each `_name` in the pattern, wraps `expr` as:
+/// ```ignore
+/// {
+///     let __snap_unify_x = __unify_x; // per name
+///     let __uokN = <expr>;
+///     if !__uokN { __unify_x = __snap_unify_x; } // per name, on failure
+///     __uokN
+/// }
+/// ```
+/// When there are no unify names, returns `expr` unchanged (zero overhead).
+fn wrap_with_unify_rollback(expr: TokenStream, ctx: &mut Lower) -> TokenStream {
+    if ctx.unify_names.is_empty() {
+        return expr;
+    }
+    let names = ctx.unify_names.clone();
+    let snaps: Vec<Ident> = names
+        .iter()
+        .map(|n| gensym(ctx, &format!("__snap_unify_{n}_")))
+        .collect();
+    let vars: Vec<Ident> = names.iter().map(|n| unify_var(n)).collect();
+    let save_stmts: Vec<TokenStream> = snaps
+        .iter()
+        .zip(vars.iter())
+        .map(|(snap, var)| quote!(let #snap = #var;))
+        .collect();
+    let restore_stmts: Vec<TokenStream> = snaps
+        .iter()
+        .zip(vars.iter())
+        .map(|(snap, var)| quote!(#var = #snap;))
+        .collect();
+    let ok = gensym(ctx, "__uok");
+    quote! {
+        ({
+            #(#save_stmts)*
+            let #ok = #expr;
+            if !#ok {
+                #(#restore_stmts)*
+            }
+            #ok
+        })
+    }
 }
 
 /// Allocate a fresh, collision-free binding identifier `#{prefix}#{n}`.
@@ -1006,10 +1126,15 @@ fn lower_pat(
                 }
             }
             // Normal union (no uniform captures): each alternative lowers to a
-            // `return`-free bool expression; the node matches iff any arm is true.
+            // `return`-free bool expression with unify rollback on failure.
+            // The rollback ensures that a failed arm's partial `_name` bindings
+            // do not leak into the next arm (D4, murphy-nnr8).
             let alt_bools: Vec<TokenStream> = alts
                 .iter()
-                .map(|alt| lower_bool(alt, subject, ctx))
+                .map(|alt| {
+                    let b = lower_bool(alt, subject, ctx)?;
+                    Ok(wrap_with_unify_rollback(b, ctx))
+                })
                 .collect::<syn::Result<_>>()?;
             let fail = fail_stmt(ctx);
             let ok = gensym(ctx, "__ok");
@@ -1022,11 +1147,13 @@ fn lower_pat(
         }
         PatKind::Not(inner) => {
             // `!x` matches iff `x` does not — lower `x` to a bool expression
-            // and fail when it holds.
+            // and fail when it holds. Unify bindings from the inner body are
+            // always rolled back (Not never commits inner state).
             let inner_bool = lower_bool(inner, subject, ctx)?;
+            let inner_with_rollback = wrap_with_unify_rollback(inner_bool, ctx);
             let fail = fail_stmt(ctx);
             Ok(quote! {
-                if #inner_bool {
+                if #inner_with_rollback {
                     #fail
                 }
             })
@@ -1086,13 +1213,16 @@ fn lower_pat(
             // `` `x `` — succeed iff some descendant matches `inner`. The
             // descendant scan visits many nodes, so `inner` cannot capture;
             // lower it via `lower_bool` (which structurally rejects captures)
-            // into a bool expression over the per-descendant binding.
+            // into a bool expression over the per-descendant binding. Each
+            // iteration's unify bindings are rolled back so a match attempt on
+            // one descendant does not pollute a subsequent attempt.
             let d = gensym(ctx, "__d");
             let inner_bool = lower_bool(inner, &quote!(#d), ctx)?;
+            let inner_with_rollback = wrap_with_unify_rollback(inner_bool, ctx);
             let hit = gensym(ctx, "__hit");
             let fail = fail_stmt(ctx);
             Ok(quote! {
-                let #hit = cx.descendants(#subject).into_iter().any(|#d| #inner_bool);
+                let #hit = cx.descendants(#subject).into_iter().any(|#d| #inner_with_rollback);
                 if !#hit {
                     #fail
                 }
@@ -1104,6 +1234,54 @@ fn lower_pat(
              of a node match's List slot; reaching it in `lower_pat` is an \
              internal invariant violation",
         )),
+        PatKind::Intersection { children } => {
+            // `[a b c]` — all children match the same subject. Lower each
+            // child as a sequential guard (captures flow into function-level
+            // bindings in source order). Semantically equivalent to running
+            // every child body in sequence on the same node.
+            let guards: Vec<TokenStream> = children
+                .iter()
+                .map(|child| lower_pat(child, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            Ok(quote!(#(#guards)*))
+        }
+        PatKind::Unify { name } => {
+            // D4 (murphy-nnr8): `_name` unification.
+            //
+            // Each unique name gets one `let mut __unify_{name}: Option<NodeId> = None;`
+            // variable at the top of the generated function (see `lower_matcher`,
+            // which collects them via `collect_unify_names`). Here we emit the
+            // runtime binding/check logic:
+            //
+            //   match __unify_{name} {
+            //     None => { __unify_{name} = Some(#subject); }   // first occurrence: bind
+            //     Some(__u) => { if __u != #subject { return fail; } }  // check
+            //   }
+            let var = unify_var(name);
+            let fail = fail_stmt(ctx);
+            Ok(quote! {
+                match #var {
+                    ::core::option::Option::None => {
+                        #var = ::core::option::Option::Some(#subject);
+                    }
+                    ::core::option::Option::Some(__u) => {
+                        if __u != #subject {
+                            #fail
+                        }
+                    }
+                }
+            })
+        }
+        PatKind::Regex { pattern, flags } => {
+            // D5 (murphy-t8km): `/.../[imxo]*` regex match (guard form).
+            let fail = fail_stmt(ctx);
+            let check = lower_bool_regex(pattern, flags, subject, ctx)?;
+            Ok(quote! {
+                if !#check {
+                    #fail
+                }
+            })
+        }
         other => Err(syn::Error::new(
             Span::call_site(),
             format!("node_pattern!: pattern feature not yet supported: {other:?}"),
@@ -1739,12 +1917,19 @@ fn collect_capture_slots(pat: &murphy_pattern::Pat, out: &mut Vec<u16>) {
                 collect_capture_slots(c, out);
             }
         }
+        PatKind::Intersection { children } => {
+            for c in children {
+                collect_capture_slots(c, out);
+            }
+        }
         PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
-        | PatKind::Rest => {}
+        | PatKind::Rest
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
     }
 }
 
@@ -2110,6 +2295,52 @@ fn lower_bool_anyorder_probe(
                 .collect::<syn::Result<_>>()?;
             Ok(quote!( ( #(#alt_bools)||* ) ))
         }
+        PatKind::Intersection { children } => {
+            // `[a b c]` inside an AnyOrder arm: AND of children's bool
+            // expressions, each routed through the probe path so any captures
+            // nested inside write their `__pcap{slot}` bindings.
+            //
+            // The C matcher snapshots its trial buffer and discards it if any
+            // child fails (`matcher.rs::IrNode::Intersection`); the macro must
+            // match that atomicity. Without a rollback, child 1 could write a
+            // probe binding before child 2 fails, leaving a stale
+            // `__pcap{slot}` that a subsequent AnyOrder permutation would
+            // observe. Snapshot every probe-capture slot reachable from this
+            // intersection before the AND chain, and restore on failure.
+            let child_bools: Vec<TokenStream> = children
+                .iter()
+                .map(|child| lower_bool_anyorder_probe(child, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            let mut slots: Vec<u16> = Vec::new();
+            for child in children {
+                collect_capture_slots(child, &mut slots);
+            }
+            slots.sort_unstable();
+            slots.dedup();
+            // Resolve each slot to its current probe-scope ident; skip slots
+            // that are not registered (defensive — a capture inside an
+            // intersection that isn't itself inside the surrounding AnyOrder
+            // shouldn't be possible, but if it ever is we just don't snapshot
+            // and the existing match behaviour is preserved).
+            let pcap_idents: Vec<Ident> = slots
+                .iter()
+                .filter_map(|s| ctx.probe_caps.get(s).cloned())
+                .collect();
+            if pcap_idents.is_empty() {
+                return Ok(quote!( ( #(#child_bools)&&* ) ));
+            }
+            let snap_idents: Vec<Ident> = (0..pcap_idents.len())
+                .map(|_| gensym(ctx, "__isnap"))
+                .collect();
+            Ok(quote!({
+                #( let #snap_idents = #pcap_idents; )*
+                let __intersection_ok = #(#child_bools)&&*;
+                if !__intersection_ok {
+                    #( #pcap_idents = #snap_idents; )*
+                }
+                __intersection_ok
+            }))
+        }
         // All other arms (Wildcard, Lit, Kind, NilTest, Not, Predicate,
         // Descend) cannot legally contain a Capture (parser-enforced), so
         // lower_bool is a correct and complete delegate.
@@ -2464,15 +2695,22 @@ fn lower_bool(
         }),
         PatKind::Node { head, children } => lower_bool_node(head, children, subject, ctx),
         PatKind::Union(alts) => {
+            // Each arm gets unify rollback so a failed arm's partial bindings
+            // don't leak into the next (D4, murphy-nnr8).
             let alt_bools: Vec<TokenStream> = alts
                 .iter()
-                .map(|alt| lower_bool(alt, subject, ctx))
+                .map(|alt| {
+                    let b = lower_bool(alt, subject, ctx)?;
+                    Ok(wrap_with_unify_rollback(b, ctx))
+                })
                 .collect::<syn::Result<_>>()?;
             Ok(quote!( ( #(#alt_bools)||* ) ))
         }
         PatKind::Not(inner) => {
             let inner_bool = lower_bool(inner, subject, ctx)?;
-            Ok(quote!( ( !#inner_bool ) ))
+            // Always roll back unify bindings from Not's inner body.
+            let inner_with_rollback = wrap_with_unify_rollback(inner_bool, ctx);
+            Ok(quote!( ( !#inner_with_rollback ) ))
         }
         PatKind::Predicate { name, args } => {
             // `#name` / `#name(args...)` calls a free fn in scope at the
@@ -2491,8 +2729,9 @@ fn lower_bool(
         PatKind::Descend(inner) => {
             let d = gensym(ctx, "__d");
             let inner_bool = lower_bool(inner, &quote!(#d), ctx)?;
+            let inner_with_rollback = wrap_with_unify_rollback(inner_bool, ctx);
             Ok(quote! {
-                ( cx.descendants(#subject).into_iter().any(|#d| #inner_bool) )
+                ( cx.descendants(#subject).into_iter().any(|#d| #inner_with_rollback) )
             })
         }
         PatKind::Capture { .. } => Err(syn::Error::new(
@@ -2513,6 +2752,38 @@ fn lower_bool(
             Span::call_site(),
             "node_pattern!: `<...>` any-order is not valid inside `{}` / `!` / `` ` ``",
         )),
+        PatKind::Intersection { children } => {
+            // `[a b c]` inside `{}` / `!` / `` ` ``: AND of children's bool
+            // expressions. Captures are structurally forbidden in the `bool`
+            // context (`lower_bool` rejects them), so each child lowers cleanly.
+            let child_bools: Vec<TokenStream> = children
+                .iter()
+                .map(|child| lower_bool(child, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            Ok(quote!( ( #(#child_bools)&&* ) ))
+        }
+        PatKind::Unify { name } => {
+            // D4 (murphy-nnr8): `_name` unification in bool context.
+            // Uses the same `__unify_{name}` variable declared at function scope.
+            let var = unify_var(name);
+            Ok(quote! {
+                ({
+                    match #var {
+                        ::core::option::Option::None => {
+                            #var = ::core::option::Option::Some(#subject);
+                            true
+                        }
+                        ::core::option::Option::Some(__u) => __u == #subject,
+                    }
+                })
+            })
+        }
+        PatKind::Regex { pattern, flags } => {
+            // D5 (murphy-t8km): `/.../[imxo]*` regex match in bool context.
+            // Delegates to the same static LazyLock as the guard-form arm
+            // in `lower_pat`.
+            lower_bool_regex(pattern, flags, subject, ctx)
+        }
     }
 }
 
@@ -2564,6 +2835,51 @@ fn lower_bool_lit(lit: &murphy_pattern::Lit, subject: &TokenStream) -> TokenStre
             ( ::core::matches!(*cx.kind(#subject), ::murphy_plugin_api::NodeKind::Nil) )
         },
     }
+}
+
+/// Lower a `/.../flags` regex atom into a `return`-free bool expression (D5,
+/// murphy-t8km). Generates a `static LazyLock<Regex>` gensym'd per unique
+/// `(pattern, flags)` pair so the regex is compiled at most once per process
+/// lifetime.
+///
+/// The subject must be a `Sym` or `Str` atom; any other kind returns `false`.
+/// Flag `o` (Ruby once-compile) is accepted lexically but has no effect on
+/// Rust's `regex` crate — it is silently ignored.
+fn lower_bool_regex(
+    pattern: &str,
+    flags: &str,
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    // Gensym a stable ident for this specific (pattern, flags) pair.
+    let static_ident = gensym(ctx, "__REGEX_");
+    // Build flag arguments for `RegexBuilder`.
+    let case_insensitive = flags.contains('i');
+    let multi_line = flags.contains('m');
+    let ignore_whitespace = flags.contains('x');
+    // Emit the LazyLock static and the match check.
+    Ok(quote! {
+        ({
+            static #static_ident: ::std::sync::LazyLock<::murphy_plugin_api::regex::Regex> =
+                ::std::sync::LazyLock::new(|| {
+                    ::murphy_plugin_api::regex::RegexBuilder::new(#pattern)
+                        .case_insensitive(#case_insensitive)
+                        .multi_line(#multi_line)
+                        .ignore_whitespace(#ignore_whitespace)
+                        .build()
+                        .unwrap_or_else(|e| panic!("node_pattern! regex compile error: {e}"))
+                });
+            match *cx.kind(#subject) {
+                ::murphy_plugin_api::NodeKind::Sym(__sym) => {
+                    #static_ident.is_match(cx.symbol_str(__sym))
+                }
+                ::murphy_plugin_api::NodeKind::Str(__id) => {
+                    #static_ident.is_match(cx.string_str(__id))
+                }
+                _ => false,
+            }
+        })
+    })
 }
 
 /// Lower a `(head child...)` node match into a `return`-free bool expression.

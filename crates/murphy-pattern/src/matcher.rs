@@ -270,6 +270,67 @@ fn match_pat<P: PredicateHost + ?Sized>(
             debug_assert!(false, "AnyOrder IR reached scalar slot");
             false
         }
+        IrNode::Intersection { children } => {
+            // All children must match the same subject node. Route through a
+            // trial buffer so a failing child rolls back any partial captures
+            // written by earlier children.
+            let child_ids: Vec<IrNodeId> = ctx.ir.children
+                [children.start as usize..(children.start + children.len) as usize]
+                .to_vec();
+            let mut trial = buf.clone();
+            for child in child_ids {
+                if !match_pat(ctx, child, node, &mut trial, predicates) {
+                    return false;
+                }
+            }
+            *buf = trial;
+            true
+        }
+
+        IrNode::Regex { pattern, flags } => {
+            // D5 (murphy-t8km): `/.../[imxo]*` regex match.
+            // Matches Symbol or String atoms only; any other kind → false.
+            // The regex is compiled on every match call (the B backend caches
+            // via LazyLock; the C backend can be optimised later if needed).
+            // A compile error in the pattern → panic (the pattern was already
+            // accepted by the lexer/parser so this implies a Rust `regex`
+            // syntax incompatibility — treat as a hard programming error).
+            let pat_str = ctx.pool(*pattern);
+            let flags_str = ctx.pool(*flags);
+            let subject_str: Option<&str> = match *ctx.ast.kind(node) {
+                NodeKind::Sym(s) => Some(ctx.ast.interner().resolve(s.0)),
+                NodeKind::Str(s) => Some(ctx.ast.interner().resolve(s.0)),
+                _ => None,
+            };
+            let Some(s) = subject_str else { return false };
+            let regex = regex::RegexBuilder::new(pat_str)
+                .case_insensitive(flags_str.contains('i'))
+                .multi_line(flags_str.contains('m'))
+                .ignore_whitespace(flags_str.contains('x'))
+                .build()
+                .unwrap_or_else(|e| panic!("node_pattern regex compile error: {e}"));
+            regex.is_match(s)
+        }
+
+        IrNode::Unify { name } => {
+            // D4 (murphy-nnr8): `_name` unification.
+            // First occurrence of this name → bind the current NodeId.
+            // Subsequent occurrences → check that the NodeId equals the bound
+            // value. The unification table lives in `buf.unify`; it is
+            // snapshot/restored via `Clone` by every Union/Not/Descend/
+            // Intersection arm that already clones `buf`.
+            let pool_name = ctx.pool(*name);
+            if let Some(entry) = buf.unify.iter().find(|(r, _)| {
+                &ctx.ir.str_pool[r.start as usize..(r.start + r.len) as usize] == pool_name
+            }) {
+                // Already bound — NodeId must match.
+                entry.1 == node
+            } else {
+                // First occurrence — bind.
+                buf.unify.push((*name, node));
+                true
+            }
+        }
     }
 }
 
@@ -1664,5 +1725,311 @@ mod tests {
     #[allow(dead_code)]
     fn _force_use_symbol(s: Symbol, l: NodeList) {
         let _ = (s, l);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Intersection (murphy-l448)
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn intersection_matches_when_all_children_match() {
+        // `[!nil? int]` — subject must not be nil AND must be an int.
+        // Use Int(1): not-nil and is int → hit.
+        let mut b = AstBuilder::new("1", "t.rb");
+        let one = b.push(NodeKind::Int(1), r());
+        let ast = b.finish(one);
+        let ir = compile("[!nil? int]").unwrap();
+        assert!(
+            matches(&ir, &ast, one, &mut NoPredicates).is_some(),
+            "[!nil? int] must match Int(1)"
+        );
+    }
+
+    #[test]
+    fn intersection_misses_when_any_child_fails() {
+        // `[!nil? int]` — subject is Nil: fails the `!nil?` guard.
+        let mut b = AstBuilder::new("nil", "t.rb");
+        let nil = b.push(NodeKind::Nil, r());
+        let ast = b.finish(nil);
+        let ir = compile("[!nil? int]").unwrap();
+        assert!(
+            matches(&ir, &ast, nil, &mut NoPredicates).is_none(),
+            "[!nil? int] must miss Nil"
+        );
+        // Also fail on a node that IS not-nil but is NOT an int (e.g. True_).
+        let mut b2 = AstBuilder::new("true", "t.rb");
+        let t = b2.push(NodeKind::True_, r());
+        let ast2 = b2.finish(t);
+        assert!(
+            matches(&ir, &ast2, t, &mut NoPredicates).is_none(),
+            "[!nil? int] must miss True"
+        );
+    }
+
+    #[test]
+    fn intersection_single_child_behaves_like_child() {
+        // `[int]` — equivalent to bare `int`; matches Int, misses Sym.
+        let mut b = AstBuilder::new("42", "t.rb");
+        let n = b.push(NodeKind::Int(42), r());
+        let ast = b.finish(n);
+        let ir = compile("[int]").unwrap();
+        assert!(
+            matches(&ir, &ast, n, &mut NoPredicates).is_some(),
+            "[int] must match Int"
+        );
+        let mut b2 = AstBuilder::new(":x", "t.rb");
+        let s = b2.intern_symbol("x");
+        let sym = b2.push(NodeKind::Sym(s), r());
+        let ast2 = b2.finish(sym);
+        assert!(
+            matches(&ir, &ast2, sym, &mut NoPredicates).is_none(),
+            "[int] must miss Sym"
+        );
+    }
+
+    #[test]
+    fn intersection_capture_writes_slot_when_all_match() {
+        // `[$v int]` — capture writes `v` iff Int matches.
+        let mut b = AstBuilder::new("7", "t.rb");
+        let n = b.push(NodeKind::Int(7), r());
+        let ast = b.finish(n);
+        let ir = compile("[$v int]").unwrap();
+        let caps = matches(&ir, &ast, n, &mut NoPredicates).expect("must match");
+        let CaptureValue::Node(id) = caps.get(0).unwrap() else {
+            panic!("expected Node capture");
+        };
+        assert_eq!(*id, n, "captured node must be Int(7)");
+    }
+
+    #[test]
+    fn intersection_capture_does_not_write_when_later_child_fails() {
+        // `[!1 $_ !int]` — subject is Int(1): passes `!1`? No, Int(1) fails `!1`.
+        // Use: `[$_ !int]` — subject is Int(3): passes `$_` but fails `!int`.
+        // The whole intersection must miss; no captures should be returned.
+        let mut b = AstBuilder::new("3", "t.rb");
+        let n = b.push(NodeKind::Int(3), r());
+        let ast = b.finish(n);
+        // `[$_ !int]`: capture wildcard but NOT int. Int(3) is int so `!int` fails.
+        let ir = compile("[$_ !int]").unwrap();
+        assert!(
+            matches(&ir, &ast, n, &mut NoPredicates).is_none(),
+            "[$_ !int] must miss Int(3) (fails second child !int)"
+        );
+        // True_ satisfies !int → both children pass → match + capture.
+        let mut b2 = AstBuilder::new("true", "t.rb");
+        let t = b2.push(NodeKind::True_, r());
+        let ast2 = b2.finish(t);
+        let caps = matches(&ir, &ast2, t, &mut NoPredicates);
+        assert!(caps.is_some(), "[$_ !int] must match True_");
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // D4 (murphy-nnr8): tUNIFY — `_name` NodeId unification.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Build `obj.foo(obj)` where receiver and arg are the *same* NodeId.
+    fn same_receiver_and_arg_ast() -> (Ast, NodeId, NodeId) {
+        // Receiver and the single arg share the same node id.
+        let mut b = AstBuilder::new("obj.foo(obj)", "t.rb");
+        let obj_sym = b.intern_symbol("obj");
+        let obj = b.push(NodeKind::Lvar(obj_sym), r());
+        let m = b.intern_symbol("foo");
+        let args = b.push_list(&[obj]);
+        let send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::some(obj),
+                method: m,
+                args,
+            },
+            r(),
+        );
+        let ast = b.finish(send);
+        (ast, send, obj)
+    }
+
+    /// Build `obj.foo(other)` where receiver and arg are different NodeIds.
+    fn different_receiver_and_arg_ast() -> (Ast, NodeId) {
+        let mut b = AstBuilder::new("obj.foo(other)", "t.rb");
+        let obj_sym = b.intern_symbol("obj");
+        let other_sym = b.intern_symbol("other");
+        let obj = b.push(NodeKind::Lvar(obj_sym), r());
+        let other = b.push(NodeKind::Lvar(other_sym), r());
+        let m = b.intern_symbol("foo");
+        let args = b.push_list(&[other]);
+        let send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::some(obj),
+                method: m,
+                args,
+            },
+            r(),
+        );
+        let ast = b.finish(send);
+        (ast, send)
+    }
+
+    #[test]
+    fn unify_same_node_hits() {
+        // `(send _x _ _x)` must match when receiver == arg (same NodeId).
+        let (ast, send, _) = same_receiver_and_arg_ast();
+        let ir = compile("(send _x _ _x)").unwrap();
+        assert!(
+            matches(&ir, &ast, send, &mut NoPredicates).is_some(),
+            "(send _x _ _x) must hit when receiver == arg NodeId"
+        );
+    }
+
+    #[test]
+    fn unify_different_nodes_misses() {
+        // `(send _x _ _x)` must miss when receiver != arg (different NodeIds).
+        let (ast, send) = different_receiver_and_arg_ast();
+        let ir = compile("(send _x _ _x)").unwrap();
+        assert!(
+            matches(&ir, &ast, send, &mut NoPredicates).is_none(),
+            "(send _x _ _x) must miss when receiver != arg NodeId"
+        );
+    }
+
+    #[test]
+    fn unify_two_distinct_names_are_independent() {
+        // `(send _x _ _y)` — `_x` and `_y` are independent bindings.
+        // Both `obj.foo(obj)` and `obj.foo(other)` must match because
+        // `_x` binds receiver and `_y` binds arg with no equality constraint.
+        let (ast, send, _) = same_receiver_and_arg_ast();
+        let ir = compile("(send _x _ _y)").unwrap();
+        assert!(
+            matches(&ir, &ast, send, &mut NoPredicates).is_some(),
+            "(send _x _ _y) must hit (independent bindings)"
+        );
+        let (ast2, send2) = different_receiver_and_arg_ast();
+        assert!(
+            matches(&ir, &ast2, send2, &mut NoPredicates).is_some(),
+            "(send _x _ _y) must also hit with different nodes (independent bindings)"
+        );
+    }
+
+    #[test]
+    fn unify_rollback_across_union_arms() {
+        // `{ (send _x _ _x) (send _x _ !_x) }` — first arm requires same
+        // NodeId, second arm requires different. For `obj.foo(obj)` (same),
+        // first arm should win; for `obj.foo(other)` (different), second arm.
+        // The key is that `_x` binding from the first arm must NOT leak into
+        // the second arm (rollback via clone).
+        let pat = "{ (send _x _ _x) (send _x _ !_x) }";
+        let ir = compile(pat).unwrap();
+
+        let (ast, send, _) = same_receiver_and_arg_ast();
+        assert!(
+            matches(&ir, &ast, send, &mut NoPredicates).is_some(),
+            "first union arm (same) must hit for obj.foo(obj)"
+        );
+
+        let (ast2, send2) = different_receiver_and_arg_ast();
+        assert!(
+            matches(&ir, &ast2, send2, &mut NoPredicates).is_some(),
+            "second union arm (different) must hit for obj.foo(other)"
+        );
+    }
+
+    // =========================================================================
+    // D5 (murphy-t8km): tREGEXP — C-backend matcher tests.
+    // =========================================================================
+
+    fn sym_ast(name: &str) -> (Ast, NodeId) {
+        let mut b = AstBuilder::new(name, "t.rb");
+        let s = b.intern_symbol(name);
+        let node = b.push(NodeKind::Sym(s), r());
+        let ast = b.finish(node);
+        (ast, node)
+    }
+
+    fn str_ast(value: &str) -> (Ast, NodeId) {
+        let mut b = AstBuilder::new(value, "t.rb");
+        let s = b.intern_string(value);
+        let node = b.push(NodeKind::Str(s), r());
+        let ast = b.finish(node);
+        (ast, node)
+    }
+
+    fn int_ast(value: i64) -> (Ast, NodeId) {
+        let mut b = AstBuilder::new("0", "t.rb");
+        let node = b.push(NodeKind::Int(value), r());
+        let ast = b.finish(node);
+        (ast, node)
+    }
+
+    #[test]
+    fn regex_sym_hit() {
+        let ir = compile("/^to_/").expect("compile ok");
+        let (ast, node) = sym_ast("to_s");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_some(),
+            "/^to_/ must match :to_s"
+        );
+    }
+
+    #[test]
+    fn regex_sym_miss() {
+        let ir = compile("/^to_/").expect("compile ok");
+        let (ast, node) = sym_ast("other");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_none(),
+            "/^to_/ must NOT match :other"
+        );
+    }
+
+    #[test]
+    fn regex_int_slot_type_mismatch_is_miss() {
+        // An Int node does not match a regex pattern — slot-type mismatch.
+        let ir = compile("/^to_/").expect("compile ok");
+        let (ast, node) = int_ast(1);
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_none(),
+            "/^to_/ must NOT match Int(1)"
+        );
+    }
+
+    #[test]
+    fn regex_case_insensitive_flag() {
+        // `/abc/i` must match `:ABC`.
+        let ir = compile("/abc/i").expect("compile ok");
+        let (ast, node) = sym_ast("ABC");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_some(),
+            "/abc/i must match :ABC (case-insensitive)"
+        );
+        // Without `i`, it should miss.
+        let ir2 = compile("/abc/").expect("compile ok");
+        assert!(
+            matches(&ir2, &ast, node, &mut NoPredicates).is_none(),
+            "/abc/ must NOT match :ABC (case-sensitive)"
+        );
+    }
+
+    #[test]
+    fn regex_str_match() {
+        let ir = compile("/hello/").expect("compile ok");
+        let (ast, node) = str_ast("hello world");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_some(),
+            "/hello/ must match \"hello world\""
+        );
+    }
+
+    #[test]
+    fn regex_digit_class_passes_through() {
+        // `/\d+/` — `\d` must reach the regex crate unmodified (option A:
+        // only `\/` is consumed by the lexer).
+        let ir = compile("/\\d+/").expect("compile ok");
+        let (ast, node) = sym_ast("123");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_some(),
+            "/\\d+/ must match :123"
+        );
+        let (ast2, node2) = sym_ast("abc");
+        assert!(
+            matches(&ir, &ast2, node2, &mut NoPredicates).is_none(),
+            "/\\d+/ must NOT match :abc"
+        );
     }
 }
