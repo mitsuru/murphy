@@ -1104,6 +1104,17 @@ fn lower_pat(
              of a node match's List slot; reaching it in `lower_pat` is an \
              internal invariant violation",
         )),
+        PatKind::Intersection { children } => {
+            // `[a b c]` — all children match the same subject. Lower each
+            // child as a sequential guard (captures flow into function-level
+            // bindings in source order). Semantically equivalent to running
+            // every child body in sequence on the same node.
+            let guards: Vec<TokenStream> = children
+                .iter()
+                .map(|child| lower_pat(child, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            Ok(quote!(#(#guards)*))
+        }
         other => Err(syn::Error::new(
             Span::call_site(),
             format!("node_pattern!: pattern feature not yet supported: {other:?}"),
@@ -1739,6 +1750,11 @@ fn collect_capture_slots(pat: &murphy_pattern::Pat, out: &mut Vec<u16>) {
                 collect_capture_slots(c, out);
             }
         }
+        PatKind::Intersection { children } => {
+            for c in children {
+                collect_capture_slots(c, out);
+            }
+        }
         PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
@@ -2109,6 +2125,16 @@ fn lower_bool_anyorder_probe(
                 .map(|alt| lower_bool_anyorder_probe(alt, subject, ctx))
                 .collect::<syn::Result<_>>()?;
             Ok(quote!( ( #(#alt_bools)||* ) ))
+        }
+        PatKind::Intersection { children } => {
+            // `[a b c]` inside an AnyOrder arm: AND of children's bool
+            // expressions, each routed through the probe path so any captures
+            // nested inside write their `__pcap{slot}` bindings.
+            let child_bools: Vec<TokenStream> = children
+                .iter()
+                .map(|child| lower_bool_anyorder_probe(child, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            Ok(quote!( ( #(#child_bools)&&* ) ))
         }
         // All other arms (Wildcard, Lit, Kind, NilTest, Not, Predicate,
         // Descend) cannot legally contain a Capture (parser-enforced), so
@@ -2513,6 +2539,16 @@ fn lower_bool(
             Span::call_site(),
             "node_pattern!: `<...>` any-order is not valid inside `{}` / `!` / `` ` ``",
         )),
+        PatKind::Intersection { children } => {
+            // `[a b c]` inside `{}` / `!` / `` ` ``: AND of children's bool
+            // expressions. Captures are structurally forbidden in the `bool`
+            // context (`lower_bool` rejects them), so each child lowers cleanly.
+            let child_bools: Vec<TokenStream> = children
+                .iter()
+                .map(|child| lower_bool(child, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            Ok(quote!( ( #(#child_bools)&&* ) ))
+        }
     }
 }
 
