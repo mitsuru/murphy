@@ -181,6 +181,33 @@ mod capture_position_tests {
             .expect_err("must reject capture in non-uniform outer union");
         assert!(e.message.contains('$'));
     }
+
+    #[test]
+    fn capture_sugar_nested_capture_in_arm_body_node_rejected() {
+        // `${(send $recv :foo) int}` — uniform sugar where one arm's body is
+        // a Node containing a nested `$recv` capture. If the `int` arm wins,
+        // `$recv`'s slot is never written. The validator must reject this.
+        let e = parse("${(send $recv :foo) int}")
+            .expect_err("must reject nested capture inside sugar arm body subtree");
+        assert!(e.message.contains('$'));
+    }
+
+    #[test]
+    fn capture_sugar_nested_capture_in_both_arm_bodies_rejected() {
+        // `${(send $_ :foo) (send $_ :bar)}` — both arms contain an
+        // anonymous `$_` nested inside the arm body's Node. Even though
+        // every arm carries a capture, each is in a *different* slot (1
+        // and 2), so the losing arm's slot is unwritten. The validator
+        // is conservative: nested captures inside sugar arm bodies are
+        // forbidden regardless of whether all arms happen to have them.
+        let e = parse("${(send $_ :foo) (send $_ :bar)}")
+            .expect_err("must reject nested capture in sugar arm bodies");
+        assert!(
+            e.message.contains('$'),
+            "expected `$` in error, got: {}",
+            e.message
+        );
+    }
 }
 
 /// Resolve a capture's slot kind from its body's shape. `Rest` and the
@@ -362,25 +389,19 @@ fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseErro
                     )
                 });
                 if all_same && !forbidden {
-                    // Validate each arm's body. The body of a sugar arm must
-                    // not itself be a `$` capture — `${int $float}` would
-                    // produce a nested slot that is never written on the
-                    // non-winning arm. Treat a bare `Capture` body as if it
-                    // were in a forbidden position.
+                    // Validate each arm's body with `forbidden = true`. Only
+                    // the outer sugar slot is guaranteed to be written by the
+                    // winning arm — any *nested* `$` capture inside an arm
+                    // body would have its slot unwritten on the losing arms.
+                    // The recursive call rejects:
+                    //   - bare Capture body, e.g. `${int $float}`
+                    //   - Capture inside Node body, e.g. `${(send $recv :foo) int}`
+                    //   - Capture inside any other forbidden-propagating shape.
                     for alt in alts {
                         let PatKind::Capture { body, .. } = &alt.kind else {
                             unreachable!("all_same guarantees Capture");
                         };
-                        // A body that is directly a Capture is forbidden
-                        // (would create an unwritten nested slot).
-                        if matches!(body.kind, PatKind::Capture { .. }) {
-                            return Err(ParseError::new(
-                                "`$` capture is not allowed inside `{}` / `!` / `` ` `` \
-                                 (the body has no definite-assignment path)",
-                                body.span,
-                            ));
-                        }
-                        validate_capture_position(body, false)?;
+                        validate_capture_position(body, true)?;
                     }
                     return Ok(());
                 }
