@@ -1280,8 +1280,17 @@ impl<'a> Parser<'a> {
                     args.push(PredArg::Lit(Lit::False));
                 }
                 Token::Ident(name) if name == "nil" => {
-                    self.pos += 1;
-                    args.push(PredArg::Lit(Lit::Nil));
+                    // `nil` has no Rust-side counterpart for a cop method
+                    // signature: the B backend would have to invent a type
+                    // (unit? `Option<NodeId>` with None?) and the choice
+                    // would diverge from the C matcher's `PredCallArg::Nil`.
+                    // Reject at parse time so both backends agree.
+                    let nil_span = next.span;
+                    return Err(ParseError::new(
+                        "`nil` is not supported as a predicate argument in v1: \
+                         `nil` has no Rust-side counterpart for the cop method signature",
+                        nil_span,
+                    ));
                 }
                 Token::Dollar => {
                     // `$ident` back-reference to an already-declared capture slot.
@@ -2527,6 +2536,21 @@ mod tests {
         assert!(
             e.message.contains("unknown or forward capture reference"),
             "expected 'unknown or forward capture reference', got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn parse_predicate_nil_arg_is_rejected() {
+        // `nil` has no Rust-side counterpart for a cop method signature; the
+        // B backend can't lower it and the C matcher's `PredCallArg::Nil`
+        // would have to be paired with an invented B-side representation.
+        // Reject in the parser so both backends stay in sync for v1.
+        let e = parse("#p?(nil)").expect_err("must reject `nil` predicate arg");
+        assert!(
+            e.message
+                .contains("`nil` is not supported as a predicate argument in v1"),
+            "expected the v1-unsupported nil-arg message, got: {}",
             e.message
         );
     }
