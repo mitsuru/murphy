@@ -1949,3 +1949,148 @@ fn predicate_with_capture_ref_arg_agrees_across_backends() {
         "C backend must forward the captured NodeId to the predicate host"
     );
 }
+
+// 12c. Literal string arg: `#starts_with?("foo")`.
+// The B backend lowers `Lit::Str("foo")` to a `&str` literal and calls
+// `starts_with_p(node, cx, "foo")`.  The C backend forwards
+// `PredCallArg::Str("foo")` to the host.
+node_pattern!(b_starts_with_foo, "#starts_with?(\"foo\")");
+
+fn starts_with_p(node: NodeId, cx: &Cx<'_>, prefix: &str) -> bool {
+    if let NodeKind::Str(id) = *cx.kind(node) {
+        cx.string_str(id).starts_with(prefix)
+    } else {
+        false
+    }
+}
+
+struct StartsWithHost<'a, 'cx> {
+    cx: &'a Cx<'cx>,
+}
+impl PredicateHost for StartsWithHost<'_, '_> {
+    fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+        if name == "starts_with?" {
+            let Some(PredCallArg::Str(prefix)) = args.first() else {
+                return false;
+            };
+            if let NodeKind::Str(id) = *self.cx.kind(node) {
+                self.cx.string_str(id).starts_with(prefix)
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+}
+
+#[test]
+fn predicate_with_literal_str_arg_agrees_across_backends() {
+    let mut b = AstBuilder::new("\"foobar\"", "t.rb");
+    let foobar_id = b.intern_string("foobar");
+    let foobar = b.push(NodeKind::Str(foobar_id), r());
+    let xyz_id = b.intern_string("xyz");
+    let xyz = b.push(NodeKind::Str(xyz_id), r());
+    let list = b.push_list(&[foobar, xyz]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let mut host = StartsWithHost { cx: &cx };
+    // "foobar" starts with "foo" → both backends match.
+    assert!(b_starts_with_foo(foobar, &cx), "B: foobar starts with foo");
+    assert_c_matches_with(
+        "#starts_with?(\"foo\")",
+        &ast,
+        foobar,
+        b_starts_with_foo(foobar, &cx),
+        &mut host,
+    );
+
+    // "xyz" does not start with "foo" → both backends miss.
+    let mut host2 = StartsWithHost { cx: &cx };
+    assert!(
+        !b_starts_with_foo(xyz, &cx),
+        "B: xyz does not start with foo"
+    );
+    assert_c_matches_with(
+        "#starts_with?(\"foo\")",
+        &ast,
+        xyz,
+        b_starts_with_foo(xyz, &cx),
+        &mut host2,
+    );
+}
+
+// 12d. Literal symbol arg: `#sym_eq?(:foo)`.
+// The B backend lowers `Lit::Sym("foo")` to a `&str` literal (stripping the
+// `:` prefix) and calls `sym_eq_p(node, cx, "foo")`.  The C backend forwards
+// `PredCallArg::Sym("foo")` to the host.
+node_pattern!(b_sym_eq_foo, "#sym_eq?(:foo)");
+
+fn sym_eq_p(node: NodeId, cx: &Cx<'_>, expected: &str) -> bool {
+    if let NodeKind::Sym(sym) = *cx.kind(node) {
+        cx.symbol_str(sym) == expected
+    } else {
+        false
+    }
+}
+
+struct SymEqHost<'a, 'cx> {
+    cx: &'a Cx<'cx>,
+}
+impl PredicateHost for SymEqHost<'_, '_> {
+    fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+        if name == "sym_eq?" {
+            let Some(PredCallArg::Sym(expected)) = args.first() else {
+                return false;
+            };
+            if let NodeKind::Sym(sym) = *self.cx.kind(node) {
+                self.cx.symbol_str(sym) == *expected
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+}
+
+#[test]
+fn predicate_with_literal_sym_arg_agrees_across_backends() {
+    let mut b = AstBuilder::new(":foo", "t.rb");
+    let foo_sym = b.intern_symbol("foo");
+    let foo_node = b.push(NodeKind::Sym(foo_sym), r());
+    let bar_sym = b.intern_symbol("bar");
+    let bar_node = b.push(NodeKind::Sym(bar_sym), r());
+    let list = b.push_list(&[foo_node, bar_node]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let mut host = SymEqHost { cx: &cx };
+    // :foo == :foo → both backends match.
+    assert!(b_sym_eq_foo(foo_node, &cx), "B: :foo equals :foo");
+    assert_c_matches_with(
+        "#sym_eq?(:foo)",
+        &ast,
+        foo_node,
+        b_sym_eq_foo(foo_node, &cx),
+        &mut host,
+    );
+
+    // :bar != :foo → both backends miss.
+    let mut host2 = SymEqHost { cx: &cx };
+    assert!(!b_sym_eq_foo(bar_node, &cx), "B: :bar does not equal :foo");
+    assert_c_matches_with(
+        "#sym_eq?(:foo)",
+        &ast,
+        bar_node,
+        b_sym_eq_foo(bar_node, &cx),
+        &mut host2,
+    );
+}
