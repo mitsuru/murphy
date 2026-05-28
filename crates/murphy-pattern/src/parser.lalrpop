@@ -1,4 +1,60 @@
-// Test - add NodeMatch and UnionPrimary.
+// LALRPOP grammar for Murphy's S-expression pattern language.
+//
+// Grammar–to–parser.y correspondence
+// ====================================
+// The reference grammar is RuboCop's node_pattern parser.y (103 lines).
+// The table below maps each parser.y production to the LALRPOP rule(s)
+// that implement it.  Productions deferred to later phases are noted.
+//
+// parser.y production              | LALRPOP rule(s)
+// ---------------------------------|-------------------------------------------
+// node_pattern                     | Pattern → Prefixed
+// node_pattern_no_union            | Prefixed (!, ^, `, $, Postfixed)
+//   '(' variadic_pattern_list ')'  | NodeMatch (children: NodeChild*)
+//   '[' node_pattern_list ']'      | (deferred — beads murphy-l448: intersection)
+//   '!' node_pattern               | Prefixed "!" <inner:Prefixed>
+//   '^' node_pattern               | Prefixed "^" <inner:Prefixed>
+//   '`' node_pattern               | Prefixed "`" <inner:Prefixed>
+//   '$' node_pattern               | Capture rule (also CaptureBody)
+//   tFUNCTION_CALL args            | (not in v1 scope — subset of predicate)
+//   tPREDICATE args                | Primary/CapturePrimary "predicate" arm;
+//                                  |   args pre-folded by fold_predicate_args
+//   tNODE_TYPE                     | Primary/CapturePrimary "ident" arm
+//                                  |   → kind_or_unknown_ident → PatKind::Kind
+//   atom                           | (see atom table below)
+// ---------------------------------|-------------------------------------------
+// atom                             | Primary / CapturePrimary literals
+//   tSYMBOL                        | "sym" token → PatKind::Lit(Sym)
+//   tNUMBER                        | "int" / "float" tokens → PatKind::Lit
+//   tSTRING                        | "str" token → PatKind::Lit(Str)
+//   tWILDCARD                      | "_" → PatKind::Wildcard
+//   tPARAM_NAMED                   | (not in v1 scope — Ruby-side $name params)
+//   tPARAM_NUMBER                  | (not in v1 scope — Ruby-side $1/$2 params)
+//   tPARAM_CONST                   | (deferred — beads murphy-kq57)
+//   tREGEXP                        | (deferred — beads murphy-t8km)
+//   tUNIFY                         | (deferred — beads murphy-nnr8)
+// ---------------------------------|-------------------------------------------
+// union (with '|' separator)       | UnionPrimary (brace form only);
+//                                  |   '|' pipe separator between alternatives
+//                                  |   (deferred — beads murphy-wsep)
+// variadic_pattern                 | NodeChild (child of NodeMatch)
+//   node_pattern repetition        | Postfixed / CapturePostfixed + Quantifier
+//   opt_capture '<' … opt_rest '>' | AnyOrder rule; note: opt_capture (i.e.
+//                                  |   $<...> capture-of-any-order) is not in v1
+//   rest                           | NodeChild / AnyOrderChild "..." arm
+// repetition (?, *, +)             | Quantifier rule
+// opt_capture                      | handled inline in Capture + AnyOrder rules
+// rest (with opt_capture)          | NodeChild "..." + Capture "$" "..."
+// args (tARG_LIST …)               | not in grammar; pre-folded by
+//                                  |   fold_predicate_args in parser.rs
+// ---------------------------------|-------------------------------------------
+// D-phase deferred (not added here):
+//   intersection `[...]`           — beads murphy-l448
+//   union pipe `|`                 — beads murphy-wsep
+//   tPARAM_CONST                   — beads murphy-kq57
+//   tUNIFY                         — beads murphy-nnr8
+//   tREGEXP                        — beads murphy-t8km
+
 use crate::lexer::Token;
 use crate::{Head, Lit, ParseError, Pat, PatKind, PatSpan};
 use crate::parser::{make_capture_placeholder, resolve_kind};

@@ -1,25 +1,41 @@
 //! Pattern parser entry point and post-parse passes.
 //!
-//! As of beads issue murphy-qpf9 Round 2, the actual grammar lives in
-//! `src/parser.lalrpop` and is compiled at build time into the
-//! `lalrpop_parser` module included by `lib.rs`. This file hosts:
+//! The grammar itself lives in `src/parser.lalrpop` (compiled at build time
+//! into `crate::lalrpop_parser_inner::lalrpop_parser`).  This file provides:
 //!
-//! * `pub fn parse` — the top-level entry. Tokenises the source, hands the
-//!   token stream to the LALRPOP-generated parser, then runs the post-passes
-//!   below in order.
-//! * `assign_capture_slots` — walks the AST and assigns dense slot indices
-//!   in source order, collapsing the `${...}` sugar marker into a single
-//!   shared slot per Union.
-//! * `resolve_pred_capture_refs` — walks predicate args, swapping the
-//!   `\0capref:<name>` sentinel string back to a real `PredArg::Capture(slot)`
-//!   using the name table built during slot allocation. Forward / unknown
-//!   references error here, matching the hand-written parser's behaviour.
-//! * `validate_rest_placement`, `validate_capture_position`,
-//!   `validate_quantifier_placement` — the structural walks that enforce
-//!   the v1 grammar rules. Unchanged from the pre-LALRPOP parser.
-//! * Helper functions exposed to the grammar's actions:
-//!   `make_capture_placeholder`, `kind_or_unknown_ident`, `resolve_kind`,
-//!   `check_oneof_kind`, `pred_arg_from_ident`.
+//! * **Entry point** — `pub fn parse` tokenises the source, runs the token
+//!   pre-passes, invokes the LALRPOP-generated parser, then applies the
+//!   post-passes below in order.
+//!
+//! * **Token preprocessing** — `fold_bare_predicate_shorthand` and
+//!   `fold_predicate_args` transform the flat token stream before it reaches
+//!   the grammar, sidestepping LR(1) conflicts that would otherwise require
+//!   grammar-level lookahead into argument lists.
+//!
+//! * **Diagnostic pre-scan** — `diagnose_shape_errors` walks the folded token
+//!   stream and emits span-precise messages for errors whose location the
+//!   LALRPOP generic "unexpected token" diagnostic cannot reproduce.
+//!
+//! * **Grammar-action helpers** — small `pub(crate)` functions called from
+//!   `parser.lalrpop` action bodies: `make_capture_placeholder`,
+//!   `kind_or_unknown_ident`, `resolve_kind`, `split_predicate_name`.
+//!
+//! * **Post-passes** (applied in order after the grammar returns):
+//!   1. `convert_named_captures` — rewrites `$ident` anonymous-capture nodes
+//!      back to the `Capture { name: Some(ident), body: Wildcard }` shape.
+//!   2. `validate_bare_predicate_position` — enforces that bare-predicate
+//!      shorthand (e.g. `even?` without `#`) only appears in node-child slots
+//!      where the schema permits it.
+//!   3. `assign_capture_slots` — assigns dense slot indices in source order,
+//!      detecting the `${...}` uniform-capture sugar shape.
+//!   4. `resolve_pred_capture_refs` — resolves `$name` back-references inside
+//!      predicate arg lists to slot indices; forward references are rejected.
+//!   5. `validate_rest_placement` — rejects `...`/`$...` outside direct node
+//!      children and duplicate rests in one child list.
+//!   6. `validate_capture_position` — rejects captures on non-definite-
+//!      assignment paths (inside `!`/`` ` ``/non-uniform unions).
+//!   7. `validate_quantifier_placement` — rejects quantifiers outside direct
+//!      node children and captures/rests inside quantifier bodies.
 
 use crate::ast::PredArg;
 use crate::lexer::{Spanned, Token, tokenize};
@@ -590,22 +606,13 @@ pub(crate) fn resolve_kind(name: &str, span: PatSpan) -> Result<NodeKindTag, Par
         .ok_or_else(|| ParseError::new(format!("unknown node type `{name}`"), span))
 }
 
-/// Build a `Head::OneOf` from a non-empty vector of (tag, span) pairs.
-/// Currently infallible — `(tag, span)` pairs reaching here are already
-/// resolved by `resolve_kind`. The signature returns `Result` so the
-/// grammar can route through `=>?`.
-#[allow(dead_code)]
-pub(crate) fn check_oneof_kind(tags: Vec<(NodeKindTag, PatSpan)>) -> Result<Head, ParseError> {
-    Ok(Head::OneOf(tags.into_iter().map(|(t, _)| t).collect()))
-}
-
 /// Resolve a bare ident at primary position to a `Pat`:
 /// * `true` / `false` / `nil` -> the corresponding literal,
 /// * a known node-kind name -> `PatKind::Kind(tag)`,
-/// * otherwise -> `PatKind::Predicate { name, args: vec![] }` (bare-predicate
-///   shorthand). Round 2 always emits the shorthand for unknown names; the
-///   position-validity check (must be in a node-child slot) is deferred to
-///   Round 3 along with the "unknown node type" hint diagnostic.
+/// * otherwise -> `PatKind::Predicate { name, args: vec![] }` tagged with
+///   `BARE_IDENT_MARKER` (bare-predicate shorthand). The position-validity
+///   check (`validate_bare_predicate_position`) runs in a post-pass and
+///   rejects bare predicates that appear outside a permitted node-child slot.
 pub(crate) fn kind_or_unknown_ident(name: &str, span: PatSpan) -> Pat {
     let kind = match name {
         "true" => PatKind::Lit(Lit::True),
@@ -616,13 +623,13 @@ pub(crate) fn kind_or_unknown_ident(name: &str, span: PatSpan) -> Pat {
                 PatKind::Kind(tag)
             } else {
                 // Unknown ident. Tag the predicate name with `BARE_IDENT_MARKER`
-                // so the post-pass `validate_bare_predicate_root` can tell
+                // so the post-pass `validate_bare_predicate_position` can tell
                 // bare-ident shorthand apart from explicit `#name` predicates.
                 // After `convert_named_captures` rewrites `Capture { body:
                 // Predicate(bare-ident) }` to the named-capture shape, the
                 // remaining bare-ident Predicates are real bare-predicate
                 // shorthand candidates — at the root they're rejected; in
-                // node-child slots Round 3 will validate position.
+                // node-child slots `validate_bare_predicate_position` decides.
                 PatKind::Predicate {
                     name: format!("{BARE_IDENT_MARKER}{name}"),
                     args: vec![],
@@ -631,25 +638,6 @@ pub(crate) fn kind_or_unknown_ident(name: &str, span: PatSpan) -> Pat {
         }
     };
     Pat { kind, span }
-}
-
-/// Build a `PredArg` from a bare identifier inside a predicate-arg list.
-/// `true` / `false` are valid literals; `nil` is rejected per the v1 contract.
-#[allow(dead_code)]
-pub(crate) fn pred_arg_from_ident(name: &str, span: PatSpan) -> Result<PredArg, ParseError> {
-    match name {
-        "true" => Ok(PredArg::Lit(Lit::True)),
-        "false" => Ok(PredArg::Lit(Lit::False)),
-        "nil" => Err(ParseError::new(
-            "`nil` is not supported as a predicate argument in v1: \
-             `nil` has no Rust-side counterpart for the cop method signature",
-            span,
-        )),
-        _ => Err(ParseError::new(
-            "pattern args in v1: literal/capture only",
-            span,
-        )),
-    }
 }
 
 // ============================================================================
