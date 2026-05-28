@@ -1001,6 +1001,35 @@ node_pattern!(is_float_one_five, "1.5");
 node_pattern!(is_str_hello, "\"hello\"");
 node_pattern!(is_false_lit, "false");
 
+// ── Predicate with string-literal arg: `#starts_with?("foo")` ─────────
+// B-backend acceptance criterion (murphy-jyi §2): `Lit::Str` arg is lowered
+// to a `&str` literal. The generated call is:
+//   `starts_with_p(node, cx, "foo")`
+node_pattern!(is_starts_with_foo, "#starts_with?(\"foo\")");
+
+fn starts_with_p(node: NodeId, cx: &Cx<'_>, prefix: &str) -> bool {
+    if let NodeKind::Str(id) = *cx.kind(node) {
+        cx.string_str(id).starts_with(prefix)
+    } else {
+        false
+    }
+}
+
+// ── Predicate with symbol-literal arg: `#sym_eq?(:foo)` ───────────────
+// B-backend acceptance criterion (murphy-jyi §3): `Lit::Sym` arg is lowered
+// to a `&str` literal (the symbol name without the `:` prefix). The generated
+// call is:
+//   `sym_eq_p(node, cx, "foo")`
+node_pattern!(is_sym_eq_foo, "#sym_eq?(:foo)");
+
+fn sym_eq_p(node: NodeId, cx: &Cx<'_>, expected: &str) -> bool {
+    if let NodeKind::Sym(sym) = *cx.kind(node) {
+        cx.symbol_str(sym) == expected
+    } else {
+        false
+    }
+}
+
 #[test]
 fn float_str_false_literal_lowerings() {
     let mut b = AstBuilder::new("src", "t.rb");
@@ -1025,4 +1054,48 @@ fn float_str_false_literal_lowerings() {
     assert!(!is_str_hello(world, &cx));
     assert!(is_false_lit(f, &cx));
     assert!(!is_false_lit(t, &cx));
+}
+
+#[test]
+fn predicate_with_str_literal_arg_calls_fn_with_str_ref() {
+    // `#starts_with?("foo")` — B backend lowers `Lit::Str("foo")` to a
+    // `&str` literal and passes it as the third argument to `starts_with_p`.
+    let mut b = AstBuilder::new("src", "t.rb");
+    let foobar_id = b.intern_string("foobar");
+    let foobar = b.push(NodeKind::Str(foobar_id), r());
+    let xyz_id = b.intern_string("xyz");
+    let xyz = b.push(NodeKind::Str(xyz_id), r());
+    let list = b.push_list(&[foobar, xyz]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // "foobar".starts_with("foo") → true
+    assert!(is_starts_with_foo(foobar, &cx));
+    // "xyz".starts_with("foo") → false
+    assert!(!is_starts_with_foo(xyz, &cx));
+}
+
+#[test]
+fn predicate_with_sym_literal_arg_calls_fn_with_str_ref() {
+    // `#sym_eq?(:foo)` — B backend lowers `Lit::Sym("foo")` to a `&str`
+    // literal (stripping the `:` prefix) and passes it to `sym_eq_p`.
+    let mut b = AstBuilder::new("src", "t.rb");
+    let foo_sym = b.intern_symbol("foo");
+    let foo_node = b.push(NodeKind::Sym(foo_sym), r());
+    let bar_sym = b.intern_symbol("bar");
+    let bar_node = b.push(NodeKind::Sym(bar_sym), r());
+    let list = b.push_list(&[foo_node, bar_node]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // :foo == :foo → true
+    assert!(is_sym_eq_foo(foo_node, &cx));
+    // :bar == :foo → false
+    assert!(!is_sym_eq_foo(bar_node, &cx));
 }
