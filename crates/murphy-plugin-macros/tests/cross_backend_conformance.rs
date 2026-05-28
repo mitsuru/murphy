@@ -2780,3 +2780,108 @@ fn d3_tparam_const_raise_foo_hits_and_misses() {
     );
     assert_c_matches("(send nil? :raise Foo)", &ast_sym, send_sym, b_miss_sym);
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// 14. D4 (murphy-nnr8): tUNIFY — `_name` NodeId unification.
+//
+// B↔C conformance: both backends must agree on hit/miss for patterns
+// containing `_name` unification atoms. The key semantic is that the
+// **first** occurrence of `_name` binds the subject's NodeId; subsequent
+// occurrences require equality.
+// ────────────────────────────────────────────────────────────────────────
+
+/// `obj.foo(obj)` — receiver and sole arg share the *same* NodeId.
+fn same_recv_arg_ast() -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("obj.foo(obj)", "t.rb");
+    let sym = b.intern_symbol("obj");
+    let obj = b.push(NodeKind::Lvar(sym), r());
+    let m = b.intern_symbol("foo");
+    let args = b.push_list(&[obj]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(obj),
+            method: m,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send)
+}
+
+/// `obj.foo(other)` — receiver and arg are *different* NodeIds.
+fn diff_recv_arg_ast() -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("obj.foo(other)", "t.rb");
+    let obj_sym = b.intern_symbol("obj");
+    let other_sym = b.intern_symbol("other");
+    let obj = b.push(NodeKind::Lvar(obj_sym), r());
+    let other = b.push(NodeKind::Lvar(other_sym), r());
+    let m = b.intern_symbol("foo");
+    let args = b.push_list(&[other]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(obj),
+            method: m,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send)
+}
+
+node_pattern!(b_send_x_any_x, "(send _x _ _x)");
+node_pattern!(b_send_x_any_y, "(send _x _ _y)");
+
+#[test]
+fn unify_same_node_hits_both_backends() {
+    // `(send _x _ _x)` with obj.foo(obj) (same NodeId) → hit in both B and C.
+    let fns = fns();
+    let (ast, send) = same_recv_arg_ast();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_hit: bool = b_send_x_any_x(send, &cx);
+    assert!(b_hit, "B: (send _x _ _x) must hit when recv == arg NodeId");
+    assert_c_matches("(send _x _ _x)", &ast, send, b_hit);
+}
+
+#[test]
+fn unify_different_nodes_misses_both_backends() {
+    // `(send _x _ _x)` with obj.foo(other) (different NodeIds) → miss in both.
+    let fns = fns();
+    let (ast, send) = diff_recv_arg_ast();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_miss: bool = b_send_x_any_x(send, &cx);
+    assert!(
+        !b_miss,
+        "B: (send _x _ _x) must miss when recv != arg NodeId"
+    );
+    assert_c_matches("(send _x _ _x)", &ast, send, b_miss);
+}
+
+#[test]
+fn unify_two_distinct_names_independent_both_backends() {
+    // `(send _x _ _y)` — `_x` and `_y` are independent; must hit for both
+    // same-node and different-node subjects.
+    let fns = fns();
+
+    let (ast, send) = same_recv_arg_ast();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let b_same: bool = b_send_x_any_y(send, &cx);
+    assert!(b_same, "B: (send _x _ _y) must hit for same-node subject");
+    assert_c_matches("(send _x _ _y)", &ast, send, b_same);
+
+    let (ast2, send2) = diff_recv_arg_ast();
+    let raw2 = cx_raw_for(&ast2, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let b_diff: bool = b_send_x_any_y(send2, &cx2);
+    assert!(
+        b_diff,
+        "B: (send _x _ _y) must hit for different-node subject"
+    );
+    assert_c_matches("(send _x _ _y)", &ast2, send2, b_diff);
+}
