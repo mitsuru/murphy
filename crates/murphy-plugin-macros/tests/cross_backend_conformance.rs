@@ -2682,3 +2682,101 @@ fn union_pipe_separator_agrees_across_backends() {
     );
     assert!(!b_miss_c, "B: pipe union must miss c()");
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// D3 (murphy-kq57): tPARAM_CONST — `Foo` uppercase-start atom.
+//
+// `Foo` / `%Foo` are expanded to `(const _ :Foo)` at parse time.
+// The pattern `(send _ :raise Foo)` matches `raise(Foo)` but not
+// `raise(Bar)` (different name) or `raise(:foo)` (Sym kind, not Const).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Build `raise(Foo)` — a send with a Const arg: `(send nil? :raise (const nil :Foo))`.
+fn raise_const_ast(const_name: &str) -> (Ast, NodeId, NodeId) {
+    let mut b = AstBuilder::new("raise(Foo)", "t.rb");
+    let name_sym = b.intern_symbol(const_name);
+    let const_node = b.push(
+        NodeKind::Const {
+            scope: OptNodeId::NONE,
+            name: name_sym,
+        },
+        r(),
+    );
+    let method_sym = b.intern_symbol("raise");
+    let args = b.push_list(&[const_node]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: method_sym,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send, const_node)
+}
+
+/// Build `raise(:foo)` — a send with a Sym literal arg (not a Const node).
+fn raise_sym_ast(sym_name: &str) -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("raise(:foo)", "t.rb");
+    let sym = b.intern_symbol(sym_name);
+    let sym_node = b.push(NodeKind::Sym(sym), r());
+    let method_sym = b.intern_symbol("raise");
+    let args = b.push_list(&[sym_node]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: method_sym,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    (ast, send)
+}
+
+// D3: `Foo` expands to `(const nil? :Foo)` at parse time.
+// `nil?` is used for the receiver slot (not `_`) because Murphy's `_` in an
+// OptNode slot rejects `None` — see the note in `const_or_kind_or_unknown_ident`.
+node_pattern!(b_send_raise_foo, "(send nil? :raise Foo)");
+node_pattern!(
+    b_send_raise_explicit_const,
+    "(send nil? :raise (const nil? :Foo))"
+);
+
+#[test]
+fn d3_tparam_const_raise_foo_hits_and_misses() {
+    let fns = fns();
+    // Pattern: `(send nil? :raise Foo)` — `Foo` is expanded to `(const nil? :Foo)`.
+    // We use `nil?` for the receiver so we accept `raise(Foo)` (no receiver).
+
+    // ── hit: `raise(Foo)` ──────────────────────────────────────────────
+    let (ast_foo, send_foo, _const_foo) = raise_const_ast("Foo");
+    let raw_foo = cx_raw_for(&ast_foo, &fns);
+    let cx_foo = unsafe { Cx::from_raw(&raw_foo) };
+    let b_hit: bool = b_send_raise_foo(send_foo, &cx_foo);
+    assert!(b_hit, "B: `(send nil? :raise Foo)` must hit on raise(Foo)");
+    assert_c_matches("(send nil? :raise Foo)", &ast_foo, send_foo, b_hit);
+
+    // ── miss: `raise(Bar)` — different constant name ───────────────────
+    let (ast_bar, send_bar, _) = raise_const_ast("Bar");
+    let raw_bar = cx_raw_for(&ast_bar, &fns);
+    let cx_bar = unsafe { Cx::from_raw(&raw_bar) };
+    let b_miss_bar: bool = b_send_raise_foo(send_bar, &cx_bar);
+    assert!(
+        !b_miss_bar,
+        "B: `(send nil? :raise Foo)` must miss on raise(Bar)"
+    );
+    assert_c_matches("(send nil? :raise Foo)", &ast_bar, send_bar, b_miss_bar);
+
+    // ── miss: `raise(:foo)` — Sym node, not Const ──────────────────────
+    let (ast_sym, send_sym) = raise_sym_ast("foo");
+    let raw_sym = cx_raw_for(&ast_sym, &fns);
+    let cx_sym = unsafe { Cx::from_raw(&raw_sym) };
+    let b_miss_sym: bool = b_send_raise_foo(send_sym, &cx_sym);
+    assert!(
+        !b_miss_sym,
+        "B: `(send nil? :raise Foo)` must miss on raise(:foo)"
+    );
+    assert_c_matches("(send nil? :raise Foo)", &ast_sym, send_sym, b_miss_sym);
+}

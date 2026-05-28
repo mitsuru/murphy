@@ -57,7 +57,6 @@
 //                                  |   fold_predicate_args in parser.rs
 // ---------------------------------|-------------------------------------------
 // D-phase deferred (not added here):
-//   tPARAM_CONST                   — beads murphy-kq57
 //   tUNIFY                         — beads murphy-nnr8
 //   tREGEXP                        — beads murphy-t8km
 
