@@ -274,11 +274,29 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        // Consume flag characters `[imxo]*`.
+        // Consume flag characters `[imxo]*`. Any other ASCII alphabetic byte
+        // immediately after the closing `/` is rejected — without this guard
+        // `/foo/z` would lex as `Regex("foo","")` followed by `Ident("z")`,
+        // silently mis-parsing.
         let mut flags = String::new();
-        while matches!(self.peek(), Some(b'i' | b'm' | b'x' | b'o')) {
-            flags.push(*self.peek().unwrap() as char);
-            self.pos += 1;
+        loop {
+            match self.peek() {
+                Some(&b @ (b'i' | b'm' | b'x' | b'o')) => {
+                    flags.push(b as char);
+                    self.pos += 1;
+                }
+                Some(&b) if b.is_ascii_alphabetic() => {
+                    return Err(self.err_at(
+                        self.pos,
+                        self.pos + 1,
+                        format!(
+                            "unknown regex flag `{}` (allowed flags: i, m, x, o)",
+                            b as char
+                        ),
+                    ));
+                }
+                _ => break,
+            }
         }
         Ok(Token::Regex(pattern, flags))
     }
@@ -566,6 +584,10 @@ mod tests {
             .into_iter()
             .map(|s| s.tok)
             .collect()
+    }
+
+    fn run_err(src: &str) -> ParseError {
+        tokenize(src).expect_err("lex must fail")
     }
 
     #[test]
@@ -1200,6 +1222,21 @@ mod tests {
         // `/abc/o` — `o` (once-compile) is accepted lexically and stored in
         // the flags string, even though it has no runtime effect.
         assert_eq!(toks("/abc/o"), vec![Token::Regex("abc".into(), "o".into())]);
+    }
+
+    #[test]
+    fn regex_unknown_flag_is_rejected() {
+        // `/foo/z` must error rather than lex as `Regex("foo","")` + `Ident("z")`.
+        // The lexer rejects any ASCII alphabetic byte immediately after the
+        // closing `/` that isn't one of `i`/`m`/`x`/`o`.
+        let e = run_err("/foo/z");
+        assert!(
+            e.message.contains("unknown regex flag"),
+            "expected unknown-regex-flag diagnostic, got: {}",
+            e.message
+        );
+        // Non-alphabetic neighbours stay valid:
+        assert_eq!(toks("/foo/ "), vec![Token::Regex("foo".into(), "".into())]);
     }
 
     #[test]
