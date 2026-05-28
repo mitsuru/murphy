@@ -6,6 +6,7 @@
 //! the runtime-typed equivalent: slot-indexed, one entry per `$` capture in
 //! source order. Slot numbering matches `PatternIr::captures` exactly.
 
+use crate::ir::StrRef;
 use murphy_ast::NodeId;
 
 /// One captured value. The variant mirrors the pattern's [`CaptureKind`]:
@@ -75,9 +76,17 @@ impl Captures {
 /// In-progress capture buffer used by the matcher. Slot-sized at start; each
 /// slot is `None` until a successful pattern arm writes it. On a top-level
 /// match success the matcher unwraps every slot into a [`Captures`].
+///
+/// Also carries the unification table for `_name` atoms (D4, murphy-nnr8).
+/// Each entry is `(name_ref, node_id)` where `name_ref` addresses the name
+/// string in `PatternIr::str_pool`. The table grows as names are first bound
+/// and is snapshot/restored by the same `Clone` discipline used for `$` slots.
 #[derive(Debug, Clone)]
 pub(crate) struct CaptureBuf {
     slots: Vec<Option<CaptureValue>>,
+    /// Unification table: `(name StrRef, bound NodeId)` entries in bind order.
+    /// Lookup is linear (tables are tiny in practice) and clone is cheap.
+    pub(crate) unify: Vec<(StrRef, NodeId)>,
 }
 
 impl CaptureBuf {
@@ -87,6 +96,7 @@ impl CaptureBuf {
     pub(crate) fn new(n: usize) -> CaptureBuf {
         CaptureBuf {
             slots: vec![None; n],
+            unify: Vec::new(),
         }
     }
 

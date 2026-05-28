@@ -140,6 +140,19 @@ pub enum IrNode {
     Intersection {
         children: IrSlice,
     },
+    /// `_name` — named unification atom (D4, murphy-nnr8). The first
+    /// occurrence of `name` in a match binds the current subject's `NodeId`;
+    /// subsequent occurrences require the subject's `NodeId` to be equal.
+    /// The unification table lives in [`CaptureBuf`] alongside `$` captures
+    /// and is snapshot/restored by the same clone discipline.
+    ///
+    /// Semantic note: Murphy uses [`NodeId`] equality, not structural
+    /// equality; see [`crate::PatKind::Unify`] for rationale.
+    ///
+    /// [`NodeId`]: murphy_ast::NodeId
+    Unify {
+        name: StrRef,
+    },
 }
 
 /// The head of an `IrNode::Node`.
@@ -384,6 +397,10 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
                     children: child_slice,
                 },
             )
+        }
+        PatKind::Unify { name } => {
+            let name_ref = intern(ir, name);
+            push_node(ir, IrNode::Unify { name: name_ref })
         }
     }
 }

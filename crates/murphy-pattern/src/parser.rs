@@ -791,7 +791,8 @@ fn convert_named_captures(pat: &mut Pat) {
         | PatKind::NilTest
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => {}
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. } => {}
     }
 }
 
@@ -921,7 +922,8 @@ fn validate_bare_predicate_position(pat: &mut Pat, pos: BarePos<'_>) -> Result<(
         | PatKind::NilTest
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => {}
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. } => {}
     }
     Ok(())
 }
@@ -1051,7 +1053,8 @@ fn walk_assign(pat: &mut Pat, state: &mut SlotState) -> Result<(), ParseError> {
         | PatKind::Rest
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => {}
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. } => {}
     }
     Ok(())
 }
@@ -1136,7 +1139,8 @@ fn resolve_pred_capture_refs(
         | PatKind::NilTest
         | PatKind::Rest
         | PatKind::Lit(_)
-        | PatKind::Kind(_) => {}
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. } => {}
     }
     Ok(())
 }
@@ -1222,7 +1226,8 @@ fn validate_quantifier_placement(pat: &Pat, is_node_child: bool) -> Result<(), P
         | PatKind::NilTest
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => Ok(()),
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. } => Ok(()),
     }
 }
 
@@ -1269,7 +1274,8 @@ fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
         | PatKind::NilTest
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => Ok(()),
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. } => Ok(()),
     }
 }
 
@@ -1346,7 +1352,8 @@ fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseErro
         | PatKind::NilTest
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => Ok(()),
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. } => Ok(()),
     }
 }
 
@@ -1410,7 +1417,8 @@ fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseEr
         | PatKind::NilTest
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => {}
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. } => {}
     }
     Ok(())
 }
@@ -3133,5 +3141,67 @@ mod tparam_const_tests {
             }
             other => panic!("expected Capture, got {other:?}"),
         }
+    }
+}
+
+// ============================================================================
+// D4 (murphy-nnr8): tUNIFY — `_name` named wildcard with unification.
+// ============================================================================
+
+#[cfg(test)]
+mod unify_tests {
+    use crate::{PatKind, parse};
+
+    #[test]
+    fn bare_unify_parses_as_unify_kind_with_name_without_underscore() {
+        // `_x` → PatKind::Unify { name: "x" } (no leading `_` in name).
+        let p = parse("_x").expect("`_x` must parse");
+        match &p.root.kind {
+            PatKind::Unify { name } => {
+                assert_eq!(name, "x", "unify name should be without leading `_`");
+            }
+            other => panic!("expected PatKind::Unify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unify_with_longer_name_parses_correctly() {
+        let p = parse("_foo").expect("`_foo` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Unify { name } if name == "foo"));
+
+        let p = parse("_my_var").expect("`_my_var` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Unify { name } if name == "my_var"));
+    }
+
+    #[test]
+    fn wildcard_is_distinct_from_unify() {
+        // `_` alone stays Wildcard, not Unify.
+        let p = parse("_").expect("`_` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Wildcard));
+    }
+
+    #[test]
+    fn node_pattern_with_two_unify_atoms_parses() {
+        // `(send _x _ _x)` — unification example; must parse without error.
+        let p = parse("(send _x _ _x)").expect("`(send _x _ _x)` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Node { .. }));
+    }
+
+    #[test]
+    fn unify_and_wildcard_together_parse() {
+        // `(send _x _ _y)` — two distinct unify names.
+        let p = parse("(send _x _ _y)").expect("`(send _x _ _y)` must parse");
+        assert!(matches!(&p.root.kind, PatKind::Node { .. }));
+    }
+
+    #[test]
+    fn unify_has_no_captures() {
+        // Unify is NOT a `$` capture — slot count must be 0.
+        let p = parse("(send _x _ _x)").expect("ok");
+        assert_eq!(
+            p.n_captures(),
+            0,
+            "unify atoms must not create capture slots"
+        );
     }
 }
