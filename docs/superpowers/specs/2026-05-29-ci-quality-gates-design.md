@@ -30,10 +30,13 @@ Windows is intentionally out of scope for this change. It can be added later if 
 Keep a single `ci.yml` workflow and split work into smaller jobs:
 
 - `fmt`: Linux-only, runs on pull requests, `main`, and manual dispatch.
-- `check`: Linux-only, runs on pull requests, `main`, and manual dispatch.
+- `cargo-check`: Linux-only, runs on pull requests, `main`, and manual dispatch.
 - `test`: Linux/macOS matrix, runs on pull requests, `main`, and manual dispatch.
 - `clippy`: Linux-only, runs only on `main` and manual dispatch.
+- `full-test`: Linux/macOS matrix, runs only on `main` and manual dispatch.
 - `markdownlint`: unchanged trigger behavior.
+
+Keep a final aggregate `check` job as the required branch-protection gate. It depends on `fmt`, `cargo-check`, `test`, `clippy`, `full-test`, and `markdownlint`, runs with `if: always()`, and fails only when a needed job is `failure` or `cancelled`. `success` and `skipped` are acceptable so pull requests can intentionally skip the heavier `clippy` and `full-test` jobs.
 
 Use the same Rust setup pattern as the current workflow: checkout, `jdx/mise-action@v2`, Rust components, pinned nightly rustfmt where needed, and `Swatinem/rust-cache`.
 
@@ -44,6 +47,7 @@ The perf workflow is heavier than the desired PR feedback loop because it instal
 ## Acceptance Criteria
 
 - Pull request CI includes Linux `fmt`, Linux `cargo check --workspace --all-targets`, Linux/macOS `cargo test --workspace`, and markdownlint.
+- The required `check` status remains an aggregate gate covering all relevant CI jobs.
 - `clippy -D warnings` no longer runs on every pull request.
 - `clippy -D warnings` still runs on `main` pushes and manual dispatch.
 - `cargo test --workspace --no-fail-fast` runs on Linux and macOS for `main` pushes and manual dispatch.

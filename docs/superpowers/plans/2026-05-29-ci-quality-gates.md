@@ -4,7 +4,7 @@
 
 **Goal:** Split CI into fast pull-request gates and heavier `main`/manual quality gates.
 
-**Architecture:** Keep GitHub Actions configuration in the existing workflow files. Split `.github/workflows/ci.yml` into focused jobs, and restrict `.github/workflows/phase6-perf.yml` to `main`/manual runs.
+**Architecture:** Keep GitHub Actions configuration in the existing workflow files. Split `.github/workflows/ci.yml` into focused jobs with a final aggregate `check` gate, and restrict `.github/workflows/phase6-perf.yml` to `main`/manual runs.
 
 **Tech Stack:** GitHub Actions, Rust/Cargo, mise, Swatinem/rust-cache, markdownlint-cli2.
 
@@ -59,7 +59,7 @@ jobs:
       - name: cargo fmt
         run: cargo +nightly-2026-05-24 fmt --check
 
-  check:
+  cargo-check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -137,13 +137,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DavidAnson/markdownlint-cli2-action@v20
+
+  check:
+    if: always()
+    runs-on: ubuntu-latest
+    needs: [fmt, cargo-check, test, clippy, full-test, markdownlint]
+    steps:
+      - name: Check required job results
+        env:
+          NEEDS: ${{ toJson(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS"])
+          failed = {
+              name: job["result"]
+              for name, job in needs.items()
+              if job["result"] in {"failure", "cancelled"}
+          }
+          if failed:
+              for name, result in failed.items():
+                  print(f"{name}: {result}")
+              sys.exit(1)
+          PY
 ```
 
 - [ ] **Step 2: Validate the workflow file changed as intended**
 
 Run: `git diff -- .github/workflows/ci.yml`
 
-Expected: the old `check` job is replaced by `fmt`, `check`, `test`, `clippy`, and `full-test`; `clippy` and `full-test` contain `if: github.event_name != 'pull_request'`.
+Expected: the old monolithic Rust `check` job is replaced by `fmt`, `cargo-check`, `test`, `clippy`, and `full-test`, plus a final aggregate `check` job; `clippy` and `full-test` contain `if: github.event_name != 'pull_request'`, and the aggregate `check` job needs all relevant CI jobs.
 
 ### Task 2: Restrict Perf Workflow
 

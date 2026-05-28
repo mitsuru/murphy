@@ -14,21 +14,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
+  fmt:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up toolchain (mise)
         uses: jdx/mise-action@v2
 
-      - name: Install rustfmt + clippy components
-        run: rustup component add rustfmt clippy
-
       - name: Install nightly rustfmt
-        # Pinned date keeps fmt output stable across CI runs; bump deliberately
-        # when adopting a new nightly rustfmt release.
         run: rustup toolchain install nightly-2026-05-24 --profile minimal --component rustfmt
 
       - name: Cache cargo
@@ -37,10 +32,79 @@ jobs:
       - name: cargo fmt
         run: cargo +nightly-2026-05-24 fmt --check
 
+  cargo-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise)
+        uses: jdx/mise-action@v2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise)
+        uses: jdx/mise-action@v2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  clippy:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise)
+        uses: jdx/mise-action@v2
+
+      - name: Install clippy component
+        run: rustup component add clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: cargo test
+  full-test:
+    if: github.event_name != 'pull_request'
+    name: full test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise)
+        uses: jdx/mise-action@v2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: cargo test --no-fail-fast
         run: cargo test --workspace --no-fail-fast
 
   markdownlint:
@@ -49,3 +113,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DavidAnson/markdownlint-cli2-action@v20
+
+  check:
+    if: always()
+    runs-on: ubuntu-latest
+    needs: [fmt, cargo-check, test, clippy, full-test, markdownlint]
+    steps:
+      - name: Check required job results
+        env:
+          NEEDS: ${{ toJson(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS"])
+          failed = {
+              name: job["result"]
+              for name, job in needs.items()
+              if job["result"] in {"failure", "cancelled"}
+          }
+          if failed:
+              for name, result in failed.items():
+                  print(f"{name}: {result}")
+              sys.exit(1)
+          PY
