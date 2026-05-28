@@ -1734,7 +1734,6 @@ fn emit_anyorder_step(
     let cur = gensym(ctx, "__cur");
     let consume = gensym(ctx, "__consume");
     let assign_ident = gensym(ctx, "__assign");
-    let used_ident = gensym(ctx, "__used");
     let found_ident = gensym(ctx, "__found");
     // Gensym the label so that multiple `<...>` siblings in the same node
     // list generate distinct label names inside the same outer closure.
@@ -1779,7 +1778,6 @@ fn emit_anyorder_step(
         &probe_elems,
         &probe_bools,
         &assign_ident,
-        &used_ident,
         &consume,
         &cur,
         list_val,
@@ -1796,7 +1794,6 @@ fn emit_anyorder_step(
     let sub = gensym(ctx, "__sub");
     let one_attempt = quote! {
         let mut #assign_ident: [usize; 10] = [usize::MAX; 10];
-        let mut #used_ident: u64 = 0u64;
         let mut #found_ident: bool = false;
         #search_label: {
             #search_body
@@ -1845,11 +1842,14 @@ fn emit_anyorder_step(
 /// Build the phase-1 backtracking search tree for [`emit_anyorder_step`].
 ///
 /// Recursively unrolls N loops (one per non-rest pattern) at compile time.
-/// At each depth `i`, we try every unused element index `j` in `0..consume`,
+/// At each depth `i`, we try every candidate element index `j` in `0..consume`,
 /// probe pattern `i` against `list[cur + j]` (using the pre-built bool
-/// expression), and if it passes, mark `j` as used and recurse to depth `i+1`.
+/// expression), and if it passes, record `j` in `assign[i]` and recurse to
+/// depth `i+1`.  Duplicate detection uses compile-time index comparisons
+/// `assign[0] == j || assign[1] == j || ...` against the already-assigned
+/// slots, so any list length is supported without bitmask size limits.
 /// When `depth == n` (all patterns placed), set `found` to `true` and break
-/// the labeled block.  On backtrack, unmark the element.
+/// the labeled block.
 ///
 /// `found` and `search_label` are gensym'd idents that the caller wires up;
 /// this function only emits expressions that reference them.
@@ -1860,7 +1860,6 @@ fn build_anyorder_search(
     probe_elems: &[Ident],
     probe_bools: &[TokenStream],
     assign: &Ident,
-    used: &Ident,
     consume: &Ident,
     cur: &Ident,
     list_val: &Ident,
@@ -1885,32 +1884,29 @@ fn build_anyorder_search(
         probe_elems,
         probe_bools,
         assign,
-        used,
         consume,
         cur,
         list_val,
         found,
         search_label,
     );
-    // The backtrack step `used &= !(1 << lv)` is unreachable when
-    // `depth == n - 1` because `inner` is the base case which always
-    // breaks out of the labeled block.  Omit it to silence the warning.
-    let backtrack = if depth + 1 == n {
-        quote!()
+    let checks = (0..depth).map(|idx| quote!(#assign[#idx] == #loop_var));
+    let skip_check = if depth > 0 {
+        quote! {
+            if #(#checks)||* {
+                continue;
+            }
+        }
     } else {
-        quote!(#used &= !(1u64 << #loop_var);)
+        quote!()
     };
     quote! {
         for #loop_var in 0usize..#consume {
-            if #used & (1u64 << #loop_var) != 0u64 {
-                continue;
-            }
+            #skip_check
             let #elem = #list_val[#cur + #loop_var];
             if #probe {
                 #assign[#i] = #loop_var;
-                #used |= 1u64 << #loop_var;
                 #inner
-                #backtrack
             }
         }
     }

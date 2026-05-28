@@ -596,26 +596,16 @@ fn match_anyorder<P: PredicateHost + ?Sized>(
     }
 
     // Phase 1: find a valid assignment without writing captures.
-    // `assignment[pat_idx]` = chosen elem index; `u8::MAX` = unassigned.
-    let mut assignment = [u8::MAX; 10];
-    let mut used = 0u64; // bitmask of used element indices
+    // `assignment[pat_idx]` = chosen elem index; `usize::MAX` = unassigned.
+    let mut assignment = [usize::MAX; 10];
 
-    if !find_assignment(
-        ctx,
-        patterns,
-        elems,
-        0,
-        &mut assignment,
-        &mut used,
-        buf,
-        predicates,
-    ) {
+    if !find_assignment(ctx, patterns, elems, 0, &mut assignment, buf, predicates) {
         return false;
     }
 
     // Phase 2: replay in declaration order, writing captures into `buf`.
     for (pat_idx, elem_idx) in assignment[..n].iter().enumerate() {
-        let elem_idx = *elem_idx as usize;
+        let elem_idx = *elem_idx;
         if !match_pat(ctx, patterns[pat_idx], elems[elem_idx], buf, predicates) {
             // Phase-1 confirmed this matches; failure here is a defensive guard.
             return false;
@@ -629,7 +619,8 @@ fn match_anyorder<P: PredicateHost + ?Sized>(
 ///
 /// `pat_idx` is the index of the next pattern to assign (0 = first).
 /// `assignment` accumulates the chosen element index per pattern slot.
-/// `used` is a bitmask of already-assigned element indices.
+/// Duplicate detection uses `assignment[..pat_idx].contains(&elem_idx)`,
+/// which works for any list length without bitmask size limits.
 ///
 /// Returns `true` as soon as one valid full assignment is found.
 #[allow(clippy::too_many_arguments)]
@@ -638,8 +629,7 @@ fn find_assignment<P: PredicateHost + ?Sized>(
     patterns: &[IrNodeId],
     elems: &[NodeId],
     pat_idx: usize,
-    assignment: &mut [u8; 10],
-    used: &mut u64,
+    assignment: &mut [usize; 10],
     buf: &CaptureBuf,
     predicates: &mut P,
 ) -> bool {
@@ -647,7 +637,7 @@ fn find_assignment<P: PredicateHost + ?Sized>(
         return true; // all patterns assigned
     }
     for elem_idx in 0..elems.len() {
-        if *used & (1u64 << elem_idx) != 0 {
+        if assignment[..pat_idx].contains(&elem_idx) {
             continue; // element already used by an earlier pattern
         }
         // Probe without writing captures (discard trial buf).
@@ -659,22 +649,20 @@ fn find_assignment<P: PredicateHost + ?Sized>(
             &mut trial,
             predicates,
         ) {
-            assignment[pat_idx] = elem_idx as u8;
-            *used |= 1u64 << elem_idx;
+            assignment[pat_idx] = elem_idx;
             if find_assignment(
                 ctx,
                 patterns,
                 elems,
                 pat_idx + 1,
                 assignment,
-                used,
                 buf,
                 predicates,
             ) {
                 return true;
             }
             // Backtrack.
-            *used &= !(1u64 << elem_idx);
+            assignment[pat_idx] = usize::MAX;
         }
     }
     false
