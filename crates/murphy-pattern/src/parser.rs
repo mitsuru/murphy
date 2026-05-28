@@ -125,6 +125,36 @@ mod capture_position_tests {
         assert!(e.message.contains('$'));
     }
 
+    // murphy-iqv: $!body — capture wrapping Not is allowed
+    #[test]
+    fn capture_wrapping_not_is_allowed() {
+        // `$!(int 1)` — outer Capture, inner Not — definite-assignment because
+        // the Capture always writes on success.
+        let p = parse("$!(int 1)").expect("capture wrapping not must parse");
+        assert_eq!(p.n_captures(), 1);
+        assert!(
+            matches!(p.root.kind, PatKind::Capture { .. }),
+            "root must be Capture"
+        );
+    }
+
+    #[test]
+    fn capture_wrapping_not_in_node_child_is_allowed() {
+        // `(send $!(int 1) :foo)` — receiver is captured only when it is not
+        // the integer `1`.
+        let p =
+            parse("(send $!(int 1) :foo)").expect("capture wrapping not in node child must parse");
+        assert_eq!(p.n_captures(), 1);
+    }
+
+    #[test]
+    fn inner_capture_inside_negation_remains_rejected() {
+        // `!$body` — Not wrapping Capture — is still forbidden: "what does it
+        // mean to capture a node that didn't match?".
+        let e = parse("!$(int 1)").expect_err("must reject capture inside not");
+        assert!(e.message.contains('$'));
+    }
+
     #[test]
     fn captures_inside_descend_are_rejected() {
         let e = parse("`$_").expect_err("must reject capture in descend");

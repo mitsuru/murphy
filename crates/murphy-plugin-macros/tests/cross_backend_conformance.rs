@@ -2185,3 +2185,247 @@ fn anyorder_capture_ref_pred_arg_agrees_across_backends() {
         other => panic!("C: slot 0 expected Node, got {other:?}"),
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// 12f. AnyOrder nested-capture predicate arg:
+//      `(array <(send $recv :foo) #expects?($recv)>)`.
+//
+// The capture `$recv` is nested *inside* a Node child `(send $recv :foo)`,
+// not a direct Capture arm of the AnyOrder child.  The B-backend probe
+// phase must walk into Node children to write the probe-scope binding
+// `__pcap{slot}`, so that the subsequent `#expects?($recv)` predicate can
+// read the just-tried element as its argument.
+//
+// Without the fix, `lower_bool_anyorder_probe` delegates the Node arm to
+// `lower_bool`, which rejects `Capture` with a compile error (or in a
+// future codegen path, produces an uninitialized binding).
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(
+    b_anyorder_nested_cap_pred_arg,
+    "(array <(send $recv :foo) #expects?($recv)>)"
+);
+
+#[test]
+fn anyorder_nested_capture_ref_pred_arg_agrees_across_backends() {
+    // Build `[recv.foo, other.foo]` — two send nodes.
+    //   recv_node = Int(1) (stand-in for the receiver)
+    //   other_node = Int(2)
+    //   send1 = (send recv_node :foo [])
+    //   send2 = (send other_node :foo [])
+    //   arr   = Array([send1, send2])
+    //
+    // The host fires `expects?` only when the subject is `send2` AND the
+    // captured `$recv` is `recv_node` (i.e. send1's receiver).  The only
+    // valid assignment is:
+    //   (send $recv :foo) → send1  ($recv = recv_node)
+    //   #expects?($recv)  → send2  (predicate: send2 != recv_node ✓)
+    let mut b = AstBuilder::new("a.foo; b.foo", "t.rb");
+    let recv_node = b.push(NodeKind::Int(1), r());
+    let other_node = b.push(NodeKind::Int(2), r());
+    let foo_sym = b.intern_symbol("foo");
+    let args_empty = b.push_list(&[]);
+    let send1 = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv_node),
+            method: foo_sym,
+            args: args_empty,
+        },
+        r(),
+    );
+    let send2 = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(other_node),
+            method: foo_sym,
+            args: args_empty,
+        },
+        r(),
+    );
+    let elems = b.push_list(&[send1, send2]);
+    let arr = b.push(NodeKind::Array(elems), r());
+    let ast = b.finish(arr);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // B backend: expect match with $recv = recv_node.
+    let b_caps: Option<(NodeId,)> = b_anyorder_nested_cap_pred_arg(arr, &cx);
+
+    // C backend with a host that fires `expects?` on send2 with arg recv_node.
+    let mut host = ExpectsHost {
+        want_node: send2,
+        want_arg: recv_node,
+    };
+    let c = assert_c_matches_with(
+        "(array <(send $recv :foo) #expects?($recv)>)",
+        &ast,
+        arr,
+        b_caps.is_some(),
+        &mut host,
+    );
+
+    // B must match and capture recv_node into $recv.
+    assert!(
+        b_caps.is_some(),
+        "B must match [send1, send2] with <(send $recv :foo) #expects?($recv)>"
+    );
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, recv_node, "B: $recv must capture recv_node (Int(1))");
+
+    // B and C captures must agree.
+    let c_caps = c.expect("C also matched");
+    let c_cap0 = c_caps.get(0).cloned();
+    match c_cap0 {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: $recv capture disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 12g. AnyOrder uniform-capture sugar inside `<...>`: `(array <${int sym}>)`.
+//
+// `${int sym}` parses as a Union of two Captures sharing slot 0. The B
+// backend's `lower_bool_anyorder_probe` must recurse into Union arms
+// (rather than delegating to `lower_bool`) so the probe-bool expression
+// has type `bool` (one bool per arm, OR-chained), not the `()` of a
+// capture-write block.
+//
+// Without the fix, `lower_bool` for the union emits
+// `{ __cap0 = subject; }` (statement block, type `()`), which the
+// surrounding `if #probe { ... }` rejects with a Rust compile error.
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_anyorder_union_cap_sugar, "(array <${int sym}>)");
+
+#[test]
+fn anyorder_union_capture_sugar_agrees_across_backends() {
+    // `[42, :foo]` — array of two elements, one `int` one `sym`. The
+    // uniform-capture sugar matches whichever element happens to land
+    // in the AnyOrder slot and captures it into slot 0.
+    //
+    // Since the AnyOrder has a single non-rest child, the matched
+    // element must be either int or sym; the array is consumed in full
+    // (no `...`, so consume == 1 must equal block length 1 — but the
+    // array has 2 elems, so this won't match). Use a 1-element array
+    // to make the match succeed.
+    let mut b = AstBuilder::new("[42]", "t.rb");
+    let int_node = b.push(NodeKind::Int(42), r());
+    let elems = b.push_list(&[int_node]);
+    let arr = b.push(NodeKind::Array(elems), r());
+    let ast = b.finish(arr);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // B backend: must compile (was an E0308 `expected bool, found ()`
+    // pre-fix) and capture the int into slot 0.
+    let b_caps: Option<(NodeId,)> = b_anyorder_union_cap_sugar(arr, &cx);
+    assert!(
+        b_caps.is_some(),
+        "B: `(array <${{int sym}}>)` must match [42] and capture the int"
+    );
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, int_node, "B: captured slot 0 must be the int node");
+
+    // C backend: same match outcome and same captured id.
+    let c = assert_c_matches("(array <${int sym}>)", &ast, arr, b_caps.is_some());
+    let c_caps = c.expect("C must also match");
+    match c_caps.get(0).cloned() {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: capture id disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 14. murphy-iqv: `$!body` — capture wrapping Not.
+//
+// `$!send` matches any non-send node and captures the subject id.
+// Both backends must agree on hit/miss and on the captured node id.
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_capture_not_send, "$!send");
+node_pattern!(b_capture_not_send_receiver, "(send $!array :foo)");
+
+#[test]
+fn capture_wrapping_not_agrees_across_backends() {
+    // Int(2) is not a send — should match and capture.
+    let mut b = AstBuilder::new("2", "t.rb");
+    let two = b.push(NodeKind::Int(2), r());
+    let ast = b.finish(two);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // B backend must match and capture `two`.
+    let b_caps: Option<(NodeId,)> = b_capture_not_send(two, &cx);
+    let c = assert_c_matches("$!send", &ast, two, b_caps.is_some());
+
+    assert!(b_caps.is_some(), "B: $!send must match a non-send node");
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, two, "B: $!send must capture the Int(2) subject");
+
+    let c_caps = c.expect("C must also match");
+    match c_caps.get(0).cloned() {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: $!send capture id disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+}
+
+#[test]
+fn capture_wrapping_not_misses_on_matching_body_agrees_across_backends() {
+    // A send node — $!send must NOT match.
+    let (ast, send, _arg) = puts_one_ast();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_caps: Option<(NodeId,)> = b_capture_not_send(send, &cx);
+    assert_c_matches("$!send", &ast, send, b_caps.is_some());
+    assert!(b_caps.is_none(), "B: $!send must NOT match a send node");
+}
+
+#[test]
+fn capture_wrapping_not_in_receiver_position_agrees_across_backends() {
+    // `(send $!array :foo)` with an Int(2) receiver — should match and
+    // capture the receiver.
+    let mut b = AstBuilder::new("2.foo", "t.rb");
+    let two = b.push(NodeKind::Int(2), r());
+    let m = b.intern_symbol("foo");
+    let args = b.push_list(&[]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: murphy_ast::OptNodeId::some(two),
+            method: m,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_caps: Option<(NodeId,)> = b_capture_not_send_receiver(send, &cx);
+    let c = assert_c_matches("(send $!array :foo)", &ast, send, b_caps.is_some());
+
+    assert!(
+        b_caps.is_some(),
+        "B: (send $!array :foo) must match when receiver is not array"
+    );
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, two, "B: captured receiver must be Int(2)");
+
+    let c_caps = c.expect("C must also match");
+    match c_caps.get(0).cloned() {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: receiver capture id disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+}

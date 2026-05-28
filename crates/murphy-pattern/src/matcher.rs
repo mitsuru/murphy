@@ -1187,6 +1187,89 @@ mod tests {
         assert!(matches(&compile("!send").unwrap(), &ast, send, &mut NoPredicates).is_none());
     }
 
+    // murphy-iqv: $!body — capture wrapping Not records subject on negation success
+    #[test]
+    fn capture_wrapping_not_records_subject_on_negation_success() {
+        // `$!send` matches any node that is NOT a send node, and captures
+        // the subject node id. Use Int(2) as the subject — it is not a send.
+        let mut b = AstBuilder::new("2", "t.rb");
+        let two = b.push(NodeKind::Int(2), r());
+        let ast = b.finish(two);
+
+        let ir = compile("$!send").expect("$!send must compile");
+        let caps =
+            matches(&ir, &ast, two, &mut NoPredicates).expect("$!send must match an Int node");
+        assert_eq!(caps.len(), 1);
+        let CaptureValue::Node(captured_id) = caps.get(0).unwrap() else {
+            panic!("expected Node capture, got {:?}", caps.get(0));
+        };
+        assert_eq!(*captured_id, two, "captured id must be the Int(2) subject");
+    }
+
+    #[test]
+    fn capture_wrapping_not_misses_when_body_matches() {
+        // `$!send` must NOT match a send node.
+        let (ast, send) = puts_one_ast();
+
+        let ir = compile("$!send").expect("$!send must compile");
+        assert!(
+            matches(&ir, &ast, send, &mut NoPredicates).is_none(),
+            "$!send must NOT match a send node"
+        );
+    }
+
+    #[test]
+    fn capture_wrapping_not_literal_captures_non_matching_node() {
+        // `$!1` captures any node whose value is not the integer literal 1.
+        // Use Int(2) as the subject — should match and capture.
+        let mut b = AstBuilder::new("2", "t.rb");
+        let two = b.push(NodeKind::Int(2), r());
+        let ast = b.finish(two);
+
+        let ir = compile("$!1").expect("$!1 must compile");
+        let caps = matches(&ir, &ast, two, &mut NoPredicates).expect("$!1 must match Int(2)");
+        let CaptureValue::Node(captured_id) = caps.get(0).unwrap() else {
+            panic!("expected Node capture");
+        };
+        assert_eq!(*captured_id, two, "captured id must be the Int(2) subject");
+
+        // Int(1) must NOT match.
+        let mut b2 = AstBuilder::new("1", "t.rb");
+        let one = b2.push(NodeKind::Int(1), r());
+        let ast2 = b2.finish(one);
+        assert!(
+            matches(&ir, &ast2, one, &mut NoPredicates).is_none(),
+            "$!1 must NOT match Int(1)"
+        );
+    }
+
+    #[test]
+    fn capture_wrapping_not_in_send_receiver() {
+        // `(send $!array :foo)` captures the receiver only when it is not an
+        // array node. Use Int(2) as receiver — it is not an array.
+        let mut b = AstBuilder::new("2.foo", "t.rb");
+        let two = b.push(NodeKind::Int(2), r());
+        let m = b.intern_symbol("foo");
+        let args = b.push_list(&[]);
+        let send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::some(two),
+                method: m,
+                args,
+            },
+            r(),
+        );
+        let ast = b.finish(send);
+
+        let ir = compile("(send $!array :foo)").expect("must compile");
+        let caps = matches(&ir, &ast, send, &mut NoPredicates)
+            .expect("must match: receiver is Int(2), not array");
+        let CaptureValue::Node(captured_id) = caps.get(0).unwrap() else {
+            panic!("expected Node capture");
+        };
+        assert_eq!(*captured_id, two, "captured receiver must be Int(2)");
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // Capture
     // ────────────────────────────────────────────────────────────────────

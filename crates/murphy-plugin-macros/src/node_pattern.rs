@@ -2040,7 +2040,8 @@ fn build_anyorder_search(
 
 /// Probe helper for [`emit_anyorder_step`]'s phase-1 search.
 ///
-/// Behaves like [`lower_bool`] but also handles `PatKind::Capture` by:
+/// Behaves like [`lower_bool`] but also handles `PatKind::Capture` *at any
+/// depth* inside the pattern tree by:
 /// 1. Writing `__pcap{n} = Some(subject)` into the probe-scope binding
 ///    (so that a subsequent predicate in the same AnyOrder block can read the
 ///    just-tried element as a predicate arg), then
@@ -2050,6 +2051,11 @@ fn build_anyorder_search(
 /// The probe-scope binding `__pcap{n}` is the gensym'd `Ident` registered in
 /// `ctx.probe_caps[slot]` by [`emit_anyorder_step`] before calling this fn.
 ///
+/// Compound patterns that can nest a `Capture` — `Node` and `Parent` — are
+/// handled recursively (via [`lower_bool_anyorder_probe_node`] and a direct
+/// recursive call, respectively) so that an inner `$x` is written to
+/// `__pcap{x}` during probe, not just top-level captures.
+///
 /// All other arms delegate to [`lower_bool`], which already rejects
 /// `Rest`, `Quantifier`, and nested `AnyOrder` (parser-enforced).
 fn lower_bool_anyorder_probe(
@@ -2058,24 +2064,236 @@ fn lower_bool_anyorder_probe(
     ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
     use murphy_pattern::PatKind;
-    if let PatKind::Capture { slot, body, .. } = &pat.kind {
-        // Write the probe-scope binding so that later predicates in the same
-        // AnyOrder block can read the just-tried element via its capture slot.
-        let assign = if let Some(pcap) = ctx.probe_caps.get(slot) {
-            quote!(#pcap = ::core::option::Option::Some(#subject);)
-        } else {
-            // No probe-cap registered for this slot (can only happen if the
-            // slot was not collected, which would be a bug). Emit nothing and
-            // let phase-2 handle it; the function-level __cap{slot} would be
-            // uninitialized at this point, but the body probe alone is enough
-            // to avoid a spurious match — correctness is preserved, capture
-            // forwarding to predicates simply won't work.
-            quote!()
-        };
-        let body_probe = lower_bool_anyorder_probe(body, subject, ctx)?;
-        return Ok(quote!({ #assign #body_probe }));
+    match &pat.kind {
+        PatKind::Capture { slot, body, .. } => {
+            // Write the probe-scope binding so that later predicates in the
+            // same AnyOrder block can read the just-tried element via its
+            // capture slot.
+            let assign = if let Some(pcap) = ctx.probe_caps.get(slot) {
+                quote!(#pcap = ::core::option::Option::Some(#subject);)
+            } else {
+                // No probe-cap registered for this slot (can only happen if
+                // the slot was not collected, which would be a bug). Emit
+                // nothing and let phase-2 handle it.
+                quote!()
+            };
+            let body_probe = lower_bool_anyorder_probe(body, subject, ctx)?;
+            Ok(quote!({ #assign #body_probe }))
+        }
+        PatKind::Node { head, children } => {
+            // Recurse through node children so that captures nested inside
+            // `(node $x ...)` are written to their probe-scope bindings.
+            lower_bool_anyorder_probe_node(head, children, subject, ctx)
+        }
+        PatKind::Parent(inner) => {
+            // `^x` inside an AnyOrder arm: bind the parent (bool-expr form
+            // returns false if absent), then recurse with the probe path.
+            let p = gensym(ctx, "__p");
+            let inner_probe = lower_bool_anyorder_probe(inner, &quote!(#p), ctx)?;
+            Ok(quote! {
+                ( cx.parent(#subject).get().map_or(false, |#p| #inner_probe) )
+            })
+        }
+        PatKind::Union(alts) => {
+            // Uniform-capture sugar `${a b ...}` parses as a Union whose every
+            // arm is a Capture with the same slot. Delegating to `lower_bool`
+            // would (a) emit a `__cap{slot} = subject;` statement-block of type
+            // `()` — which `if #probe { ... }` rejects — and (b) skip writing
+            // the probe-scope binding `__pcap{slot}`, so a later predicate in
+            // the same AnyOrder block referencing that slot would read None.
+            // Recurse into each arm with the probe lowering and OR-chain the
+            // resulting bool expressions: the arm that matches writes its
+            // probe binding and yields `true`; the others short-circuit.
+            let alt_bools: Vec<TokenStream> = alts
+                .iter()
+                .map(|alt| lower_bool_anyorder_probe(alt, subject, ctx))
+                .collect::<syn::Result<_>>()?;
+            Ok(quote!( ( #(#alt_bools)||* ) ))
+        }
+        // All other arms (Wildcard, Lit, Kind, NilTest, Not, Predicate,
+        // Descend) cannot legally contain a Capture (parser-enforced), so
+        // lower_bool is a correct and complete delegate.
+        _ => lower_bool(pat, subject, ctx),
     }
-    lower_bool(pat, subject, ctx)
+}
+
+/// Probe-mode counterpart of [`lower_bool_node`].
+///
+/// Mirrors [`lower_bool_node`]'s structure but routes fixed-slot children
+/// through [`lower_bool_anyorder_probe_fixed_slot`] instead of
+/// [`lower_bool_fixed_slot`], so that a `Capture` nested inside a slot child
+/// writes its probe-scope binding (`__pcap{slot}`) during phase-1.
+fn lower_bool_anyorder_probe_node(
+    head: &murphy_pattern::Head,
+    children: &[murphy_pattern::Pat],
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    use murphy_pattern::Head;
+    match head {
+        Head::Any => {
+            check_kind_only_children(children)?;
+            Ok(quote!(true))
+        }
+        Head::OneOf(tags) => {
+            check_kind_only_children(children)?;
+            let tag_u8s: Vec<u8> = tags.iter().map(|t| t.0).collect();
+            Ok(quote! {
+                ( ::core::matches!(cx.kind(#subject).tag().0, #(#tag_u8s)|*) )
+            })
+        }
+        Head::Exact(t) => lower_bool_anyorder_probe_exact_node(*t, children, subject, ctx),
+    }
+}
+
+/// Probe-mode counterpart of [`lower_bool_exact_node`].
+///
+/// Identical to [`lower_bool_exact_node`] except that per-slot children are
+/// lowered via [`lower_bool_anyorder_probe_fixed_slot`] so that captures
+/// inside slots write their probe bindings.
+fn lower_bool_anyorder_probe_exact_node(
+    tag: murphy_ast::NodeKindTag,
+    children: &[murphy_pattern::Pat],
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    let schema = schema_for(tag.0).ok_or_else(|| unsupported_node_match_error(tag))?;
+
+    let has_list = schema
+        .slots
+        .last()
+        .is_some_and(|s| matches!(s.ty, SlotTy::List));
+    let fixed_count = schema.slots.len() - usize::from(has_list);
+
+    if children.len() < fixed_count {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: too few children",
+        ));
+    }
+    if children.len() > fixed_count {
+        if has_list {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "node_pattern!: a node pattern with a variable-length child \
+                 list is not supported inside `{}` / `!` / `` ` `` in v1",
+            ));
+        }
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: wrong number of children",
+        ));
+    }
+
+    let variant = Ident::new(schema.variant, Span::call_site());
+    let fixed_binds: Vec<Ident> = (0..fixed_count).map(|_| gensym(ctx, "__b")).collect();
+
+    let field_pats: Vec<TokenStream> = schema
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let bind: TokenStream = if i < fixed_count {
+                let b = &fixed_binds[i];
+                quote!(#b)
+            } else {
+                quote!(_)
+            };
+            match slot.field {
+                FieldRef::Named(name) => {
+                    let f = Ident::new(name, Span::call_site());
+                    quote!(#f: #bind)
+                }
+                FieldRef::Pos(arity, index) => {
+                    let holes =
+                        (0..arity).map(|j| if j == index { bind.clone() } else { quote!(_) });
+                    quote!(#(#holes),*)
+                }
+            }
+        })
+        .collect();
+
+    // Per-fixed-slot bool sub-expressions, using the probe variant.
+    let mut slot_checks: Vec<TokenStream> = Vec::new();
+    for (slot, (bind, child)) in schema
+        .slots
+        .iter()
+        .take(fixed_count)
+        .zip(fixed_binds.iter().zip(children))
+    {
+        slot_checks.push(lower_bool_anyorder_probe_fixed_slot(
+            slot.ty, bind, child, ctx,
+        )?);
+    }
+    let body = if slot_checks.is_empty() {
+        quote!(true)
+    } else {
+        quote!( #(#slot_checks)&&* )
+    };
+
+    let is_tuple = matches!(
+        schema.slots.first().map(|s| s.field),
+        Some(FieldRef::Pos(..))
+    );
+    let destructure = if is_tuple {
+        quote!(::murphy_plugin_api::NodeKind::#variant(#(#field_pats),*))
+    } else {
+        let rest = if schema.covers_all_fields {
+            quote!()
+        } else {
+            quote!(, ..)
+        };
+        quote!(::murphy_plugin_api::NodeKind::#variant { #(#field_pats),* #rest })
+    };
+
+    Ok(quote! {
+        ( if let #destructure = *cx.kind(#subject) {
+            #body
+        } else {
+            false
+        } )
+    })
+}
+
+/// Probe-mode counterpart of [`lower_bool_fixed_slot`].
+///
+/// Routes `Node` and `OptNode` children through [`lower_bool_anyorder_probe`]
+/// instead of [`lower_bool`], so that captures nested inside slot children
+/// write their probe-scope bindings during phase-1.  `Sym` slots cannot
+/// contain captures (parser-enforced) and are delegated to `lower_bool_fixed_slot`.
+fn lower_bool_anyorder_probe_fixed_slot(
+    ty: SlotTy,
+    bind: &Ident,
+    child: &murphy_pattern::Pat,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    use murphy_pattern::PatKind;
+    match ty {
+        SlotTy::Node => lower_bool_anyorder_probe(child, &quote!(#bind), ctx),
+        SlotTy::OptNode => {
+            if matches!(child.kind, PatKind::NilTest) {
+                // Bare `nil?` at an `OptNode` slot: an absent slot matches,
+                // a present slot must be a `nil` node.
+                let n = gensym(ctx, "__n");
+                Ok(quote! {
+                    ( #bind.get().map_or(true, |#n| ::core::matches!(
+                        *cx.kind(#n),
+                        ::murphy_plugin_api::NodeKind::Nil
+                    )) )
+                })
+            } else {
+                // Any other child: slot must be present; recurse probe.
+                let n = gensym(ctx, "__n");
+                let inner = lower_bool_anyorder_probe(child, &quote!(#n), ctx)?;
+                Ok(quote! {
+                    ( #bind.get().map_or(false, |#n| #inner) )
+                })
+            }
+        }
+        // Sym slots only accept wildcard / literal / literal-union — no
+        // captures possible, delegate to the non-probe variant.
+        SlotTy::Sym | SlotTy::List => lower_bool_fixed_slot(ty, bind, child, ctx),
+    }
 }
 
 /// Emit a fixed-element step: bind `list[cursor]`, run the per-element
