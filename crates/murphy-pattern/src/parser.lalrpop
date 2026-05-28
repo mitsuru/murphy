@@ -57,9 +57,6 @@
 //                                  |   fold_predicate_args in parser.rs
 // ---------------------------------|-------------------------------------------
 // D-phase deferred (not added here):
-//   tUNIFY                         — implemented in D4 (murphy-nnr8): NodeId
-//                                    equality (not structural equality like
-//                                    RuboCop) — see PatKind::Unify in ast.rs
 //   tREGEXP                        — beads murphy-t8km
 
 use crate::lexer::Token;

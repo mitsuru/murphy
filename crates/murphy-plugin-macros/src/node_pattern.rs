@@ -83,20 +83,21 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
         )
     };
 
+    let unify_names = collect_unify_names(&ast.root);
     let mut ctx = Lower {
         fail: fail.clone(),
         next: 0,
         capture_kinds: ast.capture_kinds().to_vec(),
         local_caps: HashMap::new(),
         probe_caps: HashMap::new(),
+        unify_names: unify_names.clone(),
     };
     let body = lower_pat(&ast.root, &quote!(node), &mut ctx)?;
 
     // D4 (murphy-nnr8): declare one `Option<NodeId>` variable per unique `_name`
     // unification atom. These are initialized to `None` at function entry and
     // read/written by the `lower_pat`/`lower_bool` arms for `PatKind::Unify`.
-    let unify_names = collect_unify_names(&ast.root);
-    let unify_decls: Vec<TokenStream> = unify_names
+    let unify_decls: Vec<TokenStream> = ctx.unify_names
         .iter()
         .map(|n| {
             let var = unify_var(n);
@@ -227,6 +228,56 @@ struct Lower {
     /// AnyOrder probe scope it is always empty, so [`predicate_arg_exprs`]
     /// falls back to the function-level `__cap{slot}` binding.
     probe_caps: HashMap<u16, Ident>,
+    /// All distinct `_name` unification variable names collected from the
+    /// pattern tree. Used by `emit_unify_snapshot` / `emit_unify_restore`
+    /// to generate snapshot/restore code at each backtracking site (Union,
+    /// Not body, Descend iteration). Populated once in `lower_matcher`.
+    unify_names: Vec<String>,
+}
+
+/// Emit a wrapped bool expression with snapshot/restore for unify variables.
+///
+/// For each `_name` in the pattern, wraps `expr` as:
+/// ```ignore
+/// {
+///     let __snap_unify_x = __unify_x; // per name
+///     let __uokN = <expr>;
+///     if !__uokN { __unify_x = __snap_unify_x; } // per name, on failure
+///     __uokN
+/// }
+/// ```
+/// When there are no unify names, returns `expr` unchanged (zero overhead).
+fn wrap_with_unify_rollback(expr: TokenStream, ctx: &mut Lower) -> TokenStream {
+    if ctx.unify_names.is_empty() {
+        return expr;
+    }
+    let names = ctx.unify_names.clone();
+    let snaps: Vec<Ident> = names
+        .iter()
+        .map(|n| gensym(ctx, &format!("__snap_unify_{n}_")))
+        .collect();
+    let vars: Vec<Ident> = names.iter().map(|n| unify_var(n)).collect();
+    let save_stmts: Vec<TokenStream> = snaps
+        .iter()
+        .zip(vars.iter())
+        .map(|(snap, var)| quote!(let #snap = #var;))
+        .collect();
+    let restore_stmts: Vec<TokenStream> = snaps
+        .iter()
+        .zip(vars.iter())
+        .map(|(snap, var)| quote!(#var = #snap;))
+        .collect();
+    let ok = gensym(ctx, "__uok");
+    quote! {
+        ({
+            #(#save_stmts)*
+            let #ok = #expr;
+            if !#ok {
+                #(#restore_stmts)*
+            }
+            #ok
+        })
+    }
 }
 
 /// Allocate a fresh, collision-free binding identifier `#{prefix}#{n}`.
@@ -1074,10 +1125,15 @@ fn lower_pat(
                 }
             }
             // Normal union (no uniform captures): each alternative lowers to a
-            // `return`-free bool expression; the node matches iff any arm is true.
+            // `return`-free bool expression with unify rollback on failure.
+            // The rollback ensures that a failed arm's partial `_name` bindings
+            // do not leak into the next arm (D4, murphy-nnr8).
             let alt_bools: Vec<TokenStream> = alts
                 .iter()
-                .map(|alt| lower_bool(alt, subject, ctx))
+                .map(|alt| {
+                    let b = lower_bool(alt, subject, ctx)?;
+                    Ok(wrap_with_unify_rollback(b, ctx))
+                })
                 .collect::<syn::Result<_>>()?;
             let fail = fail_stmt(ctx);
             let ok = gensym(ctx, "__ok");
@@ -1090,11 +1146,13 @@ fn lower_pat(
         }
         PatKind::Not(inner) => {
             // `!x` matches iff `x` does not — lower `x` to a bool expression
-            // and fail when it holds.
+            // and fail when it holds. Unify bindings from the inner body are
+            // always rolled back (Not never commits inner state).
             let inner_bool = lower_bool(inner, subject, ctx)?;
+            let inner_with_rollback = wrap_with_unify_rollback(inner_bool, ctx);
             let fail = fail_stmt(ctx);
             Ok(quote! {
-                if #inner_bool {
+                if #inner_with_rollback {
                     #fail
                 }
             })
@@ -1154,13 +1212,16 @@ fn lower_pat(
             // `` `x `` — succeed iff some descendant matches `inner`. The
             // descendant scan visits many nodes, so `inner` cannot capture;
             // lower it via `lower_bool` (which structurally rejects captures)
-            // into a bool expression over the per-descendant binding.
+            // into a bool expression over the per-descendant binding. Each
+            // iteration's unify bindings are rolled back so a match attempt on
+            // one descendant does not pollute a subsequent attempt.
             let d = gensym(ctx, "__d");
             let inner_bool = lower_bool(inner, &quote!(#d), ctx)?;
+            let inner_with_rollback = wrap_with_unify_rollback(inner_bool, ctx);
             let hit = gensym(ctx, "__hit");
             let fail = fail_stmt(ctx);
             Ok(quote! {
-                let #hit = cx.descendants(#subject).into_iter().any(|#d| #inner_bool);
+                let #hit = cx.descendants(#subject).into_iter().any(|#d| #inner_with_rollback);
                 if !#hit {
                     #fail
                 }
@@ -2622,15 +2683,22 @@ fn lower_bool(
         }),
         PatKind::Node { head, children } => lower_bool_node(head, children, subject, ctx),
         PatKind::Union(alts) => {
+            // Each arm gets unify rollback so a failed arm's partial bindings
+            // don't leak into the next (D4, murphy-nnr8).
             let alt_bools: Vec<TokenStream> = alts
                 .iter()
-                .map(|alt| lower_bool(alt, subject, ctx))
+                .map(|alt| {
+                    let b = lower_bool(alt, subject, ctx)?;
+                    Ok(wrap_with_unify_rollback(b, ctx))
+                })
                 .collect::<syn::Result<_>>()?;
             Ok(quote!( ( #(#alt_bools)||* ) ))
         }
         PatKind::Not(inner) => {
             let inner_bool = lower_bool(inner, subject, ctx)?;
-            Ok(quote!( ( !#inner_bool ) ))
+            // Always roll back unify bindings from Not's inner body.
+            let inner_with_rollback = wrap_with_unify_rollback(inner_bool, ctx);
+            Ok(quote!( ( !#inner_with_rollback ) ))
         }
         PatKind::Predicate { name, args } => {
             // `#name` / `#name(args...)` calls a free fn in scope at the
@@ -2649,8 +2717,9 @@ fn lower_bool(
         PatKind::Descend(inner) => {
             let d = gensym(ctx, "__d");
             let inner_bool = lower_bool(inner, &quote!(#d), ctx)?;
+            let inner_with_rollback = wrap_with_unify_rollback(inner_bool, ctx);
             Ok(quote! {
-                ( cx.descendants(#subject).into_iter().any(|#d| #inner_bool) )
+                ( cx.descendants(#subject).into_iter().any(|#d| #inner_with_rollback) )
             })
         }
         PatKind::Capture { .. } => Err(syn::Error::new(

@@ -2885,3 +2885,37 @@ fn unify_two_distinct_names_independent_both_backends() {
     );
     assert_c_matches("(send _x _ _y)", &ast2, send2, b_diff);
 }
+
+// For the rollback test we use `(pair _x _x)` / `(pair _ _x)` — `Pair`
+// has two fixed Node slots and no List slot, so it works inside `{}` in
+// the B-backend. The pattern `{(pair _x _x) (pair _ _x)}` against a Pair
+// where key ≠ value exercises the same rollback path.
+node_pattern!(b_union_unify_rollback, "{ (pair _x _x) (pair _ _x) }");
+
+#[test]
+fn unify_rollback_across_union_arms_both_backends() {
+    // Discriminating test for B-backend unify rollback.
+    //
+    // Pattern `{ (pair _x _x) (pair _ _x) }` against Pair(key=Int(1), value=Int(2)):
+    //   - Arm 1 `(pair _x _x)`: binds `_x=Int(1)` at key, fails at value
+    //     (Int(2) ≠ Int(1)). Without rollback, `_x=Int(1)` leaks.
+    //   - Arm 2 `(pair _ _x)`: with rollback, `_x` is None → binds `_x=Int(2)`.
+    //     Without rollback, checks Int(2) == Int(1) → false → miss.
+    //
+    // Both backends must HIT on this input.
+    let fns = fns();
+    let mut b = AstBuilder::new("1 => 2", "t.rb");
+    let k = b.push(NodeKind::Int(1), r());
+    let v = b.push(NodeKind::Int(2), r());
+    let pair = b.push(NodeKind::Pair { key: k, value: v }, r());
+    let ast = b.finish(pair);
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_hit: bool = b_union_unify_rollback(pair, &cx);
+    assert!(
+        b_hit,
+        "B: union arm-1 failure must roll back _x binding so arm-2 can bind fresh"
+    );
+    assert_c_matches("{ (pair _x _x) (pair _ _x) }", &ast, pair, b_hit);
+}
