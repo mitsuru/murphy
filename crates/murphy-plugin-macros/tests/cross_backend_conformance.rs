@@ -2429,3 +2429,109 @@ fn capture_wrapping_not_in_receiver_position_agrees_across_backends() {
         other => panic!("C: slot 0 expected Node, got {other:?}"),
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Intersection `[...]` AND-pattern (murphy-l448)
+// ────────────────────────────────────────────────────────────────────────
+
+// B-backend helpers for intersection tests.
+node_pattern!(b_not_nil_and_int, "[!nil? int]");
+node_pattern!(b_int_not_one, "[int !1]");
+node_pattern!(b_intersection_capture, "[$v int]");
+
+#[test]
+fn intersection_not_nil_int_matches_int_agrees_across_backends() {
+    // `[!nil? int]` must match Int(1), miss Nil, miss True_.
+    let mut b = AstBuilder::new("1", "t.rb");
+    let one = b.push(NodeKind::Int(1), r());
+    let ast = b.finish(one);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_hit: bool = b_not_nil_and_int(one, &cx);
+    let c_hit = assert_c_matches("[!nil? int]", &ast, one, b_hit);
+    assert!(b_hit, "B: [!nil? int] must match Int(1)");
+    assert!(c_hit.is_some(), "C: [!nil? int] must match Int(1)");
+}
+
+#[test]
+fn intersection_not_nil_int_misses_nil_agrees_across_backends() {
+    // `[!nil? int]` must miss Nil (fails `!nil?`).
+    let mut b = AstBuilder::new("nil", "t.rb");
+    let nil = b.push(NodeKind::Nil, r());
+    let ast = b.finish(nil);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_miss: bool = b_not_nil_and_int(nil, &cx);
+    let c_miss = assert_c_matches("[!nil? int]", &ast, nil, b_miss);
+    assert!(!b_miss, "B: [!nil? int] must miss Nil");
+    assert!(c_miss.is_none(), "C: [!nil? int] must miss Nil");
+}
+
+#[test]
+fn intersection_int_not_one_matches_two_agrees_across_backends() {
+    // `[int !1]` must match Int(2) (is int, not the literal 1), miss Int(1).
+    let mut b = AstBuilder::new("2", "t.rb");
+    let two = b.push(NodeKind::Int(2), r());
+    let ast = b.finish(two);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_hit: bool = b_int_not_one(two, &cx);
+    let c_hit = assert_c_matches("[int !1]", &ast, two, b_hit);
+    assert!(b_hit, "B: [int !1] must match Int(2)");
+    assert!(c_hit.is_some(), "C: [int !1] must match Int(2)");
+
+    // Int(1) must miss.
+    let mut b2 = AstBuilder::new("1", "t.rb");
+    let one = b2.push(NodeKind::Int(1), r());
+    let ast2 = b2.finish(one);
+    let raw2 = cx_raw_for(&ast2, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let b_miss: bool = b_int_not_one(one, &cx2);
+    let c_miss = assert_c_matches("[int !1]", &ast2, one, b_miss);
+    assert!(!b_miss, "B: [int !1] must miss Int(1)");
+    assert!(c_miss.is_none(), "C: [int !1] must miss Int(1)");
+}
+
+#[test]
+fn intersection_capture_agrees_across_backends() {
+    // `[$v int]` — captures the int node in slot 0 on success.
+    let mut b = AstBuilder::new("5", "t.rb");
+    let five = b.push(NodeKind::Int(5), r());
+    let ast = b.finish(five);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_caps: Option<(NodeId,)> = b_intersection_capture(five, &cx);
+    let c = assert_c_matches("[$v int]", &ast, five, b_caps.is_some());
+
+    assert!(b_caps.is_some(), "B: [$v int] must match Int(5)");
+    let (b_id,) = b_caps.unwrap();
+    assert_eq!(b_id, five, "B: captured node must be Int(5)");
+
+    let c_caps = c.expect("C: [$v int] must match Int(5)");
+    match c_caps.get(0).cloned() {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_id, c_id, "B↔C: [$v int] capture id disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+
+    // Sym(x) must miss in both backends.
+    let mut b2 = AstBuilder::new(":x", "t.rb");
+    let sx = b2.intern_symbol("x");
+    let sym = b2.push(NodeKind::Sym(sx), r());
+    let ast2 = b2.finish(sym);
+    let raw2 = cx_raw_for(&ast2, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let b_miss: Option<(NodeId,)> = b_intersection_capture(sym, &cx2);
+    let c_miss = assert_c_matches("[$v int]", &ast2, sym, b_miss.is_some());
+    assert!(b_miss.is_none(), "B: [$v int] must miss Sym");
+    assert!(c_miss.is_none(), "C: [$v int] must miss Sym");
+}
