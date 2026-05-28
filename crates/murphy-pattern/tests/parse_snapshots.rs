@@ -6,7 +6,7 @@
 //! span and a message substring. The expected literals were blessed from a
 //! real `cargo test` run — do not hand-edit them.
 
-use murphy_pattern::{CaptureKind, parse};
+use murphy_pattern::{CaptureKind, PatKind, parse};
 
 // =====================================================================
 // (A) Positive snapshot tests
@@ -895,4 +895,46 @@ fn error_anyorder_duplicate_rest() {
         "expected duplicate rest error, got: {}",
         err.message
     );
+}
+
+#[test]
+fn snapshot_anyorder_sibling_anyorders() {
+    // Two `<...>` blocks as siblings in the same node's child list are
+    // both parsed as AnyOrder nodes.  This exercises the parser path where
+    // node_match encounters two `LAngle` tokens in a row.
+    let ast = parse("(array <int sym> <str nil>)").unwrap();
+    let root_kind = format!("{:#?}", ast.root.kind);
+    // Both AnyOrder nodes must be present — count occurrences of the tag.
+    let count = root_kind.matches("AnyOrder").count();
+    assert_eq!(
+        count, 2,
+        "expected 2 AnyOrder nodes in tree, got {count}: {root_kind}"
+    );
+    assert_eq!(ast.n_captures(), 0);
+}
+
+#[test]
+fn snapshot_anyorder_with_suffix_fixed() {
+    // `(array <int sym> str)` — AnyOrder followed by a fixed element.
+    // The node must have two children: one AnyOrder and one Kind (str suffix).
+    let ast = parse("(array <int sym> str)").unwrap();
+    let PatKind::Node { ref children, .. } = ast.root.kind else {
+        panic!("expected Node, got {:?}", ast.root.kind);
+    };
+    assert_eq!(
+        children.len(),
+        2,
+        "expected 2 node children (AnyOrder + suffix)"
+    );
+    assert!(
+        matches!(children[0].kind, PatKind::AnyOrder { .. }),
+        "first child must be AnyOrder, got {:?}",
+        children[0].kind
+    );
+    assert!(
+        matches!(children[1].kind, PatKind::Kind(_)),
+        "second child must be Kind (str), got {:?}",
+        children[1].kind
+    );
+    assert_eq!(ast.n_captures(), 0);
 }
