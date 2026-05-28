@@ -42,6 +42,14 @@ pub(crate) enum Token {
     Str(String),
     /// `:name` — a symbol literal; payload is the name without the leading `:`.
     Sym(String),
+    /// `_name` — a unification atom; payload is the name **without** the
+    /// leading `_` (e.g. `_x` → `Unify("x")`). Only matches `_` + one or
+    /// more lowercase-letter-starting `[a-z][a-zA-Z0-9_]*` names. A bare `_`
+    /// stays [`Token::Underscore`]; `_X` (uppercase after `_`) is left as an
+    /// `Ident("_X")` (tPARAM_CONST is uppercase-start only, not `_`-start).
+    ///
+    /// D4 (murphy-nnr8): NodeId-equality unification.
+    Unify(String),
     /// `*` — postfix quantifier (`0..`).
     Star,
     /// `+` — postfix quantifier (`1..`).
@@ -341,6 +349,14 @@ impl<'a> Lexer<'a> {
         if text == "_" {
             return Ok(Token::Underscore);
         }
+        // D4 (murphy-nnr8): `_name` where `name` starts with a lowercase
+        // letter → `Token::Unify(name)`. The payload excludes the leading `_`.
+        // `_X` (uppercase after `_`) stays `Ident("_X")` — it is not tUNIFY.
+        if let Some(rest) = text.strip_prefix('_')
+            && rest.starts_with(|c: char| c.is_ascii_lowercase())
+        {
+            return Ok(Token::Unify(rest.to_string()));
+        }
         Ok(Token::Ident(text.to_string()))
     }
 
@@ -609,7 +625,47 @@ mod tests {
     fn underscore_alone_versus_in_ident() {
         assert_eq!(toks("_"), vec![Token::Underscore]);
         assert_eq!(toks("block_pass"), vec![Token::Ident("block_pass".into())]);
-        assert_eq!(toks("_x"), vec![Token::Ident("_x".into())]);
+        // D4 (murphy-nnr8): `_x` lexes as `Token::Unify("x")`, not `Ident`.
+        assert_eq!(toks("_x"), vec![Token::Unify("x".into())]);
+    }
+
+    // --- D4 (murphy-nnr8): tUNIFY — `_name` named wildcard ----------------
+
+    #[test]
+    fn unify_token_lexes_for_underscore_lowercase_ident() {
+        // `_x`, `_foo`, `_a1` → Token::Unify (name without leading `_`).
+        assert_eq!(toks("_x"), vec![Token::Unify("x".into())]);
+        assert_eq!(toks("_foo"), vec![Token::Unify("foo".into())]);
+        assert_eq!(toks("_a1"), vec![Token::Unify("a1".into())]);
+        assert_eq!(toks("_my_var"), vec![Token::Unify("my_var".into())]);
+    }
+
+    #[test]
+    fn underscore_alone_stays_underscore_not_unify() {
+        assert_eq!(toks("_"), vec![Token::Underscore]);
+    }
+
+    #[test]
+    fn underscore_uppercase_stays_ident_not_unify() {
+        // `_X` is NOT tUNIFY — uppercase after `_` remains Ident.
+        assert_eq!(toks("_X"), vec![Token::Ident("_X".into())]);
+        assert_eq!(toks("_Foo"), vec![Token::Ident("_Foo".into())]);
+    }
+
+    #[test]
+    fn unify_in_node_pattern_context() {
+        // `(send _x _ _x)` — unification example.
+        assert_eq!(
+            toks("(send _x _ _x)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Unify("x".into()),
+                Token::Underscore,
+                Token::Unify("x".into()),
+                Token::RParen,
+            ]
+        );
     }
 
     #[test]
