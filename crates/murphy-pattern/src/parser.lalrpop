@@ -1,69 +1,225 @@
-// LALRPOP grammar for the Murphy NodePattern S-expression DSL.
-//
-// See beads issue murphy-qpf9. This file is the *target* of the parser
-// migration from `parser.rs` (hand-written recursive descent) to a LALRPOP-
-// generated LR table.
-//
-// === Round split (orchestrator) ============================================
-// Round 1 (this commit): infrastructure only — Cargo build-dep wiring, this
-//   stub grammar, and the `lalrpop_mod!` include in `lib.rs`. The existing
-//   `parser.rs` is the live parser and remains untouched. All ~200 parser
-//   tests pass via `parser.rs`.
-// Round 2: port the full grammar from `parser.rs` rule-by-rule (see the
-//   skeleton below). Capture-slot assignment becomes a post-pass walk over
-//   the parsed AST so the grammar itself stays context-free. The following
-//   features are deferred and remain `parser.rs`-only until Phase D:
-//     * intersection `[...]`
-//     * union pipe form `{a | b | c}`
-//     * `tPARAM_*`  (named/const/positional parameter atoms)
-//     * `tUNIFY`    (unification atom)
-//     * `tREGEXP`   (regexp atom)
-// Round 3: error-message parity — match `parser.rs`'s diagnostic text
-//   byte-for-byte using error productions / a custom error type, then flip
-//   the public `parse` entry point to this grammar and retire `parser.rs`.
-//
-// === Rule-by-rule porting plan (Round 2 skeleton) ==========================
-// RuboCop parser.y rule              -> LALRPOP nonterminal (planned)
-// -----------------------------------------------------------------------
-// node_pattern                       -> Pattern              [Round 2]
-// node_pattern_no_union              -> PatternNoUnion       [Round 2]
-//   '(' variadic_pattern_list ')'    -> NodeSequence         [Round 2]
-//   '[' node_pattern_list ']'        -> Intersection         [Phase D]
-//   '!' node_pattern                 -> NegationPat          [Round 2]
-//   '^' node_pattern                 -> AscendPat            [Round 2]
-//   '`' node_pattern                 -> DescendPat           [Round 2]
-//   '$' node_pattern                 -> CapturePat           [Round 2]
-//   tFUNCTION_CALL args              -> FunctionCall         [Round 2]
-//   tPREDICATE args                  -> PredicateCall        [Round 2]
-//   tNODE_TYPE                       -> NodeTypeAtom         [Round 2]
-//   atom                             -> Atom                 [Round 2]
-// atom                               -> Atom                 [Round 2]
-//   tSYMBOL / tNUMBER / tSTRING      -> LitAtom              [Round 2]
-//   tPARAM_*                         -> ParamAtom            [Phase D]
-//   tREGEXP                          -> RegexpAtom           [Phase D]
-//   tWILDCARD                        -> WildcardAtom         [Round 2]
-//   tUNIFY                           -> UnifyAtom            [Phase D]
-// union                              -> Union                [Round 2]
-// variadic_pattern{,_list}           -> VariadicPattern{,List}[Round 2]
-// rest / opt_capture / repetition    -> Rest / OptCapture / Repetition [Round 2]
-//
-// === Round 1 stub ==========================================================
-// The grammar below is intentionally trivial. It exposes a single
-// nonterminal that accepts one integer literal and returns it. Its only job
-// is to make the LALRPOP table generator and the lalrpop-util runtime link
-// cleanly so that downstream rounds can replace this body without touching
-// build wiring.
-
+// Test - add NodeMatch and UnionPrimary.
 use crate::lexer::Token;
-use crate::ParseError;
+use crate::{Head, Lit, ParseError, Pat, PatKind, PatSpan};
+use crate::parser::{make_capture_placeholder, resolve_kind};
+use murphy_ast::NodeKindTag;
 
 grammar;
 
-// Round 1: a stub parser that accepts exactly one integer literal.
-// (`tokenize` already validates the literal, so this rule cannot fail
-// post-lex; LALRPOP-level error handling lands in Round 3.)
-pub StubInt: i64 = {
-    <i:"int"> => i,
+pub Pattern: Pat = {
+    <p:Prefixed> => p,
+};
+
+Prefixed: Pat = {
+    <l:@L> "!" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Not(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <l:@L> "^" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Parent(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <l:@L> "`" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Descend(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <c:Capture> => c,
+    <p:Postfixed> => p,
+};
+
+Capture: Pat = {
+    <l:@L> "$" <r0:@R> "..." <r:@R> => {
+        let body = Pat { kind: PatKind::Rest, span: PatSpan::new(r0, r) };
+        Pat {
+            kind: make_capture_placeholder(None, body),
+            span: PatSpan::new(l, r),
+        }
+    },
+    <l:@L> "$" "{" <arms:Prefixed+> "}" <r:@R> => {
+        let union_arms: Vec<Pat> = arms.into_iter().map(|arm| Pat {
+            kind: PatKind::Capture {
+                slot: u16::MAX,
+                name: Some(crate::parser::SUGAR_MARKER.to_string()),
+                body: Box::new(arm),
+            },
+            span: PatSpan::new(l, r),
+        }).collect();
+        Pat {
+            kind: PatKind::Union(union_arms),
+            span: PatSpan::new(l, r),
+        }
+    },
+    <l:@L> "$" <body:CaptureBody> <r:@R> => Pat {
+        kind: make_capture_placeholder(None, body),
+        span: PatSpan::new(l, r),
+    },
+};
+
+// A capture body, excluding the dedicated arms (`$...`, `${...}`). Allows
+// nested `!`/`^`/`` ` ``/`$` prefixes, plus any non-brace-starting Postfixed.
+CaptureBody: Pat = {
+    <l:@L> "!" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Not(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <l:@L> "^" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Parent(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <l:@L> "`" <inner:Prefixed> <r:@R> => Pat {
+        kind: PatKind::Descend(Box::new(inner)),
+        span: PatSpan::new(l, r),
+    },
+    <c:Capture> => c,
+    <p:CapturePostfixed> => p,
+};
+
+CapturePostfixed: Pat = {
+    <p:CapturePrimary> => p,
+    <l:@L> <p:CapturePrimary> <q:Quantifier> <r:@R> => Pat {
+        kind: PatKind::Quantifier { body: Box::new(p), min: q.0, max: q.1 },
+        span: PatSpan::new(l, r),
+    },
+};
+
+// `Primary` minus `UnionPrimary` (the `{`-starting form) — `${...}` is
+// always the sugar Capture form, never an anonymous capture over a Union.
+CapturePrimary: Pat = {
+    <l:@L> "_" <r:@R> => Pat { kind: PatKind::Wildcard, span: PatSpan::new(l, r) },
+    <l:@L> "nil?" <r:@R> => Pat { kind: PatKind::NilTest, span: PatSpan::new(l, r) },
+    <l:@L> <v:"int"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Int(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"float"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Float(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"str"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Str(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"sym"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Sym(v)), span: PatSpan::new(l, r) },
+    <l:@L> <name:"predicate"> <r:@R> =>? {
+        crate::parser::split_predicate_name(name, PatSpan::new(l, r))
+            .map(|(name, args)| Pat {
+                kind: PatKind::Predicate { name, args },
+                span: PatSpan::new(l, r),
+            })
+            .map_err(|e| lalrpop_util::ParseError::User { error: e })
+    },
+    <l:@L> <name:"ident"> <r:@R> => crate::parser::kind_or_unknown_ident(&name, PatSpan::new(l, r)),
+    <m:NodeMatch> => m,
+};
+
+Postfixed: Pat = {
+    <p:Primary> => p,
+    <l:@L> <p:Primary> <q:Quantifier> <r:@R> => Pat {
+        kind: PatKind::Quantifier { body: Box::new(p), min: q.0, max: q.1 },
+        span: PatSpan::new(l, r),
+    },
+};
+
+Primary: Pat = {
+    <l:@L> "_" <r:@R> => Pat { kind: PatKind::Wildcard, span: PatSpan::new(l, r) },
+    <l:@L> "nil?" <r:@R> => Pat { kind: PatKind::NilTest, span: PatSpan::new(l, r) },
+    <l:@L> <v:"int"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Int(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"float"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Float(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"str"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Str(v)), span: PatSpan::new(l, r) },
+    <l:@L> <v:"sym"> <r:@R> => Pat { kind: PatKind::Lit(Lit::Sym(v)), span: PatSpan::new(l, r) },
+    // `#name` and `#name(args)` — args are pre-parsed by the token-stream
+    // adapter (`parser::preprocess_tokens`) to dodge an LR(1) local ambiguity
+    // at `#name (`. When the adapter encounters `Predicate(name)` immediately
+    // followed by `LParen`, it consumes through the matching `RParen`,
+    // serialises the args into a sentinel string, and stuffs them into the
+    // Predicate's name field as `name\0args_serialized`. The action below
+    // splits the name back into the real name and decoded args.
+    <l:@L> <name:"predicate"> <r:@R> =>? {
+        crate::parser::split_predicate_name(name, PatSpan::new(l, r))
+            .map(|(name, args)| Pat {
+                kind: PatKind::Predicate { name, args },
+                span: PatSpan::new(l, r),
+            })
+            .map_err(|e| lalrpop_util::ParseError::User { error: e })
+    },
+    <l:@L> <name:"ident"> <r:@R> => crate::parser::kind_or_unknown_ident(&name, PatSpan::new(l, r)),
+    <m:NodeMatch> => m,
+    <u:UnionPrimary> => u,
+};
+
+
+NodeMatch: Pat = {
+    <l:@L> "(" <head:Head> <children:NodeChild*> ")" <r:@R> => Pat {
+        kind: PatKind::Node { head, children },
+        span: PatSpan::new(l, r),
+    },
+};
+
+Head: Head = {
+    <l:@L> <name:"ident"> <r:@R> =>? {
+        resolve_kind(&name, PatSpan::new(l, r))
+            .map(Head::Exact)
+            .map_err(|e| lalrpop_util::ParseError::User { error: e })
+    },
+    "_" => Head::Any,
+    "{" <tags:OneOfHeadTag+> "}" => Head::OneOf(tags),
+};
+
+OneOfHeadTag: NodeKindTag = {
+    <l:@L> <name:"ident"> <r:@R> =>? {
+        resolve_kind(&name, PatSpan::new(l, r))
+            .map_err(|e| lalrpop_util::ParseError::User { error: e })
+    },
+};
+
+NodeChild: Pat = {
+    <l:@L> "..." <r:@R> => Pat { kind: PatKind::Rest, span: PatSpan::new(l, r) },
+    <a:AnyOrder> => a,
+    <p:Prefixed> => p,
+};
+
+AnyOrder: Pat = {
+    <l:@L> "<" <children:AnyOrderChild+> ">" <r:@R> =>? {
+        // The "$... inside <...>" rejection lives here so the error span
+        // points at the offending child, matching the hand-written parser.
+        for child in &children {
+            if let PatKind::Capture { body, .. } = &child.kind {
+                if matches!(body.kind, PatKind::Rest) {
+                    return Err(lalrpop_util::ParseError::User {
+                        error: ParseError::new(
+                            "`$...` inside `<...>` is not supported in v1: \
+                             leftover-element captures require a runtime \
+                             allocator not yet plumbed through `Cx`",
+                            child.span,
+                        ),
+                    });
+                }
+            }
+        }
+        // v1 limit: at most 10 non-rest children.
+        let non_rest = children.iter().filter(|c| !matches!(c.kind, PatKind::Rest)).count();
+        if non_rest > 10 {
+            return Err(lalrpop_util::ParseError::User {
+                error: ParseError::new(
+                    "too many elements in <...>: max 10 in v1",
+                    PatSpan::new(l, r),
+                ),
+            });
+        }
+        Ok(Pat {
+            kind: PatKind::AnyOrder { children },
+            span: PatSpan::new(l, r),
+        })
+    },
+};
+
+AnyOrderChild: Pat = {
+    <l:@L> "..." <r:@R> => Pat { kind: PatKind::Rest, span: PatSpan::new(l, r) },
+    <p:Prefixed> => p,
+};
+
+UnionPrimary: Pat = {
+    <l:@L> "{" <alts:Prefixed+> "}" <r:@R> => Pat {
+        kind: PatKind::Union(alts),
+        span: PatSpan::new(l, r),
+    },
+};
+
+Quantifier: (u8, u8) = {
+    "*" => (0, u8::MAX),
+    "+" => (1, u8::MAX),
+    "?" => (0, 1),
 };
 
 extern {
@@ -71,9 +227,27 @@ extern {
     type Error = ParseError;
 
     enum Token {
-        // Round 1 stub: only the integer literal is exposed. Round 2 will
-        // expand this enum to cover the whole token alphabet (see lexer.rs
-        // `Token` for the canonical list).
+        "(" => Token::LParen,
+        ")" => Token::RParen,
+        "{" => Token::LBrace,
+        "}" => Token::RBrace,
+        "<" => Token::LAngle,
+        ">" => Token::RAngle,
+        "$" => Token::Dollar,
+        "predicate" => Token::Predicate(<String>),
+        "..." => Token::Ellipsis,
+        "_" => Token::Underscore,
+        "!" => Token::Bang,
+        "^" => Token::Caret,
+        "`" => Token::Backtick,
+        "nil?" => Token::NilQuestion,
+        "ident" => Token::Ident(<String>),
         "int" => Token::Int(<i64>),
+        "float" => Token::Float(<f64>),
+        "str" => Token::Str(<String>),
+        "sym" => Token::Sym(<String>),
+        "*" => Token::Star,
+        "+" => Token::Plus,
+        "?" => Token::Question,
     }
 }
