@@ -174,7 +174,8 @@ fn collect_unify_names_inner(pat: &murphy_pattern::Pat, names: &mut Vec<String>)
         | PatKind::NilTest
         | PatKind::Lit(_)
         | PatKind::Predicate { .. }
-        | PatKind::Kind(_) => {}
+        | PatKind::Kind(_)
+        | PatKind::Regex { .. } => {}
     }
 }
 
@@ -1271,6 +1272,16 @@ fn lower_pat(
                 }
             })
         }
+        PatKind::Regex { pattern, flags } => {
+            // D5 (murphy-t8km): `/.../[imxo]*` regex match (guard form).
+            let fail = fail_stmt(ctx);
+            let check = lower_bool_regex(pattern, flags, subject, ctx)?;
+            Ok(quote! {
+                if !#check {
+                    #fail
+                }
+            })
+        }
         other => Err(syn::Error::new(
             Span::call_site(),
             format!("node_pattern!: pattern feature not yet supported: {other:?}"),
@@ -1917,7 +1928,8 @@ fn collect_capture_slots(pat: &murphy_pattern::Pat, out: &mut Vec<u16>) {
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Rest
-        | PatKind::Unify { .. } => {}
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. } => {}
     }
 }
 
@@ -2766,6 +2778,12 @@ fn lower_bool(
                 })
             })
         }
+        PatKind::Regex { pattern, flags } => {
+            // D5 (murphy-t8km): `/.../[imxo]*` regex match in bool context.
+            // Delegates to the same static LazyLock as the guard-form arm
+            // in `lower_pat`.
+            lower_bool_regex(pattern, flags, subject, ctx)
+        }
     }
 }
 
@@ -2817,6 +2835,51 @@ fn lower_bool_lit(lit: &murphy_pattern::Lit, subject: &TokenStream) -> TokenStre
             ( ::core::matches!(*cx.kind(#subject), ::murphy_plugin_api::NodeKind::Nil) )
         },
     }
+}
+
+/// Lower a `/.../flags` regex atom into a `return`-free bool expression (D5,
+/// murphy-t8km). Generates a `static LazyLock<Regex>` gensym'd per unique
+/// `(pattern, flags)` pair so the regex is compiled at most once per process
+/// lifetime.
+///
+/// The subject must be a `Sym` or `Str` atom; any other kind returns `false`.
+/// Flag `o` (Ruby once-compile) is accepted lexically but has no effect on
+/// Rust's `regex` crate — it is silently ignored.
+fn lower_bool_regex(
+    pattern: &str,
+    flags: &str,
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    // Gensym a stable ident for this specific (pattern, flags) pair.
+    let static_ident = gensym(ctx, "__REGEX_");
+    // Build flag arguments for `RegexBuilder`.
+    let case_insensitive = flags.contains('i');
+    let multi_line = flags.contains('m');
+    let ignore_whitespace = flags.contains('x');
+    // Emit the LazyLock static and the match check.
+    Ok(quote! {
+        ({
+            static #static_ident: ::std::sync::LazyLock<::murphy_plugin_api::regex::Regex> =
+                ::std::sync::LazyLock::new(|| {
+                    ::murphy_plugin_api::regex::RegexBuilder::new(#pattern)
+                        .case_insensitive(#case_insensitive)
+                        .multi_line(#multi_line)
+                        .ignore_whitespace(#ignore_whitespace)
+                        .build()
+                        .unwrap_or_else(|e| panic!("node_pattern! regex compile error: {e}"))
+                });
+            match *cx.kind(#subject) {
+                ::murphy_plugin_api::NodeKind::Sym(__sym) => {
+                    #static_ident.is_match(cx.symbol_str(__sym))
+                }
+                ::murphy_plugin_api::NodeKind::Str(__id) => {
+                    #static_ident.is_match(cx.string_str(__id))
+                }
+                _ => false,
+            }
+        })
+    })
 }
 
 /// Lower a `(head child...)` node match into a `return`-free bool expression.

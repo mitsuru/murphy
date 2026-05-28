@@ -2919,3 +2919,115 @@ fn unify_rollback_across_union_arms_both_backends() {
     );
     assert_c_matches("{ (pair _x _x) (pair _ _x) }", &ast, pair, b_hit);
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// 15. tREGEXP — `/.../[imxo]*` regex atom (D5, murphy-t8km).
+//
+// B↔C conformance: both backends must agree on hit/miss for a regex pattern
+// against Sym and Str atoms, and on slot-type mismatch (Int → no-match).
+// ────────────────────────────────────────────────────────────────────────
+
+node_pattern!(b_regex_to_prefix, "/^to_/");
+node_pattern!(b_regex_abc_insensitive, "/abc/i");
+
+fn sym_node_ast(name: &str) -> (Ast, NodeId) {
+    let mut b = AstBuilder::new(name, "t.rb");
+    let s = b.intern_symbol(name);
+    let n = b.push(NodeKind::Sym(s), r());
+    let ast = b.finish(n);
+    (ast, n)
+}
+
+fn str_node_ast(value: &str) -> (Ast, NodeId) {
+    let mut b = AstBuilder::new(value, "t.rb");
+    let s = b.intern_string(value);
+    let n = b.push(NodeKind::Str(s), r());
+    let ast = b.finish(n);
+    (ast, n)
+}
+
+fn int_node_ast(v: i64) -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("0", "t.rb");
+    let n = b.push(NodeKind::Int(v), r());
+    let ast = b.finish(n);
+    (ast, n)
+}
+
+#[test]
+fn regex_sym_hit_and_miss_agrees() {
+    let fns = fns();
+
+    // `:to_s` — must hit `/^to_/`.
+    {
+        let (ast, node) = sym_node_ast("to_s");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/^to_/", &ast, node, b_regex_to_prefix(node, &cx));
+    }
+
+    // `:other` — must miss `/^to_/`.
+    {
+        let (ast, node) = sym_node_ast("other");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/^to_/", &ast, node, b_regex_to_prefix(node, &cx));
+    }
+}
+
+#[test]
+fn regex_int_slot_type_mismatch_agrees() {
+    // `Int(1)` against `/^to_/` — slot-type mismatch, both backends must miss.
+    let fns = fns();
+    let (ast, node) = int_node_ast(1);
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert_c_matches("/^to_/", &ast, node, b_regex_to_prefix(node, &cx));
+}
+
+#[test]
+fn regex_case_insensitive_flag_agrees() {
+    let fns = fns();
+
+    // `:ABC` must hit `/abc/i`.
+    {
+        let (ast, node) = sym_node_ast("ABC");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/abc/i", &ast, node, b_regex_abc_insensitive(node, &cx));
+    }
+
+    // `:xyz` must miss `/abc/i`.
+    {
+        let (ast, node) = sym_node_ast("xyz");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/abc/i", &ast, node, b_regex_abc_insensitive(node, &cx));
+    }
+
+    // `:abc` (exact lowercase) must also hit.
+    {
+        let (ast, node) = sym_node_ast("abc");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_c_matches("/abc/i", &ast, node, b_regex_abc_insensitive(node, &cx));
+    }
+}
+
+node_pattern!(b_regex_str_match, "/^to_/");
+
+#[test]
+fn regex_str_node_match_agrees() {
+    // A bare `Str("to_s")` node against `/^to_/` — tests regex on Str atoms.
+    let fns = fns();
+    let (ast, node) = str_node_ast("to_s");
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    assert_c_matches("/^to_/", &ast, node, b_regex_str_match(node, &cx));
+
+    // A non-matching Str.
+    let (ast2, node2) = str_node_ast("other");
+    let raw2 = cx_raw_for(&ast2, &fns);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    assert_c_matches("/^to_/", &ast2, node2, b_regex_str_match(node2, &cx2));
+}

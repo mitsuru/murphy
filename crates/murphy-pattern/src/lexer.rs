@@ -50,6 +50,14 @@ pub(crate) enum Token {
     ///
     /// D4 (murphy-nnr8): NodeId-equality unification.
     Unify(String),
+    /// `/.../[imxo]*` — a regex literal (tREGEXP, D5 — murphy-t8km).
+    ///
+    /// The `pattern` payload is the raw body between the `/` delimiters,
+    /// with `\/` unescaped to `/` and all other bytes passed through verbatim.
+    /// `flags` contains only the flag characters that appeared after the
+    /// closing `/` (subset of `imxo`). Flag `o` (once-compile) is accepted
+    /// lexically but carries no meaning at runtime.
+    Regex(String, String),
     /// `*` — postfix quantifier (`0..`).
     Star,
     /// `+` — postfix quantifier (`1..`).
@@ -134,6 +142,7 @@ impl<'a> Lexer<'a> {
             b'[' => self.single(Token::LBracket),
             b']' => self.single(Token::RBracket),
             b'|' => self.single(Token::Pipe),
+            b'/' => self.scan_regex(),
             b'%' => {
                 // `%Foo` (uppercase-start) is tPARAM_CONST sugar — consume the
                 // `%` prefix and lex the rest as a normal uppercase ident.
@@ -195,6 +204,83 @@ impl<'a> Lexer<'a> {
             self.pos = end;
             Err(self.err_at(start, end, "expected `...`"))
         }
+    }
+
+    /// Scan `/.../[imxo]*` — a regex literal (tREGEXP, D5 — murphy-t8km).
+    ///
+    /// The opening `/` has already been identified as the first byte (it is
+    /// consumed here). The body is read until the first unescaped `/`:
+    ///
+    /// - `\/` inside the body → literal `/` in the pattern (unescaped).
+    /// - Any other `\X` pair → kept verbatim as `\X` so that regex `\d`,
+    ///   `\w`, etc. survive the lexer unchanged and are interpreted by the
+    ///   `regex` crate at compile/match time. This is option A from the
+    ///   design notes: only `\/` is consumed by the lexer; all other
+    ///   backslash sequences pass through.
+    /// - An unescaped `/` terminates the body.
+    ///
+    /// After the closing `/`, zero or more of the flag characters `imxo` are
+    /// consumed and returned verbatim in `flags`.
+    fn scan_regex(&mut self) -> Result<Token, ParseError> {
+        let open = self.pos;
+        self.pos += 1; // consume opening `/`
+        let mut pattern = String::new();
+        loop {
+            let Some(&b) = self.peek() else {
+                return Err(self.err_at(open, self.pos, "unterminated regex literal"));
+            };
+            match b {
+                b'/' => {
+                    // Closing delimiter.
+                    self.pos += 1;
+                    break;
+                }
+                b'\\' => {
+                    // Look at the next byte.
+                    self.pos += 1; // consume `\`
+                    match self.peek() {
+                        Some(&b'/') => {
+                            // `\/` — unescape to `/`.
+                            pattern.push('/');
+                            self.pos += 1;
+                        }
+                        Some(_) => {
+                            // Any other `\X` — pass through verbatim so that
+                            // regex metacharacters like `\d`, `\w`, `\s` reach
+                            // the `regex` crate unmodified.
+                            pattern.push('\\');
+                            // The next byte will be picked up on the next loop
+                            // iteration (we do NOT consume it here, letting the
+                            // raw-byte-append path below handle it).
+                        }
+                        None => {
+                            return Err(self.err_at(open, self.pos, "unterminated regex literal"));
+                        }
+                    }
+                }
+                _ => {
+                    // Raw bytes: append contiguous run up to next `\` or `/`.
+                    let chunk_start = self.pos;
+                    while let Some(&c) = self.peek() {
+                        if c == b'/' || c == b'\\' {
+                            break;
+                        }
+                        self.pos += 1;
+                    }
+                    pattern.push_str(
+                        std::str::from_utf8(&self.src[chunk_start..self.pos])
+                            .expect("source is valid UTF-8"),
+                    );
+                }
+            }
+        }
+        // Consume flag characters `[imxo]*`.
+        let mut flags = String::new();
+        while matches!(self.peek(), Some(b'i' | b'm' | b'x' | b'o')) {
+            flags.push(*self.peek().unwrap() as char);
+            self.pos += 1;
+        }
+        Ok(Token::Regex(pattern, flags))
     }
 
     /// Scan `#name` where `name` is `[A-Za-z_][A-Za-z0-9_]*[?!=]?`.
@@ -1076,5 +1162,67 @@ mod tests {
                 Token::RParen,
             ]
         );
+    }
+
+    // --- D5 (murphy-t8km): tREGEXP — `/.../[imxo]*` regex literal -----------
+
+    #[test]
+    fn regex_basic() {
+        // `/^to_/` → Token::Regex with empty flags.
+        assert_eq!(toks("/^to_/"), vec![Token::Regex("^to_".into(), "".into())]);
+    }
+
+    #[test]
+    fn regex_with_flags() {
+        // `/abc/im` → pattern "abc", flags "im".
+        assert_eq!(
+            toks("/abc/im"),
+            vec![Token::Regex("abc".into(), "im".into())]
+        );
+    }
+
+    #[test]
+    fn regex_escape_slash() {
+        // `/a\/b/` → pattern "a/b" (the `\/` is unescaped to `/`).
+        assert_eq!(toks("/a\\/b/"), vec![Token::Regex("a/b".into(), "".into())]);
+    }
+
+    #[test]
+    fn regex_other_backslash_passthrough() {
+        // `/\d+/` — the `\d` passes through verbatim so the `regex` crate
+        // can interpret it as a digit class. Option A semantics: only `\/`
+        // is consumed; all other `\X` are passed through.
+        assert_eq!(toks("/\\d+/"), vec![Token::Regex("\\d+".into(), "".into())]);
+    }
+
+    #[test]
+    fn regex_flag_o_accepted() {
+        // `/abc/o` — `o` (once-compile) is accepted lexically and stored in
+        // the flags string, even though it has no runtime effect.
+        assert_eq!(toks("/abc/o"), vec![Token::Regex("abc".into(), "o".into())]);
+    }
+
+    #[test]
+    fn regex_in_node_pattern_context() {
+        // `(send _ /^to_/ ...)` produces a sensible token stream.
+        assert_eq!(
+            toks("(send _ /^to_/ ...)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Underscore,
+                Token::Regex("^to_".into(), "".into()),
+                Token::Ellipsis,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn colon_slash_still_lexes_as_operator_symbol() {
+        // `:/` is an operator-symbol (division); scan_symbol's take_operator_name
+        // consumes it before `scan_token` could dispatch on `/`. Ensure it
+        // still produces `Token::Sym("/")` and does NOT produce a Regex token.
+        assert_eq!(toks(":/"), vec![Token::Sym("/".into())]);
     }
 }

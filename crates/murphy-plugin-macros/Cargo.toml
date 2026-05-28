@@ -21,6 +21,10 @@ serde_json = "1"
 murphy-pattern = { path = "../murphy-pattern" }
 # NodeKindTag / pattern-name resolution for the schema table.
 murphy-ast = { path = "../murphy-ast" }
+# node_pattern! generates `regex::RegexBuilder` calls; this re-exports the
+# crate so generated code can reference `::regex::...` without the user crate
+# needing its own `regex` dependency.
+regex = "1"
 
 [dev-dependencies]
 trybuild = "1"

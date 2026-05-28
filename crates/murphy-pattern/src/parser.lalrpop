@@ -56,8 +56,8 @@
 // args (tARG_LIST …)               | not in grammar; pre-folded by
 //                                  |   fold_predicate_args in parser.rs
 // ---------------------------------|-------------------------------------------
-// D-phase deferred (not added here):
-//   tREGEXP                        — beads murphy-t8km
+// D-phase implemented:
+//   tREGEXP                        — implemented in D5 (murphy-t8km)
 
 use crate::lexer::Token;
 use crate::{Head, Lit, ParseError, Pat, PatKind, PatSpan};
@@ -162,6 +162,8 @@ CapturePrimary: Pat = {
     <l:@L> <name:"ident"> <r:@R> => crate::parser::const_or_kind_or_unknown_ident(&name, PatSpan::new(l, r)),
     // D4 (murphy-nnr8): tUNIFY — `_name` unification in capture body position.
     <l:@L> <name:"unify"> <r:@R> => Pat { kind: PatKind::Unify { name }, span: PatSpan::new(l, r) },
+    // D5 (murphy-t8km): tREGEXP — `/.../[imxo]*` regex atom in capture body position.
+    <l:@L> <rx:"regex"> <r:@R> => Pat { kind: PatKind::Regex { pattern: rx.0, flags: rx.1 }, span: PatSpan::new(l, r) },
     <m:NodeMatch> => m,
     <i:IntersectionPrimary> => i,
 };
@@ -199,6 +201,8 @@ Primary: Pat = {
     <l:@L> <name:"ident"> <r:@R> => crate::parser::const_or_kind_or_unknown_ident(&name, PatSpan::new(l, r)),
     // D4 (murphy-nnr8): tUNIFY — `_name` named wildcard with NodeId unification.
     <l:@L> <name:"unify"> <r:@R> => Pat { kind: PatKind::Unify { name }, span: PatSpan::new(l, r) },
+    // D5 (murphy-t8km): tREGEXP — `/.../[imxo]*` regex atom.
+    <l:@L> <rx:"regex"> <r:@R> => Pat { kind: PatKind::Regex { pattern: rx.0, flags: rx.1 }, span: PatSpan::new(l, r) },
     <m:NodeMatch> => m,
     <u:UnionPrimary> => u,
     <i:IntersectionPrimary> => i,
@@ -362,6 +366,7 @@ extern {
         "str" => Token::Str(<String>),
         "sym" => Token::Sym(<String>),
         "unify" => Token::Unify(<String>),
+        "regex" => Token::Regex(<String>, <String>),
         "*" => Token::Star,
         "+" => Token::Plus,
         "?" => Token::Question,

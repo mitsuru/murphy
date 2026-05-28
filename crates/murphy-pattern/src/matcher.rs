@@ -287,6 +287,31 @@ fn match_pat<P: PredicateHost + ?Sized>(
             true
         }
 
+        IrNode::Regex { pattern, flags } => {
+            // D5 (murphy-t8km): `/.../[imxo]*` regex match.
+            // Matches Symbol or String atoms only; any other kind → false.
+            // The regex is compiled on every match call (the B backend caches
+            // via LazyLock; the C backend can be optimised later if needed).
+            // A compile error in the pattern → panic (the pattern was already
+            // accepted by the lexer/parser so this implies a Rust `regex`
+            // syntax incompatibility — treat as a hard programming error).
+            let pat_str = ctx.pool(*pattern);
+            let flags_str = ctx.pool(*flags);
+            let subject_str: Option<&str> = match *ctx.ast.kind(node) {
+                NodeKind::Sym(s) => Some(ctx.ast.interner().resolve(s.0)),
+                NodeKind::Str(s) => Some(ctx.ast.interner().resolve(s.0)),
+                _ => None,
+            };
+            let Some(s) = subject_str else { return false };
+            let regex = regex::RegexBuilder::new(pat_str)
+                .case_insensitive(flags_str.contains('i'))
+                .multi_line(flags_str.contains('m'))
+                .ignore_whitespace(flags_str.contains('x'))
+                .build()
+                .unwrap_or_else(|e| panic!("node_pattern regex compile error: {e}"));
+            regex.is_match(s)
+        }
+
         IrNode::Unify { name } => {
             // D4 (murphy-nnr8): `_name` unification.
             // First occurrence of this name → bind the current NodeId.
@@ -1903,6 +1928,108 @@ mod tests {
         assert!(
             matches(&ir, &ast2, send2, &mut NoPredicates).is_some(),
             "second union arm (different) must hit for obj.foo(other)"
+        );
+    }
+
+    // =========================================================================
+    // D5 (murphy-t8km): tREGEXP — C-backend matcher tests.
+    // =========================================================================
+
+    fn sym_ast(name: &str) -> (Ast, NodeId) {
+        let mut b = AstBuilder::new(name, "t.rb");
+        let s = b.intern_symbol(name);
+        let node = b.push(NodeKind::Sym(s), r());
+        let ast = b.finish(node);
+        (ast, node)
+    }
+
+    fn str_ast(value: &str) -> (Ast, NodeId) {
+        let mut b = AstBuilder::new(value, "t.rb");
+        let s = b.intern_string(value);
+        let node = b.push(NodeKind::Str(s), r());
+        let ast = b.finish(node);
+        (ast, node)
+    }
+
+    fn int_ast(value: i64) -> (Ast, NodeId) {
+        let mut b = AstBuilder::new("0", "t.rb");
+        let node = b.push(NodeKind::Int(value), r());
+        let ast = b.finish(node);
+        (ast, node)
+    }
+
+    #[test]
+    fn regex_sym_hit() {
+        let ir = compile("/^to_/").expect("compile ok");
+        let (ast, node) = sym_ast("to_s");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_some(),
+            "/^to_/ must match :to_s"
+        );
+    }
+
+    #[test]
+    fn regex_sym_miss() {
+        let ir = compile("/^to_/").expect("compile ok");
+        let (ast, node) = sym_ast("other");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_none(),
+            "/^to_/ must NOT match :other"
+        );
+    }
+
+    #[test]
+    fn regex_int_slot_type_mismatch_is_miss() {
+        // An Int node does not match a regex pattern — slot-type mismatch.
+        let ir = compile("/^to_/").expect("compile ok");
+        let (ast, node) = int_ast(1);
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_none(),
+            "/^to_/ must NOT match Int(1)"
+        );
+    }
+
+    #[test]
+    fn regex_case_insensitive_flag() {
+        // `/abc/i` must match `:ABC`.
+        let ir = compile("/abc/i").expect("compile ok");
+        let (ast, node) = sym_ast("ABC");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_some(),
+            "/abc/i must match :ABC (case-insensitive)"
+        );
+        // Without `i`, it should miss.
+        let ir2 = compile("/abc/").expect("compile ok");
+        assert!(
+            matches(&ir2, &ast, node, &mut NoPredicates).is_none(),
+            "/abc/ must NOT match :ABC (case-sensitive)"
+        );
+    }
+
+    #[test]
+    fn regex_str_match() {
+        let ir = compile("/hello/").expect("compile ok");
+        let (ast, node) = str_ast("hello world");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_some(),
+            "/hello/ must match \"hello world\""
+        );
+    }
+
+    #[test]
+    fn regex_digit_class_passes_through() {
+        // `/\d+/` — `\d` must reach the regex crate unmodified (option A:
+        // only `\/` is consumed by the lexer).
+        let ir = compile("/\\d+/").expect("compile ok");
+        let (ast, node) = sym_ast("123");
+        assert!(
+            matches(&ir, &ast, node, &mut NoPredicates).is_some(),
+            "/\\d+/ must match :123"
+        );
+        let (ast2, node2) = sym_ast("abc");
+        assert!(
+            matches(&ir, &ast2, node2, &mut NoPredicates).is_none(),
+            "/\\d+/ must NOT match :abc"
         );
     }
 }

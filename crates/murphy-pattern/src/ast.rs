@@ -102,6 +102,26 @@ pub enum PatKind {
     ///
     /// [`NodeId`]: murphy_ast::NodeId
     Unify { name: String },
+    /// `/.../[imxo]*` — regex match on a Symbol or String slot (tREGEXP,
+    /// D5 — murphy-t8km).
+    ///
+    /// Matches when the subject node is a [`Lit::Sym`] or [`Lit::Str`] atom
+    /// whose string value matches the regex. Any other literal kind (Int,
+    /// Float, Bool, Nil) is a runtime slot-type mismatch and returns `false`.
+    ///
+    /// **Regex engine**: Rust's [`regex`](https://docs.rs/regex) crate (RE2
+    /// semantics). Behaviour differences from Ruby's Onigmo are documented in
+    /// the crate itself (look-around and backreferences are not supported).
+    ///
+    /// **Flags** (`[imxo]*`):
+    /// - `i` — case-insensitive match.
+    /// - `m` — multi-line mode (`^`/`$` match line boundaries; `.` does
+    ///   NOT match `\n` in the `regex` crate's multi-line mode; use `(?s)` for
+    ///   dot-matches-all).
+    /// - `x` — extended/verbose mode (whitespace and `#` comments ignored).
+    /// - `o` — once-compile (Ruby-only; has no meaning in Rust — silently
+    ///   ignored).
+    Regex { pattern: String, flags: String },
 }
 
 /// The head of a `Node` match: what the node's kind must satisfy.

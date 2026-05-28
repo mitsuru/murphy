@@ -8,6 +8,7 @@ build = "build.rs"
 [dependencies]
 murphy-ast = { path = "../murphy-ast" }
 lalrpop-util = { version = "0.23", default-features = false }
+regex = "1"
 
 [build-dependencies]
 lalrpop = { version = "0.23", default-features = false }
