@@ -170,6 +170,14 @@ NodeChild: Pat = {
 };
 
 AnyOrder: Pat = {
+    <l:@L> "<" ">" <r:@R> =>? {
+        Err(lalrpop_util::ParseError::User {
+            error: ParseError::new(
+                "empty `<>` any-order: must contain at least one child pattern",
+                PatSpan::new(l, r),
+            ),
+        })
+    },
     <l:@L> "<" <children:AnyOrderChild+> ">" <r:@R> =>? {
         // The "$... inside <...>" rejection lives here so the error span
         // points at the offending child, matching the hand-written parser.
@@ -210,6 +218,14 @@ AnyOrderChild: Pat = {
 };
 
 UnionPrimary: Pat = {
+    <l:@L> "{" "}" <r:@R> =>? {
+        Err(lalrpop_util::ParseError::User {
+            error: ParseError::new(
+                "empty union `{}`: must contain at least one alternative",
+                PatSpan::new(l, r),
+            ),
+        })
+    },
     <l:@L> "{" <alts:Prefixed+> "}" <r:@R> => Pat {
         kind: PatKind::Union(alts),
         span: PatSpan::new(l, r),
