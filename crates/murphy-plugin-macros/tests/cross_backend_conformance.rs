@@ -1246,3 +1246,380 @@ fn union_capture_sugar_returns_same_node_id_for_both_arms() {
         assert!(b_matched.is_none(), "Sym must not match ${{int float}}");
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// 12. AnyOrder `<...>` — order-independent sequence matching (murphy-ejd).
+//
+// The first three tests drive the C-backend only (via `compile`/`matches`).
+// The last three are B↔C paired conformance tests that also exercise the
+// `node_pattern!` B-backend.
+// ────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn anyorder_basic_both_orderings() {
+    // `(array <int sym>)` must match whether the int or sym comes first.
+    let pat = "(array <int sym>)";
+    let ir = compile(pat).unwrap_or_else(|e| panic!("compile `{pat}` failed: {e}"));
+
+    // [42, :foo] — int first, sym second.
+    let (ast_a, arr_a) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let i = b.push(NodeKind::Int(42), r());
+        let s_sym = b.intern_symbol("foo");
+        let s = b.push(NodeKind::Sym(s_sym), r());
+        let list = b.push_list(&[i, s]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    assert!(
+        matches(&ir, &ast_a, arr_a, &mut NoPredicates).is_some(),
+        "`{pat}` must match [int, sym]"
+    );
+
+    // [:foo, 42] — sym first, int second.
+    let (ast_b, arr_b) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let s_sym = b.intern_symbol("foo");
+        let s = b.push(NodeKind::Sym(s_sym), r());
+        let i = b.push(NodeKind::Int(42), r());
+        let list = b.push_list(&[s, i]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    assert!(
+        matches(&ir, &ast_b, arr_b, &mut NoPredicates).is_some(),
+        "`{pat}` must match [sym, int]"
+    );
+
+    // [42, 99] — two ints, no sym → miss.
+    let (ast_c, arr_c) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let i1 = b.push(NodeKind::Int(42), r());
+        let i2 = b.push(NodeKind::Int(99), r());
+        let list = b.push_list(&[i1, i2]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    assert!(
+        matches(&ir, &ast_c, arr_c, &mut NoPredicates).is_none(),
+        "`{pat}` must NOT match [int, int]"
+    );
+}
+
+#[test]
+fn anyorder_with_rest_absorbs_extras() {
+    // `(array <int sym ...>)` must match [42, :foo, :bar, :baz] — int + sym
+    // must be found somewhere; the rest absorbs the leftover syms.
+    let pat = "(array <int sym ...>)";
+    let ir = compile(pat).unwrap_or_else(|e| panic!("compile `{pat}` failed: {e}"));
+
+    let (ast, arr) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let i = b.push(NodeKind::Int(42), r());
+        let s1 = b.intern_symbol("foo");
+        let sym1 = b.push(NodeKind::Sym(s1), r());
+        let s2 = b.intern_symbol("bar");
+        let sym2 = b.push(NodeKind::Sym(s2), r());
+        let s3 = b.intern_symbol("baz");
+        let sym3 = b.push(NodeKind::Sym(s3), r());
+        let list = b.push_list(&[i, sym1, sym2, sym3]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    assert!(
+        matches(&ir, &ast, arr, &mut NoPredicates).is_some(),
+        "`{pat}` must match [int, sym, sym, sym]"
+    );
+
+    // sym first, int in the middle.
+    let (ast2, arr2) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let s1 = b.intern_symbol("a");
+        let sym1 = b.push(NodeKind::Sym(s1), r());
+        let i = b.push(NodeKind::Int(1), r());
+        let s2 = b.intern_symbol("b");
+        let sym2 = b.push(NodeKind::Sym(s2), r());
+        let list = b.push_list(&[sym1, i, sym2]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    assert!(
+        matches(&ir, &ast2, arr2, &mut NoPredicates).is_some(),
+        "`{pat}` must match [sym, int, sym] with rest"
+    );
+
+    // Only one element: just int — misses because no sym.
+    let (ast3, arr3) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let i = b.push(NodeKind::Int(7), r());
+        let list = b.push_list(&[i]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    assert!(
+        matches(&ir, &ast3, arr3, &mut NoPredicates).is_none(),
+        "`{pat}` must NOT match [int] (no sym)"
+    );
+}
+
+#[test]
+fn anyorder_captures_in_declaration_order() {
+    // `(array <$a $b>)` — wildcard captures: the C-backend must assign
+    // captures in declaration order (slot 0 = first element assigned to
+    // pattern 0, slot 1 = first element assigned to pattern 1).
+    // With wildcards and input [sym, int], pattern 0 takes element 0 (sym)
+    // and pattern 1 takes element 1 (int).
+    let pat = "(array <$a $b>)";
+    let ir = compile(pat).unwrap_or_else(|e| panic!("compile `{pat}` failed: {e}"));
+
+    // [:foo, 42] — sym first, int second.
+    let (ast, arr) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let s_sym = b.intern_symbol("foo");
+        let s = b.push(NodeKind::Sym(s_sym), r());
+        let i = b.push(NodeKind::Int(42), r());
+        let list = b.push_list(&[s, i]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    let caps = matches(&ir, &ast, arr, &mut NoPredicates)
+        .expect("`(array <$a $b>)` must match [:foo, 42]");
+    // Slot 0 = first element (Sym(:foo)), slot 1 = second element (Int(42)).
+    let slot0 = caps.get(0).expect("slot 0 must be set");
+    let slot1 = caps.get(1).expect("slot 1 must be set");
+    match slot0 {
+        CaptureValue::Node(nid) => {
+            assert!(
+                matches!(ast.node(*nid).kind, NodeKind::Sym(_)),
+                "slot 0 must be Sym (first element), got {:?}",
+                ast.node(*nid).kind
+            );
+        }
+        other => panic!("slot 0 expected Node, got {other:?}"),
+    }
+    match slot1 {
+        CaptureValue::Node(nid) => {
+            assert!(
+                matches!(ast.node(*nid).kind, NodeKind::Int(_)),
+                "slot 1 must be Int (second element), got {:?}",
+                ast.node(*nid).kind
+            );
+        }
+        other => panic!("slot 1 expected Node, got {other:?}"),
+    }
+}
+
+// ─── B↔C paired conformance for AnyOrder ─────────────────────────────────
+
+// Declare B-backend matchers for the paired tests below.
+node_pattern!(b_anyorder_basic, "(array <int sym>)");
+node_pattern!(b_anyorder_underscore_then_int, "(array <_ int>)");
+// Wildcard captures: `$a` captures anything into slot 0, `$b` into slot 1.
+node_pattern!(b_anyorder_caps, "(array <$a $b>)");
+// Backtracking + capture: `$a` is a wildcard capture, `int` is a type
+// discriminator. Against [42, :sym], `$a` must end up on :sym (slot 0)
+// after backtracking forces `int` to take 42.
+node_pattern!(b_anyorder_backtrack_cap, "(array <$a int>)");
+
+#[test]
+fn b_anyorder_basic_both_orderings() {
+    // B and C agree: `(array <int sym>)` matches both orderings.
+    let pat = "(array <int sym>)";
+    let ir = compile(pat).unwrap_or_else(|e| panic!("compile `{pat}` failed: {e}"));
+    let fns = fns();
+
+    // [42, :foo] — int first.
+    let (ast_a, arr_a) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let i = b.push(NodeKind::Int(42), r());
+        let s_sym = b.intern_symbol("foo");
+        let s = b.push(NodeKind::Sym(s_sym), r());
+        let list = b.push_list(&[i, s]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    let raw_a = cx_raw_for(&ast_a, &fns);
+    let cx_a = unsafe { Cx::from_raw(&raw_a) };
+    let b_hit_a: bool = b_anyorder_basic(arr_a, &cx_a);
+    let c_hit_a = matches(&ir, &ast_a, arr_a, &mut NoPredicates).is_some();
+    assert_eq!(b_hit_a, c_hit_a, "B↔C disagree on [int, sym]");
+    assert!(b_hit_a, "must match [int, sym]");
+
+    // [:foo, 42] — sym first.
+    let (ast_b, arr_b) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let s_sym = b.intern_symbol("foo");
+        let s = b.push(NodeKind::Sym(s_sym), r());
+        let i = b.push(NodeKind::Int(42), r());
+        let list = b.push_list(&[s, i]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    let raw_b = cx_raw_for(&ast_b, &fns);
+    let cx_b = unsafe { Cx::from_raw(&raw_b) };
+    let b_hit_b: bool = b_anyorder_basic(arr_b, &cx_b);
+    let c_hit_b = matches(&ir, &ast_b, arr_b, &mut NoPredicates).is_some();
+    assert_eq!(b_hit_b, c_hit_b, "B↔C disagree on [sym, int]");
+    assert!(b_hit_b, "must match [sym, int]");
+
+    // [42, 99] — no sym → miss.
+    let (ast_c, arr_c) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let i1 = b.push(NodeKind::Int(42), r());
+        let i2 = b.push(NodeKind::Int(99), r());
+        let list = b.push_list(&[i1, i2]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    let raw_c = cx_raw_for(&ast_c, &fns);
+    let cx_c = unsafe { Cx::from_raw(&raw_c) };
+    let b_miss_c: bool = b_anyorder_basic(arr_c, &cx_c);
+    let c_miss_c = matches(&ir, &ast_c, arr_c, &mut NoPredicates).is_some();
+    assert_eq!(b_miss_c, c_miss_c, "B↔C disagree on [int, int]");
+    assert!(!b_miss_c, "must NOT match [int, int]");
+}
+
+#[test]
+fn b_anyorder_underscore_then_int_discriminator() {
+    // `(array <_ int>)` against [42, :sym] — backtracking discriminator.
+    // A greedy (non-backtracking) B-backend: `_` takes 42, `int` fails on :sym.
+    // A correct backtracking B-backend: `_` retries :sym, `int` takes 42. Match.
+    let pat = "(array <_ int>)";
+    let ir = compile(pat).unwrap_or_else(|e| panic!("compile `{pat}` failed: {e}"));
+    let fns = fns();
+
+    let (ast, arr) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let i = b.push(NodeKind::Int(42), r());
+        let s_sym = b.intern_symbol("sym");
+        let s = b.push(NodeKind::Sym(s_sym), r());
+        let list = b.push_list(&[i, s]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_hit: bool = b_anyorder_underscore_then_int(arr, &cx);
+    let c_hit = matches(&ir, &ast, arr, &mut NoPredicates).is_some();
+    assert_eq!(b_hit, c_hit, "B↔C disagree on [int, sym] for `<_ int>`");
+    assert!(
+        b_hit,
+        "`<_ int>` must match [int, sym] (backtracking required)"
+    );
+}
+
+#[test]
+fn b_anyorder_captures_in_declaration_order() {
+    // `(array <$a $b>)` — wildcard captures: slot 0 = first matched element,
+    // slot 1 = second matched element. B and C must agree.
+    let pat = "(array <$a $b>)";
+    let ir = compile(pat).unwrap_or_else(|e| panic!("compile `{pat}` failed: {e}"));
+    let fns = fns();
+
+    // [:foo, 42] — sym first in array, int is slot 0.
+    let (ast, arr) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let s_sym = b.intern_symbol("foo");
+        let s = b.push(NodeKind::Sym(s_sym), r());
+        let i = b.push(NodeKind::Int(42), r());
+        let list = b.push_list(&[s, i]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_caps: Option<(NodeId, NodeId)> = b_anyorder_caps(arr, &cx);
+    let c_caps = matches(&ir, &ast, arr, &mut NoPredicates);
+
+    assert!(b_caps.is_some(), "B must match [:foo, 42]");
+    assert!(c_caps.is_some(), "C must match [:foo, 42]");
+
+    let (b_slot0, b_slot1) = b_caps.unwrap();
+    let c = c_caps.unwrap();
+    let c_slot0 = match c.get(0).expect("C slot 0") {
+        CaptureValue::Node(n) => *n,
+        other => panic!("C slot 0 expected Node, got {other:?}"),
+    };
+    let c_slot1 = match c.get(1).expect("C slot 1") {
+        CaptureValue::Node(n) => *n,
+        other => panic!("C slot 1 expected Node, got {other:?}"),
+    };
+
+    assert_eq!(b_slot0, c_slot0, "B↔C slot 0 disagree");
+    assert_eq!(b_slot1, c_slot1, "B↔C slot 1 disagree");
+
+    // Wildcards assign declaration-order: slot 0 = first element (Sym), slot 1 = second (Int).
+    assert!(
+        matches!(ast.node(b_slot0).kind, NodeKind::Sym(_)),
+        "slot 0 must be Sym (first element), got {:?}",
+        ast.node(b_slot0).kind
+    );
+    assert!(
+        matches!(ast.node(b_slot1).kind, NodeKind::Int(_)),
+        "slot 1 must be Int (second element), got {:?}",
+        ast.node(b_slot1).kind
+    );
+}
+
+#[test]
+fn b_anyorder_backtrack_captures_after_backtrack() {
+    // `(array <$a int>)` against [42, :sym].
+    //
+    // Declaration order is: pattern 0 = `$a` (wildcard), pattern 1 = `int`.
+    // A greedy implementation tries `$a`=42, `int`=:sym → fails.
+    // Backtracking commits `$a`=:sym, `int`=42 → succeeds.
+    // Slot 0 ($a) must be the Sym node (:sym), not the Int node.
+    // B and C must agree on both the match result and which node is captured.
+    let pat = "(array <$a int>)";
+    let ir = compile(pat).unwrap_or_else(|e| panic!("compile `{pat}` failed: {e}"));
+    let fns = fns();
+
+    let (ast, arr) = {
+        let mut b = AstBuilder::new("", "t.rb");
+        let i = b.push(NodeKind::Int(42), r());
+        let s_sym = b.intern_symbol("sym");
+        let s = b.push(NodeKind::Sym(s_sym), r());
+        // Array is [42, :sym] — int first, then sym.
+        let list = b.push_list(&[i, s]);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_cap: Option<(NodeId,)> = b_anyorder_backtrack_cap(arr, &cx);
+    let c_cap = matches(&ir, &ast, arr, &mut NoPredicates);
+
+    assert!(b_cap.is_some(), "B must match [42, :sym] for `<$a int>`");
+    assert!(c_cap.is_some(), "C must match [42, :sym] for `<$a int>`");
+
+    let (b_slot0,) = b_cap.unwrap();
+    let c_slot0 = match c_cap.unwrap().get(0).expect("C slot 0") {
+        CaptureValue::Node(n) => *n,
+        other => panic!("C slot 0 expected Node, got {other:?}"),
+    };
+
+    assert_eq!(b_slot0, c_slot0, "B↔C slot 0 disagree");
+
+    // After backtracking, $a must be bound to the Sym node (:sym), not Int.
+    assert!(
+        matches!(ast.node(b_slot0).kind, NodeKind::Sym(_)),
+        "slot 0 ($a) must be Sym after backtrack, got {:?}",
+        ast.node(b_slot0).kind
+    );
+}

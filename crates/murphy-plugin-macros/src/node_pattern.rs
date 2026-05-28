@@ -1011,6 +1011,12 @@ fn lower_pat(
                 }
             })
         }
+        PatKind::AnyOrder { .. } => Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: `<...>` any-order is only valid as a direct child \
+             of a node match's List slot; reaching it in `lower_pat` is an \
+             internal invariant violation",
+        )),
         other => Err(syn::Error::new(
             Span::call_site(),
             format!("node_pattern!: pattern feature not yet supported: {other:?}"),
@@ -1432,9 +1438,14 @@ fn lower_trailing_list(
 }
 
 /// True iff any child carries a postfix `*` / `+` / `?` quantifier — directly
-/// or wrapped by a single `$` capture (`$pat+` etc.). The parser forbids any
-/// other nesting (`($pat)+`, double-`Capture`, `Quantifier` inside
-/// `Quantifier` body), so the classification is unambiguous.
+/// or wrapped by a single `$` capture (`$pat+` etc.) — OR if any child is an
+/// `AnyOrder` (`<...>`) block. Both shapes require the backtracking closure
+/// scaffolding from [`lower_quantifier_list`] to safely re-assign captures
+/// across backtrack attempts.
+///
+/// The parser forbids any other nesting (`($pat)+`, double-`Capture`,
+/// `Quantifier` inside `Quantifier` body), so the classification is
+/// unambiguous.
 fn has_quantifier_child(children: &[murphy_pattern::Pat]) -> bool {
     use murphy_pattern::PatKind;
     children.iter().any(|c| {
@@ -1442,7 +1453,7 @@ fn has_quantifier_child(children: &[murphy_pattern::Pat]) -> bool {
             PatKind::Capture { body, .. } => &body.kind,
             other => other,
         };
-        matches!(inner, PatKind::Quantifier { .. })
+        matches!(inner, PatKind::Quantifier { .. } | PatKind::AnyOrder { .. })
     })
 }
 
@@ -1454,6 +1465,7 @@ enum ListKid<'a> {
     Fixed(&'a murphy_pattern::Pat),
     Rest(RestKind),
     Quantifier(QuantifierPat<'a>),
+    AnyOrder(&'a [murphy_pattern::Pat]),
 }
 
 /// A classified quantifier child: its body, arity bounds, and optional
@@ -1473,6 +1485,9 @@ fn classify_list_kid(pat: &murphy_pattern::Pat) -> ListKid<'_> {
     use murphy_pattern::PatKind;
     if let Some(r) = rest_kind(pat) {
         return ListKid::Rest(r);
+    }
+    if let PatKind::AnyOrder { children } = &pat.kind {
+        return ListKid::AnyOrder(children);
     }
     let (cap_slot, q_pat) = match &pat.kind {
         PatKind::Quantifier { .. } => (None, pat),
@@ -1632,6 +1647,11 @@ fn collect_capture_slots(pat: &murphy_pattern::Pat, out: &mut Vec<u16>) {
             collect_capture_slots(b, out);
         }
         PatKind::Quantifier { body, .. } => collect_capture_slots(body, out),
+        PatKind::AnyOrder { children } => {
+            for c in children {
+                collect_capture_slots(c, out);
+            }
+        }
         PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
@@ -1669,7 +1689,252 @@ fn emit_list_step(
         ListKid::Quantifier(q) => {
             emit_quantifier_step(q, rest_kids, cursor_expr, list_val, len_val, ctx)
         }
+        ListKid::AnyOrder(children) => {
+            emit_anyorder_step(children, rest_kids, cursor_expr, list_val, len_val, ctx)
+        }
     }
+}
+
+/// Emit an any-order step: try all permutations of `children` against a
+/// prefix of the remaining list elements, then recurse on the suffix.
+///
+/// Mirrors the C-backend's two-phase backtracking algorithm:
+///
+/// * **Phase 1 (probe)**: compile-time-unrolled nested loops find a valid
+///   element assignment using [`lower_bool_anyorder_probe`] (no captures
+///   written).
+/// * **Phase 2 (commit)**: replay in declaration order via [`lower_pat`],
+///   writing captures into the `ctx.local_caps`-redirected slots.
+///
+/// Requires that the caller has already set up backtracking closure
+/// scaffolding (i.e., the list was routed through [`lower_quantifier_list`]).
+/// This is guaranteed because [`has_quantifier_child`] returns `true` for any
+/// list containing an `AnyOrder` child.
+///
+/// v1 limit: at most 10 non-rest patterns in `children` (parser-enforced).
+fn emit_anyorder_step(
+    children: &[murphy_pattern::Pat],
+    rest_kids: &[murphy_pattern::Pat],
+    cursor_expr: &TokenStream,
+    list_val: &Ident,
+    len_val: &Ident,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    use murphy_pattern::PatKind;
+
+    // Separate rest from non-rest children.
+    let has_rest = children.iter().any(|c| matches!(&c.kind, PatKind::Rest));
+    let non_rest: Vec<&murphy_pattern::Pat> = children
+        .iter()
+        .filter(|c| !matches!(&c.kind, PatKind::Rest))
+        .collect();
+    let n = non_rest.len(); // compile-time known, ≤ 10
+
+    // --- shared idents -----------------------------------------------
+    let cur = gensym(ctx, "__cur");
+    let consume = gensym(ctx, "__consume");
+    let assign_ident = gensym(ctx, "__assign");
+    let used_ident = gensym(ctx, "__used");
+    let found_ident = gensym(ctx, "__found");
+    // Gensym the label so that multiple `<...>` siblings in the same node
+    // list generate distinct label names inside the same outer closure.
+    let label_ident = gensym(ctx, "__aos");
+    let search_label = syn::Lifetime::new(&format!("'{}", label_ident), Span::call_site());
+
+    // --- phase-1 probe booleans --------------------------------------
+    // Pre-allocate a unique element ident for each non-rest pattern, then
+    // build the probe bool expression (no capture writes).
+    let probe_elems: Vec<Ident> = (0..n).map(|_| gensym(ctx, "__pe")).collect();
+    let probe_bools: Vec<TokenStream> = non_rest
+        .iter()
+        .zip(probe_elems.iter())
+        .map(|(pat, elem)| lower_bool_anyorder_probe(pat, &quote!(#elem), ctx))
+        .collect::<syn::Result<_>>()?;
+
+    // --- phase-2 commit guards ---------------------------------------
+    // Pre-allocate commit element idents, then lower each non-rest pattern
+    // via lower_pat (writes captures via ctx.local_caps).
+    let commit_elems: Vec<Ident> = (0..n).map(|_| gensym(ctx, "__ce")).collect();
+    let commit_guards: Vec<TokenStream> = non_rest
+        .iter()
+        .zip(commit_elems.iter())
+        .enumerate()
+        .map(|(i, (pat, commit_elem))| {
+            let guard = lower_pat(pat, &quote!(#commit_elem), ctx)?;
+            Ok(quote! {
+                let #commit_elem = #list_val[#cur + #assign_ident[#i]];
+                #guard
+            })
+        })
+        .collect::<syn::Result<_>>()?;
+
+    // --- suffix continuation -----------------------------------------
+    let suffix_cursor = quote!(#cur + #consume);
+    let suffix = emit_list_step(rest_kids, &suffix_cursor, list_val, len_val, ctx)?;
+
+    // --- build the phase-1 nested search loops -----------------------
+    let search_body = build_anyorder_search(
+        n,
+        0,
+        &probe_elems,
+        &probe_bools,
+        &assign_ident,
+        &used_ident,
+        &consume,
+        &cur,
+        list_val,
+        &found_ident,
+        &search_label,
+    );
+
+    // --- assemble the per-consume-value body -------------------------
+    // Reset search state, run phase-1, then on success run phase-2 +
+    // suffix in a nested probe closure.  The nested closure means a
+    // commit-guard failure returns `None` from the *inner* closure only,
+    // not from the outer backtracking closure — allowing the outer loop
+    // to try the next consume value.
+    let sub = gensym(ctx, "__sub");
+    let one_attempt = quote! {
+        let mut #assign_ident: [usize; 10] = [usize::MAX; 10];
+        let mut #used_ident: u64 = 0u64;
+        let mut #found_ident: bool = false;
+        #search_label: {
+            #search_body
+        }
+        if #found_ident {
+            let #sub: ::core::option::Option<()> = (|| -> ::core::option::Option<()> {
+                #(#commit_guards)*
+                #suffix
+            })();
+            if #sub.is_some() {
+                return ::core::option::Option::Some(());
+            }
+        }
+    };
+
+    // --- outer structure: iterate consume values ---------------------
+    let code = if has_rest {
+        // With rest: try each consume value from n to remaining, return
+        // on first success.
+        quote! {
+            let #cur: usize = #cursor_expr;
+            if #cur + #n > #len_val {
+                return ::core::option::Option::None;
+            }
+            for #consume in #n..=(#len_val - #cur) {
+                #one_attempt
+            }
+            return ::core::option::Option::None;
+        }
+    } else {
+        // Without rest: consume is fixed at n.
+        quote! {
+            let #cur: usize = #cursor_expr;
+            if #cur + #n > #len_val {
+                return ::core::option::Option::None;
+            }
+            let #consume: usize = #n;
+            #one_attempt
+            return ::core::option::Option::None;
+        }
+    };
+
+    Ok(code)
+}
+
+/// Build the phase-1 backtracking search tree for [`emit_anyorder_step`].
+///
+/// Recursively unrolls N loops (one per non-rest pattern) at compile time.
+/// At each depth `i`, we try every unused element index `j` in `0..consume`,
+/// probe pattern `i` against `list[cur + j]` (using the pre-built bool
+/// expression), and if it passes, mark `j` as used and recurse to depth `i+1`.
+/// When `depth == n` (all patterns placed), set `found` to `true` and break
+/// the labeled block.  On backtrack, unmark the element.
+///
+/// `found` and `search_label` are gensym'd idents that the caller wires up;
+/// this function only emits expressions that reference them.
+#[allow(clippy::too_many_arguments)]
+fn build_anyorder_search(
+    n: usize,
+    depth: usize,
+    probe_elems: &[Ident],
+    probe_bools: &[TokenStream],
+    assign: &Ident,
+    used: &Ident,
+    consume: &Ident,
+    cur: &Ident,
+    list_val: &Ident,
+    found: &Ident,
+    search_label: &syn::Lifetime,
+) -> TokenStream {
+    if depth == n {
+        // All patterns placed: record success and break out of the search block.
+        return quote! {
+            #found = true;
+            break #search_label;
+        };
+    }
+    let i = depth;
+    // Collision-free loop variable: index by depth only (one loop per depth).
+    let loop_var = Ident::new(&format!("__lv{i}"), Span::call_site());
+    let elem = &probe_elems[i];
+    let probe = &probe_bools[i];
+    let inner = build_anyorder_search(
+        n,
+        depth + 1,
+        probe_elems,
+        probe_bools,
+        assign,
+        used,
+        consume,
+        cur,
+        list_val,
+        found,
+        search_label,
+    );
+    // The backtrack step `used &= !(1 << lv)` is unreachable when
+    // `depth == n - 1` because `inner` is the base case which always
+    // breaks out of the labeled block.  Omit it to silence the warning.
+    let backtrack = if depth + 1 == n {
+        quote!()
+    } else {
+        quote!(#used &= !(1u64 << #loop_var);)
+    };
+    quote! {
+        for #loop_var in 0usize..#consume {
+            if #used & (1u64 << #loop_var) != 0u64 {
+                continue;
+            }
+            let #elem = #list_val[#cur + #loop_var];
+            if #probe {
+                #assign[#i] = #loop_var;
+                #used |= 1u64 << #loop_var;
+                #inner
+                #backtrack
+            }
+        }
+    }
+}
+
+/// Probe helper for [`emit_anyorder_step`]'s phase-1 search.
+///
+/// Behaves like [`lower_bool`] but also handles `PatKind::Capture` by
+/// stripping the capture wrapper and evaluating only the body as a bool
+/// expression (no capture write — captures are committed in phase 2 only).
+///
+/// All other arms delegate to [`lower_bool`], which already rejects
+/// `Rest`, `Quantifier`, and nested `AnyOrder` (parser-enforced).
+fn lower_bool_anyorder_probe(
+    pat: &murphy_pattern::Pat,
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    use murphy_pattern::PatKind;
+    if let PatKind::Capture { body, .. } = &pat.kind {
+        // Strip the capture wrapper: probe only the body.
+        return lower_bool_anyorder_probe(body, subject, ctx);
+    }
+    lower_bool(pat, subject, ctx)
 }
 
 /// Emit a fixed-element step: bind `list[cursor]`, run the per-element
@@ -1883,6 +2148,10 @@ fn lower_bool(
             "node_pattern!: postfix `*` / `+` / `?` quantifier is only legal \
              as a direct child of a node match (parser-enforced; reaching \
              this arm is an internal invariant violation)",
+        )),
+        PatKind::AnyOrder { .. } => Err(syn::Error::new(
+            Span::call_site(),
+            "node_pattern!: `<...>` any-order is not valid inside `{}` / `!` / `` ` ``",
         )),
     }
 }
