@@ -2130,11 +2130,47 @@ fn lower_bool_anyorder_probe(
             // `[a b c]` inside an AnyOrder arm: AND of children's bool
             // expressions, each routed through the probe path so any captures
             // nested inside write their `__pcap{slot}` bindings.
+            //
+            // The C matcher snapshots its trial buffer and discards it if any
+            // child fails (`matcher.rs::IrNode::Intersection`); the macro must
+            // match that atomicity. Without a rollback, child 1 could write a
+            // probe binding before child 2 fails, leaving a stale
+            // `__pcap{slot}` that a subsequent AnyOrder permutation would
+            // observe. Snapshot every probe-capture slot reachable from this
+            // intersection before the AND chain, and restore on failure.
             let child_bools: Vec<TokenStream> = children
                 .iter()
                 .map(|child| lower_bool_anyorder_probe(child, subject, ctx))
                 .collect::<syn::Result<_>>()?;
-            Ok(quote!( ( #(#child_bools)&&* ) ))
+            let mut slots: Vec<u16> = Vec::new();
+            for child in children {
+                collect_capture_slots(child, &mut slots);
+            }
+            slots.sort_unstable();
+            slots.dedup();
+            // Resolve each slot to its current probe-scope ident; skip slots
+            // that are not registered (defensive — a capture inside an
+            // intersection that isn't itself inside the surrounding AnyOrder
+            // shouldn't be possible, but if it ever is we just don't snapshot
+            // and the existing match behaviour is preserved).
+            let pcap_idents: Vec<Ident> = slots
+                .iter()
+                .filter_map(|s| ctx.probe_caps.get(s).cloned())
+                .collect();
+            if pcap_idents.is_empty() {
+                return Ok(quote!( ( #(#child_bools)&&* ) ));
+            }
+            let snap_idents: Vec<Ident> = (0..pcap_idents.len())
+                .map(|_| gensym(ctx, "__isnap"))
+                .collect();
+            Ok(quote!({
+                #( let #snap_idents = #pcap_idents; )*
+                let __intersection_ok = #(#child_bools)&&*;
+                if !__intersection_ok {
+                    #( #pcap_idents = #snap_idents; )*
+                }
+                __intersection_ok
+            }))
         }
         // All other arms (Wildcard, Lit, Kind, NilTest, Not, Predicate,
         // Descend) cannot legally contain a Capture (parser-enforced), so
