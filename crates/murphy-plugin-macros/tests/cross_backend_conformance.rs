@@ -2028,6 +2028,14 @@ fn predicate_with_literal_str_arg_agrees_across_backends() {
 // The B backend lowers `Lit::Sym("foo")` to a `&str` literal (stripping the
 // `:` prefix) and calls `sym_eq_p(node, cx, "foo")`.  The C backend forwards
 // `PredCallArg::Sym("foo")` to the host.
+//
+// 12e. AnyOrder capture-ref predicate arg: `(array <$x #expects?($x)>)`.
+// Phase-1 probe for the capture pattern `$x` must write a probe-scope binding
+// so that the immediately following `#expects?($x)` predicate can read the
+// just-tried element as its argument.  Without the fix the B backend emits
+// `__cap0` (the function-level deferred-init slot) in the probe expression,
+// causing E0381 (used binding isn't initialized).
+node_pattern!(b_anyorder_cap_pred_arg, "(array <$x #expects?($x)>)");
 node_pattern!(b_sym_eq_foo, "#sym_eq?(:foo)");
 
 fn sym_eq_p(node: NodeId, cx: &Cx<'_>, expected: &str) -> bool {
@@ -2093,4 +2101,87 @@ fn predicate_with_literal_sym_arg_agrees_across_backends() {
         b_sym_eq_foo(bar_node, &cx),
         &mut host2,
     );
+}
+
+// ── 12e helpers ──────────────────────────────────────────────────────────────
+
+/// B-backend free fn for `#expects?($x)`: fires when `node != arg`, i.e. the
+/// two elements of the array are distinct.  Paired with a two-element array
+/// `[int1, int2]` the only valid assignment is `$x = int1`, predicate fires
+/// on `int2` with arg `int1`.
+fn expects_p(node: NodeId, _cx: &Cx<'_>, arg: NodeId) -> bool {
+    node != arg
+}
+
+/// C-backend [`PredicateHost`] that matches the same semantics: fires on
+/// `expects?` when the subject node equals `want_node` and the first
+/// `PredCallArg::Node` argument equals `want_arg`.
+struct ExpectsHost {
+    want_node: NodeId,
+    want_arg: NodeId,
+}
+impl PredicateHost for ExpectsHost {
+    fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+        if name != "expects?" {
+            return false;
+        }
+        node == self.want_node
+            && matches!(args.first(), Some(PredCallArg::Node(id)) if *id == self.want_arg)
+    }
+}
+
+#[test]
+fn anyorder_capture_ref_pred_arg_agrees_across_backends() {
+    // `(array <$x #expects?($x)>)` against `[int1, int2]`.
+    //
+    // The host fires only when the subject is `int2` AND the captured node
+    // (`$x`) is `int1`.  The only valid permutation is therefore:
+    //   $x → int1,  #expects?($x) → int2   (predicate: int2 != int1 ✓)
+    //
+    // B-backend phase-1 probe must write a probe-scope binding for $x so that
+    // the predicate-arg expression resolves to the trial element rather than
+    // the uninitialized function-level `__cap0`.
+    let mut b = AstBuilder::new("[1,2]", "t.rb");
+    let int1 = b.push(NodeKind::Int(1), r());
+    let int2 = b.push(NodeKind::Int(2), r());
+    let elems = b.push_list(&[int1, int2]);
+    let arr = b.push(NodeKind::Array(elems), r());
+    let ast = b.finish(arr);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // B backend.
+    let b_caps: Option<(NodeId,)> = b_anyorder_cap_pred_arg(arr, &cx);
+
+    // C backend with the same host semantics.
+    let mut host = ExpectsHost {
+        want_node: int2,
+        want_arg: int1,
+    };
+    let c = assert_c_matches_with(
+        "(array <$x #expects?($x)>)",
+        &ast,
+        arr,
+        b_caps.is_some(),
+        &mut host,
+    );
+
+    // B must match and capture int1 into $x.
+    assert!(
+        b_caps.is_some(),
+        "B must match [1,2] with <$x #expects?($x)>"
+    );
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, int1, "B: $x must capture int1");
+
+    // B and C captures must agree.
+    let c_caps = c.expect("C also matched");
+    let c_cap0 = c_caps.get(0).cloned();
+    match c_cap0 {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: $x capture disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
 }
