@@ -419,9 +419,10 @@ fn snapshot_named_capture_and_predicate() {
                     },
                 },
                 Pat {
-                    kind: Predicate(
-                        "pred?",
-                    ),
+                    kind: Predicate {
+                        name: "pred?",
+                        args: [],
+                    },
                     span: PatSpan {
                         start: 16,
                         end: 22,
@@ -895,6 +896,27 @@ fn error_anyorder_duplicate_rest() {
         "expected duplicate rest error, got: {}",
         err.message
     );
+}
+
+#[test]
+fn error_anyorder_captured_rest_unsupported_in_v1() {
+    // `$...` inside `<...>` cannot be supported without a runtime allocator
+    // plumbed through `Cx` (leftover elements are non-contiguous), so v1
+    // rejects the construct at parse time. The error message must point users
+    // at the underlying reason rather than reading like a generic syntax error.
+    for src in [
+        "(array <int $...>)",
+        "(array <$... int>)",
+        "(array <$_ $...>)",
+    ] {
+        let err = parse(src).expect_err("`$...` inside `<...>` must be rejected in v1");
+        assert!(
+            err.message
+                .contains("`$...` inside `<...>` is not supported in v1"),
+            "expected the v1-unsupported `$...` error for {src:?}, got: {}",
+            err.message
+        );
+    }
 }
 
 #[test]

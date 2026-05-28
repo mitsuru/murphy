@@ -88,6 +88,7 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
         next: 0,
         capture_kinds: ast.capture_kinds().to_vec(),
         local_caps: HashMap::new(),
+        probe_caps: HashMap::new(),
     };
     let body = lower_pat(&ast.root, &quote!(node), &mut ctx)?;
 
@@ -147,6 +148,17 @@ struct Lower {
     /// on exit and commits the local Options to the outer captures on
     /// the successful path.
     local_caps: HashMap<u16, Ident>,
+    /// Probe-scope capture bindings declared inside the AnyOrder phase-1
+    /// search loops. Each entry maps a capture slot to a gensym'd
+    /// `__pcap{n}: Option<NodeId>` identifier that is written when the
+    /// capture pattern's element is probed and read by subsequent
+    /// predicate-arg expressions within the same probe path.
+    ///
+    /// This map is populated just before `lower_bool_anyorder_probe` is
+    /// called for the AnyOrder children and cleared on exit. Outside
+    /// AnyOrder probe scope it is always empty, so [`predicate_arg_exprs`]
+    /// falls back to the function-level `__cap{slot}` binding.
+    probe_caps: HashMap<u16, Ident>,
 }
 
 /// Allocate a fresh, collision-free binding identifier `#{prefix}#{n}`.
@@ -776,6 +788,80 @@ fn predicate_ident(name: &str) -> syn::Result<Ident> {
     })
 }
 
+/// Turn `PredArg` elements into token-stream expressions to be passed as
+/// extra arguments in the generated predicate call.
+///
+/// - `Lit::Int(v)` → `v_i64` literal
+/// - `Lit::Float(v)` → `v_f64` literal
+/// - `Lit::Str(s)` → `"s"` string literal
+/// - `Lit::Sym(s)` → `"s"` string literal (cop methods receive `&str`)
+/// - `Lit::True` / `Lit::False` → `true` / `false`
+/// - `Lit::Nil` → compile error (nil args are not meaningful in Rust)
+/// - `PredArg::Capture(slot)` → the capture slot's variable. Inside an
+///   AnyOrder phase-1 probe (when `ctx.probe_caps` is populated) the
+///   probe-scope binding `__pcap{n}.unwrap()` is used so that the
+///   just-tried element is visible to the predicate; outside that scope
+///   the function-level deferred-init variable `__cap{slot}` is used.
+fn predicate_arg_exprs(
+    args: &[murphy_pattern::PredArg],
+    ctx: &Lower,
+) -> syn::Result<Vec<TokenStream>> {
+    use murphy_pattern::{Lit, PredArg};
+    args.iter()
+        .map(|arg| match arg {
+            PredArg::Lit(lit) => Ok(match lit {
+                Lit::Int(v) => quote!(#v),
+                Lit::Float(v) => quote!(#v),
+                Lit::Str(s) => {
+                    let s = s.as_str();
+                    quote!(#s)
+                }
+                Lit::Sym(s) => {
+                    let s = s.as_str();
+                    quote!(#s)
+                }
+                Lit::True => quote!(true),
+                Lit::False => quote!(false),
+                Lit::Nil => {
+                    return Err(syn::Error::new(
+                        Span::call_site(),
+                        "node_pattern!: `nil` predicate arg has no Rust counterpart",
+                    ));
+                }
+            }),
+            PredArg::Capture(slot) => {
+                // If we are inside an AnyOrder phase-1 probe and a probe-scope
+                // binding was declared for this slot, forward the argument
+                // through that binding (`.unwrap()` is safe because
+                // `lower_bool_anyorder_probe` wrote `Some(elem)` before the
+                // predicate expression is evaluated in the same search path).
+                if let Some(pcap) = ctx.probe_caps.get(slot) {
+                    let expr = quote!(#pcap.unwrap());
+                    return Ok(match ctx.capture_kinds.get(*slot as usize) {
+                        Some(CaptureKind::OptNode) => {
+                            quote!(::core::option::Option::Some(#expr))
+                        }
+                        _ => expr,
+                    });
+                }
+                // If we are inside a backtracking commit scope (AnyOrder
+                // phase-2 or quantifier), captures are written to a local
+                // `Option<T>` via `local_caps`. A predicate arg that references
+                // the same slot must read `<local>.unwrap()` rather than the
+                // function-level `__cap{slot}` which has not been committed yet.
+                if let Some(lcap) = ctx.local_caps.get(slot) {
+                    return Ok(quote!(#lcap.unwrap()));
+                }
+                // Outside any backtracking scope: capture slots are bound as
+                // `__cap{slot}` by the generated match function.
+                // Forward-references are rejected at parse time.
+                let var = cap_ident(*slot as usize);
+                Ok(quote!(#var))
+            }
+        })
+        .collect()
+}
+
 /// Lower one `Pat` against `subject` (a `NodeId`-typed expression) into a
 /// block of guard statements that `return ctx.fail` on mismatch.
 fn lower_pat(
@@ -969,13 +1055,14 @@ fn lower_pat(
             let assign = capture_assign(*slot, quote!(#subject), ctx);
             Ok(quote!(#body_guards #assign))
         }
-        PatKind::Predicate(name) => {
-            // `#name` calls a free fn `name(node, cx) -> bool` in scope at the
+        PatKind::Predicate { name, args } => {
+            // `#name` / `#name(args...)` calls a free fn in scope at the
             // call site. Fail the guard when the predicate returns `false`.
             let ident = predicate_ident(name)?;
             let fail = fail_stmt(ctx);
+            let arg_exprs = predicate_arg_exprs(args, ctx)?;
             Ok(quote! {
-                if !#ident(#subject, cx) {
+                if !#ident(#subject, cx #(, #arg_exprs)*) {
                     #fail
                 }
             })
@@ -1655,7 +1742,7 @@ fn collect_capture_slots(pat: &murphy_pattern::Pat, out: &mut Vec<u16>) {
         PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
-        | PatKind::Predicate(_)
+        | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Rest => {}
     }
@@ -1741,14 +1828,39 @@ fn emit_anyorder_step(
     let search_label = syn::Lifetime::new(&format!("'{}", label_ident), Span::call_site());
 
     // --- phase-1 probe booleans --------------------------------------
+    // Collect all capture slots referenced in the non-rest children so that
+    // we can declare probe-scope `Option<NodeId>` bindings (`__pcap{n}`) that
+    // hold the just-tried element value.  A predicate whose args include a
+    // capture (`#pred?($x)`) may then read the probe-scope binding instead of
+    // the function-level deferred-init `__cap{slot}` (which would be
+    // uninitialized at this point, causing E0381).
+    let mut probe_cap_slots: Vec<u16> = Vec::new();
+    for pat in non_rest.iter() {
+        collect_capture_slots(pat, &mut probe_cap_slots);
+    }
+    probe_cap_slots.dedup();
+    // Gensym a probe-cap ident for each slot and register in `ctx.probe_caps`.
+    let probe_cap_idents: Vec<(u16, Ident)> = probe_cap_slots
+        .iter()
+        .map(|&slot| (slot, gensym(ctx, "__pcap")))
+        .collect();
+    for (slot, ident) in &probe_cap_idents {
+        ctx.probe_caps.insert(*slot, ident.clone());
+    }
     // Pre-allocate a unique element ident for each non-rest pattern, then
-    // build the probe bool expression (no capture writes).
+    // build the probe bool expression (no capture writes, but probe-scope
+    // bindings are written via `lower_bool_anyorder_probe`).
     let probe_elems: Vec<Ident> = (0..n).map(|_| gensym(ctx, "__pe")).collect();
     let probe_bools: Vec<TokenStream> = non_rest
         .iter()
         .zip(probe_elems.iter())
         .map(|(pat, elem)| lower_bool_anyorder_probe(pat, &quote!(#elem), ctx))
         .collect::<syn::Result<_>>()?;
+    // Clear the probe-scope bindings — they must not be visible outside this
+    // AnyOrder block's phase-1 code.
+    for (slot, _) in &probe_cap_idents {
+        ctx.probe_caps.remove(slot);
+    }
 
     // --- phase-2 commit guards ---------------------------------------
     // Pre-allocate commit element idents, then lower each non-rest pattern
@@ -1792,7 +1904,21 @@ fn emit_anyorder_step(
     // not from the outer backtracking closure — allowing the outer loop
     // to try the next consume value.
     let sub = gensym(ctx, "__sub");
+    // Probe-scope capture declarations: one `Option<NodeId>` per capture slot
+    // referenced inside this AnyOrder block.  Written by
+    // `lower_bool_anyorder_probe` when it encounters a `Capture` pattern, and
+    // read by `predicate_arg_exprs` via `ctx.probe_caps` when a predicate arg
+    // names the same slot.  Re-initialised to `None` at the top of each
+    // attempt so that a failed probe path never leaks a stale value into the
+    // next attempt.
+    let probe_cap_decls: Vec<TokenStream> = probe_cap_idents
+        .iter()
+        .map(|(_, ident)| {
+            quote!(let mut #ident: ::core::option::Option<::murphy_plugin_api::NodeId> = ::core::option::Option::None;)
+        })
+        .collect();
     let one_attempt = quote! {
+        #(#probe_cap_decls)*
         let mut #assign_ident: [usize; 10] = [usize::MAX; 10];
         let mut #found_ident: bool = false;
         #search_label: {
@@ -1914,9 +2040,15 @@ fn build_anyorder_search(
 
 /// Probe helper for [`emit_anyorder_step`]'s phase-1 search.
 ///
-/// Behaves like [`lower_bool`] but also handles `PatKind::Capture` by
-/// stripping the capture wrapper and evaluating only the body as a bool
-/// expression (no capture write — captures are committed in phase 2 only).
+/// Behaves like [`lower_bool`] but also handles `PatKind::Capture` by:
+/// 1. Writing `__pcap{n} = Some(subject)` into the probe-scope binding
+///    (so that a subsequent predicate in the same AnyOrder block can read the
+///    just-tried element as a predicate arg), then
+/// 2. Probing only the capture body as a bool expression (no function-level
+///    capture write — that happens in phase 2 only).
+///
+/// The probe-scope binding `__pcap{n}` is the gensym'd `Ident` registered in
+/// `ctx.probe_caps[slot]` by [`emit_anyorder_step`] before calling this fn.
 ///
 /// All other arms delegate to [`lower_bool`], which already rejects
 /// `Rest`, `Quantifier`, and nested `AnyOrder` (parser-enforced).
@@ -1926,9 +2058,22 @@ fn lower_bool_anyorder_probe(
     ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
     use murphy_pattern::PatKind;
-    if let PatKind::Capture { body, .. } = &pat.kind {
-        // Strip the capture wrapper: probe only the body.
-        return lower_bool_anyorder_probe(body, subject, ctx);
+    if let PatKind::Capture { slot, body, .. } = &pat.kind {
+        // Write the probe-scope binding so that later predicates in the same
+        // AnyOrder block can read the just-tried element via its capture slot.
+        let assign = if let Some(pcap) = ctx.probe_caps.get(slot) {
+            quote!(#pcap = ::core::option::Option::Some(#subject);)
+        } else {
+            // No probe-cap registered for this slot (can only happen if the
+            // slot was not collected, which would be a bug). Emit nothing and
+            // let phase-2 handle it; the function-level __cap{slot} would be
+            // uninitialized at this point, but the body probe alone is enough
+            // to avoid a spurious match — correctness is preserved, capture
+            // forwarding to predicates simply won't work.
+            quote!()
+        };
+        let body_probe = lower_bool_anyorder_probe(body, subject, ctx)?;
+        return Ok(quote!({ #assign #body_probe }));
     }
     lower_bool(pat, subject, ctx)
 }
@@ -2111,11 +2256,12 @@ fn lower_bool(
             let inner_bool = lower_bool(inner, subject, ctx)?;
             Ok(quote!( ( !#inner_bool ) ))
         }
-        PatKind::Predicate(name) => {
-            // `#name` calls a free fn `name(node, cx) -> bool` in scope at the
+        PatKind::Predicate { name, args } => {
+            // `#name` / `#name(args...)` calls a free fn in scope at the
             // call site; in value form it is simply that bool expression.
             let ident = predicate_ident(name)?;
-            Ok(quote!( ( #ident(#subject, cx) ) ))
+            let arg_exprs = predicate_arg_exprs(args, ctx)?;
+            Ok(quote!( ( #ident(#subject, cx #(, #arg_exprs)*) ) ))
         }
         PatKind::Parent(inner) => {
             let p = gensym(ctx, "__p");

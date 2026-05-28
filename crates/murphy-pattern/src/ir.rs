@@ -4,7 +4,7 @@
 //! a side table.
 
 use crate::CaptureKind;
-use crate::ast::{Head, Lit, Pat, PatKind, PatternAst};
+use crate::ast::{Head, Lit, Pat, PatKind, PatternAst, PredArg as AstPredArg};
 use murphy_ast::NodeKindTag;
 
 /// Index into [`PatternIr::nodes`].
@@ -38,6 +38,10 @@ pub struct PatternIr {
     pub str_pool: String,
     /// One entry per `$` capture, in slot order.
     pub captures: Vec<CaptureMeta>,
+    /// Side table for `IrNode::Predicate` arguments (in arg order within each
+    /// predicate). Each predicate references a contiguous slice via
+    /// `args_start..args_start+args_len`.
+    pub pred_args: Vec<IrPredArg>,
     /// The root node.
     pub root: IrNodeId,
 }
@@ -48,6 +52,24 @@ pub struct CaptureMeta {
     pub kind: CaptureKind,
     /// `Some` for `$ident` named captures.
     pub name: Option<StrRef>,
+}
+
+/// A resolved predicate argument at the IR level. Lifted out of the AST's
+/// `PredArg` so the matcher has a fully resolved, pool-referenced form.
+///
+/// Capture back-references carry the slot index (same as the AST's `u16`);
+/// the matcher resolves this to a `NodeId` from `buf` at match time.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IrPredArg {
+    Int(i64),
+    Float(f64),
+    Str(StrRef),
+    Sym(StrRef),
+    Bool(bool),
+    Nil,
+    /// Back-reference to a capture slot — the matcher will look up the captured
+    /// `NodeId` from the current `CaptureBuf`.
+    Capture(u16),
 }
 
 /// A flat IR node. `PatKind` resolved and flattened; children by index.
@@ -68,7 +90,12 @@ pub enum IrNode {
     LitTrue,
     LitFalse,
     LitNil,
-    Predicate(StrRef),
+    Predicate {
+        name: StrRef,
+        /// Flat index into [`PatternIr::pred_args`].
+        args_start: u32,
+        args_len: u32,
+    },
     Kind(NodeKindTag),
     Node {
         head: IrHead,
@@ -145,6 +172,7 @@ pub fn lower(ast: &PatternAst) -> PatternIr {
             };
             ast.n_captures()
         ],
+        pred_args: Vec::new(),
         root: IrNodeId(0),
     };
     ir.root = lower_pat(&ast.root, ast, &mut ir);
@@ -232,9 +260,40 @@ fn lower_pat(pat: &Pat, ast: &PatternAst, ir: &mut PatternIr) -> IrNodeId {
             };
             push_node(ir, node)
         }
-        PatKind::Predicate(name) => {
-            let r = intern(ir, name);
-            push_node(ir, IrNode::Predicate(r))
+        PatKind::Predicate { name, args } => {
+            let name_ref = intern(ir, name);
+            // Append args into the pred_args side table.
+            let args_start = ir.pred_args.len() as u32;
+            for arg in args {
+                let ir_arg = match arg {
+                    AstPredArg::Lit(lit) => match lit {
+                        crate::ast::Lit::Int(v) => IrPredArg::Int(*v),
+                        crate::ast::Lit::Float(v) => IrPredArg::Float(*v),
+                        crate::ast::Lit::Str(s) => {
+                            let r = intern(ir, s);
+                            IrPredArg::Str(r)
+                        }
+                        crate::ast::Lit::Sym(s) => {
+                            let r = intern(ir, s);
+                            IrPredArg::Sym(r)
+                        }
+                        crate::ast::Lit::True => IrPredArg::Bool(true),
+                        crate::ast::Lit::False => IrPredArg::Bool(false),
+                        crate::ast::Lit::Nil => IrPredArg::Nil,
+                    },
+                    AstPredArg::Capture(slot) => IrPredArg::Capture(*slot),
+                };
+                ir.pred_args.push(ir_arg);
+            }
+            let args_len = ir.pred_args.len() as u32 - args_start;
+            push_node(
+                ir,
+                IrNode::Predicate {
+                    name: name_ref,
+                    args_start,
+                    args_len,
+                },
+            )
         }
         PatKind::Kind(tag) => push_node(ir, IrNode::Kind(*tag)),
         PatKind::Node { head, children } => {
@@ -334,6 +393,7 @@ mod tests {
             tags: vec![],
             str_pool: String::new(),
             captures: vec![],
+            pred_args: vec![],
             root: IrNodeId(0),
         };
         assert_eq!(ir.nodes.len(), 1);
@@ -498,7 +558,10 @@ mod tests {
     fn lowers_predicate_into_pool() {
         let ir = lower(&parse("#odd?").unwrap());
         match ir.nodes[ir.root.0 as usize] {
-            IrNode::Predicate(r) => assert_eq!(pooled(&ir, r), "odd?"),
+            IrNode::Predicate { name, args_len, .. } => {
+                assert_eq!(pooled(&ir, name), "odd?");
+                assert_eq!(args_len, 0, "no-arg predicate should have args_len=0");
+            }
             ref other => panic!("expected Predicate, got {other:?}"),
         }
     }

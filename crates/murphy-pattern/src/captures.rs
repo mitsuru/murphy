@@ -97,6 +97,20 @@ impl CaptureBuf {
         self.slots[slot as usize] = Some(value);
     }
 
+    /// Read the current value of `slot`, if written, as a single `NodeId`.
+    ///
+    /// Returns `Some(id)` for both `Node(id)` and `OptNode(Some(id))` —
+    /// both represent a single matched node and are valid as predicate args.
+    /// Returns `None` for `OptNode(None)` (the optional pattern matched
+    /// nothing) and for `Seq` (use the `Captures` public API for slices).
+    pub(crate) fn get(&self, slot: u16) -> Option<NodeId> {
+        match self.slots.get(slot as usize)?.as_ref()? {
+            CaptureValue::Node(id) => Some(*id),
+            CaptureValue::OptNode(Some(id)) => Some(*id),
+            _ => None,
+        }
+    }
+
     /// Finish: unwrap every slot into the public [`Captures`]. Returns
     /// `None` if any slot is unwritten — defense in depth against an
     /// IR shape the parser's `validate_capture_position` should have
@@ -162,6 +176,37 @@ mod tests {
         let c = buf.finish().expect("OptNode(Some) is a written value");
         assert_eq!(c.len(), 1);
         assert_eq!(c.get(0), Some(&CaptureValue::OptNode(Some(NodeId(7)))));
+    }
+
+    // --- murphy-jyi: CaptureBuf::get must resolve OptNode(Some) ---
+
+    #[test]
+    fn capture_buf_get_optnode_some_resolves_to_nodeid() {
+        // Regression: CaptureBuf::get used to only handle CaptureValue::Node
+        // and returned None for OptNode(Some(id)), causing predicate args
+        // referencing an OptNode-kind capture to degrade to PredCallArg::Nil.
+        let mut buf = CaptureBuf::new(1);
+        buf.set(0, CaptureValue::OptNode(Some(NodeId(42))));
+        assert_eq!(
+            buf.get(0),
+            Some(NodeId(42)),
+            "OptNode(Some(id)) must resolve to Some(id) so predicate arg \
+             forwarding works for optional captures"
+        );
+    }
+
+    #[test]
+    fn capture_buf_get_optnode_none_resolves_to_none() {
+        // OptNode(None) means the optional pattern matched zero nodes.
+        // There is no NodeId to forward, so get() must return None (safe
+        // fallback: predicate will receive PredCallArg::Nil).
+        let mut buf = CaptureBuf::new(1);
+        buf.set(0, CaptureValue::OptNode(None));
+        assert_eq!(
+            buf.get(0),
+            None,
+            "OptNode(None) has no NodeId to forward — get() must return None"
+        );
     }
 
     #[test]

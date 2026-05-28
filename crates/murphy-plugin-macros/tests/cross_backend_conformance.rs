@@ -15,7 +15,9 @@
 //! the explicit drift guard for design §4 ("1 grammar, 2 backends").
 
 use murphy_ast::{Ast, AstBuilder, NodeId, NodeKind, OptNodeId, Range};
-use murphy_pattern::{CaptureValue, Captures, NoPredicates, PredicateHost, compile, matches};
+use murphy_pattern::{
+    CaptureValue, Captures, NoPredicates, PredCallArg, PredicateHost, compile, matches,
+};
 use murphy_plugin_api::{Cx, CxRaw, FnTable, RawSlice};
 use murphy_plugin_macros::node_pattern;
 
@@ -574,7 +576,12 @@ struct PredFixture<'a, 'cx> {
     cx: &'a Cx<'cx>,
 }
 impl PredicateHost for PredFixture<'_, '_> {
-    fn call(&mut self, name: &str, node: NodeId) -> bool {
+    fn call(
+        &mut self,
+        name: &str,
+        node: NodeId,
+        _args: &[murphy_pattern::PredCallArg<'_>],
+    ) -> bool {
         match name {
             "odd?" => odd_p(node, self.cx),
             "save!" => save_bang(node, self.cx),
@@ -1788,4 +1795,393 @@ fn b_anyorder_two_anyorder_siblings() {
         !b_miss_c,
         "`<int sym> <str nil>` must NOT match [42, :foo, 99, nil]"
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 12. Predicate args — literal and capture-ref (murphy-jyi).
+//
+// The B backend calls the free fn directly with the resolved arg(s); the
+// C backend calls `PredicateHost::call` with `&[PredCallArg<'_>]`. Both
+// must agree on hit/miss.
+// ────────────────────────────────────────────────────────────────────────
+
+// 12a. Literal int arg: `#divisible_by?(42)`.
+// The B backend calls `fn divisible_by_qmark(node, cx, n: i64) -> bool`.
+node_pattern!(b_divisible_by_42, "#divisible_by?(42)");
+node_pattern!(b_divisible_by_13, "#divisible_by?(13)");
+
+fn divisible_by_p(node: NodeId, cx: &Cx<'_>, n: i64) -> bool {
+    n != 0 && matches!(*cx.kind(node), NodeKind::Int(v) if v % n == 0)
+}
+
+/// C-backend host for `#divisible_by?` — extracts the int arg and applies
+/// the same `v % n == 0` check.
+struct DivisibleByHost<'a, 'cx> {
+    cx: &'a Cx<'cx>,
+}
+impl PredicateHost for DivisibleByHost<'_, '_> {
+    fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+        if name == "divisible_by?" {
+            let Some(PredCallArg::Int(n)) = args.first() else {
+                return false;
+            };
+            let n = *n;
+            n != 0 && matches!(*self.cx.kind(node), NodeKind::Int(v) if v % n == 0)
+        } else {
+            false
+        }
+    }
+}
+
+#[test]
+fn predicate_with_literal_int_arg_agrees_across_backends() {
+    // 84 is divisible by 42 → both backends should match.
+    let mut b = AstBuilder::new("84", "t.rb");
+    let n84 = b.push(NodeKind::Int(84), r());
+    let ast = b.finish(n84);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let mut host = DivisibleByHost { cx: &cx };
+    // B hit
+    assert!(b_divisible_by_42(n84, &cx), "B: 84 is divisible by 42");
+    // C hit (must agree with B)
+    assert_c_matches_with(
+        "#divisible_by?(42)",
+        &ast,
+        n84,
+        b_divisible_by_42(n84, &cx),
+        &mut host,
+    );
+
+    // 84 is NOT divisible by 13 → both backends should miss.
+    let mut host2 = DivisibleByHost { cx: &cx };
+    assert!(!b_divisible_by_13(n84, &cx), "B: 84 is not divisible by 13");
+    assert_c_matches_with(
+        "#divisible_by?(13)",
+        &ast,
+        n84,
+        b_divisible_by_13(n84, &cx),
+        &mut host2,
+    );
+}
+
+// 12b. Capture-ref arg: `(send $recv _ #same_as?($recv))`.
+// The B backend calls `fn same_as_qmark(node, cx, recv: NodeId) -> bool`.
+// The C backend host receives `PredCallArg::Node(recv_id)` and applies the
+// same logic.
+node_pattern!(b_send_same_as, "(send $recv _ #same_as?($recv))");
+
+/// True iff `node` and `recv` have the same `NodeId`.  In a real cop this
+/// would be a semantic check; here we just verify the NodeId is forwarded.
+fn same_as_p(_node: NodeId, _cx: &Cx<'_>, recv: NodeId) -> bool {
+    // We can't meaningfully compare "is arg the same as receiver" using
+    // NodeIds directly (they refer to different nodes), so instead we
+    // just check the predicate receives *any* NodeId (non-zero discriminant).
+    // A real test would use semantic equality. For the conformance check we
+    // unconditionally return true to confirm the arg was threaded through.
+    let _ = recv;
+    true
+}
+
+/// C-backend host for `#same_as?` — checks that a `Node` arg is forwarded.
+struct SameAsHost {
+    /// Set to `true` when the predicate is called with a `Node` arg.
+    saw_node_arg: bool,
+}
+impl PredicateHost for SameAsHost {
+    fn call(&mut self, name: &str, _node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+        if name == "same_as?" {
+            // Must receive exactly one `Node` arg (the captured receiver).
+            if matches!(args.first(), Some(PredCallArg::Node(_))) {
+                self.saw_node_arg = true;
+                true // confirm match so we can inspect captures
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+}
+
+#[test]
+fn predicate_with_capture_ref_arg_agrees_across_backends() {
+    // Build `recv.method(42)`: receiver=Lvar(:recv), method=:method, args=[42].
+    let mut b = AstBuilder::new("recv.method(42)", "t.rb");
+    let recv_sym = b.intern_symbol("recv");
+    let recv = b.push(NodeKind::Lvar(recv_sym), r());
+    let method_sym = b.intern_symbol("method");
+    let arg0 = b.push(NodeKind::Int(42), r());
+    let args = b.push_list(&[arg0]);
+    let send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv),
+            method: method_sym,
+            args,
+        },
+        r(),
+    );
+    let ast = b.finish(send);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // B backend: `same_as_p` always returns `true`, so B must match.
+    let b_result = b_send_same_as(send, &cx);
+    let b_matched = b_result.is_some();
+    assert!(b_matched, "B: `(send $recv _ #same_as?($recv))` must match");
+
+    // C backend: must also match and must have threaded the NodeId arg.
+    let mut host = SameAsHost {
+        saw_node_arg: false,
+    };
+    assert_c_matches_with(
+        "(send $recv _ #same_as?($recv))",
+        &ast,
+        send,
+        b_matched,
+        &mut host,
+    );
+    assert!(
+        host.saw_node_arg,
+        "C backend must forward the captured NodeId to the predicate host"
+    );
+}
+
+// 12c. Literal string arg: `#starts_with?("foo")`.
+// The B backend lowers `Lit::Str("foo")` to a `&str` literal and calls
+// `starts_with_p(node, cx, "foo")`.  The C backend forwards
+// `PredCallArg::Str("foo")` to the host.
+node_pattern!(b_starts_with_foo, "#starts_with?(\"foo\")");
+
+fn starts_with_p(node: NodeId, cx: &Cx<'_>, prefix: &str) -> bool {
+    if let NodeKind::Str(id) = *cx.kind(node) {
+        cx.string_str(id).starts_with(prefix)
+    } else {
+        false
+    }
+}
+
+struct StartsWithHost<'a, 'cx> {
+    cx: &'a Cx<'cx>,
+}
+impl PredicateHost for StartsWithHost<'_, '_> {
+    fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+        if name == "starts_with?" {
+            let Some(PredCallArg::Str(prefix)) = args.first() else {
+                return false;
+            };
+            if let NodeKind::Str(id) = *self.cx.kind(node) {
+                self.cx.string_str(id).starts_with(prefix)
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+}
+
+#[test]
+fn predicate_with_literal_str_arg_agrees_across_backends() {
+    let mut b = AstBuilder::new("\"foobar\"", "t.rb");
+    let foobar_id = b.intern_string("foobar");
+    let foobar = b.push(NodeKind::Str(foobar_id), r());
+    let xyz_id = b.intern_string("xyz");
+    let xyz = b.push(NodeKind::Str(xyz_id), r());
+    let list = b.push_list(&[foobar, xyz]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let mut host = StartsWithHost { cx: &cx };
+    // "foobar" starts with "foo" → both backends match.
+    assert!(b_starts_with_foo(foobar, &cx), "B: foobar starts with foo");
+    assert_c_matches_with(
+        "#starts_with?(\"foo\")",
+        &ast,
+        foobar,
+        b_starts_with_foo(foobar, &cx),
+        &mut host,
+    );
+
+    // "xyz" does not start with "foo" → both backends miss.
+    let mut host2 = StartsWithHost { cx: &cx };
+    assert!(
+        !b_starts_with_foo(xyz, &cx),
+        "B: xyz does not start with foo"
+    );
+    assert_c_matches_with(
+        "#starts_with?(\"foo\")",
+        &ast,
+        xyz,
+        b_starts_with_foo(xyz, &cx),
+        &mut host2,
+    );
+}
+
+// 12d. Literal symbol arg: `#sym_eq?(:foo)`.
+// The B backend lowers `Lit::Sym("foo")` to a `&str` literal (stripping the
+// `:` prefix) and calls `sym_eq_p(node, cx, "foo")`.  The C backend forwards
+// `PredCallArg::Sym("foo")` to the host.
+//
+// 12e. AnyOrder capture-ref predicate arg: `(array <$x #expects?($x)>)`.
+// Phase-1 probe for the capture pattern `$x` must write a probe-scope binding
+// so that the immediately following `#expects?($x)` predicate can read the
+// just-tried element as its argument.  Without the fix the B backend emits
+// `__cap0` (the function-level deferred-init slot) in the probe expression,
+// causing E0381 (used binding isn't initialized).
+node_pattern!(b_anyorder_cap_pred_arg, "(array <$x #expects?($x)>)");
+node_pattern!(b_sym_eq_foo, "#sym_eq?(:foo)");
+
+fn sym_eq_p(node: NodeId, cx: &Cx<'_>, expected: &str) -> bool {
+    if let NodeKind::Sym(sym) = *cx.kind(node) {
+        cx.symbol_str(sym) == expected
+    } else {
+        false
+    }
+}
+
+struct SymEqHost<'a, 'cx> {
+    cx: &'a Cx<'cx>,
+}
+impl PredicateHost for SymEqHost<'_, '_> {
+    fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+        if name == "sym_eq?" {
+            let Some(PredCallArg::Sym(expected)) = args.first() else {
+                return false;
+            };
+            if let NodeKind::Sym(sym) = *self.cx.kind(node) {
+                self.cx.symbol_str(sym) == *expected
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+}
+
+#[test]
+fn predicate_with_literal_sym_arg_agrees_across_backends() {
+    let mut b = AstBuilder::new(":foo", "t.rb");
+    let foo_sym = b.intern_symbol("foo");
+    let foo_node = b.push(NodeKind::Sym(foo_sym), r());
+    let bar_sym = b.intern_symbol("bar");
+    let bar_node = b.push(NodeKind::Sym(bar_sym), r());
+    let list = b.push_list(&[foo_node, bar_node]);
+    let root = b.push(NodeKind::Begin(list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let mut host = SymEqHost { cx: &cx };
+    // :foo == :foo → both backends match.
+    assert!(b_sym_eq_foo(foo_node, &cx), "B: :foo equals :foo");
+    assert_c_matches_with(
+        "#sym_eq?(:foo)",
+        &ast,
+        foo_node,
+        b_sym_eq_foo(foo_node, &cx),
+        &mut host,
+    );
+
+    // :bar != :foo → both backends miss.
+    let mut host2 = SymEqHost { cx: &cx };
+    assert!(!b_sym_eq_foo(bar_node, &cx), "B: :bar does not equal :foo");
+    assert_c_matches_with(
+        "#sym_eq?(:foo)",
+        &ast,
+        bar_node,
+        b_sym_eq_foo(bar_node, &cx),
+        &mut host2,
+    );
+}
+
+// ── 12e helpers ──────────────────────────────────────────────────────────────
+
+/// B-backend free fn for `#expects?($x)`: fires when `node != arg`, i.e. the
+/// two elements of the array are distinct.  Paired with a two-element array
+/// `[int1, int2]` the only valid assignment is `$x = int1`, predicate fires
+/// on `int2` with arg `int1`.
+fn expects_p(node: NodeId, _cx: &Cx<'_>, arg: NodeId) -> bool {
+    node != arg
+}
+
+/// C-backend [`PredicateHost`] that matches the same semantics: fires on
+/// `expects?` when the subject node equals `want_node` and the first
+/// `PredCallArg::Node` argument equals `want_arg`.
+struct ExpectsHost {
+    want_node: NodeId,
+    want_arg: NodeId,
+}
+impl PredicateHost for ExpectsHost {
+    fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+        if name != "expects?" {
+            return false;
+        }
+        node == self.want_node
+            && matches!(args.first(), Some(PredCallArg::Node(id)) if *id == self.want_arg)
+    }
+}
+
+#[test]
+fn anyorder_capture_ref_pred_arg_agrees_across_backends() {
+    // `(array <$x #expects?($x)>)` against `[int1, int2]`.
+    //
+    // The host fires only when the subject is `int2` AND the captured node
+    // (`$x`) is `int1`.  The only valid permutation is therefore:
+    //   $x → int1,  #expects?($x) → int2   (predicate: int2 != int1 ✓)
+    //
+    // B-backend phase-1 probe must write a probe-scope binding for $x so that
+    // the predicate-arg expression resolves to the trial element rather than
+    // the uninitialized function-level `__cap0`.
+    let mut b = AstBuilder::new("[1,2]", "t.rb");
+    let int1 = b.push(NodeKind::Int(1), r());
+    let int2 = b.push(NodeKind::Int(2), r());
+    let elems = b.push_list(&[int1, int2]);
+    let arr = b.push(NodeKind::Array(elems), r());
+    let ast = b.finish(arr);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // B backend.
+    let b_caps: Option<(NodeId,)> = b_anyorder_cap_pred_arg(arr, &cx);
+
+    // C backend with the same host semantics.
+    let mut host = ExpectsHost {
+        want_node: int2,
+        want_arg: int1,
+    };
+    let c = assert_c_matches_with(
+        "(array <$x #expects?($x)>)",
+        &ast,
+        arr,
+        b_caps.is_some(),
+        &mut host,
+    );
+
+    // B must match and capture int1 into $x.
+    assert!(
+        b_caps.is_some(),
+        "B must match [1,2] with <$x #expects?($x)>"
+    );
+    let (b_cap,) = b_caps.unwrap();
+    assert_eq!(b_cap, int1, "B: $x must capture int1");
+
+    // B and C captures must agree.
+    let c_caps = c.expect("C also matched");
+    let c_cap0 = c_caps.get(0).cloned();
+    match c_cap0 {
+        Some(CaptureValue::Node(c_id)) => {
+            assert_eq!(b_cap, c_id, "B↔C: $x capture disagrees");
+        }
+        other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
 }

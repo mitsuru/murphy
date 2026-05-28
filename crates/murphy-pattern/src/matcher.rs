@@ -14,8 +14,24 @@ use murphy_ast::{Ast, NodeId, NodeKind};
 
 use crate::CaptureKind;
 use crate::captures::{CaptureBuf, CaptureValue, Captures};
-use crate::ir::{IrHead, IrNode, IrNodeId, PatternIr, StrRef};
+use crate::ir::{IrHead, IrNode, IrNodeId, IrPredArg, PatternIr, StrRef};
 use crate::schema::{PatChild, pattern_children};
+
+/// A resolved predicate argument passed to [`PredicateHost::call`].
+///
+/// Capture back-references have been resolved to `NodeId` values by the
+/// matcher before calling the host.
+#[derive(Debug, Clone)]
+pub enum PredCallArg<'a> {
+    Int(i64),
+    Float(f64),
+    Str(&'a str),
+    Sym(&'a str),
+    Bool(bool),
+    Nil,
+    /// A capture-slot back-reference, resolved to the captured `NodeId`.
+    Node(NodeId),
+}
 
 /// Hook used by the matcher to evaluate `#predicate` calls.
 ///
@@ -24,9 +40,10 @@ use crate::schema::{PatChild, pattern_children};
 /// on the cop instance. [`NoPredicates`] is the trivial default ("every
 /// predicate fails"), suitable for tests and standalone use.
 pub trait PredicateHost {
-    /// Look up the predicate by `name` and evaluate it on `node`. Returns
-    /// `true` if the predicate accepts the node.
-    fn call(&mut self, name: &str, node: NodeId) -> bool;
+    /// Look up the predicate by `name` and evaluate it on `node`, optionally
+    /// passing resolved arguments `args`. Returns `true` if the predicate
+    /// accepts the node.
+    fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool;
 }
 
 /// Predicate host that fails every predicate — useful for tests and any
@@ -34,7 +51,7 @@ pub trait PredicateHost {
 pub struct NoPredicates;
 
 impl PredicateHost for NoPredicates {
-    fn call(&mut self, _name: &str, _node: NodeId) -> bool {
+    fn call(&mut self, _name: &str, _node: NodeId, _args: &[PredCallArg<'_>]) -> bool {
         false
     }
 }
@@ -128,7 +145,40 @@ fn match_pat<P: PredicateHost + ?Sized>(
         IrNode::LitFalse => matches!(*ctx.ast.kind(node), NodeKind::False_),
         IrNode::LitNil => matches!(*ctx.ast.kind(node), NodeKind::Nil),
 
-        IrNode::Predicate(r) => predicates.call(ctx.pool(*r), node),
+        IrNode::Predicate {
+            name,
+            args_start,
+            args_len,
+        } => {
+            // Resolve args from the pred_args side table into `PredCallArg` values.
+            let args_slice =
+                &ctx.ir.pred_args[*args_start as usize..(*args_start + *args_len) as usize];
+            let resolved: Vec<PredCallArg<'_>> = args_slice
+                .iter()
+                .map(|arg| match arg {
+                    IrPredArg::Int(v) => PredCallArg::Int(*v),
+                    IrPredArg::Float(v) => PredCallArg::Float(*v),
+                    IrPredArg::Str(r) => PredCallArg::Str(ctx.pool(*r)),
+                    IrPredArg::Sym(r) => PredCallArg::Sym(ctx.pool(*r)),
+                    IrPredArg::Bool(b) => PredCallArg::Bool(*b),
+                    IrPredArg::Nil => PredCallArg::Nil,
+                    IrPredArg::Capture(slot) => {
+                        // Resolve the capture slot to a NodeId. If the slot
+                        // hasn't been written yet (forward-ref), this is a
+                        // bug — the parser rejects forward refs at parse time.
+                        match buf.get(*slot) {
+                            Some(id) => PredCallArg::Node(id),
+                            None => {
+                                // Unresolved capture slot — return Nil as a safe
+                                // fallback (the predicate will almost certainly fail).
+                                PredCallArg::Nil
+                            }
+                        }
+                    }
+                })
+                .collect();
+            predicates.call(ctx.pool(*name), node, &resolved)
+        }
 
         IrNode::Kind(tag) => ctx.ast.kind(node).tag() == *tag,
 
@@ -640,7 +690,8 @@ fn find_assignment<P: PredicateHost + ?Sized>(
         if assignment[..pat_idx].contains(&elem_idx) {
             continue; // element already used by an earlier pattern
         }
-        // Probe without writing captures (discard trial buf).
+        // Probe with a fresh clone of `buf` so we don't pollute the caller's
+        // capture state on backtrack.
         let mut trial = buf.clone();
         if match_pat(
             ctx,
@@ -650,13 +701,18 @@ fn find_assignment<P: PredicateHost + ?Sized>(
             predicates,
         ) {
             assignment[pat_idx] = elem_idx;
+            // Thread the trial buf into the deeper search so later patterns
+            // can resolve `#pred?($cap)` against captures written by earlier
+            // anyorder children. The eventual commit pass re-matches against
+            // the caller's `buf`, so writes here remain scoped to this
+            // assignment attempt and are discarded on backtrack.
             if find_assignment(
                 ctx,
                 patterns,
                 elems,
                 pat_idx + 1,
                 assignment,
-                buf,
+                &trial,
                 predicates,
             ) {
                 return true;
@@ -1272,7 +1328,7 @@ mod tests {
             answer: bool,
         }
         impl PredicateHost for Recording {
-            fn call(&mut self, name: &str, node: NodeId) -> bool {
+            fn call(&mut self, name: &str, node: NodeId, _args: &[PredCallArg<'_>]) -> bool {
                 self.seen.push((name.to_owned(), node));
                 self.answer
             }
@@ -1290,6 +1346,172 @@ mod tests {
             answer: false,
         };
         assert!(matches(&ir, &ast, send, &mut host_false).is_none());
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // murphy-jyi: predicate args (literal arg + capture-ref arg)
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn predicate_with_int_arg_passes_literal_to_host() {
+        // `#divisible_by?(42)` — the host receives `[PredCallArg::Int(42)]`.
+        let mut b = AstBuilder::new("84", "t.rb");
+        let n = b.push(NodeKind::Int(84), r());
+        let ast = b.finish(n);
+
+        struct DivisibleBy {
+            called_with: Vec<(String, Vec<i64>)>,
+        }
+        impl PredicateHost for DivisibleBy {
+            fn call(&mut self, name: &str, _node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+                let ints: Vec<i64> = args
+                    .iter()
+                    .filter_map(|a| {
+                        if let PredCallArg::Int(v) = a {
+                            Some(*v)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                self.called_with.push((name.to_owned(), ints.clone()));
+                // 84 is divisible by 42.
+                ints.first().is_some_and(|&d| d != 0 && 84 % d == 0)
+            }
+        }
+        let ir = compile("#divisible_by?(42)").unwrap();
+        let mut host = DivisibleBy {
+            called_with: vec![],
+        };
+        assert!(
+            matches(&ir, &ast, n, &mut host).is_some(),
+            "84 should be divisible by 42"
+        );
+        assert_eq!(
+            host.called_with,
+            vec![("divisible_by?".to_owned(), vec![42i64])]
+        );
+
+        // A divisor that doesn't divide 84 should fail (84 % 13 != 0).
+        let ir2 = compile("#divisible_by?(13)").unwrap();
+        let mut host2 = DivisibleBy {
+            called_with: vec![],
+        };
+        assert!(
+            matches(&ir2, &ast, n, &mut host2).is_none(),
+            "84 is not divisible by 13"
+        );
+    }
+
+    #[test]
+    fn predicate_with_capture_ref_arg_passes_nodeid_to_host() {
+        // Pattern: `(send $recv _ #check_arg?($recv))`
+        //
+        // The Send node has: receiver=$recv (OptNode), method=_ (Sym),
+        // args=[arg0, arg1] (List). The list pattern is `#check_arg?($recv)`:
+        // it matches `arg0` in the list slot, and the host receives
+        // `PredCallArg::Node(recv_id)` as its first argument.
+        let mut b = AstBuilder::new("recv.method(42)", "t.rb");
+        let recv_sym = b.intern_symbol("recv");
+        let recv = b.push(NodeKind::Lvar(recv_sym), r());
+        let method_sym = b.intern_symbol("method");
+        let arg0 = b.push(NodeKind::Int(42), r());
+        let args = b.push_list(&[arg0]);
+        let send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::some(recv),
+                method: method_sym,
+                args,
+            },
+            r(),
+        );
+        let ast = b.finish(send);
+
+        struct CheckArg {
+            expected_recv: NodeId,
+        }
+        impl PredicateHost for CheckArg {
+            fn call(&mut self, name: &str, _node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+                if name == "check_arg?" {
+                    // The first (and only) arg must be the captured receiver NodeId.
+                    matches!(args.first(), Some(PredCallArg::Node(id)) if *id == self.expected_recv)
+                } else {
+                    false
+                }
+            }
+        }
+        // Pattern: receiver is captured as $recv (slot 0), method matches `_`,
+        // then in the list slot `#check_arg?($recv)` is tested against arg0.
+        let ir = compile("(send $recv _ #check_arg?($recv))").unwrap();
+        let mut host = CheckArg {
+            expected_recv: recv,
+        };
+        assert!(
+            matches(&ir, &ast, send, &mut host).is_some(),
+            "captured receiver NodeId should be passed to predicate as arg"
+        );
+
+        // A host that always returns false should cause the match to fail.
+        struct Reject;
+        impl PredicateHost for Reject {
+            fn call(&mut self, _name: &str, _node: NodeId, _args: &[PredCallArg<'_>]) -> bool {
+                false
+            }
+        }
+        let mut reject = Reject;
+        assert!(
+            matches(&ir, &ast, send, &mut reject).is_none(),
+            "should not match when predicate returns false"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // murphy-jyi × murphy-ejd: capture written by an AnyOrder child must
+    // be visible to a later child's predicate-arg probe.
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn anyorder_predicate_arg_sees_capture_from_earlier_child() {
+        // `(array <$x #expects?($x)>)` against `[1, 2]`.
+        //
+        // The host fires only when `node == int2 && args[0] == Node(int1)`.
+        // The only valid permutation is `$x → int1`, `#expects?($x) → int2`.
+        //
+        // Phase 1 must thread the just-captured trial buffer into the next
+        // pattern's probe. If it instead probes against the original (empty)
+        // buf, the predicate-arg slot resolves to Nil and no permutation can
+        // satisfy the host, so the whole match wrongly fails.
+        let mut b = AstBuilder::new("[1,2]", "t.rb");
+        let int1 = b.push(NodeKind::Int(1), r());
+        let int2 = b.push(NodeKind::Int(2), r());
+        let elems = b.push_list(&[int1, int2]);
+        let arr = b.push(NodeKind::Array(elems), r());
+        let ast = b.finish(arr);
+
+        struct ExpectsCaptured {
+            want_node: NodeId,
+            want_arg: NodeId,
+        }
+        impl PredicateHost for ExpectsCaptured {
+            fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+                if name != "expects?" {
+                    return false;
+                }
+                node == self.want_node
+                    && matches!(args.first(), Some(PredCallArg::Node(id)) if *id == self.want_arg)
+            }
+        }
+
+        let ir = compile("(array <$x #expects?($x)>)").unwrap();
+        let mut host = ExpectsCaptured {
+            want_node: int2,
+            want_arg: int1,
+        };
+        assert!(
+            matches(&ir, &ast, arr, &mut host).is_some(),
+            "AnyOrder's phase-1 probe must thread the trial capture buf so \
+             a later child's #pred?($x) sees the slot just written by $x"
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────

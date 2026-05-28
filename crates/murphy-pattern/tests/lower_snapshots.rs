@@ -41,6 +41,7 @@ fn snapshot_wildcard() {
     tags: [],
     str_pool: "",
     captures: [],
+    pred_args: [],
     root: IrNodeId(
         0,
     ),
@@ -66,6 +67,7 @@ fn snapshot_sym_literal() {
     tags: [],
     str_pool: "puts",
     captures: [],
+    pred_args: [],
     root: IrNodeId(
         0,
     ),
@@ -125,6 +127,7 @@ fn snapshot_node_with_nil_test_sym_and_seq_capture() {
             name: None,
         },
     ],
+    pred_args: [],
     root: IrNodeId(
         4,
     ),
@@ -175,6 +178,7 @@ fn snapshot_oneof_head_and_rest() {
     ],
     str_pool: "",
     captures: [],
+    pred_args: [],
     root: IrNodeId(
         2,
     ),
@@ -218,6 +222,7 @@ fn snapshot_union() {
     tags: [],
     str_pool: "",
     captures: [],
+    pred_args: [],
     root: IrNodeId(
         2,
     ),
@@ -267,6 +272,7 @@ fn snapshot_not() {
     tags: [],
     str_pool: "x",
     captures: [],
+    pred_args: [],
     root: IrNodeId(
         3,
     ),
@@ -315,6 +321,7 @@ fn snapshot_parent() {
     tags: [],
     str_pool: "",
     captures: [],
+    pred_args: [],
     root: IrNodeId(
         4,
     ),
@@ -364,6 +371,7 @@ fn snapshot_descend() {
     tags: [],
     str_pool: "raise",
     captures: [],
+    pred_args: [],
     root: IrNodeId(
         3,
     ),
@@ -385,12 +393,14 @@ fn snapshot_named_capture_and_predicate() {
                 0,
             ),
         },
-        Predicate(
-            StrRef {
+        Predicate {
+            name: StrRef {
                 start: 8,
                 len: 5,
             },
-        ),
+            args_start: 0,
+            args_len: 0,
+        },
         Node {
             head: Exact(
                 NodeKindTag(
@@ -424,6 +434,7 @@ fn snapshot_named_capture_and_predicate() {
             ),
         },
     ],
+    pred_args: [],
     root: IrNodeId(
         3,
     ),
