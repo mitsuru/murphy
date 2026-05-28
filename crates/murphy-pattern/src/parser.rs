@@ -43,19 +43,21 @@ pub(crate) const CAPREF_MARKER: &str = "\0capref:";
 /// the token-stream preprocessor folds `Predicate(name) LParen args RParen`
 /// into a single `Predicate(name + ARGS_SEP + serialised_args)` token. The
 /// grammar action `split_predicate_name` splits the payload back.
+///
+/// Records inside the args payload are length-prefixed (`LEN:RECORD`
+/// concatenated, no inter-record separator) so the payload can contain
+/// arbitrary bytes — including bytes the lexer admits inside string or
+/// symbol literals — without colliding with a delimiter. Each record is one
+/// of:
+///
+/// - `iINT` — integer literal (i64)
+/// - `fFLOAT` — float literal (f64; `{:?}`-formatted for lossless round-trip)
+/// - `sSTRING` — string literal (raw UTF-8, length-counted)
+/// - `ySYM` — symbol literal (raw UTF-8, length-counted)
+/// - `cNAME` — `$NAME` capture back-reference (post-pass resolves to slot)
+/// - `t` — boolean true
+/// - `x` — boolean false
 const ARGS_SEP: &str = "\0args:";
-
-/// Separator between individual serialised args inside the folded predicate
-/// name string. Args are encoded as one of:
-/// * `iINT` — integer literal (i64)
-/// * `fFLOAT` — float literal (f64; `{:?}`-formatted for lossless round-trip)
-/// * `sSTRING` — string literal (raw UTF-8, no escaping; outer `RECORD_SEP`
-///   delimits)
-/// * `ySYM` — symbol literal
-/// * `tTRUE` — boolean true
-/// * `xFALSE` — boolean false
-/// * `cNAME` — `$NAME` capture back-reference (post-pass resolves to slot)
-const RECORD_SEP: &str = "\x01";
 
 /// Sentinel prefix tagging a `PatKind::Predicate` produced from a bare
 /// identifier (e.g. `even?` in node-child position, or `sned` at the root).
@@ -447,39 +449,29 @@ fn parse_pred_args(
     }
 }
 
-/// Serialise a `PredArg` list to a compact, parseable string using
-/// `RECORD_SEP` as a delimiter. The grammar action `split_predicate_name`
-/// inverts this.
+/// Serialise a `PredArg` list to a compact, parseable string with each
+/// record length-prefixed as `LEN:RECORD`. Records concatenate with no
+/// inter-record separator, so payloads (string/symbol literals, capture
+/// names) may contain arbitrary bytes without escaping. The grammar action
+/// `split_predicate_name` inverts this.
 fn serialise_pred_args(args: &[PredArg]) -> String {
     let mut out = String::new();
-    for (idx, arg) in args.iter().enumerate() {
-        if idx > 0 {
-            out.push_str(RECORD_SEP);
-        }
-        match arg {
-            PredArg::Lit(Lit::Int(v)) => {
-                out.push('i');
-                out.push_str(&v.to_string());
-            }
-            PredArg::Lit(Lit::Float(v)) => {
-                out.push('f');
-                out.push_str(&format!("{v:?}"));
-            }
-            PredArg::Lit(Lit::Str(s)) => {
-                out.push('s');
-                out.push_str(s);
-            }
-            PredArg::Lit(Lit::Sym(s)) => {
-                out.push('y');
-                out.push_str(s);
-            }
-            PredArg::Lit(Lit::True) => out.push('t'),
-            PredArg::Lit(Lit::False) => out.push('x'),
+    for arg in args {
+        let record = match arg {
+            PredArg::Lit(Lit::Int(v)) => format!("i{v}"),
+            PredArg::Lit(Lit::Float(v)) => format!("f{v:?}"),
+            PredArg::Lit(Lit::Str(s)) => format!("s{s}"),
+            PredArg::Lit(Lit::Sym(s)) => format!("y{s}"),
+            PredArg::Lit(Lit::True) => "t".to_string(),
+            PredArg::Lit(Lit::False) => "x".to_string(),
             PredArg::Lit(Lit::Nil) => unreachable!("Nil is rejected at parse time"),
             // PredArg::Capture should not appear yet — back-refs are stashed
             // as Lit::Sym via CAPREF_MARKER until the post-pass resolves them.
             PredArg::Capture(_) => unreachable!("Capture refs are stashed as Lit::Sym"),
-        }
+        };
+        out.push_str(&record.len().to_string());
+        out.push(':');
+        out.push_str(&record);
     }
     out
 }
@@ -493,17 +485,37 @@ pub(crate) fn split_predicate_name(
     if let Some(sep_idx) = combined.find(ARGS_SEP) {
         let name = combined[..sep_idx].to_string();
         let rest = &combined[sep_idx + ARGS_SEP.len()..];
-        let args = if rest.is_empty() {
-            vec![]
-        } else {
-            rest.split(RECORD_SEP)
-                .map(|field| decode_pred_arg(field, span))
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        let args = decode_pred_args(rest, span)?;
         Ok((name, args))
     } else {
         Ok((combined, vec![]))
     }
+}
+
+/// Decode length-prefixed records (`LEN:RECORD` concatenated) back to a
+/// `Vec<PredArg>`. The byte length is decimal-encoded and ends at the first
+/// `:`; the next LEN bytes are the record payload (tag + value).
+fn decode_pred_args(rest: &str, span: PatSpan) -> Result<Vec<PredArg>, ParseError> {
+    let mut out = Vec::new();
+    let bytes = rest.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let colon = bytes[pos..]
+            .iter()
+            .position(|&b| b == b':')
+            .ok_or_else(|| ParseError::new("internal: missing record length delimiter", span))?;
+        let len: usize = rest[pos..pos + colon]
+            .parse()
+            .map_err(|_| ParseError::new("internal: bad record length", span))?;
+        let record_start = pos + colon + 1;
+        let record_end = record_start
+            .checked_add(len)
+            .filter(|&end| end <= bytes.len())
+            .ok_or_else(|| ParseError::new("internal: record truncated", span))?;
+        out.push(decode_pred_arg(&rest[record_start..record_end], span)?);
+        pos = record_end;
+    }
+    Ok(out)
 }
 
 fn decode_pred_arg(field: &str, span: PatSpan) -> Result<PredArg, ParseError> {
@@ -832,8 +844,13 @@ fn validate_bare_predicate_position(pat: &mut Pat, pos: BarePos<'_>) -> Result<(
             validate_bare_predicate_position(body, pos)?;
         }
         PatKind::AnyOrder { children } => {
+            // `<...>` children were parsed with `prefixed(false)` in the
+            // hand-written parser, which forbade bare-predicate shorthand
+            // even when the enclosing node slot allowed it. Treat each child
+            // as if it were a root pattern so unknown-ident → bare-predicate
+            // conversion is rejected here as well.
             for child in children {
-                validate_bare_predicate_position(child, pos.clone())?;
+                validate_bare_predicate_position(child, BarePos::Root)?;
             }
         }
         PatKind::Rest
@@ -2675,6 +2692,30 @@ mod tests {
             "expected 'unknown or forward capture reference', got: {}",
             e.message
         );
+    }
+
+    #[test]
+    fn parse_predicate_str_arg_with_raw_low_byte_round_trips() {
+        // The old separator-based serialisation broke when a string payload
+        // contained the `\x01` byte that delimited records — it would split
+        // one argument into two and fail to decode. With length-prefix
+        // records, raw bytes pass through verbatim.
+        use crate::ast::PredArg;
+        let src = "#p?(\"a\x01b\")";
+        let pat = parse(src).expect("string arg with `\\x01` byte must parse");
+        match &pat.root.kind {
+            PatKind::Predicate { name, args } => {
+                assert_eq!(name, "p?");
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    PredArg::Lit(crate::ast::Lit::Str(s)) => {
+                        assert_eq!(s, "a\x01b", "payload must round-trip verbatim");
+                    }
+                    other => panic!("expected Str arg, got {other:?}"),
+                }
+            }
+            other => panic!("expected Predicate, got {other:?}"),
+        }
     }
 
     #[test]
