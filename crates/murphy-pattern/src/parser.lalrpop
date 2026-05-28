@@ -30,7 +30,7 @@
 //   tWILDCARD                      | "_" → PatKind::Wildcard
 //   tPARAM_NAMED                   | (not in v1 scope — Ruby-side $name params)
 //   tPARAM_NUMBER                  | (not in v1 scope — Ruby-side $1/$2 params)
-//   tPARAM_CONST                   | (deferred — beads murphy-kq57)
+//   tPARAM_CONST                   | implemented in D3 (murphy-kq57): `Foo`/`%Foo`
 //   tREGEXP                        | (deferred — beads murphy-t8km)
 //   tUNIFY                         | (deferred — beads murphy-nnr8)
 // ---------------------------------|-------------------------------------------
@@ -57,7 +57,6 @@
 //                                  |   fold_predicate_args in parser.rs
 // ---------------------------------|-------------------------------------------
 // D-phase deferred (not added here):
-//   tPARAM_CONST                   — beads murphy-kq57
 //   tUNIFY                         — beads murphy-nnr8
 //   tREGEXP                        — beads murphy-t8km
 
@@ -161,7 +160,7 @@ CapturePrimary: Pat = {
             })
             .map_err(|e| lalrpop_util::ParseError::User { error: e })
     },
-    <l:@L> <name:"ident"> <r:@R> => crate::parser::kind_or_unknown_ident(&name, PatSpan::new(l, r)),
+    <l:@L> <name:"ident"> <r:@R> => crate::parser::const_or_kind_or_unknown_ident(&name, PatSpan::new(l, r)),
     <m:NodeMatch> => m,
     <i:IntersectionPrimary> => i,
 };
@@ -196,7 +195,7 @@ Primary: Pat = {
             })
             .map_err(|e| lalrpop_util::ParseError::User { error: e })
     },
-    <l:@L> <name:"ident"> <r:@R> => crate::parser::kind_or_unknown_ident(&name, PatSpan::new(l, r)),
+    <l:@L> <name:"ident"> <r:@R> => crate::parser::const_or_kind_or_unknown_ident(&name, PatSpan::new(l, r)),
     <m:NodeMatch> => m,
     <u:UnionPrimary> => u,
     <i:IntersectionPrimary> => i,

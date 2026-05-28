@@ -120,19 +120,27 @@ impl<'a> Lexer<'a> {
             b'"' => self.scan_string(),
             b'-' => self.scan_number(),
             b'0'..=b'9' => self.scan_number(),
-            b'a'..=b'z' | b'_' => self.scan_ident(),
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.scan_ident(),
             b'<' => self.single(Token::LAngle),
             b'>' => self.single(Token::RAngle),
             b'[' => self.single(Token::LBracket),
             b']' => self.single(Token::RBracket),
             b'|' => self.single(Token::Pipe),
             b'%' => {
-                let (ch, len) = self.char_at_cursor();
-                Err(self.err_at(
-                    self.pos,
-                    self.pos + len,
-                    format!("`{ch}` is not supported in v1"),
-                ))
+                // `%Foo` (uppercase-start) is tPARAM_CONST sugar — consume the
+                // `%` prefix and lex the rest as a normal uppercase ident.
+                // Lowercase-start `%var` (tPARAM_NAMED) is out of v1 scope.
+                if matches!(self.src.get(self.pos + 1), Some(b'A'..=b'Z')) {
+                    self.pos += 1; // consume `%`
+                    self.scan_ident()
+                } else {
+                    let (ch, len) = self.char_at_cursor();
+                    Err(self.err_at(
+                        self.pos,
+                        self.pos + len,
+                        format!("`{ch}` is not supported in v1"),
+                    ))
+                }
             }
             _ => {
                 let (ch, len) = self.char_at_cursor();
@@ -306,16 +314,21 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Scan a `[a-z_][a-z0-9_]*` identifier.
+    /// Scan a `[A-Za-z_][A-Za-z0-9_]*` identifier.
     ///
+    /// Uppercase-start names (e.g. `Foo`, `MyClass`) are valid here and are
+    /// translated to `(const _ :Name)` at the parser level (D3, murphy-kq57).
     /// `_` alone -> `Underscore`; `nil?` -> `NilQuestion`. `!` and `?`
     /// suffixes are *not* consumed: `int?` lexes to `Ident("int")` and
     /// `Question`, and `save!` lexes to `Ident("save")` and `Bang`.
     fn scan_ident(&mut self) -> Result<Token, ParseError> {
         let start = self.pos;
-        // First byte is already known to be `[a-z_]`.
+        // First byte is already known to be `[A-Za-z_]`.
         self.pos += 1;
-        while matches!(self.peek(), Some(b'a'..=b'z' | b'0'..=b'9' | b'_')) {
+        while matches!(
+            self.peek(),
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+        ) {
             self.pos += 1;
         }
         let text = self.slice_str(start, self.pos);
@@ -962,5 +975,50 @@ mod tests {
         assert!(e.message.contains("expected a symbol name"));
         let e = tokenize(":$1").expect_err("must reject `:$1`");
         assert!(e.message.contains("expected a symbol name"));
+    }
+
+    // --- D3 (murphy-kq57): tPARAM_CONST — uppercase-start ident ---------------
+
+    #[test]
+    fn lexes_uppercase_ident_as_ident_token() {
+        // Bare `Foo` (no `%`) lexes as `Ident("Foo")`.
+        assert_eq!(toks("Foo"), vec![Token::Ident("Foo".into())]);
+        assert_eq!(toks("MyClass"), vec![Token::Ident("MyClass".into())]);
+        assert_eq!(toks("FOO"), vec![Token::Ident("FOO".into())]);
+    }
+
+    #[test]
+    fn percent_uppercase_lexes_as_ident_without_percent() {
+        // `%Foo` — tPARAM_CONST sugar: `%` is consumed and the name lexes as
+        // `Ident("Foo")`, identical to the bare `Foo` form.
+        assert_eq!(toks("%Foo"), vec![Token::Ident("Foo".into())]);
+        assert_eq!(toks("%MyClass"), vec![Token::Ident("MyClass".into())]);
+    }
+
+    #[test]
+    fn percent_lowercase_is_still_rejected() {
+        // `%var` (tPARAM_NAMED) remains out of v1 scope — must error.
+        let e = tokenize("%var").expect_err("must reject `%var`");
+        assert!(
+            e.message.contains('%') && e.message.contains("not supported in v1"),
+            "message for `%var` was: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn uppercase_ident_in_node_pattern() {
+        // `(send _ :raise Foo)` produces correct token stream.
+        assert_eq!(
+            toks("(send _ :raise Foo)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Underscore,
+                Token::Sym("raise".into()),
+                Token::Ident("Foo".into()),
+                Token::RParen,
+            ]
+        );
     }
 }

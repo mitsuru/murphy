@@ -330,6 +330,15 @@ fn fold_bare_predicate_shorthand(tokens: &[Spanned]) -> Vec<Spanned> {
             if name == "true" || name == "false" || name == "nil" {
                 return None;
             }
+            // Uppercase-start names are tPARAM_CONST (D3, murphy-kq57) and are
+            // expanded to `(const _ :Name)` by `const_or_kind_or_unknown_ident`.
+            // `Foo?` must NOT be folded into a bare-predicate: let it reach the
+            // grammar as `Ident("Foo") Question`, where `Postfixed` will wrap the
+            // expanded const node in a Quantifier — and then
+            // `validate_quantifier_placement` rejects the root-level form.
+            if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                return None;
+            }
             let next = tokens.get(i + 1)?;
             let suffix = match next.tok {
                 Token::Question => '?',
@@ -614,6 +623,47 @@ pub(crate) fn make_capture_placeholder(name: Option<String>, body: Pat) -> PatKi
 pub(crate) fn resolve_kind(name: &str, span: PatSpan) -> Result<NodeKindTag, ParseError> {
     murphy_ast::tag_from_pattern_name(name)
         .ok_or_else(|| ParseError::new(format!("unknown node type `{name}`"), span))
+}
+
+/// Resolve a bare ident at primary position, expanding uppercase-start names
+/// (tPARAM_CONST, D3 — murphy-kq57) to `(const _ :Name)` node patterns.
+///
+/// * `Foo` / `%Foo` (uppercase-start after `%` is stripped by the lexer) →
+///   `PatKind::Node { head: Exact(const), children: [Wildcard, Lit(Sym("Foo"))] }`
+///   mirrors the RuboCop semantics where a bare constant reference in a pattern
+///   matches any `(const _ :Foo)` node.
+/// * lowercase / `_` / `true` / `false` / `nil` → delegated to
+///   `kind_or_unknown_ident` as before.
+pub(crate) fn const_or_kind_or_unknown_ident(name: &str, span: PatSpan) -> Pat {
+    if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+        // Expand `Foo` → `(const nil? :Foo)`.
+        // `Const` is tag 13 (ADR 0037, frozen layout; see murphy-ast::kinds).
+        //
+        // NOTE: we use `nil?` (NilTest), not `_` (Wildcard), for the scope slot
+        // because Murphy's `_` in an OptNode slot rejects `None` (it requires the
+        // slot to be present). `nil?` accepts both `None` (absent scope = top-level
+        // constant, the common case) and a Nil node. RuboCop's `Foo` also matches
+        // `Module::Foo`; supporting a scoped constant requires a future extension.
+        let const_tag = murphy_ast::NodeKindTag(13);
+        Pat {
+            kind: PatKind::Node {
+                head: Head::Exact(const_tag),
+                children: vec![
+                    Pat {
+                        kind: PatKind::NilTest,
+                        span,
+                    },
+                    Pat {
+                        kind: PatKind::Lit(Lit::Sym(name.to_string())),
+                        span,
+                    },
+                ],
+            },
+            span,
+        }
+    } else {
+        kind_or_unknown_ident(name, span)
+    }
 }
 
 /// Resolve a bare ident at primary position to a `Pat`:
@@ -2939,6 +2989,145 @@ mod intersection_tests {
                 assert!(
                     matches!(body.kind, PatKind::Intersection { .. }),
                     "capture body must be Intersection, got {:?}",
+                    body.kind
+                );
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+}
+
+// ============================================================================
+// Tests — D3 (murphy-kq57): tPARAM_CONST — `Foo` uppercase-start atom.
+// ============================================================================
+
+#[cfg(test)]
+mod tparam_const_tests {
+    use super::*;
+    use crate::{Lit, PatKind};
+    use murphy_ast::NodeKindTag;
+
+    const CONST_TAG: NodeKindTag = NodeKindTag(13); // Const — ADR 0037 frozen
+
+    /// Helper: assert `pat`'s root is `(const nil? :Name)` with the given name.
+    ///
+    /// The scope slot uses `nil?` (NilTest), not `_` (Wildcard), so that the
+    /// pattern accepts top-level constants (scope = absent) without requiring the
+    /// scope to be a present node — see `const_or_kind_or_unknown_ident` for the
+    /// rationale.
+    fn assert_const_node(pat: &crate::PatternAst, expected_name: &str) {
+        match &pat.root.kind {
+            PatKind::Node { head, children } => {
+                assert_eq!(
+                    *head,
+                    crate::Head::Exact(CONST_TAG),
+                    "head must be Exact(Const)"
+                );
+                assert_eq!(children.len(), 2, "must have 2 children (scope + name)");
+                assert!(
+                    matches!(children[0].kind, PatKind::NilTest),
+                    "first child (scope) must be NilTest (nil?), got {:?}",
+                    children[0].kind
+                );
+                assert_eq!(
+                    children[1].kind,
+                    PatKind::Lit(Lit::Sym(expected_name.to_string())),
+                    "second child (name) must be Lit(Sym({expected_name:?}))"
+                );
+            }
+            other => panic!("expected Node (const), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_uppercase_ident_parses_as_const_node() {
+        // `Foo` → (const _ :Foo)
+        let p = parse("Foo").expect("`Foo` must parse");
+        assert_const_node(&p, "Foo");
+    }
+
+    #[test]
+    fn percent_prefix_uppercase_parses_as_const_node() {
+        // `%Foo` — tPARAM_CONST sugar with `%` prefix: same AST as bare `Foo`.
+        let p = parse("%Foo").expect("`%Foo` must parse");
+        assert_const_node(&p, "Foo");
+    }
+
+    #[test]
+    fn percent_prefix_and_bare_produce_same_ast() {
+        // `Foo` and `%Foo` are the same token (tPARAM_CONST) and must produce
+        // the same (const _ :Foo) expansion. Spans differ (source lengths differ)
+        // so we compare by calling `assert_const_node` on both.
+        let bare = parse("Foo").expect("`Foo` must parse");
+        let pct = parse("%Foo").expect("`%Foo` must parse");
+        assert_const_node(&bare, "Foo");
+        assert_const_node(&pct, "Foo");
+    }
+
+    #[test]
+    fn uppercase_ident_inside_node_pattern() {
+        // `(send _ :raise Foo)` — Foo as a child of a node pattern.
+        let p = parse("(send _ :raise Foo)").expect("`(send _ :raise Foo)` must parse");
+        assert!(
+            matches!(p.root.kind, PatKind::Node { .. }),
+            "root must be Node (send), got {:?}",
+            p.root.kind
+        );
+        if let PatKind::Node { children, .. } = &p.root.kind {
+            // children: [_, :raise, Foo-expansion]
+            assert_eq!(children.len(), 3, "send node must have 3 children");
+            // Third child (index 2) must be the (const nil? :Foo) expansion.
+            match &children[2].kind {
+                PatKind::Node {
+                    head,
+                    children: inner,
+                } => {
+                    assert_eq!(*head, crate::Head::Exact(CONST_TAG));
+                    assert_eq!(inner.len(), 2);
+                    assert!(matches!(inner[0].kind, PatKind::NilTest));
+                    assert_eq!(inner[1].kind, PatKind::Lit(Lit::Sym("Foo".to_string())));
+                }
+                other => panic!("third child must be const-expansion, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn lowercase_ident_keeps_existing_behavior() {
+        // `foo` (lowercase, no `?`/`!` suffix, unknown kind) is a bare
+        // predicate at the root level — rejected as an unknown node type.
+        let e = parse("foo").expect_err("`foo` must be rejected at root");
+        assert!(
+            e.message.contains("unknown node type"),
+            "expected unknown-node-type error for `foo`, got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn lowercase_known_kind_keeps_existing_behavior() {
+        // `send` is a known node kind — stays as PatKind::Kind, not a const expansion.
+        let p = parse("send").expect("`send` must parse as Kind");
+        assert!(
+            matches!(p.root.kind, PatKind::Kind(_)),
+            "root must be Kind for known lowercase name, got {:?}",
+            p.root.kind
+        );
+    }
+
+    #[test]
+    fn uppercase_ident_in_capture() {
+        // `$Foo` — anonymous capture wrapping the (const _ :Foo) expansion.
+        // Unlike `$send` (which becomes named capture), `$Foo` stays anonymous
+        // because `convert_named_captures` only rewrites `Kind` / bare-ident
+        // Predicate bodies, not `Node` bodies.
+        let p = parse("$Foo").expect("`$Foo` must parse");
+        assert_eq!(p.n_captures(), 1);
+        match &p.root.kind {
+            PatKind::Capture { body, .. } => {
+                assert!(
+                    matches!(body.kind, PatKind::Node { .. }),
+                    "capture body must be Node (const expansion), got {:?}",
                     body.kind
                 );
             }
