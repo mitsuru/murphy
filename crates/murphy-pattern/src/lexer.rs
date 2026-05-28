@@ -52,6 +52,10 @@ pub(crate) enum Token {
     LAngle,
     /// `>` — closing angle bracket for any-order sequence `<...>`.
     RAngle,
+    /// `[` — opening bracket for intersection AND-pattern `[...]`.
+    LBracket,
+    /// `]` — closing bracket for intersection AND-pattern `[...]`.
+    RBracket,
 }
 
 /// A [`Token`] paired with its byte-offset span in the source string.
@@ -117,7 +121,9 @@ impl<'a> Lexer<'a> {
             b'a'..=b'z' | b'_' => self.scan_ident(),
             b'<' => self.single(Token::LAngle),
             b'>' => self.single(Token::RAngle),
-            b'%' | b'[' => {
+            b'[' => self.single(Token::LBracket),
+            b']' => self.single(Token::RBracket),
+            b'%' => {
                 let (ch, len) = self.char_at_cursor();
                 Err(self.err_at(
                     self.pos,
@@ -493,18 +499,27 @@ mod tests {
 
     #[test]
     fn lex_error_on_unsupported_sigil() {
-        // `%`, `[` are not supported in v1 (`<` is now LAngle for any-order).
-        for sigil in ['%', '['] {
-            let src = format!("(send {sigil}1)");
-            let e = tokenize(&src).expect_err("must reject unsupported sigil");
-            assert!(
-                e.message.contains(sigil) && e.message.contains("not supported in v1"),
-                "message for `{sigil}` was: {}",
-                e.message
-            );
-            // span points at the sigil
-            assert_eq!(e.span.start, 6);
-        }
+        // `%` is not supported in v1 (`<` is now LAngle for any-order,
+        // `[` / `]` are LBracket / RBracket for intersection).
+        let src = "(send %1)";
+        let e = tokenize(src).expect_err("must reject `%`");
+        assert!(
+            e.message.contains('%') && e.message.contains("not supported in v1"),
+            "message for `%` was: {}",
+            e.message
+        );
+        // span points at `%` which is at byte offset 6.
+        assert_eq!(e.span.start, 6);
+    }
+
+    #[test]
+    fn lex_bracket_tokens() {
+        // `[` → LBracket, `]` → RBracket; no error.
+        let t = tokenize("[int]").expect("bracket tokens must lex ok");
+        assert_eq!(t[0].tok, Token::LBracket);
+        assert_eq!((t[0].span.start, t[0].span.end), (0, 1));
+        assert_eq!(t[2].tok, Token::RBracket);
+        assert_eq!((t[2].span.start, t[2].span.end), (4, 5));
     }
 
     #[test]
