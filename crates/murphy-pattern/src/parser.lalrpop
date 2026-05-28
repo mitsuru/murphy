@@ -163,6 +163,7 @@ CapturePrimary: Pat = {
     },
     <l:@L> <name:"ident"> <r:@R> => crate::parser::kind_or_unknown_ident(&name, PatSpan::new(l, r)),
     <m:NodeMatch> => m,
+    <i:IntersectionPrimary> => i,
 };
 
 Postfixed: Pat = {

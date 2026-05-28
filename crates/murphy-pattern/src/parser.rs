@@ -2923,4 +2923,26 @@ mod intersection_tests {
             );
         }
     }
+
+    #[test]
+    fn anonymous_capture_wrapping_intersection() {
+        // `$[int !nil?]` — an anonymous capture whose body is an intersection.
+        // The CapturePrimary alternative for IntersectionPrimary must be
+        // reachable so the `$` prefix can wrap the AND-pattern.
+        let p = parse("$[int !nil?]").expect("$[int !nil?] must parse");
+        assert_eq!(p.n_captures(), 1);
+        assert_eq!(p.captures[0], CaptureKind::Node);
+        match &p.root.kind {
+            PatKind::Capture { slot, name, body } => {
+                assert_eq!(*slot, 0);
+                assert!(name.is_none(), "anonymous capture");
+                assert!(
+                    matches!(body.kind, PatKind::Intersection { .. }),
+                    "capture body must be Intersection, got {:?}",
+                    body.kind
+                );
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
 }
