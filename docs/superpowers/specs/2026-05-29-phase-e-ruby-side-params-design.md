@@ -96,13 +96,24 @@ node_pattern!(name, "(send _ %method)", opts: MyOpts)
 // Pattern C: only %1/%2 (no %var) → positional arg added, no opts:
 node_pattern!(name, "(send _ :foo %1)")
 //  fn name(node: NodeId, cx: &Cx<'_>, positional: &[Param<'_>]) -> bool
+
+// Pattern D: mixed %var and %N → opts: required, positional arg added
+node_pattern!(name, "(send _ %method %1)", opts: MyOpts)
+//  fn name(node: NodeId, cx: &Cx<'_>, positional: &[Param<'_>]) -> bool
 ```
+
+There are only **two** generated signatures — the legacy 2-arg form (no
+runtime params) and the 3-arg form that takes `positional`. Patterns B and D
+share the same signature: the macro adds `positional: &[Param<'_>]` whenever
+*any* runtime param (`%var` or `%N` or both) appears, even if a particular
+pattern only references `%var`. Cop authors writing the B form can simply
+pass `&[]` for `positional`.
 
 Macro-time validation rules:
 
 - pattern has `%var` AND no `opts:` → compile error (named param used but no Options type provided)
 - pattern has `opts:` AND no `%var` → compile error (unused `opts:`)
-- pattern has `%1`/`%2` → signature switches to the positional-bearing form
+- pattern has any `%var` or `%N` → signature switches to the positional-bearing form
 
 Existing cops that never use `%var`/`%N` keep their current signature and
 require no changes.

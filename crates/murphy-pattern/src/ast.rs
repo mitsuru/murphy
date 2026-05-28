@@ -89,21 +89,28 @@ pub enum PatKind {
     Intersection { children: Vec<Pat> },
     /// `%name` — named runtime parameter (tPARAM_NAMED, Phase E — murphy-aow).
     ///
-    /// At match time the caller supplies a `Params` struct; the matcher looks up
-    /// `name` in `Params::named` and compares the subject's `Sym` value against
-    /// the resolved symbol string.
+    /// At match time the matcher resolves `name` via
+    /// [`crate::ParamHost::named`] and compares the subject's literal shape
+    /// against the returned [`crate::Param`] using
+    /// [`crate::match_lit_against_param`]. The B-backend macro (`node_pattern!`)
+    /// supplies the same `Param` value from the cop's `CopOptions` field via
+    /// [`crate::IntoParam`].
     ///
-    /// **Scope**: Symbol comparisons only. `Set`/`Array` type support and
-    /// `CopOptions` type ↔ `%var` integration are future work.
+    /// Supported `Param` shapes: `String`, `Vec<String>`, `i64`, `Vec<i64>`,
+    /// `bool`, `Option<T>` (None → always miss), `CopOptionEnum`. Type
+    /// mismatch between the subject literal and the resolved `Param` is a
+    /// runtime miss, not a panic. Unknown name → miss.
     ParamNamed { name: String },
     /// `%1`, `%2`, … — positional runtime parameter (tPARAM_NUMBER, Phase E — murphy-aow).
     ///
-    /// `index` is 1-based. At match time the caller supplies a `Params` struct;
-    /// the matcher looks up `Params::positional[index - 1]` and compares the
-    /// subject's `Sym` value against the resolved symbol string.
+    /// `index` is 1-based (the lexer rejects `%0`). At match time the matcher
+    /// resolves `positional[index - 1]` via [`crate::ParamHost::positional`]
+    /// and compares the subject's literal shape against the returned
+    /// [`crate::Param`] using [`crate::match_lit_against_param`]. The
+    /// B-backend macro supplies these from the `positional: &[Param<'_>]`
+    /// argument the caller passes on each invocation.
     ///
-    /// **Scope**: Symbol comparisons only. `Set`/`Array` type support and
-    /// `CopOptions` type ↔ `%N` integration are future work.
+    /// Out-of-bounds index → miss (no panic).
     ParamNumber { index: u16 },
     /// `_name` — named unification atom (tUNIFY, D4 — murphy-nnr8).
     ///

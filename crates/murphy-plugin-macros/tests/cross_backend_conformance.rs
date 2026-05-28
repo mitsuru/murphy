@@ -3138,10 +3138,14 @@ fn assert_c_matches_with_params(
     );
 }
 
-/// Phase E B-backend cop options struct. One struct hosts every CopOptions
-/// field type the matrix covers — each `node_pattern!` below references a
-/// different field so the pre-resolve path is exercised end-to-end.
-#[derive(murphy_plugin_macros::CopOptions)]
+/// Phase E B-backend cop options struct used by the conformance pairings.
+///
+/// `Default` is derived **explicitly** so the `..Default::default()` spread
+/// in each test reads as a standard Rust pattern, instead of relying on the
+/// `#[derive(CopOptions)]` macro's implicit `Default` impl. `CopOptions` is
+/// hand-rolled below — small enough to read at a glance, and side-steps the
+/// derive-vs-derive `Default` collision the proc macro would otherwise cause.
+#[derive(Default)]
 struct TestOpts {
     method: String,
     methods: Vec<String>,
@@ -3153,6 +3157,68 @@ struct TestOpts {
     // must lower `%type` to `__opts.r#type` without panicking — see
     // `parse_field_ident` in node_pattern.rs.
     r#type: String,
+}
+
+impl murphy_plugin_api::CopOptions for TestOpts {
+    fn from_config_json(bytes: &[u8]) -> Result<Self, murphy_plugin_api::ConfigError> {
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(murphy_plugin_api::ConfigError::parse)?;
+        let obj = value
+            .as_object()
+            .ok_or_else(murphy_plugin_api::ConfigError::not_an_object)?;
+        let mut out = Self::default();
+        if let Some(s) = obj.get("method").and_then(|v| v.as_str()) {
+            out.method = s.to_string();
+        }
+        if let Some(arr) = obj.get("methods").and_then(|v| v.as_array()) {
+            out.methods = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(n) = obj.get("threshold").and_then(|v| v.as_i64()) {
+            out.threshold = n;
+        }
+        if let Some(b) = obj.get("active").and_then(|v| v.as_bool()) {
+            out.active = b;
+        }
+        if let Some(s) = obj.get("opt_method").and_then(|v| v.as_str()) {
+            out.opt_method = Some(s.to_string());
+        }
+        if let Some(s) = obj.get("type").and_then(|v| v.as_str()) {
+            out.r#type = s.to_string();
+        }
+        Ok(out)
+    }
+
+    fn to_config_json(&self) -> String {
+        // Hand-rolled JSON for the test struct — tiny and readable. The
+        // production `#[derive(CopOptions)]` round-trips via serde_json.
+        fn esc(s: &str) -> String {
+            s.replace('\\', "\\\\").replace('"', "\\\"")
+        }
+        let methods_json: String = {
+            let parts: Vec<String> = self
+                .methods
+                .iter()
+                .map(|s| format!("\"{}\"", esc(s)))
+                .collect();
+            format!("[{}]", parts.join(","))
+        };
+        let opt_method_json = match &self.opt_method {
+            Some(s) => format!("\"{}\"", esc(s)),
+            None => "null".to_string(),
+        };
+        format!(
+            r#"{{"method":"{}","methods":{},"threshold":{},"active":{},"opt_method":{},"type":"{}"}}"#,
+            esc(&self.method),
+            methods_json,
+            self.threshold,
+            self.active,
+            opt_method_json,
+            esc(&self.r#type),
+        )
+    }
 }
 
 node_pattern!(b_pn_str, "%method", opts: TestOpts);
