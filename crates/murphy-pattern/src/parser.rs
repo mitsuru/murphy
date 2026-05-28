@@ -1072,7 +1072,28 @@ impl<'a> Parser<'a> {
                     });
                 }
                 _ => {
-                    children.push(self.prefixed(false)?);
+                    let child = self.prefixed(false)?;
+                    // `$...` (captured rest) inside `<...>` is not supported in
+                    // v1: matching it requires writing a slice of *non-contiguous*
+                    // elements (the bits unassigned by the AnyOrder permutation
+                    // search) into a `Seq` capture slot. The C backend can do
+                    // that by allocating a `Vec<NodeId>` into `CaptureValue::Seq`,
+                    // but the B backend returns borrowed `&'a [NodeId]` slices
+                    // and has no `'a`-lifetime allocator plumbed through `Cx`,
+                    // so the only ways to produce one are `Box::leak` (leaks per
+                    // match) or an ABI-breaking arena addition. Until one of
+                    // those lands, keep the two backends consistent by rejecting
+                    // the construct at parse time.
+                    if let PatKind::Capture { body, .. } = &child.kind
+                        && matches!(body.kind, PatKind::Rest)
+                    {
+                        return Err(ParseError::new(
+                            "`$...` inside `<...>` is not supported in v1: leftover-element \
+                             captures require a runtime allocator not yet plumbed through `Cx`",
+                            child.span,
+                        ));
+                    }
+                    children.push(child);
                 }
             }
         }
