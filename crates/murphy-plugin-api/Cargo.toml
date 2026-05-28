@@ -18,6 +18,12 @@ serde_json = "1"
 # code can use `::regex::RegexBuilder` / `::regex::Regex` without the caller
 # crate needing its own `regex` dependency (D5, murphy-t8km).
 regex = "1"
+# Re-exports `Param` / `LitView` / `IntoParam` / `match_lit_against_param`
+# (Phase E, murphy-aow) so `node_pattern!`-generated code can resolve
+# `::murphy_plugin_api::Param` etc. without the caller needing its own
+# `murphy-pattern` dependency. No runtime cycle: `murphy-pattern` itself
+# depends only on `murphy-ast`.
+murphy-pattern = { path = "../murphy-pattern" }
 # Optional: only pulled in by the `test-support` feature so the
 # parser-driven cop harness (`test_support` module) can `translate`
 # Ruby source. Production plugins never use this path; the cdylib

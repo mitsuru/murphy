@@ -16,7 +16,8 @@
 
 use murphy_ast::{Ast, AstBuilder, NodeId, NodeKind, OptNodeId, Range};
 use murphy_pattern::{
-    CaptureValue, Captures, NoPredicates, PredCallArg, PredicateHost, compile, matches,
+    CaptureValue, Captures, NoPredicates, ParamHost, PredCallArg, PredicateHost, compile, matches,
+    matches_with_params,
 };
 use murphy_plugin_api::{Cx, CxRaw, FnTable, RawSlice};
 use murphy_plugin_macros::node_pattern;
@@ -62,6 +63,45 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable) -> CxRaw {
         sorted_tokens: p.sorted_tokens.as_ptr(),
         sorted_tokens_len: p.sorted_tokens.len(),
         options_json: RawSlice::from_str("{}"),
+    }
+}
+
+/// Same as [`cx_raw_for`] but stores `options_json` so the cop can decode
+/// the typed value via `cx.options::<T>()`. Used by Phase E (murphy-aow)
+/// tests that exercise `%name` runtime params; the caller is responsible
+/// for calling `<T as CopOptions>::to_config_json()` and keeping the
+/// resulting `String` alive for the lifetime of the returned `CxRaw`.
+fn cx_raw_for_with_options_json<'a>(
+    ast: &'a Ast,
+    fns: &'a FnTable,
+    options_json: &'a str,
+) -> CxRaw {
+    let p = ast.raw_parts();
+    CxRaw {
+        nodes: p.nodes.as_ptr(),
+        nodes_len: p.nodes.len(),
+        lists: p.node_lists.as_ptr(),
+        lists_len: p.node_lists.len(),
+        interner_blob: p.interner_blob.as_ptr(),
+        interner_blob_len: p.interner_blob.len(),
+        interner_offsets: p.interner_offsets.as_ptr(),
+        interner_offsets_len: p.interner_offsets.len(),
+        comments: p.comments.as_ptr(),
+        comments_len: p.comments.len(),
+        source: p.source.as_ptr(),
+        source_len: p.source.len(),
+        root: p.root,
+        cop_name: RawSlice::EMPTY,
+        fns: fns as *const FnTable,
+        sink: std::ptr::null_mut(),
+        sorted_tokens: p.sorted_tokens.as_ptr(),
+        sorted_tokens_len: p.sorted_tokens.len(),
+        // `RawSlice::from_str` wants `&'static str`; ours is a borrowed
+        // dynamic JSON, so build the raw fields by hand.
+        options_json: RawSlice {
+            ptr: options_json.as_ptr(),
+            len: options_json.len(),
+        },
     }
 }
 
@@ -3030,4 +3070,332 @@ fn regex_str_node_match_agrees() {
     let raw2 = cx_raw_for(&ast2, &fns);
     let cx2 = unsafe { Cx::from_raw(&raw2) };
     assert_c_matches("/^to_/", &ast2, node2, b_regex_str_match(node2, &cx2));
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────
+// Section 16: Phase E — `%name` / `%N` runtime parameters
+// ────────────────────────────────────────────────────────────────────────
+//
+// Cross-backend conformance for the Ruby-side parameter mechanism. Both
+// backends decompose the subject into a `LitView`, look up the resolved
+// `Param` (via macro pre-resolve on the B side, via `ParamHost` on the C
+// side), and call `match_lit_against_param`. Disagreements would mean the
+// macro's pre-resolve diverges from the matcher's runtime resolution.
+
+use std::collections::HashMap;
+
+use murphy_plugin_api::{CopOptions as _, Param};
+
+/// In-memory `ParamHost` paired with the equivalent `CopOptions` struct for
+/// the C-backend half of each Phase E pairing.
+struct MapParams {
+    named: HashMap<String, ParamOwn>,
+    positional: Vec<ParamOwn>,
+}
+
+enum ParamOwn {
+    Str(String),
+    StrSet(Vec<String>),
+    Int(i64),
+    Bool(bool),
+    None,
+}
+
+impl ParamOwn {
+    fn borrow(&self) -> Param<'_> {
+        match self {
+            ParamOwn::Str(s) => Param::Str(s.as_str()),
+            ParamOwn::StrSet(v) => Param::StrSet(v.as_slice()),
+            ParamOwn::Int(n) => Param::Int(*n),
+            ParamOwn::Bool(b) => Param::Bool(*b),
+            ParamOwn::None => Param::None,
+        }
+    }
+}
+
+impl ParamHost for MapParams {
+    fn named(&self, name: &str) -> Option<Param<'_>> {
+        self.named.get(name).map(|p| p.borrow())
+    }
+    fn positional(&self, index: usize) -> Option<Param<'_>> {
+        self.positional.get(index).map(|p| p.borrow())
+    }
+}
+
+fn assert_c_matches_with_params(
+    src: &str,
+    ast: &Ast,
+    node: NodeId,
+    b_matched: bool,
+    params: &MapParams,
+) {
+    let ir = compile(src).unwrap_or_else(|e| panic!("compile `{src}` failed: {e}"));
+    let c = matches_with_params(&ir, ast, node, &mut NoPredicates, params).is_some();
+    assert_eq!(
+        c, b_matched,
+        "B/C disagree on `{src}` against node {node:?}: B={b_matched}, C={c}"
+    );
+}
+
+/// Phase E B-backend cop options struct. One struct hosts every CopOptions
+/// field type the matrix covers — each `node_pattern!` below references a
+/// different field so the pre-resolve path is exercised end-to-end.
+#[derive(murphy_plugin_macros::CopOptions)]
+struct TestOpts {
+    method: String,
+    methods: Vec<String>,
+    threshold: i64,
+    active: bool,
+    opt_method: Option<String>,
+}
+
+node_pattern!(b_pn_str, "%method", opts: TestOpts);
+node_pattern!(b_pn_strset, "%methods", opts: TestOpts);
+node_pattern!(b_pn_int, "%threshold", opts: TestOpts);
+node_pattern!(b_pn_bool, "%active", opts: TestOpts);
+node_pattern!(b_pn_opt, "%opt_method", opts: TestOpts);
+node_pattern!(b_positional1, "%1");
+
+fn true_node_ast() -> (Ast, NodeId) {
+    let mut b = AstBuilder::new("true", "t.rb");
+    let node = b.push(NodeKind::True_, r());
+    (b.finish(node), node)
+}
+
+#[test]
+fn param_named_str_agrees() {
+    let fns = fns();
+    let (ast, node) = sym_node_ast("foo");
+    // hit case
+    let opts = TestOpts {
+        method: "foo".into(),
+        ..Default::default()
+    };
+    let json = opts.to_config_json();
+    let raw = cx_raw_for_with_options_json(&ast, &fns, &json);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let mut params = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params
+        .named
+        .insert("method".into(), ParamOwn::Str("foo".into()));
+    let b = b_pn_str(node, &cx, &[]);
+    assert!(b, "B must hit %method=\"foo\" on :foo");
+    assert_c_matches_with_params("%method", &ast, node, b, &params);
+
+    // miss case
+    let opts2 = TestOpts {
+        method: "bar".into(),
+        ..Default::default()
+    };
+    let json2 = opts2.to_config_json();
+    let raw2 = cx_raw_for_with_options_json(&ast, &fns, &json2);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let mut params2 = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params2
+        .named
+        .insert("method".into(), ParamOwn::Str("bar".into()));
+    let b2 = b_pn_str(node, &cx2, &[]);
+    assert!(!b2, "B must miss %method=\"bar\" on :foo");
+    assert_c_matches_with_params("%method", &ast, node, b2, &params2);
+}
+
+#[test]
+fn param_named_strset_agrees() {
+    let fns = fns();
+    let (ast, node) = sym_node_ast("foo");
+
+    let opts = TestOpts {
+        methods: vec!["foo".into(), "bar".into()],
+        ..Default::default()
+    };
+    let json = opts.to_config_json();
+    let raw = cx_raw_for_with_options_json(&ast, &fns, &json);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let mut params = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params.named.insert(
+        "methods".into(),
+        ParamOwn::StrSet(vec!["foo".into(), "bar".into()]),
+    );
+    let b = b_pn_strset(node, &cx, &[]);
+    assert!(b, "B must hit StrSet[foo,bar] on :foo");
+    assert_c_matches_with_params("%methods", &ast, node, b, &params);
+
+    let opts2 = TestOpts {
+        methods: vec!["bar".into()],
+        ..Default::default()
+    };
+    let json2 = opts2.to_config_json();
+    let raw2 = cx_raw_for_with_options_json(&ast, &fns, &json2);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let mut params2 = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params2
+        .named
+        .insert("methods".into(), ParamOwn::StrSet(vec!["bar".into()]));
+    let b2 = b_pn_strset(node, &cx2, &[]);
+    assert!(!b2, "B must miss StrSet[bar] on :foo");
+    assert_c_matches_with_params("%methods", &ast, node, b2, &params2);
+}
+
+#[test]
+fn param_named_int_agrees() {
+    let fns = fns();
+    let (ast, node) = int_node_ast(42);
+
+    let opts = TestOpts {
+        threshold: 42,
+        ..Default::default()
+    };
+    let json = opts.to_config_json();
+    let raw = cx_raw_for_with_options_json(&ast, &fns, &json);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let mut params = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params.named.insert("threshold".into(), ParamOwn::Int(42));
+    let b = b_pn_int(node, &cx, &[]);
+    assert!(b, "B must hit Int(42) on threshold=42");
+    assert_c_matches_with_params("%threshold", &ast, node, b, &params);
+
+    let opts2 = TestOpts {
+        threshold: 7,
+        ..Default::default()
+    };
+    let json2 = opts2.to_config_json();
+    let raw2 = cx_raw_for_with_options_json(&ast, &fns, &json2);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let mut params2 = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params2.named.insert("threshold".into(), ParamOwn::Int(7));
+    let b2 = b_pn_int(node, &cx2, &[]);
+    assert!(!b2, "B must miss Int(42) on threshold=7");
+    assert_c_matches_with_params("%threshold", &ast, node, b2, &params2);
+}
+
+#[test]
+fn param_named_bool_agrees() {
+    let fns = fns();
+    let (ast, node) = true_node_ast();
+    let opts = TestOpts {
+        active: true,
+        ..Default::default()
+    };
+    let json = opts.to_config_json();
+    let raw = cx_raw_for_with_options_json(&ast, &fns, &json);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let mut params = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params.named.insert("active".into(), ParamOwn::Bool(true));
+    let b = b_pn_bool(node, &cx, &[]);
+    assert!(b, "B must hit Bool(true) on True_");
+    assert_c_matches_with_params("%active", &ast, node, b, &params);
+}
+
+#[test]
+fn param_named_option_some_and_none_agree() {
+    let fns = fns();
+    let (ast, node) = sym_node_ast("foo");
+
+    // None → Param::None → always miss.
+    let opts = TestOpts {
+        opt_method: None,
+        ..Default::default()
+    };
+    let json = opts.to_config_json();
+    let raw = cx_raw_for_with_options_json(&ast, &fns, &json);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let mut params = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params.named.insert("opt_method".into(), ParamOwn::None);
+    let b = b_pn_opt(node, &cx, &[]);
+    assert!(!b, "B must miss Option::None on :foo");
+    assert_c_matches_with_params("%opt_method", &ast, node, b, &params);
+
+    // Some("foo") → Param::Str("foo") → hit.
+    let opts2 = TestOpts {
+        opt_method: Some("foo".into()),
+        ..Default::default()
+    };
+    let json2 = opts2.to_config_json();
+    let raw2 = cx_raw_for_with_options_json(&ast, &fns, &json2);
+    let cx2 = unsafe { Cx::from_raw(&raw2) };
+    let mut params2 = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params2
+        .named
+        .insert("opt_method".into(), ParamOwn::Str("foo".into()));
+    let b2 = b_pn_opt(node, &cx2, &[]);
+    assert!(b2, "B must hit Option::Some(\"foo\") on :foo");
+    assert_c_matches_with_params("%opt_method", &ast, node, b2, &params2);
+}
+
+#[test]
+fn param_positional_agrees() {
+    let fns = fns();
+    let (ast, node) = int_node_ast(42);
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let pos_b = [Param::Int(42)];
+    let params = MapParams {
+        named: HashMap::new(),
+        positional: vec![ParamOwn::Int(42)],
+    };
+    let b = b_positional1(node, &cx, &pos_b);
+    assert!(b, "B must hit positional[0]=Int(42) on Int(42)");
+    assert_c_matches_with_params("%1", &ast, node, b, &params);
+    let _ = params.positional.len(); // keep params alive for the comparison
+
+    // out-of-bounds → miss
+    let pos_b_empty: [Param<'_>; 0] = [];
+    let params_empty = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    let b2 = b_positional1(node, &cx, &pos_b_empty);
+    assert!(!b2, "B must miss when positional is empty");
+    assert_c_matches_with_params("%1", &ast, node, b2, &params_empty);
+}
+
+#[test]
+fn param_named_type_mismatch_agrees() {
+    // %threshold: i64 against Sym(:foo) — both backends must miss.
+    let fns = fns();
+    let (ast, node) = sym_node_ast("foo");
+    let opts = TestOpts {
+        threshold: 42,
+        ..Default::default()
+    };
+    let json = opts.to_config_json();
+    let raw = cx_raw_for_with_options_json(&ast, &fns, &json);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    let mut params = MapParams {
+        named: HashMap::new(),
+        positional: Vec::new(),
+    };
+    params.named.insert("threshold".into(), ParamOwn::Int(42));
+    let b = b_pn_int(node, &cx, &[]);
+    assert!(!b, "B must miss type-mismatched (i64 vs Sym)");
+    assert_c_matches_with_params("%threshold", &ast, node, b, &params);
 }

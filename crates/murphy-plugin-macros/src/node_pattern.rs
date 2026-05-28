@@ -13,17 +13,59 @@ use std::collections::HashMap;
 use murphy_pattern::{CaptureKind, PatternAst};
 
 /// Parsed `node_pattern!(name, "pattern")` invocation.
+///
+/// Phase E (murphy-aow) adds an optional `opts: <CopOptions struct>` form for
+/// patterns that use `%var` runtime parameters. The grammar is:
+///
+/// ```text
+/// node_pattern!(name, "pattern")                    // existing form
+/// node_pattern!(name, "pattern", opts: MyOpts)      // %var-bearing form
+/// ```
 struct NodePatternInput {
     name: Ident,
     pattern: LitStr,
+    /// Optional Options-struct path supplied via `, opts: <Path>` — only
+    /// permitted (and required) when the pattern references `%var`.
+    opts_struct: Option<syn::Path>,
 }
 
 impl Parse for NodePatternInput {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let name = input.parse()?;
         input.parse::<Token![,]>()?;
-        let pattern = input.parse()?;
-        Ok(NodePatternInput { name, pattern })
+        let pattern: LitStr = input.parse()?;
+        let mut opts_struct: Option<syn::Path> = None;
+        // Optional trailing `, opts: <Path>` clause.
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            // Accept an empty trailing comma (`name, "pat",`) for ergonomics.
+            if !input.is_empty() {
+                let key: Ident = input.parse()?;
+                if key != "opts" {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!("node_pattern!: unknown keyword `{key}`; expected `opts`",),
+                    ));
+                }
+                input.parse::<Token![:]>()?;
+                opts_struct = Some(input.parse()?);
+                // Allow optional trailing comma after the path.
+                if input.peek(Token![,]) {
+                    input.parse::<Token![,]>()?;
+                }
+            }
+        }
+        if !input.is_empty() {
+            return Err(syn::Error::new(
+                input.span(),
+                "node_pattern!: unexpected trailing input after pattern (and optional `opts: <Path>`)",
+            ));
+        }
+        Ok(NodePatternInput {
+            name,
+            pattern,
+            opts_struct,
+        })
     }
 }
 
@@ -43,14 +85,46 @@ pub fn node_pattern(input: TokenStream) -> TokenStream {
             .to_compile_error();
         }
     };
-    match lower_matcher(&input.name, &ast) {
+    match lower_matcher(&input.name, &ast, input.opts_struct.as_ref()) {
         Ok(ts) => ts,
         Err(e) => e.to_compile_error(),
     }
 }
 
 /// Build the whole matcher `fn` from a parsed pattern.
-fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
+///
+/// `opts_struct` is the `opts: <Path>` clause from the macro invocation (Phase
+/// E, murphy-aow). It is required iff the pattern uses any `%name` named
+/// runtime parameter, and forbidden otherwise (`unused opts:` is a compile
+/// error so cop authors don't accidentally pay the decode cost for nothing).
+fn lower_matcher(
+    name: &Ident,
+    ast: &PatternAst,
+    opts_struct: Option<&syn::Path>,
+) -> syn::Result<TokenStream> {
+    // Phase E (murphy-aow): detect the param atoms in the pattern.
+    let param_named_names = collect_param_named_names(&ast.root);
+    let has_param_named = !param_named_names.is_empty();
+    let has_param_number = pattern_has_param_number(&ast.root);
+    let uses_any_param = has_param_named || has_param_number;
+
+    // Phase E validation: `%name` ↔ `opts:` integrity.
+    match (has_param_named, opts_struct.is_some()) {
+        (true, false) => {
+            return Err(syn::Error::new(
+                name.span(),
+                "node_pattern!: pattern uses `%name` runtime parameter(s) but no `opts: <CopOptions struct>` clause was supplied (expected `node_pattern!(name, \"pat\", opts: MyOpts)`)",
+            ));
+        }
+        (false, true) => {
+            return Err(syn::Error::new(
+                name.span(),
+                "node_pattern!: `opts:` was given but the pattern contains no `%name` runtime parameter — remove the `opts:` clause",
+            ));
+        }
+        _ => {}
+    }
+
     let n_caps = ast.n_captures();
     // Return type: `bool` for zero captures, `Option<(..)>` otherwise.
     let cap_tys: Vec<TokenStream> = ast
@@ -91,6 +165,7 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
         local_caps: HashMap::new(),
         probe_caps: HashMap::new(),
         unify_names: unify_names.clone(),
+        opts_struct: opts_struct.cloned(),
     };
     let body = lower_pat(&ast.root, &quote!(node), &mut ctx)?;
 
@@ -105,6 +180,45 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
         })
         .collect();
 
+    // Phase E (murphy-aow): emit options decode + per-`%name` pre-resolve at
+    // the top of the function body. The bindings live for the duration of the
+    // call so `Param<'_>` references into `__opts` stay valid.
+    let opts_decode: TokenStream = if let Some(opts_path) = opts_struct {
+        quote!(let __opts = cx.options_or_default::<#opts_path>();)
+    } else {
+        quote!()
+    };
+    let param_decls: Vec<TokenStream> = param_named_names
+        .iter()
+        .map(|n| {
+            let local = param_named_local(n);
+            let field = Ident::new(n, Span::call_site());
+            quote! {
+                let #local: ::murphy_plugin_api::Param<'_> =
+                    ::murphy_plugin_api::IntoParam::into_param(&__opts.#field);
+            }
+        })
+        .collect();
+
+    // Phase E: signature switches to take a `positional: &[Param<'_>]` arg
+    // whenever the pattern uses any `%var` / `%N`. Existing patterns that use
+    // neither keep the legacy 2-arg signature so unrelated cops compile
+    // unchanged.
+    let signature_extra = if uses_any_param {
+        quote!(, positional: &[::murphy_plugin_api::Param<'_>])
+    } else {
+        quote!()
+    };
+    // Suppress `unused_variables` on `positional` in the rare case the pattern
+    // uses `%name` but no `%N` (still need the arg for caller-side uniformity).
+    let positional_binding = if has_param_number {
+        quote!()
+    } else if uses_any_param {
+        quote!(let _ = positional;)
+    } else {
+        quote!()
+    };
+
     Ok(quote! {
         // A capture matcher's `OptNode`-slot lowering emits `let Some(n) =
         // slot.get() else { return None; }`, which clippy wants rewritten
@@ -113,10 +227,14 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
         #[allow(clippy::question_mark)]
         fn #name<'a>(
             node: ::murphy_plugin_api::NodeId,
-            cx: &::murphy_plugin_api::Cx<'a>,
+            cx: &::murphy_plugin_api::Cx<'a>
+            #signature_extra
         ) -> #ret_ty {
             #(#cap_decls)*
             #(#unify_decls)*
+            #opts_decode
+            #(#param_decls)*
+            #positional_binding
             #body
             #success
         }
@@ -129,6 +247,81 @@ fn lower_matcher(name: &Ident, ast: &PatternAst) -> syn::Result<TokenStream> {
 /// portion stored in [`murphy_pattern::PatKind::Unify`].
 fn unify_var(name: &str) -> Ident {
     Ident::new(&format!("__unify_{name}"), Span::call_site())
+}
+
+/// The local identifier holding the pre-resolved `Param<'_>` for a `%name`
+/// named runtime parameter (Phase E, murphy-aow). One such local is emitted at
+/// the top of the generated function for every unique `%name` that appears in
+/// the pattern; `lower_bool_param_named` references it without recomputing.
+fn param_named_local(name: &str) -> Ident {
+    Ident::new(&format!("__pn_{name}"), Span::call_site())
+}
+
+/// Collect distinct `%name` (named runtime parameter) names from the pattern
+/// tree in first-occurrence order. Stable across recompilations so the
+/// emitted pre-resolve declarations are deterministic.
+fn collect_param_named_names(pat: &murphy_pattern::Pat) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_param_named_names_inner(pat, &mut out);
+    out
+}
+
+fn collect_param_named_names_inner(pat: &murphy_pattern::Pat, out: &mut Vec<String>) {
+    use murphy_pattern::PatKind;
+    match &pat.kind {
+        PatKind::ParamNamed { name } => {
+            if !out.iter().any(|n| n == name) {
+                out.push(name.clone());
+            }
+        }
+        PatKind::Node { children, .. } => {
+            for c in children {
+                collect_param_named_names_inner(c, out);
+            }
+        }
+        PatKind::Union(alts) => {
+            for a in alts {
+                collect_param_named_names_inner(a, out);
+            }
+        }
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => {
+            collect_param_named_names_inner(b, out);
+        }
+        PatKind::Capture { body, .. } => collect_param_named_names_inner(body, out),
+        PatKind::Quantifier { body, .. } => collect_param_named_names_inner(body, out),
+        PatKind::AnyOrder { children } | PatKind::Intersection { children } => {
+            for c in children {
+                collect_param_named_names_inner(c, out);
+            }
+        }
+        PatKind::Wildcard
+        | PatKind::Rest
+        | PatKind::NilTest
+        | PatKind::Lit(_)
+        | PatKind::Predicate { .. }
+        | PatKind::Kind(_)
+        | PatKind::Unify { .. }
+        | PatKind::Regex { .. }
+        | PatKind::ParamNumber { .. } => {}
+    }
+}
+
+/// `true` if the pattern uses any `%N` positional runtime parameter atom.
+fn pattern_has_param_number(pat: &murphy_pattern::Pat) -> bool {
+    use murphy_pattern::PatKind;
+    match &pat.kind {
+        PatKind::ParamNumber { .. } => true,
+        PatKind::Node { children, .. } => children.iter().any(pattern_has_param_number),
+        PatKind::Union(alts) => alts.iter().any(pattern_has_param_number),
+        PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => pattern_has_param_number(b),
+        PatKind::Capture { body, .. } | PatKind::Quantifier { body, .. } => {
+            pattern_has_param_number(body)
+        }
+        PatKind::AnyOrder { children } | PatKind::Intersection { children } => {
+            children.iter().any(pattern_has_param_number)
+        }
+        _ => false,
+    }
 }
 
 /// Collect all distinct unify names from the pattern tree.
@@ -236,6 +429,12 @@ struct Lower {
     /// to generate snapshot/restore code at each backtracking site (Union,
     /// Not body, Descend iteration). Populated once in `lower_matcher`.
     unify_names: Vec<String>,
+    /// CopOptions struct path supplied via `opts:` in the macro invocation
+    /// (Phase E, murphy-aow). `None` when the pattern uses no `%name` atoms.
+    /// `lower_bool_param_named` consults this both to decide whether `%name`
+    /// is valid in this context and to know which `__opts.<field>` binding it
+    /// can reference.
+    opts_struct: Option<syn::Path>,
 }
 
 /// Emit a wrapped bool expression with snapshot/restore for unify variables.
@@ -1278,6 +1477,26 @@ fn lower_pat(
             // D5 (murphy-t8km): `/.../[imxo]*` regex match (guard form).
             let fail = fail_stmt(ctx);
             let check = lower_bool_regex(pattern, flags, subject, ctx)?;
+            Ok(quote! {
+                if !#check {
+                    #fail
+                }
+            })
+        }
+        PatKind::ParamNamed { name } => {
+            // Phase E (murphy-aow): `%name` runtime parameter (guard form).
+            let fail = fail_stmt(ctx);
+            let check = lower_bool_param_named(name, subject, ctx)?;
+            Ok(quote! {
+                if !#check {
+                    #fail
+                }
+            })
+        }
+        PatKind::ParamNumber { index } => {
+            // Phase E (murphy-aow): `%N` positional runtime parameter (guard form).
+            let fail = fail_stmt(ctx);
+            let check = lower_bool_param_number(*index, subject, ctx)?;
             Ok(quote! {
                 if !#check {
                     #fail
@@ -2801,39 +3020,77 @@ fn lower_bool(
     }
 }
 
-/// Lower a `%name` runtime-parameter atom to a bool expression. Phase E
-/// (murphy-aow) currently exposes runtime params via the C-backend matcher
-/// only; the B-backend macro pipeline is wired up in a follow-up commit.
-fn lower_bool_param_named(
-    name: &str,
-    _subject: &TokenStream,
-    _ctx: &mut Lower,
-) -> syn::Result<TokenStream> {
-    Err(syn::Error::new(
-        proc_macro2::Span::call_site(),
-        format!(
-            "node_pattern!: `%{name}` runtime parameter (Phase E, murphy-aow) is not yet \
-             supported by the B-backend macro — use the C-backend matcher (matches_with_params) \
-             or wait for the follow-up B-backend wiring",
-        ),
-    ))
+/// Build an expression that decomposes `subject` into an `Option<LitView<'_>>`,
+/// suitable for passing to `::murphy_plugin_api::match_lit_against_param`.
+///
+/// Returns `Some(LitView::*)` for the atom kinds Phase E recognises (`Sym`,
+/// `Str`, `Int`, `True_`, `False_`, `Nil`) and `None` for any other node kind
+/// — so a `%var` against a structural slot collapses to a miss.
+fn lit_view_expr(subject: &TokenStream) -> TokenStream {
+    quote! {
+        match *cx.kind(#subject) {
+            ::murphy_plugin_api::NodeKind::Sym(__s) =>
+                ::core::option::Option::Some(::murphy_plugin_api::LitView::Sym(cx.symbol_str(__s))),
+            ::murphy_plugin_api::NodeKind::Str(__s) =>
+                ::core::option::Option::Some(::murphy_plugin_api::LitView::Str(cx.string_str(__s))),
+            ::murphy_plugin_api::NodeKind::Int(__n) =>
+                ::core::option::Option::Some(::murphy_plugin_api::LitView::Int(__n)),
+            ::murphy_plugin_api::NodeKind::True_ =>
+                ::core::option::Option::Some(::murphy_plugin_api::LitView::True),
+            ::murphy_plugin_api::NodeKind::False_ =>
+                ::core::option::Option::Some(::murphy_plugin_api::LitView::False),
+            ::murphy_plugin_api::NodeKind::Nil =>
+                ::core::option::Option::Some(::murphy_plugin_api::LitView::Nil),
+            _ => ::core::option::Option::None,
+        }
+    }
 }
 
-/// Lower a `%N` positional runtime-parameter atom to a bool expression. See
-/// [`lower_bool_param_named`] for the staging plan.
+/// Lower a `%name` runtime-parameter atom to a bool expression that decodes
+/// the subject's literal shape and compares it against the pre-resolved
+/// `__pn_<name>: Param<'_>` local (declared at function entry by
+/// [`lower_matcher`]).
+fn lower_bool_param_named(
+    name: &str,
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    // The Lower context's `opts_struct` guard is already enforced at
+    // `lower_matcher` entry (a `%name` pattern without `opts:` errors there),
+    // so reaching this point with `opts_struct == None` would mean a logic
+    // bug in the validator — but defense-in-depth says assert anyway.
+    if ctx.opts_struct.is_none() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            format!(
+                "node_pattern!: internal — `%{name}` reached lower_bool_param_named without an `opts:` clause; this should have been caught upstream",
+            ),
+        ));
+    }
+    let local = param_named_local(name);
+    let lit_view = lit_view_expr(subject);
+    Ok(quote! {
+        ::murphy_plugin_api::match_lit_against_param(#lit_view, &#local)
+    })
+}
+
+/// Lower a `%N` positional runtime-parameter atom to a bool expression that
+/// looks up `positional[index - 1]` (with out-of-bounds collapsing to
+/// `Param::None` → miss).
 fn lower_bool_param_number(
     index: u16,
-    _subject: &TokenStream,
+    subject: &TokenStream,
     _ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
-    Err(syn::Error::new(
-        proc_macro2::Span::call_site(),
-        format!(
-            "node_pattern!: `%{index}` positional runtime parameter (Phase E, murphy-aow) is not \
-             yet supported by the B-backend macro — use the C-backend matcher \
-             (matches_with_params) or wait for the follow-up B-backend wiring",
-        ),
-    ))
+    // The lexer rejects `%0`, so subtracting 1 is always safe.
+    let idx = (index as usize) - 1;
+    let lit_view = lit_view_expr(subject);
+    Ok(quote! {
+        ::murphy_plugin_api::match_lit_against_param(
+            #lit_view,
+            positional.get(#idx).unwrap_or(&::murphy_plugin_api::Param::None),
+        )
+    })
 }
 
 /// Lower a `Lit` into a `return`-free bool expression — the value-form

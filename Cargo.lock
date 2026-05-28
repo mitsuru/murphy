@@ -885,6 +885,7 @@ version = "0.1.0"
 dependencies = [
  "indoc",
  "murphy-ast",
+ "murphy-pattern",
  "murphy-plugin-macros",
  "murphy-translate",
  "regex",
