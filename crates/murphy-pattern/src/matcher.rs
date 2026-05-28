@@ -690,7 +690,8 @@ fn find_assignment<P: PredicateHost + ?Sized>(
         if assignment[..pat_idx].contains(&elem_idx) {
             continue; // element already used by an earlier pattern
         }
-        // Probe without writing captures (discard trial buf).
+        // Probe with a fresh clone of `buf` so we don't pollute the caller's
+        // capture state on backtrack.
         let mut trial = buf.clone();
         if match_pat(
             ctx,
@@ -700,13 +701,18 @@ fn find_assignment<P: PredicateHost + ?Sized>(
             predicates,
         ) {
             assignment[pat_idx] = elem_idx;
+            // Thread the trial buf into the deeper search so later patterns
+            // can resolve `#pred?($cap)` against captures written by earlier
+            // anyorder children. The eventual commit pass re-matches against
+            // the caller's `buf`, so writes here remain scoped to this
+            // assignment attempt and are discarded on backtrack.
             if find_assignment(
                 ctx,
                 patterns,
                 elems,
                 pat_idx + 1,
                 assignment,
-                buf,
+                &trial,
                 predicates,
             ) {
                 return true;
@@ -1456,6 +1462,55 @@ mod tests {
         assert!(
             matches(&ir, &ast, send, &mut reject).is_none(),
             "should not match when predicate returns false"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // murphy-jyi × murphy-ejd: capture written by an AnyOrder child must
+    // be visible to a later child's predicate-arg probe.
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn anyorder_predicate_arg_sees_capture_from_earlier_child() {
+        // `(array <$x #expects?($x)>)` against `[1, 2]`.
+        //
+        // The host fires only when `node == int2 && args[0] == Node(int1)`.
+        // The only valid permutation is `$x → int1`, `#expects?($x) → int2`.
+        //
+        // Phase 1 must thread the just-captured trial buffer into the next
+        // pattern's probe. If it instead probes against the original (empty)
+        // buf, the predicate-arg slot resolves to Nil and no permutation can
+        // satisfy the host, so the whole match wrongly fails.
+        let mut b = AstBuilder::new("[1,2]", "t.rb");
+        let int1 = b.push(NodeKind::Int(1), r());
+        let int2 = b.push(NodeKind::Int(2), r());
+        let elems = b.push_list(&[int1, int2]);
+        let arr = b.push(NodeKind::Array(elems), r());
+        let ast = b.finish(arr);
+
+        struct ExpectsCaptured {
+            want_node: NodeId,
+            want_arg: NodeId,
+        }
+        impl PredicateHost for ExpectsCaptured {
+            fn call(&mut self, name: &str, node: NodeId, args: &[PredCallArg<'_>]) -> bool {
+                if name != "expects?" {
+                    return false;
+                }
+                node == self.want_node
+                    && matches!(args.first(), Some(PredCallArg::Node(id)) if *id == self.want_arg)
+            }
+        }
+
+        let ir = compile("(array <$x #expects?($x)>)").unwrap();
+        let mut host = ExpectsCaptured {
+            want_node: int2,
+            want_arg: int1,
+        };
+        assert!(
+            matches(&ir, &ast, arr, &mut host).is_some(),
+            "AnyOrder's phase-1 probe must thread the trial capture buf so \
+             a later child's #pred?($x) sees the slot just written by $x"
         );
     }
 
