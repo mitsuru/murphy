@@ -74,6 +74,13 @@ pub enum PatKind {
     /// Only valid as a direct child of a [`PatKind::Node`]; captures may
     /// appear *around* the quantifier but not *inside* its `body`.
     Quantifier { body: Box<Pat>, min: u8, max: u8 },
+    /// `<child*>` — any-order sequence match. All non-rest children must each
+    /// match exactly one input element; the overall set of input elements may
+    /// appear in any permutation. An optional trailing `...` absorbs leftover
+    /// elements. Only valid as a direct child of a [`PatKind::Node`] (not at
+    /// the top level, not inside Union/Not/Descend/Quantifier body).
+    /// v1 limit: at most 10 non-rest children.
+    AnyOrder { children: Vec<Pat> },
 }
 
 /// The head of a `Node` match: what the node's kind must satisfy.

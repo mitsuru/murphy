@@ -283,6 +283,13 @@ fn validate_quantifier_placement(pat: &Pat, is_node_child: bool) -> Result<(), P
         // is allowed at the same position the capture itself is allowed —
         // propagate `is_node_child` rather than reset it.
         PatKind::Capture { body, .. } => validate_quantifier_placement(body, is_node_child),
+        PatKind::AnyOrder { children } => {
+            // AnyOrder children behave like node children for quantifier purposes.
+            for child in children {
+                validate_quantifier_placement(child, true)?;
+            }
+            Ok(())
+        }
         PatKind::Rest
         | PatKind::Wildcard
         | PatKind::NilTest
@@ -321,6 +328,12 @@ fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
         }
         PatKind::Not(b) | PatKind::Parent(b) | PatKind::Descend(b) => validate_quantifier_body(b),
         PatKind::Quantifier { body, .. } => validate_quantifier_body(body),
+        PatKind::AnyOrder { children } => {
+            for child in children {
+                validate_quantifier_body(child)?;
+            }
+            Ok(())
+        }
         PatKind::Wildcard
         | PatKind::NilTest
         | PatKind::Lit(_)
@@ -424,6 +437,14 @@ fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseErro
             }
             Ok(())
         }
+        // AnyOrder children are definite-assignment (every permutation writes
+        // all non-rest slots), so recurse with forbidden=false.
+        PatKind::AnyOrder { children } => {
+            for child in children {
+                validate_capture_position(child, false)?;
+            }
+            Ok(())
+        }
         PatKind::Rest
         | PatKind::Wildcard
         | PatKind::NilTest
@@ -478,6 +499,18 @@ fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseEr
             // it. Any other capture (`$_`, `$(...)`, `$name`, …) recurses.
             if !is_rest_like(pat) {
                 validate_rest_placement(body, false)?;
+            }
+        }
+        PatKind::AnyOrder { children } => {
+            // AnyOrder: at most one rest-like child, recurse with is_node_child=true.
+            if let Some(second) = children.iter().filter(|c| is_rest_like(c)).nth(1) {
+                return Err(ParseError::new(
+                    "at most one `...` / `$...` per `<...>` child list",
+                    second.span,
+                ));
+            }
+            for child in children {
+                validate_rest_placement(child, true)?;
             }
         }
         PatKind::Quantifier { body, .. } => {
@@ -840,6 +873,13 @@ impl<'a> Parser<'a> {
                     span,
                 ));
             }
+            Token::LAngle => {
+                return Err(ParseError::new(
+                    "`<...>` any-order sequence is only valid as a direct child of a node match",
+                    span,
+                ));
+            }
+            Token::RAngle => return Err(ParseError::new("unexpected `>`", span)),
             Token::Bang | Token::Caret | Token::Backtick | Token::Dollar => {
                 // `prefixed` dispatches these; `primary` never sees them.
                 unreachable!("prefix sigils are handled by `prefixed`");
@@ -894,6 +934,12 @@ impl<'a> Parser<'a> {
                         kind: PatKind::Rest,
                         span: ell_span,
                     });
+                    child_idx += 1;
+                }
+                Token::LAngle => {
+                    let open_span = tok.span;
+                    self.pos += 1; // consume `<`
+                    children.push(self.any_order(open_span)?);
                     child_idx += 1;
                 }
                 _ => {
@@ -953,6 +999,69 @@ impl<'a> Parser<'a> {
                     });
                 }
                 _ => alts.push(self.prefixed(allow_bare_predicate)?),
+            }
+        }
+    }
+
+    /// `any_order := '<' child+ '>'`
+    ///
+    /// `open_span` is the span of the already-consumed `<`. Children are parsed
+    /// with [`prefixed`]; `...` is converted to [`PatKind::Rest`] as in
+    /// `node_match`. The resulting `Pat`'s span covers `<` through the closing
+    /// `>`. Rules enforced here:
+    ///   - at least one child (empty `<>` → error)
+    ///   - at most 10 non-rest children (v1 limit)
+    ///   - at most one `...` (duplicate rest → error; position validated later)
+    fn any_order(&mut self, open_span: PatSpan) -> Result<Pat, ParseError> {
+        let mut children: Vec<Pat> = Vec::new();
+        loop {
+            let Some(tok) = self.peek() else {
+                return Err(ParseError::new("unclosed `<`: expected `>`", open_span));
+            };
+            match tok.tok {
+                Token::RAngle => {
+                    let close_span = tok.span;
+                    self.pos += 1; // consume `>`
+                    let span = PatSpan {
+                        start: open_span.start,
+                        end: close_span.end,
+                    };
+                    if children.is_empty() {
+                        return Err(ParseError::new(
+                            "empty `<>` needs at least one child pattern",
+                            span,
+                        ));
+                    }
+                    // Count non-rest children and check the v1 limit.
+                    let non_rest = children.iter().filter(|c| !is_rest_like(c)).count();
+                    if non_rest > 10 {
+                        return Err(ParseError::new(
+                            "too many elements in <...>: max 10 in v1",
+                            span,
+                        ));
+                    }
+                    return Ok(Pat {
+                        kind: PatKind::AnyOrder { children },
+                        span,
+                    });
+                }
+                Token::Ellipsis => {
+                    let ell_span = tok.span;
+                    self.pos += 1; // consume `...`
+                    if let Some((_, _, q_span)) = self.try_quantifier() {
+                        return Err(ParseError::new(
+                            "`...` cannot take a postfix `*` / `+` / `?` quantifier",
+                            q_span,
+                        ));
+                    }
+                    children.push(Pat {
+                        kind: PatKind::Rest,
+                        span: ell_span,
+                    });
+                }
+                _ => {
+                    children.push(self.prefixed(false)?);
+                }
             }
         }
     }

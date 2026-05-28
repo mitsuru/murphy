@@ -213,6 +213,13 @@ fn match_pat<P: PredicateHost + ?Sized>(
             );
             false
         }
+        IrNode::AnyOrder { .. } => {
+            // AnyOrder is a sequence operator; it is consumed by
+            // `match_list_from`. Reaching it as a scalar pattern means
+            // hand-built IR was used incorrectly.
+            debug_assert!(false, "AnyOrder IR reached scalar slot");
+            false
+        }
     }
 }
 
@@ -429,6 +436,37 @@ fn match_list_from<P: PredicateHost + ?Sized>(
         return false;
     }
 
+    // AnyOrder: try to match the `<...>` block against a prefix of `elems`,
+    // then continue with the suffix.
+    if let IrNode::AnyOrder { children } = ctx.ir_node(pat) {
+        let child_ids: Vec<IrNodeId> = ctx.ir.children
+            [children.start as usize..(children.start + children.len) as usize]
+            .to_vec();
+        // Try every possible count of elements that the AnyOrder block could
+        // consume.  The block must consume at least as many elements as there
+        // are non-rest children; if there is a rest, it can consume more.
+        let has_rest = child_ids.iter().any(|id| rest_kind(ctx, *id).is_some());
+        let non_rest_ids: Vec<IrNodeId> = child_ids
+            .iter()
+            .copied()
+            .filter(|id| rest_kind(ctx, *id).is_none())
+            .collect();
+        let min_consume = non_rest_ids.len();
+        let max_consume = if has_rest { elems.len() } else { min_consume };
+
+        for consume in min_consume..=max_consume {
+            let (block, suffix) = elems.split_at(consume);
+            let mut trial = buf.clone();
+            if match_anyorder(ctx, &non_rest_ids, block, has_rest, &mut trial, predicates)
+                && match_list_from(ctx, rest, suffix, &mut trial, predicates)
+            {
+                *buf = trial;
+                return true;
+            }
+        }
+        return false;
+    }
+
     let Some((&actual, remaining)) = elems.split_first() else {
         return false;
     };
@@ -516,6 +554,130 @@ fn rest_kind(ctx: &MatcherCtx, pat: IrNodeId) -> Option<Option<u16>> {
         }
         _ => None,
     }
+}
+
+/// Match an `<...>` any-order block against `elems`.
+///
+/// `patterns` contains the non-rest children of the AnyOrder node (in
+/// declaration order). `elems` is the slice of input elements that the block
+/// is to consume (may be larger than `patterns.len()` when `has_rest` is
+/// true). `has_rest` indicates whether the AnyOrder node has a trailing `...`.
+///
+/// Algorithm — backtracking with used-element bitmask (O(N! / elided) in the
+/// worst case, but the parser enforces N ≤ 10 and typical patterns are tiny):
+///
+/// Walk patterns in declaration order. For each pattern try every input
+/// element not yet used; on a match recurse into the next pattern. Captures
+/// are written to `buf` in declaration order (the first-found permutation).
+///
+/// Two passes are used so captures are committed only on a full match:
+///   Phase 1 (probe, no writes)  — find a valid assignment without touching `buf`.
+///   Phase 2 (commit, with writes) — replay the found assignment, writing captures.
+///
+/// If `has_rest` is true the elements not assigned to any pattern are accepted
+/// (they are the "rest"); otherwise the total consumed element count must equal
+/// `patterns.len()`.
+fn match_anyorder<P: PredicateHost + ?Sized>(
+    ctx: &MatcherCtx,
+    patterns: &[IrNodeId],
+    elems: &[NodeId],
+    has_rest: bool,
+    buf: &mut CaptureBuf,
+    predicates: &mut P,
+) -> bool {
+    let n = patterns.len();
+    debug_assert!(n <= 10, "v1 limit: at most 10 non-rest children in <...>");
+
+    if elems.len() < n {
+        return false;
+    }
+    if !has_rest && elems.len() != n {
+        return false;
+    }
+
+    // Phase 1: find a valid assignment without writing captures.
+    // `assignment[pat_idx]` = chosen elem index; `u8::MAX` = unassigned.
+    let mut assignment = [u8::MAX; 10];
+    let mut used = 0u64; // bitmask of used element indices
+
+    if !find_assignment(
+        ctx,
+        patterns,
+        elems,
+        0,
+        &mut assignment,
+        &mut used,
+        buf,
+        predicates,
+    ) {
+        return false;
+    }
+
+    // Phase 2: replay in declaration order, writing captures into `buf`.
+    for (pat_idx, elem_idx) in assignment[..n].iter().enumerate() {
+        let elem_idx = *elem_idx as usize;
+        if !match_pat(ctx, patterns[pat_idx], elems[elem_idx], buf, predicates) {
+            // Phase-1 confirmed this matches; failure here is a defensive guard.
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Recursive helper for the phase-1 permutation search.
+///
+/// `pat_idx` is the index of the next pattern to assign (0 = first).
+/// `assignment` accumulates the chosen element index per pattern slot.
+/// `used` is a bitmask of already-assigned element indices.
+///
+/// Returns `true` as soon as one valid full assignment is found.
+#[allow(clippy::too_many_arguments)]
+fn find_assignment<P: PredicateHost + ?Sized>(
+    ctx: &MatcherCtx,
+    patterns: &[IrNodeId],
+    elems: &[NodeId],
+    pat_idx: usize,
+    assignment: &mut [u8; 10],
+    used: &mut u64,
+    buf: &CaptureBuf,
+    predicates: &mut P,
+) -> bool {
+    if pat_idx == patterns.len() {
+        return true; // all patterns assigned
+    }
+    for elem_idx in 0..elems.len() {
+        if *used & (1u64 << elem_idx) != 0 {
+            continue; // element already used by an earlier pattern
+        }
+        // Probe without writing captures (discard trial buf).
+        let mut trial = buf.clone();
+        if match_pat(
+            ctx,
+            patterns[pat_idx],
+            elems[elem_idx],
+            &mut trial,
+            predicates,
+        ) {
+            assignment[pat_idx] = elem_idx as u8;
+            *used |= 1u64 << elem_idx;
+            if find_assignment(
+                ctx,
+                patterns,
+                elems,
+                pat_idx + 1,
+                assignment,
+                used,
+                buf,
+                predicates,
+            ) {
+                return true;
+            }
+            // Backtrack.
+            *used &= !(1u64 << elem_idx);
+        }
+    }
+    false
 }
 
 #[cfg(test)]
