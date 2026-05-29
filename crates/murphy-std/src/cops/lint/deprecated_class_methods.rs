@@ -8,7 +8,8 @@
 //! gap_issues:
 //!   - murphy-uo3u
 //! notes: >
-//!   Known gaps remain around FileTest handling and RuboCop message parity.
+//!   FileTest false-positive removed (RuboCop only matches {:File :Dir}).
+//!   exists? offense message now matches RuboCop's MSG template.
 //! ```
 //!
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
@@ -19,7 +20,7 @@ def_node_matcher!(
 );
 def_node_matcher!(
     is_deprecated_exists_method,
-    "(send (const nil? {:File :Dir :FileTest}) :exists? _)"
+    "(send (const nil? {:File :Dir}) :exists? _)"
 );
 def_node_matcher!(
     is_deprecated_socket_method,
@@ -137,14 +138,17 @@ fn offense(node: NodeId, cx: &Cx<'_>) -> Option<DeprecatedOffense> {
     let receiver = receiver.get()?;
     let const_name = top_level_const_name(cx, receiver)?;
     match (const_name, method) {
-        ("File" | "Dir" | "FileTest", "exists?") => {
+        ("File" | "Dir", "exists?") => {
             // RuboCop-style range: `receiver.selector` only, excluding
             // arguments — `File.exists?(path)` flags `File.exists?`.
             let range = receiver_selector_range(cx, node)?;
             let selector = cx.node(node).loc.name;
             Some(DeprecatedOffense {
                 range,
-                message: "Use `exist?` instead of deprecated `exists?`".to_string(),
+                message: format!(
+                    "`{}` is deprecated in favor of `{const_name}.exist?`.",
+                    cx.raw_source(range)
+                ),
                 replacement: Some(Replacement {
                     range: selector,
                     text: "exist?".to_string(),
@@ -229,16 +233,22 @@ mod tests {
     };
 
     #[test]
-    fn flags_file_exists_and_filetest_exists() {
+    fn flags_file_and_dir_exists() {
         // RuboCop-style range: receiver.selector only, no args.
+        // RuboCop's def_node_matcher only matches {:File :Dir}, not FileTest.
         test::<DeprecatedClassMethods>().expect_offense(indoc! {r#"
             File.exists?(path)
-            ^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+            ^^^^^^^^^^^^ `File.exists?` is deprecated in favor of `File.exist?`.
             Dir.exists?(path)
-            ^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
-            FileTest.exists?(path)
-            ^^^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+            ^^^^^^^^^^^ `Dir.exists?` is deprecated in favor of `Dir.exist?`.
         "#});
+    }
+
+    #[test]
+    fn does_not_flag_filetest_exists() {
+        // RuboCop's def_node_matcher only covers {:File :Dir}, not FileTest.
+        // Murphy must not emit a false positive here.
+        test::<DeprecatedClassMethods>().expect_no_offenses("FileTest.exists?(path)\n");
     }
 
     #[test]
@@ -274,7 +284,7 @@ mod tests {
         // Range covers `::File.exists?`, not the whole call with args.
         test::<DeprecatedClassMethods>().expect_offense(indoc! {r#"
                 ::File.exists?(path)
-                ^^^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+                ^^^^^^^^^^^^^^ `::File.exists?` is deprecated in favor of `File.exist?`.
             "#});
     }
 
@@ -282,7 +292,7 @@ mod tests {
     fn flags_file_exists_uses_receiver_selector_range() {
         test::<DeprecatedClassMethods>().expect_offense(indoc! {r#"
                 File.exists?(path)
-                ^^^^^^^^^^^^ Use `exist?` instead of deprecated `exists?`
+                ^^^^^^^^^^^^ `File.exists?` is deprecated in favor of `File.exist?`.
             "#});
     }
 

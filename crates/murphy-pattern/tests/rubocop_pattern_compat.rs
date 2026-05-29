@@ -64,7 +64,7 @@ fn cases() -> Vec<CompatCase> {
             category: MurphyBaseline,
         },
         CompatCase {
-            pattern: "(send (const nil? {:File :Dir :FileTest}) :exists? _)",
+            pattern: "(send (const nil? {:File :Dir}) :exists? _)",
             source: "murphy-std Lint/DeprecatedClassMethods",
             category: MurphyBaseline,
         },
