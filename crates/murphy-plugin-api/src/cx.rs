@@ -872,6 +872,87 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// `ArrayNode#values` — the array's element nodes. Empty slice for a
+    /// non-`Array` node.
+    pub fn array_elements(&self, id: NodeId) -> &'a [NodeId] {
+        match *self.kind(id) {
+            NodeKind::Array(list) => self.list(list),
+            _ => &[],
+        }
+    }
+
+    /// `CaseNode#condition` — the subject of a `case subj; when …`, or
+    /// `OptNodeId::NONE` (a subject-less `case` or a non-`Case` node).
+    pub fn case_subject(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Case { subject, .. } => subject,
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `CaseNode#when_branches` — the `When` child nodes. Empty slice for
+    /// a non-`Case` node.
+    pub fn case_when_branches(&self, id: NodeId) -> &'a [NodeId] {
+        match *self.kind(id) {
+            NodeKind::Case { whens, .. } => self.list(whens),
+            _ => &[],
+        }
+    }
+
+    /// `CaseNode#else_branch` — the `else` body, or `OptNodeId::NONE`.
+    pub fn case_else_branch(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Case { else_, .. } => else_,
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `WhenNode#conditions` — the match values of a `when a, b then …`.
+    /// Empty slice for a non-`When` node.
+    pub fn when_conditions(&self, id: NodeId) -> &'a [NodeId] {
+        match *self.kind(id) {
+            NodeKind::When { conds, .. } => self.list(conds),
+            _ => &[],
+        }
+    }
+
+    /// `WhenNode#body` — the branch body, or `OptNodeId::NONE`.
+    pub fn when_body(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::When { body, .. } => body,
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `DefNode#receiver` — the singleton receiver of `def self.foo` /
+    /// `def obj.foo` (a `Defs`), or `OptNodeId::NONE` for a plain `def`
+    /// or non-def node.
+    pub fn def_receiver(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Def { receiver, .. } => receiver,
+            NodeKind::Defs { receiver, .. } => OptNodeId::some(receiver),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `DefNode#arguments` — the method's `Args` node (always present for
+    /// a def, possibly empty). `OptNodeId::NONE` for a non-def node.
+    pub fn def_arguments(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Def { args, .. } | NodeKind::Defs { args, .. } => OptNodeId::some(args),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `DefNode#body` — the method body, or `OptNodeId::NONE` for an
+    /// empty body or a non-def node.
+    pub fn def_body(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Def { body, .. } | NodeKind::Defs { body, .. } => body,
+            _ => OptNodeId::NONE,
+        }
+    }
+
     /// The file's comments, in source order.
     pub fn comments(&self) -> &'a [Comment] {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
@@ -2337,5 +2418,65 @@ mod tests {
         });
         // Ternary lacks `end` but is excluded by the ternary? guard.
         with_parsed("a ? b : c", |cx, root| assert!(!cx.is_modifier_form(root)));
+    }
+
+    #[test]
+    fn array_accessor_projects_elements() {
+        with_parsed("[10, 20, 30]", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Array(_)));
+            assert_eq!(cx.array_elements(root).len(), 3);
+        });
+        with_parsed("[]", |cx, root| assert!(cx.array_elements(root).is_empty()));
+        // Non-array projects empty.
+        with_parsed("foo", |cx, root| {
+            assert!(cx.array_elements(root).is_empty())
+        });
+    }
+
+    #[test]
+    fn case_and_when_accessors_project_parts() {
+        let src = "case x\nwhen 1, 2 then a\nelse b\nend";
+        with_parsed(src, |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Case { .. }));
+            assert!(cx.case_subject(root).get().is_some());
+            let whens = cx.case_when_branches(root);
+            assert_eq!(whens.len(), 1);
+            assert!(cx.case_else_branch(root).get().is_some());
+            // The When child: two conditions, a body.
+            let when = whens[0];
+            assert!(matches!(cx.kind(when), NodeKind::When { .. }));
+            assert_eq!(cx.when_conditions(when).len(), 2);
+            assert!(cx.when_body(when).get().is_some());
+        });
+        // Subject-less `case` has no subject.
+        with_parsed("case\nwhen a then b\nend", |cx, root| {
+            assert!(cx.case_subject(root).get().is_none());
+            assert_eq!(cx.case_when_branches(root).len(), 1);
+            assert!(cx.case_else_branch(root).get().is_none());
+        });
+    }
+
+    #[test]
+    fn def_accessors_project_receiver_args_body() {
+        // Plain instance method: no receiver, args + body present.
+        with_parsed("def foo(a, b)\n  c\nend", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Def { .. }));
+            assert!(cx.def_receiver(root).get().is_none());
+            assert!(cx.def_arguments(root).get().is_some());
+            assert!(cx.def_body(root).get().is_some());
+        });
+        // Singleton method `def self.foo`: receiver present.
+        with_parsed("def self.foo\nend", |cx, root| {
+            assert!(
+                cx.def_receiver(root).get().is_some(),
+                "def self.foo has a receiver"
+            );
+            assert!(cx.def_body(root).get().is_none(), "empty body");
+        });
+        // Non-def projects empty.
+        with_parsed("foo", |cx, root| {
+            assert!(cx.def_receiver(root).get().is_none());
+            assert!(cx.def_arguments(root).get().is_none());
+        });
     }
 }
