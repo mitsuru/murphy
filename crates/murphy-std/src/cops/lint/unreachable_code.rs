@@ -11,12 +11,13 @@
 //! notes: >
 //!   Remaining gaps (translator-blocked): retry/redo nodes are not emitted
 //!   by the translator (retry causes parse errors, redo translates to
-//!   Unknown), so those keyword terminators are forward-compat arms only.
-//!   case/in (CaseMatch) also translates to Unknown. All other gaps from
-//!   the original survey are fixed: message parity, first-only reporting,
-//!   fail/throw/exit/exit!/abort method terminators, Kernel.* receiver
-//!   form, if/case all-branches check, nested begin recursion, sibling
-//!   def-redefinition suppression, and instance_eval block suppression.
+//!   Unknown), so those keyword terminator arms are forward-compat only.
+//!   case/in (CaseMatch) also translates to Unknown; a forward-compat arm
+//!   mirrors the Case arm but is similarly untestable today. All other
+//!   gaps from the original survey are fixed: message parity, first-only
+//!   reporting, fail/throw/exit/exit!/abort method terminators, Kernel.*
+//!   receiver form, if/case all-branches check, nested begin recursion,
+//!   sibling def-redefinition suppression, and instance_eval suppression.
 //! ```
 //!
 //! flow-terminator inside the *same* `Begin(NodeList)` container.
@@ -211,6 +212,35 @@ fn is_flow_terminator(
             }
             for when_id in cx.list(*whens) {
                 if let NodeKind::When { body, .. } = cx.kind(*when_id) {
+                    let Some(body_id) = body.get() else {
+                        return false;
+                    };
+                    if !is_flow_terminator(body_id, cx, redefined, in_instance_eval) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            true
+        }
+
+        // `case subject; in pattern; ...; else ...; end` — forward-compat arm.
+        // CaseMatch currently translates to Unknown in the translator, so this
+        // arm is never exercised today but mirrors the Case arm for parity.
+        NodeKind::CaseMatch {
+            in_patterns,
+            else_body,
+            ..
+        } => {
+            let Some(else_id) = else_body.get() else {
+                return false;
+            };
+            if !is_flow_terminator(else_id, cx, redefined, in_instance_eval) {
+                return false;
+            }
+            for in_id in cx.list(*in_patterns) {
+                if let NodeKind::InPattern { body, .. } = cx.kind(*in_id) {
                     let Some(body_id) = body.get() else {
                         return false;
                     };
