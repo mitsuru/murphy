@@ -12,3 +12,9 @@ librust_out.rlib
 .dolt/
 *.db
 .beads-credential-key
+
+# Antigravity CLI scratch dir
+.antigravitycli/
+
+# Claude session worktrees (analogous to .worktrees/)
+.claude/worktrees/
