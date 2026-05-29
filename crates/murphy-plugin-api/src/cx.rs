@@ -647,6 +647,77 @@ impl<'a> Cx<'a> {
         )
     }
 
+    /// `basic_literal?` — a **non-composite** literal: RuboCop's
+    /// `BASIC_LITERALS` (`LITERALS - COMPOSITE_LITERALS`) =
+    /// string/integer/float/symbol/`true`/`false`/`nil`/complex/rational
+    /// and the regexp-options `regopt`. Composite literals (array, hash,
+    /// dstr, range, …) are **not** basic literals.
+    pub fn is_basic_literal(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::Str(..)
+                | NodeKind::Int(..)
+                | NodeKind::Float(..)
+                | NodeKind::Sym(..)
+                | NodeKind::True_
+                | NodeKind::False_
+                | NodeKind::Nil
+                | NodeKind::Complex(..)
+                | NodeKind::Rational(..)
+                | NodeKind::Regopt(..)
+        )
+    }
+
+    /// `recursive_basic_literal?` — the node is a basic literal, a
+    /// recursively-composed literal (`[1, 2]`, `{a: 1}`, `1..2`, `"a" "b"`,
+    /// `a && b`, …) whose every child is itself a recursive basic literal,
+    /// or a literal-operator send (`1 == 2`, `1 * 2`, `!true`) whose
+    /// receiver and arguments are all recursive basic literals.
+    ///
+    /// Faithful to RuboCop's `def_recursive_literal_predicate :basic_literal`:
+    /// - `send` arm — selector ∈ `LITERAL_RECURSIVE_METHODS`
+    ///   (`COMPARISON_OPERATORS + [*, !, <=>]`) and receiver + args recurse;
+    /// - `LITERAL_RECURSIVE_TYPES` arm — `and`/`or`/`dstr`/`xstr`/`dsym`/
+    ///   `array`/`hash`/`irange`/`erange`/`regexp`/`begin`/`pair` recurse over
+    ///   children (Murphy folds `irange`/`erange` into [`NodeKind::RangeExpr`];
+    ///   `begin` is [`NodeKind::Begin`], **not** `kwbegin`);
+    /// - otherwise — [`Self::is_basic_literal`].
+    pub fn is_recursive_basic_literal(&self, id: NodeId) -> bool {
+        const LITERAL_RECURSIVE_METHODS: &[&str] =
+            &["==", "===", "!=", "<=", ">=", ">", "<", "*", "!", "<=>"];
+        match self.kind(id) {
+            NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+                let Some(name) = self.method_name(id) else {
+                    return false;
+                };
+                LITERAL_RECURSIVE_METHODS.contains(&name)
+                    && self
+                        .call_receiver(id)
+                        .get()
+                        .is_some_and(|r| self.is_recursive_basic_literal(r))
+                    && self
+                        .call_arguments(id)
+                        .iter()
+                        .all(|&a| self.is_recursive_basic_literal(a))
+            }
+            NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Dstr(..)
+            | NodeKind::Xstr(..)
+            | NodeKind::Dsym(..)
+            | NodeKind::Array(..)
+            | NodeKind::Hash(..)
+            | NodeKind::RangeExpr { .. }
+            | NodeKind::Regexp { .. }
+            | NodeKind::Begin(..)
+            | NodeKind::Pair { .. } => self
+                .children(id)
+                .iter()
+                .all(|&c| self.is_recursive_basic_literal(c)),
+            _ => self.is_basic_literal(id),
+        }
+    }
+
     /// The number of source lines the node's expression range spans —
     /// Murphy's analog of RuboCop's `node.line_count`
     /// (`last_line - first_line + 1`), computed from the expression
@@ -2478,5 +2549,61 @@ mod tests {
             assert!(cx.def_receiver(root).get().is_none());
             assert!(cx.def_arguments(root).get().is_none());
         });
+    }
+
+    #[test]
+    fn basic_literal_excludes_composites() {
+        // Note: `1r` / `1i` currently parse to `Unknown` in Murphy's
+        // translator (it does not yet emit Rational/Complex), so they are
+        // not exercised here; `is_basic_literal` still matches those
+        // variants for when the translator produces them.
+        for src in ["42", "\"s\"", ":sym", "nil", "true", "false", "1.5"] {
+            with_parsed(src, |cx, root| {
+                assert!(cx.is_basic_literal(root), "{src} is a basic literal");
+            });
+        }
+        // Composites and non-literals are not basic literals.
+        for src in ["[1]", "{a: 1}", "1..2", "foo"] {
+            with_parsed(src, |cx, root| {
+                assert!(!cx.is_basic_literal(root), "{src} is not a basic literal");
+            });
+        }
+    }
+
+    #[test]
+    fn recursive_basic_literal_recurses_through_composites_and_literal_ops() {
+        for src in [
+            "42",
+            "[1, 2]",
+            "[1, [2, 3]]",
+            "{a: 1}",
+            "1..2",
+            "\"a\" \"b\"", // adjacent-string concat -> dstr
+            "1 == 2",
+            "1 * 2", // `*` is a LITERAL_RECURSIVE_METHOD
+            "!true",
+            "1 <=> 2",
+        ] {
+            with_parsed(src, |cx, root| {
+                assert!(
+                    cx.is_recursive_basic_literal(root),
+                    "{src} should be recursive_basic_literal"
+                );
+            });
+        }
+        for src in [
+            "[1, foo]", // foo is a non-literal send
+            "foo",
+            "1 + 2", // `+` is NOT in LITERAL_RECURSIVE_METHODS (RuboCop quirk)
+            "[1, foo.bar]",
+            "{a: foo}",
+        ] {
+            with_parsed(src, |cx, root| {
+                assert!(
+                    !cx.is_recursive_basic_literal(root),
+                    "{src} should NOT be recursive_basic_literal"
+                );
+            });
+        }
     }
 }
