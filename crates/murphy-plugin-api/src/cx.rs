@@ -2325,10 +2325,14 @@ mod tests {
         with_parsed("b if a", |cx, root| assert!(cx.is_modifier_form(root)));
         with_parsed("b unless a", |cx, root| assert!(cx.is_modifier_form(root)));
         with_parsed("b while a", |cx, root| assert!(cx.is_modifier_form(root)));
+        with_parsed("b until a", |cx, root| assert!(cx.is_modifier_form(root)));
         with_parsed("if a then b end", |cx, root| {
             assert!(!cx.is_modifier_form(root))
         });
         with_parsed("while a do b end", |cx, root| {
+            assert!(!cx.is_modifier_form(root))
+        });
+        with_parsed("until a do b end", |cx, root| {
             assert!(!cx.is_modifier_form(root))
         });
         // Ternary lacks `end` but is excluded by the ternary? guard.
