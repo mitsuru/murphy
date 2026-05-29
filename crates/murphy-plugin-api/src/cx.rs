@@ -783,6 +783,34 @@ impl<'a> Cx<'a> {
         self.find_token_text_in(self.range(then_).end, self.range(else_).start, b":")
     }
 
+    /// `setter_method?` — an attribute-write send (`obj.foo = x`). Mirrors
+    /// RuboCop's `setter_method?` (`loc?(:operator)`): true iff the call
+    /// carries a standalone assignment `=` operator. More precise than the
+    /// name-based [`Self::is_assignment_method`] — it keys on the operator
+    /// location, not just a trailing `=` in the selector.
+    pub fn is_setter_method(&self, id: NodeId) -> bool {
+        self.assignment_operator_loc(id) != Range::ZERO
+    }
+
+    /// `ternary?` — a ternary conditional (`a ? b : c`). Mirrors RuboCop's
+    /// `IfNode#ternary?` (`loc?(:question)`).
+    pub fn is_ternary(&self, id: NodeId) -> bool {
+        self.ternary_question_loc(id) != Range::ZERO
+    }
+
+    /// `modifier_form?` — a modifier-form `if`/`unless`/`while`/`until`
+    /// (`body if cond`), which has no closing `end` keyword. Mirrors
+    /// RuboCop's `(if? || unless?) && loc.end.nil?`: a ternary (which also
+    /// lacks `end`) is **excluded** via the `ternary?` guard. `unless` is
+    /// an `If` node in Murphy; modifier `while`/`until` are `While`/`Until`.
+    pub fn is_modifier_form(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::If { .. } | NodeKind::While { .. } | NodeKind::Until { .. }
+        ) && self.ternary_question_loc(id) == Range::ZERO
+            && self.loc(id).end_keyword() == Range::ZERO
+    }
+
     /// `HashNode#pairs` — the hash's **`Pair`-type** children only.
     /// Faithful to RuboCop's `pairs` (`each_child_node(:pair)`): a
     /// `kwsplat` such as the `**h` in `{ **h, a: 1 }` is **excluded**
@@ -2276,5 +2304,38 @@ mod tests {
         with_parsed("a ? b : c", |cx, root| {
             assert_eq!(cx.loc(root).end_keyword(), Range::ZERO);
         });
+    }
+
+    #[test]
+    fn setter_ternary_modifier_consumer_predicates() {
+        // setter_method?
+        with_parsed("self.foo = bar", |cx, root| {
+            assert!(cx.is_setter_method(root))
+        });
+        with_parsed("foo(a = 1)", |cx, root| assert!(!cx.is_setter_method(root)));
+        with_parsed("a == b", |cx, root| assert!(!cx.is_setter_method(root)));
+
+        // ternary?
+        with_parsed("a ? b : c", |cx, root| assert!(cx.is_ternary(root)));
+        with_parsed("if a then b end", |cx, root| assert!(!cx.is_ternary(root)));
+        with_parsed("b if a", |cx, root| assert!(!cx.is_ternary(root)));
+
+        // modifier_form? — if / unless / while modifiers are true;
+        // block-form and ternary are false.
+        with_parsed("b if a", |cx, root| assert!(cx.is_modifier_form(root)));
+        with_parsed("b unless a", |cx, root| assert!(cx.is_modifier_form(root)));
+        with_parsed("b while a", |cx, root| assert!(cx.is_modifier_form(root)));
+        with_parsed("b until a", |cx, root| assert!(cx.is_modifier_form(root)));
+        with_parsed("if a then b end", |cx, root| {
+            assert!(!cx.is_modifier_form(root))
+        });
+        with_parsed("while a do b end", |cx, root| {
+            assert!(!cx.is_modifier_form(root))
+        });
+        with_parsed("until a do b end", |cx, root| {
+            assert!(!cx.is_modifier_form(root))
+        });
+        // Ternary lacks `end` but is excluded by the ternary? guard.
+        with_parsed("a ? b : c", |cx, root| assert!(!cx.is_modifier_form(root)));
     }
 }
