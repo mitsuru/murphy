@@ -352,12 +352,19 @@ impl<'a> Cx<'a> {
 
     /// The method-name selector of a method-bearing node — the call
     /// selector for `Send`/`Csend`, or the defined name for `Def`/`Defs`.
-    /// `None` for any other node kind. Mirrors `node.method_name` on
-    /// RuboCop's method-dispatch and def nodes.
+    /// A block node (`Block` / `Numblock` / `Itblock`) delegates to its
+    /// wrapped call, so `foo.each { }` reports `"each"` — matching
+    /// RuboCop, where `BlockNode`/`NumblockNode` are method-dispatch
+    /// nodes whose `method_name` is the underlying `send_node`'s. `None`
+    /// for any other node kind.
     pub fn method_name(&self, id: NodeId) -> Option<&'a str> {
         let sym = match *self.kind(id) {
             NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => method,
             NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => name,
+            NodeKind::Block { call, .. } => return self.method_name(call),
+            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => {
+                return self.method_name(send);
+            }
             _ => return None,
         };
         Some(self.symbol_str(sym))
@@ -2068,6 +2075,24 @@ mod tests {
             assert!(!cx.is_negation_method(root));
             assert!(!cx.is_prefix_not(root));
             assert!(!cx.is_prefix_bang(root));
+        });
+    }
+
+    #[test]
+    fn method_name_delegates_through_block_nodes() {
+        // `foo.each { }` — the Block delegates to its `foo.each` call,
+        // so method_name is "each" (RuboCop parity: BlockNode is a
+        // method-dispatch node).
+        with_parsed("foo.each { }", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Block { .. }));
+            assert_eq!(cx.method_name(root), Some("each"));
+            // The predicate wrappers route through method_name, so they
+            // also see the inner call's selector.
+            assert!(cx.is_enumerable_method(root));
+        });
+        // Numbered-parameter block `foo.map { _1 }`.
+        with_parsed("foo.map { _1 }", |cx, root| {
+            assert_eq!(cx.method_name(root), Some("map"));
         });
     }
 }
