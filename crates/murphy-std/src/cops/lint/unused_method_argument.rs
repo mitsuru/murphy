@@ -220,7 +220,7 @@ fn body_contains_zsuper(cx: &Cx<'_>, body: NodeId) -> bool {
         match *cx.kind(id) {
             NodeKind::Zsuper => return true,
             // A nested def has its own super scope; don't cross the boundary.
-            NodeKind::Def { .. } => continue,
+            NodeKind::Def { .. } | NodeKind::Defs { .. } => continue,
             _ => {}
         }
         stack.extend(cx.children(id));
@@ -245,7 +245,11 @@ fn body_contains_zero_arity_binding(cx: &Cx<'_>, body: NodeId) -> bool {
             {
                 return true;
             }
-            NodeKind::Def { .. } => continue,
+            NodeKind::Def { .. }
+            | NodeKind::Defs { .. }
+            | NodeKind::Module { .. }
+            | NodeKind::Class { .. }
+            | NodeKind::Sclass { .. } => continue,
             _ => {}
         }
         stack.extend(cx.children(id));
