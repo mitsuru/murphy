@@ -5,7 +5,9 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/DotPosition
 //! upstream_version_checked: 1.86.2
-//! status: complete
+//! status: partial
+//! gap_issues:
+//!   - murphy-6udc
 //! notes: >
 //!   All RuboCop spec cases covered including implicit-call nodes with
 //!   no method name (l.\n(1) / l\n.(1)).
@@ -220,14 +222,16 @@ fn check_implicit_call(node: NodeId, cx: &Cx<'_>, style: DotPositionStyle) {
     let node_end = cx.range(node).end;
 
     // Find the first LeftParen token after the receiver end.
-    let paren_start = cx
-        .sorted_tokens()
+    // sorted_tokens is sorted by start position, so binary_search_by_key
+    // lets us jump directly to receiver_naive_end instead of scanning from 0.
+    let tokens = cx.sorted_tokens();
+    let start_idx = tokens
+        .binary_search_by_key(&receiver_naive_end, |tok| tok.range.start)
+        .unwrap_or_else(|idx| idx);
+    let paren_start = tokens[start_idx..]
         .iter()
-        .find(|tok| {
-            tok.kind == SourceTokenKind::LeftParen
-                && tok.range.start >= receiver_naive_end
-                && tok.range.start < node_end
-        })
+        .take_while(|tok| tok.range.start < node_end)
+        .find(|tok| tok.kind == SourceTokenKind::LeftParen)
         .map(|tok| tok.range.start);
     let Some(paren_start) = paren_start else {
         return;
@@ -301,7 +305,7 @@ fn scan_dot(source: &str, start: u32, end: u32) -> Option<Range> {
         return None;
     }
     let src = source.as_bytes();
-    let window = &src[start as usize..end as usize];
+    let window = src.get(start as usize..end as usize)?;
     let mut i = 0;
     let mut in_comment = false;
     while i < window.len() {
