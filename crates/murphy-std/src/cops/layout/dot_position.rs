@@ -112,9 +112,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // falls back to the `Default` (`leading`) when no override is set.
     let opts = cx.options_or_default::<DotPositionOptions>();
     let style = opts.enforced_style;
-    let Some(dot_range) = cx.call_operator_loc(node) else {
+    let dot_range = cx.loc(node).dot();
+    if dot_range == Range::ZERO {
         return;
-    };
+    }
 
     let receiver = match *cx.kind(node) {
         NodeKind::Send {
