@@ -509,6 +509,37 @@ pub enum NodeKind {
     ForwardArgs,
     /// `bar(...)` の forwarding arg passing (caller side)。
     ForwardedArgs,
+
+    // ── MID-priority NodeKindTag extensions (murphy-o57f, parent
+    // murphy-xvjv). Ruby 3 pattern matching family + `it` block.
+    // Parser-only: subject-side translate support lands per cop as needed.
+    /// `case expr; in pat; ...; end`（`CaseMatchNode`）。
+    CaseMatch {
+        subject: NodeId,
+        in_patterns: NodeList,
+        else_body: OptNodeId,
+    },
+    /// `in <pattern> [if|unless guard]; body` 一節（`InNode`）。
+    /// `guard` は parser-gem の `if-guard` / `unless-guard` 個別 wrap を本
+    /// サブセットでは導入せず、`OptNodeId` で guard 式を直接保持する。
+    /// 互換 cop で if/unless 区別が必要になったら個別 variant を追加。
+    InPattern {
+        pattern: NodeId,
+        guard: OptNodeId,
+        body: OptNodeId,
+    },
+    /// `[a, b, c]` の array pattern (parser-gem `array-pattern`)。
+    ArrayPattern(NodeList),
+    /// `{a:, b:}` の hash pattern (parser-gem `hash-pattern`)。
+    HashPattern(NodeList),
+    /// `match_var` — pattern 内で名前束縛する identifier (`in [x, y]` の `x`/`y`)。
+    MatchVar(Symbol),
+    /// `it { ... }` block (Ruby 3.4+; parser-gem `itblock`)。`send` は block
+    /// の receiver call、`body` は block 本体。`:it` marker は variant 自身。
+    Itblock {
+        send: NodeId,
+        body: OptNodeId,
+    },
 }
 
 /// A source comment, stored outside the node tree.
@@ -630,6 +661,13 @@ impl NodeKind {
             NodeKind::Procarg0(_) => 83,
             NodeKind::ForwardArgs => 84,
             NodeKind::ForwardedArgs => 85,
+            // murphy-o57f MID-priority extensions
+            NodeKind::CaseMatch { .. } => 86,
+            NodeKind::InPattern { .. } => 87,
+            NodeKind::ArrayPattern(_) => 88,
+            NodeKind::HashPattern(_) => 89,
+            NodeKind::MatchVar(_) => 90,
+            NodeKind::Itblock { .. } => 91,
         };
         crate::NodeKindTag(t)
     }

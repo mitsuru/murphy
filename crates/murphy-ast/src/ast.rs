@@ -262,6 +262,36 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
         }
 
         NodeKind::ForwardArgs | NodeKind::ForwardedArgs => {}
+
+        // ── murphy-o57f MID-priority extensions ─────────────────────────
+        NodeKind::CaseMatch {
+            subject,
+            in_patterns,
+            else_body,
+        } => {
+            out.push(subject);
+            push_list(out, lists, in_patterns);
+            push_opt(out, else_body);
+        }
+
+        NodeKind::InPattern {
+            pattern,
+            guard,
+            body,
+        } => {
+            out.push(pattern);
+            push_opt(out, guard);
+            push_opt(out, body);
+        }
+
+        NodeKind::ArrayPattern(l) | NodeKind::HashPattern(l) => push_list(out, lists, l),
+
+        NodeKind::MatchVar(_) => {}
+
+        NodeKind::Itblock { send, body } => {
+            out.push(send);
+            push_opt(out, body);
+        }
     }
 }
 

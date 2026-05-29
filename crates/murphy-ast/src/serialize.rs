@@ -22,7 +22,14 @@ pub const MAGIC: &[u8; 8] = b"MURPHYAS";
 
 /// Binary format version. Bump on **any** layout change — old caches are
 /// then rejected with [`SerError::FormatVersionMismatch`].
-pub const FORMAT_VERSION: u32 = 3;
+///
+/// Version 4 (murphy-o57f): covers the `NodeKind` discriminants added in
+/// murphy-w5ba (HIGH, tags 69–85) and murphy-o57f (MID, tags 86–91).
+/// Older serializers wrote arenas with discriminants ≤ 68 only; reading
+/// a v3 cache through this build is rejected at the header instead of
+/// the more obscure `BadDiscriminant` (or worse — accidental success on
+/// an arena that happens to be tag-compatible).
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Total header size in bytes. The body immediately follows. Downstream
 /// (cache, mmap) code can rely on this offset being fixed.
@@ -546,6 +553,44 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
         }
         NodeKind::ForwardArgs => put_u8(out, 84),
         NodeKind::ForwardedArgs => put_u8(out, 85),
+        // ── murphy-o57f MID-priority extensions ──────────────────────────
+        NodeKind::CaseMatch {
+            subject,
+            in_patterns,
+            else_body,
+        } => {
+            put_u8(out, 86);
+            put_u32(out, subject.0);
+            write_node_list(in_patterns, out);
+            put_u32(out, else_body.0);
+        }
+        NodeKind::InPattern {
+            pattern,
+            guard,
+            body,
+        } => {
+            put_u8(out, 87);
+            put_u32(out, pattern.0);
+            put_u32(out, guard.0);
+            put_u32(out, body.0);
+        }
+        NodeKind::ArrayPattern(l) => {
+            put_u8(out, 88);
+            write_node_list(l, out);
+        }
+        NodeKind::HashPattern(l) => {
+            put_u8(out, 89);
+            write_node_list(l, out);
+        }
+        NodeKind::MatchVar(s) => {
+            put_u8(out, 90);
+            put_u32(out, s.0);
+        }
+        NodeKind::Itblock { send, body } => {
+            put_u8(out, 91);
+            put_u32(out, send.0);
+            put_u32(out, body.0);
+        }
     }
 }
 
@@ -770,6 +815,24 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         83 => NodeKind::Procarg0(read_node_list(cur)?),
         84 => NodeKind::ForwardArgs,
         85 => NodeKind::ForwardedArgs,
+        // ── murphy-o57f MID-priority extensions ──────────────────────────
+        86 => NodeKind::CaseMatch {
+            subject: NodeId(get_u32(cur)?),
+            in_patterns: read_node_list(cur)?,
+            else_body: OptNodeId(get_u32(cur)?),
+        },
+        87 => NodeKind::InPattern {
+            pattern: NodeId(get_u32(cur)?),
+            guard: OptNodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+        },
+        88 => NodeKind::ArrayPattern(read_node_list(cur)?),
+        89 => NodeKind::HashPattern(read_node_list(cur)?),
+        90 => NodeKind::MatchVar(Symbol(get_u32(cur)?)),
+        91 => NodeKind::Itblock {
+            send: NodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+        },
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -1179,6 +1242,31 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
             NodeKind::Rational(s) | NodeKind::Complex(s) => check_sym(s.0)?,
             NodeKind::Not(n) => check_node(n.0)?,
             NodeKind::Numblock { send, body, .. } => {
+                check_node(send.0)?;
+                check_opt_node(body)?;
+            }
+            // ── murphy-o57f MID-priority extensions ──────────────────
+            NodeKind::CaseMatch {
+                subject,
+                in_patterns,
+                else_body,
+            } => {
+                check_node(subject.0)?;
+                check_list(in_patterns)?;
+                check_opt_node(else_body)?;
+            }
+            NodeKind::InPattern {
+                pattern,
+                guard,
+                body,
+            } => {
+                check_node(pattern.0)?;
+                check_opt_node(guard)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::ArrayPattern(l) | NodeKind::HashPattern(l) => check_list(l)?,
+            NodeKind::MatchVar(s) => check_sym(s.0)?,
+            NodeKind::Itblock { send, body } => {
                 check_node(send.0)?;
                 check_opt_node(body)?;
             }
