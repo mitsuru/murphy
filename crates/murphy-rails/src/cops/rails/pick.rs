@@ -54,10 +54,12 @@
 //!
 //! ## Implementation
 //!
-//! Three [`def_node_matcher!`] patterns cover the four outer/inner
+//! Four [`def_node_matcher!`] patterns cover the four outer/inner
 //! Send/Csend combinations:
 //!
 //! - `is_pluck_first_send`: outer Send + inner Send (original shape).
+//! - `is_pluck_first_send_csend_inner`: outer Send + inner Csend
+//!   (`x&.pluck(:a).first`).
 //! - `is_pluck_first_csend_outer`: outer Csend + inner Send
 //!   (`x.pluck(:a)&.first`).
 //! - `is_pluck_first_csend_both`: outer Csend + inner Csend
@@ -88,7 +90,7 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_ma
 // --- node-pattern matchers --------------------------------------------------
 //
 // RuboCop uses a single `(call ...)` wildcard that matches both `send` and
-// `csend`. Murphy has no `call` alias, so we need three separate matchers
+// `csend`. Murphy has no `call` alias, so we need four separate matchers
 // to cover all four outer/inner combinations.
 //
 // Pattern grammar: `_ ...` = one wildcard + rest ≥0 → arity ≥1 (excludes
@@ -97,6 +99,12 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_ma
 
 // Outer send, inner send: `Post.pluck(:id).first`
 def_node_matcher!(is_pluck_first_send, "(send (send _ :pluck _ ...) :first)");
+
+// Outer send, inner csend: `x&.pluck(:a).first`
+def_node_matcher!(
+    is_pluck_first_send_csend_inner,
+    "(send (csend _ :pluck _ ...) :first)"
+);
 
 // Outer csend, inner send: `x.pluck(:a)&.first`
 def_node_matcher!(
@@ -110,9 +118,10 @@ def_node_matcher!(
     "(csend (csend _ :pluck _ ...) :first)"
 );
 
-/// Returns true if `node` matches any of the three pluck-first patterns.
+/// Returns true if `node` matches any of the four pluck-first patterns.
 fn is_any_pluck_first(node: NodeId, cx: &Cx<'_>) -> bool {
     is_pluck_first_send(node, cx)
+        || is_pluck_first_send_csend_inner(node, cx)
         || is_pluck_first_csend_outer(node, cx)
         || is_pluck_first_csend_both(node, cx)
 }
@@ -186,11 +195,14 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // which runs from the inner method name to the outer method name end.
     let inner_name_start = cx.loc(inner).name.start;
     let outer_name_end = cx.loc(node).name.end;
-    let current_range = Range {
-        start: inner_name_start,
-        end: outer_name_end,
+    let current_str = if inner_name_start > 0 && outer_name_end > inner_name_start {
+        cx.raw_source(Range {
+            start: inner_name_start,
+            end: outer_name_end,
+        })
+    } else {
+        cx.raw_source(cx.range(node))
     };
-    let current_str = cx.raw_source(current_range);
 
     let msg = format!("Prefer `pick({args_str})` over `{current_str}`.");
     cx.emit_offense(cx.range(node), &msg, None);
@@ -273,6 +285,17 @@ mod tests {
         test::<Pick>().expect_offense(indoc! {r#"
                 x&.pluck(:a)&.first
                 ^^^^^^^^^^^^^^^^^^^ Prefer `pick(:a)` over `pluck(:a)&.first`.
+            "#});
+    }
+
+    #[test]
+    fn flags_send_outer_csend_inner() {
+        // Safe-navigation on the inner `.pluck` call; outer `.first` is
+        // a regular send. This is the fourth outer/inner combination
+        // (`x&.pluck(:a).first`).
+        test::<Pick>().expect_offense(indoc! {r#"
+                x&.pluck(:a).first
+                ^^^^^^^^^^^^^^^^^^ Prefer `pick(:a)` over `pluck(:a).first`.
             "#});
     }
 
