@@ -274,6 +274,81 @@ impl<'a> Cx<'a> {
             .is_some_and(crate::method_predicates::is_nonmutating_string_method)
     }
 
+    /// The receiver of a call node (`Send`/`Csend`), or `OptNodeId::NONE`
+    /// for a receiverless `Send` or any non-call node. Mirrors RuboCop's
+    /// `node.receiver`.
+    pub fn call_receiver(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Send { receiver, .. } => receiver,
+            NodeKind::Csend { receiver, .. } => OptNodeId::some(receiver),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// The argument list of a call node (`Send`/`Csend`); an empty slice
+    /// for a non-call node. Mirrors RuboCop's `node.arguments`.
+    pub fn call_arguments(&self, id: NodeId) -> &'a [NodeId] {
+        match *self.kind(id) {
+            NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => self.list(args),
+            _ => &[],
+        }
+    }
+
+    /// The first argument of a call node, or `OptNodeId::NONE`. Mirrors
+    /// RuboCop's `node.first_argument`.
+    pub fn first_argument(&self, id: NodeId) -> OptNodeId {
+        self.call_arguments(id)
+            .first()
+            .copied()
+            .map_or(OptNodeId::NONE, OptNodeId::some)
+    }
+
+    /// The last argument of a call node, or `OptNodeId::NONE`. Mirrors
+    /// RuboCop's `node.last_argument`.
+    pub fn last_argument(&self, id: NodeId) -> OptNodeId {
+        self.call_arguments(id)
+            .last()
+            .copied()
+            .map_or(OptNodeId::NONE, OptNodeId::some)
+    }
+
+    /// Whether a call node has any arguments. Mirrors RuboCop's
+    /// `node.arguments?`.
+    pub fn has_call_arguments(&self, id: NodeId) -> bool {
+        !self.call_arguments(id).is_empty()
+    }
+
+    /// `self_receiver?` — the call's receiver is `self`. Mirrors RuboCop's
+    /// `node.self_receiver?` (`receiver&.self_type?`).
+    pub fn is_self_receiver(&self, id: NodeId) -> bool {
+        self.call_receiver(id)
+            .get()
+            .is_some_and(|r| matches!(self.kind(r), NodeKind::SelfExpr))
+    }
+
+    /// `const_receiver?` — the call's receiver is a constant. Mirrors
+    /// RuboCop's `node.const_receiver?` (`receiver&.const_type?`).
+    pub fn is_const_receiver(&self, id: NodeId) -> bool {
+        self.call_receiver(id)
+            .get()
+            .is_some_and(|r| matches!(self.kind(r), NodeKind::Const { .. }))
+    }
+
+    /// `command?(name)` — a receiverless `Send` whose selector is `name`.
+    /// Mirrors RuboCop's `node.command?(name)` (`!receiver && method?(name)`).
+    /// A `Csend` always has a receiver, so it is never a command.
+    pub fn is_command(&self, id: NodeId, name: &str) -> bool {
+        matches!(*self.kind(id), NodeKind::Send { receiver, .. } if receiver.get().is_none())
+            && self.method_name(id) == Some(name)
+    }
+
+    /// `negation_method?` — a call to `!` with a receiver (`!x`, parsed as
+    /// `x.!`). Mirrors RuboCop's `node.negation_method?`
+    /// (`receiver && method_name == :!`).
+    pub fn is_negation_method(&self, id: NodeId) -> bool {
+        self.call_receiver(id).get().is_some() && self.method_name(id) == Some("!")
+    }
+
     /// The file's comments, in source order.
     pub fn comments(&self) -> &'a [Comment] {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
@@ -1076,5 +1151,136 @@ mod tests {
         assert!(cx.is_nonmutating_binary_operator_method(plus));
         assert!(cx.is_nonmutating_operator_method(plus));
         assert!(!cx.is_nonmutating_unary_operator_method(plus));
+    }
+
+    /// Build `<recv-kind>.<sel>(args…)` where the receiver is a chosen
+    /// `NodeKind` (self / const / a sub-send), returning the call + Ast.
+    fn build_call_with(
+        recv_kind: Option<NodeKind>,
+        selector: &str,
+        arg_ints: &[i64],
+    ) -> (Ast, murphy_ast::NodeId) {
+        let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+        let z = Range { start: 0, end: 1 };
+        let receiver = match recv_kind {
+            Some(k) => OptNodeId::some(b.push(k, z)),
+            None => OptNodeId::NONE,
+        };
+        let arg_ids: Vec<_> = arg_ints
+            .iter()
+            .map(|&n| b.push(NodeKind::Int(n), z))
+            .collect();
+        let args = b.push_list(&arg_ids);
+        let method = b.intern_symbol(selector);
+        let root = b.push(
+            NodeKind::Send {
+                receiver,
+                method,
+                args,
+            },
+            z,
+        );
+        (b.finish(root), root)
+    }
+
+    #[test]
+    fn call_receiver_and_arguments_resolve_send_parts() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `foo(1, 2)` — receiverless, two args.
+        let (ast, call) = build_call_with(None, "foo", &[1, 2]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.call_receiver(call).get().is_none());
+        let args = cx.call_arguments(call);
+        assert_eq!(args.len(), 2);
+        assert!(cx.has_call_arguments(call));
+        assert_eq!(cx.first_argument(call).get(), Some(args[0]));
+        assert_eq!(cx.last_argument(call).get(), Some(args[1]));
+
+        // `self.bar` — self receiver, no args.
+        let (ast, call) = build_call_with(Some(NodeKind::SelfExpr), "bar", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.call_receiver(call).get().is_some());
+        assert!(!cx.has_call_arguments(call));
+        assert!(cx.first_argument(call).get().is_none());
+        assert!(cx.last_argument(call).get().is_none());
+    }
+
+    #[test]
+    fn self_and_const_receiver_predicates() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `self.foo`
+        let (ast, call) = build_call_with(Some(NodeKind::SelfExpr), "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_self_receiver(call));
+        assert!(!cx.is_const_receiver(call));
+
+        // `Foo.bar` — const receiver.
+        let const_name = {
+            let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+            b.intern_symbol("Foo")
+        };
+        let (ast, call) = build_call_with(
+            Some(NodeKind::Const {
+                scope: OptNodeId::NONE,
+                name: const_name,
+            }),
+            "bar",
+            &[],
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_const_receiver(call));
+        assert!(!cx.is_self_receiver(call));
+
+        // Receiverless send is neither.
+        let (ast, call) = build_call_with(None, "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_self_receiver(call));
+        assert!(!cx.is_const_receiver(call));
+    }
+
+    #[test]
+    fn command_and_negation_predicates() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `foo` — receiverless ⇒ command?("foo") true, command?("bar") false.
+        let (ast, call) = build_call_with(None, "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_command(call, "foo"));
+        assert!(!cx.is_command(call, "bar"));
+        assert!(!cx.is_negation_method(call));
+
+        // `self.foo` — has a receiver ⇒ not a command.
+        let (ast, call) = build_call_with(Some(NodeKind::SelfExpr), "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_command(call, "foo"));
+
+        // `x.!` — receiver + `!` selector ⇒ negation_method?.
+        let (ast, call) = build_call_with(Some(NodeKind::SelfExpr), "!", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_negation_method(call));
+        // Bare `!` with no receiver is not a negation method.
+        let (ast, call) = build_call_with(None, "!", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_negation_method(call));
     }
 }
