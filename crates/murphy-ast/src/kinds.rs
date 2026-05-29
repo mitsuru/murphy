@@ -130,6 +130,15 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("procarg0", 83),
     ("forward_args", 84),
     ("forwarded_args", 85),
+    // ── murphy-o57f MID-priority extensions (parser-only; subject-side
+    // murphy-translate support lands per cop as actually needed). See
+    // docs/superpowers/specs/2026-05-29-rubocop-pattern-gap-survey.md.
+    ("case_match", 86),
+    ("in_pattern", 87),
+    ("array_pattern", 88),
+    ("hash_pattern", 89),
+    ("match_var", 90),
+    ("itblock", 91),
 ];
 
 /// Resolve a pattern node-type name to its tag. `None` for unknown names.
@@ -368,6 +377,24 @@ mod tests {
             NodeKind::Procarg0(NodeList::EMPTY),
             NodeKind::ForwardArgs,
             NodeKind::ForwardedArgs,
+            // murphy-o57f MID-priority extensions
+            NodeKind::CaseMatch {
+                subject: n,
+                in_patterns: NodeList::EMPTY,
+                else_body: OptNodeId::NONE,
+            },
+            NodeKind::InPattern {
+                pattern: n,
+                guard: OptNodeId::NONE,
+                body: OptNodeId::NONE,
+            },
+            NodeKind::ArrayPattern(NodeList::EMPTY),
+            NodeKind::HashPattern(NodeList::EMPTY),
+            NodeKind::MatchVar(s),
+            NodeKind::Itblock {
+                send: n,
+                body: OptNodeId::NONE,
+            },
         ]
     }
 
@@ -495,6 +522,13 @@ mod tests {
             NodeKind::Procarg0(_) => "procarg0",
             NodeKind::ForwardArgs => "forward_args",
             NodeKind::ForwardedArgs => "forwarded_args",
+            // murphy-o57f MID-priority extensions
+            NodeKind::CaseMatch { .. } => "case_match",
+            NodeKind::InPattern { .. } => "in_pattern",
+            NodeKind::ArrayPattern(_) => "array_pattern",
+            NodeKind::HashPattern(_) => "hash_pattern",
+            NodeKind::MatchVar(_) => "match_var",
+            NodeKind::Itblock { .. } => "itblock",
         })
     }
 

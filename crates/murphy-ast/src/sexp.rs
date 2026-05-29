@@ -557,6 +557,55 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         NodeKind::ForwardArgs => out.push_str("(forward_args)"),
         NodeKind::ForwardedArgs => out.push_str("(forwarded_args)"),
 
+        // ── murphy-o57f MID-priority extensions ─────────────────────────
+        NodeKind::CaseMatch {
+            subject, else_body, ..
+        } => {
+            out.push_str("(case_match\n");
+            write_node(ast, subject, d, out);
+            // `collect_children` lays out subject + in_patterns + else_body.
+            // The in-pattern slice runs from offset 1 to children.len()-1
+            // (the else_body is the last child) — slice exactly that range.
+            let arms = ast.children(id).count().saturating_sub(2);
+            write_slice(ast, id, 1, arms, d, out);
+            out.push('\n');
+            write_opt(ast, else_body, d, out);
+            out.push(')');
+        }
+        NodeKind::InPattern {
+            pattern,
+            guard,
+            body,
+        } => {
+            out.push_str("(in_pattern\n");
+            write_node(ast, pattern, d, out);
+            out.push('\n');
+            write_opt(ast, guard, d, out);
+            out.push('\n');
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+        NodeKind::ArrayPattern(_) => {
+            out.push_str("(array_pattern");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::HashPattern(_) => {
+            out.push_str("(hash_pattern");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::MatchVar(s) => {
+            let _ = write!(out, "(match_var :{})", interner.resolve(s.0));
+        }
+        NodeKind::Itblock { send, body } => {
+            out.push_str("(itblock\n");
+            write_node(ast, send, d, out);
+            out.push('\n');
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+
         NodeKind::Unknown => out.push_str("(unknown)"),
     }
 }
