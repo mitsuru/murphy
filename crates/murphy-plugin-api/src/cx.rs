@@ -218,6 +218,62 @@ impl<'a> Cx<'a> {
             .is_some_and(crate::method_predicates::is_camel_case_method)
     }
 
+    /// `enumerable_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_enumerable_method`].
+    pub fn is_enumerable_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_enumerable_method)
+    }
+
+    /// `enumerator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_enumerator_method`].
+    pub fn is_enumerator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_enumerator_method)
+    }
+
+    /// `nonmutating_binary_operator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_binary_operator_method`].
+    pub fn is_nonmutating_binary_operator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_binary_operator_method)
+    }
+
+    /// `nonmutating_unary_operator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_unary_operator_method`].
+    pub fn is_nonmutating_unary_operator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_unary_operator_method)
+    }
+
+    /// `nonmutating_operator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_operator_method`].
+    pub fn is_nonmutating_operator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_operator_method)
+    }
+
+    /// `nonmutating_array_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_array_method`].
+    pub fn is_nonmutating_array_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_array_method)
+    }
+
+    /// `nonmutating_hash_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_hash_method`].
+    pub fn is_nonmutating_hash_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_hash_method)
+    }
+
+    /// `nonmutating_string_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_string_method`].
+    pub fn is_nonmutating_string_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_string_method)
+    }
+
     /// The file's comments, in source order.
     pub fn comments(&self) -> &'a [Comment] {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
@@ -964,5 +1020,61 @@ mod tests {
         assert!(!cx.is_predicate_method(root));
         assert!(!cx.is_bang_method(root));
         assert!(!cx.is_camel_case_method(root));
+    }
+
+    #[test]
+    fn cx_collection_and_enumerable_wrappers_classify_the_node_selector() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `a.map` → enumerable + enumerator (in set), not a nonmutating
+        // collection-specific table.
+        let (ast, map) = build_call(
+            "a.map",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 5 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_enumerable_method(map));
+        assert!(cx.is_enumerator_method(map));
+
+        // `a.each_slice` → enumerator via the `each_` prefix rule.
+        let (ast, es) = build_call(
+            "a.each_slice",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 12 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_enumerator_method(es));
+
+        // `a.merge` → nonmutating hash method.
+        let (ast, merge) = build_call(
+            "a.merge",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 7 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_nonmutating_hash_method(merge));
+
+        // `a + b` → nonmutating binary operator (so also nonmutating operator).
+        let (ast, plus) = build_call(
+            "a + b",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 3 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_nonmutating_binary_operator_method(plus));
+        assert!(cx.is_nonmutating_operator_method(plus));
+        assert!(!cx.is_nonmutating_unary_operator_method(plus));
     }
 }
