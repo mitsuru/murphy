@@ -771,6 +771,68 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The position of `id` among its parent's children, or `None` if it
+    /// is the root. Murphy's `cx.children` skips absent (`None`) optional
+    /// children, so indices match RuboCop's `sibling_index` for the
+    /// fixed-position cases used by [`Self::is_value_used`]
+    /// (condition = 0, `for` body = 2) and for the last-child test on
+    /// `begin`/`kwbegin` (whose children are all present statements).
+    fn sibling_index(&self, id: NodeId) -> Option<usize> {
+        let parent = self.parent(id).get()?;
+        self.children(parent).iter().position(|&c| c == id)
+    }
+
+    /// `value_used?` — whether the result of evaluating `id` is consumed
+    /// by its surrounding context (vs discarded as a void statement).
+    /// Mirrors RuboCop's `Node#value_used?`: a parent-context walk —
+    /// pass-through containers (array/hash/pair/range/dstr/… and `defined?`)
+    /// delegate to the parent; `begin`/`kwbegin` use only their last child;
+    /// `if`/`case` use the condition (index 0) or whatever uses the parent;
+    /// `while`/`until` use only the condition; `for` uses the body
+    /// (index 2); everything else uses the value. A root node's value is
+    /// unused.
+    ///
+    /// `while_post`/`until_post` fold into [`NodeKind::While`]/
+    /// [`NodeKind::Until`]; flip-flops parse to [`NodeKind::Unknown`]
+    /// (handled by the `_ => true` arm, as RuboCop's pass-through would).
+    pub fn is_value_used(&self, id: NodeId) -> bool {
+        let Some(parent) = self.parent(id).get() else {
+            return false;
+        };
+        match self.kind(parent) {
+            // Pass-through containers: used iff the container's value is used.
+            NodeKind::Array(..)
+            | NodeKind::Defined(..)
+            | NodeKind::Dstr(..)
+            | NodeKind::Dsym(..)
+            | NodeKind::RangeExpr { .. }
+            | NodeKind::Float(..)
+            | NodeKind::Hash(..)
+            | NodeKind::Not(..)
+            | NodeKind::Pair { .. }
+            | NodeKind::Regexp { .. }
+            | NodeKind::Str(..)
+            | NodeKind::Sym(..)
+            | NodeKind::When { .. }
+            | NodeKind::Xstr(..) => self.is_value_used(parent),
+            // begin/kwbegin: only the last child's value is the block's value.
+            NodeKind::Begin(..) | NodeKind::Kwbegin(..) => {
+                self.children(parent).last() == Some(&id) && self.is_value_used(parent)
+            }
+            // for var in enum; body; end → the body (index 2) flows to parent;
+            // the var/enum (index 0/1) are used by the loop construct.
+            NodeKind::For { .. } if self.sibling_index(id) == Some(2) => self.is_value_used(parent),
+            NodeKind::For { .. } => true,
+            // if/case: the condition (index 0) is used; branches flow to parent.
+            NodeKind::If { .. } | NodeKind::Case { .. } => {
+                self.sibling_index(id) == Some(0) || self.is_value_used(parent)
+            }
+            // while/until evaluate to nil: only the condition (index 0) is used.
+            NodeKind::While { .. } | NodeKind::Until { .. } => self.sibling_index(id) == Some(0),
+            _ => true,
+        }
+    }
+
     /// The number of source lines the node's expression range spans —
     /// Murphy's analog of RuboCop's `node.line_count`
     /// (`last_line - first_line + 1`), computed from the expression
@@ -2695,5 +2757,33 @@ mod tests {
                 assert!(!cx.is_pure(root), "{src} should NOT be pure")
             });
         }
+    }
+
+    #[test]
+    fn value_used_walks_parent_context() {
+        with_parsed("foo(bar)", |cx, root| {
+            let arg = cx.call_arguments(root)[0];
+            assert!(cx.is_value_used(arg));
+        });
+        with_parsed("x = 1", |cx, root| {
+            let value = cx.children(root)[0];
+            assert!(cx.is_value_used(value));
+        });
+        with_parsed("if a then b end", |cx, root| {
+            assert!(cx.is_value_used(cx.if_condition(root).get().unwrap()));
+            assert!(!cx.is_value_used(cx.if_then_branch(root).get().unwrap()));
+        });
+        with_parsed("[1, 2]", |cx, root| {
+            assert!(!cx.is_value_used(cx.array_elements(root)[0]));
+        });
+        with_parsed("x = [1, 2]", |cx, root| {
+            let array = cx.children(root)[0];
+            assert!(cx.is_value_used(cx.array_elements(array)[0]));
+        });
+        with_parsed("while a do b end", |cx, root| {
+            let kids = cx.children(root);
+            assert!(cx.is_value_used(kids[0]), "while condition is used");
+            assert!(!cx.is_value_used(kids[1]), "while body value is discarded");
+        });
     }
 }
