@@ -96,14 +96,14 @@ fn flags_dead_code_after_next() {
 }
 
 #[test]
-fn emits_one_offense_per_dead_sibling() {
-    // Two statements follow the terminator; both are unreachable.
+fn emits_offense_for_first_dead_sibling_only() {
+    // Two dead siblings; only the first gets an offense (RuboCop each_cons(2) contract).
     let (code, offs) = lint_json("def foo\n  return\n  puts 'a'\n  puts 'b'\nend\n");
     assert_eq!(code, 1);
     assert_eq!(
         offenses_named(&offs, "Lint/UnreachableCode").len(),
-        2,
-        "each dead sibling must produce its own offense; got {offs:?}",
+        1,
+        "only first dead sibling produces an offense; got {offs:?}",
     );
 }
 
