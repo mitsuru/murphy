@@ -63,6 +63,7 @@
 //!   scope yet, so `self.x` inside a pattern body where `x` is the
 //!   matched name is flagged when it shouldn't be.
 
+use murphy_plugin_api::method_predicates::{is_camel_case_method, is_operator_method};
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
@@ -129,8 +130,11 @@ const KEYWORDS: &[&str] = &[
 
 /// Non-CamelCase names in `Kernel.methods(false)`. CamelCase names
 /// (`Array`, `Complex`, `Float`, `Hash`, `Integer`, `Rational`,
-/// `String`) are already filtered by [`starts_with_uppercase`]; the
-/// backtick operator (`` ` ``) is filtered by [`is_operator_method`].
+/// `String`) are already filtered by [`is_camel_case_method`]; the
+/// backtick operator (`` ` ``) is filtered by [`is_operator_method`]
+/// (now faithfully via the shared `MethodIdentifierPredicates` set,
+/// which — unlike the previous hand-rolled copy — actually includes
+/// `` ` ``, `!@`, and `~@`).
 /// Enumerated against MRI 4.0 — keep in sync with the upstream surface.
 const KERNEL_METHODS: &[&str] = &[
     "__callee__",
@@ -188,20 +192,19 @@ const KERNEL_METHODS: &[&str] = &[
 ];
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send {
-        receiver, method, ..
-    } = *cx.kind(node)
-    else {
+    let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
         return;
     };
 
-    // Receiver must be a bare `self` literal.
+    // Receiver must be a bare `self` literal. `is_self_receiver` routes
+    // through `call_receiver` (the shared dispatch surface, es99.1); we
+    // still keep `receiver_id` for the autocorrect range below.
     let OptNodeId(idx) = receiver;
     if idx == u32::MAX {
         return;
     }
     let receiver_id = NodeId(idx);
-    if !matches!(cx.kind(receiver_id), NodeKind::SelfExpr) {
+    if !cx.is_self_receiver(node) {
         return;
     }
 
@@ -212,7 +215,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    let method_name = cx.symbol_str(method);
+    let Some(method_name) = cx.method_name(node) else {
+        return;
+    };
 
     // Setter (`self.foo = bar`): method ends with `=`. Removing
     // `self.` would change the meaning to `foo = bar` (local
@@ -228,7 +233,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // CamelCase method (`self.Foo`) — disambiguates from a constant
     // reference of the same name.
-    if starts_with_uppercase(method_name) {
+    if is_camel_case_method(method_name) {
         return;
     }
 
@@ -337,46 +342,6 @@ fn descendant_introduces_name(cx: &Cx<'_>, desc: NodeId, name: &str) -> bool {
         NodeKind::Kwoptarg { name: n, .. } => matches_sym(n),
         _ => false,
     }
-}
-
-/// Operator methods that may be invoked with `self.` syntax. These
-/// match RuboCop's `node.operator_method?` set so the cop never
-/// rewrites `self.+(x)` (which would parse as the binary operator
-/// `+x`).
-fn is_operator_method(name: &str) -> bool {
-    matches!(
-        name,
-        "+" | "-"
-            | "*"
-            | "/"
-            | "%"
-            | "**"
-            | "=="
-            | "!="
-            | "==="
-            | "!"
-            | "<"
-            | ">"
-            | "<="
-            | ">="
-            | "<=>"
-            | "<<"
-            | ">>"
-            | "&"
-            | "|"
-            | "^"
-            | "~"
-            | "=~"
-            | "!~"
-            | "[]"
-            | "[]="
-            | "+@"
-            | "-@"
-    )
-}
-
-fn starts_with_uppercase(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
 }
 
 #[cfg(test)]
@@ -572,6 +537,15 @@ mod tests {
     #[test]
     fn accepts_self_camel_case_method() {
         test::<RedundantSelf>().expect_no_offenses("self.Foo\n");
+    }
+
+    #[test]
+    fn accepts_self_backtick_operator() {
+        // Regression: the previous hand-rolled operator set omitted the
+        // backtick method, so `self.\`` was wrongly flagged. Delegating
+        // to the shared `operator_method?` set (which includes `` ` ``)
+        // fixes it — `self.\`(cmd)` must not be reported.
+        test::<RedundantSelf>().expect_no_offenses("self.`(\"ls\")\n");
     }
 
     #[test]

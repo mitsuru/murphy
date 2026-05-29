@@ -3,7 +3,8 @@
 use std::marker::PhantomData;
 
 use murphy_ast::{
-    AstNode, Comment, NodeId, NodeKind, NodeLoc, OptNodeId, Range, SourceToken, collect_children,
+    AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind,
+    collect_children,
 };
 
 use crate::abi::CxRaw;
@@ -29,6 +30,151 @@ unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
         &[]
     } else {
         unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+}
+
+/// Lazy source-location view for a node — Murphy's analog of rubocop-ast's
+/// `node.loc`. `expression` and `name` are plain fields (zero-cost); all
+/// other sub-ranges are computed on demand from the arena's sorted token
+/// list and source bytes.
+pub struct LocRef<'a> {
+    pub expression: Range,
+    pub name: Range,
+    // Private: precomputed for dot() and keyword()
+    receiver_end: Option<u32>,
+    keyword_bearing: bool,
+    sorted_tokens: &'a [SourceToken],
+    source: &'a [u8],
+}
+
+impl<'a> LocRef<'a> {
+    /// The call-operator range: `.` for `Send`, `&.` for `Csend`.
+    /// Returns `Range::ZERO` when the node has no receiver (bare method
+    /// call), or when called on a non-Send/Csend node.
+    pub fn dot(&self) -> Range {
+        let Some(recv_end) = self.receiver_end else {
+            return Range::ZERO;
+        };
+        let name_start = self.name.start;
+        if recv_end >= name_start {
+            return Range::ZERO;
+        }
+        let window = &self.source[recv_end as usize..name_start as usize];
+        let mut i = 0;
+        let mut in_comment = false;
+        while i < window.len() {
+            let b = window[i];
+            if b == b'\n' {
+                in_comment = false;
+                i += 1;
+                continue;
+            }
+            if in_comment {
+                i += 1;
+                continue;
+            }
+            if b == b'#' {
+                in_comment = true;
+                i += 1;
+                continue;
+            }
+            if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
+                let start = recv_end + i as u32;
+                return Range {
+                    start,
+                    end: start + 2,
+                };
+            }
+            if b == b'.' {
+                let start = recv_end + i as u32;
+                return Range {
+                    start,
+                    end: start + 1,
+                };
+            }
+            i += 1;
+        }
+        Range::ZERO
+    }
+
+    /// The leading keyword token range (`def`, `class`, `if`, `while`, …).
+    /// Computed by binary-searching sorted_tokens for the first token at
+    /// `expression.start`. Returns `Range::ZERO` if no token starts exactly
+    /// at that position.
+    ///
+    /// **Limitation:** modifier-form control flow (`x if cond`) places the
+    /// keyword *after* the expression start — returns `Range::ZERO` for those.
+    pub fn keyword(&self) -> Range {
+        if !self.keyword_bearing {
+            return Range::ZERO;
+        }
+        let target = self.expression.start;
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.start < target);
+        if let Some(tok) = self.sorted_tokens.get(idx)
+            && tok.range.start == target
+        {
+            return tok.range;
+        }
+        Range::ZERO
+    }
+
+    /// The opening-paren `(` range for this node's own argument list, or
+    /// `Range::ZERO` if none. Covers only `(` — not `[`, `{`, or `do`.
+    ///
+    /// Searches from `name.end` (not `expression.start`) so that parens
+    /// inside child nodes (e.g. `foo bar(baz)`) are not mistakenly returned
+    /// for the outer call.
+    pub fn begin(&self) -> Range {
+        // Search from name.end to skip over child node parens.
+        let search_from = if self.name != Range::ZERO {
+            self.name.end
+        } else {
+            self.expression.start
+        };
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.start < search_from);
+        if let Some(tok) = self.sorted_tokens.get(idx)
+            && tok.range.start < self.expression.end
+            && tok.kind == SourceTokenKind::LeftParen
+        {
+            return tok.range;
+        }
+        Range::ZERO
+    }
+
+    /// The closing-paren `)` matching this node's `begin()` paren, or
+    /// `Range::ZERO` if `begin()` is `Range::ZERO`. Uses a nesting counter
+    /// so `foo(bar(x))` correctly returns the outer `)`.
+    pub fn end(&self) -> Range {
+        let begin = self.begin();
+        if begin == Range::ZERO {
+            return Range::ZERO;
+        }
+        let search_from = begin.end;
+        let expr_end = self.expression.end;
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.start < search_from);
+        let mut depth: i32 = 1;
+        for tok in &self.sorted_tokens[idx..] {
+            if tok.range.start >= expr_end {
+                break;
+            }
+            match tok.kind {
+                SourceTokenKind::LeftParen => depth += 1,
+                SourceTokenKind::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return tok.range;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Range::ZERO
     }
 }
 
@@ -75,15 +221,57 @@ impl<'a> Cx<'a> {
         self.nodes()[id.0 as usize].loc.expression
     }
 
-    /// The `node.loc` bundle for `id` — Murphy's analog of the parser
-    /// gem's `node.loc` accessor. `.expression` is the AST node's full
-    /// source range; `.name` is the identifier range (the
-    /// `node.loc.name` analog), [`Range::ZERO`] for nodes without
-    /// an identifier or for name-bearing nodes the translator did not
-    /// annotate. Equivalent to `self.node(id).loc`; provided as a
-    /// shorthand so cops can write `cx.loc(node).name`.
-    pub fn loc(&self, id: NodeId) -> NodeLoc {
-        self.nodes()[id.0 as usize].loc
+    /// The source-location view for `id`. `expression` and `name` are plain
+    /// fields. Call `.dot()`, `.keyword()`, `.begin()`, `.end()` for sub-ranges
+    /// — they compute only when used.
+    pub fn loc(&self, id: NodeId) -> LocRef<'a> {
+        let node = &self.nodes()[id.0 as usize];
+        let receiver_end = match node.kind {
+            NodeKind::Send { receiver, .. } => receiver.get().map(|r| self.range(r).end),
+            NodeKind::Csend { receiver, .. } => Some(self.range(receiver).end),
+            _ => None,
+        };
+        let src: &'a [u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
+        // For conditionals/loops that have both block-form (`if cond; end`) and
+        // modifier-form (`body if cond`), detect block-form by checking whether
+        // the source at expression.start begins with the keyword itself.
+        let starts_with_ctrl_kw = |start: u32| -> bool {
+            let s = start as usize;
+            let rest = &src[s..];
+            let word_len = rest
+                .iter()
+                .position(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+                .unwrap_or(rest.len());
+            matches!(&rest[..word_len], b"if" | b"unless" | b"while" | b"until")
+        };
+        let keyword_bearing = matches!(
+            node.kind,
+            NodeKind::Def { .. }
+                | NodeKind::Defs { .. }
+                | NodeKind::Class { .. }
+                | NodeKind::Module { .. }
+                | NodeKind::Case { .. }
+                | NodeKind::When { .. }
+                | NodeKind::Begin(_)
+                | NodeKind::Kwbegin(_)
+                | NodeKind::Return(_)
+                | NodeKind::Break(_)
+                | NodeKind::Next(_)
+                | NodeKind::Yield(_)
+                | NodeKind::For { .. }
+                | NodeKind::Rescue { .. }
+        ) || matches!(
+            node.kind,
+            NodeKind::If { .. } | NodeKind::While { .. } | NodeKind::Until { .. }
+        ) && starts_with_ctrl_kw(node.loc.expression.start);
+        LocRef {
+            expression: node.loc.expression,
+            name: node.loc.name,
+            receiver_end,
+            keyword_bearing,
+            sorted_tokens: self.sorted_tokens(),
+            source: src,
+        }
     }
 
     /// The parent of `id`; `OptNodeId::NONE` for the root.
@@ -162,6 +350,391 @@ impl<'a> Cx<'a> {
         self.resolve(id.0)
     }
 
+    /// The method-name selector of a method-bearing node — the call
+    /// selector for `Send`/`Csend`, or the defined name for `Def`/`Defs`.
+    /// A block node (`Block` / `Numblock` / `Itblock`) delegates to its
+    /// wrapped call, so `foo.each { }` reports `"each"` — matching
+    /// RuboCop, where `BlockNode`/`NumblockNode` are method-dispatch
+    /// nodes whose `method_name` is the underlying `send_node`'s. `None`
+    /// for any other node kind.
+    pub fn method_name(&self, id: NodeId) -> Option<&'a str> {
+        let sym = match *self.kind(id) {
+            NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => method,
+            NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => name,
+            NodeKind::Block { call, .. } => return self.method_name(call),
+            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => {
+                return self.method_name(send);
+            }
+            _ => return None,
+        };
+        Some(self.symbol_str(sym))
+    }
+
+    /// `comparison_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_comparison_method`]. `false` for
+    /// nodes without a selector.
+    pub fn is_comparison_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_comparison_method)
+    }
+
+    /// `operator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_operator_method`].
+    pub fn is_operator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_operator_method)
+    }
+
+    /// `assignment_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_assignment_method`].
+    pub fn is_assignment_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_assignment_method)
+    }
+
+    /// `predicate_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_predicate_method`].
+    pub fn is_predicate_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_predicate_method)
+    }
+
+    /// `bang_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_bang_method`].
+    pub fn is_bang_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_bang_method)
+    }
+
+    /// `camel_case_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_camel_case_method`].
+    pub fn is_camel_case_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_camel_case_method)
+    }
+
+    /// `enumerable_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_enumerable_method`].
+    pub fn is_enumerable_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_enumerable_method)
+    }
+
+    /// `enumerator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_enumerator_method`].
+    pub fn is_enumerator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_enumerator_method)
+    }
+
+    /// `nonmutating_binary_operator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_binary_operator_method`].
+    pub fn is_nonmutating_binary_operator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_binary_operator_method)
+    }
+
+    /// `nonmutating_unary_operator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_unary_operator_method`].
+    pub fn is_nonmutating_unary_operator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_unary_operator_method)
+    }
+
+    /// `nonmutating_operator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_operator_method`].
+    pub fn is_nonmutating_operator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_operator_method)
+    }
+
+    /// `nonmutating_array_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_array_method`].
+    pub fn is_nonmutating_array_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_array_method)
+    }
+
+    /// `nonmutating_hash_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_hash_method`].
+    pub fn is_nonmutating_hash_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_hash_method)
+    }
+
+    /// `nonmutating_string_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_nonmutating_string_method`].
+    pub fn is_nonmutating_string_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_nonmutating_string_method)
+    }
+
+    /// The receiver of a call node (`Send`/`Csend`), or `OptNodeId::NONE`
+    /// for a receiverless `Send` or any non-call node. Mirrors RuboCop's
+    /// `node.receiver`.
+    pub fn call_receiver(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Send { receiver, .. } => receiver,
+            NodeKind::Csend { receiver, .. } => OptNodeId::some(receiver),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// The argument list of a call node (`Send`/`Csend`); an empty slice
+    /// for a non-call node. Mirrors RuboCop's `node.arguments`.
+    pub fn call_arguments(&self, id: NodeId) -> &'a [NodeId] {
+        match *self.kind(id) {
+            NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => self.list(args),
+            _ => &[],
+        }
+    }
+
+    /// The first argument of a call node, or `OptNodeId::NONE`. Mirrors
+    /// RuboCop's `node.first_argument`.
+    pub fn first_argument(&self, id: NodeId) -> OptNodeId {
+        self.call_arguments(id)
+            .first()
+            .copied()
+            .map_or(OptNodeId::NONE, OptNodeId::some)
+    }
+
+    /// The last argument of a call node, or `OptNodeId::NONE`. Mirrors
+    /// RuboCop's `node.last_argument`.
+    pub fn last_argument(&self, id: NodeId) -> OptNodeId {
+        self.call_arguments(id)
+            .last()
+            .copied()
+            .map_or(OptNodeId::NONE, OptNodeId::some)
+    }
+
+    /// Whether a call node has any arguments. Mirrors RuboCop's
+    /// `node.arguments?`.
+    pub fn has_call_arguments(&self, id: NodeId) -> bool {
+        !self.call_arguments(id).is_empty()
+    }
+
+    /// `self_receiver?` — the call's receiver is `self`. Mirrors RuboCop's
+    /// `node.self_receiver?` (`receiver&.self_type?`).
+    pub fn is_self_receiver(&self, id: NodeId) -> bool {
+        self.call_receiver(id)
+            .get()
+            .is_some_and(|r| matches!(self.kind(r), NodeKind::SelfExpr))
+    }
+
+    /// `const_receiver?` — the call's receiver is a constant. Mirrors
+    /// RuboCop's `node.const_receiver?` (`receiver&.const_type?`).
+    pub fn is_const_receiver(&self, id: NodeId) -> bool {
+        self.call_receiver(id)
+            .get()
+            .is_some_and(|r| matches!(self.kind(r), NodeKind::Const { .. }))
+    }
+
+    /// `command?(name)` — a receiverless `Send` whose selector is `name`.
+    /// Mirrors RuboCop's `node.command?(name)` (`!receiver && method?(name)`).
+    /// A `Csend` always has a receiver, so it is never a command.
+    pub fn is_command(&self, id: NodeId, name: &str) -> bool {
+        matches!(*self.kind(id), NodeKind::Send { receiver, .. } if receiver.get().is_none())
+            && self.method_name(id) == Some(name)
+    }
+
+    /// `negation_method?` — a call to `!` with a receiver (`!x`, parsed as
+    /// `x.!`). Mirrors RuboCop's `node.negation_method?`
+    /// (`receiver && method_name == :!`).
+    pub fn is_negation_method(&self, id: NodeId) -> bool {
+        self.call_receiver(id).get().is_some() && self.method_name(id) == Some("!")
+    }
+
+    /// `dot?` — the call uses the `.` operator. Mirrors RuboCop's
+    /// `node.dot?` (`loc_is?(:dot, '.')`). Uses es99.6's [`LocRef::dot`],
+    /// which returns `Range::ZERO` for operator sends (`a + b`) and for
+    /// `&.` calls, so this is `false` for both — not merely "Send with a
+    /// receiver".
+    pub fn is_dot(&self, id: NodeId) -> bool {
+        let dot = self.loc(id).dot();
+        dot != Range::ZERO && self.raw_source(dot) == "."
+    }
+
+    /// `safe_navigation?` — the call uses `&.`. Mirrors RuboCop's
+    /// `node.safe_navigation?` (`loc_is?(:dot, '&.')`); Murphy models
+    /// safe-navigation as the distinct [`NodeKind::Csend`] variant, so
+    /// this is a kind check (no loc scan needed).
+    pub fn is_safe_navigation(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Csend { .. })
+    }
+
+    /// `parenthesized?` — the call's argument list is wrapped in parens.
+    /// Mirrors RuboCop's `parenthesized?` (`loc_is?(:end, ')')`) via
+    /// es99.6's [`LocRef::end`], which returns the matching `)` token or
+    /// `Range::ZERO`.
+    ///
+    /// **Limitation (inherited from es99.6's token-scan `begin`/`end`):**
+    /// a command call with a parenthesized *argument* — `foo (1)` (note
+    /// the space) — is reported `true`, whereas RuboCop's parser-provided
+    /// `loc.end` makes it `false`. Distinguishing the two needs the call's
+    /// own `(` location, which the token scan cannot recover. Tracked
+    /// against es99.6.
+    pub fn is_parenthesized(&self, id: NodeId) -> bool {
+        self.loc(id).end() != Range::ZERO
+    }
+
+    /// `prefix_not?` — a negation written as the `not` keyword (`not x`).
+    /// Mirrors RuboCop's `prefix_not?`
+    /// (`negation_method? && loc.selector.is?('not')`); the selector
+    /// range is Murphy's `loc.name`.
+    pub fn is_prefix_not(&self, id: NodeId) -> bool {
+        self.is_negation_method(id) && self.raw_source(self.loc(id).name) == "not"
+    }
+
+    /// `prefix_bang?` — a negation written as `!` (`!x`). Mirrors
+    /// RuboCop's `prefix_bang?` (`negation_method? && loc.selector.is?('!')`).
+    pub fn is_prefix_bang(&self, id: NodeId) -> bool {
+        self.is_negation_method(id) && self.raw_source(self.loc(id).name) == "!"
+    }
+
+    /// `literal?` — the node is one of RuboCop's `LITERALS`
+    /// (`TRUTHY_LITERALS + FALSEY_LITERALS`): string/xstring/dstring,
+    /// symbol/dsymbol, integer/float/rational/complex, array, hash,
+    /// regexp (+ its `regopt`), range, and `true`/`false`/`nil`.
+    ///
+    /// RuboCop distinguishes `irange`/`erange`; Murphy folds both into
+    /// [`NodeKind::RangeExpr`], which is sound here because both are
+    /// literals.
+    pub fn is_literal(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::Str(..)
+                | NodeKind::Dstr(..)
+                | NodeKind::Xstr(..)
+                | NodeKind::Int(..)
+                | NodeKind::Float(..)
+                | NodeKind::Sym(..)
+                | NodeKind::Dsym(..)
+                | NodeKind::Array(..)
+                | NodeKind::Hash(..)
+                | NodeKind::Regexp { .. }
+                | NodeKind::Regopt(..)
+                | NodeKind::True_
+                | NodeKind::False_
+                | NodeKind::Nil
+                | NodeKind::RangeExpr { .. }
+                | NodeKind::Rational(..)
+                | NodeKind::Complex(..)
+        )
+    }
+
+    /// The number of source lines the node's expression range spans —
+    /// Murphy's analog of RuboCop's `node.line_count`
+    /// (`last_line - first_line + 1`), computed from the expression
+    /// range's source text.
+    fn line_count(&self, id: NodeId) -> usize {
+        self.raw_source(self.range(id)).matches('\n').count() + 1
+    }
+
+    /// `single_line?` — the node's expression spans exactly one line.
+    pub fn is_single_line(&self, id: NodeId) -> bool {
+        self.line_count(id) == 1
+    }
+
+    /// `multiline?` — the node's expression spans more than one line.
+    pub fn is_multiline(&self, id: NodeId) -> bool {
+        self.line_count(id) > 1
+    }
+
+    // --- typed-node accessors (pure field projections) ---
+    //
+    // Each returns the relevant child of a specific node kind, or the
+    // empty value (`OptNodeId::NONE` / `&[]`) when `id` is a different
+    // kind, so a cop can call them without a prior kind check. Mirrors
+    // the accessor methods on RuboCop's typed `IfNode` / `HashNode` /
+    // `PairNode` / `BlockNode`.
+
+    /// `IfNode#condition` — the `if`/`unless`/ternary condition.
+    pub fn if_condition(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::If { cond, .. } => OptNodeId::some(cond),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `IfNode#if_branch` — the `then` branch (the body run when the
+    /// condition holds). `OptNodeId::NONE` if absent or not an `If`.
+    pub fn if_then_branch(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::If { then_, .. } => then_,
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `IfNode#else_branch` — the `else` branch. `OptNodeId::NONE` if
+    /// absent or not an `If`.
+    pub fn if_else_branch(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::If { else_, .. } => else_,
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `HashNode#pairs` — the hash's **`Pair`-type** children only.
+    /// Faithful to RuboCop's `pairs` (`each_child_node(:pair)`): a
+    /// `kwsplat` such as the `**h` in `{ **h, a: 1 }` is **excluded**
+    /// (use [`Self::children`] for every child — verified via
+    /// `murphy ast`: `{**h}` parses to `(hash (kwsplat …))`). Empty
+    /// `Vec` for a non-`Hash` node. Allocates, like [`Self::children`].
+    pub fn hash_pairs(&self, id: NodeId) -> Vec<NodeId> {
+        match *self.kind(id) {
+            NodeKind::Hash(list) => self
+                .list(list)
+                .iter()
+                .copied()
+                .filter(|&c| matches!(self.kind(c), NodeKind::Pair { .. }))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `PairNode#key`. `OptNodeId::NONE` if not a `Pair`.
+    pub fn pair_key(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Pair { key, .. } => OptNodeId::some(key),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `PairNode#value`. `OptNodeId::NONE` if not a `Pair`.
+    pub fn pair_value(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Pair { value, .. } => OptNodeId::some(value),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `BlockNode#send_node` — the call the block is attached to.
+    /// `OptNodeId::NONE` if not a `Block`.
+    pub fn block_call(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Block { call, .. } => OptNodeId::some(call),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `BlockNode#arguments` — the block's `Args` node (always present
+    /// for a block, possibly empty). `OptNodeId::NONE` if not a `Block`.
+    pub fn block_arguments(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Block { args, .. } => OptNodeId::some(args),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `BlockNode#body` — the block body. `OptNodeId::NONE` for an empty
+    /// body or a non-`Block` node.
+    pub fn block_body(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Block { body, .. } => body,
+            _ => OptNodeId::NONE,
+        }
+    }
+
     /// The file's comments, in source order.
     pub fn comments(&self) -> &'a [Comment] {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
@@ -208,53 +781,8 @@ impl<'a> Cx<'a> {
     /// chain), so this is cheaper than maintaining a side-table that
     /// every `Ast` would pay for. Cops that never call it pay nothing.
     pub fn call_operator_loc(&self, id: NodeId) -> Option<Range> {
-        let node = &self.nodes()[id.0 as usize];
-        let (receiver, name_start) = match node.kind {
-            NodeKind::Send { receiver, .. } => (receiver.get()?, node.loc.name.start),
-            NodeKind::Csend { receiver, .. } => (receiver, node.loc.name.start),
-            _ => return None,
-        };
-        let scan_start = self.nodes()[receiver.0 as usize].loc.expression.end;
-        if scan_start >= name_start {
-            return None;
-        }
-        let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
-        let window = &src[scan_start as usize..name_start as usize];
-        let mut i = 0;
-        let mut in_comment = false;
-        while i < window.len() {
-            let b = window[i];
-            if b == b'\n' {
-                in_comment = false;
-                i += 1;
-                continue;
-            }
-            if in_comment {
-                i += 1;
-                continue;
-            }
-            if b == b'#' {
-                in_comment = true;
-                i += 1;
-                continue;
-            }
-            if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
-                let start = scan_start + i as u32;
-                return Some(Range {
-                    start,
-                    end: start + 2,
-                });
-            }
-            if b == b'.' {
-                let start = scan_start + i as u32;
-                return Some(Range {
-                    start,
-                    end: start + 1,
-                });
-            }
-            i += 1;
-        }
-        None
+        let r = self.loc(id).dot();
+        if r == Range::ZERO { None } else { Some(r) }
     }
 
     /// The whole file's source text. A `NodeCop` with `KINDS = &[]`
@@ -518,6 +1046,73 @@ mod tests {
     }
 
     #[test]
+    fn loc_ref_fields_match_nodeloc() {
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let loc = cx.loc(root);
+        assert_eq!(loc.expression, cx.range(root));
+        assert_eq!(loc.name, cx.node(root).loc.name);
+    }
+
+    #[test]
+    fn loc_dot_finds_explicit_dot() {
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).dot(), Range { start: 3, end: 4 });
+    }
+
+    #[test]
+    fn loc_dot_finds_safe_navigation() {
+        let (ast, root) = build_call(
+            "foo&.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 5, end: 8 },
+            true,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).dot(), Range { start: 3, end: 5 });
+    }
+
+    #[test]
+    fn loc_dot_zero_for_no_receiver() {
+        // bare `puts 'x'` — Send with no receiver
+        let (ast, root) = build_call("puts", None, Range { start: 0, end: 4 }, false);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).dot(), Range::ZERO);
+    }
+
+    #[test]
     fn call_operator_loc_finds_explicit_dot() {
         // `foo.bar`
         let (ast, root) = build_call(
@@ -771,5 +1366,733 @@ mod tests {
 
         assert_eq!(cx.symbol_str(sym), "x");
         assert_eq!(cx.string_str(str_id), "hi");
+    }
+
+    /// Build a bare `def <name>; end` and return its `Def` node id + Ast.
+    fn build_def(source: &str, name: &str, name_range: Range) -> (Ast, murphy_ast::NodeId) {
+        let mut b = AstBuilder::new(source.to_string(), "t.rb".to_string());
+        let args = b.push(NodeKind::Args(murphy_ast::NodeList::EMPTY), name_range);
+        let sym = b.intern_symbol(name);
+        let root = b.push_named(
+            NodeKind::Def {
+                receiver: OptNodeId::NONE,
+                name: sym,
+                args,
+                body: OptNodeId::NONE,
+            },
+            Range {
+                start: 0,
+                end: source.len() as u32,
+            },
+            name_range,
+        );
+        (b.finish(root), root)
+    }
+
+    #[test]
+    fn method_name_resolves_send_csend_and_def_selectors() {
+        // Send: `a == b` — selector `==` at [2, 4).
+        let (ast, send) = build_call(
+            "a == b",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 4 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.method_name(send), Some("=="));
+
+        // Csend: `a&.foo` — selector `foo` at [3, 6).
+        let (ast, csend) = build_call(
+            "a&.foo",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 3, end: 6 },
+            true,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.method_name(csend), Some("foo"));
+
+        // Def: `def foo=(v); end` — selector `foo=`.
+        let (ast, def) = build_def("def foo=(v); end", "foo=", Range { start: 4, end: 8 });
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.method_name(def), Some("foo="));
+    }
+
+    #[test]
+    fn method_name_is_none_for_non_method_nodes() {
+        // An Int literal has no selector.
+        let mut b = AstBuilder::new("42", "t.rb".to_string());
+        let root = b.push(NodeKind::Int(42), Range { start: 0, end: 2 });
+        let ast = b.finish(root);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.method_name(root), None);
+    }
+
+    #[test]
+    fn cx_predicate_wrappers_classify_the_node_selector() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `a == b` → comparison + operator, not assignment/predicate/bang/camel.
+        let (ast, cmp) = build_call(
+            "a == b",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 4 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_comparison_method(cmp));
+        assert!(cx.is_operator_method(cmp));
+        assert!(!cx.is_assignment_method(cmp));
+        assert!(!cx.is_predicate_method(cmp));
+
+        // `def foo=(v); end` → assignment, not comparison.
+        let (ast, setter) = build_def("def foo=(v); end", "foo=", Range { start: 4, end: 8 });
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_assignment_method(setter));
+        assert!(!cx.is_comparison_method(setter));
+
+        // `a.foo?` → predicate.
+        let (ast, pred) = build_call(
+            "a.foo?",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 6 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_predicate_method(pred));
+        assert!(!cx.is_bang_method(pred));
+
+        // `Foo()` → camel-case method.
+        let (ast, camel) = build_call("Foo()", None, Range { start: 0, end: 3 }, false);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_camel_case_method(camel));
+    }
+
+    #[test]
+    fn cx_predicate_wrappers_are_false_for_non_method_nodes() {
+        let mut b = AstBuilder::new("42", "t.rb".to_string());
+        let root = b.push(NodeKind::Int(42), Range { start: 0, end: 2 });
+        let ast = b.finish(root);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_comparison_method(root));
+        assert!(!cx.is_operator_method(root));
+        assert!(!cx.is_assignment_method(root));
+        assert!(!cx.is_predicate_method(root));
+        assert!(!cx.is_bang_method(root));
+        assert!(!cx.is_camel_case_method(root));
+    }
+
+    #[test]
+    fn cx_collection_and_enumerable_wrappers_classify_the_node_selector() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `a.map` → enumerable + enumerator (in set), not a nonmutating
+        // collection-specific table.
+        let (ast, map) = build_call(
+            "a.map",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 5 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_enumerable_method(map));
+        assert!(cx.is_enumerator_method(map));
+
+        // `a.each_slice` → enumerator via the `each_` prefix rule.
+        let (ast, es) = build_call(
+            "a.each_slice",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 12 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_enumerator_method(es));
+
+        // `a.merge` → nonmutating hash method.
+        let (ast, merge) = build_call(
+            "a.merge",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 7 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_nonmutating_hash_method(merge));
+
+        // `a + b` → nonmutating binary operator (so also nonmutating operator).
+        let (ast, plus) = build_call(
+            "a + b",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 3 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_nonmutating_binary_operator_method(plus));
+        assert!(cx.is_nonmutating_operator_method(plus));
+        assert!(!cx.is_nonmutating_unary_operator_method(plus));
+    }
+
+    /// Build `<recv-kind>.<sel>(args…)` where the receiver is a chosen
+    /// `NodeKind` (self / const / a sub-send), returning the call + Ast.
+    fn build_call_with(
+        recv_kind: Option<NodeKind>,
+        selector: &str,
+        arg_ints: &[i64],
+    ) -> (Ast, murphy_ast::NodeId) {
+        let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+        let z = Range { start: 0, end: 1 };
+        let receiver = match recv_kind {
+            Some(k) => OptNodeId::some(b.push(k, z)),
+            None => OptNodeId::NONE,
+        };
+        let arg_ids: Vec<_> = arg_ints
+            .iter()
+            .map(|&n| b.push(NodeKind::Int(n), z))
+            .collect();
+        let args = b.push_list(&arg_ids);
+        let method = b.intern_symbol(selector);
+        let root = b.push(
+            NodeKind::Send {
+                receiver,
+                method,
+                args,
+            },
+            z,
+        );
+        (b.finish(root), root)
+    }
+
+    #[test]
+    fn call_receiver_and_arguments_resolve_send_parts() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `foo(1, 2)` — receiverless, two args.
+        let (ast, call) = build_call_with(None, "foo", &[1, 2]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.call_receiver(call).get().is_none());
+        let args = cx.call_arguments(call);
+        assert_eq!(args.len(), 2);
+        assert!(cx.has_call_arguments(call));
+        assert_eq!(cx.first_argument(call).get(), Some(args[0]));
+        assert_eq!(cx.last_argument(call).get(), Some(args[1]));
+
+        // `self.bar` — self receiver, no args.
+        let (ast, call) = build_call_with(Some(NodeKind::SelfExpr), "bar", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.call_receiver(call).get().is_some());
+        assert!(!cx.has_call_arguments(call));
+        assert!(cx.first_argument(call).get().is_none());
+        assert!(cx.last_argument(call).get().is_none());
+    }
+
+    #[test]
+    fn self_and_const_receiver_predicates() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `self.foo`
+        let (ast, call) = build_call_with(Some(NodeKind::SelfExpr), "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_self_receiver(call));
+        assert!(!cx.is_const_receiver(call));
+
+        // `Foo.bar` — const receiver.
+        let const_name = {
+            let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+            b.intern_symbol("Foo")
+        };
+        let (ast, call) = build_call_with(
+            Some(NodeKind::Const {
+                scope: OptNodeId::NONE,
+                name: const_name,
+            }),
+            "bar",
+            &[],
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_const_receiver(call));
+        assert!(!cx.is_self_receiver(call));
+
+        // Receiverless send is neither.
+        let (ast, call) = build_call_with(None, "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_self_receiver(call));
+        assert!(!cx.is_const_receiver(call));
+    }
+
+    #[test]
+    fn command_and_negation_predicates() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `foo` — receiverless ⇒ command?("foo") true, command?("bar") false.
+        let (ast, call) = build_call_with(None, "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_command(call, "foo"));
+        assert!(!cx.is_command(call, "bar"));
+        assert!(!cx.is_negation_method(call));
+
+        // `self.foo` — has a receiver ⇒ not a command.
+        let (ast, call) = build_call_with(Some(NodeKind::SelfExpr), "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_command(call, "foo"));
+
+        // `x.!` — receiver + `!` selector ⇒ negation_method?.
+        let (ast, call) = build_call_with(Some(NodeKind::SelfExpr), "!", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_negation_method(call));
+        // Bare `!` with no receiver is not a negation method.
+        let (ast, call) = build_call_with(None, "!", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_negation_method(call));
+    }
+
+    #[test]
+    fn literal_predicate_matches_literal_node_kinds() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // An Int literal.
+        let mut b = AstBuilder::new("42".to_string(), "t.rb".to_string());
+        let root = b.push(NodeKind::Int(42), Range { start: 0, end: 2 });
+        let ast = b.finish(root);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_literal(root));
+
+        // A `nil` literal.
+        let mut b = AstBuilder::new("nil".to_string(), "t.rb".to_string());
+        let root = b.push(NodeKind::Nil, Range { start: 0, end: 3 });
+        let ast = b.finish(root);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_literal(root));
+
+        // A Send is not a literal.
+        let (ast, call) = build_call_with(None, "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_literal(call));
+    }
+
+    #[test]
+    fn single_and_multiline_count_expression_lines() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `42` — one line.
+        let mut b = AstBuilder::new("42".to_string(), "t.rb".to_string());
+        let root = b.push(NodeKind::Int(42), Range { start: 0, end: 2 });
+        let ast = b.finish(root);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_single_line(root));
+        assert!(!cx.is_multiline(root));
+
+        // `[\n1,\n2,\n]` — the Array expression spans four lines.
+        let src = "[\n1,\n2,\n]";
+        let mut b = AstBuilder::new(src.to_string(), "t.rb".to_string());
+        let one = b.push(NodeKind::Int(1), Range { start: 2, end: 3 });
+        let two = b.push(NodeKind::Int(2), Range { start: 5, end: 6 });
+        let elems = b.push_list(&[one, two]);
+        let root = b.push(
+            NodeKind::Array(elems),
+            Range {
+                start: 0,
+                end: src.len() as u32,
+            },
+        );
+        let ast = b.finish(root);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_multiline(root));
+        assert!(!cx.is_single_line(root));
+    }
+
+    #[test]
+    fn if_node_accessors_project_branches() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let z = Range { start: 0, end: 1 };
+        let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+        let cond = b.push(NodeKind::True_, z);
+        let then_ = b.push(NodeKind::Int(1), z);
+        let else_ = b.push(NodeKind::Int(2), z);
+        let iff = b.push(
+            NodeKind::If {
+                cond,
+                then_: OptNodeId::some(then_),
+                else_: OptNodeId::some(else_),
+            },
+            z,
+        );
+        let ast = b.finish(iff);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.if_condition(iff).get(), Some(cond));
+        assert_eq!(cx.if_then_branch(iff).get(), Some(then_));
+        assert_eq!(cx.if_else_branch(iff).get(), Some(else_));
+        // Non-If node projects to NONE.
+        assert!(cx.if_condition(then_).get().is_none());
+    }
+
+    #[test]
+    fn hash_and_pair_accessors_project_children() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let z = Range { start: 0, end: 1 };
+        let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+        let key = b.intern_symbol("k");
+        let key_node = b.push(NodeKind::Sym(key), z);
+        let val_node = b.push(NodeKind::Int(7), z);
+        let pair = b.push(
+            NodeKind::Pair {
+                key: key_node,
+                value: val_node,
+            },
+            z,
+        );
+        // `{ **h, k => 7 }` — a kwsplat plus a pair. `pairs` must return
+        // only the pair (faithful to RuboCop's `each_child_node(:pair)`),
+        // excluding the kwsplat — the shape `{**h}` -> (hash (kwsplat …))
+        // confirmed via `murphy ast`.
+        let h_recv = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method: key,
+                args: murphy_ast::NodeList::EMPTY,
+            },
+            z,
+        );
+        let kwsplat = b.push(NodeKind::Kwsplat(OptNodeId::some(h_recv)), z);
+        let pairs = b.push_list(&[kwsplat, pair]);
+        let hash = b.push(NodeKind::Hash(pairs), z);
+        let ast = b.finish(hash);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.hash_pairs(hash), vec![pair]);
+        assert_eq!(cx.children(hash).len(), 2, "children includes the kwsplat");
+        assert_eq!(cx.pair_key(pair).get(), Some(key_node));
+        assert_eq!(cx.pair_value(pair).get(), Some(val_node));
+        // Non-matching kinds project empty.
+        assert!(cx.hash_pairs(pair).is_empty());
+        assert!(cx.pair_key(hash).get().is_none());
+    }
+
+    #[test]
+    fn block_accessors_project_call_args_body() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let z = Range { start: 0, end: 1 };
+        let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+        let method = b.intern_symbol("each");
+        let call = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method,
+                args: murphy_ast::NodeList::EMPTY,
+            },
+            z,
+        );
+        let args = b.push(NodeKind::Args(murphy_ast::NodeList::EMPTY), z);
+        let body = b.push(NodeKind::Int(1), z);
+        let block = b.push(
+            NodeKind::Block {
+                call,
+                args,
+                body: OptNodeId::some(body),
+            },
+            z,
+        );
+        let ast = b.finish(block);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.block_call(block).get(), Some(call));
+        assert_eq!(cx.block_arguments(block).get(), Some(args));
+        assert_eq!(cx.block_body(block).get(), Some(body));
+        // Non-Block node projects to NONE.
+        assert!(cx.block_call(body).get().is_none());
+    }
+
+    #[test]
+    fn loc_keyword_def() {
+        let ast = murphy_translate::translate("def foo; end", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        let kw = cx.loc(root).keyword();
+        assert_eq!(kw, Range { start: 0, end: 3 });
+        assert_eq!(cx.raw_source(kw), "def");
+    }
+
+    #[test]
+    fn loc_keyword_zero_for_send() {
+        // `foo.bar` — a Send node has no keyword token at expression.start.
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).keyword(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_keyword_zero_for_send_real_parse() {
+        // Real prism parse: `foo` identifier token is at expression.start
+        // but keyword() must return ZERO because Send is not keyword_bearing.
+        let ast = murphy_translate::translate("foo.bar", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).keyword(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_begin_finds_open_paren() {
+        let ast = murphy_translate::translate("foo(a, b)", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).begin(), Range { start: 3, end: 4 });
+    }
+
+    #[test]
+    fn loc_end_finds_close_paren() {
+        let ast = murphy_translate::translate("foo(a, b)", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).end(), Range { start: 8, end: 9 });
+    }
+
+    #[test]
+    fn loc_begin_zero_when_no_parens() {
+        let ast = murphy_translate::translate("foo a, b", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).begin(), Range::ZERO);
+        assert_eq!(cx.loc(root).end(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_keyword_block_if() {
+        // Block-form `if` starts with keyword: keyword() returns `if` range.
+        let ast = murphy_translate::translate("if true; end", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        let kw = cx.loc(root).keyword();
+        assert_eq!(kw, Range { start: 0, end: 2 });
+        assert_eq!(cx.raw_source(kw), "if");
+    }
+
+    #[test]
+    fn loc_keyword_zero_modifier_if() {
+        // Modifier-form `if` places keyword after body: keyword() returns ZERO.
+        let ast = murphy_translate::translate("1 if true", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).keyword(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_begin_zero_for_command_with_arg_paren() {
+        // `foo bar(baz)` — outer Send has no `(`, only inner `bar(baz)` does.
+        let ast = murphy_translate::translate("foo bar(baz)", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        // Outer `foo` call: begin()/end() must be ZERO.
+        assert_eq!(cx.loc(root).begin(), Range::ZERO);
+        assert_eq!(cx.loc(root).end(), Range::ZERO);
+    }
+
+    /// Parse `src` for real (prism → arena) and hand the root node to `f`.
+    /// Unlike the hand-built `AstBuilder` fixtures, this exercises the
+    /// actual translator, so loc-dependent predicates are verified against
+    /// the real token/selector ranges they assume — not ranges the test
+    /// planted itself.
+    fn with_parsed(src: &str, f: impl FnOnce(&Cx<'_>, murphy_ast::NodeId)) {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let ast = murphy_translate::translate(src, "t.rb");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        f(&cx, ast.root());
+    }
+
+    #[test]
+    fn dot_and_safe_navigation_on_real_parses() {
+        with_parsed("a.b", |cx, root| {
+            assert!(cx.is_dot(root), "a.b uses the dot operator");
+            assert!(!cx.is_safe_navigation(root));
+        });
+        with_parsed("a&.b", |cx, root| {
+            assert!(cx.is_safe_navigation(root), "a&.b is a csend");
+            assert!(!cx.is_dot(root), "&. is not .");
+        });
+        // Operator sends have a receiver but no dot — es99.6's dot()
+        // returns ZERO, so dot? must be false (not "Send with receiver").
+        with_parsed("a + b", |cx, root| {
+            assert!(
+                !cx.is_dot(root),
+                "a + b is an operator send, not a dot call"
+            );
+            assert!(!cx.is_safe_navigation(root));
+        });
+    }
+
+    #[test]
+    fn parenthesized_on_real_parses() {
+        with_parsed("foo(1)", |cx, root| assert!(cx.is_parenthesized(root)));
+        with_parsed("foo", |cx, root| assert!(!cx.is_parenthesized(root)));
+        with_parsed("foo()", |cx, root| assert!(cx.is_parenthesized(root)));
+        // Documented limitation: a command call with a parenthesized
+        // *argument* (`foo (1)`, note the space) is reported `true`,
+        // whereas RuboCop's parser-provided loc.end makes it `false`.
+        // Pinned here so the divergence is visible, not silent — tracked
+        // against es99.6's token-scan begin()/end().
+        with_parsed("foo (1)", |cx, root| {
+            assert!(
+                cx.is_parenthesized(root),
+                "known es99.6 token-scan limitation: command + paren-arg reads as parenthesized",
+            );
+        });
+    }
+
+    #[test]
+    fn prefix_not_and_bang_on_real_parses() {
+        with_parsed("!x", |cx, root| {
+            assert!(cx.is_negation_method(root));
+            assert!(cx.is_prefix_bang(root), "!x is the bang form");
+            assert!(!cx.is_prefix_not(root));
+        });
+        with_parsed("not x", |cx, root| {
+            assert!(cx.is_negation_method(root));
+            assert!(cx.is_prefix_not(root), "not x is the keyword form");
+            assert!(!cx.is_prefix_bang(root));
+        });
+        // A non-negation send is neither.
+        with_parsed("x.foo", |cx, root| {
+            assert!(!cx.is_negation_method(root));
+            assert!(!cx.is_prefix_not(root));
+            assert!(!cx.is_prefix_bang(root));
+        });
+    }
+
+    #[test]
+    fn method_name_delegates_through_block_nodes() {
+        // `foo.each { }` — the Block delegates to its `foo.each` call,
+        // so method_name is "each" (RuboCop parity: BlockNode is a
+        // method-dispatch node).
+        with_parsed("foo.each { }", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Block { .. }));
+            assert_eq!(cx.method_name(root), Some("each"));
+            // The predicate wrappers route through method_name, so they
+            // also see the inner call's selector.
+            assert!(cx.is_enumerable_method(root));
+        });
+        // Numbered-parameter block `foo.map { _1 }`.
+        with_parsed("foo.map { _1 }", |cx, root| {
+            assert_eq!(cx.method_name(root), Some("map"));
+        });
     }
 }

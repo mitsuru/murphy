@@ -116,7 +116,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // Detect implicit-call nodes: `loc.name == Range::ZERO` means the
     // call has no method-name token (e.g. `l.(1)` or `l\n.(1)`).
-    // `call_operator_loc` degenerates to None for these because its
+    // `loc.dot()` degenerates to `Range::ZERO` for these because its
     // scan window is empty. Mirror RuboCop's `selector_range`
     // substitution: find the first LeftParen token after the receiver
     // and use its start as the "name_start" proxy.
@@ -126,9 +126,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    let Some(dot_range) = cx.call_operator_loc(node) else {
+    let dot_range = cx.loc(node).dot();
+    if dot_range == Range::ZERO {
         return;
-    };
+    }
 
     let receiver = match *cx.kind(node) {
         NodeKind::Send {
