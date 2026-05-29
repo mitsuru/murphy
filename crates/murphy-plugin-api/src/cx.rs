@@ -176,6 +176,31 @@ impl<'a> LocRef<'a> {
         }
         Range::ZERO
     }
+
+    /// The exact source bytes of `tok`.
+    fn token_text(&self, tok: SourceToken) -> &'a [u8] {
+        &self.source[tok.range.start as usize..tok.range.end as usize]
+    }
+
+    /// The closing `end` keyword of a block-form `if`/`unless`/`while`/
+    /// `until`/`def`/`class`/… , or `Range::ZERO` for modifier-form
+    /// (`body if cond`) and ternaries, which have none. The `end` keyword
+    /// terminates the node, so it is the token ending exactly at
+    /// `expression.end`; presence is the `loc.end`-keyword signal that
+    /// `modifier_form?` (RuboCop's `loc.end.nil?`) inverts.
+    pub fn end_keyword(&self) -> Range {
+        let expr_end = self.expression.end;
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.end < expr_end);
+        if let Some(tok) = self.sorted_tokens.get(idx)
+            && tok.range.end == expr_end
+            && self.token_text(*tok) == b"end"
+        {
+            return tok.range;
+        }
+        Range::ZERO
+    }
 }
 
 impl<'a> Cx<'a> {
@@ -672,6 +697,87 @@ impl<'a> Cx<'a> {
             NodeKind::If { else_, .. } => else_,
             _ => OptNodeId::NONE,
         }
+    }
+
+    /// First token in the **gap** `[from, to)` whose source text is
+    /// exactly `text`. Prism delimits tokens, so this is an exact-token
+    /// match (`b"="` never matches the `=` in `==` or inside a string).
+    /// Callers pass a gap *between two sibling child ranges*, which is
+    /// what keeps punctuation lookups faithful: a `?`/`:`/`=` nested
+    /// deeper in a child subtree falls outside the gap and is never
+    /// matched. `Range::ZERO` if the gap is empty or holds no such token.
+    fn find_token_text_in(&self, from: u32, to: u32, text: &[u8]) -> Range {
+        if from >= to {
+            return Range::ZERO;
+        }
+        let toks = self.sorted_tokens();
+        let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
+        let idx = toks.partition_point(|t| t.range.start < from);
+        for tok in &toks[idx..] {
+            if tok.range.start >= to {
+                break;
+            }
+            if &src[tok.range.start as usize..tok.range.end as usize] == text {
+                return tok.range;
+            }
+        }
+        Range::ZERO
+    }
+
+    /// The assignment-operator `=` of an attribute-write send
+    /// (`obj.foo = x`, including the `obj.foo=(x)` spelling which prism
+    /// parses as the same attribute write) — the parser-gem
+    /// `loc.operator` analog — or `Range::ZERO`. Searched only in the gap
+    /// between the selector and the first argument (the assigned value),
+    /// so a `=` deeper inside an argument (`foo(a = 1)`) is never
+    /// mistaken for it. This is the faithful signal behind
+    /// `setter_method?` (`loc?(:operator)`), beyond the name-based
+    /// [`Self::is_assignment_method`].
+    pub fn assignment_operator_loc(&self, id: NodeId) -> Range {
+        if !matches!(
+            self.kind(id),
+            NodeKind::Send { .. } | NodeKind::Csend { .. }
+        ) {
+            return Range::ZERO;
+        }
+        let name = self.loc(id).name;
+        let from = if name != Range::ZERO {
+            name.end
+        } else {
+            self.range(id).start
+        };
+        let Some(first_arg) = self.call_arguments(id).first().copied() else {
+            return Range::ZERO;
+        };
+        self.find_token_text_in(from, self.range(first_arg).start, b"=")
+    }
+
+    /// The ternary `?` of `a ? b : c` — the `loc.question` analog — or
+    /// `Range::ZERO` for a non-ternary `if` (block-form `if`/`unless`
+    /// have `then`/newline, modifier-form has the branch before the
+    /// condition). Searched only in the gap between the condition and the
+    /// then-branch, so a `?` inside a predicate selector or sub-expression
+    /// is never matched. Presence is the faithful `IfNode#ternary?` signal.
+    pub fn ternary_question_loc(&self, id: NodeId) -> Range {
+        let (Some(cond), Some(then_)) =
+            (self.if_condition(id).get(), self.if_then_branch(id).get())
+        else {
+            return Range::ZERO;
+        };
+        self.find_token_text_in(self.range(cond).end, self.range(then_).start, b"?")
+    }
+
+    /// The ternary `:` of `a ? b : c` — the `loc.colon` analog — or
+    /// `Range::ZERO`. Searched only in the gap between the then- and
+    /// else-branches, so a `:` inside the then-branch (a hash key
+    /// `h(x: 1)`, a symbol, `::`) is never matched.
+    pub fn ternary_colon_loc(&self, id: NodeId) -> Range {
+        let (Some(then_), Some(else_)) =
+            (self.if_then_branch(id).get(), self.if_else_branch(id).get())
+        else {
+            return Range::ZERO;
+        };
+        self.find_token_text_in(self.range(then_).end, self.range(else_).start, b":")
     }
 
     /// `HashNode#pairs` — the hash's **`Pair`-type** children only.
@@ -2093,6 +2199,79 @@ mod tests {
         // Numbered-parameter block `foo.map { _1 }`.
         with_parsed("foo.map { _1 }", |cx, root| {
             assert_eq!(cx.method_name(root), Some("map"));
+        });
+    }
+
+    #[test]
+    fn assignment_operator_loc_is_bounded_to_the_selector_value_gap() {
+        // Attribute write: `=` sits between selector and value.
+        with_parsed("self.foo = bar", |cx, root| {
+            let op = cx.assignment_operator_loc(root);
+            assert_eq!(cx.raw_source(op), "=");
+        });
+        // `obj.foo=(x)` is parsed as the same attribute write — operator present.
+        with_parsed("obj.foo=(x)", |cx, root| {
+            assert_eq!(cx.raw_source(cx.assignment_operator_loc(root)), "=");
+        });
+        // Contamination guard: a `=` *inside an argument* is NOT the
+        // call's operator (this is the case the unbounded scan got wrong).
+        with_parsed("foo(a = 1)", |cx, root| {
+            assert_eq!(
+                cx.assignment_operator_loc(root),
+                Range::ZERO,
+                "the `=` inside the argument is not foo's operator",
+            );
+        });
+        // A comparison is not an attribute write.
+        with_parsed("a == b", |cx, root| {
+            assert_eq!(cx.assignment_operator_loc(root), Range::ZERO);
+        });
+    }
+
+    #[test]
+    fn ternary_question_and_colon_are_bounded_between_branches() {
+        with_parsed("a ? b : c", |cx, root| {
+            assert_eq!(cx.raw_source(cx.ternary_question_loc(root)), "?");
+            assert_eq!(cx.raw_source(cx.ternary_colon_loc(root)), ":");
+        });
+        // Contamination guard: a hash colon inside the then-branch is NOT
+        // the ternary colon (the case the unbounded scan got wrong).
+        with_parsed("a ? foo(x: 1) : c", |cx, root| {
+            let colon = cx.ternary_colon_loc(root);
+            assert_ne!(colon, Range::ZERO);
+            // The matched colon is the ternary one — it sits after the
+            // then-branch `foo(x: 1)`, not the `x:` hash colon within it.
+            let then_end = cx.range(cx.if_then_branch(root).get().unwrap()).end;
+            assert!(
+                colon.start >= then_end,
+                "matched the ternary colon, not the hash key colon"
+            );
+        });
+        // Block-form and modifier `if` are not ternaries.
+        with_parsed("if a then b end", |cx, root| {
+            assert_eq!(cx.ternary_question_loc(root), Range::ZERO);
+            assert_eq!(cx.ternary_colon_loc(root), Range::ZERO);
+        });
+        with_parsed("b if a", |cx, root| {
+            assert_eq!(cx.ternary_question_loc(root), Range::ZERO);
+        });
+    }
+
+    #[test]
+    fn loc_end_keyword_marks_block_form_not_modifier() {
+        with_parsed("if a then b end", |cx, root| {
+            assert_eq!(cx.raw_source(cx.loc(root).end_keyword()), "end");
+        });
+        with_parsed("while a do b end", |cx, root| {
+            assert_eq!(cx.raw_source(cx.loc(root).end_keyword()), "end");
+        });
+        // Modifier form has no `end`.
+        with_parsed("b if a", |cx, root| {
+            assert_eq!(cx.loc(root).end_keyword(), Range::ZERO);
+        });
+        // Ternary has no `end`.
+        with_parsed("a ? b : c", |cx, root| {
+            assert_eq!(cx.loc(root).end_keyword(), Range::ZERO);
         });
     }
 }
