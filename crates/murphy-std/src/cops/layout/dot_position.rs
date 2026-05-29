@@ -9,7 +9,8 @@
 //! gap_issues:
 //!   - murphy-6udc
 //! notes: >
-//!   Known gap remains for selector-less implicit call shapes.
+//!   All RuboCop spec cases covered including implicit-call nodes with
+//!   no method name (l.\n(1) / l\n.(1)).
 //! ```
 //!
 //! multi-line method chains. Mirrors RuboCop's same-named cop;
@@ -37,21 +38,21 @@
 //! to compute the *effective* receiver-end line, matching RuboCop's
 //! `last_heredoc_line` correction.
 //!
+//! For implicit-call nodes (`l.(1)`) whose `loc.name == Range::ZERO`,
+//! `call_operator_loc` degenerates to an empty scan window. Murphy
+//! mirrors RuboCop's `selector_range` substitution: it finds the first
+//! `SourceTokenKind::LeftParen` token after the receiver and scans
+//! between the receiver end and that paren for the dot.
+//!
 //! ## Autocorrect
 //!
 //! - Remove the dot from its current position. If the dot is the only
 //!   non-whitespace on its line, remove the entire line including the
 //!   trailing newline; otherwise remove just the operator bytes.
 //! - Insert the dot text (`.` or `&.`) at the target site: before the
-//!   selector for `leading`, after the receiver for `trailing`.
-//!
-//! ## Known v1 limitations
-//!
-//! - **Implicit `.()` calls.** `l.\n(1)` — calls with no selector
-//!   range — are skipped because `call_operator_loc` returns `None`
-//!   when `loc.name == Range::ZERO`. RuboCop substitutes `loc.begin`
-//!   (the paren) as the selector in this case; that path is not
-//!   wired in Murphy yet (follow-up `murphy-q09t`).
+//!   opening paren for `leading` (implicit-call), before the
+//!   selector for `leading` (named selector), or after the receiver
+//!   for `trailing`.
 
 use murphy_plugin_api::{
     CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, SourceTokenKind, cop,
@@ -112,6 +113,19 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // falls back to the `Default` (`leading`) when no override is set.
     let opts = cx.options_or_default::<DotPositionOptions>();
     let style = opts.enforced_style;
+
+    // Detect implicit-call nodes: `loc.name == Range::ZERO` means the
+    // call has no method-name token (e.g. `l.(1)` or `l\n.(1)`).
+    // `call_operator_loc` degenerates to None for these because its
+    // scan window is empty. Mirror RuboCop's `selector_range`
+    // substitution: find the first LeftParen token after the receiver
+    // and use its start as the "name_start" proxy.
+    let name_loc = cx.loc(node).name;
+    if name_loc == Range::ZERO {
+        check_implicit_call(node, cx, style);
+        return;
+    }
+
     let Some(dot_range) = cx.call_operator_loc(node) else {
         return;
     };
@@ -139,7 +153,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // Intervening blank or comment line? Use the effective receiver
     // end (heredoc-aware) plus the dot end as the lower bound, then
-    // count newlines through to the selector. ≥2 newlines means at
+    // count newlines through to the selector. >=2 newlines means at
     // least one entirely intermediate line — skip (matches RuboCop's
     // `line_between?` check).
     let receiver_effective_end = effective_receiver_end(cx, receiver_naive_end, name_start);
@@ -150,7 +164,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     // Is the dot sitting on the selector's line? (No newlines between
-    // dot end and selector start ⇒ same line.)
+    // dot end and selector start => same line.)
     let dot_on_selector_line = !contains_newline(slice_or_empty(source, dot_range.end, name_start));
 
     let offense_for_this_style = match style {
@@ -187,13 +201,155 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     );
 }
 
+/// Handle implicit-call nodes (`l.(1)` / `l\n.(1)`) where `loc.name ==
+/// Range::ZERO`. RuboCop substitutes `node.loc.begin` (the opening
+/// parenthesis) as the selector range in this case. We locate the first
+/// `SourceTokenKind::LeftParen` token whose start is >= receiver_end and
+/// < node_end, then scan between receiver_end and paren_start for the dot,
+/// and use paren_start as the name_start proxy for all subsequent checks.
+fn check_implicit_call(node: NodeId, cx: &Cx<'_>, style: DotPositionStyle) {
+    let receiver = match *cx.kind(node) {
+        NodeKind::Send {
+            receiver: OptNodeId(idx),
+            ..
+        } if idx != u32::MAX => NodeId(idx),
+        NodeKind::Csend { receiver, .. } => receiver,
+        _ => return,
+    };
+
+    let source = cx.source();
+    let receiver_naive_end = cx.range(receiver).end;
+    let node_end = cx.range(node).end;
+
+    // Find the first LeftParen token after the receiver end.
+    // sorted_tokens is sorted by start position, so binary_search_by_key
+    // lets us jump directly to receiver_naive_end instead of scanning from 0.
+    let tokens = cx.sorted_tokens();
+    let start_idx = tokens
+        .binary_search_by_key(&receiver_naive_end, |tok| tok.range.start)
+        .unwrap_or_else(|idx| idx);
+    let paren_start = tokens[start_idx..]
+        .iter()
+        .take_while(|tok| tok.range.start < node_end)
+        .find(|tok| tok.kind == SourceTokenKind::LeftParen)
+        .map(|tok| tok.range.start);
+    let Some(paren_start) = paren_start else {
+        return;
+    };
+
+    // Scan receiver_naive_end..paren_start for the dot operator.
+    let dot_range = scan_dot(source, receiver_naive_end, paren_start);
+    let Some(dot_range) = dot_range else {
+        return;
+    };
+
+    // Single-line call: no newline between receiver end and paren start.
+    let receiver_to_paren = slice_or_empty(source, receiver_naive_end, paren_start);
+    if !contains_newline(receiver_to_paren) {
+        return;
+    }
+
+    // Intervening blank or comment line check (same as named-selector path).
+    let receiver_effective_end = effective_receiver_end(cx, receiver_naive_end, paren_start);
+    let pivot = receiver_effective_end.max(dot_range.end);
+    let pivot_to_paren = slice_or_empty(source, pivot, paren_start);
+    if count_newlines(pivot_to_paren) >= 2 {
+        return;
+    }
+
+    // Is the dot on the paren's line?
+    let dot_on_paren_line = !contains_newline(slice_or_empty(source, dot_range.end, paren_start));
+
+    let offense_for_this_style = match style {
+        DotPositionStyle::Leading => !dot_on_paren_line,
+        DotPositionStyle::Trailing => dot_on_paren_line,
+    };
+    if !offense_for_this_style {
+        return;
+    }
+
+    let dot_text = cx.raw_source(dot_range);
+    let message = match style {
+        DotPositionStyle::Leading => {
+            format!("Place the {dot_text} on the next line, together with the method name.")
+        }
+        DotPositionStyle::Trailing => format!(
+            "Place the {dot_text} on the previous line, together with the method call receiver."
+        ),
+    };
+    cx.emit_offense(dot_range, &message, None);
+
+    let removal = removal_range(source, dot_range);
+    cx.emit_edit(removal, "");
+    // For Leading: insert dot before the opening paren (RuboCop's
+    // `selector_range.begin_pos` substitute). For Trailing: insert
+    // after receiver end (same as the named-selector path).
+    let insert_at = match style {
+        DotPositionStyle::Leading => paren_start,
+        DotPositionStyle::Trailing => receiver_naive_end,
+    };
+    cx.emit_edit(
+        Range {
+            start: insert_at,
+            end: insert_at,
+        },
+        dot_text,
+    );
+}
+
+/// Scan `source[start..end]` for a `.` or `&.` operator, skipping
+/// `#`-to-newline line comments. Returns the byte range of the dot if
+/// found, otherwise `None`.
+fn scan_dot(source: &str, start: u32, end: u32) -> Option<Range> {
+    if start >= end {
+        return None;
+    }
+    let src = source.as_bytes();
+    let window = src.get(start as usize..end as usize)?;
+    let mut i = 0;
+    let mut in_comment = false;
+    while i < window.len() {
+        let b = window[i];
+        if b == b'\n' {
+            in_comment = false;
+            i += 1;
+            continue;
+        }
+        if in_comment {
+            i += 1;
+            continue;
+        }
+        if b == b'#' {
+            in_comment = true;
+            i += 1;
+            continue;
+        }
+        if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
+            let dot_start = start + i as u32;
+            return Some(Range {
+                start: dot_start,
+                end: dot_start + 2,
+            });
+        }
+        if b == b'.' {
+            let dot_start = start + i as u32;
+            return Some(Range {
+                start: dot_start,
+                end: dot_start + 1,
+            });
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Effective end of the receiver for line-distance math. When the
 /// receiver contains a heredoc (str literal whose source range covers
 /// only the opener), Prism reports the body and closer through
 /// `SourceTokenKind::HeredocEnd` tokens that fall between the
 /// receiver-start and the selector-start. We take the last such
 /// `HeredocEnd`'s end as the effective receiver-end line so the
-/// "intervening blank line" skip does not silently suppress offenses
+/// "intervening blank" skip does not silently suppress offenses
 /// on heredoc-bearing chains.
 fn effective_receiver_end(cx: &Cx<'_>, naive_end: u32, name_start: u32) -> u32 {
     let mut effective = naive_end;
@@ -452,7 +608,7 @@ mod tests {
 
     #[test]
     fn flags_dynamic_heredoc_receiver() {
-        // Heredoc with `#{…}` interpolation: the str node carries
+        // Heredoc with `#{...}` interpolation: the str node carries
         // interpolation parts but the `HeredocEnd` token still spans the
         // closer line, so `effective_receiver_end` lifts past the body.
         test::<DotPosition>().expect_correction(
@@ -488,17 +644,39 @@ mod tests {
     }
 
     #[test]
-    fn implicit_call_without_method_name_is_v1_gap() {
-        // RuboCop's spec expects an offense on `l.\n(1)` (the operator
-        // is the `.` between `l` and the implicit call's parens). Murphy
-        // v1 skips this because `call_operator_loc` requires a
-        // non-empty selector range — see the file's "Known v1
-        // limitations" note. Locked in so any future fix flips this
-        // test alongside the doc update.
-        test::<DotPosition>().expect_no_offenses(indoc! {"
-            l.
-            (1)
-        "});
+    fn flags_implicit_call_leading_style_trailing_dot() {
+        // RuboCop spec: `l.\n(1)` — dot trails the receiver line, offense
+        // expected on the `.` under leading style. Previously a v1 gap.
+        test::<DotPosition>().expect_correction(
+            indoc! {"
+                l.
+                 ^ Place the . on the next line, together with the method name.
+                (1)
+            "},
+            indoc! {"
+                l
+                .(1)
+            "},
+        );
+    }
+
+    #[test]
+    fn flags_implicit_call_trailing_style_leading_dot() {
+        // RuboCop spec: `l\n.(1)` — dot leads the next line, offense
+        // expected on the `.` under trailing style.
+        test::<DotPosition>()
+            .with_options(&trailing())
+            .expect_correction(
+                indoc! {"
+                    l
+                    .(1)
+                    ^ Place the . on the previous line, together with the method call receiver.
+                "},
+                indoc! {"
+                    l.
+                    (1)
+                "},
+            );
     }
 
     #[test]
