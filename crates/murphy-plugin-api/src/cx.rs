@@ -136,10 +136,11 @@ impl<'a> LocRef<'a> {
         let idx = self
             .sorted_tokens
             .partition_point(|t| t.range.start < search_from);
-        if let Some(tok) = self.sorted_tokens.get(idx) {
-            if tok.range.start < self.expression.end && tok.kind == SourceTokenKind::LeftParen {
-                return tok.range;
-            }
+        if let Some(tok) = self.sorted_tokens.get(idx)
+            && tok.range.start < self.expression.end
+            && tok.kind == SourceTokenKind::LeftParen
+        {
+            return tok.range;
         }
         Range::ZERO
     }
@@ -534,6 +535,53 @@ impl<'a> Cx<'a> {
     /// (`receiver && method_name == :!`).
     pub fn is_negation_method(&self, id: NodeId) -> bool {
         self.call_receiver(id).get().is_some() && self.method_name(id) == Some("!")
+    }
+
+    /// `dot?` — the call uses the `.` operator. Mirrors RuboCop's
+    /// `node.dot?` (`loc_is?(:dot, '.')`). Uses es99.6's [`LocRef::dot`],
+    /// which returns `Range::ZERO` for operator sends (`a + b`) and for
+    /// `&.` calls, so this is `false` for both — not merely "Send with a
+    /// receiver".
+    pub fn is_dot(&self, id: NodeId) -> bool {
+        let dot = self.loc(id).dot();
+        dot != Range::ZERO && self.raw_source(dot) == "."
+    }
+
+    /// `safe_navigation?` — the call uses `&.`. Mirrors RuboCop's
+    /// `node.safe_navigation?` (`loc_is?(:dot, '&.')`); Murphy models
+    /// safe-navigation as the distinct [`NodeKind::Csend`] variant, so
+    /// this is a kind check (no loc scan needed).
+    pub fn is_safe_navigation(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Csend { .. })
+    }
+
+    /// `parenthesized?` — the call's argument list is wrapped in parens.
+    /// Mirrors RuboCop's `parenthesized?` (`loc_is?(:end, ')')`) via
+    /// es99.6's [`LocRef::end`], which returns the matching `)` token or
+    /// `Range::ZERO`.
+    ///
+    /// **Limitation (inherited from es99.6's token-scan `begin`/`end`):**
+    /// a command call with a parenthesized *argument* — `foo (1)` (note
+    /// the space) — is reported `true`, whereas RuboCop's parser-provided
+    /// `loc.end` makes it `false`. Distinguishing the two needs the call's
+    /// own `(` location, which the token scan cannot recover. Tracked
+    /// against es99.6.
+    pub fn is_parenthesized(&self, id: NodeId) -> bool {
+        self.loc(id).end() != Range::ZERO
+    }
+
+    /// `prefix_not?` — a negation written as the `not` keyword (`not x`).
+    /// Mirrors RuboCop's `prefix_not?`
+    /// (`negation_method? && loc.selector.is?('not')`); the selector
+    /// range is Murphy's `loc.name`.
+    pub fn is_prefix_not(&self, id: NodeId) -> bool {
+        self.is_negation_method(id) && self.raw_source(self.loc(id).name) == "not"
+    }
+
+    /// `prefix_bang?` — a negation written as `!` (`!x`). Mirrors
+    /// RuboCop's `prefix_bang?` (`negation_method? && loc.selector.is?('!')`).
+    pub fn is_prefix_bang(&self, id: NodeId) -> bool {
+        self.is_negation_method(id) && self.raw_source(self.loc(id).name) == "!"
     }
 
     /// `literal?` — the node is one of RuboCop's `LITERALS`
@@ -1946,5 +1994,80 @@ mod tests {
         // Outer `foo` call: begin()/end() must be ZERO.
         assert_eq!(cx.loc(root).begin(), Range::ZERO);
         assert_eq!(cx.loc(root).end(), Range::ZERO);
+    }
+
+    /// Parse `src` for real (prism → arena) and hand the root node to `f`.
+    /// Unlike the hand-built `AstBuilder` fixtures, this exercises the
+    /// actual translator, so loc-dependent predicates are verified against
+    /// the real token/selector ranges they assume — not ranges the test
+    /// planted itself.
+    fn with_parsed(src: &str, f: impl FnOnce(&Cx<'_>, murphy_ast::NodeId)) {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let ast = murphy_translate::translate(src, "t.rb");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        f(&cx, ast.root());
+    }
+
+    #[test]
+    fn dot_and_safe_navigation_on_real_parses() {
+        with_parsed("a.b", |cx, root| {
+            assert!(cx.is_dot(root), "a.b uses the dot operator");
+            assert!(!cx.is_safe_navigation(root));
+        });
+        with_parsed("a&.b", |cx, root| {
+            assert!(cx.is_safe_navigation(root), "a&.b is a csend");
+            assert!(!cx.is_dot(root), "&. is not .");
+        });
+        // Operator sends have a receiver but no dot — es99.6's dot()
+        // returns ZERO, so dot? must be false (not "Send with receiver").
+        with_parsed("a + b", |cx, root| {
+            assert!(
+                !cx.is_dot(root),
+                "a + b is an operator send, not a dot call"
+            );
+            assert!(!cx.is_safe_navigation(root));
+        });
+    }
+
+    #[test]
+    fn parenthesized_on_real_parses() {
+        with_parsed("foo(1)", |cx, root| assert!(cx.is_parenthesized(root)));
+        with_parsed("foo", |cx, root| assert!(!cx.is_parenthesized(root)));
+        with_parsed("foo()", |cx, root| assert!(cx.is_parenthesized(root)));
+        // Documented limitation: a command call with a parenthesized
+        // *argument* (`foo (1)`, note the space) is reported `true`,
+        // whereas RuboCop's parser-provided loc.end makes it `false`.
+        // Pinned here so the divergence is visible, not silent — tracked
+        // against es99.6's token-scan begin()/end().
+        with_parsed("foo (1)", |cx, root| {
+            assert!(
+                cx.is_parenthesized(root),
+                "known es99.6 token-scan limitation: command + paren-arg reads as parenthesized",
+            );
+        });
+    }
+
+    #[test]
+    fn prefix_not_and_bang_on_real_parses() {
+        with_parsed("!x", |cx, root| {
+            assert!(cx.is_negation_method(root));
+            assert!(cx.is_prefix_bang(root), "!x is the bang form");
+            assert!(!cx.is_prefix_not(root));
+        });
+        with_parsed("not x", |cx, root| {
+            assert!(cx.is_negation_method(root));
+            assert!(cx.is_prefix_not(root), "not x is the keyword form");
+            assert!(!cx.is_prefix_bang(root));
+        });
+        // A non-negation send is neither.
+        with_parsed("x.foo", |cx, root| {
+            assert!(!cx.is_negation_method(root));
+            assert!(!cx.is_prefix_not(root));
+            assert!(!cx.is_prefix_bang(root));
+        });
     }
 }
