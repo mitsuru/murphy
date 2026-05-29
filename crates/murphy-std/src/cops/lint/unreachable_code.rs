@@ -112,16 +112,24 @@ fn is_inside_instance_eval(node: NodeId, cx: &Cx<'_>) -> bool {
         let kind = cx.kind(ancestor);
         match kind {
             NodeKind::Block { call, .. } | NodeKind::Numblock { send: call, .. } => {
-                if let NodeKind::Send { method, .. } = *cx.kind(*call)
-                    && cx.symbol_str(method) == "instance_eval"
-                {
+                let is_ie = match cx.kind(*call) {
+                    NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => {
+                        cx.symbol_str(*method) == "instance_eval"
+                    }
+                    _ => false,
+                };
+                if is_ie {
                     return true;
                 }
             }
             NodeKind::Itblock { send, .. } => {
-                if let NodeKind::Send { method, .. } = *cx.kind(*send)
-                    && cx.symbol_str(method) == "instance_eval"
-                {
+                let is_ie = match cx.kind(*send) {
+                    NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => {
+                        cx.symbol_str(*method) == "instance_eval"
+                    }
+                    _ => false,
+                };
+                if is_ie {
                     return true;
                 }
             }
@@ -160,7 +168,7 @@ fn is_flow_terminator(
             // Receiver-less call to a redefinable flow method.
             if *receiver == OptNodeId::NONE && REDEFINABLE_FLOW_METHODS.contains(&method_str) {
                 // Suppress if the method was redefined as a sibling def.
-                if redefined.iter().any(|s| cx.symbol_str(*s) == method_str) {
+                if redefined.contains(method) {
                     return false;
                 }
                 // Suppress if inside an instance_eval block (unknown self).
@@ -175,7 +183,11 @@ fn is_flow_terminator(
             if let Some(recv_id) = receiver.get() {
                 let is_kernel = match cx.kind(recv_id) {
                     NodeKind::Const { scope, name } => {
-                        scope.get().is_none() && cx.symbol_str(*name) == "Kernel"
+                        let scope_is_root = match scope.get() {
+                            None => true,
+                            Some(sid) => matches!(*cx.kind(sid), NodeKind::Cbase),
+                        };
+                        scope_is_root && cx.symbol_str(*name) == "Kernel"
                     }
                     NodeKind::Cbase => true,
                     _ => false,
