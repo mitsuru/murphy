@@ -226,12 +226,8 @@ impl<'a> Cx<'a> {
     pub fn loc(&self, id: NodeId) -> LocRef<'a> {
         let node = &self.nodes()[id.0 as usize];
         let receiver_end = match node.kind {
-            NodeKind::Send { receiver, .. } => receiver
-                .get()
-                .map(|r| self.nodes()[r.0 as usize].loc.expression.end),
-            NodeKind::Csend { receiver, .. } => {
-                Some(self.nodes()[receiver.0 as usize].loc.expression.end)
-            }
+            NodeKind::Send { receiver, .. } => receiver.get().map(|r| self.range(r).end),
+            NodeKind::Csend { receiver, .. } => Some(self.range(receiver).end),
             _ => None,
         };
         let src: &'a [u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
