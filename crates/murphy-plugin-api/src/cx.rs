@@ -3,7 +3,8 @@
 use std::marker::PhantomData;
 
 use murphy_ast::{
-    AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken, collect_children,
+    AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind,
+    collect_children,
 };
 
 use crate::abi::CxRaw;
@@ -105,6 +106,36 @@ impl<'a> LocRef<'a> {
             return tok.range;
         }
         Range::ZERO
+    }
+
+    /// The opening-paren `(` range within this node's expression, or
+    /// `Range::ZERO` if none. Covers only `(` — not `[`, `{`, or `do`.
+    pub fn begin(&self) -> Range {
+        let (start, end) = (self.expression.start, self.expression.end);
+        let idx = self.sorted_tokens.partition_point(|t| t.range.start < start);
+        for tok in &self.sorted_tokens[idx..] {
+            if tok.range.start >= end { break; }
+            if tok.kind == SourceTokenKind::LeftParen {
+                return tok.range;
+            }
+        }
+        Range::ZERO
+    }
+
+    /// The closing-paren `)` range within this node's expression, or
+    /// `Range::ZERO` if none. Returns the *last* `)` in the range (correct
+    /// for nested calls like `foo(bar(x))`).
+    pub fn end(&self) -> Range {
+        let (start, end) = (self.expression.start, self.expression.end);
+        let idx = self.sorted_tokens.partition_point(|t| t.range.start < start);
+        let mut result = Range::ZERO;
+        for tok in &self.sorted_tokens[idx..] {
+            if tok.range.start >= end { break; }
+            if tok.kind == SourceTokenKind::RightParen {
+                result = tok.range;
+            }
+        }
+        result
     }
 }
 
@@ -1747,5 +1778,45 @@ mod tests {
         let raw = cx_raw_for(&ast, &fns);
         let cx = unsafe { Cx::from_raw(&raw) };
         assert_eq!(cx.loc(root).keyword(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_begin_finds_open_paren() {
+        let ast = murphy_translate::translate("foo(a, b)", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).begin(), Range { start: 3, end: 4 });
+    }
+
+    #[test]
+    fn loc_end_finds_close_paren() {
+        let ast = murphy_translate::translate("foo(a, b)", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).end(), Range { start: 8, end: 9 });
+    }
+
+    #[test]
+    fn loc_begin_zero_when_no_parens() {
+        let ast = murphy_translate::translate("foo a, b", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).begin(), Range::ZERO);
+        assert_eq!(cx.loc(root).end(), Range::ZERO);
     }
 }
