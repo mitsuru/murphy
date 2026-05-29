@@ -230,6 +230,7 @@ fn parse_plugins(value: yaml_rust2::Yaml) -> Result<Vec<PluginConfig>, String> {
     match value {
         Yaml::String(s) => Ok(vec![PluginConfig::Name(s)]),
         Yaml::Array(arr) => arr.into_iter().map(parse_plugin_entry).collect(),
+        Yaml::Null => Ok(vec![]),
         _ => Err("`plugins:` must be a sequence or string".to_string()),
     }
 }
@@ -328,7 +329,9 @@ fn yaml_to_json(yaml: yaml_rust2::Yaml) -> Option<serde_json::Value> {
                     Yaml::Real(s) => Some(s),
                     _ => None,
                 };
-                if let Some(key) = key && let Some(val) = yaml_to_json(v) {
+                if let Some(key) = key
+                    && let Some(val) = yaml_to_json(v)
+                {
                     map.insert(key, val);
                 }
             }
