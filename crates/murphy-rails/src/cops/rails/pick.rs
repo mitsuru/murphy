@@ -9,7 +9,9 @@
 //! gap_issues:
 //!   - murphy-gu5d
 //! notes: >
-//!   Known gaps remain around safe navigation, target Rails version behavior, autocorrect, and message parity.
+//!   csend (safe-navigation) outer/inner shapes and dynamic offense message
+//!   now match RuboCop. Remaining gap: target Rails version gating (6.0
+//!   minimum) is adr-deferred (murphy-gu5d).
 //! ```
 //!
 //! Rails 6+ `pick(:col)` shorthand. `pick` materialises only the first
@@ -18,10 +20,11 @@
 //! discards everything but the first row — a needless round-trip and
 //! allocation in any non-trivial table.
 //!
-//! ## Matched shape (Send node)
+//! ## Matched shapes (Send and Csend nodes)
 //!
-//! Outer `Send(receiver=Some(inner), method="first", args=[])`, where
-//! `inner` is itself `Send(receiver=_, method="pluck", args=[_, ...])`.
+//! Outer `Send`/`Csend`(receiver=Some(inner), method="first", args=[])`,
+//! where `inner` is itself `Send`/`Csend`(receiver=_, method="pluck",
+//! args=[_, ...])`.
 //!
 //! - **outer method == `first`** — the terminator we care about.
 //!   `.last`, `.second`, etc. are intentionally out of scope (upstream
@@ -29,16 +32,18 @@
 //! - **outer args empty** — `pluck(:id).first(5)` carries a limit
 //!   argument and is **not** rewritable to `pick(:id)` (pick has no
 //!   multi-row form), so it's excluded.
-//! - **outer receiver is a `pluck` Send with ≥1 argument** —
+//! - **outer receiver is a `pluck` Send/Csend with ≥1 argument** —
 //!   `pluck.first` (zero args) is excluded as a degenerate /
 //!   non-equivalent form. Rails 6+ `pick(*columns)` is variadic, so
 //!   `pluck(:id, :name).first` (multi-column) **does** match
 //!   (roborev review feedback on murphy-cy1).
-//! - **inner Send's receiver shape is unconstrained** — a const
+//! - **inner Send/Csend's receiver shape is unconstrained** — a const
 //!   (`Post.pluck(:id).first`), a chain
 //!   (`User.where(active: true).pluck(:name).first`), a local
-//!   (`posts.pluck(:title).first`) all match. Mirrors upstream
-//!   RuboCop-rails which doesn't gate on the receiver of `pluck`.
+//!   (`posts.pluck(:title).first`) all match. Safe-navigation forms
+//!   (`x.pluck(:a)&.first`, `x&.pluck(:a)&.first`) also match.
+//!   Mirrors upstream RuboCop-rails which doesn't gate on the receiver
+//!   of `pluck`.
 //! - **inner arg's content is unconstrained** — `:id`, a string, a
 //!   send, anything; we only care about the arity. Mirrors upstream.
 //!
@@ -49,12 +54,30 @@
 //!
 //! ## Implementation
 //!
-//! Expressed declaratively with [`def_node_matcher!`] (RuboCop NodePattern
-//! grammar). `_ ...` in the inner Send's argument list means "one
-//! wildcard followed by zero-or-more rest" — i.e. ≥1 arg — which
-//! rules out the zero-arg `pluck.first` shape. Trailing argument
-//! placeholders are omitted on the outer Send (it must take exactly
-//! zero args, ruling out `.first(5)`).
+//! Four [`def_node_matcher!`] patterns cover the four outer/inner
+//! Send/Csend combinations:
+//!
+//! - `is_pluck_first_send`: outer Send + inner Send (original shape).
+//! - `is_pluck_first_send_csend_inner`: outer Send + inner Csend
+//!   (`x&.pluck(:a).first`).
+//! - `is_pluck_first_csend_outer`: outer Csend + inner Send
+//!   (`x.pluck(:a)&.first`).
+//! - `is_pluck_first_csend_both`: outer Csend + inner Csend
+//!   (`x&.pluck(:a)&.first`).
+//!
+//! `_ ...` in the inner node's argument list means "one wildcard
+//! followed by zero-or-more rest" — i.e. ≥1 arg — which rules out the
+//! zero-arg `pluck.first` shape. Trailing argument placeholders are
+//! omitted on the outer node (it must take exactly zero args, ruling
+//! out `.first(5)`).
+//!
+//! ## Offense message
+//!
+//! The message mirrors RuboCop's format:
+//! `Prefer \`pick(%<args>s)\` over \`%<current>s\`.`
+//! where `args` is the joined raw source of the pluck arguments and
+//! `current` is the source from the pluck selector start to the first
+//! selector end (e.g. `pluck(:a)&.first`, not `x.pluck(:a)&.first`).
 //!
 //! ## No autocorrect
 //!
@@ -62,13 +85,46 @@
 //! Rails 6+, but v1 ships as detect-only; ADR 0006 requires a deliberate
 //! fix block per cop. Tracked as a follow-up.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
 
-// RuboCop NodePattern equivalent: `(send (send _ :pluck _ ...) :first)`.
-// - Outer: receiver = inner Send, method `:first`, exactly 0 args.
-// - Inner: receiver `_` (unconstrained), method `:pluck`, ≥1 arg
-//   (`_ ...` = one wildcard + rest, excludes zero-arg `pluck.first`).
-def_node_matcher!(is_pluck_first, "(send (send _ :pluck _ ...) :first)");
+// --- node-pattern matchers --------------------------------------------------
+//
+// RuboCop uses a single `(call ...)` wildcard that matches both `send` and
+// `csend`. Murphy has no `call` alias, so we need four separate matchers
+// to cover all four outer/inner combinations.
+//
+// Pattern grammar: `_ ...` = one wildcard + rest ≥0 → arity ≥1 (excludes
+// zero-arg `pluck.first`). No trailing placeholders on the outer node
+// (outer must have exactly zero args, ruling out `.first(5)`).
+
+// Outer send, inner send: `Post.pluck(:id).first`
+def_node_matcher!(is_pluck_first_send, "(send (send _ :pluck _ ...) :first)");
+
+// Outer send, inner csend: `x&.pluck(:a).first`
+def_node_matcher!(
+    is_pluck_first_send_csend_inner,
+    "(send (csend _ :pluck _ ...) :first)"
+);
+
+// Outer csend, inner send: `x.pluck(:a)&.first`
+def_node_matcher!(
+    is_pluck_first_csend_outer,
+    "(csend (send _ :pluck _ ...) :first)"
+);
+
+// Outer csend, inner csend: `x&.pluck(:a)&.first`
+def_node_matcher!(
+    is_pluck_first_csend_both,
+    "(csend (csend _ :pluck _ ...) :first)"
+);
+
+/// Returns true if `node` matches any of the four pluck-first patterns.
+fn is_any_pluck_first(node: NodeId, cx: &Cx<'_>) -> bool {
+    is_pluck_first_send(node, cx)
+        || is_pluck_first_send_csend_inner(node, cx)
+        || is_pluck_first_csend_outer(node, cx)
+        || is_pluck_first_csend_both(node, cx)
+}
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -84,15 +140,72 @@ pub struct Pick;
 impl Pick {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        if !is_pluck_first(node, cx) {
-            return;
-        }
-        cx.emit_offense(
-            cx.range(node),
-            "Prefer `pick(...)` over `pluck(...).first`.",
-            None,
-        );
+        check(node, cx);
     }
+
+    #[on_node(kind = "csend")]
+    fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
+}
+
+/// Core check shared by send and csend dispatch.
+///
+/// Emits an offense with a dynamic message mirroring RuboCop's format:
+/// `Prefer \`pick(<args>)\` over \`<current>\`.`
+///
+/// - `<args>`: raw source of the inner pluck node's arguments, joined
+///   with `", "`.
+/// - `<current>`: raw source from the inner pluck node's selector start
+///   to the outer first node's selector end (e.g. `pluck(:a)&.first`).
+fn check(node: NodeId, cx: &Cx<'_>) {
+    if !is_any_pluck_first(node, cx) {
+        return;
+    }
+
+    // Extract the inner pluck node from the outer's receiver.
+    // Both Send and Csend use the same field layout (receiver is first),
+    // but their NodeKind variants differ.
+    let inner = match *cx.kind(node) {
+        NodeKind::Send { receiver, .. } => {
+            // Receiver is always present here (pattern gated on it).
+            receiver.get().unwrap()
+        }
+        NodeKind::Csend { receiver, .. } => receiver,
+        _ => return,
+    };
+
+    // Extract the inner pluck node's args (works for both Send and Csend).
+    let inner_args = match *cx.kind(inner) {
+        NodeKind::Send { args, .. } => args,
+        NodeKind::Csend { args, .. } => args,
+        _ => return,
+    };
+
+    // Build `<args>`: join raw source of each pluck arg with ", ".
+    let args_str = cx
+        .list(inner_args)
+        .iter()
+        .map(|&arg_id| cx.raw_source(cx.range(arg_id)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Build `<current>`: from the inner pluck selector start to the
+    // outer first selector end. This mirrors RuboCop's offense_range
+    // which runs from the inner method name to the outer method name end.
+    let inner_name_start = cx.loc(inner).name.start;
+    let outer_name_end = cx.loc(node).name.end;
+    let current_str = if inner_name_start > 0 && outer_name_end > inner_name_start {
+        cx.raw_source(Range {
+            start: inner_name_start,
+            end: outer_name_end,
+        })
+    } else {
+        cx.raw_source(cx.range(node))
+    };
+
+    let msg = format!("Prefer `pick({args_str})` over `{current_str}`.");
+    cx.emit_offense(cx.range(node), &msg, None);
 }
 
 #[cfg(test)]
@@ -106,7 +219,7 @@ mod tests {
     fn flags_pluck_id_first() {
         test::<Pick>().expect_offense(indoc! {r#"
                 Post.pluck(:id).first
-                ^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
+                ^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:id)` over `pluck(:id).first`.
             "#});
     }
 
@@ -116,7 +229,7 @@ mod tests {
         // receiver shape is unconstrained, so this still hits.
         test::<Pick>().expect_offense(indoc! {r#"
                 User.where(active: true).pluck(:name).first
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:name)` over `pluck(:name).first`.
             "#});
     }
 
@@ -125,7 +238,7 @@ mod tests {
         // Bare local receiver — same shape, still hits.
         test::<Pick>().expect_offense(indoc! {r#"
                 posts.pluck(:title).first
-                ^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:title)` over `pluck(:title).first`.
             "#});
     }
 
@@ -137,7 +250,7 @@ mod tests {
         // matches all our gates on its own.
         test::<Pick>().expect_offense(indoc! {r#"
                 Post.pluck(:id).first.something
-                ^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
+                ^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:id)` over `pluck(:id).first`.
             "#});
     }
 
@@ -150,7 +263,39 @@ mod tests {
         // multi-column.
         test::<Pick>().expect_offense(indoc! {r#"
                 Post.pluck(:id, :name).first
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(...)` over `pluck(...).first`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:id, :name)` over `pluck(:id, :name).first`.
+            "#});
+    }
+
+    #[test]
+    fn flags_csend_outer_send_inner() {
+        // Safe-navigation on the outer `.first` call; inner `pluck` is
+        // a regular send. RuboCop flags this as a csend (outer) + send
+        // (inner) combination.
+        test::<Pick>().expect_offense(indoc! {r#"
+                x.pluck(:a)&.first
+                ^^^^^^^^^^^^^^^^^^ Prefer `pick(:a)` over `pluck(:a)&.first`.
+            "#});
+    }
+
+    #[test]
+    fn flags_csend_both_outer_and_inner() {
+        // Safe-navigation on both outer `.first` and inner `.pluck`.
+        // RuboCop flags this combination as well.
+        test::<Pick>().expect_offense(indoc! {r#"
+                x&.pluck(:a)&.first
+                ^^^^^^^^^^^^^^^^^^^ Prefer `pick(:a)` over `pluck(:a)&.first`.
+            "#});
+    }
+
+    #[test]
+    fn flags_send_outer_csend_inner() {
+        // Safe-navigation on the inner `.pluck` call; outer `.first` is
+        // a regular send. This is the fourth outer/inner combination
+        // (`x&.pluck(:a).first`).
+        test::<Pick>().expect_offense(indoc! {r#"
+                x&.pluck(:a).first
+                ^^^^^^^^^^^^^^^^^^ Prefer `pick(:a)` over `pluck(:a).first`.
             "#});
     }
 
