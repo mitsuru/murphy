@@ -248,11 +248,11 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
             out.push(value);
         }
 
-        NodeKind::Kwbegin(l) | NodeKind::Regopt(l) | NodeKind::Procarg0(l) => {
+        NodeKind::Kwbegin(l) | NodeKind::Procarg0(l) => {
             push_list(out, lists, l);
         }
 
-        NodeKind::Rational(_) | NodeKind::Complex(_) => {}
+        NodeKind::Rational(_) | NodeKind::Complex(_) | NodeKind::Regopt(_) => {}
 
         NodeKind::Not(n) => out.push(n),
 

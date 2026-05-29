@@ -354,7 +354,7 @@ mod tests {
             },
             NodeKind::Kwbegin(NodeList::EMPTY),
             NodeKind::Cbase,
-            NodeKind::Regopt(NodeList::EMPTY),
+            NodeKind::Regopt(s),
             NodeKind::Rational(StringId(0)),
             NodeKind::Complex(StringId(0)),
             NodeKind::Not(n),

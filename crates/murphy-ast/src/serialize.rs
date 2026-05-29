@@ -516,9 +516,9 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             write_node_list(l, out);
         }
         NodeKind::Cbase => put_u8(out, 75),
-        NodeKind::Regopt(l) => {
+        NodeKind::Regopt(s) => {
             put_u8(out, 76);
-            write_node_list(l, out);
+            put_u32(out, s.0);
         }
         NodeKind::Rational(s) => {
             put_u8(out, 77);
@@ -756,7 +756,7 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         },
         74 => NodeKind::Kwbegin(read_node_list(cur)?),
         75 => NodeKind::Cbase,
-        76 => NodeKind::Regopt(read_node_list(cur)?),
+        76 => NodeKind::Regopt(Symbol(get_u32(cur)?)),
         77 => NodeKind::Rational(StringId(get_u32(cur)?)),
         78 => NodeKind::Complex(StringId(get_u32(cur)?)),
         79 => NodeKind::Not(NodeId(get_u32(cur)?)),
@@ -1165,9 +1165,12 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
                 check_list(args)?;
                 check_node(value.0)?;
             }
-            NodeKind::Kwbegin(l) | NodeKind::Regopt(l) | NodeKind::Procarg0(l) => {
+            NodeKind::Kwbegin(l) | NodeKind::Procarg0(l) => {
                 check_list(l)?;
             }
+            // `Regopt(Symbol)` — flag string (e.g. "im") interned as a
+            // Symbol; mirrors `Regexp { opts: Symbol }`.
+            NodeKind::Regopt(s) => check_sym(s.0)?,
             // `Rational(StringId)` / `Complex(StringId)` route through the
             // same `check_sym` as `NodeKind::Str(StringId)` because Murphy's
             // interner is shared between `Symbol` and `StringId` ids — see

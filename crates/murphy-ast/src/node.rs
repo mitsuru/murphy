@@ -479,8 +479,11 @@ pub enum NodeKind {
     /// payload なしの marker。
     Cbase,
     /// `/.../[imxo]*` の flag 部分（`RegularExpressionOptionsNode`）。
-    /// payload は flag シンボルの並び (parser-gem は `(regopt :i :m)` の形)。
-    Regopt(NodeList),
+    /// parser-gem は `(regopt :i :m)` と個別 sym で表現するが、Murphy は
+    /// [`NodeKind::Regexp`] の `opts: Symbol` 表現と統一して flag 文字列
+    /// (`"im"` 等) を interned `Symbol` 1 つで保持する。順序保持・順序非
+    /// 依存どちらの解釈でも扱える、最も alloc-cheap な形。
+    Regopt(Symbol),
     /// `1r` の rational literal（`RationalNode`）。payload は raw text を
     /// interned した string id。
     Rational(StringId),

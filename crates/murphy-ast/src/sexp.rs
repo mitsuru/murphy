@@ -485,9 +485,14 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             args,
             body,
         } => {
-            let _ = writeln!(out, "(defs :{}", interner.resolve(name.0));
+            // parser-gem: `(defs receiver :name args body)` — keep that
+            // ordering so golden tests and downstream tooling that compares
+            // against parser-gem's shape see the expected layout.
+            out.push_str("(defs\n");
             write_node(ast, receiver, d, out);
             out.push('\n');
+            indent(d, out);
+            let _ = writeln!(out, ":{}", interner.resolve(name.0));
             write_node(ast, args, d, out);
             out.push('\n');
             write_opt(ast, body, d, out);
@@ -521,10 +526,8 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             out.push(')');
         }
         NodeKind::Cbase => out.push_str("(cbase)"),
-        NodeKind::Regopt(_) => {
-            out.push_str("(regopt");
-            write_slice(ast, id, 0, usize::MAX, d, out);
-            out.push(')');
+        NodeKind::Regopt(s) => {
+            let _ = write!(out, "(regopt :{})", interner.resolve(s.0));
         }
         NodeKind::Rational(s) => {
             let _ = write!(out, "(rational {})", interner.resolve(s.0));
