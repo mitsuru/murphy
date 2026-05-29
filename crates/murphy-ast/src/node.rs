@@ -434,6 +434,78 @@ pub enum NodeKind {
     },
     /// 多重代入の左辺ターゲット並び（`MultiWriteNode` / `MultiTargetNode`）。
     Mlhs(NodeList),
+
+    // --- HIGH-priority NodeKindTag extensions (murphy-w5ba, beads epic
+    // murphy-xvjv). Added so RuboCop `def_node_matcher` strings that touch
+    // these node kinds compile under `node_pattern!`. Subject-side support
+    // (murphy-translate producing these from real Ruby source) lands per
+    // node kind as cops actually need it — see the survey report at
+    // docs/superpowers/specs/2026-05-29-rubocop-pattern-gap-survey.md.
+    // Payload shapes mirror parser-gem's AST_FORMAT.md.
+    /// `for x in iter; body; end`（`ForNode`）。
+    For {
+        var: NodeId,
+        iter: NodeId,
+        body: OptNodeId,
+    },
+    /// `-> { ... }` の短縮ラムダ（`LambdaNode`）。`block { send(:lambda) }`
+    /// と異なる構文表現を区別する目印 — payload なしの marker variant。
+    Lambda,
+    /// `def self.foo(...)`（`SingletonMethodDefinitionNode`）。
+    Defs {
+        receiver: NodeId,
+        name: Symbol,
+        args: NodeId,
+        body: OptNodeId,
+    },
+    /// `foo[i, j]` の bracket call。parser-gem は `send` から分離した `index`
+    /// 表現を持つ。`receiver` + 添字 NodeList。
+    Index {
+        receiver: NodeId,
+        args: NodeList,
+    },
+    /// `foo[i, j] = x` の bracket assignment。`args` は添字、`value` は最後の
+    /// 引数 (parser-gem は同じ NodeList に詰めるが Murphy では分離保持)。
+    IndexAsgn {
+        receiver: NodeId,
+        args: NodeList,
+        value: NodeId,
+    },
+    /// `begin ... end` キーワード形式の begin block (parser-gem `kwbegin`)。
+    /// 暗黙の begin (rescue/ensure 文脈で挿入) ではなく **キーワード明示**
+    /// 形式のみ。
+    Kwbegin(NodeList),
+    /// `::Foo` の `::` 部分（top-level namespace root、`ConstantBaseNode`）。
+    /// payload なしの marker。
+    Cbase,
+    /// `/.../[imxo]*` の flag 部分（`RegularExpressionOptionsNode`）。
+    /// payload は flag シンボルの並び (parser-gem は `(regopt :i :m)` の形)。
+    Regopt(NodeList),
+    /// `1r` の rational literal（`RationalNode`）。payload は raw text を
+    /// interned した string id。
+    Rational(StringId),
+    /// `1i` の complex literal（`ImaginaryNode`）。同上。
+    Complex(StringId),
+    /// `not foo` キーワード（`! foo` と AST 上は別表現）。
+    Not(NodeId),
+    /// `retry` キーワード。payload なし。
+    Retry,
+    /// `redo` キーワード。payload なし。
+    Redo,
+    /// `{ _1 + _2 }` の numbered-parameter block (`NumberedParametersNode`)。
+    /// `send` は block の receiver、`max_n` は使用された最大 `_N` 番号、
+    /// `body` は block 本体。
+    Numblock {
+        send: NodeId,
+        max_n: u8,
+        body: OptNodeId,
+    },
+    /// 単一引数 proc の暗黙のラップ (`procarg0` per AST_FORMAT.md)。
+    Procarg0(NodeList),
+    /// `def foo(...)` の forwarding arg parameter (declarer side)。
+    ForwardArgs,
+    /// `bar(...)` の forwarding arg passing (caller side)。
+    ForwardedArgs,
 }
 
 /// A source comment, stored outside the node tree.
@@ -537,6 +609,24 @@ impl NodeKind {
             NodeKind::Regexp { .. } => 66,
             NodeKind::Masgn { .. } => 67,
             NodeKind::Mlhs(_) => 68,
+            // murphy-w5ba HIGH-priority extensions
+            NodeKind::For { .. } => 69,
+            NodeKind::Lambda => 70,
+            NodeKind::Defs { .. } => 71,
+            NodeKind::Index { .. } => 72,
+            NodeKind::IndexAsgn { .. } => 73,
+            NodeKind::Kwbegin(_) => 74,
+            NodeKind::Cbase => 75,
+            NodeKind::Regopt(_) => 76,
+            NodeKind::Rational(_) => 77,
+            NodeKind::Complex(_) => 78,
+            NodeKind::Not(_) => 79,
+            NodeKind::Retry => 80,
+            NodeKind::Redo => 81,
+            NodeKind::Numblock { .. } => 82,
+            NodeKind::Procarg0(_) => 83,
+            NodeKind::ForwardArgs => 84,
+            NodeKind::ForwardedArgs => 85,
         };
         crate::NodeKindTag(t)
     }

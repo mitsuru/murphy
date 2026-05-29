@@ -468,6 +468,87 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             out.push(')');
         }
 
+        // ── murphy-w5ba HIGH-priority extensions ─────────────────────────
+        NodeKind::For { var, iter, body } => {
+            out.push_str("(for\n");
+            write_node(ast, var, d, out);
+            out.push('\n');
+            write_node(ast, iter, d, out);
+            out.push('\n');
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+        NodeKind::Lambda => out.push_str("(lambda)"),
+        NodeKind::Defs {
+            receiver,
+            name,
+            args,
+            body,
+        } => {
+            let _ = writeln!(out, "(defs :{}", interner.resolve(name.0));
+            write_node(ast, receiver, d, out);
+            out.push('\n');
+            write_node(ast, args, d, out);
+            out.push('\n');
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+        NodeKind::Index { receiver, .. } => {
+            out.push_str("(index\n");
+            write_node(ast, receiver, d, out);
+            write_slice(ast, id, 1, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::IndexAsgn {
+            receiver, value, ..
+        } => {
+            out.push_str("(indexasgn\n");
+            write_node(ast, receiver, d, out);
+            // children: receiver + args... + value (value is last per `collect_children`)
+            write_slice(ast, id, 1, usize::MAX - 1, d, out);
+            out.push('\n');
+            write_node(ast, value, d, out);
+            out.push(')');
+        }
+        NodeKind::Kwbegin(_) => {
+            out.push_str("(kwbegin");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::Cbase => out.push_str("(cbase)"),
+        NodeKind::Regopt(_) => {
+            out.push_str("(regopt");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::Rational(s) => {
+            let _ = write!(out, "(rational {})", interner.resolve(s.0));
+        }
+        NodeKind::Complex(s) => {
+            let _ = write!(out, "(complex {})", interner.resolve(s.0));
+        }
+        NodeKind::Not(n) => {
+            out.push_str("(not\n");
+            write_node(ast, n, d, out);
+            out.push(')');
+        }
+        NodeKind::Retry => out.push_str("(retry)"),
+        NodeKind::Redo => out.push_str("(redo)"),
+        NodeKind::Numblock { send, max_n, body } => {
+            let _ = writeln!(out, "(numblock max_n={max_n}");
+            write_node(ast, send, d, out);
+            out.push('\n');
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+        NodeKind::Procarg0(_) => {
+            out.push_str("(procarg0");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::ForwardArgs => out.push_str("(forward_args)"),
+        NodeKind::ForwardedArgs => out.push_str("(forwarded_args)"),
+
         NodeKind::Unknown => out.push_str("(unknown)"),
     }
 }

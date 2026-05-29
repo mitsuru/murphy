@@ -110,6 +110,26 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("regexp", 66),
     ("masgn", 67),
     ("mlhs", 68),
+    // ── murphy-w5ba HIGH-priority extensions (parser-only; subject-side
+    // murphy-translate support lands per node kind as cops actually need it).
+    // See docs/superpowers/specs/2026-05-29-rubocop-pattern-gap-survey.md.
+    ("for", 69),
+    ("lambda", 70),
+    ("defs", 71),
+    ("index", 72),
+    ("indexasgn", 73),
+    ("kwbegin", 74),
+    ("cbase", 75),
+    ("regopt", 76),
+    ("rational", 77),
+    ("complex", 78),
+    ("not", 79),
+    ("retry", 80),
+    ("redo", 81),
+    ("numblock", 82),
+    ("procarg0", 83),
+    ("forward_args", 84),
+    ("forwarded_args", 85),
 ];
 
 /// Resolve a pattern node-type name to its tag. `None` for unknown names.
@@ -310,6 +330,44 @@ mod tests {
             },
             NodeKind::Masgn { lhs: n, rhs: n },
             NodeKind::Mlhs(NodeList::EMPTY),
+            // murphy-w5ba HIGH-priority extensions
+            NodeKind::For {
+                var: n,
+                iter: n,
+                body: OptNodeId::NONE,
+            },
+            NodeKind::Lambda,
+            NodeKind::Defs {
+                receiver: n,
+                name: s,
+                args: n,
+                body: OptNodeId::NONE,
+            },
+            NodeKind::Index {
+                receiver: n,
+                args: NodeList::EMPTY,
+            },
+            NodeKind::IndexAsgn {
+                receiver: n,
+                args: NodeList::EMPTY,
+                value: n,
+            },
+            NodeKind::Kwbegin(NodeList::EMPTY),
+            NodeKind::Cbase,
+            NodeKind::Regopt(NodeList::EMPTY),
+            NodeKind::Rational(StringId(0)),
+            NodeKind::Complex(StringId(0)),
+            NodeKind::Not(n),
+            NodeKind::Retry,
+            NodeKind::Redo,
+            NodeKind::Numblock {
+                send: n,
+                max_n: 0,
+                body: OptNodeId::NONE,
+            },
+            NodeKind::Procarg0(NodeList::EMPTY),
+            NodeKind::ForwardArgs,
+            NodeKind::ForwardedArgs,
         ]
     }
 
@@ -419,6 +477,24 @@ mod tests {
             NodeKind::Regexp { .. } => "regexp",
             NodeKind::Masgn { .. } => "masgn",
             NodeKind::Mlhs(_) => "mlhs",
+            // murphy-w5ba HIGH-priority extensions
+            NodeKind::For { .. } => "for",
+            NodeKind::Lambda => "lambda",
+            NodeKind::Defs { .. } => "defs",
+            NodeKind::Index { .. } => "index",
+            NodeKind::IndexAsgn { .. } => "indexasgn",
+            NodeKind::Kwbegin(_) => "kwbegin",
+            NodeKind::Cbase => "cbase",
+            NodeKind::Regopt(_) => "regopt",
+            NodeKind::Rational(_) => "rational",
+            NodeKind::Complex(_) => "complex",
+            NodeKind::Not(_) => "not",
+            NodeKind::Retry => "retry",
+            NodeKind::Redo => "redo",
+            NodeKind::Numblock { .. } => "numblock",
+            NodeKind::Procarg0(_) => "procarg0",
+            NodeKind::ForwardArgs => "forward_args",
+            NodeKind::ForwardedArgs => "forwarded_args",
         })
     }
 
