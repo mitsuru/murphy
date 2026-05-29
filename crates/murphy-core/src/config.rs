@@ -197,8 +197,19 @@ impl MurphyConfig {
                     }
                 }
                 "plugins" => {
-                    plugins = serde_yaml::from_value(value)
-                        .map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+                    // Accept both `plugins: name` (scalar) and `plugins: [...]`
+                    // (sequence). Scalar is `plugins: rubocop-rails` — valid
+                    // RuboCop shorthand; RuboCop itself treats it the same as a
+                    // one-element list.
+                    match value {
+                        serde_yaml::Value::String(s) => {
+                            plugins = vec![PluginConfig::Name(s)];
+                        }
+                        other => {
+                            plugins = serde_yaml::from_value(other)
+                                .map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+                        }
+                    }
                 }
                 _ => {
                     // Treat as a cop rule (open-keyed, compatible with RuboCop format).
@@ -469,23 +480,14 @@ pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigErr
     let mut plugin_names: Vec<String> = Vec::new();
     let mut unsupported_plugins: Vec<String> = Vec::new();
 
-    // Extract plugin info for the rename hint and normalize scalar `plugins:`
-    // to a sequence so the output is always loadable by `from_yaml_str`.
+    // Extract plugin info for the rename hint and rebuild `top["plugins"]` as
+    // a sequence of only valid (string-name) entries. Unsupported entries are
+    // dropped to comments so the output is always loadable by `from_yaml_str`.
     let plugins_key = serde_yaml::Value::String("plugins".to_string());
-    if let Some(plugins_val) = top.get(&plugins_key) {
+    if let Some(plugins_val) = top.remove(&plugins_key) {
         let items: Vec<serde_yaml::Value> = match plugins_val {
-            serde_yaml::Value::Sequence(seq) => seq.clone(),
-            serde_yaml::Value::String(s) => {
-                // Scalar form (e.g. `plugins: rubocop-rails`). Normalize to a
-                // one-element sequence so the output round-trips through
-                // `MurphyConfig::from_yaml_str` without error.
-                let normalized = vec![serde_yaml::Value::String(s.clone())];
-                top.insert(
-                    plugins_key.clone(),
-                    serde_yaml::Value::Sequence(normalized.clone()),
-                );
-                normalized
-            }
+            serde_yaml::Value::Sequence(seq) => seq,
+            serde_yaml::Value::String(s) => vec![serde_yaml::Value::String(s)],
             other => {
                 unsupported_plugins.push(format!("{other:?} (unsupported plugins: form)"));
                 vec![]
@@ -509,6 +511,20 @@ pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigErr
                     unsupported_plugins.push(format!("{other:?} (non-string / non-mapping)"));
                 }
             }
+        }
+        // Re-insert only the valid string-name entries as a sequence.
+        // Non-string / mapping entries are surfaced as unsupported comments
+        // instead of being passed through so the output is always loadable.
+        if !plugin_names.is_empty() {
+            top.insert(
+                plugins_key,
+                serde_yaml::Value::Sequence(
+                    plugin_names
+                        .iter()
+                        .map(|n| serde_yaml::Value::String(n.clone()))
+                        .collect(),
+                ),
+            );
         }
     }
 
