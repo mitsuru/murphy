@@ -1162,18 +1162,24 @@ impl<'a> Cx<'a> {
     /// `tok.range.end <= range.end`; a token straddling a boundary is
     /// excluded. The returned slice is a contiguous sub-slice of
     /// [`sorted_tokens`](Self::sorted_tokens) (tokens are sorted by start
-    /// offset and never overlap), located by two binary searches.
+    /// offset; ends are monotonic, with at most equal-end overlaps), located
+    /// by two binary searches plus a short trailing-straddler trim.
     pub fn tokens_in(&self, range: Range) -> &'a [SourceToken] {
         let toks = self.sorted_tokens();
         // First token whose start is at or after range.start.
         let lo = toks.partition_point(|t| t.range.start < range.start);
         // First token (from lo) whose start is at or after range.end —
         // everything from lo up to (but not including) hi starts inside
-        // [range.start, range.end). Trim a trailing token whose end spills
-        // past range.end (a straddler is not fully contained).
-        let hi = toks.partition_point(|t| t.range.start < range.end);
+        // [range.start, range.end). Search only the [lo..] suffix.
+        let hi = lo + toks[lo..].partition_point(|t| t.range.start < range.end);
+        // Trim *every* trailing token whose end spills past range.end: ends
+        // are monotonic, so straddlers cluster at the tail, but equal-end
+        // overlaps (e.g. a heredoc-end token sharing its end with the
+        // standalone newline) mean there can be more than one — a single
+        // `if` would leave the rest in, breaking the "fully contained"
+        // contract.
         let mut end = hi;
-        if end > lo && toks[end - 1].range.end > range.end {
+        while end > lo && toks[end - 1].range.end > range.end {
             end -= 1;
         }
         &toks[lo..end]
@@ -2941,6 +2947,40 @@ mod tests {
             .token_before(comma.range.start)
             .expect("token before comma");
         assert_eq!(cx.token_text(before), "<<~H");
+    }
+
+    #[test]
+    fn tokens_in_trims_multiple_trailing_straddlers() {
+        // Regression (gemini, PR #129): two equal-end tokens both start
+        // inside the query range but end past it. A single-`if` trim would
+        // leave one straddler in; the `while` loop must drop both.
+        use murphy_ast::{AstBuilder, NodeKind, Range};
+        let mut b = AstBuilder::new("xxxxxx", "t.rb");
+        let root = b.push(NodeKind::Int(1), Range { start: 0, end: 1 });
+        // Contained.
+        b.add_source_token(SourceToken {
+            kind: SourceTokenKind::Comma,
+            range: Range { start: 0, end: 2 },
+        });
+        // Two straddlers: start < 4 (inside [0,4)) but end == 6 > 4.
+        b.add_source_token(SourceToken {
+            kind: SourceTokenKind::LeftBrace,
+            range: Range { start: 2, end: 6 },
+        });
+        b.add_source_token(SourceToken {
+            kind: SourceTokenKind::RightBrace,
+            range: Range { start: 3, end: 6 },
+        });
+        let ast = b.finish(root);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let toks = cx.tokens_in(Range { start: 0, end: 4 });
+        assert_eq!(toks.len(), 1, "both straddlers trimmed, only [0,2) remains");
+        assert_eq!(toks[0].kind, SourceTokenKind::Comma);
     }
 
     #[test]
