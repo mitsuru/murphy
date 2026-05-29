@@ -7,7 +7,7 @@ Test harness: `crates/murphy-pattern/tests/rubocop_pattern_compat.rs`.
 ## Goal
 
 Quantify and categorise the work needed to land RuboCop `def_node_matcher`
-strings — `def_node_matcher :foo, '<pattern>'` — into Murphy's `node_pattern!`
+strings — `def_node_matcher :foo, '<pattern>'` — into Murphy's `def_node_matcher!`
 verbatim, with no syntactic massaging required from the cop author.
 
 ## Approach
@@ -44,7 +44,7 @@ By category:
 ```
 
 **Headline**: every RuboCopCanon pattern compiles today. The "paste a
-def_node_matcher pattern into `node_pattern!`" goal is **already met for the
+def_node_matcher pattern into `def_node_matcher!`" goal is **already met for the
 mainstream RuboCop cop catalogue**. What remains is the long tail of
 specialised node kinds.
 

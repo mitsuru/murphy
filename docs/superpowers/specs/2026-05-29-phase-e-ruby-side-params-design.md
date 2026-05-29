@@ -79,26 +79,26 @@ referencing them with `%var` is a compile error (Rust trait-bound unsatisfied).
 A `match_lit_against_param` helper in `murphy-plugin-api` is the central
 comparison function reused by both backends and called from generated code.
 
-## `node_pattern!` macro signature
+## `def_node_matcher!` macro signature
 
 The generated function's signature varies by what params the pattern uses. The
 macro inspects the parsed AST to decide:
 
 ```rust
 // Pattern A: no params → unchanged from existing API
-node_pattern!(name, "(send _ :foo)")
+def_node_matcher!(name, "(send _ :foo)")
 //  fn name(node: NodeId, cx: &Cx<'_>) -> bool
 
 // Pattern B: at least one %var → opts: required, positional arg added
-node_pattern!(name, "(send _ %method)", opts: MyOpts)
+def_node_matcher!(name, "(send _ %method)", opts: MyOpts)
 //  fn name(node: NodeId, cx: &Cx<'_>, positional: &[Param<'_>]) -> bool
 
 // Pattern C: only %1/%2 (no %var) → positional arg added, no opts:
-node_pattern!(name, "(send _ :foo %1)")
+def_node_matcher!(name, "(send _ :foo %1)")
 //  fn name(node: NodeId, cx: &Cx<'_>, positional: &[Param<'_>]) -> bool
 
 // Pattern D: mixed %var and %N → opts: required, positional arg added
-node_pattern!(name, "(send _ %method %1)", opts: MyOpts)
+def_node_matcher!(name, "(send _ %method %1)", opts: MyOpts)
 //  fn name(node: NodeId, cx: &Cx<'_>, positional: &[Param<'_>]) -> bool
 ```
 
@@ -120,7 +120,7 @@ require no changes.
 
 ## B-backend codegen sketch
 
-For `node_pattern!(is_interesting_call, "(send _ %method %1)", opts: MyOpts)`
+For `def_node_matcher!(is_interesting_call, "(send _ %method %1)", opts: MyOpts)`
 the macro emits roughly:
 
 ```rust
