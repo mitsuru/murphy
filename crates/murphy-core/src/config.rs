@@ -469,11 +469,23 @@ pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigErr
     let mut plugin_names: Vec<String> = Vec::new();
     let mut unsupported_plugins: Vec<String> = Vec::new();
 
-    // Extract plugin info for the rename hint (do not modify the value yet).
-    if let Some(plugins_val) = top.get("plugins") {
+    // Extract plugin info for the rename hint and normalize scalar `plugins:`
+    // to a sequence so the output is always loadable by `from_yaml_str`.
+    let plugins_key = serde_yaml::Value::String("plugins".to_string());
+    if let Some(plugins_val) = top.get(&plugins_key) {
         let items: Vec<serde_yaml::Value> = match plugins_val {
             serde_yaml::Value::Sequence(seq) => seq.clone(),
-            serde_yaml::Value::String(s) => vec![serde_yaml::Value::String(s.clone())],
+            serde_yaml::Value::String(s) => {
+                // Scalar form (e.g. `plugins: rubocop-rails`). Normalize to a
+                // one-element sequence so the output round-trips through
+                // `MurphyConfig::from_yaml_str` without error.
+                let normalized = vec![serde_yaml::Value::String(s.clone())];
+                top.insert(
+                    plugins_key.clone(),
+                    serde_yaml::Value::Sequence(normalized.clone()),
+                );
+                normalized
+            }
             other => {
                 unsupported_plugins.push(format!("{other:?} (unsupported plugins: form)"));
                 vec![]
@@ -784,6 +796,27 @@ plugins:
         assert!(
             out.contains("# NOTE:"),
             "rename hint should be present:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_scalar_plugins_output_roundtrips_to_from_yaml_str() {
+        // Regression: scalar `plugins: rubocop-rails` in a .rubocop.yml must
+        // produce migrate output that MurphyConfig::from_yaml_str can load
+        // without error (the scalar must be normalized to a sequence first).
+        let out = migrate_rubocop_yml_to_murphy_yml("plugins: rubocop-rails\n").unwrap();
+        let cfg = MurphyConfig::from_yaml_str(&out)
+            .expect("migrated scalar plugins output must be loadable by from_yaml_str");
+        assert_eq!(
+            cfg.plugins.len(),
+            1,
+            "expected 1 plugin, got {:?}",
+            cfg.plugins
+        );
+        assert!(
+            matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "rubocop-rails"),
+            "expected Name(rubocop-rails), got {:?}",
+            cfg.plugins[0]
         );
     }
 
