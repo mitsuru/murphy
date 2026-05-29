@@ -162,6 +162,62 @@ impl<'a> Cx<'a> {
         self.resolve(id.0)
     }
 
+    /// The method-name selector of a method-bearing node — the call
+    /// selector for `Send`/`Csend`, or the defined name for `Def`/`Defs`.
+    /// `None` for any other node kind. Mirrors `node.method_name` on
+    /// RuboCop's method-dispatch and def nodes.
+    pub fn method_name(&self, id: NodeId) -> Option<&'a str> {
+        let sym = match *self.kind(id) {
+            NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => method,
+            NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => name,
+            _ => return None,
+        };
+        Some(self.symbol_str(sym))
+    }
+
+    /// `comparison_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_comparison_method`]. `false` for
+    /// nodes without a selector.
+    pub fn is_comparison_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_comparison_method)
+    }
+
+    /// `operator_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_operator_method`].
+    pub fn is_operator_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_operator_method)
+    }
+
+    /// `assignment_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_assignment_method`].
+    pub fn is_assignment_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_assignment_method)
+    }
+
+    /// `predicate_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_predicate_method`].
+    pub fn is_predicate_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_predicate_method)
+    }
+
+    /// `bang_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_bang_method`].
+    pub fn is_bang_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_bang_method)
+    }
+
+    /// `camel_case_method?` for the node's selector — see
+    /// [`crate::method_predicates::is_camel_case_method`].
+    pub fn is_camel_case_method(&self, id: NodeId) -> bool {
+        self.method_name(id)
+            .is_some_and(crate::method_predicates::is_camel_case_method)
+    }
+
     /// The file's comments, in source order.
     pub fn comments(&self) -> &'a [Comment] {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
@@ -771,5 +827,142 @@ mod tests {
 
         assert_eq!(cx.symbol_str(sym), "x");
         assert_eq!(cx.string_str(str_id), "hi");
+    }
+
+    /// Build a bare `def <name>; end` and return its `Def` node id + Ast.
+    fn build_def(source: &str, name: &str, name_range: Range) -> (Ast, murphy_ast::NodeId) {
+        let mut b = AstBuilder::new(source.to_string(), "t.rb".to_string());
+        let args = b.push(NodeKind::Args(murphy_ast::NodeList::EMPTY), name_range);
+        let sym = b.intern_symbol(name);
+        let root = b.push_named(
+            NodeKind::Def {
+                receiver: OptNodeId::NONE,
+                name: sym,
+                args,
+                body: OptNodeId::NONE,
+            },
+            Range {
+                start: 0,
+                end: source.len() as u32,
+            },
+            name_range,
+        );
+        (b.finish(root), root)
+    }
+
+    #[test]
+    fn method_name_resolves_send_csend_and_def_selectors() {
+        // Send: `a == b` — selector `==` at [2, 4).
+        let (ast, send) = build_call(
+            "a == b",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 4 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.method_name(send), Some("=="));
+
+        // Csend: `a&.foo` — selector `foo` at [3, 6).
+        let (ast, csend) = build_call(
+            "a&.foo",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 3, end: 6 },
+            true,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.method_name(csend), Some("foo"));
+
+        // Def: `def foo=(v); end` — selector `foo=`.
+        let (ast, def) = build_def("def foo=(v); end", "foo=", Range { start: 4, end: 8 });
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.method_name(def), Some("foo="));
+    }
+
+    #[test]
+    fn method_name_is_none_for_non_method_nodes() {
+        // An Int literal has no selector.
+        let mut b = AstBuilder::new("42", "t.rb".to_string());
+        let root = b.push(NodeKind::Int(42), Range { start: 0, end: 2 });
+        let ast = b.finish(root);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.method_name(root), None);
+    }
+
+    #[test]
+    fn cx_predicate_wrappers_classify_the_node_selector() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `a == b` → comparison + operator, not assignment/predicate/bang/camel.
+        let (ast, cmp) = build_call(
+            "a == b",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 4 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_comparison_method(cmp));
+        assert!(cx.is_operator_method(cmp));
+        assert!(!cx.is_assignment_method(cmp));
+        assert!(!cx.is_predicate_method(cmp));
+
+        // `def foo=(v); end` → assignment, not comparison.
+        let (ast, setter) = build_def("def foo=(v); end", "foo=", Range { start: 4, end: 8 });
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_assignment_method(setter));
+        assert!(!cx.is_comparison_method(setter));
+
+        // `a.foo?` → predicate.
+        let (ast, pred) = build_call(
+            "a.foo?",
+            Some(Range { start: 0, end: 1 }),
+            Range { start: 2, end: 6 },
+            false,
+        );
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_predicate_method(pred));
+        assert!(!cx.is_bang_method(pred));
+
+        // `Foo()` → camel-case method.
+        let (ast, camel) = build_call("Foo()", None, Range { start: 0, end: 3 }, false);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_camel_case_method(camel));
+    }
+
+    #[test]
+    fn cx_predicate_wrappers_are_false_for_non_method_nodes() {
+        let mut b = AstBuilder::new("42", "t.rb".to_string());
+        let root = b.push(NodeKind::Int(42), Range { start: 0, end: 2 });
+        let ast = b.finish(root);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_comparison_method(root));
+        assert!(!cx.is_operator_method(root));
+        assert!(!cx.is_assignment_method(root));
+        assert!(!cx.is_predicate_method(root));
+        assert!(!cx.is_bang_method(root));
+        assert!(!cx.is_camel_case_method(root));
     }
 }
