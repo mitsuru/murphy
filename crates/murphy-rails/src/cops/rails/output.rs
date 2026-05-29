@@ -28,10 +28,12 @@
 //!
 //! - **bare call only** for output methods: `receiver == OptNodeId::NONE`.
 //! - **stdio receiver** for io_output methods.
-//! - **Not flagged** when the node's parent is a Send/Csend (the `p` is
-//!   a receiver, not a debug call), or when the node IS the call of its
-//!   parent Block/Numblock/Itblock (DSL usage like `p { 'text' }`), or
-//!   when any argument is a Hash or BlockPass.
+//! - **Not flagged** when the node is the *receiver* of a parent Send/Csend
+//!   (e.g. `p.do_something` — the `p` is chained, not a bare debug call),
+//!   or when the node IS the call of its parent Block/Numblock/Itblock
+//!   (DSL usage like `p { 'text' }`), or when any argument is a Hash or
+//!   BlockPass. A debug call used as an *argument* (e.g. `foo(p)`) IS
+//!   flagged.
 //!
 //! ## No autocorrect
 //!
@@ -90,26 +92,30 @@ impl Output {
             return;
         }
 
-        // Gate 2: skip when the parent is a Send/Csend (this `p` is
-        // the receiver of another call, e.g. `p.do_something`), or when
-        // this node is the *call* child of a parent Block/Numblock/Itblock
-        // (DSL block call like `p { 'text' }` — mirrors RuboCop's
-        // `node.block_node` check). Note: a send that is merely in the
-        // *body* of a block (e.g. `foo do; puts "x"; end`) is not the
-        // block's call — it still fires.
+        // Gate 2: skip in two cases —
+        //
+        // (a) This node is the *call* child of a parent Block/Numblock/Itblock
+        //     (DSL block call like `p { 'text' }` — mirrors RuboCop's
+        //     `node.block_node` check). Note: a send that is merely in the
+        //     *body* of a block (e.g. `foo do; puts "x"; end`) is not the
+        //     block's call — it still fires.
+        //
+        // (b) This node is the *receiver* of a parent Send/Csend
+        //     (e.g. `p.do_something` or `p&.do_something`). A debug call
+        //     used as an *argument* — e.g. `foo(p)` or
+        //     `logger.info(puts "x")` — is still flagged.
         if let Some(pid) = cx.parent(node).get() {
-            let is_block_call = match *cx.kind(pid) {
+            let suppress = match *cx.kind(pid) {
                 NodeKind::Block { call, .. } => call == node,
                 NodeKind::Numblock { send, .. } => send == node,
                 NodeKind::Itblock { send, .. } => send == node,
+                // Narrowed: only suppress when the debug call is the
+                // *receiver* (p.foo), not when it is an argument (foo(p)).
+                NodeKind::Send { receiver, .. } => receiver.get() == Some(node),
+                NodeKind::Csend { receiver, .. } => receiver == node,
                 _ => false,
             };
-            if is_block_call
-                || matches!(
-                    *cx.kind(pid),
-                    NodeKind::Send { .. } | NodeKind::Csend { .. }
-                )
-            {
+            if suppress {
                 return;
             }
         }
@@ -310,6 +316,27 @@ mod tests {
     fn does_not_flag_p_safe_nav_do_something() {
         // Same as above but with safe-navigation (`p&.do_something`).
         test::<Output>().expect_no_offenses("p&.do_something\n");
+    }
+
+    #[test]
+    fn flags_debug_call_as_method_argument() {
+        // `puts "x"` is an argument to another method — it is still a
+        // bare debug-output call and must fire even though its parent is
+        // a Send node. The old guard was too broad: it skipped any
+        // Send/Csend parent, causing a false negative here.
+        test::<Output>().expect_offense(indoc! {r#"
+                logger.info(puts "x")
+                            ^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#});
+    }
+
+    #[test]
+    fn flags_p_as_method_argument() {
+        // `p` passed as an argument — not a receiver chain, still a debug call.
+        test::<Output>().expect_offense(indoc! {r#"
+                foo(p)
+                    ^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#});
     }
 
     // === block-call guard (node IS the block's call, not body) ===
