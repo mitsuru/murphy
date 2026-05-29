@@ -132,10 +132,10 @@ fn flags_multiple_trailing_whitespace_lines() {
 fn config_disabled_silences_the_cop() {
     let dir = tempdir().expect("create tempdir");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "[cops.rules.\"Layout/TrailingWhitespace\"]\nenabled = false\n",
+        dir.path().join(".murphy.yml"),
+        "Layout/TrailingWhitespace:\n  Enabled: false\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
     fs::write(dir.path().join("t.rb"), "x = 1  \n").expect("write source");
 
     let assert = Command::cargo_bin("murphy")

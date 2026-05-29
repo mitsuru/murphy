@@ -1,8 +1,16 @@
 # ADR 0015 — Phase 5 Murphy-owned config schema
 
 - Date: 2026-05-20
-- Status: Accepted
+- Status: Superseded (see note below)
 - Issue: `murphy-3c3.2`
+
+> **Superseded 2026-05-30 (murphy-5saj):** The config file was changed from
+> `murphy.toml` (TOML, Murphy-owned schema) to `.murphy.yml` (YAML,
+> RuboCop-compatible format). The new schema uses `AllCops: Include/Exclude/CopsPath`
+> and top-level cop sections (e.g. `Style/Foo: {Enabled: false}`) instead of
+> `[files]`/`[cops.rules."Name"]` TOML tables. The "not RuboCop-compatible by
+> design" decision below is reversed — `.murphy.yml` IS designed to be compatible.
+> The content below is preserved as historical record.
 
 ## Decision
 

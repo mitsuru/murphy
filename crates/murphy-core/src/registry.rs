@@ -8,13 +8,13 @@
 //!   that the host obtained from `murphy-std` via its `mode = static`
 //!   `register_cops!`, or an empty slice for tests / minimal embedders),
 //!   and
-//! - any `[[plugins]]` configured in `murphy.toml`, loaded via
+//! - any `plugins:` configured in `.murphy.yml`, loaded via
 //!   `crate::plugin_loader::load_plugin_pack` (the single-symbol ABI
 //!   loader, murphy-9cr.4).
 //!
 //! Built-in and dynamic packs flow through the *same* registration code
 //! path (design §5) — the registry never special-cases "builtin". Per-cop
-//! enable/disable from `[cops.rules."Name"]` is applied here, so the
+//! enable/disable from cop rule sections in `.murphy.yml` are applied here, so the
 //! dispatch host sees the post-config cop set.
 //!
 //! ## `cops/*.rb` enumeration (deferred to murphy-9cr.24)
@@ -43,7 +43,7 @@ use crate::plugin_loader::{LoadKind, LoadedPluginPack, PluginLoadDiagnostic, loa
 use crate::plugin_resolver::plan_plugin_loads;
 
 /// The cop set for a run: builtins + cops contributed by `.so` plugin
-/// packs, filtered by `[cops.rules."Name".enabled]`.
+/// packs, filtered by `Enabled:` in cop rule sections of `.murphy.yml`.
 ///
 /// ## Lifetime safety
 ///
@@ -127,7 +127,7 @@ impl CopRegistry {
 
     /// Build a registry for the project rooted at `root`: the caller's
     /// built-in pack plus every configured `[[plugins]]` entry, with
-    /// `[cops.rules."Name"]` applied.
+    /// cop rule sections of `.murphy.yml` applied.
     pub fn discover(root: &Path, builtins: &[&'static PluginCopV1]) -> Result<Self, ConfigError> {
         let config = MurphyConfig::load(root)?;
         Self::discover_with_config(root, &config, builtins)
@@ -212,7 +212,7 @@ impl CopRegistry {
             )));
         }
 
-        // Apply the `[cops.rules."Name"].enabled = false` filter to
+        // Apply the `Enabled: false` filter from `.murphy.yml` cop rules to
         // build the dispatch view, leaving `all_cops_ptrs` unfiltered
         // for the catalogue (`murphy cops list`).
         let cops_ptrs: Vec<NonNull<PluginCopV1>> = all_cops_ptrs
@@ -382,7 +382,7 @@ mod tests {
     fn discover_with_empty_root_yields_builtins_only() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let reg =
-            CopRegistry::discover(dir.path(), STUB_BUILTINS).expect("absent murphy.toml is fine");
+            CopRegistry::discover(dir.path(), STUB_BUILTINS).expect("absent .murphy.yml is fine");
         let names = reg.cop_names();
         assert_eq!(names, vec!["Stub/Builtin".to_string()]);
         assert_eq!(reg.pack_names(), &["builtin".to_string()]);
@@ -392,10 +392,10 @@ mod tests {
     fn discover_respects_config_disabled_builtin() {
         let dir = tempfile::tempdir().expect("create tempdir");
         std::fs::write(
-            dir.path().join("murphy.toml"),
-            "[cops.rules.\"Stub/Builtin\"]\nenabled = false\n",
+            dir.path().join(".murphy.yml"),
+            "Stub/Builtin:\n  Enabled: false\n",
         )
-        .expect("write murphy.toml");
+        .expect("write .murphy.yml");
 
         let reg = CopRegistry::discover(dir.path(), STUB_BUILTINS).expect("discover Ok");
         let names = reg.cop_names();

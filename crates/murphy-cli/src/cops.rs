@@ -211,7 +211,7 @@ fn write_json<W: Write>(out: &mut W, listings: &[Listing]) -> std::io::Result<()
 }
 
 /// Emit a warning for every cop the user explicitly enabled in
-/// `murphy.toml` that is currently in the disabled registry. Called
+/// `.murphy.yml` that is currently in the disabled registry. Called
 /// once per lint run (after config load, before any file is parsed) so
 /// the diagnostic surfaces even on a zero-file run. Skipping the cop
 /// itself happens for free — it has no `PluginCopV1` to dispatch.
@@ -221,7 +221,7 @@ pub fn warn_user_enabled_disabled(config: &MurphyConfig) {
             eprintln!(
                 "warning: cop `{name}` is in the disabled registry \
                  (arena migration in progress, murphy-9cr.23 / murphy-au8); \
-                 `enabled = true` in murphy.toml is honoured but the cop will not run"
+                 `Enabled: true` in .murphy.yml is honoured but the cop will not run"
             );
         }
     }

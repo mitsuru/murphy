@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Murphy** is a from-scratch, high-speed Ruby linter/formatter — "Ruff for Ruby". It is **not** a port of RuboCop and shares no code with `rfmt`. The goal is to eliminate RuboCop's slowness with a native Rust core.
 
-**Status: Phase 6 — v1 standard-cop scope + perf gates (complete).** `crates/murphy-core` + `crates/murphy-cli` build a working `murphy lint` that runs built-in standard cops from ADR 0018 by default across `Murphy`, `Lint`, `Style`, and limited `Layout` namespaces. Directory discovery uses `murphy.toml` `[files] include`/`exclude` plus `.murphyignore`; `.gitignore` is deliberately not honored. User cops are loaded from configured `[cops].path` (default `cops/`, cwd-relative, ADR 0004) and run in-process via embedded mruby with per-cop isolation, wall-clock deadline guarding, and exception isolation. `murphy.toml` is Murphy-owned, not RuboCop-compatible: `[cops.rules."Cop/Name"]` supports `enabled = false` and `severity = "warning" | "error"`; configured cops path is excluded from directory discovery. `murphy migrate <.rubocop.yml>` remains the one-way bootstrap helper. Autocorrect is available via `murphy lint --fix`/`-a`. Default offense JSON and exit-code contracts remain frozen (ADR 0006); ADR 0020 records a passing Phase 6 gate. Config schema is ADR 0015; migration mapping is ADR 0016.
+**Status: Phase 6 — v1 standard-cop scope + perf gates (complete).** `crates/murphy-core` + `crates/murphy-cli` build a working `murphy lint` that runs built-in standard cops from ADR 0018 by default across `Murphy`, `Lint`, `Style`, and limited `Layout` namespaces. Directory discovery uses `.murphy.yml` `AllCops: Include/Exclude` plus `.murphyignore`; `.gitignore` is deliberately not honored. User cops are loaded from configured `AllCops.CopsPath` (default `cops/`, cwd-relative, ADR 0004) and run in-process via embedded mruby with per-cop isolation, wall-clock deadline guarding, and exception isolation. `.murphy.yml` is RuboCop-compatible: top-level cop sections (e.g. `Style/StringLiterals: {Enabled: false, Severity: warning}`) follow RuboCop's format; `AllCops.CopsPath` is a Murphy-only extension. `murphy migrate <.rubocop.yml>` normalizes a `.rubocop.yml` to `.murphy.yml` (thin, mostly pass-through). Autocorrect is available via `murphy lint --fix`/`-a`. Default offense JSON and exit-code contracts remain frozen (ADR 0006); ADR 0020 records a passing Phase 6 gate. Config schema is ADR 0015; migration mapping is ADR 0016.
 
 **Security posture (ADR 0004):** v1 ships **no sandbox** for user cops — a `.rb` in the configured cops path is **trusted code** run in-process with full host privileges. Per-cop isolation is fault isolation, not a security boundary.
 
@@ -22,10 +22,10 @@ source -> prism parse once -> shared immutable AST
 Load-bearing decisions:
 
 - Core in Rust; standard cops are native and run across all cores.
-- User cops stay as `.rb`, run via embedded mruby, and are loaded from configured `[cops].path`.
+- User cops stay as `.rb`, run via embedded mruby, and are loaded from configured `AllCops.CopsPath`.
 - One prism parse is shared in-memory; no AST serialization round-trip.
 - Offense aggregation is the determinism point and applies severity precedence.
-- Config is Murphy-owned; `.rubocop.yml` migration is one-way and lossy.
+- Config is `.murphy.yml` (RuboCop-compatible format); `.rubocop.yml` migration is thin and mostly a pass-through.
 - Exit codes: `0` clean / `1` offenses / `2` config-or-cop-setup error / `3` internal failure.
 
 ## Testing Philosophy

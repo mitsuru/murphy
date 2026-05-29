@@ -1,6 +1,6 @@
 //! E2E integration test for dynamic plugin pack loading (murphy-9cr.10.1).
 //!
-//! Loads `murphy-example-pack` via the `[[plugins]]` config + dlopen path
+//! Loads `murphy-example-pack` via the `plugins:` config + dlopen path
 //! and asserts that `Example/NoEval` and `Example/TodoFormat` fire on a
 //! fixture .rb file.
 //!
@@ -79,11 +79,11 @@ fn detailed_form_loads_example_pack_and_emits_offenses() {
     )
     .expect("write rb");
 
-    let toml = format!(
-        "[[plugins]]\nname = \"murphy-example-pack\"\npath = {:?}\n",
+    let yml = format!(
+        "plugins:\n  - name: murphy-example-pack\n    path: {:?}\n",
         pack.display().to_string()
     );
-    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write toml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -117,8 +117,8 @@ fn detailed_form_missing_path_exits_2_with_diagnostic() {
     let rb = dir.path().join("sample.rb");
     fs::write(&rb, "puts 'hi'\n").expect("write rb");
 
-    let toml = "[[plugins]]\nname = \"nonexistent\"\npath = \"./does-not-exist.so\"\n";
-    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+    let yml = "plugins:\n  - name: nonexistent\n    path: ./does-not-exist.so\n";
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write toml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -159,7 +159,7 @@ fn stage_pack_symlink(
 
 #[test]
 fn name_form_resolves_via_murphy_plugin_path_env() {
-    // `plugins = ["murphy-example-pack"]` + `MURPHY_PLUGIN_PATH=<dir>`
+    // `plugins: [murphy-example-pack]` + `MURPHY_PLUGIN_PATH=<dir>`
     // proves the resolver follows env-listed search dirs, AND that the
     // Cargo cdylib hyphen→underscore convention is applied (the artifact
     // on disk is `libmurphy_example_pack.so`, not `libmurphy-example-pack.so`).
@@ -175,8 +175,8 @@ fn name_form_resolves_via_murphy_plugin_path_env() {
     let rb = dir.path().join("sample.rb");
     fs::write(&rb, "# TODO: x\neval(\"x\")\n").expect("write rb");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "plugins = [\"murphy-example-pack\"]\n",
+        dir.path().join(".murphy.yml"),
+        "plugins:\n  - murphy-example-pack\n",
     )
     .expect("write toml");
 
@@ -204,7 +204,7 @@ fn name_form_resolves_via_murphy_plugin_path_env() {
 
 #[test]
 fn name_form_resolves_via_project_local_dot_murphy_plugins() {
-    // `plugins = ["murphy-example-pack"]` + `<project>/.murphy/plugins/`
+    // `plugins: [murphy-example-pack]` + `<project>/.murphy/plugins/`
     // proves the project-local search dir is wired up. Env explicitly
     // cleared so we only hit the project-local path.
     let pack = example_pack_path()
@@ -219,8 +219,8 @@ fn name_form_resolves_via_project_local_dot_murphy_plugins() {
     let rb = dir.path().join("sample.rb");
     fs::write(&rb, "# TODO: x\n").expect("write rb");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "plugins = [\"murphy-example-pack\"]\n",
+        dir.path().join(".murphy.yml"),
+        "plugins:\n  - murphy-example-pack\n",
     )
     .expect("write toml");
 
@@ -249,13 +249,13 @@ fn name_form_resolves_via_project_local_dot_murphy_plugins() {
 #[test]
 fn name_form_missing_exits_2_with_search_path_and_detailed_hint() {
     // No staging anywhere; env cleared. The error must echo the
-    // searched dirs and point the user at the `[[plugins]]` detailed form.
+    // searched dirs and point the user at the detailed form.
     let dir = tempdir().expect("tempdir");
     let rb = dir.path().join("sample.rb");
     fs::write(&rb, "puts 'hi'\n").expect("write rb");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "plugins = [\"murphy-not-installed\"]\n",
+        dir.path().join(".murphy.yml"),
+        "plugins:\n  - murphy-not-installed\n",
     )
     .expect("write toml");
 
@@ -284,7 +284,7 @@ fn name_form_missing_exits_2_with_search_path_and_detailed_hint() {
         "stderr must surface `hint:` with searched dirs: {stderr}"
     );
     assert!(
-        stderr.contains("[[plugins]]") && stderr.contains("path"),
+        stderr.contains("path"),
         "stderr must point user at the detailed form: {stderr}"
     );
 }
@@ -301,11 +301,11 @@ fn name_and_detailed_same_name_loads_once_via_detailed_path() {
     let dir = tempdir().expect("tempdir");
     let rb = dir.path().join("sample.rb");
     fs::write(&rb, "# TODO: x\n").expect("write rb");
-    let toml = format!(
-        "plugins = [\n  \"murphy-example-pack\",\n  {{ name = \"murphy-example-pack\", path = {:?} }}\n]\n",
+    let yml = format!(
+        "plugins:\n  - murphy-example-pack\n  - name: murphy-example-pack\n    path: {:?}\n",
         pack.display().to_string()
     );
-    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write toml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")

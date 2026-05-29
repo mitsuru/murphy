@@ -27,7 +27,7 @@ fn lint_json(source: &str) -> (i32, Vec<serde_json::Value>) {
 
 fn lint_json_with_config(source: &str, config: &str) -> (i32, Vec<serde_json::Value>) {
     let dir = tempdir().expect("create tempdir");
-    fs::write(dir.path().join("murphy.toml"), config).expect("write murphy.toml");
+    fs::write(dir.path().join(".murphy.yml"), config).expect("write .murphy.yml");
     fs::write(dir.path().join("t.rb"), source).expect("write source");
 
     let assert = Command::cargo_bin("murphy")
@@ -153,7 +153,7 @@ fn flags_spaces_inside_send_parentheses() {
 fn space_style_requires_spaces_inside_non_empty_parentheses() {
     let (code, offs) = lint_json_with_config(
         "foo(1)\nbar()\n",
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+        "Layout/SpaceInsideParens:\n  EnforcedStyle: space\n",
     );
     assert_eq!(code, 1);
     let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
@@ -185,7 +185,7 @@ fn space_style_requires_spaces_inside_non_empty_parentheses() {
 fn space_style_removes_space_inside_empty_parentheses() {
     let (_code, offs) = lint_json_with_config(
         "foo( )\n",
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+        "Layout/SpaceInsideParens:\n  EnforcedStyle: space\n",
     );
     let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
     assert_eq!(
@@ -203,7 +203,7 @@ fn space_style_removes_space_inside_empty_parentheses() {
 fn space_style_removes_tab_inside_empty_parentheses_without_reinserting_space() {
     let (_code, offs) = lint_json_with_config(
         "foo(\t)\n",
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+        "Layout/SpaceInsideParens:\n  EnforcedStyle: space\n",
     );
     let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
     assert_eq!(
@@ -221,7 +221,7 @@ fn space_style_removes_tab_inside_empty_parentheses_without_reinserting_space() 
 fn compact_style_allows_consecutive_closing_parens_without_space() {
     let (code, offs) = lint_json_with_config(
         "outer(inner(1))\n",
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"compact\"\n",
+        "Layout/SpaceInsideParens:\n  EnforcedStyle: compact\n",
     );
     assert_eq!(code, 1);
     let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
@@ -242,7 +242,7 @@ fn compact_style_allows_consecutive_closing_parens_without_space() {
 fn compact_style_removes_multiple_spaces_between_consecutive_closing_parens() {
     let (_code, offs) = lint_json_with_config(
         "outer(inner(1)  )\n",
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"compact\"\n",
+        "Layout/SpaceInsideParens:\n  EnforcedStyle: compact\n",
     );
     let parens = offenses_named(&offs, "Layout/SpaceInsideParens");
     assert!(
@@ -330,7 +330,7 @@ struct LintRun {
 
 fn lint_capture(source: &str, config: &str) -> LintRun {
     let dir = tempdir().expect("create tempdir");
-    fs::write(dir.path().join("murphy.toml"), config).expect("write murphy.toml");
+    fs::write(dir.path().join(".murphy.yml"), config).expect("write .murphy.yml");
     fs::write(dir.path().join("t.rb"), source).expect("write source");
 
     let assert = Command::cargo_bin("murphy")
@@ -387,7 +387,7 @@ fn space_style_does_not_flag_parens_around_heredoc() {
     // asymmetric `puts( <<~EOS)` autocorrect.
     let run = lint_capture(
         "puts(<<~EOS)\n  hi\nEOS\n",
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+        "Layout/SpaceInsideParens:\n  EnforcedStyle: space\n",
     );
     // Guard against vacuous pass: an empty offense list is only meaningful if
     // the cop actually ran, not if a panic re-disabled it mid-file.
@@ -406,7 +406,7 @@ fn compact_style_does_not_flag_parens_around_heredoc() {
     // non-flagging contract here too.
     let run = lint_capture(
         "puts(<<~EOS)\n  hi\nEOS\n",
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"compact\"\n",
+        "Layout/SpaceInsideParens:\n  EnforcedStyle: compact\n",
     );
     assert_cop_ran_cleanly(&run);
     let parens = offenses_named(&run.offenses, "Layout/SpaceInsideParens");
@@ -424,7 +424,7 @@ fn space_style_does_not_panic_on_heredoc_with_parens() {
     // pass those reversed bounds through cx.raw_source and panic.
     let run = lint_capture(
         "def x\n  puts(<<~EOS)\n    hello (world)\n  EOS\nend\n",
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"space\"\n",
+        "Layout/SpaceInsideParens:\n  EnforcedStyle: space\n",
     );
     assert_cop_ran_cleanly(&run);
 }
@@ -433,7 +433,7 @@ fn space_style_does_not_panic_on_heredoc_with_parens() {
 fn compact_style_does_not_panic_on_heredoc_with_parens() {
     let run = lint_capture(
         "def x\n  puts(<<~EOS)\n    hello (world)\n  EOS\nend\n",
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nEnforcedStyle = \"compact\"\n",
+        "Layout/SpaceInsideParens:\n  EnforcedStyle: compact\n",
     );
     assert_cop_ran_cleanly(&run);
 }
@@ -442,10 +442,10 @@ fn compact_style_does_not_panic_on_heredoc_with_parens() {
 fn config_disabled_silences_the_cop() {
     let dir = tempdir().expect("create tempdir");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "[cops.rules.\"Layout/SpaceInsideParens\"]\nenabled = false\n",
+        dir.path().join(".murphy.yml"),
+        "Layout/SpaceInsideParens:\n  Enabled: false\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
     fs::write(dir.path().join("t.rb"), "foo( 1 )\n").expect("write source");
 
     let assert = Command::cargo_bin("murphy")

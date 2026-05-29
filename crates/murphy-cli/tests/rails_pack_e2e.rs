@@ -1,7 +1,7 @@
 //! E2E integration test for the `murphy-rails` dynamic plugin pack
 //! (murphy-2ob §14a).
 //!
-//! Loads `murphy-rails` via `[[plugins]]` + dlopen and asserts:
+//! Loads `murphy-rails` via `plugins:` config + dlopen and asserts:
 //! 1. `murphy cops list --format=json` enumerates the 138 Rails stubs
 //!    with `source_pack = "murphy-rails"`.
 //! 2. `murphy lint` on a Rails-shaped fixture exits 0 — the stubs'
@@ -69,11 +69,11 @@ fn cops_list_enumerates_138_rails_stubs_under_murphy_rails_source_pack() {
         .expect("murphy-rails artifact should exist (Cargo dep graph)");
 
     let dir = tempdir().expect("tempdir");
-    let toml = format!(
-        "[[plugins]]\nname = \"murphy-rails\"\npath = {:?}\n",
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\n",
         pack.display().to_string()
     );
-    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write toml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -139,11 +139,11 @@ fn lint_on_rails_fixture_exits_clean_with_pack_loaded() {
     )
     .expect("write rb");
 
-    let toml = format!(
-        "[[plugins]]\nname = \"murphy-rails\"\npath = {:?}\n",
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\n",
         pack.display().to_string()
     );
-    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write toml");
 
     Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -156,8 +156,8 @@ fn lint_on_rails_fixture_exits_clean_with_pack_loaded() {
 
 #[test]
 fn rails_rule_section_does_not_error_lint_setup() {
-    // §14a: a user-authored `[cops.rules."Rails/..."]` section in
-    // murphy.toml must not raise a setup error (exit 2). With the pack
+    // §14a: a user-authored `Rails/...:` section in
+    // .murphy.yml must not raise a setup error (exit 2). With the pack
     // loaded the cop is known; setting `enabled = true` is honoured by
     // config but still produces no offenses because the stub's `check`
     // is a no-op. Exit 0 is the success signal — §12c-compatible.
@@ -173,12 +173,11 @@ fn rails_rule_section_does_not_error_lint_setup() {
     // inert against the current standard pack.
     fs::write(&rb, "class Foo\nend\n").expect("write rb");
 
-    let toml = format!(
-        "[[plugins]]\nname = \"murphy-rails\"\npath = {:?}\n\n\
-         [cops.rules.\"Rails/HttpStatus\"]\nenabled = true\n",
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\nRails/HttpStatus:\n  Enabled: true\n",
         pack.display().to_string()
     );
-    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write toml");
 
     Command::cargo_bin("murphy")
         .expect("murphy binary builds")

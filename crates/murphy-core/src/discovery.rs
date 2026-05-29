@@ -1,19 +1,18 @@
-//! File discovery: `murphy.toml` `[files]` include/exclude + `.murphyignore`
+//! File discovery: `.murphy.yml` `AllCops` include/exclude + `.murphyignore`
 //! (Phase 2 Task 6, Scope Fence 2 — discovery-only config).
 //!
 //! `murphy lint <dir>` / `murphy lint` (no paths) needs the file *list* to
 //! come from walking a directory tree, pruned by an optional `.murphyignore`
-//! (gitignore syntax) and an optional `murphy.toml` `[files]` table:
+//! (gitignore syntax) and an optional `.murphy.yml` `AllCops` section:
 //!
-//! ```toml
-//! [files]
-//! include = ["**/*.rb"]    # globs; default `["**/*.rb"]` if absent
-//! exclude = ["vendor/**"]  # globs; applied AFTER include
+//! ```yaml
+//! AllCops:
+//!   Include: ["**/*.rb"]    # globs; default `["**/*.rb"]` if absent
+//!   Exclude: ["vendor/**"]  # globs; applied AFTER include
 //! ```
 //!
-//! Scope Fence 2 (decided): `murphy.toml` has ONLY `[files] include/exclude`.
-//! NO `[cops]`, severity, options, or `.rubocop.yml` migration here. A
-//! malformed `murphy.toml`, an unreadable directory, or a bad glob is a
+//! Scope Fence 2 (decided): `.murphy.yml` `AllCops` drives include/exclude.
+//! A malformed `.murphy.yml`, an unreadable directory, or a bad glob is a
 //! structured [`ConfigError`] (the CLI maps it to exit `2`) — never a panic,
 //! never silently ignored.
 //!
@@ -25,14 +24,14 @@
 //! avoids hand-rolling gitignore matching. We deliberately **disable** all of
 //! `ignore`'s ambient sources (`.gitignore`/`.ignore`/global git ignore,
 //! hidden-file skipping, parent traversal) so pruning is *exactly*
-//! `.murphyignore` + the `exclude` globs — predictable and not perturbed by an
-//! ambient `.gitignore`. Include/exclude glob matching uses **`globset`**
+//! `.murphyignore` + the `Exclude` globs — predictable and not perturbed by
+//! an ambient `.gitignore`. Include/exclude glob matching uses **`globset`**
 //! (also from the ripgrep family) as two explicit `GlobSet`s
-//! (`include.is_match(p) && !exclude.is_match(p)`), which expresses the plan's
-//! "exclude applied after include" directly. `murphy.toml` is parsed with
-//! **`toml`** + `serde` derive. Pure-Rust deps, caret-pinned (project
-//! convention; exact `=` pins are reserved for the contract-affecting native
-//! bindings only).
+//! (`include.is_match(p) && !exclude.is_match(p)`), which expresses the
+//! plan's "exclude applied after include" directly. `.murphy.yml` is parsed
+//! with **`serde_yaml`** + a hand-rolled open-map parser. Pure-Rust deps,
+//! caret-pinned (project convention; exact `=` pins are reserved for the
+//! contract-affecting native bindings only).
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
@@ -45,15 +44,13 @@ use crate::MurphyConfig;
 /// (config/cop/file-setup error, design §6) via its `AppError::setup`.
 #[derive(Debug)]
 pub enum ConfigError {
-    /// `murphy.toml` exists but is not valid TOML or violates the schema.
-    BadToml(String),
-    /// `.rubocop.yml` exists but is not valid YAML for migration.
+    /// `.murphy.yml` exists but is not valid YAML or violates the schema.
     BadYaml(String),
-    /// An `include`/`exclude` entry is not a valid glob.
+    /// An `Include`/`Exclude` entry is not a valid glob.
     BadGlob(String),
     /// The discovery root is unreadable / the walk hit an I/O error.
     Io(String),
-    /// A `[[plugins]]` entry could not be resolved or loaded. Renders
+    /// A `plugins:` entry could not be resolved or loaded. Renders
     /// a rustc-style `error:` / `cause:` / `hint:` block (murphy-tvh).
     PluginLoad(crate::plugin_loader::PluginLoadDiagnostic),
 }
@@ -61,9 +58,8 @@ pub enum ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConfigError::BadToml(m) => write!(f, "invalid murphy.toml: {m}"),
-            ConfigError::BadYaml(m) => write!(f, "invalid .rubocop.yml: {m}"),
-            ConfigError::BadGlob(m) => write!(f, "invalid glob in murphy.toml: {m}"),
+            ConfigError::BadYaml(m) => write!(f, "invalid .murphy.yml: {m}"),
+            ConfigError::BadGlob(m) => write!(f, "invalid glob in .murphy.yml: {m}"),
             ConfigError::Io(m) => write!(f, "{m}"),
             ConfigError::PluginLoad(d) => write!(f, "{d}"),
         }
@@ -93,7 +89,7 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet, ConfigError> {
 }
 
 /// Discover the `.rb` files under `root`, honoring an optional
-/// `<root>/murphy.toml` `[files]` include/exclude and an optional
+/// `<root>/.murphy.yml` `AllCops` include/exclude and an optional
 /// `.murphyignore` (gitignore syntax) anywhere in the tree.
 ///
 /// The returned `Vec<PathBuf>` is **sorted** (deterministic input to the
@@ -102,7 +98,7 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet, ConfigError> {
 /// yields them (so `discover(Path::new("."))` yields `./foo.rb`-shaped paths
 /// and `discover(some_dir)` yields `some_dir/foo.rb`-shaped paths).
 ///
-/// Errors (malformed `murphy.toml`, bad glob, unreadable root) are a
+/// Errors (malformed `.murphy.yml`, bad glob, unreadable root) are a
 /// structured [`ConfigError`]; the CLI maps these to exit `2`.
 pub fn discover(root: &Path) -> Result<Vec<PathBuf>, ConfigError> {
     let config = MurphyConfig::load(root)?;
@@ -117,7 +113,7 @@ pub fn discover_with_config(
     let exclude = build_globset(&config.files.exclude)?;
 
     // Walk: ONLY `.murphyignore` prunes (gitignore semantics). Every ambient
-    // source is disabled so pruning is exactly `.murphyignore` + `exclude`.
+    // source is disabled so pruning is exactly `.murphyignore` + `Exclude`.
     // CORRECTNESS-CRITICAL: if upgrading the `ignore` crate, re-audit
     // standard_filters() membership — any new ambient filter must be explicitly
     // disabled here (see ambient_gitignore_is_not_honored test).
@@ -140,7 +136,7 @@ pub fn discover_with_config(
             continue;
         }
         let path = entry.path();
-        // Glob-match against the path relative to `root` so include/exclude
+        // Glob-match against the path relative to `root` so Include/Exclude
         // globs (`vendor/**`, `**/*.rb`) match user-meaningful paths, not the
         // `./` / `<root>/` prefix the walker carries.
         let rel = path.strip_prefix(root).unwrap_or(path);
@@ -191,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn no_murphy_toml_defaults_to_all_rb_recursively() {
+    fn no_murphy_yml_defaults_to_all_rb_recursively() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write(root, "a.rb", "x = 1\n");
@@ -202,30 +198,30 @@ mod tests {
     }
 
     #[test]
-    fn murphy_toml_include_narrows_the_set() {
+    fn murphy_yml_include_narrows_the_set() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write(root, "lib/a.rb", "x = 1\n");
         write(root, "test/b.rb", "y = 2\n");
         write(
             root,
-            "murphy.toml",
-            "[files]\ninclude = [\"lib/**/*.rb\"]\n",
+            ".murphy.yml",
+            "AllCops:\n  Include:\n    - 'lib/**/*.rb'\n",
         );
 
         assert_eq!(discover_rel(root), vec!["lib/a.rb"]);
     }
 
     #[test]
-    fn murphy_toml_exclude_applied_after_include() {
+    fn murphy_yml_exclude_applied_after_include() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write(root, "app.rb", "x = 1\n");
         write(root, "vendor/dep.rb", "y = 2\n");
         write(
             root,
-            "murphy.toml",
-            "[files]\ninclude = [\"**/*.rb\"]\nexclude = [\"vendor/**\"]\n",
+            ".murphy.yml",
+            "AllCops:\n  Include:\n    - '**/*.rb'\n  Exclude:\n    - 'vendor/**'\n",
         );
 
         assert_eq!(discover_rel(root), vec!["app.rb"]);
@@ -239,7 +235,7 @@ mod tests {
         write(root, "skip.rb", "y = 2\n");
         write(root, ".murphyignore", "skip.rb\n");
 
-        // No murphy.toml → default `**/*.rb`, still honors `.murphyignore`.
+        // No .murphy.yml → default `**/*.rb`, still honors `.murphyignore`.
         assert_eq!(discover_rel(root), vec!["keep.rb"]);
     }
 
@@ -256,7 +252,7 @@ mod tests {
 
     #[test]
     fn ambient_gitignore_is_not_honored() {
-        // CORRECTNESS-CRITICAL: only `.murphyignore` + murphy.toml `exclude`
+        // CORRECTNESS-CRITICAL: only `.murphyignore` + .murphy.yml `Exclude`
         // prune. An ambient `.gitignore` must NOT (the WalkBuilder disables all
         // ambient ignore sources). Guards against a regression / `ignore`
         // crate upgrade silently re-enabling git-ignore semantics.
@@ -272,7 +268,7 @@ mod tests {
 
         assert!(
             discover_rel(root).contains(&"kept.rb".to_string()),
-            "ambient .gitignore must NOT prune; only .murphyignore + exclude do"
+            "ambient .gitignore must NOT prune; only .murphyignore + Exclude do"
         );
     }
 
@@ -286,56 +282,58 @@ mod tests {
         write(root, ".murphyignore", "b.rb\n");
         write(
             root,
-            "murphy.toml",
-            "[files]\ninclude = [\"**/*.rb\"]\nexclude = [\"c.rb\"]\n",
+            ".murphy.yml",
+            "AllCops:\n  Include:\n    - '**/*.rb'\n  Exclude:\n    - 'c.rb'\n",
         );
 
         assert_eq!(discover_rel(root), vec!["a.rb"]);
     }
 
     #[test]
-    fn malformed_murphy_toml_is_a_config_error_not_a_panic() {
+    fn malformed_murphy_yml_is_a_config_error_not_a_panic() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write(root, "a.rb", "1\n");
-        write(root, "murphy.toml", "this is not = valid = toml [[[\n");
+        // Invalid YAML: unclosed flow sequence
+        write(root, ".murphy.yml", "AllCops: [unclosed\n");
 
         match discover(root) {
-            Err(ConfigError::BadToml(_)) => {}
-            other => panic!("expected ConfigError::BadToml, got {other:?}"),
+            Err(ConfigError::BadYaml(_)) => {}
+            other => panic!("expected ConfigError::BadYaml, got {other:?}"),
         }
     }
 
     #[test]
-    fn unknown_murphy_toml_key_is_rejected() {
-        // Scope Fence 2: `#[serde(deny_unknown_fields)]` makes a typo or an
-        // unknown section a loud `BadToml`, not a silent no-op. Phase 5 adds
-        // [cops] as a KNOWN field; this test uses a permanently-bogus key so it
-        // still guards the deny_unknown_fields typo-catching invariant.
+    fn unknown_top_level_keys_become_cop_rules_not_errors() {
+        // `.murphy.yml` is open-keyed at the top level: any key that is not
+        // `AllCops` or `plugins` is treated as a cop rule (RuboCop compatibility).
+        // This means typos in `AllCops` (e.g. `AlCops`) silently become cop rules.
+        // The trade-off is accepted for RuboCop format compatibility.
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write(root, "a.rb", "1\n");
         write(
             root,
-            "murphy.toml",
-            "[files]\ninclude = [\"**/*.rb\"]\n[zzz_definitely_not_a_real_section]\nFoo = true\n",
+            ".murphy.yml",
+            "AllCops:\n  Include:\n    - '**/*.rb'\nZzz/DefinitelyNotReal:\n  Enabled: false\n",
         );
 
+        // Should succeed (open-keyed), not error.
         match discover(root) {
-            Err(ConfigError::BadToml(_)) => {}
-            other => panic!("expected ConfigError::BadToml for unknown key, got {other:?}"),
+            Ok(_) => {}
+            Err(e) => panic!("expected success for unknown cop key, got: {e}"),
         }
     }
 
     #[test]
-    fn bad_glob_in_murphy_toml_is_a_config_error() {
+    fn bad_glob_in_murphy_yml_is_a_config_error() {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
         write(root, "a.rb", "1\n");
         write(
             root,
-            "murphy.toml",
-            "[files]\ninclude = [\"[unterminated\"]\n",
+            ".murphy.yml",
+            "AllCops:\n  Include:\n    - '[unterminated'\n",
         );
 
         match discover(root) {

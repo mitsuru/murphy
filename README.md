@@ -12,10 +12,10 @@ eliminate RuboCop's slowness with a native Rust core.
   Phase-1 behavior.
 - `murphy lint <dir>` and `murphy lint` (zero path args → discover from the
   current directory) walk for `.rb` files.
-- Discovery is configured by an optional `murphy.toml` `[files]`
-  `include`/`exclude` glob lists plus a `.murphyignore` file
+- Discovery is configured by an optional `.murphy.yml` `AllCops:
+  Include`/`Exclude` glob lists plus a `.murphyignore` file
   (gitignore-syntax). Ambient `.gitignore` is **deliberately not** honored —
-  only `.murphyignore` and `exclude` prune files.
+  only `.murphyignore` and `Exclude` prune files.
 - Linting runs **file-level parallel across all cores** (rayon); output is
   deterministic regardless of thread or argument order.
 - Within a single run, files with byte-identical content are parsed and
@@ -23,13 +23,15 @@ eliminate RuboCop's slowness with a native Rust core.
   identical to the non-memoized result.
 - Standard built-ins from ADR 0018 are enabled by default across `Murphy`, `Lint`,
   `Style`, and limited `Layout` namespaces.
-- `murphy.toml` also supports `[cops]`: a configurable user-cop path, per-cop
-  `enabled = false`, and per-cop `severity = "warning" | "error"` override.
+- `.murphy.yml` also supports `AllCops.CopsPath` (user-cop path), per-cop
+  `Enabled: false`, and per-cop `Severity: warning | error` override.
   Directory discovery excludes the configured cops path so cop implementation
   files are not linted as ordinary source unless named explicitly.
-- `murphy migrate <.rubocop.yml>` writes one-way, lossy Murphy TOML to stdout.
-  It maps `AllCops.Include`/`Exclude` plus per-cop `Enabled`/`Severity`; it is
-  not a RuboCop compatibility layer.
+  The `.murphy.yml` format is intentionally RuboCop-compatible: any
+  `.rubocop.yml` can serve as a `.murphy.yml` with only minor additions.
+- `murphy migrate <.rubocop.yml>` normalizes a `.rubocop.yml` to `.murphy.yml`
+  (adds `AllCops.CopsPath: cops`, emits plugin rename hints); the output is
+  valid `.murphy.yml` that Murphy reads directly.
 - **User cops:** drop a `.rb` file into a `cops/` directory and Murphy runs
   it **in addition to** the native cops, merged into one deterministic JSON
   offense array. `cops/` is resolved relative to the invocation working
@@ -43,7 +45,7 @@ eliminate RuboCop's slowness with a native Rust core.
   - is **exception-isolated** — a cop that `raise`s degrades to exactly one
     `severity:"error"` offense for that cop×file; all other cops/files are
     unaffected and the run completes.
-- **Native plugin packs:** configure `[[plugins]]` in `murphy.toml` to load
+- **Native plugin packs:** configure `plugins:` in `.murphy.yml` to load
   `.so`/`.dylib` libraries as cop providers. Per-cop config is passed as JSON to
   native callbacks. Native file-level cops can narrow files with
   `Include` / `Exclude` globs (for example: `Include = ["app/**/*.rb"]`), while
@@ -78,7 +80,7 @@ eliminate RuboCop's slowness with a native Rust core.
 - JSON array of offenses printed to stdout; multi-file aggregation.
 - `murphy lint --profile` emits JSON profiling data, with optional
   `--profile-format speedscope` output.
-- Exit codes 0/1/2/3. A malformed or unknown-key `murphy.toml` exits 2.
+- Exit codes 0/1/2/3. A malformed `.murphy.yml` exits 2.
 
 Not yet production-ready. Murphy is described as a "linter/formatter", but
 **only the lint path exists today**. Autocorrect (`murphy lint --fix`/`-a`)
@@ -163,18 +165,17 @@ $ echo $?
 Output is deterministic regardless of argument or thread order; linting runs
 in parallel across all cores.
 
-Prune files and configure cops with `murphy.toml`:
+Prune files and configure cops with `.murphy.yml` (RuboCop-compatible format):
 
 ```console
-$ cat murphy.toml
-[files]
-exclude = ["sub/**"]
+$ cat .murphy.yml
+AllCops:
+  Exclude:
+    - "sub/**"
+  CopsPath: cops
 
-[cops]
-path = "cops"
-
-[cops.rules."Murphy/NoReceiverPuts"]
-severity = "error"
+Murphy/NoReceiverPuts:
+  Severity: error
 $ /path/to/murphy lint
 [{"file":"./a.rb","cop_name":"Murphy/NoReceiverPuts","range":{"start_offset":0,"end_offset":4},"severity":"error","message":"Use a logger instead of puts"}]
 $ echo $?
@@ -290,26 +291,21 @@ $ echo $?
 2
 ```
 
-A malformed or unknown-key `murphy.toml` is a setup error (exit 2):
+A malformed `.murphy.yml` is a setup error (exit 2):
 
 ```console
-$ cat murphy.toml
-[files]
-bogus = 1
+$ cat .murphy.yml
+AllCops: [unclosed
 $ /path/to/murphy lint
-murphy: invalid murphy.toml: TOML parse error at line 2, column 1
-  |
-2 | bogus = 1
-  | ^^^^^
-unknown field `bogus`, expected `include` or `exclude`
+murphy: invalid .murphy.yml: did not find expected node content at ...
 $ echo $?
 2
 ```
 
-Migrate a subset of `.rubocop.yml` to Murphy TOML:
+Normalize a `.rubocop.yml` to `.murphy.yml` (adds `CopsPath`, plugin rename hint):
 
 ```console
-$ ./target/debug/murphy migrate .rubocop.yml > murphy.toml
+$ ./target/debug/murphy migrate .rubocop.yml > .murphy.yml
 $ echo $?
 0
 ```

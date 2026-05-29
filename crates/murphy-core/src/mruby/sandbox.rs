@@ -320,7 +320,7 @@ fn is_fingerprint_input(path: &Path) -> bool {
 
     matches!(
         path.file_name().and_then(|name| name.to_str()),
-        Some("murphy.toml" | "package.toml" | "murphy-package.toml")
+        Some(".murphy.yml" | "package.toml" | "murphy-package.toml")
     )
 }
 
