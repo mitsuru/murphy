@@ -209,6 +209,12 @@ fn lower_matcher(
     // whenever the pattern uses any `%var` / `%N`. Existing patterns that use
     // neither keep the legacy 2-arg signature so unrelated cops compile
     // unchanged.
+    //
+    // Two signature shapes total (not three): every runtime-param pattern
+    // takes `positional`, regardless of whether it uses `%var` only, `%N`
+    // only, or both. Trading one extra `&[]` at named-only call sites for a
+    // stable shape across the param matrix means a cop author can extend
+    // `(send _ %method)` to `(send _ %method %1)` without breaking callers.
     let signature_extra = if uses_any_param {
         quote!(, positional: &[::murphy_plugin_api::Param<'_>])
     } else {
