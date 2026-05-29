@@ -3,7 +3,8 @@
 use std::marker::PhantomData;
 
 use murphy_ast::{
-    AstNode, Comment, NodeId, NodeKind, NodeLoc, OptNodeId, Range, SourceToken, collect_children,
+    AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind,
+    collect_children,
 };
 
 use crate::abi::CxRaw;
@@ -29,6 +30,150 @@ unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
         &[]
     } else {
         unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+}
+
+/// Lazy source-location view for a node — Murphy's analog of rubocop-ast's
+/// `node.loc`. `expression` and `name` are plain fields (zero-cost); all
+/// other sub-ranges are computed on demand from the arena's sorted token
+/// list and source bytes.
+pub struct LocRef<'a> {
+    pub expression: Range,
+    pub name: Range,
+    // Private: precomputed for dot() and keyword()
+    receiver_end: Option<u32>,
+    keyword_bearing: bool,
+    sorted_tokens: &'a [SourceToken],
+    source: &'a [u8],
+}
+
+impl<'a> LocRef<'a> {
+    /// The call-operator range: `.` for `Send`, `&.` for `Csend`.
+    /// Returns `Range::ZERO` when the node has no receiver (bare method
+    /// call), or when called on a non-Send/Csend node.
+    pub fn dot(&self) -> Range {
+        let Some(recv_end) = self.receiver_end else {
+            return Range::ZERO;
+        };
+        let name_start = self.name.start;
+        if recv_end >= name_start {
+            return Range::ZERO;
+        }
+        let window = &self.source[recv_end as usize..name_start as usize];
+        let mut i = 0;
+        let mut in_comment = false;
+        while i < window.len() {
+            let b = window[i];
+            if b == b'\n' {
+                in_comment = false;
+                i += 1;
+                continue;
+            }
+            if in_comment {
+                i += 1;
+                continue;
+            }
+            if b == b'#' {
+                in_comment = true;
+                i += 1;
+                continue;
+            }
+            if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
+                let start = recv_end + i as u32;
+                return Range {
+                    start,
+                    end: start + 2,
+                };
+            }
+            if b == b'.' {
+                let start = recv_end + i as u32;
+                return Range {
+                    start,
+                    end: start + 1,
+                };
+            }
+            i += 1;
+        }
+        Range::ZERO
+    }
+
+    /// The leading keyword token range (`def`, `class`, `if`, `while`, …).
+    /// Computed by binary-searching sorted_tokens for the first token at
+    /// `expression.start`. Returns `Range::ZERO` if no token starts exactly
+    /// at that position.
+    ///
+    /// **Limitation:** modifier-form control flow (`x if cond`) places the
+    /// keyword *after* the expression start — returns `Range::ZERO` for those.
+    pub fn keyword(&self) -> Range {
+        if !self.keyword_bearing {
+            return Range::ZERO;
+        }
+        let target = self.expression.start;
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.start < target);
+        if let Some(tok) = self.sorted_tokens.get(idx)
+            && tok.range.start == target
+        {
+            return tok.range;
+        }
+        Range::ZERO
+    }
+
+    /// The opening-paren `(` range for this node's own argument list, or
+    /// `Range::ZERO` if none. Covers only `(` — not `[`, `{`, or `do`.
+    ///
+    /// Searches from `name.end` (not `expression.start`) so that parens
+    /// inside child nodes (e.g. `foo bar(baz)`) are not mistakenly returned
+    /// for the outer call.
+    pub fn begin(&self) -> Range {
+        // Search from name.end to skip over child node parens.
+        let search_from = if self.name != Range::ZERO {
+            self.name.end
+        } else {
+            self.expression.start
+        };
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.start < search_from);
+        if let Some(tok) = self.sorted_tokens.get(idx) {
+            if tok.range.start < self.expression.end && tok.kind == SourceTokenKind::LeftParen {
+                return tok.range;
+            }
+        }
+        Range::ZERO
+    }
+
+    /// The closing-paren `)` matching this node's `begin()` paren, or
+    /// `Range::ZERO` if `begin()` is `Range::ZERO`. Uses a nesting counter
+    /// so `foo(bar(x))` correctly returns the outer `)`.
+    pub fn end(&self) -> Range {
+        let begin = self.begin();
+        if begin == Range::ZERO {
+            return Range::ZERO;
+        }
+        let search_from = begin.end;
+        let expr_end = self.expression.end;
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.start < search_from);
+        let mut depth: i32 = 1;
+        for tok in &self.sorted_tokens[idx..] {
+            if tok.range.start >= expr_end {
+                break;
+            }
+            match tok.kind {
+                SourceTokenKind::LeftParen => depth += 1,
+                SourceTokenKind::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return tok.range;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Range::ZERO
     }
 }
 
@@ -75,15 +220,57 @@ impl<'a> Cx<'a> {
         self.nodes()[id.0 as usize].loc.expression
     }
 
-    /// The `node.loc` bundle for `id` — Murphy's analog of the parser
-    /// gem's `node.loc` accessor. `.expression` is the AST node's full
-    /// source range; `.name` is the identifier range (the
-    /// `node.loc.name` analog), [`Range::ZERO`] for nodes without
-    /// an identifier or for name-bearing nodes the translator did not
-    /// annotate. Equivalent to `self.node(id).loc`; provided as a
-    /// shorthand so cops can write `cx.loc(node).name`.
-    pub fn loc(&self, id: NodeId) -> NodeLoc {
-        self.nodes()[id.0 as usize].loc
+    /// The source-location view for `id`. `expression` and `name` are plain
+    /// fields. Call `.dot()`, `.keyword()`, `.begin()`, `.end()` for sub-ranges
+    /// — they compute only when used.
+    pub fn loc(&self, id: NodeId) -> LocRef<'a> {
+        let node = &self.nodes()[id.0 as usize];
+        let receiver_end = match node.kind {
+            NodeKind::Send { receiver, .. } => receiver.get().map(|r| self.range(r).end),
+            NodeKind::Csend { receiver, .. } => Some(self.range(receiver).end),
+            _ => None,
+        };
+        let src: &'a [u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
+        // For conditionals/loops that have both block-form (`if cond; end`) and
+        // modifier-form (`body if cond`), detect block-form by checking whether
+        // the source at expression.start begins with the keyword itself.
+        let starts_with_ctrl_kw = |start: u32| -> bool {
+            let s = start as usize;
+            let rest = &src[s..];
+            let word_len = rest
+                .iter()
+                .position(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+                .unwrap_or(rest.len());
+            matches!(&rest[..word_len], b"if" | b"unless" | b"while" | b"until")
+        };
+        let keyword_bearing = matches!(
+            node.kind,
+            NodeKind::Def { .. }
+                | NodeKind::Defs { .. }
+                | NodeKind::Class { .. }
+                | NodeKind::Module { .. }
+                | NodeKind::Case { .. }
+                | NodeKind::When { .. }
+                | NodeKind::Begin(_)
+                | NodeKind::Kwbegin(_)
+                | NodeKind::Return(_)
+                | NodeKind::Break(_)
+                | NodeKind::Next(_)
+                | NodeKind::Yield(_)
+                | NodeKind::For { .. }
+                | NodeKind::Rescue { .. }
+        ) || matches!(
+            node.kind,
+            NodeKind::If { .. } | NodeKind::While { .. } | NodeKind::Until { .. }
+        ) && starts_with_ctrl_kw(node.loc.expression.start);
+        LocRef {
+            expression: node.loc.expression,
+            name: node.loc.name,
+            receiver_end,
+            keyword_bearing,
+            sorted_tokens: self.sorted_tokens(),
+            source: src,
+        }
     }
 
     /// The parent of `id`; `OptNodeId::NONE` for the root.
@@ -539,53 +726,8 @@ impl<'a> Cx<'a> {
     /// chain), so this is cheaper than maintaining a side-table that
     /// every `Ast` would pay for. Cops that never call it pay nothing.
     pub fn call_operator_loc(&self, id: NodeId) -> Option<Range> {
-        let node = &self.nodes()[id.0 as usize];
-        let (receiver, name_start) = match node.kind {
-            NodeKind::Send { receiver, .. } => (receiver.get()?, node.loc.name.start),
-            NodeKind::Csend { receiver, .. } => (receiver, node.loc.name.start),
-            _ => return None,
-        };
-        let scan_start = self.nodes()[receiver.0 as usize].loc.expression.end;
-        if scan_start >= name_start {
-            return None;
-        }
-        let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
-        let window = &src[scan_start as usize..name_start as usize];
-        let mut i = 0;
-        let mut in_comment = false;
-        while i < window.len() {
-            let b = window[i];
-            if b == b'\n' {
-                in_comment = false;
-                i += 1;
-                continue;
-            }
-            if in_comment {
-                i += 1;
-                continue;
-            }
-            if b == b'#' {
-                in_comment = true;
-                i += 1;
-                continue;
-            }
-            if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
-                let start = scan_start + i as u32;
-                return Some(Range {
-                    start,
-                    end: start + 2,
-                });
-            }
-            if b == b'.' {
-                let start = scan_start + i as u32;
-                return Some(Range {
-                    start,
-                    end: start + 1,
-                });
-            }
-            i += 1;
-        }
-        None
+        let r = self.loc(id).dot();
+        if r == Range::ZERO { None } else { Some(r) }
     }
 
     /// The whole file's source text. A `NodeCop` with `KINDS = &[]`
@@ -846,6 +988,73 @@ mod tests {
             )
         };
         (b.finish(root), root)
+    }
+
+    #[test]
+    fn loc_ref_fields_match_nodeloc() {
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let loc = cx.loc(root);
+        assert_eq!(loc.expression, cx.range(root));
+        assert_eq!(loc.name, cx.node(root).loc.name);
+    }
+
+    #[test]
+    fn loc_dot_finds_explicit_dot() {
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).dot(), Range { start: 3, end: 4 });
+    }
+
+    #[test]
+    fn loc_dot_finds_safe_navigation() {
+        let (ast, root) = build_call(
+            "foo&.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 5, end: 8 },
+            true,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).dot(), Range { start: 3, end: 5 });
+    }
+
+    #[test]
+    fn loc_dot_zero_for_no_receiver() {
+        // bare `puts 'x'` — Send with no receiver
+        let (ast, root) = build_call("puts", None, Range { start: 0, end: 4 }, false);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).dot(), Range::ZERO);
     }
 
     #[test]
@@ -1603,5 +1812,139 @@ mod tests {
         assert_eq!(cx.block_body(block).get(), Some(body));
         // Non-Block node projects to NONE.
         assert!(cx.block_call(body).get().is_none());
+    }
+
+    #[test]
+    fn loc_keyword_def() {
+        let ast = murphy_translate::translate("def foo; end", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        let kw = cx.loc(root).keyword();
+        assert_eq!(kw, Range { start: 0, end: 3 });
+        assert_eq!(cx.raw_source(kw), "def");
+    }
+
+    #[test]
+    fn loc_keyword_zero_for_send() {
+        // `foo.bar` — a Send node has no keyword token at expression.start.
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).keyword(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_keyword_zero_for_send_real_parse() {
+        // Real prism parse: `foo` identifier token is at expression.start
+        // but keyword() must return ZERO because Send is not keyword_bearing.
+        let ast = murphy_translate::translate("foo.bar", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).keyword(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_begin_finds_open_paren() {
+        let ast = murphy_translate::translate("foo(a, b)", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).begin(), Range { start: 3, end: 4 });
+    }
+
+    #[test]
+    fn loc_end_finds_close_paren() {
+        let ast = murphy_translate::translate("foo(a, b)", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).end(), Range { start: 8, end: 9 });
+    }
+
+    #[test]
+    fn loc_begin_zero_when_no_parens() {
+        let ast = murphy_translate::translate("foo a, b", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).begin(), Range::ZERO);
+        assert_eq!(cx.loc(root).end(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_keyword_block_if() {
+        // Block-form `if` starts with keyword: keyword() returns `if` range.
+        let ast = murphy_translate::translate("if true; end", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        let kw = cx.loc(root).keyword();
+        assert_eq!(kw, Range { start: 0, end: 2 });
+        assert_eq!(cx.raw_source(kw), "if");
+    }
+
+    #[test]
+    fn loc_keyword_zero_modifier_if() {
+        // Modifier-form `if` places keyword after body: keyword() returns ZERO.
+        let ast = murphy_translate::translate("1 if true", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).keyword(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_begin_zero_for_command_with_arg_paren() {
+        // `foo bar(baz)` — outer Send has no `(`, only inner `bar(baz)` does.
+        let ast = murphy_translate::translate("foo bar(baz)", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        // Outer `foo` call: begin()/end() must be ZERO.
+        assert_eq!(cx.loc(root).begin(), Range::ZERO);
+        assert_eq!(cx.loc(root).end(), Range::ZERO);
     }
 }

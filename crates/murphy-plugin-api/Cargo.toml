@@ -42,3 +42,7 @@ indoc = { version = "2", optional = true }
 # cops without rebuilding the `CxRaw` + sink plumbing or pulling in
 # `indoc` directly. See `src/test_support.rs`.
 test-support = ["dep:murphy-translate", "dep:indoc"]
+
+[dev-dependencies]
+# Real prism parse in cx.rs unit tests (loc_keyword_def).
+murphy-translate = { path = "../murphy-translate" }
