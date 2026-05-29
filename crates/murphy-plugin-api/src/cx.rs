@@ -120,42 +120,60 @@ impl<'a> LocRef<'a> {
         Range::ZERO
     }
 
-    /// The opening-paren `(` range within this node's expression, or
+    /// The opening-paren `(` range for this node's own argument list, or
     /// `Range::ZERO` if none. Covers only `(` — not `[`, `{`, or `do`.
+    ///
+    /// Searches from `name.end` (not `expression.start`) so that parens
+    /// inside child nodes (e.g. `foo bar(baz)`) are not mistakenly returned
+    /// for the outer call.
     pub fn begin(&self) -> Range {
-        let (start, end) = (self.expression.start, self.expression.end);
+        // Search from name.end to skip over child node parens.
+        let search_from = if self.name != Range::ZERO {
+            self.name.end
+        } else {
+            self.expression.start
+        };
         let idx = self
             .sorted_tokens
-            .partition_point(|t| t.range.start < start);
-        for tok in &self.sorted_tokens[idx..] {
-            if tok.range.start >= end {
-                break;
-            }
-            if tok.kind == SourceTokenKind::LeftParen {
+            .partition_point(|t| t.range.start < search_from);
+        if let Some(tok) = self.sorted_tokens.get(idx) {
+            if tok.range.start < self.expression.end && tok.kind == SourceTokenKind::LeftParen {
                 return tok.range;
             }
         }
         Range::ZERO
     }
 
-    /// The closing-paren `)` range within this node's expression, or
-    /// `Range::ZERO` if none. Returns the *last* `)` in the range (correct
-    /// for nested calls like `foo(bar(x))`).
+    /// The closing-paren `)` matching this node's `begin()` paren, or
+    /// `Range::ZERO` if `begin()` is `Range::ZERO`. Uses a nesting counter
+    /// so `foo(bar(x))` correctly returns the outer `)`.
     pub fn end(&self) -> Range {
-        let (start, end) = (self.expression.start, self.expression.end);
+        let begin = self.begin();
+        if begin == Range::ZERO {
+            return Range::ZERO;
+        }
+        let search_from = begin.end;
+        let expr_end = self.expression.end;
         let idx = self
             .sorted_tokens
-            .partition_point(|t| t.range.start < start);
-        let mut result = Range::ZERO;
+            .partition_point(|t| t.range.start < search_from);
+        let mut depth: i32 = 1;
         for tok in &self.sorted_tokens[idx..] {
-            if tok.range.start >= end {
+            if tok.range.start >= expr_end {
                 break;
             }
-            if tok.kind == SourceTokenKind::RightParen {
-                result = tok.range;
+            match tok.kind {
+                SourceTokenKind::LeftParen => depth += 1,
+                SourceTokenKind::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return tok.range;
+                    }
+                }
+                _ => {}
             }
         }
-        result
+        Range::ZERO
     }
 }
 
@@ -216,6 +234,19 @@ impl<'a> Cx<'a> {
             }
             _ => None,
         };
+        let src: &'a [u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
+        // For conditionals/loops that have both block-form (`if cond; end`) and
+        // modifier-form (`body if cond`), detect block-form by checking whether
+        // the source at expression.start begins with the keyword itself.
+        let starts_with_ctrl_kw = |start: u32| -> bool {
+            let s = start as usize;
+            let rest = &src[s..];
+            let word_len = rest
+                .iter()
+                .position(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+                .unwrap_or(rest.len());
+            matches!(&rest[..word_len], b"if" | b"unless" | b"while" | b"until")
+        };
         let keyword_bearing = matches!(
             node.kind,
             NodeKind::Def { .. }
@@ -232,8 +263,10 @@ impl<'a> Cx<'a> {
                 | NodeKind::Yield(_)
                 | NodeKind::For { .. }
                 | NodeKind::Rescue { .. }
-        );
-        let src: &'a [u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
+        ) || matches!(
+            node.kind,
+            NodeKind::If { .. } | NodeKind::While { .. } | NodeKind::Until { .. }
+        ) && starts_with_ctrl_kw(node.loc.expression.start);
         LocRef {
             expression: node.loc.expression,
             name: node.loc.name,
@@ -1869,6 +1902,52 @@ mod tests {
         let raw = cx_raw_for(&ast, &fns);
         let cx = unsafe { Cx::from_raw(&raw) };
         let root = ast.root();
+        assert_eq!(cx.loc(root).begin(), Range::ZERO);
+        assert_eq!(cx.loc(root).end(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_keyword_block_if() {
+        // Block-form `if` starts with keyword: keyword() returns `if` range.
+        let ast = murphy_translate::translate("if true; end", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        let kw = cx.loc(root).keyword();
+        assert_eq!(kw, Range { start: 0, end: 2 });
+        assert_eq!(cx.raw_source(kw), "if");
+    }
+
+    #[test]
+    fn loc_keyword_zero_modifier_if() {
+        // Modifier-form `if` places keyword after body: keyword() returns ZERO.
+        let ast = murphy_translate::translate("1 if true", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        assert_eq!(cx.loc(root).keyword(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_begin_zero_for_command_with_arg_paren() {
+        // `foo bar(baz)` — outer Send has no `(`, only inner `bar(baz)` does.
+        let ast = murphy_translate::translate("foo bar(baz)", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
+        // Outer `foo` call: begin()/end() must be ZERO.
         assert_eq!(cx.loc(root).begin(), Range::ZERO);
         assert_eq!(cx.loc(root).end(), Range::ZERO);
     }
