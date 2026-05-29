@@ -79,11 +79,17 @@ impl<'a> LocRef<'a> {
             }
             if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
                 let start = recv_end + i as u32;
-                return Range { start, end: start + 2 };
+                return Range {
+                    start,
+                    end: start + 2,
+                };
             }
             if b == b'.' {
                 let start = recv_end + i as u32;
-                return Range { start, end: start + 1 };
+                return Range {
+                    start,
+                    end: start + 1,
+                };
             }
             i += 1;
         }
@@ -99,7 +105,9 @@ impl<'a> LocRef<'a> {
     /// keyword *after* the expression start — returns `Range::ZERO` for those.
     pub fn keyword(&self) -> Range {
         let target = self.expression.start;
-        let idx = self.sorted_tokens.partition_point(|t| t.range.start < target);
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.start < target);
         if let Some(tok) = self.sorted_tokens.get(idx)
             && tok.range.start == target
         {
@@ -112,9 +120,13 @@ impl<'a> LocRef<'a> {
     /// `Range::ZERO` if none. Covers only `(` — not `[`, `{`, or `do`.
     pub fn begin(&self) -> Range {
         let (start, end) = (self.expression.start, self.expression.end);
-        let idx = self.sorted_tokens.partition_point(|t| t.range.start < start);
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.start < start);
         for tok in &self.sorted_tokens[idx..] {
-            if tok.range.start >= end { break; }
+            if tok.range.start >= end {
+                break;
+            }
             if tok.kind == SourceTokenKind::LeftParen {
                 return tok.range;
             }
@@ -127,10 +139,14 @@ impl<'a> LocRef<'a> {
     /// for nested calls like `foo(bar(x))`).
     pub fn end(&self) -> Range {
         let (start, end) = (self.expression.start, self.expression.end);
-        let idx = self.sorted_tokens.partition_point(|t| t.range.start < start);
+        let idx = self
+            .sorted_tokens
+            .partition_point(|t| t.range.start < start);
         let mut result = Range::ZERO;
         for tok in &self.sorted_tokens[idx..] {
-            if tok.range.start >= end { break; }
+            if tok.range.start >= end {
+                break;
+            }
             if tok.kind == SourceTokenKind::RightParen {
                 result = tok.range;
             }
@@ -188,9 +204,9 @@ impl<'a> Cx<'a> {
     pub fn loc(&self, id: NodeId) -> LocRef<'a> {
         let node = &self.nodes()[id.0 as usize];
         let receiver_end = match node.kind {
-            NodeKind::Send { receiver, .. } => {
-                receiver.get().map(|r| self.nodes()[r.0 as usize].loc.expression.end)
-            }
+            NodeKind::Send { receiver, .. } => receiver
+                .get()
+                .map(|r| self.nodes()[r.0 as usize].loc.expression.end),
             NodeKind::Csend { receiver, .. } => {
                 Some(self.nodes()[receiver.0 as usize].loc.expression.end)
             }
