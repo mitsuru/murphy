@@ -9,7 +9,7 @@
 //! gap_issues:
 //!   - murphy-juee
 //! notes: >
-//!   Known gaps remain around message-arg forms, autocorrect, and test-file gating.
+//!   Known gaps remain around autocorrect and test-file gating.
 //! ```
 //!
 //! `assert` with a single negated argument) and recommend the
@@ -33,27 +33,26 @@
 //!
 //! ## Matched shape (Send node)
 //!
-//! Outer `Send(receiver=None, method="assert", args=[inner])`, where
+//! Outer `Send(receiver=None, method="assert", args=[inner, ...])`, where
 //! `inner` is itself a `Send(receiver=Some(_), method="!", args=[])`.
+//! The trailing `...` on the outer Send allows an optional failure-message
+//! second argument (e.g. `assert !foo, 'msg'`).
 //!
 //! Expressed declaratively with [`def_node_matcher!`] (RuboCop NodePattern
 //! grammar): in DSL `nil?` means receiver-None on the outer Send,
 //! `!nil?` on the inner Send forces a non-None receiver (the negated
-//! expression), and the trailing argument list is omitted so each
-//! Send must take exactly its specified arity (outer = 1 inner arg,
-//! inner = 0).
+//! expression), and the trailing `...` on the outer send permits zero
+//! or more additional arguments after the negation.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent:
-//   `(send nil? :assert (send !nil? :!))`
+//   `(send nil? :assert (send !nil? :!) ...)`
 //
-// - Outer: receiver None (`nil?`), method `:assert`, exactly 1 arg.
+// - Outer: receiver None (`nil?`), method `:assert`, 1 or more args
+//   (the `...` allows the optional failure-message second argument).
 // - Inner: receiver non-None (`!nil?`), method `:!`, exactly 0 args.
-//
-// Strict arity on both Sends is load-bearing (excludes
-// `assert foo, "msg"`, `assert()`, and any inner-bang oddity).
-def_node_matcher!(is_assert_bang, "(send nil? :assert (send !nil? :!))");
+def_node_matcher!(is_assert_bang, "(send nil? :assert (send !nil? :!) ...)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -119,6 +118,14 @@ mod tests {
             "#});
     }
 
+    #[test]
+    fn flags_assert_bang_with_message() {
+        test::<AssertNot>().expect_offense(indoc! {r#"
+                assert !foo, 'a failure message'
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `assert_not` over `assert !`.
+            "#});
+    }
+
     // === no-hit cases ===
 
     #[test]
@@ -142,8 +149,7 @@ mod tests {
     #[test]
     fn does_not_flag_assert_with_message_arg() {
         // `assert foo, "msg"` carries an explicit failure message;
-        // the arity gate excludes it (and the single arg is not a
-        // bang send anyway).
+        // the first arg is not a bang send, so no offense.
         test::<AssertNot>().expect_no_offenses("assert foo, \"msg\"\n");
     }
 
