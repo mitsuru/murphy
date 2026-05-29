@@ -58,6 +58,14 @@ impl Translator {
             prism::PM_TOKEN_IGNORED_NEWLINE => SourceTokenKind::IgnoredNewline,
             prism::PM_TOKEN_HEREDOC_START => SourceTokenKind::HeredocStart,
             prism::PM_TOKEN_HEREDOC_END => SourceTokenKind::HeredocEnd,
+            prism::PM_TOKEN_COMMA => SourceTokenKind::Comma,
+            // `PM_TOKEN_BRACE_LEFT`/`PM_TOKEN_BRACE_RIGHT` cover hash-literal
+            // and brace-block braces only. String interpolation (`#{`/`}`)
+            // uses `PM_TOKEN_EMBEXPR_BEGIN`/`PM_TOKEN_EMBEXPR_END` and lambda
+            // openers (`-> {`) use `PM_TOKEN_LAMBDA_BEGIN`, so those fall
+            // through to `Other` and never masquerade as braces.
+            prism::PM_TOKEN_BRACE_LEFT => SourceTokenKind::LeftBrace,
+            prism::PM_TOKEN_BRACE_RIGHT => SourceTokenKind::RightBrace,
             _ => SourceTokenKind::Other,
         }
     }
@@ -2658,6 +2666,57 @@ mod tests {
         let kinds: Vec<_> = heredoc.sorted_tokens().iter().map(|t| t.kind).collect();
         assert!(kinds.contains(&murphy_ast::SourceTokenKind::HeredocStart));
         assert!(kinds.contains(&murphy_ast::SourceTokenKind::HeredocEnd));
+    }
+
+    #[test]
+    fn translates_comma_token() {
+        let ast = translate("foo(a, b)", "t.rb");
+        let commas: Vec<_> = ast
+            .sorted_tokens()
+            .iter()
+            .filter(|t| t.kind == murphy_ast::SourceTokenKind::Comma)
+            .map(|t| ast.raw_source(t.range).to_string())
+            .collect();
+        assert_eq!(commas, vec![",".to_string()]);
+    }
+
+    #[test]
+    fn translates_hash_and_block_braces() {
+        // Hash literal braces.
+        let hash = translate("{a: 1}", "t.rb");
+        let kinds: Vec<_> = hash
+            .sorted_tokens()
+            .iter()
+            .map(|t| (t.kind, hash.raw_source(t.range).to_string()))
+            .collect();
+        assert!(kinds.contains(&(murphy_ast::SourceTokenKind::LeftBrace, "{".to_string())));
+        assert!(kinds.contains(&(murphy_ast::SourceTokenKind::RightBrace, "}".to_string())));
+
+        // Brace block braces.
+        let block = translate("foo { }", "t.rb");
+        let kinds: Vec<_> = block.sorted_tokens().iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&murphy_ast::SourceTokenKind::LeftBrace));
+        assert!(kinds.contains(&murphy_ast::SourceTokenKind::RightBrace));
+    }
+
+    #[test]
+    fn do_end_block_is_not_classified_as_braces() {
+        // `do`/`end` keywords are not brace tokens — they must stay `Other`.
+        let ast = translate("foo do end", "t.rb");
+        let kinds: Vec<_> = ast.sorted_tokens().iter().map(|t| t.kind).collect();
+        assert!(!kinds.contains(&murphy_ast::SourceTokenKind::LeftBrace));
+        assert!(!kinds.contains(&murphy_ast::SourceTokenKind::RightBrace));
+    }
+
+    #[test]
+    fn string_interpolation_braces_are_not_classified_as_braces() {
+        // `#{` / `}` in interpolation are EMBEXPR tokens, not brace tokens.
+        let ast = translate("\"#{x}\"", "t.rb");
+        let kinds: Vec<_> = ast.sorted_tokens().iter().map(|t| t.kind).collect();
+        assert!(!kinds.contains(&murphy_ast::SourceTokenKind::LeftBrace));
+        // The interpolation-closing `}` is EMBEXPR_END, so it stays Other —
+        // there is no BRACE_RIGHT token in a bare interpolation.
+        assert!(!kinds.contains(&murphy_ast::SourceTokenKind::RightBrace));
     }
 
     // --- murphy-ocv: super-with-block ---

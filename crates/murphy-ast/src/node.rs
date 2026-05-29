@@ -108,6 +108,24 @@ pub enum SourceTokenKind {
     HeredocStart,
     HeredocEnd,
     Other,
+    // New variants are appended at the tail to preserve the `#[repr(u8)]`
+    // discriminants of the existing kinds (the serialized format and the
+    // plugin ABI both encode `kind as u8`). Adding a variant here is an
+    // additive ABI change: bump `MURPHY_PLUGIN_ABI_VERSION` and
+    // `FORMAT_VERSION`.
+    /// A `,` separator token (`PM_TOKEN_COMMA`). Consumed by comma-spacing
+    /// and trailing-comma layout cops.
+    Comma,
+    /// A `{` opening brace for a hash literal or brace block
+    /// (`PM_TOKEN_BRACE_LEFT`). Distinct from string-interpolation `#{`
+    /// (`PM_TOKEN_EMBEXPR_BEGIN`) and lambda `-> {` (`PM_TOKEN_LAMBDA_BEGIN`),
+    /// which keep their own prism token types and so fall through to
+    /// [`SourceTokenKind::Other`].
+    LeftBrace,
+    /// A `}` closing brace (`PM_TOKEN_BRACE_RIGHT`). Closes a hash literal,
+    /// a brace block, *or* a lambda body (`-> { }`); string interpolation
+    /// `}` is `PM_TOKEN_EMBEXPR_END` and stays [`SourceTokenKind::Other`].
+    RightBrace,
 }
 
 /// A reference to a contiguous slice of `node_lists` — the side table for

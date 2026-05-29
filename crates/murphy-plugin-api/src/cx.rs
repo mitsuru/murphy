@@ -1149,6 +1149,55 @@ impl<'a> Cx<'a> {
         unsafe { slice(self.raw.sorted_tokens, self.raw.sorted_tokens_len) }
     }
 
+    /// The exact source bytes of `tok`. Use this to match a token by text
+    /// when no dedicated [`SourceTokenKind`] exists for it — e.g. `=`,
+    /// `end`, or `::` (which all land in [`SourceTokenKind::Other`]).
+    pub fn token_text(&self, tok: SourceToken) -> &'a str {
+        self.raw_source(tok.range)
+    }
+
+    /// The source tokens fully contained within `range`, in source order.
+    ///
+    /// "Fully contained" means `tok.range.start >= range.start` **and**
+    /// `tok.range.end <= range.end`; a token straddling a boundary is
+    /// excluded. The returned slice is a contiguous sub-slice of
+    /// [`sorted_tokens`](Self::sorted_tokens) (tokens are sorted by start
+    /// offset and never overlap), located by two binary searches.
+    pub fn tokens_in(&self, range: Range) -> &'a [SourceToken] {
+        let toks = self.sorted_tokens();
+        // First token whose start is at or after range.start.
+        let lo = toks.partition_point(|t| t.range.start < range.start);
+        // First token (from lo) whose start is at or after range.end —
+        // everything from lo up to (but not including) hi starts inside
+        // [range.start, range.end). Trim a trailing token whose end spills
+        // past range.end (a straddler is not fully contained).
+        let hi = toks.partition_point(|t| t.range.start < range.end);
+        let mut end = hi;
+        if end > lo && toks[end - 1].range.end > range.end {
+            end -= 1;
+        }
+        &toks[lo..end]
+    }
+
+    /// The last source token ending at or before `offset`, or `None` if no
+    /// token lies entirely before it. `tok.range.end <= offset`.
+    pub fn token_before(&self, offset: u32) -> Option<SourceToken> {
+        let toks = self.sorted_tokens();
+        // Tokens are sorted by start and non-overlapping, so `end` is also
+        // monotonic; the last token with `end <= offset` is the one just
+        // before the partition point on `end`.
+        let idx = toks.partition_point(|t| t.range.end <= offset);
+        if idx == 0 { None } else { Some(toks[idx - 1]) }
+    }
+
+    /// The first source token starting at or after `offset`, or `None` if no
+    /// token lies at or after it. `tok.range.start >= offset`.
+    pub fn token_after(&self, offset: u32) -> Option<SourceToken> {
+        let toks = self.sorted_tokens();
+        let idx = toks.partition_point(|t| t.range.start < offset);
+        toks.get(idx).copied()
+    }
+
     /// Decode the current cop's runtime options.
     pub fn options<T: CopOptions>(&self) -> Result<T, ConfigError> {
         let bytes = unsafe { self.raw.options_json.as_bytes() };
@@ -2784,6 +2833,126 @@ mod tests {
             let kids = cx.children(root);
             assert!(cx.is_value_used(kids[0]), "while condition is used");
             assert!(!cx.is_value_used(kids[1]), "while body value is discarded");
+        });
+    }
+
+    // --- es99.8: token-search helpers ---
+
+    #[test]
+    fn token_before_returns_last_token_ending_at_or_before_offset() {
+        // `a = b`: the `=` token spans [2, 3). Searching just before `b`
+        // (offset 4) must return the `=`, not the `b` identifier.
+        with_parsed("a = b", |cx, _root| {
+            let eq = cx.token_before(4).expect("token before offset 4");
+            assert_eq!(cx.token_text(eq), "=");
+        });
+    }
+
+    #[test]
+    fn token_after_returns_first_token_starting_at_or_after_offset() {
+        // `a = b`: from offset 1 (just after `a`) the next token is `=`.
+        with_parsed("a = b", |cx, _root| {
+            let eq = cx.token_after(1).expect("token after offset 1");
+            assert_eq!(cx.token_text(eq), "=");
+        });
+    }
+
+    #[test]
+    fn token_before_and_after_at_boundaries() {
+        with_parsed("a = b", |cx, _root| {
+            // Nothing ends at or before offset 0.
+            assert!(cx.token_before(0).is_none());
+            // Prism emits a zero-width EOF token at the end of source, so
+            // `token_after(len)` finds it. Past the EOF token's start there
+            // is nothing left.
+            let past_end = cx.source().len() as u32 + 1;
+            assert!(cx.token_after(past_end).is_none());
+        });
+    }
+
+    #[test]
+    fn tokens_in_returns_fully_contained_tokens() {
+        // `[1, 2]`: the comma at [2, 3) is fully inside the array's range.
+        with_parsed("[1, 2]", |cx, root| {
+            let toks = cx.tokens_in(cx.range(root));
+            assert!(
+                toks.iter().any(|t| t.kind == SourceTokenKind::Comma),
+                "array literal contains a comma token"
+            );
+        });
+    }
+
+    #[test]
+    fn braces_via_tokens_in_finds_hash_and_block_braces() {
+        // Demonstrate a `braces?`-style consumer: a hash/block node whose
+        // range contains a LeftBrace + RightBrace token pair.
+        let has_braces = |cx: &Cx<'_>, id: murphy_ast::NodeId| {
+            let toks = cx.tokens_in(cx.range(id));
+            toks.iter().any(|t| t.kind == SourceTokenKind::LeftBrace)
+                && toks.iter().any(|t| t.kind == SourceTokenKind::RightBrace)
+        };
+        with_parsed("{a: 1}", |cx, root| {
+            assert!(has_braces(cx, root), "hash literal is brace-delimited");
+        });
+        with_parsed("foo { }", |cx, root| {
+            assert!(has_braces(cx, root), "brace block is brace-delimited");
+        });
+        // `do`/`end` block is NOT brace-delimited.
+        with_parsed("foo do end", |cx, root| {
+            assert!(!has_braces(cx, root), "do/end block has no brace tokens");
+        });
+    }
+
+    #[test]
+    fn sorted_tokens_are_monotonic_even_with_heredoc_and_interpolation() {
+        // Heredocs/interpolation are where prism's lex order is least
+        // source-like, so pin the invariants the partition-based helpers
+        // stand on, on exactly that input:
+        //   - `token_after`/`tokens_in` partition on `start` → start-monotonic
+        //   - `token_before` partitions on `end`            → end-monotonic
+        // (Strict non-overlap does NOT hold: a heredoc-end token folds the
+        // trailing newline and shares its `end` with the standalone newline
+        // token — an equal-end overlap that is benign for all three helpers.)
+        let src = "foo(<<~H, \"a#{b}c\")\nbody\nH\n";
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let ast = murphy_translate::translate(src, "t.rb");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let toks = cx.sorted_tokens();
+        assert!(
+            toks.windows(2)
+                .all(|p| p[0].range.start <= p[1].range.start),
+            "start-monotonic (token_after/tokens_in): {toks:?}",
+        );
+        assert!(
+            toks.windows(2).all(|p| p[0].range.end <= p[1].range.end),
+            "end-monotonic (token_before): {toks:?}",
+        );
+        // The helpers agree on this input: the token before the `,` offset
+        // is the heredoc opener.
+        let comma = toks
+            .iter()
+            .find(|t| t.kind == SourceTokenKind::Comma)
+            .expect("comma present");
+        let before = cx
+            .token_before(comma.range.start)
+            .expect("token before comma");
+        assert_eq!(cx.token_text(before), "<<~H");
+    }
+
+    #[test]
+    fn colon_colon_found_via_text_search_without_a_dedicated_kind() {
+        // `::` lands in `Other`; consumers retrieve it by token text, the
+        // same path `=`/`end` use. No dedicated SourceTokenKind needed.
+        with_parsed("Foo::Bar", |cx, root| {
+            let has_colon_colon = cx
+                .tokens_in(cx.range(root))
+                .iter()
+                .any(|t| cx.token_text(*t) == "::");
+            assert!(has_colon_colon, "Foo::Bar contains a `::` token");
         });
     }
 }

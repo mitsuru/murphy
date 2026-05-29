@@ -173,7 +173,13 @@ pub struct CxRaw {
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
 /// was never frozen, so this is a new ABI starting at 1, not a bump.
-pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 1;
+///
+/// Bumped to 2 (murphy-es99.8): the `SourceToken.kind` carried across the
+/// ABI gained the `Comma`/`LeftBrace`/`RightBrace` variants. The addition
+/// is tail-only (existing discriminants unchanged), but a plugin built
+/// against v1 must still be rejected so it never observes a token kind it
+/// cannot decode.
+pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 2;
 
 /// The dispatch entry for one cop: invoked once per matching node.
 ///
@@ -334,8 +340,11 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_one() {
-        assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 1);
+    fn abi_version_is_two() {
+        // Bumped from 1 → 2 in murphy-es99.8 (SourceTokenKind gained
+        // Comma/LeftBrace/RightBrace; additive but the loader must still
+        // reject v1 plugins that predate the new token kinds).
+        assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 2);
     }
 
     #[test]
