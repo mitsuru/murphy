@@ -22,7 +22,14 @@ pub const MAGIC: &[u8; 8] = b"MURPHYAS";
 
 /// Binary format version. Bump on **any** layout change — old caches are
 /// then rejected with [`SerError::FormatVersionMismatch`].
-pub const FORMAT_VERSION: u32 = 3;
+///
+/// Version 4 (murphy-o57f): covers the `NodeKind` discriminants added in
+/// murphy-w5ba (HIGH, tags 69–85) and murphy-o57f (MID, tags 86–91).
+/// Older serializers wrote arenas with discriminants ≤ 68 only; reading
+/// a v3 cache through this build is rejected at the header instead of
+/// the more obscure `BadDiscriminant` (or worse — accidental success on
+/// an arena that happens to be tag-compatible).
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Total header size in bytes. The body immediately follows. Downstream
 /// (cache, mmap) code can rely on this offset being fixed.
