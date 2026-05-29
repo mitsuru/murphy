@@ -740,7 +740,10 @@ impl<'a> Cx<'a> {
         ) {
             return Range::ZERO;
         }
-        let name = self.loc(id).name;
+        // Read `loc.name` straight off the node — building a full `LocRef`
+        // via `self.loc(id)` would run the `keyword()`/`dot()` setup we do
+        // not need here (gemini review).
+        let name = self.node(id).loc.name;
         let from = if name != Range::ZERO {
             name.end
         } else {
