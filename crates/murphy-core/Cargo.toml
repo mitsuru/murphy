@@ -38,7 +38,8 @@ globset = "0.4"
 # platform rules. Caret-pinned per project convention (exact `=` pins are
 # reserved for the contract-affecting native bindings only).
 dirs = "5"
-serde_yaml = "0.9"
+# Pure-Rust YAML 1.2 parser. Replaces the deprecated serde_yaml 0.9 crate.
+yaml-rust2 = "0.11"
 serde_json = "1"
 sha2 = "0.10"
 murphy-pattern = { path = "../murphy-pattern" }

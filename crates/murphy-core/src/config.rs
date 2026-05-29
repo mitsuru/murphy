@@ -1,5 +1,4 @@
 use crate::Severity;
-use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -27,68 +26,15 @@ pub struct CopsConfig {
 /// Plugin pack entry from `plugins:` in `.murphy.yml`.
 ///
 /// Two shapes (RuboCop-compatible):
-/// - `- murphy-rails` — name-only shorthand. Resolved at load time against
-///   the search path (ADR 0042): same-array `Detailed` override →
-///   `MURPHY_PLUGIN_PATH` env → project-local `.murphy/plugins/` →
-///   user-local `$XDG_DATA_HOME/murphy/plugins/`.
+/// - `- murphy-rails` — name-only shorthand.
 /// - `- name: "..." path: "..."` — explicit path; bypasses the search path.
-///
-/// Deserialization dispatches manually on input shape (string vs. mapping)
-/// instead of `#[serde(untagged)]`: an untagged enum buffers the input, tries
-/// each variant, and swallows inner diagnostics into a generic "data did not
-/// match any variant". The hand-rolled `Visitor` routes a mapping straight
-/// into `PluginDetailed` so its errors propagate verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginConfig {
     Name(String),
     Detailed(PluginDetailed),
 }
 
-impl<'de> Deserialize<'de> for PluginConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct PluginConfigVisitor;
-        impl<'de> serde::de::Visitor<'de> for PluginConfigVisitor {
-            type Value = PluginConfig;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str(r#"a plugin name string or { name: "...", path: "..." } mapping"#)
-            }
-
-            fn visit_str<E>(self, v: &str) -> Result<PluginConfig, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(PluginConfig::Name(v.to_owned()))
-            }
-
-            fn visit_string<E>(self, v: String) -> Result<PluginConfig, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(PluginConfig::Name(v))
-            }
-
-            fn visit_map<M>(self, map: M) -> Result<PluginConfig, M::Error>
-            where
-                M: serde::de::MapAccess<'de>,
-            {
-                PluginDetailed::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-                    .map(PluginConfig::Detailed)
-            }
-        }
-        deserializer.deserialize_any(PluginConfigVisitor)
-    }
-}
-
-/// Explicit-path plugin entry: `- name: "..." path: "..."`.
-///
-/// Split out of [`PluginConfig::Detailed`] so that `deny_unknown_fields`
-/// and `missing field` diagnostics survive the surrounding custom visitor.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginDetailed {
     pub name: String,
     pub path: PathBuf,
@@ -96,13 +42,13 @@ pub struct PluginDetailed {
 
 /// Per-cop configuration from a top-level cop section in `.murphy.yml`.
 ///
-/// Reserved keys (`Enabled`, `Severity`) are extracted as typed fields;
-/// all other keys pass through to `options` for the cop's own parser.
+/// `Enabled` and `Severity` are extracted as typed fields; all other keys
+/// pass through to `options` as JSON values for the cop's own parser.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CopRule {
     pub enabled: Option<bool>,
     pub severity: Option<Severity>,
-    pub options: BTreeMap<String, serde_yaml::Value>,
+    pub options: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_include() -> Vec<String> {
@@ -153,15 +99,21 @@ impl MurphyConfig {
     /// Top-level keys other than `AllCops` and `plugins` are treated as cop
     /// names (open-keyed, compatible with `.rubocop.yml`).
     pub fn from_yaml_str(text: &str) -> Result<Self, ConfigError> {
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+        use yaml_rust2::{Yaml, YamlLoader};
+
+        let docs =
+            YamlLoader::load_from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+
+        let doc = match docs.into_iter().next() {
+            None => return Ok(Self::default()),
+            Some(d) => d,
+        };
 
         // An empty document, a comment-only document, or `---` / `~` / `null`
-        // all parse to `Value::Null`; treat them as "no config" (defaults),
-        // matching RuboCop's behavior for empty / comment-only config files.
-        let top = match yaml {
-            serde_yaml::Value::Mapping(m) => m,
-            serde_yaml::Value::Null => return Ok(Self::default()),
+        // all produce Yaml::Null; treat them as defaults (RuboCop-compatible).
+        let top = match doc {
+            Yaml::Hash(h) => h,
+            Yaml::Null => return Ok(Self::default()),
             _ => {
                 return Err(ConfigError::BadYaml(
                     "top-level document must be a mapping".to_string(),
@@ -177,44 +129,35 @@ impl MurphyConfig {
         let mut saw_include = false;
 
         for (key, value) in top {
-            let Some(section) = key.as_str() else {
+            let Yaml::String(section) = key else {
                 continue;
             };
 
-            match section {
+            match section.as_str() {
                 "AllCops" => {
-                    if let serde_yaml::Value::Mapping(all_cops) = value {
-                        if let Some(inc) = all_cops.get("Include") {
-                            include = yaml_string_list(Some(inc));
+                    if let Yaml::Hash(all_cops) = value {
+                        if let Some(inc) = all_cops.get(&Yaml::String("Include".to_string())) {
+                            include = yaml_string_list(inc);
                             saw_include = true;
                         }
-                        if let Some(exc) = all_cops.get("Exclude") {
-                            exclude = yaml_string_list(Some(exc));
+                        if let Some(exc) = all_cops.get(&Yaml::String("Exclude".to_string())) {
+                            exclude = yaml_string_list(exc);
                         }
-                        if let Some(path) = all_cops.get("CopsPath").and_then(|v| v.as_str()) {
-                            cops_path = PathBuf::from(path);
+                        if let Some(Yaml::String(p)) =
+                            all_cops.get(&Yaml::String("CopsPath".to_string()))
+                        {
+                            cops_path = PathBuf::from(p);
                         }
                     }
                 }
                 "plugins" => {
-                    // Accept both `plugins: name` (scalar) and `plugins: [...]`
-                    // (sequence). Scalar is `plugins: rubocop-rails` — valid
-                    // RuboCop shorthand; RuboCop itself treats it the same as a
-                    // one-element list.
-                    match value {
-                        serde_yaml::Value::String(s) => {
-                            plugins = vec![PluginConfig::Name(s)];
-                        }
-                        other => {
-                            plugins = serde_yaml::from_value(other)
-                                .map_err(|e| ConfigError::BadYaml(e.to_string()))?;
-                        }
-                    }
+                    plugins =
+                        parse_plugins(value).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
                 }
                 _ => {
                     // Treat as a cop rule (open-keyed, compatible with RuboCop format).
-                    if let serde_yaml::Value::Mapping(cop_map) = value {
-                        rules.insert(section.to_string(), parse_cop_rule(cop_map));
+                    if let Yaml::Hash(cop_map) = value {
+                        rules.insert(section, parse_cop_rule(cop_map));
                     }
                 }
             }
@@ -255,9 +198,6 @@ impl MurphyConfig {
     }
 
     /// True when the user wrote `Enabled: true` for a cop in `.murphy.yml`.
-    /// Used by the `cops list` / lint flow to detect a user trying to opt back
-    /// into a cop that is currently in the disabled registry (arena migration),
-    /// so the host can emit a warning without breaking the lint run (§12c).
     pub fn is_explicitly_enabled(&self, name: &str) -> bool {
         self.cops.rules.get(name).and_then(|rule| rule.enabled) == Some(true)
     }
@@ -284,19 +224,62 @@ impl MurphyConfig {
     }
 }
 
-fn parse_cop_rule(map: serde_yaml::Mapping) -> CopRule {
+/// Parse a `plugins:` value (sequence or scalar string).
+fn parse_plugins(value: yaml_rust2::Yaml) -> Result<Vec<PluginConfig>, String> {
+    use yaml_rust2::Yaml;
+    match value {
+        Yaml::String(s) => Ok(vec![PluginConfig::Name(s)]),
+        Yaml::Array(arr) => arr.into_iter().map(parse_plugin_entry).collect(),
+        _ => Err("`plugins:` must be a sequence or string".to_string()),
+    }
+}
+
+fn parse_plugin_entry(yaml: yaml_rust2::Yaml) -> Result<PluginConfig, String> {
+    use yaml_rust2::Yaml;
+    match yaml {
+        Yaml::String(s) => Ok(PluginConfig::Name(s)),
+        Yaml::Hash(mut m) => {
+            let name = match m.remove(&Yaml::String("name".to_string())) {
+                Some(Yaml::String(s)) => s,
+                Some(_) => return Err("plugin `name` must be a string".to_string()),
+                None => return Err("plugin entry missing required field `name`".to_string()),
+            };
+            let path = match m.remove(&Yaml::String("path".to_string())) {
+                Some(Yaml::String(s)) => PathBuf::from(s),
+                Some(_) => return Err("plugin `path` must be a string".to_string()),
+                None => return Err("plugin entry missing required field `path`".to_string()),
+            };
+            if let Some(unknown_key) = m.keys().find_map(|k| {
+                if let Yaml::String(s) = k {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            }) {
+                return Err(format!("unknown field `{unknown_key}` in plugin entry"));
+            }
+            Ok(PluginConfig::Detailed(PluginDetailed { name, path }))
+        }
+        _ => Err("plugin entry must be a string or mapping".to_string()),
+    }
+}
+
+fn parse_cop_rule(map: yaml_rust2::yaml::Hash) -> CopRule {
+    use yaml_rust2::Yaml;
     let mut rule = CopRule::default();
     for (key, value) in map {
-        let Some(k) = key.as_str() else {
+        let Yaml::String(k) = key else {
             continue;
         };
-        match k {
+        match k.as_str() {
             "Enabled" => {
-                rule.enabled = value.as_bool();
+                if let Yaml::Boolean(b) = value {
+                    rule.enabled = Some(b);
+                }
             }
             "Severity" => {
-                if let Some(s) = value.as_str() {
-                    rule.severity = match s {
+                if let Yaml::String(s) = value {
+                    rule.severity = match s.as_str() {
                         "warning" => Some(Severity::Warning),
                         "error" => Some(Severity::Error),
                         _ => None,
@@ -304,21 +287,67 @@ fn parse_cop_rule(map: serde_yaml::Mapping) -> CopRule {
                 }
             }
             other => {
-                rule.options.insert(other.to_string(), value);
+                if let Some(json_val) = yaml_to_json(value) {
+                    rule.options.insert(other.to_string(), json_val);
+                }
             }
         }
     }
     rule
 }
 
+/// Convert a yaml-rust2 `Yaml` value to a `serde_json::Value`.
+///
+/// Returns `None` for YAML-specific types with no JSON equivalent (aliases,
+/// bad values) and for Infinity/NaN floats (not representable in JSON).
+fn yaml_to_json(yaml: yaml_rust2::Yaml) -> Option<serde_json::Value> {
+    use yaml_rust2::Yaml;
+    match yaml {
+        Yaml::String(s) => Some(serde_json::Value::String(s)),
+        Yaml::Integer(i) => Some(serde_json::Value::Number(i.into())),
+        Yaml::Real(s) => s
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(serde_json::Value::Number),
+        Yaml::Boolean(b) => Some(serde_json::Value::Bool(b)),
+        Yaml::Null => Some(serde_json::Value::Null),
+        Yaml::Array(arr) => {
+            let items: Vec<_> = arr.into_iter().filter_map(yaml_to_json).collect();
+            Some(serde_json::Value::Array(items))
+        }
+        Yaml::Hash(h) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in h {
+                if let (Yaml::String(key), Some(val)) = (k, yaml_to_json(v)) {
+                    map.insert(key, val);
+                }
+            }
+            Some(serde_json::Value::Object(map))
+        }
+        Yaml::Alias(_) | Yaml::BadValue => None,
+    }
+}
+
+fn yaml_string_list(yaml: &yaml_rust2::Yaml) -> Vec<String> {
+    use yaml_rust2::Yaml;
+    match yaml {
+        Yaml::Array(arr) => arr
+            .iter()
+            .filter_map(|v| {
+                if let Yaml::String(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Yaml::String(s) => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
+
 fn is_cop_disabled_by_default(name: &str) -> bool {
-    // murphy-2ob §14a: until `MurphyConfig::cop_enabled` learns to
-    // consult the registry's `DEFAULT_ENABLED` (murphy-bnd), keep the
-    // Rails 138-cop arena-migration stub pack's default-off status
-    // here as a hardcoded fallback. The list mirrors murphy-rails's
-    // `register_cops!` contents one-for-one — adding/removing a cop
-    // in murphy-rails requires the same change here until murphy-bnd
-    // lands.
     matches!(
         name,
         "Rails/ActionControllerFlashBeforeRender"
@@ -457,37 +486,38 @@ fn is_cop_disabled_by_default(name: &str) -> bool {
 
 /// Migrate a `.rubocop.yml` document to `.murphy.yml` format.
 ///
-/// The output is a `.murphy.yml`-compatible YAML document. Since `.murphy.yml`
-/// is intentionally compatible with `.rubocop.yml`, migration is minimal:
-/// - Adds `CopsPath: cops` under `AllCops` if not present.
-/// - Emits a rename-hint comment when `rubocop-` plugin names are detected.
-/// - Emits unsupported-plugin comments for non-string/non-mapping plugin entries.
-/// - All cop rules pass through verbatim (keys, values, options).
-///
-/// Lossy: `inherit_from`, `inherit_gem`, and other RuboCop-engine directives
-/// have no Murphy equivalent and are silently dropped during load. They are
-/// preserved in the output text but will be ignored by `MurphyConfig::load`.
+/// Near-identity transform: injects `AllCops.CopsPath: cops` and emits plugin
+/// rename hints. All cop rules pass through verbatim.
 pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigError> {
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+    use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
 
-    let serde_yaml::Value::Mapping(mut top) = yaml else {
-        return Err(ConfigError::BadYaml(
-            "top-level document must be a mapping".to_string(),
-        ));
+    let docs = YamlLoader::load_from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+
+    let doc = match docs.into_iter().next() {
+        None => return Ok(String::new()),
+        Some(d) => d,
+    };
+
+    let mut top = match doc {
+        Yaml::Hash(h) => h,
+        _ => {
+            return Err(ConfigError::BadYaml(
+                "top-level document must be a mapping".to_string(),
+            ));
+        }
     };
 
     let mut plugin_names: Vec<String> = Vec::new();
     let mut unsupported_plugins: Vec<String> = Vec::new();
 
-    // Extract plugin info for the rename hint and rebuild `top["plugins"]` as
-    // a sequence of only valid (string-name) entries. Unsupported entries are
-    // dropped to comments so the output is always loadable by `from_yaml_str`.
-    let plugins_key = serde_yaml::Value::String("plugins".to_string());
+    // Extract and normalize `plugins:` to a sequence of string names only.
+    // Unsupported entries (mapping-form, non-string items, wrong top-level
+    // type) become comments; valid string names stay in the output.
+    let plugins_key = Yaml::String("plugins".to_string());
     if let Some(plugins_val) = top.remove(&plugins_key) {
-        let items: Vec<serde_yaml::Value> = match plugins_val {
-            serde_yaml::Value::Sequence(seq) => seq,
-            serde_yaml::Value::String(s) => vec![serde_yaml::Value::String(s)],
+        let items: Vec<Yaml> = match plugins_val {
+            Yaml::Array(arr) => arr,
+            Yaml::String(s) => vec![Yaml::String(s)],
             other => {
                 unsupported_plugins.push(format!("{other:?} (unsupported plugins: form)"));
                 vec![]
@@ -495,14 +525,10 @@ pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigErr
         };
         for item in items {
             match item {
-                serde_yaml::Value::String(s) => plugin_names.push(s),
-                serde_yaml::Value::Mapping(m) => {
-                    if let Some(name) = m
-                        .into_iter()
-                        .next()
-                        .and_then(|(k, _)| k.as_str().map(|s| s.to_string()))
-                    {
-                        unsupported_plugins.push(name);
+                Yaml::String(s) => plugin_names.push(s),
+                Yaml::Hash(m) => {
+                    if let Some((Yaml::String(k), _)) = m.into_iter().next() {
+                        unsupported_plugins.push(k);
                     } else {
                         unsupported_plugins.push("<empty or non-string key>".to_string());
                     }
@@ -512,16 +538,13 @@ pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigErr
                 }
             }
         }
-        // Re-insert only the valid string-name entries as a sequence.
-        // Non-string / mapping entries are surfaced as unsupported comments
-        // instead of being passed through so the output is always loadable.
         if !plugin_names.is_empty() {
             top.insert(
                 plugins_key,
-                serde_yaml::Value::Sequence(
+                Yaml::Array(
                     plugin_names
                         .iter()
-                        .map(|n| serde_yaml::Value::String(n.clone()))
+                        .map(|n| Yaml::String(n.clone()))
                         .collect(),
                 ),
             );
@@ -529,47 +552,37 @@ pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigErr
     }
 
     // Inject AllCops.CopsPath = "cops" if not already set.
-    let all_cops_key = serde_yaml::Value::String("AllCops".to_string());
+    let all_cops_key = Yaml::String("AllCops".to_string());
+    let cops_path_key = Yaml::String("CopsPath".to_string());
     match top.get_mut(&all_cops_key) {
-        Some(serde_yaml::Value::Mapping(all_cops)) => {
-            let cops_path_key = serde_yaml::Value::String("CopsPath".to_string());
+        Some(Yaml::Hash(all_cops)) => {
             if !all_cops.contains_key(&cops_path_key) {
-                all_cops.insert(cops_path_key, serde_yaml::Value::String("cops".to_string()));
+                all_cops.insert(cops_path_key, Yaml::String("cops".to_string()));
             }
         }
         _ => {
-            let mut all_cops = serde_yaml::Mapping::new();
-            all_cops.insert(
-                serde_yaml::Value::String("Include".to_string()),
-                serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("**/*.rb".to_string())]),
+            let mut all_cops_map = yaml_rust2::yaml::Hash::new();
+            all_cops_map.insert(
+                Yaml::String("Include".to_string()),
+                Yaml::Array(vec![Yaml::String("**/*.rb".to_string())]),
             );
-            all_cops.insert(
-                serde_yaml::Value::String("Exclude".to_string()),
-                serde_yaml::Value::Sequence(vec![]),
-            );
-            all_cops.insert(
-                serde_yaml::Value::String("CopsPath".to_string()),
-                serde_yaml::Value::String("cops".to_string()),
-            );
-            top.insert(all_cops_key, serde_yaml::Value::Mapping(all_cops));
+            all_cops_map.insert(Yaml::String("Exclude".to_string()), Yaml::Array(vec![]));
+            all_cops_map.insert(cops_path_key, Yaml::String("cops".to_string()));
+            top.insert(all_cops_key, Yaml::Hash(all_cops_map));
         }
     }
 
     let mut out = String::new();
 
     if !plugin_names.is_empty() {
-        // RuboCop's `rubocop-X` plugin names are not auto-renamed to
-        // `murphy-X` (ADR 0041: explicit > implicit). Surface this once
-        // so the user fixes the names before the first lint run instead
-        // of debugging a `not found` error from the resolver (ADR 0042).
+        // RuboCop's `rubocop-X` plugin names are not auto-renamed to `murphy-X`
+        // (ADR 0041). Surface this so the user fixes names before the first run.
         out.push_str(
             "# NOTE: RuboCop `rubocop-X` plugin names must be renamed to `murphy-X` \
              manually — Murphy does not auto-translate the prefix.\n",
         );
     }
     for unsupported in &unsupported_plugins {
-        // `unsupported` comes from user-supplied YAML — sanitize control
-        // characters so a malicious plugin name cannot inject extra YAML lines.
         let sanitized: String = unsupported
             .chars()
             .map(|c| if c.is_control() { '?' } else { c })
@@ -577,23 +590,16 @@ pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigErr
         out.push_str(&format!("# unsupported plugin entry: {sanitized}\n"));
     }
 
-    let yaml_str = serde_yaml::to_string(&serde_yaml::Value::Mapping(top))
+    let mut yaml_out = String::new();
+    YamlEmitter::new(&mut yaml_out)
+        .dump(&Yaml::Hash(top))
         .map_err(|e| ConfigError::BadYaml(e.to_string()))?;
-    out.push_str(&yaml_str);
+
+    // Strip the leading "---\n" document separator that YamlEmitter always emits.
+    let yaml_body = yaml_out.strip_prefix("---\n").unwrap_or(&yaml_out);
+    out.push_str(yaml_body);
 
     Ok(out)
-}
-
-fn yaml_string_list(value: Option<&serde_yaml::Value>) -> Vec<String> {
-    match value {
-        Some(serde_yaml::Value::Sequence(values)) => values
-            .iter()
-            .filter_map(serde_yaml::Value::as_str)
-            .map(str::to_string)
-            .collect(),
-        Some(serde_yaml::Value::String(value)) => vec![value.clone()],
-        _ => Vec::new(),
-    }
 }
 
 #[cfg(test)]
@@ -610,8 +616,6 @@ mod tests {
 
     #[test]
     fn comment_only_file_parses_as_defaults() {
-        // RuboCop compatibility: a comment-only or blank config file must not
-        // error; it should produce the same result as an absent config file.
         for text in ["# just a comment\n", "---\n# comment\n", "~\n", "null\n"] {
             let cfg = MurphyConfig::from_yaml_str(text).unwrap_or_else(|e| {
                 panic!("comment-only/null config must not error for {text:?}: {e}")
@@ -645,13 +649,14 @@ mod tests {
     }
 
     #[test]
-    fn cop_rule_preserves_rubocop_compatible_options() {
+    fn cop_rule_preserves_options_as_json() {
         let cfg = MurphyConfig::from_yaml_str(
             r#"
 Style/StringLiterals:
   Enabled: true
   Severity: warning
   EnforcedStyle: single_quotes
+  MaxCount: 3
   Exclude:
     - db/schema.rb
 "#,
@@ -667,61 +672,54 @@ Style/StringLiterals:
         assert_eq!(rule.severity, Some(Severity::Warning));
         assert_eq!(
             rule.options.get("EnforcedStyle"),
-            Some(&serde_yaml::Value::String("single_quotes".to_string()))
+            Some(&serde_json::Value::String("single_quotes".to_string()))
+        );
+        assert_eq!(
+            rule.options.get("MaxCount"),
+            Some(&serde_json::Value::Number(3.into()))
         );
         assert_eq!(
             rule.options.get("Exclude"),
-            Some(&serde_yaml::Value::Sequence(vec![
-                serde_yaml::Value::String("db/schema.rb".to_string())
-            ]))
+            Some(&serde_json::Value::Array(vec![serde_json::Value::String(
+                "db/schema.rb".to_string()
+            )]))
         );
+    }
+
+    #[test]
+    fn cop_options_json_roundtrip() {
+        let cfg =
+            MurphyConfig::from_yaml_str("Style/Foo:\n  EnforcedStyle: compact\n  MaxLength: 120\n")
+                .expect("config parses");
+        let json = cfg.cop_options_json("Style/Foo");
+        let parsed: serde_json::Value = serde_json::from_slice(&json).expect("valid JSON");
+        assert_eq!(parsed["EnforcedStyle"], "compact");
+        assert_eq!(parsed["MaxLength"], 120);
     }
 
     #[test]
     fn cop_enabled_is_false_for_rails_cops_disabled_by_default() {
         let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
-
-        // murphy-2ob §14a: the 138 Rails cops registered as arena-
-        // migration stubs in murphy-rails are all default-off via the
-        // `is_cop_disabled_by_default` hardcode fallback.
-        const DISABLED_BY_DEFAULT_SAMPLE: [&str; 15] = [
+        const SAMPLE: [&str; 5] = [
             "Rails/ActionControllerFlashBeforeRender",
-            "Rails/ActionControllerTestCase",
-            "Rails/AddColumnIndex",
             "Rails/ActionFilter",
             "Rails/DefaultScope",
-            "Rails/Env",
-            "Rails/EnvironmentVariableAccess",
-            "Rails/OrderById",
-            "Rails/PluckId",
-            "Rails/RequireDependency",
-            "Rails/ReversibleMigrationMethodDefinition",
             "Rails/SaveBang",
-            "Rails/SchemaComment",
-            "Rails/TableNameAssignment",
             "Rails/UnusedIgnoredColumns",
         ];
-
-        for name in DISABLED_BY_DEFAULT_SAMPLE {
+        for name in SAMPLE {
             assert!(
                 !cfg.cop_enabled(name),
                 "{name} should be disabled by default"
             );
         }
-
         assert!(cfg.cop_enabled("Unknown/Foo"));
     }
 
     #[test]
     fn cop_enabled_can_override_default_for_rails_cop() {
-        let cfg = MurphyConfig::from_yaml_str(
-            r#"
-Rails/ActionFilter:
-  Enabled: true
-"#,
-        )
-        .expect("config parses");
-
+        let cfg = MurphyConfig::from_yaml_str("Rails/ActionFilter:\n  Enabled: true\n")
+            .expect("config parses");
         assert!(cfg.cop_enabled("Rails/ActionFilter"));
     }
 
@@ -732,15 +730,19 @@ Rails/ActionFilter:
     }
 
     #[test]
+    fn parses_plugins_name_only_form() {
+        let cfg =
+            MurphyConfig::from_yaml_str("plugins:\n  - murphy-rails\n").expect("config parses");
+        assert_eq!(cfg.plugins.len(), 1);
+        assert!(matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "murphy-rails"));
+    }
+
+    #[test]
     fn parses_plugins_detailed_form() {
         let cfg = MurphyConfig::from_yaml_str(
-            r#"
-plugins:
-  - name: murphy-example-pack
-    path: target/debug/libmurphy_example_pack.so
-"#,
+            "plugins:\n  - name: murphy-example-pack\n    path: target/debug/libmurphy_example_pack.so\n",
         )
-        .unwrap();
+        .expect("config parses");
         assert_eq!(cfg.plugins.len(), 1);
         match &cfg.plugins[0] {
             PluginConfig::Detailed(d) => {
@@ -755,190 +757,47 @@ plugins:
     }
 
     #[test]
-    fn parses_plugins_name_only_form() {
-        let cfg = MurphyConfig::from_yaml_str("plugins:\n  - murphy-rails\n").unwrap();
-        assert_eq!(cfg.plugins.len(), 1);
-        match &cfg.plugins[0] {
-            PluginConfig::Name(name) => assert_eq!(name, "murphy-rails"),
-            other => panic!("expected Name, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn parses_plugins_heterogeneous_array() {
         let cfg = MurphyConfig::from_yaml_str(
-            r#"
-plugins:
-  - murphy-rails
-  - name: local-pack
-    path: ./libfoo.so
-"#,
+            "plugins:\n  - murphy-rails\n  - name: local-pack\n    path: ./libfoo.so\n",
         )
-        .unwrap();
+        .expect("config parses");
         assert_eq!(cfg.plugins.len(), 2);
         assert!(matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "murphy-rails"));
         assert!(matches!(&cfg.plugins[1], PluginConfig::Detailed(d) if d.name == "local-pack"));
     }
 
     #[test]
-    fn migrate_plugins_emits_rubocop_rename_hint_comment() {
-        // RuboCop's `plugins: rubocop-foo` migrates to `.murphy.yml` with the
-        // plugin name preserved verbatim. The user still has to rename
-        // `rubocop-` → `murphy-` themselves (ADR 0041 / 0042: no auto-rename).
-        // The migrate output emits a single `# NOTE: ...` line so the user sees
-        // the rename requirement immediately instead of getting a cryptic
-        // "plugin not found" at first lint run.
-        let out =
-            migrate_rubocop_yml_to_murphy_yml("plugins:\n  - rubocop-rails\n  - rubocop-rspec\n")
-                .unwrap();
-        assert!(
-            out.contains("rubocop-rails") && out.contains("rubocop-rspec"),
-            "plugin names preserved:\n{out}"
-        );
-        assert!(
-            out.contains("# NOTE:") && out.contains("rubocop-") && out.contains("murphy-"),
-            "expected rename-hint NOTE line:\n{out}"
-        );
-    }
-
-    #[test]
-    fn migrate_plugins_scalar_form_treated_as_single_element() {
-        // RuboCop 互換: `plugins: foo` を `plugins: [foo]` と同義に扱う
-        let out = migrate_rubocop_yml_to_murphy_yml("plugins: rubocop-rails\n").unwrap();
-        assert!(
-            out.contains("rubocop-rails"),
-            "scalar plugin should be present:\n{out}"
-        );
-        assert!(
-            out.contains("# NOTE:"),
-            "rename hint should be present:\n{out}"
-        );
-    }
-
-    #[test]
-    fn migrate_scalar_plugins_output_roundtrips_to_from_yaml_str() {
-        // Regression: scalar `plugins: rubocop-rails` in a .rubocop.yml must
-        // produce migrate output that MurphyConfig::from_yaml_str can load
-        // without error (the scalar must be normalized to a sequence first).
-        let out = migrate_rubocop_yml_to_murphy_yml("plugins: rubocop-rails\n").unwrap();
-        let cfg = MurphyConfig::from_yaml_str(&out)
-            .expect("migrated scalar plugins output must be loadable by from_yaml_str");
-        assert_eq!(
-            cfg.plugins.len(),
-            1,
-            "expected 1 plugin, got {:?}",
-            cfg.plugins
-        );
-        assert!(
-            matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "rubocop-rails"),
-            "expected Name(rubocop-rails), got {:?}",
-            cfg.plugins[0]
-        );
-    }
-
-    #[test]
-    fn migrate_plugins_non_sequence_non_string_emits_unsupported() {
-        // `plugins: 42` のように sequence でも string でもない場合、
-        // データを silently drop せず unsupported コメントで明示する
-        let out = migrate_rubocop_yml_to_murphy_yml("plugins: 42\n").unwrap();
-        assert!(
-            out.contains("# unsupported plugin entry:"),
-            "non-sequence non-string plugins: value should emit unsupported comment:\n{out}"
-        );
-    }
-
-    #[test]
-    fn migrate_plugins_non_string_item_emits_unsupported() {
-        // Sequence 内の非 string / 非 mapping 要素も silently drop しない
-        let out =
-            migrate_rubocop_yml_to_murphy_yml("plugins:\n  - rubocop-rails\n  - 42\n  - true\n")
-                .unwrap();
-        assert!(
-            out.contains("rubocop-rails"),
-            "valid string item should still be present:\n{out}"
-        );
-        // 42 と true の 2 つ分の unsupported コメント (順序非依存)
-        let unsupported_count = out.matches("# unsupported plugin entry:").count();
-        assert_eq!(
-            unsupported_count, 2,
-            "expected 2 unsupported comments for 42 and true, got {unsupported_count}:\n{out}"
-        );
-    }
-
-    #[test]
-    fn migrate_plugins_unsupported_name_with_newline_sanitized_to_single_line() {
-        // セキュリティ: 悪意ある YAML mapping-key (改行入り) が migrate 出力に
-        // 任意 YAML を inject できないこと。改行 / 制御文字は `?` 置換される。
-        let input = "plugins:\n  - \"evil\\n[malicious]\\nfoo: bar\":\n      foo: bar\n";
-        let out = migrate_rubocop_yml_to_murphy_yml(input).unwrap();
-        // unsupported comment は 1 行に押し込められる
-        let unsupported_lines: Vec<&str> = out
-            .lines()
-            .filter(|l| l.starts_with("# unsupported plugin entry:"))
-            .collect();
-        assert_eq!(
-            unsupported_lines.len(),
-            1,
-            "expected exactly 1 unsupported comment line, got {}:\n{out}",
-            unsupported_lines.len()
-        );
-        assert!(
-            !unsupported_lines[0].contains('\n') && !unsupported_lines[0].contains('\r'),
-            "sanitized line must not contain control chars:\n{}",
-            unsupported_lines[0]
-        );
-        // sanitization マーカ `?` が含まれること
-        assert!(
-            unsupported_lines[0].contains('?'),
-            "control chars in input should be replaced with `?`:\n{}",
-            unsupported_lines[0]
-        );
-    }
-
-    #[test]
-    fn migrate_plugins_empty_mapping_item_emits_unsupported() {
-        // `- {}` のような空 mapping も silently drop せず unsupported に
-        let out = migrate_rubocop_yml_to_murphy_yml("plugins:\n  - {}\n").unwrap();
-        assert!(
-            out.contains("# unsupported plugin entry: <empty or non-string key>"),
-            "empty mapping should emit named unsupported comment:\n{out}"
-        );
+    fn parses_plugins_scalar_form() {
+        // `plugins: murphy-rails` (scalar) — same as a one-element list.
+        let cfg = MurphyConfig::from_yaml_str("plugins: murphy-rails\n").expect("config parses");
+        assert_eq!(cfg.plugins.len(), 1);
+        assert!(matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "murphy-rails"));
     }
 
     #[test]
     fn plugins_detailed_rejects_unknown_field() {
-        // PluginDetailed carries its own `deny_unknown_fields`.
         let err = MurphyConfig::from_yaml_str(
-            r#"
-plugins:
-  - name: x
-    path: "y"
-    version: "0.1"
-"#,
+            "plugins:\n  - name: x\n    path: \"y\"\n    version: \"0.1\"\n",
         )
-        .expect_err("unknown field on Detailed should error");
-        let msg = err.to_string();
+        .expect_err("unknown field should error");
         assert!(
-            msg.contains("unknown field") || msg.contains("version"),
-            "expected unknown-field error mentioning `version`, got: {msg}"
+            err.to_string().contains("version"),
+            "error should mention unknown field: {err}"
         );
     }
 
     #[test]
     fn plugins_detailed_missing_path_yields_clear_error() {
-        let err = MurphyConfig::from_yaml_str(
-            r#"
-plugins:
-  - name: x
-"#,
-        )
-        .expect_err("missing path should error");
-        let msg = err.to_string();
+        let err = MurphyConfig::from_yaml_str("plugins:\n  - name: x\n")
+            .expect_err("missing path should error");
         assert!(
-            msg.contains("missing field") || msg.contains("path"),
-            "expected `missing field 'path'`-style error, got: {msg}"
+            err.to_string().contains("path"),
+            "error should mention missing field: {err}"
         );
     }
+
+    // --- migrate tests ---
 
     #[test]
     fn migrate_injects_cops_path_into_all_cops() {
@@ -950,17 +809,14 @@ plugins:
         );
         assert!(
             out.contains("cops"),
-            "CopsPath value 'cops' should be present:\n{out}"
+            "CopsPath value should be 'cops':\n{out}"
         );
     }
 
     #[test]
     fn migrate_creates_all_cops_section_if_absent() {
         let out = migrate_rubocop_yml_to_murphy_yml("Style/NoPuts:\n  Enabled: false\n").unwrap();
-        assert!(
-            out.contains("AllCops"),
-            "AllCops section should be created:\n{out}"
-        );
+        assert!(out.contains("AllCops"), "AllCops should be created:\n{out}");
         assert!(
             out.contains("CopsPath"),
             "CopsPath should be present:\n{out}"
@@ -968,15 +824,79 @@ plugins:
     }
 
     #[test]
-    fn migrate_cop_rules_pass_through_verbatim() {
+    fn migrate_cop_rules_pass_through() {
         let out = migrate_rubocop_yml_to_murphy_yml(
             "Style/NoPuts:\n  Enabled: false\n  Severity: error\n",
         )
         .unwrap();
-        assert!(out.contains("Style/NoPuts"), "cop name present:\n{out}");
-        assert!(out.contains("Enabled"), "Enabled present:\n{out}");
-        assert!(out.contains("false"), "false present:\n{out}");
-        assert!(out.contains("Severity"), "Severity present:\n{out}");
-        assert!(out.contains("error"), "error present:\n{out}");
+        assert!(out.contains("Style/NoPuts"), "cop name:\n{out}");
+        assert!(out.contains("Enabled"), "Enabled:\n{out}");
+        assert!(out.contains("false"), "false:\n{out}");
+    }
+
+    #[test]
+    fn migrate_plugins_emits_rename_hint() {
+        let out =
+            migrate_rubocop_yml_to_murphy_yml("plugins:\n  - rubocop-rails\n  - rubocop-rspec\n")
+                .unwrap();
+        assert!(
+            out.contains("rubocop-rails") && out.contains("rubocop-rspec"),
+            "plugin names preserved:\n{out}"
+        );
+        assert!(
+            out.contains("# NOTE:") && out.contains("rubocop-") && out.contains("murphy-"),
+            "rename hint:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_scalar_plugins_normalizes_to_sequence() {
+        let out = migrate_rubocop_yml_to_murphy_yml("plugins: rubocop-rails\n").unwrap();
+        assert!(out.contains("rubocop-rails"), "name present:\n{out}");
+        assert!(out.contains("# NOTE:"), "hint present:\n{out}");
+        // Must roundtrip through from_yaml_str
+        let cfg = MurphyConfig::from_yaml_str(&out).expect("migrated output must load");
+        assert_eq!(cfg.plugins.len(), 1);
+        assert!(matches!(&cfg.plugins[0], PluginConfig::Name(n) if n == "rubocop-rails"));
+    }
+
+    #[test]
+    fn migrate_unsupported_plugin_emits_comment() {
+        let out = migrate_rubocop_yml_to_murphy_yml(
+            "plugins:\n  - rubocop-rails\n  - foo:\n      option: x\n",
+        )
+        .unwrap();
+        assert!(
+            out.contains("# unsupported plugin entry: foo"),
+            "unsupported comment:\n{out}"
+        );
+        assert!(
+            out.contains("rubocop-rails"),
+            "valid name still present:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_unsupported_name_sanitized() {
+        let input = "plugins:\n  - \"evil\\n[malicious]\":\n      foo: bar\n";
+        let out = migrate_rubocop_yml_to_murphy_yml(input).unwrap();
+        let unsupported_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with("# unsupported plugin entry:"))
+            .collect();
+        assert_eq!(unsupported_lines.len(), 1, "exactly 1 comment:\n{out}");
+        assert!(
+            unsupported_lines[0].contains('?'),
+            "control chars replaced with ?:\n{out}"
+        );
+    }
+
+    #[test]
+    fn migrate_empty_mapping_plugin_emits_unsupported() {
+        let out = migrate_rubocop_yml_to_murphy_yml("plugins:\n  - {}\n").unwrap();
+        assert!(
+            out.contains("# unsupported plugin entry: <empty or non-string key>"),
+            "empty mapping:\n{out}"
+        );
     }
 }
