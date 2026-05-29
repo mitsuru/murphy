@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 
 use murphy_ast::{
-    AstNode, Comment, NodeId, NodeKind, NodeLoc, OptNodeId, Range, SourceToken, collect_children,
+    AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken, collect_children,
 };
 
 use crate::abi::CxRaw;
@@ -30,6 +30,22 @@ unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
     } else {
         unsafe { std::slice::from_raw_parts(ptr, len) }
     }
+}
+
+/// Lazy source-location view for a node — Murphy's analog of rubocop-ast's
+/// `node.loc`. `expression` and `name` are plain fields (zero-cost); all
+/// other sub-ranges are computed on demand from the arena's sorted token
+/// list and source bytes.
+pub struct LocRef<'a> {
+    pub expression: Range,
+    pub name: Range,
+    // Private: precomputed for dot()
+    #[allow(dead_code)]
+    receiver_end: Option<u32>,
+    #[allow(dead_code)]
+    sorted_tokens: &'a [SourceToken],
+    #[allow(dead_code)]
+    source: &'a [u8],
 }
 
 impl<'a> Cx<'a> {
@@ -75,15 +91,28 @@ impl<'a> Cx<'a> {
         self.nodes()[id.0 as usize].loc.expression
     }
 
-    /// The `node.loc` bundle for `id` — Murphy's analog of the parser
-    /// gem's `node.loc` accessor. `.expression` is the AST node's full
-    /// source range; `.name` is the identifier range (the
-    /// `node.loc.name` analog), [`Range::ZERO`] for nodes without
-    /// an identifier or for name-bearing nodes the translator did not
-    /// annotate. Equivalent to `self.node(id).loc`; provided as a
-    /// shorthand so cops can write `cx.loc(node).name`.
-    pub fn loc(&self, id: NodeId) -> NodeLoc {
-        self.nodes()[id.0 as usize].loc
+    /// The source-location view for `id`. `expression` and `name` are plain
+    /// fields. Call `.dot()`, `.keyword()`, `.begin()`, `.end()` for sub-ranges
+    /// — they compute only when used.
+    pub fn loc(&self, id: NodeId) -> LocRef<'a> {
+        let node = &self.nodes()[id.0 as usize];
+        let receiver_end = match node.kind {
+            NodeKind::Send { receiver, .. } => {
+                receiver.get().map(|r| self.nodes()[r.0 as usize].loc.expression.end)
+            }
+            NodeKind::Csend { receiver, .. } => {
+                Some(self.nodes()[receiver.0 as usize].loc.expression.end)
+            }
+            _ => None,
+        };
+        let src: &'a [u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
+        LocRef {
+            expression: node.loc.expression,
+            name: node.loc.name,
+            receiver_end,
+            sorted_tokens: self.sorted_tokens(),
+            source: src,
+        }
     }
 
     /// The parent of `id`; `OptNodeId::NONE` for the root.
@@ -846,6 +875,26 @@ mod tests {
             )
         };
         (b.finish(root), root)
+    }
+
+    #[test]
+    fn loc_ref_fields_match_nodeloc() {
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let loc = cx.loc(root);
+        assert_eq!(loc.expression, cx.range(root));
+        assert_eq!(loc.name, cx.node(root).loc.name);
     }
 
     #[test]
