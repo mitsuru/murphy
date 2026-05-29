@@ -398,6 +398,92 @@ impl<'a> Cx<'a> {
         self.line_count(id) > 1
     }
 
+    // --- typed-node accessors (pure field projections) ---
+    //
+    // Each returns the relevant child of a specific node kind, or the
+    // empty value (`OptNodeId::NONE` / `&[]`) when `id` is a different
+    // kind, so a cop can call them without a prior kind check. Mirrors
+    // the accessor methods on RuboCop's typed `IfNode` / `HashNode` /
+    // `PairNode` / `BlockNode`.
+
+    /// `IfNode#condition` — the `if`/`unless`/ternary condition.
+    pub fn if_condition(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::If { cond, .. } => OptNodeId::some(cond),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `IfNode#if_branch` — the `then` branch (the body run when the
+    /// condition holds). `OptNodeId::NONE` if absent or not an `If`.
+    pub fn if_then_branch(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::If { then_, .. } => then_,
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `IfNode#else_branch` — the `else` branch. `OptNodeId::NONE` if
+    /// absent or not an `If`.
+    pub fn if_else_branch(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::If { else_, .. } => else_,
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `HashNode#pairs` — the hash's child nodes (`Pair`s, and `kwsplat`
+    /// for `**h`). An empty slice for a non-`Hash` node.
+    pub fn hash_pairs(&self, id: NodeId) -> &'a [NodeId] {
+        match *self.kind(id) {
+            NodeKind::Hash(list) => self.list(list),
+            _ => &[],
+        }
+    }
+
+    /// `PairNode#key`. `OptNodeId::NONE` if not a `Pair`.
+    pub fn pair_key(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Pair { key, .. } => OptNodeId::some(key),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `PairNode#value`. `OptNodeId::NONE` if not a `Pair`.
+    pub fn pair_value(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Pair { value, .. } => OptNodeId::some(value),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `BlockNode#send_node` — the call the block is attached to.
+    /// `OptNodeId::NONE` if not a `Block`.
+    pub fn block_call(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Block { call, .. } => OptNodeId::some(call),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `BlockNode#arguments` — the block's `Args` node (always present
+    /// for a block, possibly empty). `OptNodeId::NONE` if not a `Block`.
+    pub fn block_arguments(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Block { args, .. } => OptNodeId::some(args),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `BlockNode#body` — the block body. `OptNodeId::NONE` for an empty
+    /// body or a non-`Block` node.
+    pub fn block_body(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::Block { body, .. } => body,
+            _ => OptNodeId::NONE,
+        }
+    }
+
     /// The file's comments, in source order.
     pub fn comments(&self) -> &'a [Comment] {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
@@ -1397,5 +1483,102 @@ mod tests {
         let cx = unsafe { Cx::from_raw(&raw) };
         assert!(cx.is_multiline(root));
         assert!(!cx.is_single_line(root));
+    }
+
+    #[test]
+    fn if_node_accessors_project_branches() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let z = Range { start: 0, end: 1 };
+        let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+        let cond = b.push(NodeKind::True_, z);
+        let then_ = b.push(NodeKind::Int(1), z);
+        let else_ = b.push(NodeKind::Int(2), z);
+        let iff = b.push(
+            NodeKind::If {
+                cond,
+                then_: OptNodeId::some(then_),
+                else_: OptNodeId::some(else_),
+            },
+            z,
+        );
+        let ast = b.finish(iff);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.if_condition(iff).get(), Some(cond));
+        assert_eq!(cx.if_then_branch(iff).get(), Some(then_));
+        assert_eq!(cx.if_else_branch(iff).get(), Some(else_));
+        // Non-If node projects to NONE.
+        assert!(cx.if_condition(then_).get().is_none());
+    }
+
+    #[test]
+    fn hash_and_pair_accessors_project_children() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let z = Range { start: 0, end: 1 };
+        let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+        let key = b.intern_symbol("k");
+        let key_node = b.push(NodeKind::Sym(key), z);
+        let val_node = b.push(NodeKind::Int(7), z);
+        let pair = b.push(
+            NodeKind::Pair {
+                key: key_node,
+                value: val_node,
+            },
+            z,
+        );
+        let pairs = b.push_list(&[pair]);
+        let hash = b.push(NodeKind::Hash(pairs), z);
+        let ast = b.finish(hash);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.hash_pairs(hash), &[pair]);
+        assert_eq!(cx.pair_key(pair).get(), Some(key_node));
+        assert_eq!(cx.pair_value(pair).get(), Some(val_node));
+        // Non-matching kinds project empty.
+        assert!(cx.hash_pairs(pair).is_empty());
+        assert!(cx.pair_key(hash).get().is_none());
+    }
+
+    #[test]
+    fn block_accessors_project_call_args_body() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let z = Range { start: 0, end: 1 };
+        let mut b = AstBuilder::new("x".to_string(), "t.rb".to_string());
+        let method = b.intern_symbol("each");
+        let call = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method,
+                args: murphy_ast::NodeList::EMPTY,
+            },
+            z,
+        );
+        let args = b.push(NodeKind::Args(murphy_ast::NodeList::EMPTY), z);
+        let body = b.push(NodeKind::Int(1), z);
+        let block = b.push(
+            NodeKind::Block {
+                call,
+                args,
+                body: OptNodeId::some(body),
+            },
+            z,
+        );
+        let ast = b.finish(block);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.block_call(block).get(), Some(call));
+        assert_eq!(cx.block_arguments(block).get(), Some(args));
+        assert_eq!(cx.block_body(block).get(), Some(body));
+        // Non-Block node projects to NONE.
+        assert!(cx.block_call(body).get().is_none());
     }
 }
