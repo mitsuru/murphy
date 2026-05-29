@@ -110,6 +110,19 @@ impl AstBuilder {
                 self.nodes[child.0 as usize].parent = parent;
             }
         }
+        // Prism's lexer emits tokens in *lex* order, not source order: a
+        // heredoc's body/closing tokens are streamed right after the
+        // `<<~ID` opener, before the rest of the opener's line. The
+        // `sorted_tokens` accessor and the partition-based token helpers
+        // (`begin`/`end`/`keyword` on `LocRef`; `token_before`/
+        // `token_after`/`tokens_in` on `Cx`) all assume a start-sorted
+        // stream, so enforce that here. A *stable* sort keeps the relative
+        // order of equal-start tokens, which keeps `end` monotonic on the
+        // inputs prism produces (the only overlaps are equal-end, e.g. a
+        // heredoc-end token that folds the trailing newline shares its end
+        // with the standalone newline token).
+        self.source_tokens
+            .sort_by_key(|t| (t.range.start, t.range.end));
         Ast {
             nodes: self.nodes,
             node_lists: self.node_lists,

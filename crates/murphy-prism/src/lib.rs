@@ -21,9 +21,10 @@ use std::ptr::NonNull;
 pub use self::bindings::*;
 use ruby_prism_sys::{pm_comment_t, pm_comment_type_t, pm_constant_id_list_t, pm_constant_id_t, pm_diagnostic_t, pm_integer_t, pm_lex_callback_t, pm_location_t, pm_magic_comment_t, pm_node_destroy, pm_node_list, pm_node_t, pm_parse, pm_parser_free, pm_parser_init, pm_parser_t, pm_token_t};
 pub use ruby_prism_sys::{
-    PM_TOKEN_COMMENT, PM_TOKEN_HEREDOC_END, PM_TOKEN_HEREDOC_START, PM_TOKEN_IGNORED_NEWLINE,
-    PM_TOKEN_NEWLINE, PM_TOKEN_PARENTHESIS_LEFT, PM_TOKEN_PARENTHESIS_LEFT_PARENTHESES,
-    PM_TOKEN_PARENTHESIS_RIGHT, pm_token_type_t,
+    PM_TOKEN_BRACE_LEFT, PM_TOKEN_BRACE_RIGHT, PM_TOKEN_COMMA, PM_TOKEN_COMMENT,
+    PM_TOKEN_HEREDOC_END, PM_TOKEN_HEREDOC_START, PM_TOKEN_IGNORED_NEWLINE, PM_TOKEN_NEWLINE,
+    PM_TOKEN_PARENTHESIS_LEFT, PM_TOKEN_PARENTHESIS_LEFT_PARENTHESES, PM_TOKEN_PARENTHESIS_RIGHT,
+    pm_token_type_t,
 };
 
 /// A range in the source file.

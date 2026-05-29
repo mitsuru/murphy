@@ -33,7 +33,11 @@ pub const MAGIC: &[u8; 8] = b"MURPHYAS";
 /// Version 5 (murphy-s4b4): adds the niche/legacy LOW-priority tags
 /// 92–100 (alias / undef / preexe / postexe / back_ref / nth_ref /
 /// shadowarg / kwnilarg / blocknilarg).
-pub const FORMAT_VERSION: u32 = 5;
+///
+/// Version 6 (murphy-es99.8): adds the `SourceTokenKind` discriminants
+/// 8/9/10 (Comma / LeftBrace / RightBrace). Old readers must reject
+/// blobs that carry the new token kinds, so the layout is retired.
+pub const FORMAT_VERSION: u32 = 6;
 
 /// Total header size in bytes. The body immediately follows. Downstream
 /// (cache, mmap) code can rely on this offset being fixed.
@@ -961,6 +965,9 @@ fn read_source_token(cur: &mut &[u8]) -> Result<SourceToken, SerError> {
         5 => SourceTokenKind::HeredocStart,
         6 => SourceTokenKind::HeredocEnd,
         7 => SourceTokenKind::Other,
+        8 => SourceTokenKind::Comma,
+        9 => SourceTokenKind::LeftBrace,
+        10 => SourceTokenKind::RightBrace,
         _ => return Err(SerError::BadDiscriminant),
     };
     Ok(SourceToken { range, kind })
@@ -2031,6 +2038,41 @@ mod tests {
             kind: SourceTokenKind::Newline,
             range: r(6, 7),
         });
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
+        assert_eq!(restored.sorted_tokens(), ast.sorted_tokens());
+    }
+
+    #[test]
+    fn round_trip_all_source_token_kinds() {
+        // Pin every discriminant — especially the tail-added Comma/LeftBrace/
+        // RightBrace (es99.8) — through a serialize → deserialize cycle so a
+        // future reorder or a missing read arm is caught.
+        let mut b = AstBuilder::new("x", "t.rb");
+        let root = b.push(NodeKind::Int(1), r(0, 1));
+        for (i, kind) in [
+            SourceTokenKind::LeftParen,
+            SourceTokenKind::RightParen,
+            SourceTokenKind::Comment,
+            SourceTokenKind::Newline,
+            SourceTokenKind::IgnoredNewline,
+            SourceTokenKind::HeredocStart,
+            SourceTokenKind::HeredocEnd,
+            SourceTokenKind::Other,
+            SourceTokenKind::Comma,
+            SourceTokenKind::LeftBrace,
+            SourceTokenKind::RightBrace,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let start = i as u32;
+            b.add_source_token(SourceToken {
+                kind,
+                range: r(start, start + 1),
+            });
+        }
         let ast = b.finish(root);
 
         let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
