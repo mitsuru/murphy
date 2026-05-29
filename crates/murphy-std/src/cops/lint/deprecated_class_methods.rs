@@ -146,8 +146,9 @@ fn offense(node: NodeId, cx: &Cx<'_>) -> Option<DeprecatedOffense> {
             Some(DeprecatedOffense {
                 range,
                 message: format!(
-                    "`{}` is deprecated in favor of `{const_name}.exist?`.",
-                    cx.raw_source(range)
+                    "`{}` is deprecated in favor of `{}.exist?`.",
+                    cx.raw_source(range),
+                    cx.raw_source(cx.range(receiver))
                 ),
                 replacement: Some(Replacement {
                     range: selector,
@@ -284,7 +285,7 @@ mod tests {
         // Range covers `::File.exists?`, not the whole call with args.
         test::<DeprecatedClassMethods>().expect_offense(indoc! {r#"
                 ::File.exists?(path)
-                ^^^^^^^^^^^^^^ `::File.exists?` is deprecated in favor of `File.exist?`.
+                ^^^^^^^^^^^^^^ `::File.exists?` is deprecated in favor of `::File.exist?`.
             "#});
     }
 
