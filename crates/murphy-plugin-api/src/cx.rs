@@ -41,7 +41,6 @@ pub struct LocRef<'a> {
     pub name: Range,
     // Private: precomputed for dot()
     receiver_end: Option<u32>,
-    #[allow(dead_code)]
     sorted_tokens: &'a [SourceToken],
     source: &'a [u8],
 }
@@ -86,6 +85,24 @@ impl<'a> LocRef<'a> {
                 return Range { start, end: start + 1 };
             }
             i += 1;
+        }
+        Range::ZERO
+    }
+
+    /// The leading keyword token range (`def`, `class`, `if`, `while`, …).
+    /// Computed by binary-searching sorted_tokens for the first token at
+    /// `expression.start`. Returns `Range::ZERO` if no token starts exactly
+    /// at that position.
+    ///
+    /// **Limitation:** modifier-form control flow (`x if cond`) places the
+    /// keyword *after* the expression start — returns `Range::ZERO` for those.
+    pub fn keyword(&self) -> Range {
+        let target = self.expression.start;
+        let idx = self.sorted_tokens.partition_point(|t| t.range.start < target);
+        if let Some(tok) = self.sorted_tokens.get(idx) {
+            if tok.range.start == target {
+                return tok.range;
+            }
         }
         Range::ZERO
     }
@@ -1697,5 +1714,60 @@ mod tests {
         assert_eq!(cx.block_body(block).get(), Some(body));
         // Non-Block node projects to NONE.
         assert!(cx.block_call(body).get().is_none());
+    }
+
+    #[test]
+    fn loc_keyword_def() {
+        // `def foo; end` — the `def` keyword starts at offset 0 and is 3 bytes.
+        let source = "def foo; end";
+        let mut b = AstBuilder::new(source.to_string(), "t.rb".to_string());
+        let sym = b.intern_symbol("foo");
+        let args = b.push(
+            NodeKind::Args(murphy_ast::NodeList::EMPTY),
+            Range { start: 4, end: 7 },
+        );
+        let root = b.push_named(
+            NodeKind::Def {
+                receiver: OptNodeId::NONE,
+                name: sym,
+                args,
+                body: OptNodeId::NONE,
+            },
+            Range { start: 0, end: source.len() as u32 },
+            Range { start: 4, end: 7 },
+        );
+        // Add the `def` keyword token so keyword() can find it.
+        b.add_source_token(murphy_ast::SourceToken {
+            kind: murphy_ast::SourceTokenKind::Other,
+            range: Range { start: 0, end: 3 },
+        });
+        let ast = b.finish(root);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let kw = cx.loc(root).keyword();
+        assert_eq!(kw, Range { start: 0, end: 3 });
+        assert_eq!(cx.raw_source(kw), "def");
+    }
+
+    #[test]
+    fn loc_keyword_zero_for_send() {
+        // `foo.bar` — a Send node has no keyword token at expression.start.
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).keyword(), Range::ZERO);
     }
 }
