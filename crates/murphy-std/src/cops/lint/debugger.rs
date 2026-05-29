@@ -241,12 +241,12 @@ fn receiver_signature(cx: &Cx<'_>, id: NodeId) -> Option<String> {
             method,
             args,
         } if cx.list(args).is_empty() => {
-            let method_name = cx.symbol_str(method).to_string();
+            let method_name = cx.symbol_str(method);
             match receiver.get() {
-                None => Some(method_name),
+                None => Some(method_name.to_string()),
                 Some(recv_id) => {
-                    let outer = receiver_signature(cx, recv_id)?;
-                    Some(format!("{outer}.{method_name}"))
+                    let receiver_sig = receiver_signature(cx, recv_id)?;
+                    Some(format!("{receiver_sig}.{method_name}"))
                 }
             }
         }
@@ -293,8 +293,11 @@ fn parent_will_match(cx: &Cx<'_>, node: NodeId, current_sig: &str, opts: &Option
         return false;
     }
     let parent_method_str = cx.symbol_str(parent_method);
-    let longer_sig = format!("{current_sig}.{parent_method_str}");
-    opts.debugger_methods.iter().any(|e| e == &longer_sig)
+    opts.debugger_methods.iter().any(|e| {
+        e.strip_prefix(current_sig)
+            .and_then(|rest| rest.strip_prefix('.'))
+            == Some(parent_method_str)
+    })
 }
 
 #[cfg(test)]
