@@ -231,14 +231,10 @@ fn literal_key(cx: &Cx<'_>, node: NodeId) -> Option<LiteralKey> {
         // `begin...end` and from interpolation wrappers inside `Dstr`.
         // Grouping parens like `(1)` use prism's `ParenthesesNode` which
         // translates to `Unknown` — those are NOT handled here.
-        NodeKind::Begin(list) => {
-            let items = cx.list(list);
-            if items.len() == 1 {
-                literal_key(cx, items[0])?
-            } else {
-                return None;
-            }
-        }
+        NodeKind::Begin(list) => match cx.list(list) {
+            &[single] => literal_key(cx, single)?,
+            _ => return None,
+        },
 
         // `false && true` / `false or true` — boolean expression
         // where both children are basic-literals.
