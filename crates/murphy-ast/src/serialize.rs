@@ -1168,6 +1168,11 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
             NodeKind::Kwbegin(l) | NodeKind::Regopt(l) | NodeKind::Procarg0(l) => {
                 check_list(l)?;
             }
+            // `Rational(StringId)` / `Complex(StringId)` route through the
+            // same `check_sym` as `NodeKind::Str(StringId)` because Murphy's
+            // interner is shared between `Symbol` and `StringId` ids — see
+            // `interner.rs`. The closure name is historical; both id types
+            // share its bounds check.
             NodeKind::Rational(s) | NodeKind::Complex(s) => check_sym(s.0)?,
             NodeKind::Not(n) => check_node(n.0)?,
             NodeKind::Numblock { send, body, .. } => {

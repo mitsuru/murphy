@@ -504,8 +504,13 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         } => {
             out.push_str("(indexasgn\n");
             write_node(ast, receiver, d, out);
-            // children: receiver + args... + value (value is last per `collect_children`)
-            write_slice(ast, id, 1, usize::MAX - 1, d, out);
+            // `collect_children` lays IndexAsgn out as receiver + args... + value
+            // (value last). The receiver is already emitted above and the value
+            // is emitted explicitly below; the middle slice is the args run.
+            // `usize::MAX` for `take` would walk past `value` and emit it
+            // twice, so cap the take count to the args length.
+            let args_count = ast.children(id).count().saturating_sub(2);
+            write_slice(ast, id, 1, args_count, d, out);
             out.push('\n');
             write_node(ast, value, d, out);
             out.push(')');
