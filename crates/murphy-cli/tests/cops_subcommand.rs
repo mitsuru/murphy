@@ -134,10 +134,10 @@ fn cops_list_reports_user_disabled_status_for_active_cop() {
     // arena-migration status applied to never-migrated cops.
     let dir = tempdir().expect("create tempdir");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "[cops.rules.\"Murphy/NoReceiverPuts\"]\nenabled = false\n",
+        dir.path().join(".murphy.yml"),
+        "Murphy/NoReceiverPuts:\n  Enabled: false\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -174,10 +174,10 @@ fn lint_warns_and_continues_when_user_enables_a_disabled_cop() {
     };
     let dir = tempdir().expect("create tempdir");
     fs::write(
-        dir.path().join("murphy.toml"),
-        format!("[cops.rules.\"{probe}\"]\nenabled = true\n"),
+        dir.path().join(".murphy.yml"),
+        format!("{probe}:\n  Enabled: true\n"),
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
     fs::write(dir.path().join("clean.rb"), "x = 1\n").expect("write clean.rb");
 
     let assert = Command::cargo_bin("murphy")

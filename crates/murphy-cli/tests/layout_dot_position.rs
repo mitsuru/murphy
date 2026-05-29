@@ -2,8 +2,8 @@
 //! `murphy` binary (murphy-lpc.3.4).
 //!
 //! Contract anchored:
-//! - default config (no `murphy.toml`) enforces leading dots.
-//! - `[cops.rules."Layout/DotPosition"] EnforcedStyle = "trailing"`
+//! - default config (no `.murphy.yml`) enforces leading dots.
+//! - `.murphy.yml` with `Layout/DotPosition: {EnforcedStyle: trailing}`
 //!   flips the enforcement direction, exercising the option-decode
 //!   path that the lib-level tests can only stub via an in-module
 //!   wrapper.
@@ -36,7 +36,7 @@ fn offenses_named<'a>(offenses: &'a [serde_json::Value], cop: &str) -> Vec<&'a s
 
 #[test]
 fn default_config_flags_trailing_dot() {
-    // No `murphy.toml` ⇒ default leading-dot style ⇒ trailing-style
+    // No `.murphy.yml` ⇒ default leading-dot style ⇒ trailing-style
     // input registers an offense.
     let dir = tempdir().expect("create tempdir");
     let (code, offs) = lint_json_in(dir.path(), "something.\n  method_name\n");
@@ -61,10 +61,10 @@ fn user_config_enforced_style_trailing_flips_enforcement() {
     // because the test_support harness pins `options_json = "{}"`.
     let dir = tempdir().expect("create tempdir");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "[cops.rules.\"Layout/DotPosition\"]\nEnforcedStyle = \"trailing\"\n",
+        dir.path().join(".murphy.yml"),
+        "Layout/DotPosition:\n  EnforcedStyle: trailing\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
     let (code, offs) = lint_json_in(dir.path(), "something\n  .method_name\n");
     assert_eq!(code, 1, "offense → exit 1");
     let dp = offenses_named(&offs, "Layout/DotPosition");
@@ -84,10 +84,10 @@ fn user_config_enforced_style_trailing_flips_enforcement() {
 fn user_config_enforced_style_trailing_accepts_trailing_input() {
     let dir = tempdir().expect("create tempdir");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "[cops.rules.\"Layout/DotPosition\"]\nEnforcedStyle = \"trailing\"\n",
+        dir.path().join(".murphy.yml"),
+        "Layout/DotPosition:\n  EnforcedStyle: trailing\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
     let (_code, offs) = lint_json_in(dir.path(), "something.\n  method_name\n");
     assert!(
         offenses_named(&offs, "Layout/DotPosition").is_empty(),
@@ -99,10 +99,10 @@ fn user_config_enforced_style_trailing_accepts_trailing_input() {
 fn config_disabled_silences_the_cop() {
     let dir = tempdir().expect("create tempdir");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "[cops.rules.\"Layout/DotPosition\"]\nenabled = false\n",
+        dir.path().join(".murphy.yml"),
+        "Layout/DotPosition:\n  Enabled: false\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
     let (_code, offs) = lint_json_in(dir.path(), "something.\n  method_name\n");
     assert!(
         offenses_named(&offs, "Layout/DotPosition").is_empty(),

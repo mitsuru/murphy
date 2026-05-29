@@ -16,7 +16,7 @@
 //!   it.
 //! - [`aggregate`] / [`run_to_fixpoint`] — offense aggregator + autocorrect
 //!   fixpoint loop (unchanged contract, ADR 0006/0011/0013).
-//! - [`MurphyConfig`] — `murphy.toml` schema (ADR 0015).
+//! - [`MurphyConfig`] — `.murphy.yml` schema (ADR 0015).
 //! - [`discover`] — file discovery (ADR 0014).
 
 mod aggregator;
@@ -38,7 +38,7 @@ pub use autocorrect::{
     apply_edits_logged, run_to_fixpoint,
 };
 pub use config::{
-    CopRule, MurphyConfig, PluginConfig, PluginDetailed, migrate_rubocop_yml_to_murphy_toml,
+    CopRule, MurphyConfig, PluginConfig, PluginDetailed, migrate_rubocop_yml_to_murphy_yml,
 };
 pub use discovery::{ConfigError, discover, discover_with_config};
 #[cfg(feature = "mruby-user-cops")]

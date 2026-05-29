@@ -4,5 +4,5 @@
 # (The fixture's `puts "x"` and `puts "日本語"` would otherwise produce
 # additional `Style/StringLiterals` offenses; that cop's own integration
 # tests live next to the cop, not in this snapshot.)
-[cops.rules."Style/StringLiterals"]
-enabled = false
+Style/StringLiterals:
+  Enabled: false

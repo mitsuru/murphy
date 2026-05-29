@@ -31,7 +31,7 @@ use murphy_core::{AstContext, run_mruby_cop_isolated};
 use murphy_core::{
     CopRegistry, FixpointStatus, MurphyConfig, Offense, SYNTAX_COP_NAME, Severity,
     aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
-    migrate_rubocop_yml_to_murphy_toml, parse, parse_with_cache, run_to_fixpoint,
+    migrate_rubocop_yml_to_murphy_yml, parse, parse_with_cache, run_to_fixpoint,
 };
 use murphy_plugin_api::{PluginCopV1, PluginRegistration};
 use murphy_reporting::{OutputFormat, format_lint_output};
@@ -796,10 +796,10 @@ fn run(args: &[String]) -> Result<u8, AppError> {
 fn run_migrate(args: &MigrateArgs) -> Result<u8, AppError> {
     let text = std::fs::read_to_string(&args.path)
         .map_err(|e| AppError::setup(format!("cannot read {:?}: {e}", args.path)))?;
-    let toml =
-        migrate_rubocop_yml_to_murphy_toml(&text).map_err(|e| AppError::setup(e.to_string()))?;
+    let yml =
+        migrate_rubocop_yml_to_murphy_yml(&text).map_err(|e| AppError::setup(e.to_string()))?;
     let mut stdout = std::io::stdout().lock();
-    if let Err(e) = write!(stdout, "{toml}") {
+    if let Err(e) = write!(stdout, "{yml}") {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
             return Ok(EXIT_OK);
         }

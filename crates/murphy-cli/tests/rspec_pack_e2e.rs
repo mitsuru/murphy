@@ -1,6 +1,6 @@
 //! E2E integration test for the murphy-rspec plugin pack (murphy-4n9.4).
 //!
-//! Loads `murphy-rspec` via the `[[plugins]]` config + dlopen path and
+//! Loads `murphy-rspec` via the `plugins:` config + dlopen path and
 //! asserts the bootstrap cop `RSpec/DescribeClass` fires on a fixture.
 //!
 //! Windows は plugin pack 非対応 (`plugin_loader` の Windows guard) なので
@@ -68,11 +68,11 @@ fn run_with_pack(source: &str) -> (i32, Vec<serde_json::Value>) {
     let rb = dir.path().join("widget_spec.rb");
     fs::write(&rb, source).expect("write rb");
 
-    let toml = format!(
-        "[[plugins]]\nname = \"murphy-rspec\"\npath = {:?}\n",
+    let yml = format!(
+        "plugins:\n  - name: murphy-rspec\n    path: {:?}\n",
         pack.display().to_string()
     );
-    fs::write(dir.path().join("murphy.toml"), toml).expect("write toml");
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write toml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")

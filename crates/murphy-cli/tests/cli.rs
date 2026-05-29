@@ -603,11 +603,11 @@ fn lint_help_describes_key_flags() {
 // --- Phase 2 Task 6: directory / zero-arg discovery ---
 
 /// `murphy lint <dir>` discovers `.rb` files under the dir (default
-/// `**/*.rb`), honoring a `murphy.toml` `exclude`. The clean+dirty tree →
+/// `**/*.rb`), honoring a `.murphy.yml` `Exclude`. The clean+dirty tree →
 /// exit 1 with exactly the dirty file's NoReceiverPuts offense; the excluded
 /// file is NOT discovered.
 #[test]
-fn lint_directory_discovers_and_applies_murphy_toml_exclude() {
+fn lint_directory_discovers_and_applies_murphy_yml_exclude() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
     fs::write(root.join("clean.rb"), CLEAN_SOURCE).expect("write clean.rb");
@@ -620,10 +620,10 @@ fn lint_directory_discovers_and_applies_murphy_toml_exclude() {
     )
     .expect("write dep.rb");
     fs::write(
-        root.join("murphy.toml"),
-        "[files]\ninclude = [\"**/*.rb\"]\nexclude = [\"vendor/**\"]\n",
+        root.join(".murphy.yml"),
+        "AllCops:\n  Include:\n    - '**/*.rb'\n  Exclude:\n    - 'vendor/**'\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -679,14 +679,14 @@ fn lint_zero_paths_discovers_cwd() {
     );
 }
 
-/// A malformed `murphy.toml` in a discovered dir → exit 2 (ConfigError), NOT
+/// A malformed `.murphy.yml` in a discovered dir → exit 2 (ConfigError), NOT
 /// a panic (exit 3) and NOT silently ignored. stdout stays empty.
 #[test]
-fn lint_directory_with_malformed_murphy_toml_exits_2() {
+fn lint_directory_with_malformed_murphy_yml_exits_2() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
     fs::write(root.join("a.rb"), CLEAN_SOURCE).expect("write a.rb");
-    fs::write(root.join("murphy.toml"), "not = valid = toml [[[\n").expect("write murphy.toml");
+    fs::write(root.join(".murphy.yml"), "AllCops: [unclosed\n").expect("write .murphy.yml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -711,10 +711,10 @@ fn cops_config_can_disable_native_cop() {
     let root = dir.path();
     fs::write(root.join("dirty.rb"), DIRTY_PUTS_SOURCE).expect("write dirty.rb");
     fs::write(
-        root.join("murphy.toml"),
-        "[cops.rules.\"Murphy/NoReceiverPuts\"]\nenabled = false\n",
+        root.join(".murphy.yml"),
+        "Murphy/NoReceiverPuts:\n  Enabled: false\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -734,10 +734,10 @@ fn cops_config_can_override_native_cop_severity() {
     let root = dir.path();
     fs::write(root.join("dirty.rb"), DIRTY_PUTS_SOURCE).expect("write dirty.rb");
     fs::write(
-        root.join("murphy.toml"),
-        "[cops.rules.\"Murphy/NoReceiverPuts\"]\nseverity = \"error\"\n",
+        root.join(".murphy.yml"),
+        "Murphy/NoReceiverPuts:\n  Severity: error\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -760,10 +760,10 @@ fn syntax_error_severity_cannot_be_downgraded_by_config() {
     let root = dir.path();
     fs::write(root.join("broken.rb"), "def (\n").expect("write broken.rb");
     fs::write(
-        root.join("murphy.toml"),
-        "[cops.rules.\"Murphy/Syntax\"]\nseverity = \"warning\"\n",
+        root.join(".murphy.yml"),
+        "Murphy/Syntax:\n  Severity: warning\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")

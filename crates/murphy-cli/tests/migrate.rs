@@ -3,7 +3,7 @@ use std::fs;
 use tempfile::tempdir;
 
 #[test]
-fn migrate_rubocop_yml_to_murphy_toml_stdout() {
+fn migrate_rubocop_yml_to_murphy_yml_stdout() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
     fs::write(
@@ -29,18 +29,18 @@ Style/NoPuts:
         .code(0);
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
-    assert!(stdout.contains("[files]"), "got {stdout}");
-    assert!(
-        stdout.contains("include = [\"lib/**/*.rb\"]"),
-        "got {stdout}"
-    );
-    assert!(stdout.contains("exclude = [\"vendor/**\"]"), "got {stdout}");
-    assert!(
-        stdout.contains("[cops.rules.\"Style/NoPuts\"]"),
-        "got {stdout}"
-    );
-    assert!(stdout.contains("enabled = false"), "got {stdout}");
-    assert!(stdout.contains("severity = \"error\""), "got {stdout}");
+    // AllCops section is preserved (with CopsPath injected)
+    assert!(stdout.contains("AllCops"), "got {stdout}");
+    assert!(stdout.contains("lib/**/*.rb"), "got {stdout}");
+    assert!(stdout.contains("vendor/**"), "got {stdout}");
+    // Cop rules pass through verbatim
+    assert!(stdout.contains("Style/NoPuts"), "got {stdout}");
+    assert!(stdout.contains("Enabled"), "got {stdout}");
+    assert!(stdout.contains("false"), "got {stdout}");
+    assert!(stdout.contains("Severity"), "got {stdout}");
+    assert!(stdout.contains("error"), "got {stdout}");
+    // CopsPath injected
+    assert!(stdout.contains("CopsPath"), "got {stdout}");
 }
 
 #[test]
@@ -62,8 +62,8 @@ fn migrated_output_roundtrips_to_lint_behavior() {
         .arg(".rubocop.yml")
         .assert()
         .code(0);
-    fs::write(root.join("murphy.toml"), &migrate.get_output().stdout)
-        .expect("write migrated murphy.toml");
+    fs::write(root.join(".murphy.yml"), &migrate.get_output().stdout)
+        .expect("write migrated .murphy.yml");
     fs::write(
         root.join("dirty.rb"),
         "# frozen_string_literal: true\n\nputs 'hi'\n",
@@ -139,13 +139,18 @@ AllCops:
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
     // name は preserve (auto-rename しない)
     assert!(
-        stdout.contains("plugins = [\"rubocop-rails\", \"rubocop-rspec\"]"),
-        "stdout missing plugins line:\n{stdout}"
+        stdout.contains("rubocop-rails") && stdout.contains("rubocop-rspec"),
+        "stdout missing plugin names:\n{stdout}"
     );
-    // [files] section も出ること (regression)
+    // rename hint が出ること
     assert!(
-        stdout.contains("[files]"),
-        "stdout missing [files]:\n{stdout}"
+        stdout.contains("# NOTE:"),
+        "stdout missing rename hint:\n{stdout}"
+    );
+    // AllCops section も出ること (regression)
+    assert!(
+        stdout.contains("AllCops"),
+        "stdout missing AllCops:\n{stdout}"
     );
 }
 
@@ -179,14 +184,10 @@ AllCops:
         stdout.contains("# unsupported plugin entry: foo"),
         "stdout missing unsupported comment:\n{stdout}"
     );
-    // mapping form の name は plugins 行には含まれない
+    // string form の rubocop-rails は残る
     assert!(
-        stdout.contains("plugins = [\"rubocop-rails\"]"),
-        "stdout should list only string-form plugins:\n{stdout}"
-    );
-    assert!(
-        !stdout.contains("\"foo\""),
-        "stdout should not list foo as a plugin name:\n{stdout}"
+        stdout.contains("rubocop-rails"),
+        "stdout should list string-form plugins:\n{stdout}"
     );
 }
 
@@ -212,9 +213,6 @@ fn migrate_inline_yaml_arrays() {
         .code(0);
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
-    assert!(
-        stdout.contains("include = [\"lib/**/*.rb\"]"),
-        "got {stdout}"
-    );
-    assert!(stdout.contains("exclude = [\"vendor/**\"]"), "got {stdout}");
+    assert!(stdout.contains("lib/**/*.rb"), "got {stdout}");
+    assert!(stdout.contains("vendor/**"), "got {stdout}");
 }

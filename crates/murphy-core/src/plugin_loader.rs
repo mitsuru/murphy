@@ -125,7 +125,7 @@ pub enum LoadKind {
 /// `cause:` / `hint:`) via [`std::fmt::Display`].
 ///
 /// Created at the registry boundary where the plugin name (from
-/// `[[plugins]]`) and the attempted path (None for resolve failures)
+/// `plugins:`) and the attempted path (None for resolve failures)
 /// are known.
 #[derive(Debug)]
 pub struct PluginLoadDiagnostic {
@@ -190,8 +190,8 @@ impl PluginLoadDiagnostic {
                 };
                 let hint = format!(
                     "searched: {searched}.\n\
-                     To pin an explicit path, use the detailed form:\n\
-                     `[[plugins]] name = \"{name}\" path = \"...\"`.\n\
+                     To pin an explicit path, use the detailed form in `.murphy.yml`:\n\
+                     `plugins:\\n  - name: \"{name}\"\\n    path: ...`.\n\
                      See ADR 0042 for the search-path order.",
                     name = self.plugin_name,
                 );
@@ -202,7 +202,7 @@ impl PluginLoadDiagnostic {
                     format!("dlopen failed: {msg}"),
                     format!(
                         "confirm the path exists, or use name-only shorthand\n\
-                         `plugins = [\"{name}\"]` to search MURPHY_PLUGIN_PATH /\n\
+                         `plugins: [{name}]` in `.murphy.yml` to search MURPHY_PLUGIN_PATH /\n\
                          .murphy/plugins/ (ADR 0042).",
                         name = self.plugin_name,
                     ),
@@ -540,8 +540,8 @@ mod tests {
                 error: cannot load plugin `murphy-foo`
                   cause: plugin pack `libmurphy_foo.so` not found in search path
                   hint:  searched: /opt/murphy/plugins, /home/u/.murphy/plugins.
-                         To pin an explicit path, use the detailed form:
-                         `[[plugins]] name = "murphy-foo" path = "..."`.
+                         To pin an explicit path, use the detailed form in `.murphy.yml`:
+                         `plugins:\n  - name: "murphy-foo"\n    path: ...`.
                          See ADR 0042 for the search-path order."#]]
             .assert_eq(&diag.to_string());
         }
@@ -559,7 +559,7 @@ mod tests {
                 error: cannot load plugin `murphy-foo` from `./vendor/libmurphy_foo.so`
                   cause: dlopen failed: libmurphy_foo.so: cannot open shared object file: No such file or directory
                   hint:  confirm the path exists, or use name-only shorthand
-                         `plugins = ["murphy-foo"]` to search MURPHY_PLUGIN_PATH /
+                         `plugins: [murphy-foo]` in `.murphy.yml` to search MURPHY_PLUGIN_PATH /
                          .murphy/plugins/ (ADR 0042)."#]]
             .assert_eq(&diag.to_string());
         }

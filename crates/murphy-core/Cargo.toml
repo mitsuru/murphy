@@ -30,8 +30,7 @@ mruby3-sys = { version = "=3.2.0", optional = true }
 # File discovery (Task 6, discovery.rs ADR-style doc). Pure-Rust, caret-pinned
 # per project convention (exact `=` pins are reserved for the contract-affecting
 # native bindings only). `ignore` = ripgrep's walker (.murphyignore via custom
-# ignore filename); `globset` = include/exclude glob matching; `toml` = parse
-# the discovery-only `murphy.toml` `[files]` table.
+# ignore filename); `globset` = include/exclude glob matching.
 ignore = "0.4"
 globset = "0.4"
 # Plugin name resolution (murphy-9cr.10.2 / ADR 0042): need XDG `data_dir`
@@ -39,14 +38,13 @@ globset = "0.4"
 # platform rules. Caret-pinned per project convention (exact `=` pins are
 # reserved for the contract-affecting native bindings only).
 dirs = "5"
-toml = "0.8"
 serde_yaml = "0.9"
 serde_json = "1"
 sha2 = "0.10"
 murphy-pattern = { path = "../murphy-pattern" }
 
 [dev-dependencies]
-# discovery.rs tests build temp trees with murphy.toml / .murphyignore.
+# discovery.rs tests build temp trees with .murphy.yml / .murphyignore.
 tempfile = "3"
 # Inline snapshot assertions for PluginLoadDiagnostic Display fixtures.
 expect-test = "1.5"

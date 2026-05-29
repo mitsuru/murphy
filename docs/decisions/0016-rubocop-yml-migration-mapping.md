@@ -1,8 +1,15 @@
 # ADR 0016 — One-way `.rubocop.yml` migration mapping
 
 - Date: 2026-05-20
-- Status: Accepted
+- Status: Superseded (see note below)
 - Issue: `murphy-3c3.4`
+
+> **Superseded 2026-05-30 (murphy-5saj):** Since `.murphy.yml` is now
+> RuboCop-compatible (see murphy-5saj), `murphy migrate` is no longer a format
+> conversion — it is a thin normalizer that injects `AllCops.CopsPath: cops`
+> and emits plugin rename hints. A `.rubocop.yml` is already a valid
+> `.murphy.yml`; migration just adds Murphy-specific defaults. The content
+> below is preserved as historical record.
 
 ## Decision
 

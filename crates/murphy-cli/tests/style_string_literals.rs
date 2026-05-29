@@ -120,10 +120,10 @@ fn double_with_escaped_double_quote_emits_offense_but_skips_autocorrect() {
 fn config_disabled_silences_the_cop() {
     let dir = tempdir().expect("create tempdir");
     fs::write(
-        dir.path().join("murphy.toml"),
-        "[cops.rules.\"Style/StringLiterals\"]\nenabled = false\n",
+        dir.path().join(".murphy.yml"),
+        "Style/StringLiterals:\n  Enabled: false\n",
     )
-    .expect("write murphy.toml");
+    .expect("write .murphy.yml");
     fs::write(dir.path().join("t.rb"), "x = \"hello\"\n").expect("write source");
 
     let assert = Command::cargo_bin("murphy")
