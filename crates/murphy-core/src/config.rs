@@ -249,13 +249,15 @@ fn parse_plugin_entry(yaml: yaml_rust2::Yaml) -> Result<PluginConfig, String> {
                 Some(_) => return Err("plugin `path` must be a string".to_string()),
                 None => return Err("plugin entry missing required field `path`".to_string()),
             };
-            if let Some(unknown_key) = m.keys().find_map(|k| {
-                if let Yaml::String(s) = k {
-                    Some(s.clone())
-                } else {
-                    None
-                }
-            }) {
+            if !m.is_empty() {
+                let unknown_key = m
+                    .keys()
+                    .next()
+                    .map(|k| match k {
+                        Yaml::String(s) => s.clone(),
+                        _ => format!("{k:?}"),
+                    })
+                    .unwrap_or_default();
                 return Err(format!("unknown field `{unknown_key}` in plugin entry"));
             }
             Ok(PluginConfig::Detailed(PluginDetailed { name, path }))
@@ -319,7 +321,14 @@ fn yaml_to_json(yaml: yaml_rust2::Yaml) -> Option<serde_json::Value> {
         Yaml::Hash(h) => {
             let mut map = serde_json::Map::new();
             for (k, v) in h {
-                if let (Yaml::String(key), Some(val)) = (k, yaml_to_json(v)) {
+                let key = match k {
+                    Yaml::String(s) => Some(s),
+                    Yaml::Integer(i) => Some(i.to_string()),
+                    Yaml::Boolean(b) => Some(b.to_string()),
+                    Yaml::Real(s) => Some(s),
+                    _ => None,
+                };
+                if let Some(key) = key && let Some(val) = yaml_to_json(v) {
                     map.insert(key, val);
                 }
             }
@@ -518,6 +527,7 @@ pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigErr
         let items: Vec<Yaml> = match plugins_val {
             Yaml::Array(arr) => arr,
             Yaml::String(s) => vec![Yaml::String(s)],
+            Yaml::Null => vec![],
             other => {
                 unsupported_plugins.push(format!("{other:?} (unsupported plugins: form)"));
                 vec![]
