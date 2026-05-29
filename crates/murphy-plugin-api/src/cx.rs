@@ -40,12 +40,55 @@ pub struct LocRef<'a> {
     pub expression: Range,
     pub name: Range,
     // Private: precomputed for dot()
-    #[allow(dead_code)]
     receiver_end: Option<u32>,
     #[allow(dead_code)]
     sorted_tokens: &'a [SourceToken],
-    #[allow(dead_code)]
     source: &'a [u8],
+}
+
+impl<'a> LocRef<'a> {
+    /// The call-operator range: `.` for `Send`, `&.` for `Csend`.
+    /// Returns `Range::ZERO` when the node has no receiver (bare method
+    /// call), or when called on a non-Send/Csend node.
+    pub fn dot(&self) -> Range {
+        let Some(recv_end) = self.receiver_end else {
+            return Range::ZERO;
+        };
+        let name_start = self.name.start;
+        if recv_end >= name_start {
+            return Range::ZERO;
+        }
+        let window = &self.source[recv_end as usize..name_start as usize];
+        let mut i = 0;
+        let mut in_comment = false;
+        while i < window.len() {
+            let b = window[i];
+            if b == b'\n' {
+                in_comment = false;
+                i += 1;
+                continue;
+            }
+            if in_comment {
+                i += 1;
+                continue;
+            }
+            if b == b'#' {
+                in_comment = true;
+                i += 1;
+                continue;
+            }
+            if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
+                let start = recv_end + i as u32;
+                return Range { start, end: start + 2 };
+            }
+            if b == b'.' {
+                let start = recv_end + i as u32;
+                return Range { start, end: start + 1 };
+            }
+            i += 1;
+        }
+        Range::ZERO
+    }
 }
 
 impl<'a> Cx<'a> {
@@ -568,53 +611,8 @@ impl<'a> Cx<'a> {
     /// chain), so this is cheaper than maintaining a side-table that
     /// every `Ast` would pay for. Cops that never call it pay nothing.
     pub fn call_operator_loc(&self, id: NodeId) -> Option<Range> {
-        let node = &self.nodes()[id.0 as usize];
-        let (receiver, name_start) = match node.kind {
-            NodeKind::Send { receiver, .. } => (receiver.get()?, node.loc.name.start),
-            NodeKind::Csend { receiver, .. } => (receiver, node.loc.name.start),
-            _ => return None,
-        };
-        let scan_start = self.nodes()[receiver.0 as usize].loc.expression.end;
-        if scan_start >= name_start {
-            return None;
-        }
-        let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
-        let window = &src[scan_start as usize..name_start as usize];
-        let mut i = 0;
-        let mut in_comment = false;
-        while i < window.len() {
-            let b = window[i];
-            if b == b'\n' {
-                in_comment = false;
-                i += 1;
-                continue;
-            }
-            if in_comment {
-                i += 1;
-                continue;
-            }
-            if b == b'#' {
-                in_comment = true;
-                i += 1;
-                continue;
-            }
-            if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
-                let start = scan_start + i as u32;
-                return Some(Range {
-                    start,
-                    end: start + 2,
-                });
-            }
-            if b == b'.' {
-                let start = scan_start + i as u32;
-                return Some(Range {
-                    start,
-                    end: start + 1,
-                });
-            }
-            i += 1;
-        }
-        None
+        let r = self.loc(id).dot();
+        if r == Range::ZERO { None } else { Some(r) }
     }
 
     /// The whole file's source text. A `NodeCop` with `KINDS = &[]`
@@ -895,6 +893,53 @@ mod tests {
         let loc = cx.loc(root);
         assert_eq!(loc.expression, cx.range(root));
         assert_eq!(loc.name, cx.node(root).loc.name);
+    }
+
+    #[test]
+    fn loc_dot_finds_explicit_dot() {
+        let (ast, root) = build_call(
+            "foo.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 4, end: 7 },
+            false,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).dot(), Range { start: 3, end: 4 });
+    }
+
+    #[test]
+    fn loc_dot_finds_safe_navigation() {
+        let (ast, root) = build_call(
+            "foo&.bar",
+            Some(Range { start: 0, end: 3 }),
+            Range { start: 5, end: 8 },
+            true,
+        );
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).dot(), Range { start: 3, end: 5 });
+    }
+
+    #[test]
+    fn loc_dot_zero_for_no_receiver() {
+        // bare `puts 'x'` — Send with no receiver
+        let (ast, root) = build_call("puts", None, Range { start: 0, end: 4 }, false);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).dot(), Range::ZERO);
     }
 
     #[test]
