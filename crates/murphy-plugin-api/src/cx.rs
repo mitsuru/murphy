@@ -432,12 +432,21 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// `HashNode#pairs` — the hash's child nodes (`Pair`s, and `kwsplat`
-    /// for `**h`). An empty slice for a non-`Hash` node.
-    pub fn hash_pairs(&self, id: NodeId) -> &'a [NodeId] {
+    /// `HashNode#pairs` — the hash's **`Pair`-type** children only.
+    /// Faithful to RuboCop's `pairs` (`each_child_node(:pair)`): a
+    /// `kwsplat` such as the `**h` in `{ **h, a: 1 }` is **excluded**
+    /// (use [`Self::children`] for every child — verified via
+    /// `murphy ast`: `{**h}` parses to `(hash (kwsplat …))`). Empty
+    /// `Vec` for a non-`Hash` node. Allocates, like [`Self::children`].
+    pub fn hash_pairs(&self, id: NodeId) -> Vec<NodeId> {
         match *self.kind(id) {
-            NodeKind::Hash(list) => self.list(list),
-            _ => &[],
+            NodeKind::Hash(list) => self
+                .list(list)
+                .iter()
+                .copied()
+                .filter(|&c| matches!(self.kind(c), NodeKind::Pair { .. }))
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -1532,12 +1541,26 @@ mod tests {
             },
             z,
         );
-        let pairs = b.push_list(&[pair]);
+        // `{ **h, k => 7 }` — a kwsplat plus a pair. `pairs` must return
+        // only the pair (faithful to RuboCop's `each_child_node(:pair)`),
+        // excluding the kwsplat — the shape `{**h}` -> (hash (kwsplat …))
+        // confirmed via `murphy ast`.
+        let h_recv = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method: key,
+                args: murphy_ast::NodeList::EMPTY,
+            },
+            z,
+        );
+        let kwsplat = b.push(NodeKind::Kwsplat(OptNodeId::some(h_recv)), z);
+        let pairs = b.push_list(&[kwsplat, pair]);
         let hash = b.push(NodeKind::Hash(pairs), z);
         let ast = b.finish(hash);
         let raw = cx_raw_for(&ast, &fns);
         let cx = unsafe { Cx::from_raw(&raw) };
-        assert_eq!(cx.hash_pairs(hash), &[pair]);
+        assert_eq!(cx.hash_pairs(hash), vec![pair]);
+        assert_eq!(cx.children(hash).len(), 2, "children includes the kwsplat");
         assert_eq!(cx.pair_key(pair).get(), Some(key_node));
         assert_eq!(cx.pair_value(pair).get(), Some(val_node));
         // Non-matching kinds project empty.

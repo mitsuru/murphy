@@ -192,20 +192,19 @@ const KERNEL_METHODS: &[&str] = &[
 ];
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send {
-        receiver, method, ..
-    } = *cx.kind(node)
-    else {
+    let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
         return;
     };
 
-    // Receiver must be a bare `self` literal.
+    // Receiver must be a bare `self` literal. `is_self_receiver` routes
+    // through `call_receiver` (the shared dispatch surface, es99.1); we
+    // still keep `receiver_id` for the autocorrect range below.
     let OptNodeId(idx) = receiver;
     if idx == u32::MAX {
         return;
     }
     let receiver_id = NodeId(idx);
-    if !matches!(cx.kind(receiver_id), NodeKind::SelfExpr) {
+    if !cx.is_self_receiver(node) {
         return;
     }
 
@@ -216,7 +215,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    let method_name = cx.symbol_str(method);
+    let Some(method_name) = cx.method_name(node) else {
+        return;
+    };
 
     // Setter (`self.foo = bar`): method ends with `=`. Removing
     // `self.` would change the meaning to `foo = bar` (local
