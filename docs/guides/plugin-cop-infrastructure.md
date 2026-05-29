@@ -50,7 +50,7 @@ use murphy_plugin_api::{
 ```
 
 A pack's `lib.rs` also pulls `register_cops` (§8). Cops with options
-pull `CopOptions` for `#[derive(CopOptions)]` (§7). The `node_pattern!`
+pull `CopOptions` for `#[derive(CopOptions)]` (§7). The `def_node_matcher!`
 macro (§3) is available for deeper shape matching. Anything reachable
 only through `murphy-core`, `murphy-ast`, `murphy-translate`,
 `murphy-pattern` etc. is **off limits** at runtime — the dep-boundary
@@ -179,22 +179,22 @@ Use this form when the method-name predicate is not a fixed literal
 set (runtime-computed, configuration-dependent, etc.); reach for
 `methods = [...]` whenever the allow-list is statically known.
 
-### Reusable matchers: `node_pattern!`
+### Reusable matchers: `def_node_matcher!`
 
 For cops that need to test more than one kind at a time — RuboCop's
-`def_node_matcher` use cases — the `node_pattern!` macro lowers a
+`def_node_matcher` use cases — the `def_node_matcher!` macro lowers a
 RuboCop-subset S-expression pattern to a free function at compile
 time (ADR 0033, murphy-9cr.17 / .18; the runtime IR lives in
 `crates/murphy-pattern`).
 
 ```rust
-use murphy_plugin_macros::node_pattern;
+use murphy_plugin_macros::def_node_matcher;
 
 // Zero captures → bool. Tests shape only.
-node_pattern!(is_bare_expect_call, "(send nil :expect _)");
+def_node_matcher!(is_bare_expect_call, "(send nil :expect _)");
 
 // Captured atoms → Option<(Capture1, Capture2, ...)>.
-node_pattern!(describe_first_arg, "(send {nil (const nil :RSpec)} :describe $_ ...)");
+def_node_matcher!(describe_first_arg, "(send {nil (const nil :RSpec)} :describe $_ ...)");
 
 #[on_node(kind = "send")]
 fn check_send(&self, node: NodeId, cx: &Cx<'_>) {

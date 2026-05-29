@@ -117,7 +117,7 @@ redesign of the plugin ABI both possible and cheap. This ADR formalizes the
 
 ## Out of scope
 
-- **Pattern DSL** (design doc §4 — `node_pattern!`, the B/C backends).
+- **Pattern DSL** (design doc §4 — `def_node_matcher!`, the B/C backends).
   A separate forthcoming ADR.
 - **murphy-9cr epic restructure** (design doc §6 DAG). Operational
   sequencing, handled when the epic is re-planned.

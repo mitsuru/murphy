@@ -1,7 +1,7 @@
-error: node_pattern!: atom kind `self` cannot be matched as `(self ...)` — use bare kind name `self`
+error: def_node_matcher!: atom kind `self` cannot be matched as `(self ...)` — use bare kind name `self`
  --> tests/ui/fail_node_pattern_atom_node_match_no_literal.rs:6:1
   |
-6 | murphy_plugin_macros::node_pattern!(m, "(self _)");
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+6 | murphy_plugin_macros::def_node_matcher!(m, "(self _)");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |
-  = note: this error originates in the macro `murphy_plugin_macros::node_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the macro `murphy_plugin_macros::def_node_matcher` (in Nightly builds, run with -Z macro-backtrace for more info)

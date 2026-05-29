@@ -2,6 +2,6 @@
 // time (murphy-ycx). RuboCop's NodePattern has the same rule — there is no
 // reluctant/possessive layer to disambiguate the inner quantifier.
 
-murphy_plugin_macros::node_pattern!(m, "(array int++)");
+murphy_plugin_macros::def_node_matcher!(m, "(array int++)");
 
 fn main() {}

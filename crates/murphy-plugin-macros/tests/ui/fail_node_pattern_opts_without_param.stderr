@@ -1,5 +1,5 @@
-error: node_pattern!: `opts:` was given but the pattern contains no `%name` runtime parameter — remove the `opts:` clause
- --> tests/ui/fail_node_pattern_opts_without_param.rs:8:37
+error: def_node_matcher!: `opts:` was given but the pattern contains no `%name` runtime parameter — remove the `opts:` clause
+ --> tests/ui/fail_node_pattern_opts_without_param.rs:8:41
   |
-8 | murphy_plugin_macros::node_pattern!(m, "(send _ :foo)", opts: MyOpts);
-  |                                     ^
+8 | murphy_plugin_macros::def_node_matcher!(m, "(send _ :foo)", opts: MyOpts);
+  |                                         ^

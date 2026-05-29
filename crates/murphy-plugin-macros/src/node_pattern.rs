@@ -1,4 +1,4 @@
-//! `node_pattern!` — the B backend of Murphy's pattern mechanism
+//! `def_node_matcher!` — the B backend of Murphy's pattern mechanism
 //! (murphy-9cr.18). Lowers an S-expression pattern to a Rust matcher
 //! `fn` at compile time. See
 //! `docs/plans/2026-05-23-murphy-9cr18-node-pattern-macro.md`.
@@ -12,14 +12,14 @@ use std::collections::HashMap;
 
 use murphy_pattern::{CaptureKind, PatternAst};
 
-/// Parsed `node_pattern!(name, "pattern")` invocation.
+/// Parsed `def_node_matcher!(name, "pattern")` invocation.
 ///
 /// Phase E (murphy-aow) adds an optional `opts: <CopOptions struct>` form for
 /// patterns that use `%var` runtime parameters. The grammar is:
 ///
 /// ```text
-/// node_pattern!(name, "pattern")                    // existing form
-/// node_pattern!(name, "pattern", opts: MyOpts)      // %var-bearing form
+/// def_node_matcher!(name, "pattern")                    // existing form
+/// def_node_matcher!(name, "pattern", opts: MyOpts)      // %var-bearing form
 /// ```
 struct NodePatternInput {
     name: Ident,
@@ -44,7 +44,7 @@ impl Parse for NodePatternInput {
                 if key != "opts" {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("node_pattern!: unknown keyword `{key}`; expected `opts`",),
+                        format!("def_node_matcher!: unknown keyword `{key}`; expected `opts`",),
                     ));
                 }
                 input.parse::<Token![:]>()?;
@@ -58,7 +58,7 @@ impl Parse for NodePatternInput {
         if !input.is_empty() {
             return Err(syn::Error::new(
                 input.span(),
-                "node_pattern!: unexpected trailing input after pattern (and optional `opts: <Path>`)",
+                "def_node_matcher!: unexpected trailing input after pattern (and optional `opts: <Path>`)",
             ));
         }
         Ok(NodePatternInput {
@@ -80,7 +80,7 @@ pub fn node_pattern(input: TokenStream) -> TokenStream {
         Err(e) => {
             return syn::Error::new(
                 input.pattern.span(),
-                format!("node_pattern!: pattern parse error: {e}"),
+                format!("def_node_matcher!: pattern parse error: {e}"),
             )
             .to_compile_error();
         }
@@ -113,13 +113,13 @@ fn lower_matcher(
         (true, false) => {
             return Err(syn::Error::new(
                 name.span(),
-                "node_pattern!: pattern uses `%name` runtime parameter(s) but no `opts: <CopOptions struct>` clause was supplied (expected `node_pattern!(name, \"pat\", opts: MyOpts)`)",
+                "def_node_matcher!: pattern uses `%name` runtime parameter(s) but no `opts: <CopOptions struct>` clause was supplied (expected `def_node_matcher!(name, \"pat\", opts: MyOpts)`)",
             ));
         }
         (false, true) => {
             return Err(syn::Error::new(
                 name.span(),
-                "node_pattern!: `opts:` was given but the pattern contains no `%name` runtime parameter — remove the `opts:` clause",
+                "def_node_matcher!: `opts:` was given but the pattern contains no `%name` runtime parameter — remove the `opts:` clause",
             ));
         }
         _ => {}
@@ -276,8 +276,9 @@ fn param_named_local(name: &str) -> Ident {
 fn parse_field_ident(name: &str) -> Ident {
     syn::parse_str::<Ident>(name).unwrap_or_else(|_| {
         // `syn::parse_str` rejects Rust keywords; fall back to a raw ident.
-        syn::parse_str::<Ident>(&format!("r#{name}"))
-            .unwrap_or_else(|e| panic!("node_pattern!: cannot turn `{name}` into an ident: {e}"))
+        syn::parse_str::<Ident>(&format!("r#{name}")).unwrap_or_else(|e| {
+            panic!("def_node_matcher!: cannot turn `{name}` into an ident: {e}")
+        })
     })
 }
 
@@ -785,7 +786,7 @@ static VAR_SYM_SLOTS: &[Slot] = &[Slot {
     ty: SlotTy::Sym,
 }];
 
-/// The full v1 `node_pattern!` schema table, keyed by `NodeKindTag` `u8`.
+/// The full v1 `def_node_matcher!` schema table, keyed by `NodeKindTag` `u8`.
 ///
 /// The `u8` tags are the `NodeKind` discriminants. The source of truth for
 /// the tag ↔ pattern-name mapping is `crates/murphy-ast/src/kinds.rs`
@@ -1029,7 +1030,7 @@ static SCHEMA_TABLE: &[(u8, KindSchema)] = &[
 ];
 
 /// Resolve a `NodeKindTag` `u8` to its structural schema. `None` means the
-/// kind has no `node_pattern!` schema in v1.
+/// kind has no `def_node_matcher!` schema in v1.
 fn schema_for(tag: u8) -> Option<&'static KindSchema> {
     SCHEMA_TABLE.iter().find(|(t, _)| *t == tag).map(|(_, s)| s)
 }
@@ -1076,18 +1077,18 @@ fn unsupported_node_match_error(tag: murphy_ast::NodeKindTag) -> syn::Error {
     let msg = if is_atom_kind_name(name) {
         match atom_literal_example(name) {
             Some(lit) => format!(
-                "node_pattern!: atom kind `{name}` cannot be matched as \
+                "def_node_matcher!: atom kind `{name}` cannot be matched as \
                  `({name} ...)` — use literal `{lit}` or bare kind name `{name}`"
             ),
             None => format!(
-                "node_pattern!: atom kind `{name}` cannot be matched as \
+                "def_node_matcher!: atom kind `{name}` cannot be matched as \
                  `({name} ...)` — use bare kind name `{name}`"
             ),
         }
     } else {
         format!(
-            "node_pattern!: node kind `{name}` is not supported by \
-             node_pattern! in v1 — see follow-up issue"
+            "def_node_matcher!: node kind `{name}` is not supported by \
+             def_node_matcher! in v1 — see follow-up issue"
         )
     };
     syn::Error::new(Span::call_site(), msg)
@@ -1095,7 +1096,7 @@ fn unsupported_node_match_error(tag: murphy_ast::NodeKindTag) -> syn::Error {
 
 /// Parse a `#predicate` name into a callable Rust identifier.
 ///
-/// A `#name` resolves to a free function in scope at the `node_pattern!`
+/// A `#name` resolves to a free function in scope at the `def_node_matcher!`
 /// call site. Ruby-style `?` / `!` suffixes are mangled so the call site
 /// uses a valid Rust identifier (murphy-bj7):
 ///
@@ -1125,7 +1126,7 @@ fn predicate_ident(name: &str) -> syn::Result<Ident> {
         syn::Error::new(
             Span::call_site(),
             format!(
-                "node_pattern!: predicate name `{name}` is not a valid Rust \
+                "def_node_matcher!: predicate name `{name}` is not a valid Rust \
                  identifier; `?`/`!` are mangled to `_p`/`_bang`, but other \
                  Ruby suffixes (e.g. `=`) have no Rust counterpart"
             ),
@@ -1170,7 +1171,7 @@ fn predicate_arg_exprs(
                 Lit::Nil => {
                     return Err(syn::Error::new(
                         Span::call_site(),
-                        "node_pattern!: `nil` predicate arg has no Rust counterpart",
+                        "def_node_matcher!: `nil` predicate arg has no Rust counterpart",
                     ));
                 }
             }),
@@ -1395,7 +1396,7 @@ fn lower_pat(
             if matches!(body.kind, PatKind::Rest) {
                 return Err(syn::Error::new(
                     Span::call_site(),
-                    "node_pattern!: `$...` seq capture is only allowed in a \
+                    "def_node_matcher!: `$...` seq capture is only allowed in a \
                      node's variable-length child list (e.g. `send`/`csend` \
                      args, `array`/`hash`/`begin` elements)",
                 ));
@@ -1455,7 +1456,7 @@ fn lower_pat(
         }
         PatKind::AnyOrder { .. } => Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: `<...>` any-order is only valid as a direct child \
+            "def_node_matcher!: `<...>` any-order is only valid as a direct child \
              of a node match's List slot; reaching it in `lower_pat` is an \
              internal invariant violation",
         )),
@@ -1529,7 +1530,7 @@ fn lower_pat(
         }
         other => Err(syn::Error::new(
             Span::call_site(),
-            format!("node_pattern!: pattern feature not yet supported: {other:?}"),
+            format!("def_node_matcher!: pattern feature not yet supported: {other:?}"),
         )),
     }
 }
@@ -1548,7 +1549,7 @@ fn check_kind_only_children(children: &[murphy_pattern::Pat]) -> syn::Result<()>
     } else {
         Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: (_ ...) / ({…} ...) with concrete children \
+            "def_node_matcher!: (_ ...) / ({…} ...) with concrete children \
              is not supported in v1",
         ))
     }
@@ -1622,13 +1623,13 @@ fn lower_exact_node(
     if children.len() < fixed_count {
         return Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: too few children",
+            "def_node_matcher!: too few children",
         ));
     }
     if !has_list && children.len() != fixed_count {
         return Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: wrong number of children",
+            "def_node_matcher!: wrong number of children",
         ));
     }
 
@@ -1795,7 +1796,7 @@ fn sym_slot_alternatives(child: &murphy_pattern::Pat) -> syn::Result<Vec<&str>> 
                     _ => {
                         return Err(syn::Error::new(
                             Span::call_site(),
-                            "node_pattern!: symbol slot union `{...}` only \
+                            "def_node_matcher!: symbol slot union `{...}` only \
                              accepts `:sym` literals",
                         ));
                     }
@@ -1805,7 +1806,7 @@ fn sym_slot_alternatives(child: &murphy_pattern::Pat) -> syn::Result<Vec<&str>> 
         }
         _ => Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: symbol slot only accepts a `:sym` literal, `_`, \
+            "def_node_matcher!: symbol slot only accepts a `:sym` literal, `_`, \
              or a `{:sym :sym ...}` union of `:sym` literals",
         )),
     }
@@ -2646,20 +2647,20 @@ fn lower_bool_anyorder_probe_exact_node(
     if children.len() < fixed_count {
         return Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: too few children",
+            "def_node_matcher!: too few children",
         ));
     }
     if children.len() > fixed_count {
         if has_list {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "node_pattern!: a node pattern with a variable-length child \
+                "def_node_matcher!: a node pattern with a variable-length child \
                  list is not supported inside `{}` / `!` / `` ` `` in v1",
             ));
         }
         return Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: wrong number of children",
+            "def_node_matcher!: wrong number of children",
         ));
     }
 
@@ -2983,21 +2984,21 @@ fn lower_bool(
         }
         PatKind::Capture { .. } => Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: `$` capture is not allowed inside `{}` / `!` / `` ` ``",
+            "def_node_matcher!: `$` capture is not allowed inside `{}` / `!` / `` ` ``",
         )),
         PatKind::Rest => Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: `...` is not valid here",
+            "def_node_matcher!: `...` is not valid here",
         )),
         PatKind::Quantifier { .. } => Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: postfix `*` / `+` / `?` quantifier is only legal \
+            "def_node_matcher!: postfix `*` / `+` / `?` quantifier is only legal \
              as a direct child of a node match (parser-enforced; reaching \
              this arm is an internal invariant violation)",
         )),
         PatKind::AnyOrder { .. } => Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: `<...>` any-order is not valid inside `{}` / `!` / `` ` ``",
+            "def_node_matcher!: `<...>` any-order is not valid inside `{}` / `!` / `` ` ``",
         )),
         PatKind::Intersection { children } => {
             // `[a b c]` inside `{}` / `!` / `` ` ``: AND of children's bool
@@ -3087,7 +3088,7 @@ fn lower_bool_param_named(
         return Err(syn::Error::new(
             Span::call_site(),
             format!(
-                "node_pattern!: internal — `%{name}` reached lower_bool_param_named without an `opts:` clause; this should have been caught upstream",
+                "def_node_matcher!: internal — `%{name}` reached lower_bool_param_named without an `opts:` clause; this should have been caught upstream",
             ),
         ));
     }
@@ -3114,7 +3115,7 @@ fn lower_bool_param_number(
     let Some(idx) = (index as usize).checked_sub(1) else {
         return Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: internal — `%0` positional parameter reached the macro lowering; the lexer should have rejected this. Likely a programmatically constructed AST.",
+            "def_node_matcher!: internal — `%0` positional parameter reached the macro lowering; the lexer should have rejected this. Likely a programmatically constructed AST.",
         ));
     };
     let lit_view = lit_view_expr(subject);
@@ -3206,7 +3207,7 @@ fn lower_bool_regex(
                         .multi_line(#multi_line)
                         .ignore_whitespace(#ignore_whitespace)
                         .build()
-                        .unwrap_or_else(|e| panic!("node_pattern! regex compile error: {e}"))
+                        .unwrap_or_else(|e| panic!("def_node_matcher! regex compile error: {e}"))
                 });
             match *cx.kind(#subject) {
                 ::murphy_plugin_api::NodeKind::Sym(__sym) => {
@@ -3269,7 +3270,7 @@ fn lower_bool_exact_node(
     if children.len() < fixed_count {
         return Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: too few children",
+            "def_node_matcher!: too few children",
         ));
     }
     // v1 restriction: a node whose pattern supplies `List`-slot children is
@@ -3281,13 +3282,13 @@ fn lower_bool_exact_node(
         if has_list {
             return Err(syn::Error::new(
                 Span::call_site(),
-                "node_pattern!: a node pattern with a variable-length child \
+                "def_node_matcher!: a node pattern with a variable-length child \
                  list is not supported inside `{}` / `!` / `` ` `` in v1",
             ));
         }
         return Err(syn::Error::new(
             Span::call_site(),
-            "node_pattern!: wrong number of children",
+            "def_node_matcher!: wrong number of children",
         ));
     }
 

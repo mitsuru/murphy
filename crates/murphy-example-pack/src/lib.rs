@@ -33,9 +33,9 @@ mod tests {
     #[test]
     fn smoke_compiles() {}
 
-    /// Cross-crate guard for `node_pattern!` expansion (murphy-a70).
+    /// Cross-crate guard for `def_node_matcher!` expansion (murphy-a70).
     ///
-    /// `node_pattern!` originally emitted `::murphy_ast::NodeKind /
+    /// `def_node_matcher!` originally emitted `::murphy_ast::NodeKind /
     /// NodeId / NodeKindTag`, which broke pioneer adoption in
     /// `murphy-rails` (the consuming crate had no `murphy-ast` dep —
     /// the single-surface ABI forbids it). Macro fix routes these
@@ -50,8 +50,8 @@ mod tests {
     /// `::murphy_ast::...` reference, this test stops compiling.
     #[test]
     fn node_pattern_expands_via_plugin_api_reexports() {
-        use murphy_plugin_api::node_pattern;
-        node_pattern!(_probe_send, "(send nil? :probe)");
+        use murphy_plugin_api::def_node_matcher;
+        def_node_matcher!(_probe_send, "(send nil? :probe)");
         // Take the fn pointer to force the matcher body to be emitted
         // (the const path resolution happens inside it). Signature is
         // pinned to plugin-api re-exports so a regression to

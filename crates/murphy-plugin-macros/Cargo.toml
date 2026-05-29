@@ -17,7 +17,7 @@ syn = { version = "2", default-features = false, features = ["parsing", "proc-ma
 # JSON strings embedded in the generated SCHEMA. Proc-macro crates run at
 # compile time, so this never reaches a plugin binary.
 serde_json = "1"
-# node_pattern! parses pattern strings at macro-expansion time.
+# def_node_matcher! parses pattern strings at macro-expansion time.
 murphy-pattern = { path = "../murphy-pattern" }
 # NodeKindTag / pattern-name resolution for the schema table.
 murphy-ast = { path = "../murphy-ast" }

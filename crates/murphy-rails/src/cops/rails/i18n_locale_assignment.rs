@@ -36,10 +36,10 @@
 //! `I18n.with_locale(<locale>) { ... }`; the cop has no view of the
 //! lexical extent the user wants the locale to apply to. Detect-only.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent: `(send (const nil? :I18n) :locale= _)`.
-node_pattern!(
+def_node_matcher!(
     is_i18n_locale_assignment,
     "(send (const nil? :I18n) :locale= _)"
 );

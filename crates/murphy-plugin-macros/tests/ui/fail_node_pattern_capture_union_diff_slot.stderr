@@ -1,5 +1,5 @@
-error: node_pattern!: pattern parse error: `$` capture is not allowed inside `{}` / `!` / `` ` `` (the body has no definite-assignment path) (at 1..3)
- --> tests/ui/fail_node_pattern_capture_union_diff_slot.rs:5:40
+error: def_node_matcher!: pattern parse error: `$` capture is not allowed inside `{}` / `!` / `` ` `` (the body has no definite-assignment path) (at 1..3)
+ --> tests/ui/fail_node_pattern_capture_union_diff_slot.rs:5:44
   |
-5 | murphy_plugin_macros::node_pattern!(m, "{$a $b}");
-  |                                        ^^^^^^^^^
+5 | murphy_plugin_macros::def_node_matcher!(m, "{$a $b}");
+  |                                            ^^^^^^^^^

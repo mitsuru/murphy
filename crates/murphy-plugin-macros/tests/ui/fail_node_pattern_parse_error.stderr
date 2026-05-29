@@ -1,5 +1,5 @@
-error: node_pattern!: pattern parse error: unknown node type `sned` (at 1..5)
- --> tests/ui/fail_node_pattern_parse_error.rs:4:40
+error: def_node_matcher!: pattern parse error: unknown node type `sned` (at 1..5)
+ --> tests/ui/fail_node_pattern_parse_error.rs:4:44
   |
-4 | murphy_plugin_macros::node_pattern!(m, "(sned _)");
-  |                                        ^^^^^^^^^^
+4 | murphy_plugin_macros::def_node_matcher!(m, "(sned _)");
+  |                                            ^^^^^^^^^^

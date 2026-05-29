@@ -1,6 +1,6 @@
 //! The `NodeCop` dispatch trait. `NodeKindTag` is re-exported from
 //! `murphy-ast` (the canonical home — `NodeKind`'s discriminant is an
-//! AST concern) so `node_pattern!`-generated matchers can compare a
+//! AST concern) so `def_node_matcher!`-generated matchers can compare a
 //! literal tag against `cx.kind(node).tag()` without a cross-crate type
 //! mismatch (murphy-a70).
 

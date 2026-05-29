@@ -68,7 +68,7 @@
 //! distinguish safe/unsafe autocorrect — users opt in by running
 //! `--fix`, so we ship the rewrite.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, node_pattern};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent:
 //   `(send (send $!nil? :include? $_) :!)`
@@ -76,7 +76,7 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, node_patter
 // - Outer: `:!` send, exactly 0 args (the unary `!` shape).
 // - Inner: receiver non-None (`!nil?`), method `:include?`, exactly
 //   one positional arg.
-node_pattern!(is_negate_include, "(send (send !nil? :include? _) :!)");
+def_node_matcher!(is_negate_include, "(send (send !nil? :include? _) :!)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]

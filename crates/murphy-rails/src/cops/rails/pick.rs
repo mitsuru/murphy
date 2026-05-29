@@ -49,7 +49,7 @@
 //!
 //! ## Implementation
 //!
-//! Expressed declaratively with [`node_pattern!`] (RuboCop NodePattern
+//! Expressed declaratively with [`def_node_matcher!`] (RuboCop NodePattern
 //! grammar). `_ ...` in the inner Send's argument list means "one
 //! wildcard followed by zero-or-more rest" — i.e. ≥1 arg — which
 //! rules out the zero-arg `pluck.first` shape. Trailing argument
@@ -62,13 +62,13 @@
 //! Rails 6+, but v1 ships as detect-only; ADR 0006 requires a deliberate
 //! fix block per cop. Tracked as a follow-up.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent: `(send (send _ :pluck _ ...) :first)`.
 // - Outer: receiver = inner Send, method `:first`, exactly 0 args.
 // - Inner: receiver `_` (unconstrained), method `:pluck`, ≥1 arg
 //   (`_ ...` = one wildcard + rest, excludes zero-arg `pluck.first`).
-node_pattern!(is_pluck_first, "(send (send _ :pluck _ ...) :first)");
+def_node_matcher!(is_pluck_first, "(send (send _ :pluck _ ...) :first)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]

@@ -1,5 +1,5 @@
-error: node_pattern!: pattern uses `%name` runtime parameter(s) but no `opts: <CopOptions struct>` clause was supplied (expected `node_pattern!(name, "pat", opts: MyOpts)`)
- --> tests/ui/fail_node_pattern_param_named_without_opts.rs:4:37
+error: def_node_matcher!: pattern uses `%name` runtime parameter(s) but no `opts: <CopOptions struct>` clause was supplied (expected `def_node_matcher!(name, "pat", opts: MyOpts)`)
+ --> tests/ui/fail_node_pattern_param_named_without_opts.rs:4:41
   |
-4 | murphy_plugin_macros::node_pattern!(m, "(send _ %method)");
-  |                                     ^
+4 | murphy_plugin_macros::def_node_matcher!(m, "(send _ %method)");
+  |                                         ^
