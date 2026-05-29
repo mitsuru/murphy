@@ -476,6 +476,76 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u8(out, 68);
             write_node_list(l, out);
         }
+        // ── murphy-w5ba HIGH-priority extensions ────────────────────────
+        NodeKind::For { var, iter, body } => {
+            put_u8(out, 69);
+            put_u32(out, var.0);
+            put_u32(out, iter.0);
+            put_u32(out, body.0);
+        }
+        NodeKind::Lambda => put_u8(out, 70),
+        NodeKind::Defs {
+            receiver,
+            name,
+            args,
+            body,
+        } => {
+            put_u8(out, 71);
+            put_u32(out, receiver.0);
+            put_u32(out, name.0);
+            put_u32(out, args.0);
+            put_u32(out, body.0);
+        }
+        NodeKind::Index { receiver, args } => {
+            put_u8(out, 72);
+            put_u32(out, receiver.0);
+            write_node_list(args, out);
+        }
+        NodeKind::IndexAsgn {
+            receiver,
+            args,
+            value,
+        } => {
+            put_u8(out, 73);
+            put_u32(out, receiver.0);
+            write_node_list(args, out);
+            put_u32(out, value.0);
+        }
+        NodeKind::Kwbegin(l) => {
+            put_u8(out, 74);
+            write_node_list(l, out);
+        }
+        NodeKind::Cbase => put_u8(out, 75),
+        NodeKind::Regopt(s) => {
+            put_u8(out, 76);
+            put_u32(out, s.0);
+        }
+        NodeKind::Rational(s) => {
+            put_u8(out, 77);
+            put_u32(out, s.0);
+        }
+        NodeKind::Complex(s) => {
+            put_u8(out, 78);
+            put_u32(out, s.0);
+        }
+        NodeKind::Not(n) => {
+            put_u8(out, 79);
+            put_u32(out, n.0);
+        }
+        NodeKind::Retry => put_u8(out, 80),
+        NodeKind::Redo => put_u8(out, 81),
+        NodeKind::Numblock { send, max_n, body } => {
+            put_u8(out, 82);
+            put_u32(out, send.0);
+            put_u8(out, max_n);
+            put_u32(out, body.0);
+        }
+        NodeKind::Procarg0(l) => {
+            put_u8(out, 83);
+            write_node_list(l, out);
+        }
+        NodeKind::ForwardArgs => put_u8(out, 84),
+        NodeKind::ForwardedArgs => put_u8(out, 85),
     }
 }
 
@@ -662,6 +732,44 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             rhs: NodeId(get_u32(cur)?),
         },
         68 => NodeKind::Mlhs(read_node_list(cur)?),
+        // ── murphy-w5ba HIGH-priority extensions ────────────────────────
+        69 => NodeKind::For {
+            var: NodeId(get_u32(cur)?),
+            iter: NodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+        },
+        70 => NodeKind::Lambda,
+        71 => NodeKind::Defs {
+            receiver: NodeId(get_u32(cur)?),
+            name: Symbol(get_u32(cur)?),
+            args: NodeId(get_u32(cur)?),
+            body: OptNodeId(get_u32(cur)?),
+        },
+        72 => NodeKind::Index {
+            receiver: NodeId(get_u32(cur)?),
+            args: read_node_list(cur)?,
+        },
+        73 => NodeKind::IndexAsgn {
+            receiver: NodeId(get_u32(cur)?),
+            args: read_node_list(cur)?,
+            value: NodeId(get_u32(cur)?),
+        },
+        74 => NodeKind::Kwbegin(read_node_list(cur)?),
+        75 => NodeKind::Cbase,
+        76 => NodeKind::Regopt(Symbol(get_u32(cur)?)),
+        77 => NodeKind::Rational(StringId(get_u32(cur)?)),
+        78 => NodeKind::Complex(StringId(get_u32(cur)?)),
+        79 => NodeKind::Not(NodeId(get_u32(cur)?)),
+        80 => NodeKind::Retry,
+        81 => NodeKind::Redo,
+        82 => NodeKind::Numblock {
+            send: NodeId(get_u32(cur)?),
+            max_n: get_u8(cur)?,
+            body: OptNodeId(get_u32(cur)?),
+        },
+        83 => NodeKind::Procarg0(read_node_list(cur)?),
+        84 => NodeKind::ForwardArgs,
+        85 => NodeKind::ForwardedArgs,
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -1020,6 +1128,59 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
             NodeKind::Masgn { lhs, rhs } => {
                 check_node(lhs.0)?;
                 check_node(rhs.0)?;
+            }
+            // ── murphy-w5ba HIGH-priority extensions ──────────────────
+            NodeKind::For { var, iter, body } => {
+                check_node(var.0)?;
+                check_node(iter.0)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::Lambda
+            | NodeKind::Cbase
+            | NodeKind::Retry
+            | NodeKind::Redo
+            | NodeKind::ForwardArgs
+            | NodeKind::ForwardedArgs => {}
+            NodeKind::Defs {
+                receiver,
+                name,
+                args,
+                body,
+            } => {
+                check_node(receiver.0)?;
+                check_sym(name.0)?;
+                check_node(args.0)?;
+                check_opt_node(body)?;
+            }
+            NodeKind::Index { receiver, args } => {
+                check_node(receiver.0)?;
+                check_list(args)?;
+            }
+            NodeKind::IndexAsgn {
+                receiver,
+                args,
+                value,
+            } => {
+                check_node(receiver.0)?;
+                check_list(args)?;
+                check_node(value.0)?;
+            }
+            NodeKind::Kwbegin(l) | NodeKind::Procarg0(l) => {
+                check_list(l)?;
+            }
+            // `Regopt(Symbol)` — flag string (e.g. "im") interned as a
+            // Symbol; mirrors `Regexp { opts: Symbol }`.
+            NodeKind::Regopt(s) => check_sym(s.0)?,
+            // `Rational(StringId)` / `Complex(StringId)` route through the
+            // same `check_sym` as `NodeKind::Str(StringId)` because Murphy's
+            // interner is shared between `Symbol` and `StringId` ids — see
+            // `interner.rs`. The closure name is historical; both id types
+            // share its bounds check.
+            NodeKind::Rational(s) | NodeKind::Complex(s) => check_sym(s.0)?,
+            NodeKind::Not(n) => check_node(n.0)?,
+            NodeKind::Numblock { send, body, .. } => {
+                check_node(send.0)?;
+                check_opt_node(body)?;
             }
         }
     }

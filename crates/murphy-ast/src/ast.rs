@@ -212,6 +212,56 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
             out.push(lhs);
             out.push(rhs);
         }
+
+        // ── murphy-w5ba HIGH-priority extensions ────────────────────────
+        NodeKind::For { var, iter, body } => {
+            out.push(var);
+            out.push(iter);
+            push_opt(out, body);
+        }
+
+        NodeKind::Lambda | NodeKind::Cbase | NodeKind::Retry | NodeKind::Redo => {}
+
+        NodeKind::Defs {
+            receiver,
+            args,
+            body,
+            ..
+        } => {
+            out.push(receiver);
+            out.push(args);
+            push_opt(out, body);
+        }
+
+        NodeKind::Index { receiver, args } => {
+            out.push(receiver);
+            push_list(out, lists, args);
+        }
+
+        NodeKind::IndexAsgn {
+            receiver,
+            args,
+            value,
+        } => {
+            out.push(receiver);
+            push_list(out, lists, args);
+            out.push(value);
+        }
+
+        NodeKind::Kwbegin(l) | NodeKind::Procarg0(l) => {
+            push_list(out, lists, l);
+        }
+
+        NodeKind::Rational(_) | NodeKind::Complex(_) | NodeKind::Regopt(_) => {}
+
+        NodeKind::Not(n) => out.push(n),
+
+        NodeKind::Numblock { send, body, .. } => {
+            out.push(send);
+            push_opt(out, body);
+        }
+
+        NodeKind::ForwardArgs | NodeKind::ForwardedArgs => {}
     }
 }
 

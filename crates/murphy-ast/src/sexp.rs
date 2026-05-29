@@ -468,6 +468,95 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             out.push(')');
         }
 
+        // ── murphy-w5ba HIGH-priority extensions ─────────────────────────
+        NodeKind::For { var, iter, body } => {
+            out.push_str("(for\n");
+            write_node(ast, var, d, out);
+            out.push('\n');
+            write_node(ast, iter, d, out);
+            out.push('\n');
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+        NodeKind::Lambda => out.push_str("(lambda)"),
+        NodeKind::Defs {
+            receiver,
+            name,
+            args,
+            body,
+        } => {
+            // parser-gem: `(defs receiver :name args body)` — keep that
+            // ordering so golden tests and downstream tooling that compares
+            // against parser-gem's shape see the expected layout.
+            out.push_str("(defs\n");
+            write_node(ast, receiver, d, out);
+            out.push('\n');
+            indent(d, out);
+            let _ = writeln!(out, ":{}", interner.resolve(name.0));
+            write_node(ast, args, d, out);
+            out.push('\n');
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+        NodeKind::Index { receiver, .. } => {
+            out.push_str("(index\n");
+            write_node(ast, receiver, d, out);
+            write_slice(ast, id, 1, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::IndexAsgn {
+            receiver, value, ..
+        } => {
+            out.push_str("(indexasgn\n");
+            write_node(ast, receiver, d, out);
+            // `collect_children` lays IndexAsgn out as receiver + args... + value
+            // (value last). The receiver is already emitted above and the value
+            // is emitted explicitly below; the middle slice is the args run.
+            // `usize::MAX` for `take` would walk past `value` and emit it
+            // twice, so cap the take count to the args length.
+            let args_count = ast.children(id).count().saturating_sub(2);
+            write_slice(ast, id, 1, args_count, d, out);
+            out.push('\n');
+            write_node(ast, value, d, out);
+            out.push(')');
+        }
+        NodeKind::Kwbegin(_) => {
+            out.push_str("(kwbegin");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::Cbase => out.push_str("(cbase)"),
+        NodeKind::Regopt(s) => {
+            let _ = write!(out, "(regopt :{})", interner.resolve(s.0));
+        }
+        NodeKind::Rational(s) => {
+            let _ = write!(out, "(rational {})", interner.resolve(s.0));
+        }
+        NodeKind::Complex(s) => {
+            let _ = write!(out, "(complex {})", interner.resolve(s.0));
+        }
+        NodeKind::Not(n) => {
+            out.push_str("(not\n");
+            write_node(ast, n, d, out);
+            out.push(')');
+        }
+        NodeKind::Retry => out.push_str("(retry)"),
+        NodeKind::Redo => out.push_str("(redo)"),
+        NodeKind::Numblock { send, max_n, body } => {
+            let _ = writeln!(out, "(numblock max_n={max_n}");
+            write_node(ast, send, d, out);
+            out.push('\n');
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+        NodeKind::Procarg0(_) => {
+            out.push_str("(procarg0");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::ForwardArgs => out.push_str("(forward_args)"),
+        NodeKind::ForwardedArgs => out.push_str("(forwarded_args)"),
+
         NodeKind::Unknown => out.push_str("(unknown)"),
     }
 }
