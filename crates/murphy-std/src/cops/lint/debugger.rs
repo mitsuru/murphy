@@ -473,4 +473,23 @@ mod tests {
                 ^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `require 'debug/start'`.
             "#});
     }
+
+    // Regression: ::X constants are normalised to X at the AST level,
+    // so ::Kernel and ::Pry already match the same entries as Kernel / Pry.
+
+    #[test]
+    fn flags_absolute_const_kernel_debugger() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                ::Kernel.debugger
+                ^^^^^^^^^^^^^^^^^ Remove debugger entry point `::Kernel.debugger`.
+            "#});
+    }
+
+    #[test]
+    fn flags_absolute_const_pry_rescue() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                ::Pry.rescue
+                ^^^^^^^^^^^^ Remove debugger entry point `::Pry.rescue`.
+            "#});
+    }
 }
