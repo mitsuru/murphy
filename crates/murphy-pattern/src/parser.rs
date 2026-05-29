@@ -1713,6 +1713,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_special_and_numeric_global_symbols_in_node_match() {
+        // murphy-lm7m: `(back_ref :$~)` / `(gvar :$0)` etc. parse end-to-end now
+        // that the lexer accepts special (`$~`, `$&`, …) and numeric (`$1`, `$0`)
+        // global-variable symbol names. `back_ref` was added in murphy-s4b4.
+        for (src, name) in [
+            ("(back_ref :$~)", "$~"),
+            ("(back_ref :$&)", "$&"),
+            ("(gvar :$0)", "$0"),
+            ("(gvar :$10)", "$10"),
+        ] {
+            let p = parse(src).unwrap_or_else(|e| panic!("parse `{src}`: {e:?}"));
+            let PatKind::Node { children, .. } = p.root.kind else {
+                panic!("`{src}` should be a Node, got {:?}", p.root.kind);
+            };
+            assert_eq!(children.len(), 1, "`{src}` should have one child");
+            assert_eq!(
+                children[0].kind,
+                PatKind::Lit(Lit::Sym(name.into())),
+                "child of `{src}` should be Sym(`{name}`)",
+            );
+        }
+    }
+
+    #[test]
     fn parses_nil_test_distinct_from_nil_literal() {
         assert_eq!(k("nil?"), PatKind::NilTest);
         assert_eq!(k("nil"), PatKind::Lit(Lit::Nil));

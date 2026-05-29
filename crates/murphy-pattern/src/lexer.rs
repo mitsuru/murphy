@@ -587,8 +587,11 @@ impl<'a> Lexer<'a> {
     /// The sigil bytes (`@`, `@@`, `$`) are included in the returned name —
     /// pattern matchers compare against `(ivar :@foo)` / `(cvar :@@foo)` /
     /// `(gvar :$foo)`, where the AST node's first child carries the sigil.
-    /// At least one `[A-Za-z_]` byte must follow the sigil; numeric globals
-    /// (`$1`, `$~`, ...) are out of scope.
+    ///
+    /// Instance/class variables (`@`, `@@`) require at least one `[A-Za-z_]`
+    /// byte after the sigil — they cannot start with a digit or be a special
+    /// name. Global variables (`$`) additionally accept numeric (`$1`, `$0`)
+    /// and special (`$~`, `$&`, ...) forms; see [`Self::take_global_symbol_name`].
     fn take_var_symbol_name(&mut self) -> Option<String> {
         let start = self.pos;
         let after_sigil = match self.peek() {
@@ -599,7 +602,8 @@ impl<'a> Lexer<'a> {
                     start + 1
                 }
             }
-            Some(b'$') => start + 1,
+            // Globals have a richer grammar (numeric / special) handled apart.
+            Some(b'$') => return self.take_global_symbol_name(start),
             _ => return None,
         };
         if !matches!(
@@ -617,6 +621,82 @@ impl<'a> Lexer<'a> {
         }
         self.pos = end;
         Some(self.slice_str(start, end).to_string())
+    }
+
+    /// Read a global-variable symbol name where the cursor sits on the `$` at
+    /// `start`. Returns `None` (leaving the cursor unmoved) when the `$` is not
+    /// followed by a valid global suffix (e.g. a bare `:$`).
+    ///
+    /// Ruby globals come in three shapes, all accepted here:
+    ///
+    /// 1. **ident-style**: `$foo`, `$LOAD_PATH`, `$_` — `[A-Za-z_][A-Za-z0-9_]*`.
+    ///    (`$_` and `$_foo` fall through here; `_` is consumed greedily.)
+    /// 2. **numeric** (nth-ref / program name): `$1`, `$10`, `$0` — one or more
+    ///    `[0-9]`.
+    /// 3. **single special char**: `$~`, `` $` ``, `$&`, `$'`, `$+`, … — exactly
+    ///    one byte from the closed set in [`Self::is_special_global_char`].
+    ///
+    /// The single-special-char form is matched *here*, inside the `$`-symbol
+    /// context, so trailing bytes like `*`, `+`, `"`, `.` are absorbed into the
+    /// symbol name rather than leaking into Star/Plus/string/ellipsis scans.
+    fn take_global_symbol_name(&mut self, start: usize) -> Option<String> {
+        let after_sigil = start + 1;
+        let end = match self.src.get(after_sigil) {
+            // (1) ident-style — also covers `$_` and `$_foo`.
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'_') => {
+                let mut e = after_sigil + 1;
+                while matches!(
+                    self.src.get(e),
+                    Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+                ) {
+                    e += 1;
+                }
+                e
+            }
+            // (2) numeric global / nth-ref.
+            Some(b'0'..=b'9') => {
+                let mut e = after_sigil + 1;
+                while matches!(self.src.get(e), Some(b'0'..=b'9')) {
+                    e += 1;
+                }
+                e
+            }
+            // (3) single special-global char.
+            Some(&b) if Self::is_special_global_char(b) => after_sigil + 1,
+            _ => return None,
+        };
+        self.pos = end;
+        Some(self.slice_str(start, end).to_string())
+    }
+
+    /// The closed set of single-character Ruby special globals usable as the
+    /// suffix of a `:$X` symbol literal (murphy-lm7m). `_` is excluded — it is
+    /// handled by the ident-style branch of [`Self::take_global_symbol_name`].
+    ///
+    /// `$\` (backslash, the output record separator) is deliberately omitted:
+    /// it is outside the set enumerated for this work.
+    fn is_special_global_char(b: u8) -> bool {
+        matches!(
+            b,
+            b'~' | b'&'
+                | b'`'
+                | b'\''
+                | b'+'
+                | b','
+                | b'.'
+                | b'/'
+                | b';'
+                | b':'
+                | b'?'
+                | b'<'
+                | b'>'
+                | b'"'
+                | b'!'
+                | b'@'
+                | b'='
+                | b'*'
+                | b'$'
+        )
     }
 
     /// Read a Ruby operator-method name (`+`, `[]=`, `<=>`, ...) at the cursor.
@@ -1215,13 +1295,91 @@ mod tests {
     }
 
     #[test]
-    fn variable_symbol_with_digit_after_sigil_is_error() {
-        // `:@1` and `:$1` aren't supported in v1 — variable-style symbol
-        // names must start with `[A-Za-z_]` after the sigil.
+    fn ivar_cvar_symbol_with_digit_after_sigil_is_error() {
+        // Instance/class variables cannot start with a digit, so `:@1` and
+        // `:@@1` stay lex errors — the name after `@`/`@@` must be `[A-Za-z_]…`.
         let e = tokenize(":@1").expect_err("must reject `:@1`");
         assert!(e.message.contains("expected a symbol name"));
-        let e = tokenize(":$1").expect_err("must reject `:$1`");
+        let e = tokenize(":@@1").expect_err("must reject `:@@1`");
         assert!(e.message.contains("expected a symbol name"));
+    }
+
+    // --- murphy-lm7m: special/numeric global-variable symbols (`:$~`, `:$1`) ---
+
+    #[test]
+    fn lexes_numeric_global_symbols() {
+        // `$1`, `$2`, … are Ruby nth-ref globals; `$0` is the program name.
+        // A digit run after `$` is now a valid global-variable symbol name.
+        assert_eq!(toks(":$0"), vec![Token::Sym("$0".into())]);
+        assert_eq!(toks(":$1"), vec![Token::Sym("$1".into())]);
+        assert_eq!(toks(":$9"), vec![Token::Sym("$9".into())]);
+        assert_eq!(toks(":$10"), vec![Token::Sym("$10".into())]);
+        assert_eq!(toks(":$123"), vec![Token::Sym("$123".into())]);
+    }
+
+    #[test]
+    fn lexes_special_global_symbols() {
+        // Single-character special globals. `$\` (backslash) is intentionally
+        // omitted: it is outside the closed set enumerated for murphy-lm7m.
+        for ch in [
+            '~', '&', '`', '\'', '+', ',', '.', '/', ';', ':', '?', '<', '>', '"', '!', '@', '=',
+            '*', '$',
+        ] {
+            let src = format!(":${ch}");
+            assert_eq!(
+                toks(&src),
+                vec![Token::Sym(format!("${ch}"))],
+                "`{src}` should lex as a special global symbol",
+            );
+        }
+    }
+
+    #[test]
+    fn special_global_consumes_exactly_one_char() {
+        // The special-global suffix is a single byte; a following byte is its
+        // own token rather than being absorbed into the symbol name.
+        assert_eq!(
+            toks(":$~ :$&"),
+            vec![Token::Sym("$~".into()), Token::Sym("$&".into())]
+        );
+        // `$+` consumes only `+`; the trailing `1` is a separate Int token and
+        // does NOT fold into a number literal.
+        assert_eq!(toks(":$+1"), vec![Token::Sym("$+".into()), Token::Int(1)]);
+    }
+
+    #[test]
+    fn dollar_underscore_global_lexes_via_ident_path() {
+        // `$_` (last read line) and `$_foo` are ident-style globals — the
+        // `_` is consumed greedily by the ident branch, not the special set.
+        assert_eq!(toks(":$_"), vec![Token::Sym("$_".into())]);
+        assert_eq!(toks(":$_foo"), vec![Token::Sym("$_foo".into())]);
+    }
+
+    #[test]
+    fn special_globals_in_node_match() {
+        // `(back_ref :$~)` — the failing case from the murphy-xvjv survey.
+        assert_eq!(
+            toks("(back_ref :$~)"),
+            vec![
+                Token::LParen,
+                Token::Ident("back_ref".into()),
+                Token::Sym("$~".into()),
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn special_global_symbol_span_covers_sigil_and_char() {
+        let t = tokenize(":$~").expect("ok");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].tok, Token::Sym("$~".into()));
+        assert_eq!((t[0].span.start, t[0].span.end), (0, 3));
+
+        let t = tokenize(":$10").expect("ok");
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].tok, Token::Sym("$10".into()));
+        assert_eq!((t[0].span.start, t[0].span.end), (0, 4));
     }
 
     // --- D3 (murphy-kq57): tPARAM_CONST — uppercase-start ident ---------------
