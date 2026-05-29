@@ -1,6 +1,6 @@
 //! Capture container for the C-backend runtime matcher.
 //!
-//! The B-backend (`node_pattern!` proc macro) returns captures as a typed
+//! The B-backend (`def_node_matcher!` proc macro) returns captures as a typed
 //! tuple resolved at compile time; the C-backend cannot, because the IR is
 //! consumed at runtime by mruby user cops (see design §4). [`Captures`] is
 //! the runtime-typed equivalent: slot-indexed, one entry per `$` capture in

@@ -1,16 +1,16 @@
-# `node_pattern!` — RuboCop-subset S-expression matcher
+# `def_node_matcher!` — RuboCop-subset S-expression matcher
 
-`node_pattern!` lowers a RuboCop-subset S-expression pattern to a free
+`def_node_matcher!` lowers a RuboCop-subset S-expression pattern to a free
 function at compile time (ADR 0033). It is Murphy's analogue of
 RuboCop's `def_node_matcher` and is the right tool when the cop needs
 to test the shape of a node across multiple kinds at once.
 
 Authoritative reference: infra guide §3 ("Reusable matchers:
-`node_pattern!`") plus the v1 grammar doc at
+`def_node_matcher!`") plus the v1 grammar doc at
 `docs/plans/2026-05-22-murphy-9cr17-pattern-grammar.md`. The runtime IR
 lives in `crates/murphy-pattern`.
 
-## When to reach for `node_pattern!`
+## When to reach for `def_node_matcher!`
 
 - The shape spans more than one node kind (`(send nil :describe (const …) …)`).
 - The same pattern is reused from multiple dispatch methods.
@@ -29,13 +29,13 @@ a free function `(node: NodeId, cx: &Cx<'_>) -> R`. Call the function
 from any cop's dispatch body.
 
 ```rust
-use murphy_plugin_macros::node_pattern;
+use murphy_plugin_macros::def_node_matcher;
 
 // Zero captures → fn(NodeId, &Cx) -> bool. Tests shape only.
-node_pattern!(is_bare_expect_call, "(send nil :expect _)");
+def_node_matcher!(is_bare_expect_call, "(send nil :expect _)");
 
 // Captured atoms → fn(NodeId, &Cx) -> Option<(Capture1, Capture2, …)>.
-node_pattern!(
+def_node_matcher!(
     describe_first_arg,
     "(send {nil (const nil :RSpec)} :describe $_ ...)",
 );
@@ -71,20 +71,20 @@ Worked examples (paired with the RuboCop form they replace):
 
 ```text
 RuboCop: (send nil :require _)
-Murphy : same — node_pattern!(is_require_call, "(send nil :require _)");
+Murphy : same — def_node_matcher!(is_require_call, "(send nil :require _)");
 
 RuboCop: (send {nil (const nil :Foo)} :bar _ ...)
 Murphy : same — receiver alternation, one captured-shape arg, then rest.
 
 RuboCop: (block (send nil :it $_) _ _)
-Murphy : node_pattern!(it_block_name, "(block (send nil :it $_) _ _)");
+Murphy : def_node_matcher!(it_block_name, "(block (send nil :it $_) _ _)");
          → returns Option<NodeId> for the name argument.
 ```
 
 ## What is *not* in v1
 
 The following appear in RuboCop's `def_node_matcher` grammar and are
-**not** supported by `node_pattern!` v1 — translate them out by hand:
+**not** supported by `def_node_matcher!` v1 — translate them out by hand:
 
 - Named captures (`$_name`). Use positional captures in tuple order.
 - Predicate calls (`#some_method?`). Re-write as an `if` on the

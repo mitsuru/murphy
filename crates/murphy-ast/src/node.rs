@@ -437,7 +437,7 @@ pub enum NodeKind {
 
     // --- HIGH-priority NodeKindTag extensions (murphy-w5ba, beads epic
     // murphy-xvjv). Added so RuboCop `def_node_matcher` strings that touch
-    // these node kinds compile under `node_pattern!`. Subject-side support
+    // these node kinds compile under `def_node_matcher!`. Subject-side support
     // (murphy-translate producing these from real Ruby source) lands per
     // node kind as cops actually need it — see the survey report at
     // docs/superpowers/specs/2026-05-29-rubocop-pattern-gap-survey.md.

@@ -1,4 +1,4 @@
-//! Behaviour tests for `node_pattern!`: define matchers, build a small
+//! Behaviour tests for `def_node_matcher!`: define matchers, build a small
 //! arena, run them, assert the result and captures.
 
 // `NodeId` / `NodeList` / `OptNodeId` / `Symbol` are unused by the
@@ -53,9 +53,9 @@ fn r() -> Range {
     Range { start: 0, end: 1 }
 }
 
-use murphy_plugin_macros::node_pattern;
+use murphy_plugin_macros::def_node_matcher;
 
-node_pattern!(any_node, "_");
+def_node_matcher!(any_node, "_");
 
 #[test]
 fn wildcard_matches_any_node() {
@@ -70,12 +70,12 @@ fn wildcard_matches_any_node() {
     assert!(any_node(root, &cx));
 }
 
-node_pattern!(is_int_42, "42");
-node_pattern!(is_any_int, "int");
-node_pattern!(is_sym_foo, ":foo");
-node_pattern!(is_true_lit, "true");
-node_pattern!(is_nil_node, "nil");
-node_pattern!(is_nil_test, "nil?");
+def_node_matcher!(is_int_42, "42");
+def_node_matcher!(is_any_int, "int");
+def_node_matcher!(is_sym_foo, ":foo");
+def_node_matcher!(is_true_lit, "true");
+def_node_matcher!(is_nil_node, "nil");
+def_node_matcher!(is_nil_test, "nil?");
 
 #[test]
 fn literal_and_kind_matching() {
@@ -108,8 +108,8 @@ fn literal_and_kind_matching() {
     assert!(!is_nil_test(i42, &cx));
 }
 
-node_pattern!(is_nilrecv_foo, "(send nil :foo)");
-node_pattern!(is_nested, "(send (send nil :a) :b)");
+def_node_matcher!(is_nilrecv_foo, "(send nil :foo)");
+def_node_matcher!(is_nested, "(send (send nil :a) :b)");
 
 /// Build `nil.foo` and return (ast-owning) root id.
 fn build_nil_dot_foo() -> Ast {
@@ -171,11 +171,11 @@ fn inner_of(ast: &Ast) -> NodeId {
     receiver.get().unwrap()
 }
 
-node_pattern!(is_if, "(if _ _ _)");
-node_pattern!(is_top_const, "(const nil? :Foo)");
-node_pattern!(is_array2, "(array 1 2)");
-node_pattern!(is_send_or_csend, "({send csend} ...)");
-node_pattern!(is_any_paren, "(_ ...)");
+def_node_matcher!(is_if, "(if _ _ _)");
+def_node_matcher!(is_top_const, "(const nil? :Foo)");
+def_node_matcher!(is_array2, "(array 1 2)");
+def_node_matcher!(is_send_or_csend, "({send csend} ...)");
+def_node_matcher!(is_any_paren, "(_ ...)");
 
 #[test]
 fn schema_table_and_flexible_heads() {
@@ -231,9 +231,9 @@ fn schema_table_and_flexible_heads() {
     assert!(is_any_paren(iff, &cx) && is_any_paren(arr, &cx));
 }
 
-node_pattern!(cap_receiver, "(send $_ :foo)");
-node_pattern!(cap_subpat, "$(send nil :foo)");
-node_pattern!(cap_two, "(if $_ $_ _)");
+def_node_matcher!(cap_receiver, "(send $_ :foo)");
+def_node_matcher!(cap_subpat, "$(send nil :foo)");
+def_node_matcher!(cap_two, "(if $_ $_ _)");
 
 #[test]
 fn node_captures_return_tuple() {
@@ -255,9 +255,9 @@ fn node_captures_return_tuple() {
     assert_eq!(cap_receiver(recv, &cx), None);
 }
 
-node_pattern!(cap_args, "(send nil? :foo $...)");
-node_pattern!(rest_then_cap, "(array ... $_)");
-node_pattern!(cap_then_rest, "(array $_ ...)");
+def_node_matcher!(cap_args, "(send nil? :foo $...)");
+def_node_matcher!(rest_then_cap, "(array ... $_)");
+def_node_matcher!(cap_then_rest, "(array $_ ...)");
 
 #[test]
 fn seq_capture_and_rest() {
@@ -298,8 +298,8 @@ fn seq_capture_and_rest() {
     assert_eq!(cap_then_rest(arr, &cx), Some((e1,)));
 }
 
-node_pattern!(mid_bare, "(array $_ ... $_)");
-node_pattern!(mid_cap, "(array $_ $... $_)");
+def_node_matcher!(mid_bare, "(array $_ ... $_)");
+def_node_matcher!(mid_cap, "(array $_ $... $_)");
 
 #[test]
 fn mid_position_rest() {
@@ -338,7 +338,7 @@ fn mid_position_rest() {
     assert_eq!(mid_bare(arr3, &cx), None);
 }
 
-node_pattern!(rest_only, "(array ...)");
+def_node_matcher!(rest_only, "(array ...)");
 
 #[test]
 fn bare_rest_only_list() {
@@ -363,9 +363,9 @@ fn bare_rest_only_list() {
     assert!(rest_only(empty_arr, &cx));
 }
 
-node_pattern!(is_send_or_int, "{send int}");
-node_pattern!(not_nil, "!nil");
-node_pattern!(send_nonnil_recv, "(send !nil? :foo)");
+def_node_matcher!(is_send_or_int, "{send int}");
+def_node_matcher!(not_nil, "!nil");
+def_node_matcher!(send_nonnil_recv, "(send !nil? :foo)");
 
 #[test]
 fn union_and_negation() {
@@ -428,8 +428,8 @@ fn union_and_negation() {
 // `#is_big` is a bare predicate applied directly to `node`. (`int` has no
 // schema entry, so `(int #is_big)` would be an unsupported-kind error —
 // the predicate is a child position, not a head.)
-node_pattern!(is_big_int, "#is_big");
-node_pattern!(big_or_nil, "{#is_big nil}");
+def_node_matcher!(is_big_int, "#is_big");
+def_node_matcher!(big_or_nil, "{#is_big nil}");
 
 /// User-provided predicate: a free fn in scope at the matcher call site.
 /// Both `is_big_int` and `big_or_nil` resolve `#is_big` to this fn.
@@ -458,8 +458,8 @@ fn predicate_calls_a_free_function() {
 // (predicate, mruby convention), `!` → `_bang`. `#save` and `#save?`
 // resolve to *different* Rust fns, mirroring how Ruby's `save` and
 // `save?` are distinct methods (the use case from murphy-bj7).
-node_pattern!(is_odd_int, "#odd?");
-node_pattern!(is_bang_int, "#bang!");
+def_node_matcher!(is_odd_int, "#odd?");
+def_node_matcher!(is_bang_int, "#bang!");
 
 fn odd_p(node: NodeId, cx: &Cx<'_>) -> bool {
     matches!(*cx.kind(node), NodeKind::Int(v) if v % 2 != 0)
@@ -511,8 +511,8 @@ fn predicate_inside_union() {
     assert!(!big_or_nil(small, &cx));
 }
 
-node_pattern!(parent_is_if, "^if");
-node_pattern!(has_nil_descendant, "`nil");
+def_node_matcher!(parent_is_if, "^if");
+def_node_matcher!(has_nil_descendant, "`nil");
 
 #[test]
 fn parent_and_descendant() {
@@ -545,11 +545,11 @@ fn parent_and_descendant() {
 // `Lvasgn` / `Ivasgn` / `Gvasgn` / `Cvasgn` share the `{ name, value }`
 // schema; `Casgn` has `{ scope, name, value }`. Verifying each variant
 // guards against schema drift (Sym-in-slot-0 vs slot-1, scope vs no-scope).
-node_pattern!(is_lvasgn_x, "(lvasgn :x _)");
-node_pattern!(is_ivasgn_at_x, "(ivasgn :@x _)");
-node_pattern!(is_casgn_top_foo, "(casgn nil? :Foo _)");
-node_pattern!(is_gvasgn_dollar_x, "(gvasgn :$x _)");
-node_pattern!(is_cvasgn_atat_x, "(cvasgn :@@x _)");
+def_node_matcher!(is_lvasgn_x, "(lvasgn :x _)");
+def_node_matcher!(is_ivasgn_at_x, "(ivasgn :@x _)");
+def_node_matcher!(is_casgn_top_foo, "(casgn nil? :Foo _)");
+def_node_matcher!(is_gvasgn_dollar_x, "(gvasgn :$x _)");
+def_node_matcher!(is_cvasgn_atat_x, "(cvasgn :@@x _)");
 
 #[test]
 fn assignment_variants_match_each_kind() {
@@ -623,9 +623,9 @@ fn assignment_variants_match_each_kind() {
 // `Block` has all-required fields (`call: Node`, `args: Node`, `body:
 // OptNode`); `Hash` is a single-list tuple like `Array`; `Pair` is two
 // required `Node` fields.
-node_pattern!(is_block_each, "(block (send nil? :each) _ _)");
-node_pattern!(is_hash_one_pair, "(hash (pair _ _))");
-node_pattern!(is_pair_key_a, "(pair :a _)");
+def_node_matcher!(is_block_each, "(block (send nil? :each) _ _)");
+def_node_matcher!(is_hash_one_pair, "(hash (pair _ _))");
+def_node_matcher!(is_pair_key_a, "(pair :a _)");
 
 #[test]
 fn block_hash_pair_variants() {
@@ -704,8 +704,8 @@ fn block_hash_pair_variants() {
 // destructure ends with `..` so `Case::else_` / `When::body` (which follow
 // the trailing `NodeList`) stay out of the schema. The macro expansion
 // itself is the compile-time guard; the runtime check is a smoke test.
-node_pattern!(is_case_any, "(case _ ...)");
-node_pattern!(is_when_any, "(when ...)");
+def_node_matcher!(is_case_any, "(case _ ...)");
+def_node_matcher!(is_when_any, "(when ...)");
 
 #[test]
 fn case_and_when_trailing_dotdot_paths() {
@@ -750,8 +750,8 @@ fn case_and_when_trailing_dotdot_paths() {
 // `Return(OptNodeId)` is the only `Pos`-tuple variant whose single slot is
 // an `OptNode`. The two branches of `lower_fixed_slot`'s `OptNode` arm
 // (`Some(n) => …` and `None => {}` via `nil?`) must both run.
-node_pattern!(is_return_any, "(return _)");
-node_pattern!(is_return_nil_test, "(return nil?)");
+def_node_matcher!(is_return_any, "(return _)");
+def_node_matcher!(is_return_nil_test, "(return nil?)");
 
 #[test]
 fn return_optnode_both_branches() {
@@ -776,8 +776,8 @@ fn return_optnode_both_branches() {
 }
 
 // ── And / Or ───────────────────────────────────────────────────────────
-node_pattern!(is_and_two, "(and _ _)");
-node_pattern!(is_or_two, "(or _ _)");
+def_node_matcher!(is_and_two, "(and _ _)");
+def_node_matcher!(is_or_two, "(or _ _)");
 
 #[test]
 fn and_or_two_node_slots() {
@@ -810,9 +810,9 @@ fn and_or_two_node_slots() {
 // ── Def / Class / Module ───────────────────────────────────────────────
 // `Def` has `covers_all_fields=false` (omits `receiver`). `Class` and
 // `Module` are fully covered.
-node_pattern!(is_def_foo, "(def :foo _ nil?)");
-node_pattern!(is_class_any, "(class _ nil? nil?)");
-node_pattern!(is_module_any, "(module _ nil?)");
+def_node_matcher!(is_def_foo, "(def :foo _ nil?)");
+def_node_matcher!(is_class_any, "(class _ nil? nil?)");
+def_node_matcher!(is_module_any, "(module _ nil?)");
 
 #[test]
 fn def_class_module_variants() {
@@ -881,8 +881,8 @@ fn def_class_module_variants() {
 // `While { cond, body, post: bool }` and `Until { ... }`: `post` is a flag,
 // not a child slot — `covers_all_fields=false` and the macro emits a
 // trailing `..` in the destructure.
-node_pattern!(is_while_any, "(while _ _)");
-node_pattern!(is_until_any, "(until _ _)");
+def_node_matcher!(is_while_any, "(while _ _)");
+def_node_matcher!(is_until_any, "(until _ _)");
 
 #[test]
 fn while_and_until_skip_post_flag() {
@@ -924,7 +924,7 @@ fn while_and_until_skip_post_flag() {
 // ── Head::OneOf — actually exercise the csend branch ───────────────────
 // The existing `is_send_or_csend` test only built a `Send`. This test
 // builds an actual `Csend` node and asserts the OneOf head accepts it.
-node_pattern!(is_send_or_csend_any, "({send csend} ...)");
+def_node_matcher!(is_send_or_csend_any, "({send csend} ...)");
 
 #[test]
 fn oneof_head_accepts_csend_arm() {
@@ -955,8 +955,8 @@ fn oneof_head_accepts_csend_arm() {
 // `$ident` is a named capture with an implicit Wildcard body — it binds
 // any node id at its slot. `$:sym` is an anonymous capture whose body is
 // a `Sym` literal — it binds the Sym node id when its body matches.
-node_pattern!(cap_recv_ident, "(send $recv :foo)");
-node_pattern!(cap_sym_lit_in_array, "(array $:foo)");
+def_node_matcher!(cap_recv_ident, "(send $recv :foo)");
+def_node_matcher!(cap_sym_lit_in_array, "(array $:foo)");
 
 #[test]
 fn named_ident_and_sym_literal_captures() {
@@ -997,15 +997,15 @@ fn named_ident_and_sym_literal_captures() {
 // ── Float / Str / False literals ───────────────────────────────────────
 // `is_true_lit` and `is_nil_node` already cover `True_` / `Nil`. Add the
 // remaining literal lowerings: `Float`, `Str`, `False_`.
-node_pattern!(is_float_one_five, "1.5");
-node_pattern!(is_str_hello, "\"hello\"");
-node_pattern!(is_false_lit, "false");
+def_node_matcher!(is_float_one_five, "1.5");
+def_node_matcher!(is_str_hello, "\"hello\"");
+def_node_matcher!(is_false_lit, "false");
 
 // ── Predicate with string-literal arg: `#starts_with?("foo")` ─────────
 // B-backend acceptance criterion (murphy-jyi §2): `Lit::Str` arg is lowered
 // to a `&str` literal. The generated call is:
 //   `starts_with_p(node, cx, "foo")`
-node_pattern!(is_starts_with_foo, "#starts_with?(\"foo\")");
+def_node_matcher!(is_starts_with_foo, "#starts_with?(\"foo\")");
 
 fn starts_with_p(node: NodeId, cx: &Cx<'_>, prefix: &str) -> bool {
     if let NodeKind::Str(id) = *cx.kind(node) {
@@ -1020,7 +1020,7 @@ fn starts_with_p(node: NodeId, cx: &Cx<'_>, prefix: &str) -> bool {
 // to a `&str` literal (the symbol name without the `:` prefix). The generated
 // call is:
 //   `sym_eq_p(node, cx, "foo")`
-node_pattern!(is_sym_eq_foo, "#sym_eq?(:foo)");
+def_node_matcher!(is_sym_eq_foo, "#sym_eq?(:foo)");
 
 fn sym_eq_p(node: NodeId, cx: &Cx<'_>, expected: &str) -> bool {
     if let NodeKind::Sym(sym) = *cx.kind(node) {

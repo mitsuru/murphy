@@ -97,7 +97,7 @@ impl<'a> Cx<'a> {
     /// side table. This is the allocation-free counterpart to
     /// [`Self::children`] for the variable-length child field of a single
     /// `NodeKind` variant (e.g. `Send.args`, `Array`'s elements). The
-    /// generated code of `node_pattern!` (murphy-9cr.18) uses it to bind
+    /// generated code of `def_node_matcher!` (murphy-9cr.18) uses it to bind
     /// `$...` seq captures and to match fixed-length argument lists.
     pub fn list(&self, l: murphy_ast::NodeList) -> &'a [NodeId] {
         let start = l.start as usize;

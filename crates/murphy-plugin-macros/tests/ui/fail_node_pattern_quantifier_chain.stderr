@@ -1,5 +1,5 @@
-error: node_pattern!: pattern parse error: postfix `*` / `+` / `?` cannot be chained — apply at most one quantifier per pattern (at 11..12)
- --> tests/ui/fail_node_pattern_quantifier_chain.rs:5:40
+error: def_node_matcher!: pattern parse error: postfix `*` / `+` / `?` cannot be chained — apply at most one quantifier per pattern (at 11..12)
+ --> tests/ui/fail_node_pattern_quantifier_chain.rs:5:44
   |
-5 | murphy_plugin_macros::node_pattern!(m, "(array int++)");
-  |                                        ^^^^^^^^^^^^^^^
+5 | murphy_plugin_macros::def_node_matcher!(m, "(array int++)");
+  |                                            ^^^^^^^^^^^^^^^

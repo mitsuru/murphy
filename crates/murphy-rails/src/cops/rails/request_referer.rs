@@ -38,7 +38,7 @@
 //! ## Implementation
 //!
 //! The two-level Send check is expressed declaratively with
-//! [`node_pattern!`] (RuboCop NodePattern grammar). `nil?` in DSL means
+//! [`def_node_matcher!`] (RuboCop NodePattern grammar). `nil?` in DSL means
 //! "receiver is `None`" (no AST node), distinct from `nil` which would
 //! be the Ruby `nil` literal. The pattern omits a trailing argument
 //! placeholder on each Send so both have to take **zero** arguments —
@@ -54,13 +54,13 @@
 //! the correction replaces the whole send node with `request.<style>`,
 //! normalising odd whitespace around the dot.
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, cop, node_pattern};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent: `(send (send nil? :request) :referer)`.
 // See module docs for the `nil?` vs `nil` distinction and why zero-arg
 // strictness is load-bearing.
-node_pattern!(is_request_referer, "(send (send nil? :request) :referer)");
-node_pattern!(is_request_referrer, "(send (send nil? :request) :referrer)");
+def_node_matcher!(is_request_referer, "(send (send nil? :request) :referer)");
+def_node_matcher!(is_request_referrer, "(send (send nil? :request) :referrer)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]

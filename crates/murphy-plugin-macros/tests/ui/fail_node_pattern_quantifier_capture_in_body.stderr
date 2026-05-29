@@ -1,5 +1,5 @@
-error: node_pattern!: pattern parse error: a node match needs a head: a node type, `_`, or `{...}` (at 8..9)
- --> tests/ui/fail_node_pattern_quantifier_capture_in_body.rs:5:40
+error: def_node_matcher!: pattern parse error: a node match needs a head: a node type, `_`, or `{...}` (at 8..9)
+ --> tests/ui/fail_node_pattern_quantifier_capture_in_body.rs:5:44
   |
-5 | murphy_plugin_macros::node_pattern!(m, "(array ($int)+)");
-  |                                        ^^^^^^^^^^^^^^^^^
+5 | murphy_plugin_macros::def_node_matcher!(m, "(array ($int)+)");
+  |                                            ^^^^^^^^^^^^^^^^^

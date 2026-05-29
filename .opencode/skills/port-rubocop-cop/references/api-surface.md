@@ -67,10 +67,10 @@ murphy_plugin_api::{on_node, on_new_investigation};` is what to add.
 ## Pattern matchers
 
 ```rust
-use murphy_plugin_macros::node_pattern;
+use murphy_plugin_macros::def_node_matcher;
 ```
 
-Note: `node_pattern!` is re-exported through `murphy-plugin-macros`, not
+Note: `def_node_matcher!` is re-exported through `murphy-plugin-macros`, not
 `murphy-plugin-api`. The dep boundary allows it because the macros crate
 is part of the single-surface ABI's macro half. See
 `references/node-pattern.md`.
@@ -132,5 +132,5 @@ must not be imported from a cop file:
 - `murphy_core::*` — host orchestration. Not callable from packs.
 - `murphy_translate::*` — parser. Only test_support pulls it in.
 - `murphy_pattern::*` — pattern IR runtime; lowered into by
-  `node_pattern!` at compile time and reached through the generated
+  `def_node_matcher!` at compile time and reached through the generated
   function, not directly.

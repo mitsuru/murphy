@@ -15,7 +15,7 @@
 /// `#[plugin-api]` `node_cop.rs` Task 8 note in the murphy-9cr.17 plan).
 /// As of murphy-a70 the plugin-api re-exports this type instead, so
 /// `murphy_plugin_api::NodeKindTag` and `murphy_ast::NodeKindTag` are
-/// the same nominal type — required so that `node_pattern!`-generated
+/// the same nominal type — required so that `def_node_matcher!`-generated
 /// matchers (which compare `cx.kind(node).tag()` against a literal
 /// tag) type-check across crates.
 #[repr(transparent)]

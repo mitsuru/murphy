@@ -1,7 +1,7 @@
-error: node_pattern!: symbol slot only accepts a `:sym` literal, `_`, or a `{:sym :sym ...}` union of `:sym` literals
+error: def_node_matcher!: symbol slot only accepts a `:sym` literal, `_`, or a `{:sym :sym ...}` union of `:sym` literals
  --> tests/ui/fail_node_pattern_sym_capture.rs:4:1
   |
-4 | murphy_plugin_macros::node_pattern!(m, "(send nil? $_)");
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+4 | murphy_plugin_macros::def_node_matcher!(m, "(send nil? $_)");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |
-  = note: this error originates in the macro `murphy_plugin_macros::node_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the macro `murphy_plugin_macros::def_node_matcher` (in Nightly builds, run with -Z macro-backtrace for more info)

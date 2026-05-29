@@ -8,7 +8,7 @@
 //! after a `def_node_matcher :foo, '<pattern>'` in any RuboCop / RuboCop-RSpec /
 //! RuboCop-Rails cop — Murphy's `compile()` can take verbatim. The goal of
 //! the surrounding epic (`murphy-xvjv`) is "paste a def_node_matcher pattern
-//! into `node_pattern!` and have it just work". This test exists to size that
+//! into `def_node_matcher!` and have it just work". This test exists to size that
 //! gap and to drive a punch list of NodeKindTag extensions.
 //!
 //! ## How it works

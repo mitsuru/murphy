@@ -263,7 +263,7 @@ pub fn derive_cop_option_enum(input: TokenStream) -> TokenStream {
 
 /// Define a compile-time AST pattern matcher (B backend, murphy-9cr.18).
 ///
-/// `node_pattern!(name, "pattern")` expands to a module-level
+/// `def_node_matcher!(name, "pattern")` expands to a module-level
 /// `fn name(node, cx)` that tests whether `node` matches the
 /// S-expression `pattern`. With zero `$` captures the matcher returns
 /// `bool`; with one or more it returns `Option<(captures…)>` in slot
@@ -272,12 +272,12 @@ pub fn derive_cop_option_enum(input: TokenStream) -> TokenStream {
 /// # Example
 ///
 /// ```ignore
-/// use murphy_plugin_macros::node_pattern;
+/// use murphy_plugin_macros::def_node_matcher;
 ///
-/// node_pattern!(is_puts_call, "(send nil? :puts $...)");
+/// def_node_matcher!(is_puts_call, "(send nil? :puts $...)");
 /// ```
 #[proc_macro]
-pub fn node_pattern(input: TokenStream) -> TokenStream {
+pub fn def_node_matcher(input: TokenStream) -> TokenStream {
     node_pattern::node_pattern(input.into()).into()
 }
 

@@ -11,25 +11,25 @@
 //!   Known gaps remain around FileTest handling and RuboCop message parity.
 //! ```
 //!
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, node_pattern};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
 
-node_pattern!(
+def_node_matcher!(
     is_deprecated_env_method,
     "(send (const nil? :ENV) {:clone :dup :freeze})"
 );
-node_pattern!(
+def_node_matcher!(
     is_deprecated_exists_method,
     "(send (const nil? {:File :Dir :FileTest}) :exists? _)"
 );
-node_pattern!(
+def_node_matcher!(
     is_deprecated_socket_method,
     "(send (const nil? :Socket) {:gethostbyaddr :gethostbyname} ...)"
 );
-node_pattern!(
+def_node_matcher!(
     is_deprecated_attr_method,
     "(send nil? :attr _ {true false})"
 );
-node_pattern!(is_deprecated_iterator_method, "(send nil? :iterator?)");
+def_node_matcher!(is_deprecated_iterator_method, "(send nil? :iterator?)");
 
 #[derive(Default)]
 pub struct DeprecatedClassMethods;

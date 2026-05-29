@@ -48,12 +48,12 @@
 //! layer (Rails.application.config? Settings.foo? Figaro.env.FOO?);
 //! that's outside the cop's awareness. Detect-only.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent: `(send (const nil? :ENV) _ ...)`.
 // `nil?` on the inner Const requires no scope (top-level). The method
 // position is a wildcard so every `ENV.<method>` call matches.
-node_pattern!(is_env_access, "(send (const nil? :ENV) _ ...)");
+def_node_matcher!(is_env_access, "(send (const nil? :ENV) _ ...)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]

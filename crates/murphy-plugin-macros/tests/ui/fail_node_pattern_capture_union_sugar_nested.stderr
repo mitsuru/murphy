@@ -1,5 +1,5 @@
-error: node_pattern!: pattern parse error: `$` capture is not allowed inside `{}` / `!` / `` ` `` (the body has no definite-assignment path) (at 6..12)
- --> tests/ui/fail_node_pattern_capture_union_sugar_nested.rs:4:40
+error: def_node_matcher!: pattern parse error: `$` capture is not allowed inside `{}` / `!` / `` ` `` (the body has no definite-assignment path) (at 6..12)
+ --> tests/ui/fail_node_pattern_capture_union_sugar_nested.rs:4:44
   |
-4 | murphy_plugin_macros::node_pattern!(m, "${int $float}");
-  |                                        ^^^^^^^^^^^^^^^
+4 | murphy_plugin_macros::def_node_matcher!(m, "${int $float}");
+  |                                            ^^^^^^^^^^^^^^^

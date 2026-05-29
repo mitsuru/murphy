@@ -1,9 +1,9 @@
-//! B↔C cross-backend semantic conformance for `node_pattern!` /
+//! B↔C cross-backend semantic conformance for `def_node_matcher!` /
 //! `murphy_pattern::matches`.
 //!
 //! The two backends share one grammar (`murphy-pattern::parse`) and MUST
 //! agree on whether a given pattern matches a given node, including the
-//! capture slot values. The B-backend (`node_pattern!` proc macro,
+//! capture slot values. The B-backend (`def_node_matcher!` proc macro,
 //! murphy-9cr.18) lowers patterns to typed Rust at compile time; the
 //! C-backend (`murphy_pattern::matches`, murphy-9cr.19) interprets
 //! `PatternIr` at runtime. This file exercises a representative pattern
@@ -20,7 +20,7 @@ use murphy_pattern::{
     matches_with_params,
 };
 use murphy_plugin_api::{Cx, CxRaw, FnTable, RawSlice};
-use murphy_plugin_macros::node_pattern;
+use murphy_plugin_macros::def_node_matcher;
 
 // ────────────────────────────────────────────────────────────────────────
 // `Cx` plumbing identical to `node_pattern_behavior.rs` — kept here to
@@ -213,11 +213,11 @@ fn assert_c_matches_with<P: PredicateHost>(
 // 1. Wildcard / bare kind / literal — no captures.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_wildcard, "_");
-node_pattern!(b_send_kind, "send");
-node_pattern!(b_array_kind, "array");
-node_pattern!(b_int_42, "42");
-node_pattern!(b_sym_puts, ":puts");
+def_node_matcher!(b_wildcard, "_");
+def_node_matcher!(b_send_kind, "send");
+def_node_matcher!(b_array_kind, "array");
+def_node_matcher!(b_int_42, "42");
+def_node_matcher!(b_sym_puts, ":puts");
 
 #[test]
 fn wildcard_kind_and_literal_match_consistently() {
@@ -241,8 +241,8 @@ fn wildcard_kind_and_literal_match_consistently() {
 // 2. Send node match — fixed slots (`nil?` + `:sym`) + trailing rest.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_send_nil_puts_wild, "(send nil? :puts _)");
-node_pattern!(b_send_nil_raise_wild, "(send nil? :raise _)");
+def_node_matcher!(b_send_nil_puts_wild, "(send nil? :puts _)");
+def_node_matcher!(b_send_nil_raise_wild, "(send nil? :raise _)");
 
 #[test]
 fn send_match_with_nil_test_and_sym_slot_agrees() {
@@ -269,9 +269,9 @@ fn send_match_with_nil_test_and_sym_slot_agrees() {
 // 3. Heads — Any / OneOf — kind-only with optional `...`.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_any_head, "(_ ...)");
-node_pattern!(b_oneof_send_csend, "({send csend} ...)");
-node_pattern!(b_oneof_array_hash, "({array hash} ...)");
+def_node_matcher!(b_any_head, "(_ ...)");
+def_node_matcher!(b_oneof_send_csend, "({send csend} ...)");
+def_node_matcher!(b_oneof_array_hash, "({array hash} ...)");
 
 #[test]
 fn head_any_and_oneof_agree() {
@@ -299,10 +299,10 @@ fn head_any_and_oneof_agree() {
 // 4. Union / Not.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_union_array_send, "{array send}");
-node_pattern!(b_union_array_hash, "{array hash}");
-node_pattern!(b_not_array, "!array");
-node_pattern!(b_not_send, "!send");
+def_node_matcher!(b_union_array_send, "{array send}");
+def_node_matcher!(b_union_array_hash, "{array hash}");
+def_node_matcher!(b_not_array, "!array");
+def_node_matcher!(b_not_send, "!send");
 
 #[test]
 fn union_and_negation_agree() {
@@ -321,8 +321,8 @@ fn union_and_negation_agree() {
 // 5. Captures — Node and Seq slots — values, not just hit/miss.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_capture_arg, "(send nil? :puts $_)");
-node_pattern!(b_seq_capture_bar, "(send _ :bar $...)");
+def_node_matcher!(b_capture_arg, "(send nil? :puts $_)");
+def_node_matcher!(b_seq_capture_bar, "(send _ :bar $...)");
 
 #[test]
 fn anonymous_node_capture_returns_same_id() {
@@ -378,11 +378,11 @@ fn seq_capture_collects_same_args() {
 // `(gvar :$name)` / `(ivar :@n)` / `(cvar :@@c)` / `(lvar :n)` (murphy-o5k).
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_gvar_stdout, "(gvar :$stdout)");
-node_pattern!(b_gvar_any, "(gvar _)");
-node_pattern!(b_lvar_x, "(lvar :x)");
-node_pattern!(b_ivar_at_x, "(ivar :@x)");
-node_pattern!(b_cvar_atat_c, "(cvar :@@c)");
+def_node_matcher!(b_gvar_stdout, "(gvar :$stdout)");
+def_node_matcher!(b_gvar_any, "(gvar _)");
+def_node_matcher!(b_lvar_x, "(lvar :x)");
+def_node_matcher!(b_ivar_at_x, "(ivar :@x)");
+def_node_matcher!(b_cvar_atat_c, "(cvar :@@c)");
 
 #[test]
 fn gvar_sym_slot_match_agrees() {
@@ -440,8 +440,8 @@ fn lvar_ivar_cvar_sym_slot_match_agrees() {
 // it hits when the method name matches any arm.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_send_puts_or_print, "(send nil? {:puts :print} ...)");
-node_pattern!(b_gvar_stdout_or_stderr, "(gvar {:$stdout :$stderr})");
+def_node_matcher!(b_send_puts_or_print, "(send nil? {:puts :print} ...)");
+def_node_matcher!(b_gvar_stdout_or_stderr, "(gvar {:$stdout :$stderr})");
 // `!(gvar {:$stdout :$stderr})` routes the sym-union check through
 // the B-backend's `lower_bool_fixed_slot` (the value-form sibling of
 // `lower_fixed_slot`). Without it the bool-form rewrite has no test
@@ -451,7 +451,7 @@ node_pattern!(b_gvar_stdout_or_stderr, "(gvar {:$stdout :$stderr})");
 // `lower_bool` (slot floats free) and C's matcher (slot must be
 // empty when no list pattern children are given) — a pre-existing
 // gap, independent of sym-union.
-node_pattern!(b_not_gvar_stdout_or_stderr, "!(gvar {:$stdout :$stderr})");
+def_node_matcher!(b_not_gvar_stdout_or_stderr, "!(gvar {:$stdout :$stderr})");
 
 #[test]
 fn send_method_slot_union_matches_any_listed_name() {
@@ -556,7 +556,7 @@ fn gvar_sym_slot_union_matches_any_listed_name() {
     );
 }
 
-node_pattern!(b_send_puts_odd_predicate, "(send nil? :puts odd?)");
+def_node_matcher!(b_send_puts_odd_predicate, "(send nil? :puts odd?)");
 
 #[test]
 fn bare_predicate_in_send_arg_slot_agrees() {
@@ -595,9 +595,9 @@ fn bare_predicate_in_send_arg_slot_agrees() {
 // same answer as the Rust fn for each name.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_pred_odd_q, "#odd?");
-node_pattern!(b_pred_save_bang, "#save!");
-node_pattern!(b_pred_in_union, "{#odd? #save!}");
+def_node_matcher!(b_pred_odd_q, "#odd?");
+def_node_matcher!(b_pred_save_bang, "#save!");
+def_node_matcher!(b_pred_in_union, "{#odd? #save!}");
 
 /// Free fns the B backend's mangled call sites resolve to.
 fn odd_p(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -728,12 +728,12 @@ fn array_empty_ast() -> (Ast, NodeId) {
     (ast, arr)
 }
 
-node_pattern!(b_array_int_plus, "(array int+)");
-node_pattern!(b_array_int_star, "(array int*)");
-node_pattern!(b_array_int_plus_int, "(array int+ int)");
-node_pattern!(b_send_pluck_sym_plus, "(send _ :pluck sym+)");
-node_pattern!(b_send_uc_hash_q, "(send _ :update_columns hash?)");
-node_pattern!(b_send_foo_int_star_str, "(send _ :foo int* str)");
+def_node_matcher!(b_array_int_plus, "(array int+)");
+def_node_matcher!(b_array_int_star, "(array int*)");
+def_node_matcher!(b_array_int_plus_int, "(array int+ int)");
+def_node_matcher!(b_send_pluck_sym_plus, "(send _ :pluck sym+)");
+def_node_matcher!(b_send_uc_hash_q, "(send _ :update_columns hash?)");
+def_node_matcher!(b_send_foo_int_star_str, "(send _ :foo int* str)");
 
 /// Build an `obj.<method>(<args>)` send AST. The closure produces the arg
 /// node ids in call order. Receiver is an `Lvar(:obj)` so that an OptNode
@@ -950,15 +950,15 @@ fn quantifier_optional_hash_arg() {
 
 // ─── Capture-bearing quantifier cases (`$int+`, `$str?`, $-backreffed). ───
 
-node_pattern!(b_array_cap_int_plus, "(array $int+)");
-node_pattern!(b_send_uc_cap_hash_q, "(send _ :update_columns $hash?)");
-node_pattern!(b_array_cap_int_plus_cap_1, "(array $int+ $1)");
-node_pattern!(b_send_foo_rest_int_plus, "(send _ :foo ... int+)");
+def_node_matcher!(b_array_cap_int_plus, "(array $int+)");
+def_node_matcher!(b_send_uc_cap_hash_q, "(send _ :update_columns $hash?)");
+def_node_matcher!(b_array_cap_int_plus_cap_1, "(array $int+ $1)");
+def_node_matcher!(b_send_foo_rest_int_plus, "(send _ :foo ... int+)");
 // Nested quantifier lists where an inner capture slot is also visible from
 // the outer driver's `collect_capture_slots` walk. The outer driver must
 // not double-redirect the slot or both lists race the `__cap{slot}`
 // single-assignment binding.
-node_pattern!(
+def_node_matcher!(
     b_nested_outer_q_inner_cap,
     "(send _ :wrap (array $int+) int+)"
 );
@@ -1230,7 +1230,7 @@ fn quantifier_star_with_fixed_suffix() {
 // for the capture.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_sugar_int_or_float, "${int float}");
+def_node_matcher!(b_sugar_int_or_float, "${int float}");
 
 #[test]
 fn union_capture_sugar_returns_same_node_id_for_both_arms() {
@@ -1299,7 +1299,7 @@ fn union_capture_sugar_returns_same_node_id_for_both_arms() {
 //
 // The first three tests drive the C-backend only (via `compile`/`matches`).
 // The last three are B↔C paired conformance tests that also exercise the
-// `node_pattern!` B-backend.
+// `def_node_matcher!` B-backend.
 // ────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1466,22 +1466,22 @@ fn anyorder_captures_in_declaration_order() {
 // ─── B↔C paired conformance for AnyOrder ─────────────────────────────────
 
 // Declare B-backend matchers for the paired tests below.
-node_pattern!(b_anyorder_basic, "(array <int sym>)");
-node_pattern!(b_anyorder_underscore_then_int, "(array <_ int>)");
+def_node_matcher!(b_anyorder_basic, "(array <int sym>)");
+def_node_matcher!(b_anyorder_underscore_then_int, "(array <_ int>)");
 // Wildcard captures: `$a` captures anything into slot 0, `$b` into slot 1.
-node_pattern!(b_anyorder_caps, "(array <$a $b>)");
+def_node_matcher!(b_anyorder_caps, "(array <$a $b>)");
 // Backtracking + capture: `$a` is a wildcard capture, `int` is a type
 // discriminator. Against [42, :sym], `$a` must end up on :sym (slot 0)
 // after backtracking forces `int` to take 42.
-node_pattern!(b_anyorder_backtrack_cap, "(array <$a int>)");
+def_node_matcher!(b_anyorder_backtrack_cap, "(array <$a int>)");
 // Suffix after AnyOrder: two required elements in any order, then a fixed
 // suffix element. Tests the `rest_kids` continuation path.
-node_pattern!(b_anyorder_then_suffix, "(array <int sym> int)");
+def_node_matcher!(b_anyorder_then_suffix, "(array <int sym> int)");
 // Two AnyOrder siblings in the same list: each block matches its two
 // elements in any order. Tests the gensym'd `'__aosN` label fix (without
 // the gensym, both blocks would emit the same `'__aos` label in the same
 // closure, causing a compile error).
-node_pattern!(b_anyorder_two_siblings, "(array <int sym> <str nil>)");
+def_node_matcher!(b_anyorder_two_siblings, "(array <int sym> <str nil>)");
 
 #[test]
 fn b_anyorder_basic_both_orderings() {
@@ -1847,8 +1847,8 @@ fn b_anyorder_two_anyorder_siblings() {
 
 // 12a. Literal int arg: `#divisible_by?(42)`.
 // The B backend calls `fn divisible_by_qmark(node, cx, n: i64) -> bool`.
-node_pattern!(b_divisible_by_42, "#divisible_by?(42)");
-node_pattern!(b_divisible_by_13, "#divisible_by?(13)");
+def_node_matcher!(b_divisible_by_42, "#divisible_by?(42)");
+def_node_matcher!(b_divisible_by_13, "#divisible_by?(13)");
 
 fn divisible_by_p(node: NodeId, cx: &Cx<'_>, n: i64) -> bool {
     n != 0 && matches!(*cx.kind(node), NodeKind::Int(v) if v % n == 0)
@@ -1911,7 +1911,7 @@ fn predicate_with_literal_int_arg_agrees_across_backends() {
 // The B backend calls `fn same_as_qmark(node, cx, recv: NodeId) -> bool`.
 // The C backend host receives `PredCallArg::Node(recv_id)` and applies the
 // same logic.
-node_pattern!(b_send_same_as, "(send $recv _ #same_as?($recv))");
+def_node_matcher!(b_send_same_as, "(send $recv _ #same_as?($recv))");
 
 /// True iff `node` and `recv` have the same `NodeId`.  In a real cop this
 /// would be a semantic check; here we just verify the NodeId is forwarded.
@@ -1994,7 +1994,7 @@ fn predicate_with_capture_ref_arg_agrees_across_backends() {
 // The B backend lowers `Lit::Str("foo")` to a `&str` literal and calls
 // `starts_with_p(node, cx, "foo")`.  The C backend forwards
 // `PredCallArg::Str("foo")` to the host.
-node_pattern!(b_starts_with_foo, "#starts_with?(\"foo\")");
+def_node_matcher!(b_starts_with_foo, "#starts_with?(\"foo\")");
 
 fn starts_with_p(node: NodeId, cx: &Cx<'_>, prefix: &str) -> bool {
     if let NodeKind::Str(id) = *cx.kind(node) {
@@ -2075,8 +2075,8 @@ fn predicate_with_literal_str_arg_agrees_across_backends() {
 // just-tried element as its argument.  Without the fix the B backend emits
 // `__cap0` (the function-level deferred-init slot) in the probe expression,
 // causing E0381 (used binding isn't initialized).
-node_pattern!(b_anyorder_cap_pred_arg, "(array <$x #expects?($x)>)");
-node_pattern!(b_sym_eq_foo, "#sym_eq?(:foo)");
+def_node_matcher!(b_anyorder_cap_pred_arg, "(array <$x #expects?($x)>)");
+def_node_matcher!(b_sym_eq_foo, "#sym_eq?(:foo)");
 
 fn sym_eq_p(node: NodeId, cx: &Cx<'_>, expected: &str) -> bool {
     if let NodeKind::Sym(sym) = *cx.kind(node) {
@@ -2241,7 +2241,7 @@ fn anyorder_capture_ref_pred_arg_agrees_across_backends() {
 // future codegen path, produces an uninitialized binding).
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(
+def_node_matcher!(
     b_anyorder_nested_cap_pred_arg,
     "(array <(send $recv :foo) #expects?($recv)>)"
 );
@@ -2337,7 +2337,7 @@ fn anyorder_nested_capture_ref_pred_arg_agrees_across_backends() {
 // surrounding `if #probe { ... }` rejects with a Rust compile error.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_anyorder_union_cap_sugar, "(array <${int sym}>)");
+def_node_matcher!(b_anyorder_union_cap_sugar, "(array <${int sym}>)");
 
 #[test]
 fn anyorder_union_capture_sugar_agrees_across_backends() {
@@ -2387,8 +2387,8 @@ fn anyorder_union_capture_sugar_agrees_across_backends() {
 // Both backends must agree on hit/miss and on the captured node id.
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_capture_not_send, "$!send");
-node_pattern!(b_capture_not_send_receiver, "(send $!array :foo)");
+def_node_matcher!(b_capture_not_send, "$!send");
+def_node_matcher!(b_capture_not_send_receiver, "(send $!array :foo)");
 
 #[test]
 fn capture_wrapping_not_agrees_across_backends() {
@@ -2475,9 +2475,9 @@ fn capture_wrapping_not_in_receiver_position_agrees_across_backends() {
 // ────────────────────────────────────────────────────────────────────────
 
 // B-backend helpers for intersection tests.
-node_pattern!(b_not_nil_and_int, "[!nil? int]");
-node_pattern!(b_int_not_one, "[int !1]");
-node_pattern!(b_intersection_capture, "[$v int]");
+def_node_matcher!(b_not_nil_and_int, "[!nil? int]");
+def_node_matcher!(b_int_not_one, "[int !1]");
+def_node_matcher!(b_intersection_capture, "[$v int]");
 
 #[test]
 fn intersection_not_nil_int_matches_int_agrees_across_backends() {
@@ -2596,7 +2596,7 @@ impl<'a> PredicateHost for EvenPredicate<'a> {
     }
 }
 
-node_pattern!(b_wildcard_and_even, "[$_ #even?]");
+def_node_matcher!(b_wildcard_and_even, "[$_ #even?]");
 
 #[test]
 fn intersection_with_predicate_agrees_across_backends() {
@@ -2642,13 +2642,13 @@ fn intersection_with_predicate_agrees_across_backends() {
 // `|` is treated as whitespace-equivalent in D2 (minimal scope).
 // `{(send _ :a) | (send _ :b)}` behaves identically to `{(send _ :a) (send _ :b)}`.
 //
-// NOTE: the `node_pattern!` macro (B-backend) compiles at proc-macro time
+// NOTE: the `def_node_matcher!` macro (B-backend) compiles at proc-macro time
 // from the same `murphy-pattern::parse` grammar, so both backends see the
 // same 2-alt Union after the pipe is absorbed at the grammar level.
 
 // Union-arm send patterns must not use variable-length lists (rest/quantifier)
 // since the B-backend rejects them in v1. Use nil?-receiver + no trailing args.
-node_pattern!(
+def_node_matcher!(
     b_union_pipe_send_a_or_b,
     "{(send nil? :a) | (send nil? :b)}"
 );
@@ -2778,8 +2778,8 @@ fn raise_sym_ast(sym_name: &str) -> (Ast, NodeId) {
 // D3: `Foo` expands to `(const nil? :Foo)` at parse time.
 // `nil?` is used for the receiver slot (not `_`) because Murphy's `_` in an
 // OptNode slot rejects `None` — see the note in `const_or_kind_or_unknown_ident`.
-node_pattern!(b_send_raise_foo, "(send nil? :raise Foo)");
-node_pattern!(
+def_node_matcher!(b_send_raise_foo, "(send nil? :raise Foo)");
+def_node_matcher!(
     b_send_raise_explicit_const,
     "(send nil? :raise (const nil? :Foo))"
 );
@@ -2870,8 +2870,8 @@ fn diff_recv_arg_ast() -> (Ast, NodeId) {
     (ast, send)
 }
 
-node_pattern!(b_send_x_any_x, "(send _x _ _x)");
-node_pattern!(b_send_x_any_y, "(send _x _ _y)");
+def_node_matcher!(b_send_x_any_x, "(send _x _ _x)");
+def_node_matcher!(b_send_x_any_y, "(send _x _ _y)");
 
 #[test]
 fn unify_same_node_hits_both_backends() {
@@ -2930,7 +2930,7 @@ fn unify_two_distinct_names_independent_both_backends() {
 // has two fixed Node slots and no List slot, so it works inside `{}` in
 // the B-backend. The pattern `{(pair _x _x) (pair _ _x)}` against a Pair
 // where key ≠ value exercises the same rollback path.
-node_pattern!(b_union_unify_rollback, "{ (pair _x _x) (pair _ _x) }");
+def_node_matcher!(b_union_unify_rollback, "{ (pair _x _x) (pair _ _x) }");
 
 #[test]
 fn unify_rollback_across_union_arms_both_backends() {
@@ -2967,8 +2967,8 @@ fn unify_rollback_across_union_arms_both_backends() {
 // against Sym and Str atoms, and on slot-type mismatch (Int → no-match).
 // ────────────────────────────────────────────────────────────────────────
 
-node_pattern!(b_regex_to_prefix, "/^to_/");
-node_pattern!(b_regex_abc_insensitive, "/abc/i");
+def_node_matcher!(b_regex_to_prefix, "/^to_/");
+def_node_matcher!(b_regex_abc_insensitive, "/abc/i");
 
 fn sym_node_ast(name: &str) -> (Ast, NodeId) {
     let mut b = AstBuilder::new(name, "t.rb");
@@ -3053,7 +3053,7 @@ fn regex_case_insensitive_flag_agrees() {
     }
 }
 
-node_pattern!(b_regex_str_match, "/^to_/");
+def_node_matcher!(b_regex_str_match, "/^to_/");
 
 #[test]
 fn regex_str_node_match_agrees() {
@@ -3221,13 +3221,13 @@ impl murphy_plugin_api::CopOptions for TestOpts {
     }
 }
 
-node_pattern!(b_pn_str, "%method", opts: TestOpts);
-node_pattern!(b_pn_strset, "%methods", opts: TestOpts);
-node_pattern!(b_pn_int, "%threshold", opts: TestOpts);
-node_pattern!(b_pn_bool, "%active", opts: TestOpts);
-node_pattern!(b_pn_opt, "%opt_method", opts: TestOpts);
-node_pattern!(b_pn_keyword, "%type", opts: TestOpts);
-node_pattern!(b_positional1, "%1");
+def_node_matcher!(b_pn_str, "%method", opts: TestOpts);
+def_node_matcher!(b_pn_strset, "%methods", opts: TestOpts);
+def_node_matcher!(b_pn_int, "%threshold", opts: TestOpts);
+def_node_matcher!(b_pn_bool, "%active", opts: TestOpts);
+def_node_matcher!(b_pn_opt, "%opt_method", opts: TestOpts);
+def_node_matcher!(b_pn_keyword, "%type", opts: TestOpts);
+def_node_matcher!(b_positional1, "%1");
 
 fn true_node_ast() -> (Ast, NodeId) {
     let mut b = AstBuilder::new("true", "t.rb");

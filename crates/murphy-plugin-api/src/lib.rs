@@ -10,7 +10,7 @@
 //! cross the `.so` boundary and are re-exported at the crate root.
 //!
 //! The pack-authoring proc macros (`register_cops!`, `#[derive(CopOptions)]`,
-//! `#[murphy::cop]`, `#[on_node]`, `node_pattern!`) live in
+//! `#[murphy::cop]`, `#[on_node]`, `def_node_matcher!`) live in
 //! `murphy-plugin-macros` and are re-exported here so a pack's
 //! `[dependencies]` stays at one Murphy crate (design §5; enforced for
 //! `murphy-std` by `crates/murphy-std/tests/dep_boundary.rs`). The same
@@ -57,15 +57,15 @@ pub use murphy_ast::{
     Range, SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
 };
 pub use murphy_plugin_macros::{
-    CopOptionEnum, CopOptions, cop, node_pattern, on_new_investigation, on_node, register_cops,
+    CopOptionEnum, CopOptions, cop, def_node_matcher, on_new_investigation, on_node, register_cops,
 };
-// Re-export `regex` so that `node_pattern!`-generated code referencing
+// Re-export `regex` so that `def_node_matcher!`-generated code referencing
 // `::regex::RegexBuilder` / `::regex::Regex` resolves without the caller
 // crate needing its own `regex` dependency (D5, murphy-t8km).
 #[doc(hidden)]
 pub use regex;
 
 // Phase E (murphy-aow): re-export the runtime-parameter machinery so
-// `node_pattern!`-generated code can reach `::murphy_plugin_api::Param` etc.
+// `def_node_matcher!`-generated code can reach `::murphy_plugin_api::Param` etc.
 // without the caller crate having to declare a `murphy-pattern` dependency.
 pub use murphy_pattern::{IntoParam, LitView, Param, match_lit_against_param};

@@ -1,7 +1,7 @@
-error: node_pattern!: predicate name `foo=` is not a valid Rust identifier; `?`/`!` are mangled to `_p`/`_bang`, but other Ruby suffixes (e.g. `=`) have no Rust counterpart
+error: def_node_matcher!: predicate name `foo=` is not a valid Rust identifier; `?`/`!` are mangled to `_p`/`_bang`, but other Ruby suffixes (e.g. `=`) have no Rust counterpart
  --> tests/ui/fail_node_pattern_predicate_setter.rs:6:1
   |
-6 | murphy_plugin_macros::node_pattern!(m, "#foo=");
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+6 | murphy_plugin_macros::def_node_matcher!(m, "#foo=");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |
-  = note: this error originates in the macro `murphy_plugin_macros::node_pattern` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the macro `murphy_plugin_macros::def_node_matcher` (in Nightly builds, run with -Z macro-backtrace for more info)

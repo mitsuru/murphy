@@ -2,7 +2,7 @@
 //!
 //! Walks a [`PatternIr`] over an arena [`Ast`] and reports either a
 //! successful match (with slot-indexed [`Captures`]) or no match. The
-//! semantics MUST agree with the B-backend `node_pattern!` proc macro;
+//! semantics MUST agree with the B-backend `def_node_matcher!` proc macro;
 //! cross-backend conformance is guarded by `tests/conformance.rs`.
 //!
 //! The interpreter is recursive over the IR. Variable-length child lists

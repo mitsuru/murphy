@@ -92,7 +92,7 @@ pub enum PatKind {
     /// At match time the matcher resolves `name` via
     /// [`crate::ParamHost::named`] and compares the subject's literal shape
     /// against the returned [`crate::Param`] using
-    /// [`crate::match_lit_against_param`]. The B-backend macro (`node_pattern!`)
+    /// [`crate::match_lit_against_param`]. The B-backend macro (`def_node_matcher!`)
     /// supplies the same `Param` value from the cop's `CopOptions` field via
     /// [`crate::IntoParam`].
     ///

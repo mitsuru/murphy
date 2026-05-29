@@ -4,7 +4,7 @@
 //! one `NodeKind` variant's fields, in **parser-gem child order**: each fixed
 //! slot is a `Node`, `OptNode`, or `Sym`, and an optional trailing `List`
 //! slot consumes any rest. This mirrors the `SCHEMA_TABLE` the B-backend
-//! proc macro uses to lower `node_pattern!` calls; the two backends MUST
+//! proc macro uses to lower `def_node_matcher!` calls; the two backends MUST
 //! agree on slot order and type per kind so the same source pattern matches
 //! the same set of nodes (design §4, "1 grammar, 2 backends").
 //!

@@ -54,7 +54,7 @@ and review loop catch the kinds of regressions that block merge later.
    autocorrect / test case the port does not cover.
 4. **Phase 4 — escalate gaps the guide cannot cover.** Anything that
    needs an ABI extension, a new `Cx` method, a new dispatch kind, or a
-   `node_pattern!` grammar extension goes to the user, not into a
+   `def_node_matcher!` grammar extension goes to the user, not into a
    silent workaround.
 5. **Phase 5 — pass `roborev-refine` review.** Iterate fix → re-review
    until the daemon reports passing or hits its iteration cap.
@@ -78,7 +78,7 @@ implementation against this list, so keep it explicit:
 - **`RESTRICT_ON_SEND`.** The method-name allow-list (translates
   directly into Murphy's `methods = [...]`).
 - **`def_node_matcher` / `def_node_search` patterns.** These translate
-  to `node_pattern!` — log every one verbatim so the v1 grammar
+  to `def_node_matcher!` — log every one verbatim so the v1 grammar
   subset can be compared against (`references/node-pattern.md`).
 - **`cop_config` keys, defaults, and types.** Each will become a field
   on the `#[derive(CopOptions)]` struct. Note `SupportedStyles` /
@@ -157,7 +157,7 @@ lists all valid forms.
   file with `node == cx.root()`. Use this for layout / trailing-whitespace
   style cops that work on source text rather than a specific node kind.
 - **Shape-based matching across multiple kinds** — declare a
-  `node_pattern!(...)` matcher at module top level and call it from the
+  `def_node_matcher!(...)` matcher at module top level and call it from the
   dispatch body. See `references/node-pattern.md` for the v1 grammar
   subset, or infra guide §3 ("Reusable matchers").
 
@@ -503,7 +503,7 @@ Escalation candidates:
   `on_op_asgn`, …) that maps to a Murphy kind which is not yet wired
   for dispatch, or for which substituting a nearby kind would change
   observable semantics.
-- **`node_pattern!` v1 limit.** The pattern uses named captures,
+- **`def_node_matcher!` v1 limit.** The pattern uses named captures,
   predicate calls (`#some_method?`), or non-trailing repetition — see
   `references/node-pattern.md` for what v1 *can* express.
 - **Option type unsupported.** The RuboCop config key is a nested hash
@@ -524,7 +524,7 @@ Escalation format — bring this to the user in one short report:
 3. **Blocker vs degradable.** Whether the cop ships with a documented
    v1 limitation, or whether shipping at all needs the ABI extension.
 4. **Suggested extension.** ADR, new `Cx` method, new dispatch kind,
-   `node_pattern!` grammar item — name the surface to extend.
+   `def_node_matcher!` grammar item — name the surface to extend.
 
 If the user agrees to degrade and ship with the limitation, document
 it in the cop file's `murphy-parity` block (`status: partial`, gap issue
@@ -628,7 +628,7 @@ merge — proceed once CI is green.
    marker because future agents will trust it.
 9. **Quiet workarounds for Phase 4 gaps.** Reaching into `murphy-ast` /
    `murphy-translate` to dodge a missing `Cx` method, or hand-rolling
-   a parser to substitute for an unsupported `node_pattern!` predicate,
+   a parser to substitute for an unsupported `def_node_matcher!` predicate,
    bypasses the single-surface boundary and the dep-boundary test will
    fail. Escalate instead.
 
@@ -642,7 +642,7 @@ merge — proceed once CI is green.
 - **`references/dispatch-and-cx.md`** — extended cheat-sheet for the
   `#[on_node]` / `#[on_new_investigation]` attributes and every method
   on `Cx<'_>`.
-- **`references/node-pattern.md`** — `node_pattern!` v1 grammar subset
+- **`references/node-pattern.md`** — `def_node_matcher!` v1 grammar subset
   and when to reach for it instead of hand-written destructuring.
 - **`references/options.md`** — `#[derive(CopOptions)]` + `#[option(...)]`
   reference, including the current v1 limitation that options are read

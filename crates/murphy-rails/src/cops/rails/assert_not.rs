@@ -36,14 +36,14 @@
 //! Outer `Send(receiver=None, method="assert", args=[inner])`, where
 //! `inner` is itself a `Send(receiver=Some(_), method="!", args=[])`.
 //!
-//! Expressed declaratively with [`node_pattern!`] (RuboCop NodePattern
+//! Expressed declaratively with [`def_node_matcher!`] (RuboCop NodePattern
 //! grammar): in DSL `nil?` means receiver-None on the outer Send,
 //! `!nil?` on the inner Send forces a non-None receiver (the negated
 //! expression), and the trailing argument list is omitted so each
 //! Send must take exactly its specified arity (outer = 1 inner arg,
 //! inner = 0).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent:
 //   `(send nil? :assert (send !nil? :!))`
@@ -53,7 +53,7 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, node_pattern};
 //
 // Strict arity on both Sends is load-bearing (excludes
 // `assert foo, "msg"`, `assert()`, and any inner-bang oddity).
-node_pattern!(is_assert_bang, "(send nil? :assert (send !nil? :!))");
+def_node_matcher!(is_assert_bang, "(send nil? :assert (send !nil? :!))");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]

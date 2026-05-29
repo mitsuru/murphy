@@ -1,5 +1,5 @@
-error: node_pattern!: pattern parse error: postfix `*` / `+` / `?` is only valid as a direct child of a node match (at 0..4)
- --> tests/ui/fail_node_pattern_quantifier_top_level.rs:5:40
+error: def_node_matcher!: pattern parse error: postfix `*` / `+` / `?` is only valid as a direct child of a node match (at 0..4)
+ --> tests/ui/fail_node_pattern_quantifier_top_level.rs:5:44
   |
-5 | murphy_plugin_macros::node_pattern!(m, "int+");
-  |                                        ^^^^^^
+5 | murphy_plugin_macros::def_node_matcher!(m, "int+");
+  |                                            ^^^^^^
