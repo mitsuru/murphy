@@ -718,6 +718,59 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// `pure?` — the node is free of side effects: a pure value leaf
+    /// (literals, variable reads, `const`, `defined?`) or a composite
+    /// (`and`/`or`/`if`/`case`/`begin`/`array`/`hash`/range/`while`/… ) all
+    /// of whose child nodes are themselves pure. Mirrors RuboCop's
+    /// `Node#pure?`.
+    ///
+    /// **Divergences (Murphy translator gaps, documented):** `__FILE__` /
+    /// `__LINE__` and flip-flops parse to [`NodeKind::Unknown`] in Murphy,
+    /// so they fall through to `false` where RuboCop would treat the former
+    /// as pure and recurse into the latter. `until_post`/`while_post` are
+    /// folded into [`NodeKind::Until`]/[`NodeKind::While`] (a `post` flag),
+    /// so both forms are covered.
+    pub fn is_pure(&self, id: NodeId) -> bool {
+        match self.kind(id) {
+            // Pure value leaves — always pure.
+            NodeKind::Const { .. }
+            | NodeKind::Cvar(..)
+            | NodeKind::Defined(..)
+            | NodeKind::False_
+            | NodeKind::Float(..)
+            | NodeKind::Gvar(..)
+            | NodeKind::Int(..)
+            | NodeKind::Ivar(..)
+            | NodeKind::Lvar(..)
+            | NodeKind::Nil
+            | NodeKind::Str(..)
+            | NodeKind::Sym(..)
+            | NodeKind::True_
+            | NodeKind::Regopt(..) => true,
+            // Composites — pure iff every child node is pure.
+            NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Array(..)
+            | NodeKind::Begin(..)
+            | NodeKind::Kwbegin(..)
+            | NodeKind::Case { .. }
+            | NodeKind::Dstr(..)
+            | NodeKind::Dsym(..)
+            | NodeKind::Ensure { .. }
+            | NodeKind::RangeExpr { .. }
+            | NodeKind::For { .. }
+            | NodeKind::Hash(..)
+            | NodeKind::If { .. }
+            | NodeKind::Not(..)
+            | NodeKind::Pair { .. }
+            | NodeKind::Regexp { .. }
+            | NodeKind::Until { .. }
+            | NodeKind::When { .. }
+            | NodeKind::While { .. } => self.children(id).iter().all(|&c| self.is_pure(c)),
+            _ => false,
+        }
+    }
+
     /// The number of source lines the node's expression range spans —
     /// Murphy's analog of RuboCop's `node.line_count`
     /// (`last_line - first_line + 1`), computed from the expression
@@ -2603,6 +2656,43 @@ mod tests {
                     !cx.is_recursive_basic_literal(root),
                     "{src} should NOT be recursive_basic_literal"
                 );
+            });
+        }
+    }
+
+    #[test]
+    fn pure_predicate_covers_leaves_and_pure_composites() {
+        for src in [
+            "42",
+            ":s",
+            "nil",
+            "true",
+            "1.5", // literal leaves
+            "@x",
+            "$x",
+            "@@x",
+            "FOO",         // ivar/gvar/cvar/const reads
+            "defined?(x)", // defined? is a pure leaf
+            "[1, 2]",
+            "{a: 1}",
+            "1..2", // pure composites
+            "1 && 2",
+            "1 || 2", // and/or of pure (note: `!x` parses to a
+            // `send :!`, not a `not` node, so it is not pure — matching RuboCop)
+            "1 if true", // if: pure cond + pure branch
+        ] {
+            with_parsed(src, |cx, root| {
+                assert!(cx.is_pure(root), "{src} should be pure")
+            });
+        }
+        for src in [
+            "foo", // a method send may have side effects
+            "foo.bar", "puts 1", "[1, foo]", // composite with a non-pure child
+            "x = 1",    // assignment
+            "@x = 1",
+        ] {
+            with_parsed(src, |cx, root| {
+                assert!(!cx.is_pure(root), "{src} should NOT be pure")
             });
         }
     }
