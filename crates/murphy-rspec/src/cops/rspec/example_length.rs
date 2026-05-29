@@ -169,7 +169,9 @@ fn apply_count_as_one(
         let should_fold = match cx.kind(desc) {
             NodeKind::Array(_) => fold_array,
             NodeKind::Hash(_) => fold_hash,
-            NodeKind::Send { .. } | NodeKind::Csend { .. } => fold_method_call,
+            NodeKind::Send { .. } | NodeKind::Csend { .. } | NodeKind::Block { .. } => {
+                fold_method_call
+            }
             _ => false,
         };
 
@@ -193,10 +195,7 @@ fn apply_count_as_one(
 ///
 /// This matches RuboCop's `irrelevant_line` behavior.
 fn count_lines(text: &str, count_comments: bool) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-    text.split('\n')
+    text.lines()
         .filter(|line| {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -515,6 +514,36 @@ mod tests {
             offenses.len(),
             0,
             "CountAsOne:hash should fold the multi-line hash to 1 line"
+        );
+    }
+
+    #[test]
+    fn count_as_one_folds_block_method_call_into_one_line() {
+        // A method call with a block (foo do...end) is parsed as a Block node.
+        // CountAsOne:method_call should fold it the same as Send/Csend.
+        // 1 code line + multi-line block method call folded to 1 = 2 lines.
+        // Max=3 -> no offense.
+        let src = indoc! {r#"
+            it "works" do
+              a = 1
+              foo do
+                bar(1)
+                bar(2)
+                bar(3)
+                bar(4)
+              end
+            end
+        "#};
+        let opts = ExampleLengthOptions {
+            max: 3,
+            count_comments: false,
+            count_as_one: vec!["method_call".to_string()],
+        };
+        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
+        assert_eq!(
+            offenses.len(),
+            0,
+            "CountAsOne:method_call should fold a block method call (Block node) to 1 line"
         );
     }
 }
