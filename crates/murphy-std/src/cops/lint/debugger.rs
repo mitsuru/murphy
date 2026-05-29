@@ -9,7 +9,12 @@
 //! gap_issues:
 //!   - murphy-rjwo
 //! notes: >
-//!   Known gaps remain around RuboCop configuration shape and false-positive guards.
+//!   Fixed: multi-level Send chains (Kernel.binding.*), missing default
+//!   entries (Kernel.byebug, Kernel.remote_byebug, save_page,
+//!   save_screenshot, page.save_*, Kernel.binding.* variants, debug/start).
+//!   Cbase handling not needed: Murphy translates ::X to Const{scope:None}
+//!   same as X, so ::Pry.rescue and ::Kernel.debugger already match.
+//!   Remaining gap: assumed_usage_context guard (deferred to murphy-rjwo).
 //! ```
 //!
 //! `require`s that load one. Defaults mirror RuboCop's `DebuggerMethods`
@@ -19,15 +24,20 @@
 //! ## Matched shapes
 //!
 //! - **Bare** debugger entrypoints: `debugger`, `byebug`, `remote_byebug`,
-//!   `pry`, `save_and_open_page`, `save_and_open_screenshot`, `jard`, …
+//!   `pry`, `save_and_open_page`, `save_and_open_screenshot`, `save_page`,
+//!   `save_screenshot`, `jard`, …
 //! - **Chained** entrypoints: `binding.irb`, `binding.pry`,
 //!   `binding.remote_pry`, `binding.pry_remote`, `binding.b`,
-//!   `binding.break`, `binding.console`.
+//!   `binding.break`, `binding.console`, and the `Kernel.binding.*` forms.
 //! - **Const-receiver** entrypoints: `Kernel.debugger`, `Kernel.binding`,
-//!   `Pry.rescue` (and any nested `Foo::Bar.method` path).
+//!   `Kernel.byebug`, `Kernel.remote_byebug`, `Pry.rescue` (and any
+//!   nested `Foo::Bar.method` path). `::Pry` and `::Kernel` are treated
+//!   identically to `Pry` and `Kernel` (Murphy normalises them at the
+//!   AST level).
 //! - **Debugger requires**: `require 'debug'`, `require 'debug/open'`,
-//!   `require 'debug/open_nonstop'`, `require 'byebug'`,
-//!   `require 'pry'`, `require 'pry-byebug'`, `require 'capybara/dsl'`.
+//!   `require 'debug/open_nonstop'`, `require 'debug/start'`,
+//!   `require 'byebug'`, `require 'pry'`, `require 'pry-byebug'`,
+//!   `require 'capybara/dsl'`.
 //!
 //! ## Message
 //!
@@ -71,6 +81,8 @@ pub struct Options {
             "pry",
             "save_and_open_page",
             "save_and_open_screenshot",
+            "save_page",
+            "save_screenshot",
             "jard",
             // chained on `binding`
             "binding.irb",
@@ -83,7 +95,21 @@ pub struct Options {
             // const-receiver
             "Kernel.debugger",
             "Kernel.binding",
+            "Kernel.byebug",
+            "Kernel.remote_byebug",
             "Pry.rescue",
+            // page.* Capybara helpers
+            "page.save_and_open_page",
+            "page.save_and_open_screenshot",
+            "page.save_page",
+            "page.save_screenshot",
+            // Kernel.binding.* three-level chains
+            "Kernel.binding.b",
+            "Kernel.binding.break",
+            "Kernel.binding.pry",
+            "Kernel.binding.remote_pry",
+            "Kernel.binding.pry_remote",
+            "Kernel.binding.irb",
         ],
         description = "Method calls that should be flagged as debugger entry points."
     )]
@@ -95,6 +121,7 @@ pub struct Options {
             "debug",
             "debug/open",
             "debug/open_nonstop",
+            "debug/start",
             "pry",
             "pry-byebug",
         ],
@@ -133,6 +160,8 @@ impl Debugger {
             "rescue",
             "save_and_open_page",
             "save_and_open_screenshot",
+            "save_page",
+            "save_screenshot",
             "jard",
             "require"
         ]
@@ -173,6 +202,12 @@ impl Debugger {
             return;
         };
         if opts.debugger_methods.iter().any(|e| e == &sig) {
+            // Suppress this match if the parent Send will produce a longer
+            // match — prevents double-flagging e.g. both `Kernel.binding`
+            // and `Kernel.binding.irb` when the latter is what is written.
+            if parent_will_match(cx, node, &sig, &opts) {
+                return;
+            }
             let src = cx.raw_source(cx.range(node));
             cx.emit_offense(
                 cx.range(node),
@@ -184,7 +219,7 @@ impl Debugger {
 }
 
 /// Canonical `<receiver>.<method>` signature, or just `<method>` for a
-/// bare call. Returns `None` when the receiver shape isn't one the
+/// bare call. Returns `None` when the receiver shape is not something the
 /// configured `DebuggerMethods` syntax can spell — anonymous receivers
 /// like `(some + expr).pry` are out of scope.
 fn call_signature(cx: &Cx<'_>, receiver: OptNodeId, method: &str) -> Option<String> {
@@ -197,15 +232,23 @@ fn call_signature(cx: &Cx<'_>, receiver: OptNodeId, method: &str) -> Option<Stri
 
 fn receiver_signature(cx: &Cx<'_>, id: NodeId) -> Option<String> {
     match *cx.kind(id) {
-        // Bare method call returning self / something, e.g. `binding`.
-        // Only honor it when the receiver itself is a no-receiver,
-        // no-arg call (e.g. `binding`, `Kernel`'s lookup is *not* a Send).
+        // No-arg Send call, e.g. `binding` or `page`. Recurse into the
+        // receiver so multi-level chains like `Kernel.binding.irb` work:
+        // `irb`'s receiver is `binding` (Send, recv=Const(Kernel)) →
+        // recurse → "Kernel.binding"; outer result → "Kernel.binding.irb".
         NodeKind::Send {
             receiver,
             method,
             args,
-        } if receiver.get().is_none() && cx.list(args).is_empty() => {
-            Some(cx.symbol_str(method).to_string())
+        } if cx.list(args).is_empty() => {
+            let method_name = cx.symbol_str(method).to_string();
+            match receiver.get() {
+                None => Some(method_name),
+                Some(recv_id) => {
+                    let outer = receiver_signature(cx, recv_id)?;
+                    Some(format!("{outer}.{method_name}"))
+                }
+            }
         }
         NodeKind::Const { scope, name } => {
             let name_str = cx.symbol_str(name);
@@ -219,6 +262,39 @@ fn receiver_signature(cx: &Cx<'_>, id: NodeId) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Returns `true` when the immediate parent of `node` is a no-arg Send
+/// whose full signature would also match a (longer) entry in
+/// `opts.debugger_methods`. Used to suppress the shorter match when
+/// both `Kernel.binding` and `Kernel.binding.irb` are in the list and
+/// the source says `Kernel.binding.irb`.
+fn parent_will_match(cx: &Cx<'_>, node: NodeId, current_sig: &str, opts: &Options) -> bool {
+    let Some(parent_id) = cx.parent(node).get() else {
+        return false;
+    };
+    let NodeKind::Send {
+        receiver: parent_recv,
+        method: parent_method,
+        args: parent_args,
+    } = *cx.kind(parent_id)
+    else {
+        return false;
+    };
+    // Only consider the parent if `node` is the receiver of `parent_id`.
+    let Some(actual_recv) = parent_recv.get() else {
+        return false;
+    };
+    if actual_recv != node {
+        return false;
+    }
+    // The parent must be a no-arg call (same constraint as receiver_signature).
+    if !cx.list(parent_args).is_empty() {
+        return false;
+    }
+    let parent_method_str = cx.symbol_str(parent_method);
+    let longer_sig = format!("{current_sig}.{parent_method_str}");
+    opts.debugger_methods.iter().any(|e| e == &longer_sig)
 }
 
 #[cfg(test)]
@@ -316,5 +392,85 @@ mod tests {
         // `foo.b` is not `binding.b` — the receiver must literally be
         // the `binding` no-arg call.
         test::<Debugger>().expect_no_offenses("foo.b\nfoo.break\nfoo.irb\n");
+    }
+
+    // --- parity gap tests ---
+
+    #[test]
+    fn flags_kernel_byebug() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                Kernel.byebug
+                ^^^^^^^^^^^^^ Remove debugger entry point `Kernel.byebug`.
+            "#});
+    }
+
+    #[test]
+    fn flags_kernel_remote_byebug() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                Kernel.remote_byebug
+                ^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.remote_byebug`.
+            "#});
+    }
+
+    #[test]
+    fn flags_bare_save_page_and_save_screenshot() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                save_page
+                ^^^^^^^^^ Remove debugger entry point `save_page`.
+                save_screenshot
+                ^^^^^^^^^^^^^^^ Remove debugger entry point `save_screenshot`.
+            "#});
+    }
+
+    #[test]
+    fn flags_page_dot_save_helpers() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                page.save_and_open_page
+                ^^^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `page.save_and_open_page`.
+                page.save_and_open_screenshot
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `page.save_and_open_screenshot`.
+                page.save_page
+                ^^^^^^^^^^^^^^ Remove debugger entry point `page.save_page`.
+                page.save_screenshot
+                ^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `page.save_screenshot`.
+            "#});
+    }
+
+    #[test]
+    fn flags_kernel_binding_chain_b_and_break() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                Kernel.binding.b
+                ^^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.binding.b`.
+                Kernel.binding.break
+                ^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.binding.break`.
+            "#});
+    }
+
+    #[test]
+    fn flags_kernel_binding_pry_variants() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                Kernel.binding.pry
+                ^^^^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.binding.pry`.
+                Kernel.binding.remote_pry
+                ^^^^^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.binding.remote_pry`.
+                Kernel.binding.pry_remote
+                ^^^^^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.binding.pry_remote`.
+            "#});
+    }
+
+    #[test]
+    fn flags_kernel_binding_irb() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                Kernel.binding.irb
+                ^^^^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.binding.irb`.
+            "#});
+    }
+
+    #[test]
+    fn flags_require_debug_start() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+                require 'debug/start'
+                ^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `require 'debug/start'`.
+            "#});
     }
 }
