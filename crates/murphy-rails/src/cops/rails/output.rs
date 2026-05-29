@@ -9,26 +9,31 @@
 //! gap_issues:
 //!   - murphy-hfcg
 //! notes: >
-//!   Known gaps remain around guards, STDOUT/STDERR coverage, autocorrect, and file gating.
+//!   output?/io_output? method-gating split and parent/block/hash/block_pass
+//!   guards are now closed. Autocorrect (logger rewrite) and file-gating
+//!   remain deferred per ADR 0006.
 //! ```
 //!
-//! (`puts`/`p`/`pp`/`print`/`pretty_print`/`ap`/`binwrite`/`syswrite`/
-//! `write`/`write_nonblock`). Rails apps should route debug output
-//! through `Rails.logger` so it ends up in the configured log sink
-//! instead of stdout.
+//! (`puts`/`p`/`pp`/`print`/`pretty_print`/`ap` — bare only) and
+//! (`binwrite`/`syswrite`/`write`/`write_nonblock` — stdio receiver only).
+//! Rails apps should route debug output through `Rails.logger` so it ends
+//! up in the configured log sink instead of stdout.
 //!
-//! Same pattern as `murphy-std`'s `Murphy/NoReceiverPuts`, expanded
-//! with the longer method-name table that upstream `rubocop-rails`
-//! `Rails/Output` covers (see the call-dispatch table at
-//! `git show 46a1de6^:crates/murphy-rails/src/lib.rs` for the
-//! pre-9cr.22 method list).
+//! Mirrors RuboCop's two-pattern split:
+//! - `output?`:    nil? receiver + {ap p pp pretty_print print puts}
+//! - `io_output?`: $stdout/$stderr/STDOUT/STDERR receiver +
+//!   {binwrite syswrite write write_nonblock}
 //!
 //! ## Matched shapes (Send node)
 //!
-//! - **bare call only**: `receiver == OptNodeId::NONE`. An explicit
-//!   receiver (`logger.info "x"`, `Foo.puts "x"`, `self.puts "x"`) is
-//!   intentional output and is left alone.
-//! - **method ∈ debug-output names**: the table above.
+//! - **bare call only** for output methods: `receiver == OptNodeId::NONE`.
+//! - **stdio receiver** for io_output methods.
+//! - **Not flagged** when the node is the *receiver* of a parent Send/Csend
+//!   (e.g. `p.do_something` — the `p` is chained, not a bare debug call),
+//!   or when the node IS the call of its parent Block/Numblock/Itblock
+//!   (DSL usage like `p { 'text' }`), or when any argument is a Hash or
+//!   BlockPass. A debug call used as an *argument* (e.g. `foo(p)`) IS
+//!   flagged.
 //!
 //! ## No autocorrect
 //!
@@ -57,41 +62,74 @@ impl Output {
         // nodes today (`KINDS = [send]`), but the `let-else` is free
         // insurance against a future kind-aliasing accident.
         let NodeKind::Send {
-            receiver, method, ..
+            receiver,
+            method,
+            args,
+            ..
         } = *cx.kind(node)
         else {
             return;
         };
-        // Gate 1: the receiver must be either bare (no receiver) or
-        // one of the standard-output stream aliases (`$stdout`,
-        // `$stderr`, `STDOUT`, `STDERR`). Any other receiver
-        // (`logger`, `Rails.logger`, an arbitrary Const like
-        // `Foo.puts`, a chain like `obj.pp`) is intentional output and
-        // is left alone. roborev review (job 1124) flagged that an
-        // earlier "receiver-less only" gate let through
-        // `$stdout.puts "x"` / `STDOUT.write "x"` /
-        // `$stderr.print "x"`, which are exactly the stdio-bypass
-        // shapes this cop wants to catch.
-        if !receiver_targets_stdout(cx, receiver) {
+
+        // Gate 1 (split into two branches mirroring RuboCop):
+        //
+        // Branch A — output? pattern: nil receiver + output-method names.
+        let is_output = receiver.get().is_none()
+            && matches!(
+                cx.symbol_str(method),
+                "ap" | "p" | "pp" | "pretty_print" | "print" | "puts"
+            );
+
+        // Branch B — io_output? pattern: stdio receiver + write-family names.
+        let is_io_output = !is_output
+            && matches!(
+                cx.symbol_str(method),
+                "binwrite" | "syswrite" | "write" | "write_nonblock"
+            )
+            && receiver_is_stdio(cx, receiver);
+
+        if !is_output && !is_io_output {
             return;
         }
-        // Gate 2: only the debug-output method names. Mirrors the
-        // pre-9cr.22 `output_dispatch` table.
-        if !matches!(
-            cx.symbol_str(method),
-            "puts"
-                | "print"
-                | "p"
-                | "pp"
-                | "pretty_print"
-                | "ap"
-                | "binwrite"
-                | "syswrite"
-                | "write"
-                | "write_nonblock"
-        ) {
+
+        // Gate 2: skip in two cases —
+        //
+        // (a) This node is the *call* child of a parent Block/Numblock/Itblock
+        //     (DSL block call like `p { 'text' }` — mirrors RuboCop's
+        //     `node.block_node` check). Note: a send that is merely in the
+        //     *body* of a block (e.g. `foo do; puts "x"; end`) is not the
+        //     block's call — it still fires.
+        //
+        // (b) This node is the *receiver* of a parent Send/Csend
+        //     (e.g. `p.do_something` or `p&.do_something`). A debug call
+        //     used as an *argument* — e.g. `foo(p)` or
+        //     `logger.info(puts "x")` — is still flagged.
+        if let Some(pid) = cx.parent(node).get() {
+            let suppress = match *cx.kind(pid) {
+                NodeKind::Block { call, .. } => call == node,
+                NodeKind::Numblock { send, .. } => send == node,
+                NodeKind::Itblock { send, .. } => send == node,
+                // Narrowed: only suppress when the debug call is the
+                // *receiver* (p.foo), not when it is an argument (foo(p)).
+                NodeKind::Send { receiver, .. } => receiver.get() == Some(node),
+                NodeKind::Csend { receiver, .. } => receiver == node,
+                _ => false,
+            };
+            if suppress {
+                return;
+            }
+        }
+
+        // Gate 3: skip when any argument is a Hash (DSL keyword args
+        // like `p(class: 'foo')`) or a BlockPass (`p(&:method)`).
+        if cx
+            .list(args)
+            .iter()
+            .any(|&a| matches!(*cx.kind(a), NodeKind::Hash(_) | NodeKind::BlockPass(_)))
+        {
             return;
         }
+
         cx.emit_offense(
             cx.range(node),
             "Do not write to stdout. Use Rails's logger if you want to log.",
@@ -100,18 +138,17 @@ impl Output {
     }
 }
 
-/// `true` if `receiver` is one of the standard-output stream aliases
-/// — bare (None), `$stdout` / `$stderr` (`Gvar`), or top-level
-/// `STDOUT` / `STDERR` (`Const` with no scope). These are exactly the
-/// receivers whose `puts` / `write` / etc. calls bypass `Rails.logger`
-/// and write directly to the process's stdio fds.
+/// `true` if `receiver` is one of the standard-output stream aliases —
+/// `$stdout` / `$stderr` (`Gvar`), or top-level `STDOUT` / `STDERR`
+/// (`Const` with no scope).
 ///
-/// Any other receiver (logger object, `Rails.logger`, custom Const,
-/// chained expression) is intentional output for this cop's purposes
-/// and returns `false`.
-fn receiver_targets_stdout(cx: &Cx<'_>, receiver: OptNodeId) -> bool {
+/// Note: a bare receiver (None) returns `false` here — bare calls are
+/// handled by Branch A (is_output) which only applies to output-method
+/// names, not by Branch B (io_output?) which requires an explicit stdio
+/// receiver.
+fn receiver_is_stdio(cx: &Cx<'_>, receiver: OptNodeId) -> bool {
     let Some(rid) = receiver.get() else {
-        return true; // bare call
+        return false; // bare call is not a stdio receiver for io_output?
     };
     match *cx.kind(rid) {
         NodeKind::Gvar(name) => {
@@ -179,14 +216,15 @@ mod tests {
             "#});
     }
 
+    // === puts in a block body still flags (it is the body, not the call) ===
+
     #[test]
-    fn flags_bare_binwrite() {
-        // binwrite/syswrite/write/write_nonblock are filesystem-output
-        // methods that, on a bare call, write to whatever Rails has
-        // bound to `$stdout` — same problem as puts.
+    fn flags_puts_in_block_body() {
         test::<Output>().expect_offense(indoc! {r#"
-                binwrite data
-                ^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+                foo do
+                  puts "x"
+                  ^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+                end
             "#});
     }
 
@@ -233,23 +271,7 @@ mod tests {
         test::<Output>().expect_no_offenses("puts = \"x\"\n");
     }
 
-    // === stdio-alias receiver cases (should flag, added per roborev review 1124) ===
-
-    #[test]
-    fn flags_stdout_gvar_puts() {
-        test::<Output>().expect_offense(indoc! {r#"
-                $stdout.puts "x"
-                ^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#});
-    }
-
-    #[test]
-    fn flags_stderr_gvar_print() {
-        test::<Output>().expect_offense(indoc! {r#"
-                $stderr.print "x"
-                ^^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
-            "#});
-    }
+    // === stdio-alias receiver + write-family cases (should flag) ===
 
     #[test]
     fn flags_stdout_const_write() {
@@ -279,5 +301,88 @@ mod tests {
         // `Foo::STDOUT` is a namespaced constant, not the top-level
         // stdio alias.
         test::<Output>().expect_no_offenses("Foo::STDOUT.puts \"x\"\n");
+    }
+
+    // === parent-is-call guard (false positives) ===
+
+    #[test]
+    fn does_not_flag_p_dot_do_something() {
+        // `p` is used as the receiver of a method call — not a bare
+        // debug-output call. RuboCop skips when parent is call_type?.
+        test::<Output>().expect_no_offenses("p.do_something\n");
+    }
+
+    #[test]
+    fn does_not_flag_p_safe_nav_do_something() {
+        // Same as above but with safe-navigation (`p&.do_something`).
+        test::<Output>().expect_no_offenses("p&.do_something\n");
+    }
+
+    #[test]
+    fn flags_debug_call_as_method_argument() {
+        // `puts "x"` is an argument to another method — it is still a
+        // bare debug-output call and must fire even though its parent is
+        // a Send node. The old guard was too broad: it skipped any
+        // Send/Csend parent, causing a false negative here.
+        test::<Output>().expect_offense(indoc! {r#"
+                logger.info(puts "x")
+                            ^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#});
+    }
+
+    #[test]
+    fn flags_p_as_method_argument() {
+        // `p` passed as an argument — not a receiver chain, still a debug call.
+        test::<Output>().expect_offense(indoc! {r#"
+                foo(p)
+                    ^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#});
+    }
+
+    // === block-call guard (node IS the block's call, not body) ===
+
+    #[test]
+    fn does_not_flag_p_with_block() {
+        // `p { 'text' }` — `p` is the *call* of the block node, so it
+        // is a DSL usage. RuboCop uses `node.block_node` for this check.
+        test::<Output>().expect_no_offenses(indoc! {r#"
+                div do
+                  p { 'text' }
+                end
+            "#});
+    }
+
+    // === hash/block_pass argument guard (false positives) ===
+
+    #[test]
+    fn does_not_flag_p_with_hash_arg() {
+        // `p(class: 'DSL')` — the argument is a Hash; this is a DSL
+        // call, not debug output.
+        test::<Output>().expect_no_offenses("p(class: 'this `p` method is a DSL')\n");
+    }
+
+    #[test]
+    fn does_not_flag_p_with_block_pass() {
+        // `p(&:dsl)` — the argument is a BlockPass; DSL pattern.
+        test::<Output>().expect_no_offenses("p(&:this_p_method_is_a_dsl)\n");
+    }
+
+    // === method-gating split: bare write-family should NOT flag ===
+
+    #[test]
+    fn does_not_flag_bare_write() {
+        // Bare `write` is not in RuboCop's output? group (nil receiver
+        // + output names). io_output? requires an explicit stdio
+        // receiver. Neither pattern matches.
+        test::<Output>().expect_no_offenses("write \"x\"\n");
+    }
+
+    // === method-gating split: $stdout + output-family should NOT flag ===
+
+    #[test]
+    fn does_not_flag_stdout_puts() {
+        // `$stdout.puts` — output? requires nil? receiver; io_output?
+        // does not list `puts`. Neither pattern matches RuboCop.
+        test::<Output>().expect_no_offenses("$stdout.puts \"x\"\n");
     }
 }
