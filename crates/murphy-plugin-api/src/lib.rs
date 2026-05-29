@@ -24,6 +24,7 @@ mod abi;
 mod config_error;
 mod cop;
 mod cx;
+pub mod method_predicates;
 mod node_cop;
 mod options;
 mod severity;
