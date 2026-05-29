@@ -9,7 +9,11 @@
 //! gap_issues:
 //!   - murphy-qaio
 //! notes: >
-//!   Known gaps remain around option parity, message text, and autocorrect behavior.
+//!   Fixed logic false positives: zero-arity super (Zsuper), zero-arity binding,
+//!   and fail-with-any-args asymmetry now match RuboCop v1.86.2 behavior.
+//!   Known gaps remain around option parity (AllowUnusedKeywordArguments,
+//!   IgnoreEmptyMethods toggle, NotImplementedExceptions custom classes),
+//!   message text detail, and autocorrect for kwarg/kwoptarg.
 //! ```
 //!
 //! read inside the method body.
@@ -20,7 +24,9 @@
 //!   the body is a single statement (or a `Begin` whose last statement
 //!   is) a `raise <NotImplementedException>` (or `.new(...)`), where the
 //!   exception class name is in `NotImplementedExceptions`
-//!   (default `["NotImplementedError"]`). `fail` is treated identically.
+//!   (default `["NotImplementedError"]`). `fail` is asymmetric: any
+//!   `fail` call (with or without arguments) suppresses the cop, matching
+//!   RuboCop's `not_implemented?` pattern.
 //!   Disable via `ignore_not_implemented_methods = false` to opt back
 //!   into reporting on those methods.
 //! - **`block_argument_with_yield`**: when the body uses `yield`, the
@@ -94,6 +100,18 @@ impl UnusedMethodArgument {
         }
 
         let has_yield = body_contains_yield(cx, body);
+
+        // Bare `super` implicitly forwards all arguments to the superclass.
+        if body_contains_zsuper(cx, body) {
+            return;
+        }
+
+        // `binding` with no arguments captures the full local scope —
+        // every local variable (including method parameters) is referenced.
+        if body_contains_zero_arity_binding(cx, body) {
+            return;
+        }
+
         let reads = lvar_reads(cx, body);
 
         let NodeKind::Args(list) = *cx.kind(args) else {
@@ -193,6 +211,48 @@ fn body_contains_yield(cx: &Cx<'_>, body: NodeId) -> bool {
     false
 }
 
+/// Whether `body` (a method body) contains a bare `super` (`Zsuper` node) that
+/// would implicitly forward all method arguments to the superclass. Walk stops
+/// at nested `Def` boundaries, matching `body_contains_yield`'s scoping rule.
+fn body_contains_zsuper(cx: &Cx<'_>, body: NodeId) -> bool {
+    let mut stack: Vec<NodeId> = vec![body];
+    while let Some(id) = stack.pop() {
+        match *cx.kind(id) {
+            NodeKind::Zsuper => return true,
+            // A nested def has its own super scope; don't cross the boundary.
+            NodeKind::Def { .. } => continue,
+            _ => {}
+        }
+        stack.extend(cx.children(id));
+    }
+    false
+}
+
+/// Whether `body` contains a zero-arity `binding` call (no receiver, no args).
+/// `binding` captures the full local scope, making every accessible variable
+/// implicitly referenced. Walk stops at nested `Def` boundaries.
+fn body_contains_zero_arity_binding(cx: &Cx<'_>, body: NodeId) -> bool {
+    let mut stack: Vec<NodeId> = vec![body];
+    while let Some(id) = stack.pop() {
+        match *cx.kind(id) {
+            NodeKind::Send {
+                receiver,
+                method,
+                args,
+            } if receiver.get().is_none()
+                && cx.symbol_str(method) == "binding"
+                && cx.list(args).is_empty() =>
+            {
+                return true;
+            }
+            NodeKind::Def { .. } => continue,
+            _ => {}
+        }
+        stack.extend(cx.children(id));
+    }
+    false
+}
+
 /// Whether `body` consists of nothing but a single `raise` / `fail`
 /// call whose first argument is `Const(name)` or `Const(name).new(...)`
 /// with `name` in `exceptions`. A multi-statement body like
@@ -225,6 +285,13 @@ fn is_not_implemented_body(cx: &Cx<'_>, body: NodeId, exceptions: &[String]) -> 
     let m = cx.symbol_str(method);
     if m != "raise" && m != "fail" {
         return false;
+    }
+    // RuboCop's `not_implemented?` is asymmetric: `fail` matches any
+    // arguments (including none) because bare `fail` is a common
+    // "not-implemented" sentinel. `raise` still requires the first
+    // argument to be an allowed exception class.
+    if m == "fail" {
+        return true;
     }
     let arg_ids = cx.list(args);
     let Some(&first_arg) = arg_ids.first() else {
@@ -445,5 +512,45 @@ mod tests {
             &edit.replacement,
         );
         assert_eq!(source, "def foo()\n  1\nend\n");
+    }
+
+    // Fix 1: zero-arity `super` (Zsuper node) implicitly passes all args.
+    #[test]
+    fn zero_arity_super_suppresses_all_param_offenses() {
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
+            def some_method(foo)
+              super
+            end
+        "#});
+    }
+
+    // Fix 2: zero-arity `binding` captures the full local scope.
+    #[test]
+    fn zero_arity_binding_suppresses_all_param_offenses() {
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
+            def some_method(foo, bar)
+              do_something binding
+            end
+        "#});
+    }
+
+    // Fix 3a: `fail` with a non-exception-class argument (IgnoreNotImplementedMethods: true).
+    #[test]
+    fn fail_with_any_arg_suppresses_cop() {
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
+            def method(arg)
+              fail "TODO"
+            end
+        "#});
+    }
+
+    // Fix 3b: bare `fail` with no arguments also suppresses the cop.
+    #[test]
+    fn bare_fail_suppresses_cop() {
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
+            def method(arg)
+              fail
+            end
+        "#});
     }
 }
