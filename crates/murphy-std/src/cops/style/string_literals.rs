@@ -230,7 +230,7 @@ fn double_quotes_required(src: &str) -> bool {
             // (e.g. `\n`, `\t`, `\u`, `\x`, `\'`, ...).
             if run % 2 == 1 {
                 let next = if i < b.len() { b[i] } else { 0 };
-                if next != b'\\' && next != b'"' {
+                if next != b'"' {
                     return true;
                 }
             }
