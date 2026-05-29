@@ -9,7 +9,10 @@
 //! gap_issues:
 //!   - murphy-j59g
 //! notes: >
-//!   Known gaps remain around EnforcedStyle naming, runtime config, dstr handling, message parity, and autocorrect breadth.
+//!   Fixed: double_quotes_required? guard (false-positive offenses), runtime
+//!   option wiring via cx.options_or_default, and message text parity.
+//!   Remaining gap: ConsistentQuotesInMultiline / on_dstr (non-default,
+//!   deferred).
 //! ```
 //!
 //! string literals. Mirrors RuboCop's same-named cop.
@@ -26,8 +29,21 @@
 //! `preferred_quote = "single"` (matching RuboCop). The host-side
 //! config-validation gate (murphy-9cr.9) consumes the generated
 //! `SCHEMA` to enforce the enum at config-load time; the runtime
-//! behaviour here uses the cop's `Default` until §12d's sibling
-//! validation work lands.
+//! behaviour uses `cx.options_or_default` so `preferred_quote = "double"`
+//! is now reachable via `murphy.toml`.
+//!
+//! ## Offense guard (`double_quotes_required?` parity)
+//!
+//! In `single` mode Murphy only flags a double-quoted string when double
+//! quotes are NOT required — i.e. the string body could have been written
+//! with single quotes without changing meaning. The guard mirrors
+//! RuboCop's `double_quotes_required?` / `wrong_quotes?` logic
+//! (rubocop/cop/util.rb:133): double quotes are required when the source
+//! contains a single-quote **or** a meaningful backslash escape (an
+//! odd-length run of backslashes whose following character is not `\` or
+//! `"`).  Similarly, in `double` mode single quotes are required when the
+//! source contains `"`, a non-trivial backslash escape `\[^'\\]`, or
+//! an interpolation anchor `#@`, `#{`, `#$`.
 //!
 //! ## Autocorrect
 //!
@@ -79,12 +95,7 @@ pub struct StringLiteralsOptions {
 impl StringLiterals {
     #[on_node(kind = "str")]
     fn check_str(&self, node: NodeId, cx: &Cx<'_>) {
-        // Runtime option access (murphy-9cr.9) is not yet wired through
-        // `Cx`; v1 honours the `Default` (`preferred_quote = "single"`).
-        // The schema is exported regardless so the validation gate can
-        // already enforce the enum at config-load time, and so the
-        // future runtime-options path has nothing else to add here.
-        let opts = StringLiteralsOptions::default();
+        let opts = cx.options_or_default::<StringLiteralsOptions>();
         let prefer_single = opts.preferred_quote == "single";
 
         let range = cx.range(node);
@@ -105,13 +116,26 @@ impl StringLiterals {
             return;
         }
 
+        // In single_quotes mode: only flag a double-quoted string when double
+        // quotes are NOT required. Mirrors RuboCop's double_quotes_required?
+        // guard (rubocop/cop/util.rb:133).
+        if prefer_single && actual == QuoteStyle::Double && double_quotes_required(src) {
+            return;
+        }
+
+        // In double_quotes mode: only flag a single-quoted string when single
+        // quotes are NOT required. Mirrors RuboCop's reverse guard.
+        if !prefer_single && actual == QuoteStyle::Single && single_quotes_required(src) {
+            return;
+        }
+
         let (message, replacement) = match preferred {
             QuoteStyle::Single => (
-                "Prefer single-quoted strings unless interpolation is needed",
+                "Prefer single-quoted strings when you don't need string interpolation or special symbols.",
                 safe_swap(body, b'\'', b'"').map(|s| format!("'{s}'")),
             ),
             QuoteStyle::Double => (
-                "Prefer double-quoted strings",
+                "Prefer double-quoted strings unless you need single quotes to avoid extra backslashes for escaping.",
                 safe_swap(body, b'"', b'\'').map(|s| format!("\"{s}\"")),
             ),
         };
@@ -178,4 +202,170 @@ fn safe_swap(body: &str, target_quote: u8, source_quote: u8) -> Option<&str> {
         return None;
     }
     Some(body)
+}
+
+/// Returns `true` when double quotes are semantically required — i.e. the
+/// source string (including surrounding quotes) either contains a
+/// single-quote or a meaningful backslash escape (an odd-length run of
+/// backslashes followed by a character that is neither `\` nor `"`).
+///
+/// Mirrors RuboCop's `double_quotes_required?` from rubocop/cop/util.rb:133:
+/// `/'|(?<!\\)(?:\\{2})*\\(?![\\"])/x`
+fn double_quotes_required(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\'' {
+            return true;
+        }
+        if b[i] == b'\\' {
+            // Count the run of consecutive backslashes.
+            let start = i;
+            while i < b.len() && b[i] == b'\\' {
+                i += 1;
+            }
+            let run = i - start;
+            // An odd-length run means the last backslash is an escape.
+            // If what follows is not `\` or `"` it's a meaningful escape
+            // (e.g. `\n`, `\t`, `\u`, `\x`, `\'`, ...).
+            if run % 2 == 1 {
+                let next = if i < b.len() { b[i] } else { 0 };
+                if next != b'\\' && next != b'"' {
+                    return true;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Returns `true` when single quotes are semantically required — i.e. the
+/// source string contains `"`, a backslash escape that is not `\'` or
+/// `\\`, or an interpolation anchor (`#@`, `#{`, `#$`).
+///
+/// Mirrors RuboCop's reverse guard: `/" | \\[^'\\] | \#[@{$]/x`
+fn single_quotes_required(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => return true,
+            b'\\' => {
+                let next = if i + 1 < b.len() { b[i + 1] } else { 0 };
+                // A backslash followed by anything other than `'` or `\`
+                // is a non-trivial escape.
+                if next != b'\'' && next != b'\\' {
+                    return true;
+                }
+                i += 2;
+                continue;
+            }
+            b'#' => {
+                let next = if i + 1 < b.len() { b[i + 1] } else { 0 };
+                if matches!(next, b'@' | b'{' | b'$') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- double_quotes_required tests ---
+
+    #[test]
+    fn dqr_simple_double_quoted_plain_string() {
+        // `"hello"` -- no single quote, no meaningful escape -> false (offense fires)
+        assert!(!double_quotes_required("\"hello\""));
+    }
+
+    #[test]
+    fn dqr_contains_single_quote() {
+        // `"'"` -- source contains a literal single quote -> true (no offense)
+        assert!(double_quotes_required("\"'\""));
+    }
+
+    #[test]
+    fn dqr_newline_escape() {
+        // `"\n"` -- odd backslash run followed by `n` -> true (no offense)
+        assert!(double_quotes_required("\"\\n\""));
+    }
+
+    #[test]
+    fn dqr_escape_esc() {
+        // `"\e"` -- odd backslash run followed by `e` -> true (no offense)
+        assert!(double_quotes_required("\"\\e\""));
+    }
+
+    #[test]
+    fn dqr_unicode_escape() {
+        // `"ñ"` -- odd backslash run followed by `u` -> true (no offense)
+        assert!(double_quotes_required("\"\\u00f1\""));
+    }
+
+    #[test]
+    fn dqr_hex_escape() {
+        // `"\xf9"` -- odd backslash run followed by `x` -> true (no offense)
+        assert!(double_quotes_required("\"\\xf9\""));
+    }
+
+    #[test]
+    fn dqr_even_backslash_run_not_an_escape() {
+        // `"\\"` -- even run, the two backslashes form a literal `\` -> false
+        // (single quotes could represent this as `'\\'`, so offense should fire)
+        assert!(!double_quotes_required("\"\\\\\""));
+    }
+
+    #[test]
+    fn dqr_escaped_double_quote() {
+        // `"\""` -- odd run followed by `"`, exempted by the `!= '"'` guard -> false
+        // (offense fires, autocorrect blocked by safe_swap)
+        assert!(!double_quotes_required("\"\\\"\""));
+    }
+
+    #[test]
+    fn dqr_backslash_continuation() {
+        // Three backslashes followed by `n`: odd run + n -> true
+        assert!(double_quotes_required("\"foo\\\\\\nbar\""));
+    }
+
+    // --- single_quotes_required tests ---
+
+    #[test]
+    fn sqr_plain_single_quoted() {
+        // `'hello'` -- nothing that requires single quotes -> false (offense fires)
+        assert!(!single_quotes_required("'hello'"));
+    }
+
+    #[test]
+    fn sqr_contains_double_quote() {
+        // `'say "hi"'` -- contains `"` -> true (single quotes required, no offense)
+        assert!(single_quotes_required("'say \"hi\"'"));
+    }
+
+    #[test]
+    fn sqr_interpolation_anchor_hash_brace() {
+        // `'#{foo}'` -- contains `#{` -> true
+        assert!(single_quotes_required("'#{foo}'"));
+    }
+
+    #[test]
+    fn sqr_escaped_backslash_not_required() {
+        // `'\\'` -- `\\` escape (next byte is `\`) -> false
+        assert!(!single_quotes_required("'\\\\'"));
+    }
+
+    #[test]
+    fn sqr_escaped_single_quote_not_required() {
+        // `'\''` -- `\'` escape (next byte is `'`) -> false
+        assert!(!single_quotes_required("'\\''"));
+    }
 }

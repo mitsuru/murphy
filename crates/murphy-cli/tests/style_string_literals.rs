@@ -9,6 +9,9 @@
 //!   interpolation other than double).
 //! - autocorrect emits an edit only when the body is safe to swap
 //!   (no backslash, no `#`, no conflicting quote).
+//! - double-quoted strings that REQUIRE double quotes (backslash escapes,
+//!   embedded single quotes) are NOT flagged — parity with RuboCop's
+//!   `double_quotes_required?` guard.
 
 use assert_cmd::Command;
 use std::fs;
@@ -86,10 +89,24 @@ fn safe_double_to_single_emits_autocorrect() {
 }
 
 #[test]
-fn double_with_backslash_emits_offense_but_skips_autocorrect() {
-    // `"foo\n"` contains `\n` — semantics differ between quote styles so
-    // the cop must NOT autocorrect. The offense still fires.
-    let (_code, offs) = lint_json("x = \"foo\\n\"\n");
+fn double_with_newline_escape_not_flagged() {
+    // `"\n"` contains a meaningful backslash escape — double quotes are
+    // REQUIRED (RuboCop's double_quotes_required? returns true). Murphy
+    // must not emit an offense. This was a false-positive before the
+    // double_quotes_required? guard was added.
+    let (_code, offs) = lint_json("x = \"\\n\"\n");
+    assert!(
+        offenses_named(&offs, "Style/StringLiterals").is_empty(),
+        "backslash escape means double quotes are required; must not be flagged; got {offs:?}",
+    );
+}
+
+#[test]
+fn double_with_escaped_double_quote_emits_offense_but_skips_autocorrect() {
+    // `"\""` — the `\"` is an escaped double-quote. double_quotes_required?
+    // exempts this case (odd run followed by `"`) so the offense still
+    // fires, but safe_swap is blocked by the backslash in the body.
+    let (_code, offs) = lint_json("x = \"\\\"\"\n");
     let style = offenses_named(&offs, "Style/StringLiterals");
     assert_eq!(style.len(), 1, "offense still fires; got {offs:?}");
     assert!(
