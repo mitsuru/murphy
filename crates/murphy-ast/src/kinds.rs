@@ -139,6 +139,17 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("hash_pattern", 89),
     ("match_var", 90),
     ("itblock", 91),
+    // ── murphy-s4b4 LOW-priority extensions (parser-only; subject-side
+    // murphy-translate support lands per cop as actually needed).
+    ("alias", 92),
+    ("undef", 93),
+    ("preexe", 94),
+    ("postexe", 95),
+    ("back_ref", 96),
+    ("nth_ref", 97),
+    ("shadowarg", 98),
+    ("kwnilarg", 99),
+    ("blocknilarg", 100),
 ];
 
 /// Resolve a pattern node-type name to its tag. `None` for unknown names.
@@ -395,6 +406,19 @@ mod tests {
                 send: n,
                 body: OptNodeId::NONE,
             },
+            // murphy-s4b4 LOW-priority extensions
+            NodeKind::Alias {
+                new_name: n,
+                old_name: n,
+            },
+            NodeKind::Undef(NodeList::EMPTY),
+            NodeKind::Preexe(OptNodeId::NONE),
+            NodeKind::Postexe(OptNodeId::NONE),
+            NodeKind::BackRef(s),
+            NodeKind::NthRef(0),
+            NodeKind::Shadowarg(s),
+            NodeKind::Kwnilarg,
+            NodeKind::Blocknilarg,
         ]
     }
 
@@ -529,6 +553,16 @@ mod tests {
             NodeKind::HashPattern(_) => "hash_pattern",
             NodeKind::MatchVar(_) => "match_var",
             NodeKind::Itblock { .. } => "itblock",
+            // murphy-s4b4 LOW-priority extensions
+            NodeKind::Alias { .. } => "alias",
+            NodeKind::Undef(_) => "undef",
+            NodeKind::Preexe(_) => "preexe",
+            NodeKind::Postexe(_) => "postexe",
+            NodeKind::BackRef(_) => "back_ref",
+            NodeKind::NthRef(_) => "nth_ref",
+            NodeKind::Shadowarg(_) => "shadowarg",
+            NodeKind::Kwnilarg => "kwnilarg",
+            NodeKind::Blocknilarg => "blocknilarg",
         })
     }
 

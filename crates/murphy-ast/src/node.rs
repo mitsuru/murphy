@@ -540,6 +540,38 @@ pub enum NodeKind {
         send: NodeId,
         body: OptNodeId,
     },
+
+    // ── LOW-priority NodeKindTag extensions (murphy-s4b4, parent
+    // murphy-xvjv). Niche / legacy parser-gem node kinds — used only by a
+    // handful of cops (Style/Alias, Style/SpecialGlobalVars 等). Parser-only;
+    // subject-side translate support lands per cop as actually needed.
+    /// `alias new_name old_name`（`AliasNode`）。
+    /// `new_name` / `old_name` は `Sym` または `Gvar`。
+    Alias {
+        new_name: NodeId,
+        old_name: NodeId,
+    },
+    /// `undef name, ...`（`UndefNode`）。children は `Sym` の並び。
+    Undef(NodeList),
+    /// `BEGIN { ... }`（`PreExeNode`）。body は単一 NodeId、空ブロック想定で
+    /// `OptNodeId`。
+    Preexe(OptNodeId),
+    /// `END { ... }`（`PostExeNode`）。同上。
+    Postexe(OptNodeId),
+    /// `$~`、`$&`、`$\``、`$\` などの正規表現マッチ系 special variable
+    /// (`BackReferenceReadNode`)。payload は variable 名 (`~`、`&` 等) の
+    /// Symbol。
+    BackRef(Symbol),
+    /// `$1`、`$2`、…の正規表現キャプチャ参照 (`NumberedReferenceReadNode`)。
+    /// payload は 1-based index。
+    NthRef(u32),
+    /// `-> (a; x) { ... }` の shadow arg `x`（`ShadowargNode`）。payload は
+    /// shadowed variable 名。
+    Shadowarg(Symbol),
+    /// `**nil` (kwarg suppression、`NoKeywordsParameterNode`)。marker。
+    Kwnilarg,
+    /// `&nil` (block suppression、`BlocksArgumentSuppressionNode`)。marker。
+    Blocknilarg,
 }
 
 /// A source comment, stored outside the node tree.
@@ -668,6 +700,16 @@ impl NodeKind {
             NodeKind::HashPattern(_) => 89,
             NodeKind::MatchVar(_) => 90,
             NodeKind::Itblock { .. } => 91,
+            // murphy-s4b4 LOW-priority extensions
+            NodeKind::Alias { .. } => 92,
+            NodeKind::Undef(_) => 93,
+            NodeKind::Preexe(_) => 94,
+            NodeKind::Postexe(_) => 95,
+            NodeKind::BackRef(_) => 96,
+            NodeKind::NthRef(_) => 97,
+            NodeKind::Shadowarg(_) => 98,
+            NodeKind::Kwnilarg => 99,
+            NodeKind::Blocknilarg => 100,
         };
         crate::NodeKindTag(t)
     }
