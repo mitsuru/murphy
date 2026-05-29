@@ -292,6 +292,22 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
             out.push(send);
             push_opt(out, body);
         }
+
+        // ── murphy-s4b4 LOW-priority extensions ─────────────────────────
+        NodeKind::Alias { new_name, old_name } => {
+            out.push(new_name);
+            out.push(old_name);
+        }
+
+        NodeKind::Undef(l) => push_list(out, lists, l),
+
+        NodeKind::Preexe(o) | NodeKind::Postexe(o) => push_opt(out, o),
+
+        NodeKind::BackRef(_)
+        | NodeKind::NthRef(_)
+        | NodeKind::Shadowarg(_)
+        | NodeKind::Kwnilarg
+        | NodeKind::Blocknilarg => {}
     }
 }
 

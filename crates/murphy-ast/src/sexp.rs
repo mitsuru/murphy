@@ -610,6 +610,41 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             out.push(')');
         }
 
+        // ── murphy-s4b4 LOW-priority extensions ─────────────────────────
+        NodeKind::Alias { new_name, old_name } => {
+            out.push_str("(alias\n");
+            write_node(ast, new_name, d, out);
+            out.push('\n');
+            write_node(ast, old_name, d, out);
+            out.push(')');
+        }
+        NodeKind::Undef(_) => {
+            out.push_str("(undef");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::Preexe(body) => {
+            out.push_str("(preexe\n");
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+        NodeKind::Postexe(body) => {
+            out.push_str("(postexe\n");
+            write_opt(ast, body, d, out);
+            out.push(')');
+        }
+        NodeKind::BackRef(s) => {
+            let _ = write!(out, "(back_ref :{})", interner.resolve(s.0));
+        }
+        NodeKind::NthRef(n) => {
+            let _ = write!(out, "(nth_ref {n})");
+        }
+        NodeKind::Shadowarg(s) => {
+            let _ = write!(out, "(shadowarg :{})", interner.resolve(s.0));
+        }
+        NodeKind::Kwnilarg => out.push_str("(kwnilarg)"),
+        NodeKind::Blocknilarg => out.push_str("(blocknilarg)"),
+
         NodeKind::Unknown => out.push_str("(unknown)"),
     }
 }

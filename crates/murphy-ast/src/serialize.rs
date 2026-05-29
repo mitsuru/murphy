@@ -29,7 +29,11 @@ pub const MAGIC: &[u8; 8] = b"MURPHYAS";
 /// a v3 cache through this build is rejected at the header instead of
 /// the more obscure `BadDiscriminant` (or worse — accidental success on
 /// an arena that happens to be tag-compatible).
-pub const FORMAT_VERSION: u32 = 4;
+///
+/// Version 5 (murphy-s4b4): adds the niche/legacy LOW-priority tags
+/// 92–100 (alias / undef / preexe / postexe / back_ref / nth_ref /
+/// shadowarg / kwnilarg / blocknilarg).
+pub const FORMAT_VERSION: u32 = 5;
 
 /// Total header size in bytes. The body immediately follows. Downstream
 /// (cache, mmap) code can rely on this offset being fixed.
@@ -591,6 +595,38 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, send.0);
             put_u32(out, body.0);
         }
+        // ── murphy-s4b4 LOW-priority extensions ──────────────────────────
+        NodeKind::Alias { new_name, old_name } => {
+            put_u8(out, 92);
+            put_u32(out, new_name.0);
+            put_u32(out, old_name.0);
+        }
+        NodeKind::Undef(l) => {
+            put_u8(out, 93);
+            write_node_list(l, out);
+        }
+        NodeKind::Preexe(o) => {
+            put_u8(out, 94);
+            put_u32(out, o.0);
+        }
+        NodeKind::Postexe(o) => {
+            put_u8(out, 95);
+            put_u32(out, o.0);
+        }
+        NodeKind::BackRef(s) => {
+            put_u8(out, 96);
+            put_u32(out, s.0);
+        }
+        NodeKind::NthRef(n) => {
+            put_u8(out, 97);
+            put_u32(out, n);
+        }
+        NodeKind::Shadowarg(s) => {
+            put_u8(out, 98);
+            put_u32(out, s.0);
+        }
+        NodeKind::Kwnilarg => put_u8(out, 99),
+        NodeKind::Blocknilarg => put_u8(out, 100),
     }
 }
 
@@ -833,6 +869,19 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             send: NodeId(get_u32(cur)?),
             body: OptNodeId(get_u32(cur)?),
         },
+        // ── murphy-s4b4 LOW-priority extensions ──────────────────────────
+        92 => NodeKind::Alias {
+            new_name: NodeId(get_u32(cur)?),
+            old_name: NodeId(get_u32(cur)?),
+        },
+        93 => NodeKind::Undef(read_node_list(cur)?),
+        94 => NodeKind::Preexe(OptNodeId(get_u32(cur)?)),
+        95 => NodeKind::Postexe(OptNodeId(get_u32(cur)?)),
+        96 => NodeKind::BackRef(Symbol(get_u32(cur)?)),
+        97 => NodeKind::NthRef(get_u32(cur)?),
+        98 => NodeKind::Shadowarg(Symbol(get_u32(cur)?)),
+        99 => NodeKind::Kwnilarg,
+        100 => NodeKind::Blocknilarg,
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -1270,6 +1319,17 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
                 check_node(send.0)?;
                 check_opt_node(body)?;
             }
+            // ── murphy-s4b4 LOW-priority extensions ──────────────────
+            NodeKind::Alias { new_name, old_name } => {
+                check_node(new_name.0)?;
+                check_node(old_name.0)?;
+            }
+            NodeKind::Undef(l) => check_list(l)?,
+            NodeKind::Preexe(o) | NodeKind::Postexe(o) => check_opt_node(o)?,
+            NodeKind::BackRef(s) | NodeKind::Shadowarg(s) => check_sym(s.0)?,
+            // `NthRef` payload is a 1-based regex capture index, not an
+            // interner id — nothing to bounds-check against the AST.
+            NodeKind::NthRef(_) | NodeKind::Kwnilarg | NodeKind::Blocknilarg => {}
         }
     }
     for id in &ast.node_lists {
