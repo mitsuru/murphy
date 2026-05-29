@@ -4,7 +4,7 @@
 //! `def_node_search`, or whenever the shape spans more than one node
 //! kind and would be awkward to destructure by hand.
 //!
-//! Authoritative grammar: `references/node-pattern.md` plus infra
+//! Authoritative grammar: `references/def-node-matcher.md` plus infra
 //! guide §3 ("Reusable matchers: `def_node_matcher!`").
 
 //! `Pack/MyPatternCop` — flags `expect(...).to eq(true)` (use a

@@ -68,7 +68,7 @@ implementation against this list, so keep it explicit:
   directly into Murphy's `methods = [...]`).
 - **`def_node_matcher` / `def_node_search` patterns.** These translate
   to `def_node_matcher!` — log every one verbatim so the v1 grammar
-  subset can be compared against (`references/node-pattern.md`).
+  subset can be compared against (`references/def-node-matcher.md`).
 - **`cop_config` keys, defaults, and types.** Each will become a field
   on the `#[derive(CopOptions)]` struct. Note `SupportedStyles` /
   enum-like keys — Murphy v1 renders these as `String`.
@@ -143,7 +143,7 @@ lists all valid forms.
   style cops that work on source text rather than a specific node kind.
 - **Shape-based matching across multiple kinds** — declare a
   `def_node_matcher!(...)` matcher at module top level and call it from the
-  dispatch body. See `references/node-pattern.md` for the v1 grammar
+  dispatch body. See `references/def-node-matcher.md` for the v1 grammar
   subset, or infra guide §3 ("Reusable matchers").
 
 When mapping RuboCop's `on_<kind>` names to Murphy kind strings, use
@@ -426,7 +426,7 @@ Escalation candidates:
   observable semantics.
 - **`def_node_matcher!` v1 limit.** The pattern uses named captures,
   predicate calls (`#some_method?`), or non-trailing repetition — see
-  `references/node-pattern.md` for what v1 *can* express.
+  `references/def-node-matcher.md` for what v1 *can* express.
 - **Option type unsupported.** The RuboCop config key is a nested hash
   or enum whose Murphy mapping is not obvious. `i64` / `bool` /
   `String` / `Vec<String>` cover most cases.
@@ -558,7 +558,7 @@ merge — proceed once CI is green.
 - **`references/dispatch-and-cx.md`** — extended cheat-sheet for the
   `#[on_node]` / `#[on_new_investigation]` attributes and every method
   on `Cx<'_>`.
-- **`references/node-pattern.md`** — `def_node_matcher!` v1 grammar subset
+- **`references/def-node-matcher.md`** — `def_node_matcher!` v1 grammar subset
   and when to reach for it instead of hand-written destructuring.
 - **`references/options.md`** — `#[derive(CopOptions)]` + `#[option(...)]`
   reference, including the current v1 limitation that options are read

@@ -73,7 +73,7 @@ use murphy_plugin_macros::def_node_matcher;
 Note: `def_node_matcher!` is re-exported through `murphy-plugin-macros`, not
 `murphy-plugin-api`. The dep boundary allows it because the macros crate
 is part of the single-surface ABI's macro half. See
-`references/node-pattern.md`.
+`references/def-node-matcher.md`.
 
 ## Test harness (dev-only)
 
