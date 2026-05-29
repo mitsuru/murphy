@@ -50,6 +50,23 @@ pub(crate) enum Token {
     ///
     /// D4 (murphy-nnr8): NodeId-equality unification.
     Unify(String),
+    /// `%name` — a named runtime parameter (tPARAM_NAMED, Phase E — murphy-aow).
+    ///
+    /// `name` is `[a-z_][a-zA-Z0-9_]*` — the name **without** the leading `%`.
+    /// At runtime the matcher looks up the supplied `Params::named` table and
+    /// compares the subject's `Sym` value against the result.
+    ///
+    /// **Symbol-only, Set/Array type support is future work** (see follow-up
+    /// issue filed in Phase E).
+    ParamNamed(String),
+    /// `%1`, `%2`, … — a positional runtime parameter (tPARAM_NUMBER, Phase E — murphy-aow).
+    ///
+    /// `index` is 1-based; `%0` is rejected at lex time (see below).
+    /// At runtime the matcher looks up `Params::positional[index - 1]` and
+    /// compares the subject's `Sym` value against the result.
+    ///
+    /// **Symbol-only, Set/Array type support is future work**.
+    ParamNumber(u16),
     /// `/.../[imxo]*` — a regex literal (tREGEXP, D5 — murphy-t8km).
     ///
     /// The `pattern` payload is the raw body between the `/` delimiters,
@@ -144,19 +161,36 @@ impl<'a> Lexer<'a> {
             b'|' => self.single(Token::Pipe),
             b'/' => self.scan_regex(),
             b'%' => {
-                // `%Foo` (uppercase-start) is tPARAM_CONST sugar — consume the
-                // `%` prefix and lex the rest as a normal uppercase ident.
-                // Lowercase-start `%var` (tPARAM_NAMED) is out of v1 scope.
-                if matches!(self.src.get(self.pos + 1), Some(b'A'..=b'Z')) {
-                    self.pos += 1; // consume `%`
-                    self.scan_ident()
-                } else {
-                    let (ch, len) = self.char_at_cursor();
-                    Err(self.err_at(
-                        self.pos,
-                        self.pos + len,
-                        format!("`{ch}` is not supported in v1"),
-                    ))
+                // Dispatch on the byte immediately after `%`:
+                // - `[A-Z]...` → tPARAM_CONST sugar (D3, murphy-kq57): consume
+                //   the `%` prefix and lex the rest as a normal uppercase ident.
+                // - `[a-z_]...` → tPARAM_NAMED (Phase E, murphy-aow).
+                // - `[1-9][0-9]*` → tPARAM_NUMBER (Phase E, murphy-aow).
+                // - `0` → error (`%0` is invalid; params are 1-based).
+                // - anything else → error.
+                match self.src.get(self.pos + 1) {
+                    Some(b'A'..=b'Z') => {
+                        self.pos += 1; // consume `%`
+                        self.scan_ident()
+                    }
+                    Some(b'a'..=b'z' | b'_') => self.scan_param_named(),
+                    Some(b'1'..=b'9') => self.scan_param_number(),
+                    Some(b'0') => {
+                        // `%0` is invalid — positional params are 1-based.
+                        Err(self.err_at(
+                            self.pos,
+                            self.pos + 2,
+                            "`%0` is invalid: positional params are 1-based (`%1`, `%2`, …)",
+                        ))
+                    }
+                    _ => {
+                        let (ch, len) = self.char_at_cursor();
+                        Err(self.err_at(
+                            self.pos,
+                            self.pos + len,
+                            format!("`{ch}` is not a valid param prefix; use `%name` (named) or `%1`/`%2`/… (positional)"),
+                        ))
+                    }
                 }
             }
             _ => {
@@ -464,6 +498,54 @@ impl<'a> Lexer<'a> {
         Ok(Token::Ident(text.to_string()))
     }
 
+    /// Scan `%name` where `name` is `[a-z_][a-zA-Z0-9_]*` (tPARAM_NAMED, Phase E).
+    ///
+    /// Called when the cursor is at `%` and the next byte is `[a-z_]`.
+    /// Consumes both the `%` and the name; returns `Token::ParamNamed(name)`
+    /// where `name` does NOT include the leading `%`.
+    fn scan_param_named(&mut self) -> Result<Token, ParseError> {
+        self.pos += 1; // consume `%`
+        let start = self.pos;
+        // The first byte is guaranteed `[a-z_]` by the caller.
+        self.pos += 1;
+        while matches!(
+            self.peek(),
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+        ) {
+            self.pos += 1;
+        }
+        let name = self.slice_str(start, self.pos).to_string();
+        Ok(Token::ParamNamed(name))
+    }
+
+    /// Scan `%N` where `N` is `[1-9][0-9]*` (tPARAM_NUMBER, Phase E).
+    ///
+    /// Called when the cursor is at `%` and the next byte is `[1-9]`.
+    /// Consumes both `%` and the digit run; returns `Token::ParamNumber(n)`.
+    /// Overflow (`n > u16::MAX`) is rejected with a lex error.
+    fn scan_param_number(&mut self) -> Result<Token, ParseError> {
+        let start = self.pos;
+        self.pos += 1; // consume `%`
+        let num_start = self.pos;
+        // First byte guaranteed `[1-9]` by caller.
+        self.pos += 1;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.pos += 1;
+        }
+        let text = self.slice_str(num_start, self.pos);
+        let n: u16 = text.parse().map_err(|_| {
+            self.err_at(
+                start,
+                self.pos,
+                format!(
+                    "positional param index `{text}` is too large (max {})",
+                    u16::MAX
+                ),
+            )
+        })?;
+        Ok(Token::ParamNumber(n))
+    }
+
     /// Read a Ruby-method-ish name `[A-Za-z_][A-Za-z0-9_]*[?!=]?` at the cursor.
     /// Returns `None` (leaving the cursor unmoved) when no name is present.
     ///
@@ -638,18 +720,19 @@ mod tests {
     }
 
     #[test]
-    fn lex_error_on_unsupported_sigil() {
-        // `%` is not supported in v1 (`<` is now LAngle for any-order,
-        // `[` / `]` are LBracket / RBracket for intersection).
+    fn lex_param_number_in_node_pattern() {
+        // `%1` now lexes as Token::ParamNumber(1), no longer an error.
         let src = "(send %1)";
-        let e = tokenize(src).expect_err("must reject `%`");
-        assert!(
-            e.message.contains('%') && e.message.contains("not supported in v1"),
-            "message for `%` was: {}",
-            e.message
+        let toks = tokenize(src).expect("`%1` must lex ok in Phase E");
+        assert_eq!(
+            toks.iter().map(|s| s.tok.clone()).collect::<Vec<_>>(),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::ParamNumber(1),
+                Token::RParen,
+            ]
         );
-        // span points at `%` which is at byte offset 6.
-        assert_eq!(e.span.start, 6);
     }
 
     #[test]
@@ -1160,13 +1243,13 @@ mod tests {
     }
 
     #[test]
-    fn percent_lowercase_is_still_rejected() {
-        // `%var` (tPARAM_NAMED) remains out of v1 scope — must error.
-        let e = tokenize("%var").expect_err("must reject `%var`");
-        assert!(
-            e.message.contains('%') && e.message.contains("not supported in v1"),
-            "message for `%var` was: {}",
-            e.message
+    fn percent_lowercase_lexes_as_param_named() {
+        // Phase E (murphy-aow): `%var` now lexes as Token::ParamNamed("var").
+        assert_eq!(toks("%var"), vec![Token::ParamNamed("var".into())]);
+        assert_eq!(toks("%method"), vec![Token::ParamNamed("method".into())]);
+        assert_eq!(
+            toks("%my_param"),
+            vec![Token::ParamNamed("my_param".into())]
         );
     }
 
@@ -1184,6 +1267,89 @@ mod tests {
                 Token::RParen,
             ]
         );
+    }
+
+    // --- Phase E (murphy-aow): tPARAM_NAMED / tPARAM_NUMBER ------------------
+
+    #[test]
+    fn param_named_basic() {
+        assert_eq!(toks("%var"), vec![Token::ParamNamed("var".into())]);
+        assert_eq!(toks("%method"), vec![Token::ParamNamed("method".into())]);
+        assert_eq!(
+            toks("%my_param"),
+            vec![Token::ParamNamed("my_param".into())]
+        );
+        assert_eq!(toks("%a1"), vec![Token::ParamNamed("a1".into())]);
+        assert_eq!(
+            toks("%_underscore"),
+            vec![Token::ParamNamed("_underscore".into())]
+        );
+    }
+
+    #[test]
+    fn param_number_basic() {
+        assert_eq!(toks("%1"), vec![Token::ParamNumber(1)]);
+        assert_eq!(toks("%2"), vec![Token::ParamNumber(2)]);
+        assert_eq!(toks("%10"), vec![Token::ParamNumber(10)]);
+        assert_eq!(toks("%99"), vec![Token::ParamNumber(99)]);
+    }
+
+    #[test]
+    fn param_number_zero_is_rejected() {
+        // `%0` is invalid — positional params are 1-based.
+        let e = tokenize("%0").expect_err("`%0` must be rejected");
+        assert!(
+            e.message.contains("%0") && e.message.contains("1-based"),
+            "expected 1-based message, got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn param_named_in_node_pattern_context() {
+        // `(send _ %method ...)` — named param in node pattern.
+        assert_eq!(
+            toks("(send _ %method ...)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Underscore,
+                Token::ParamNamed("method".into()),
+                Token::Ellipsis,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn param_number_in_node_pattern_context() {
+        // `(send _ %1 ...)` — positional param in node pattern.
+        assert_eq!(
+            toks("(send _ %1 ...)"),
+            vec![
+                Token::LParen,
+                Token::Ident("send".into()),
+                Token::Underscore,
+                Token::ParamNumber(1),
+                Token::Ellipsis,
+                Token::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn percent_uppercase_still_lexes_as_ident() {
+        // `%Foo` still lexes as Ident("Foo") — D3 tPARAM_CONST path unchanged.
+        assert_eq!(toks("%Foo"), vec![Token::Ident("Foo".into())]);
+        assert_eq!(toks("%MyClass"), vec![Token::Ident("MyClass".into())]);
+    }
+
+    #[test]
+    fn percent_standalone_or_unsupported_is_error() {
+        // Bare `%` at end of input.
+        tokenize("%").expect_err("`%` alone must error");
+        // `%!` — not a valid param prefix.
+        tokenize("%!").expect_err("`%!` must error");
     }
 
     // --- D5 (murphy-t8km): tREGEXP — `/.../[imxo]*` regex literal -----------

@@ -64,3 +64,8 @@ pub use murphy_plugin_macros::{
 // crate needing its own `regex` dependency (D5, murphy-t8km).
 #[doc(hidden)]
 pub use regex;
+
+// Phase E (murphy-aow): re-export the runtime-parameter machinery so
+// `node_pattern!`-generated code can reach `::murphy_plugin_api::Param` etc.
+// without the caller crate having to declare a `murphy-pattern` dependency.
+pub use murphy_pattern::{IntoParam, LitView, Param, match_lit_against_param};

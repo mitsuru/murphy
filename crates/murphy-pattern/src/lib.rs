@@ -40,9 +40,15 @@ mod schema;
 
 pub use schema::{PatChild, pattern_children};
 
+mod param;
+
+pub use param::{IntoParam, LitView, Param, match_lit_against_param};
+
 mod matcher;
 
-pub use matcher::{NoPredicates, PredCallArg, PredicateHost, matches};
+pub use matcher::{
+    NoParams, NoPredicates, ParamHost, PredCallArg, PredicateHost, matches, matches_with_params,
+};
 
 /// Parse and lower a pattern source string to `PatternIr` in one step.
 /// For the C backend (murphy-9cr.19). All errors are parse errors —

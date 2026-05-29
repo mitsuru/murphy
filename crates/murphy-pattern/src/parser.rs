@@ -793,7 +793,9 @@ fn convert_named_captures(pat: &mut Pat) {
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Unify { .. }
-        | PatKind::Regex { .. } => {}
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => {}
     }
 }
 
@@ -925,7 +927,9 @@ fn validate_bare_predicate_position(pat: &mut Pat, pos: BarePos<'_>) -> Result<(
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Unify { .. }
-        | PatKind::Regex { .. } => {}
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => {}
     }
     Ok(())
 }
@@ -1057,7 +1061,9 @@ fn walk_assign(pat: &mut Pat, state: &mut SlotState) -> Result<(), ParseError> {
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Unify { .. }
-        | PatKind::Regex { .. } => {}
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => {}
     }
     Ok(())
 }
@@ -1144,7 +1150,9 @@ fn resolve_pred_capture_refs(
         | PatKind::Lit(_)
         | PatKind::Kind(_)
         | PatKind::Unify { .. }
-        | PatKind::Regex { .. } => {}
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => {}
     }
     Ok(())
 }
@@ -1232,7 +1240,9 @@ fn validate_quantifier_placement(pat: &Pat, is_node_child: bool) -> Result<(), P
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Unify { .. }
-        | PatKind::Regex { .. } => Ok(()),
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => Ok(()),
     }
 }
 
@@ -1281,7 +1291,9 @@ fn validate_quantifier_body(pat: &Pat) -> Result<(), ParseError> {
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Unify { .. }
-        | PatKind::Regex { .. } => Ok(()),
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => Ok(()),
     }
 }
 
@@ -1360,7 +1372,9 @@ fn validate_capture_position(pat: &Pat, forbidden: bool) -> Result<(), ParseErro
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Unify { .. }
-        | PatKind::Regex { .. } => Ok(()),
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => Ok(()),
     }
 }
 
@@ -1426,7 +1440,9 @@ fn validate_rest_placement(pat: &Pat, is_node_child: bool) -> Result<(), ParseEr
         | PatKind::Predicate { .. }
         | PatKind::Kind(_)
         | PatKind::Unify { .. }
-        | PatKind::Regex { .. } => {}
+        | PatKind::Regex { .. }
+        | PatKind::ParamNamed { .. }
+        | PatKind::ParamNumber { .. } => {}
     }
     Ok(())
 }
@@ -3257,5 +3273,102 @@ mod regex_tests {
     fn regex_has_no_captures() {
         let p = parse("(send _ /^to_/ ...)").expect("ok");
         assert_eq!(p.n_captures(), 0, "regex must not create capture slots");
+    }
+}
+
+// ============================================================================
+// Phase E (murphy-aow): tPARAM_NAMED / tPARAM_NUMBER — runtime parameters.
+// ============================================================================
+
+#[cfg(test)]
+mod param_tests {
+    use crate::{PatKind, parse};
+
+    #[test]
+    fn bare_param_named_parses() {
+        let p = parse("%method").expect("`%method` must parse");
+        match &p.root.kind {
+            PatKind::ParamNamed { name } => assert_eq!(name, "method"),
+            other => panic!("expected PatKind::ParamNamed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_param_named_with_underscores_and_digits() {
+        for src in ["%a", "%a_b", "%m1", "%a1_b2_c3"] {
+            let p = parse(src).unwrap_or_else(|e| panic!("`{src}` must parse: {e:?}"));
+            assert!(
+                matches!(&p.root.kind, PatKind::ParamNamed { .. }),
+                "`{src}` must produce ParamNamed, got {:?}",
+                p.root.kind
+            );
+        }
+    }
+
+    #[test]
+    fn bare_param_number_parses() {
+        let p = parse("%1").expect("`%1` must parse");
+        match &p.root.kind {
+            PatKind::ParamNumber { index } => assert_eq!(*index, 1),
+            other => panic!("expected PatKind::ParamNumber, got {other:?}"),
+        }
+        let p = parse("%99").expect("`%99` must parse");
+        match &p.root.kind {
+            PatKind::ParamNumber { index } => assert_eq!(*index, 99),
+            other => panic!("expected PatKind::ParamNumber, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn param_zero_is_rejected_at_lex_time() {
+        // `%0` is invalid: positional params are 1-based. The lexer rejects
+        // before any parser code runs.
+        let e = parse("%0").expect_err("`%0` must be rejected");
+        assert!(
+            e.message.contains("%0") || e.message.contains("1-based"),
+            "expected `%0` / 1-based diagnostic, got: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn param_named_in_node_pattern_parses() {
+        // `(send _ %method ...)` is the canonical Ruby-side-param usage.
+        let p = parse("(send _ %method ...)").expect("must parse");
+        assert!(matches!(&p.root.kind, PatKind::Node { .. }));
+        if let PatKind::Node { children, .. } = &p.root.kind {
+            assert!(
+                matches!(children[1].kind, PatKind::ParamNamed { .. }),
+                "second child must be ParamNamed, got {:?}",
+                children[1].kind
+            );
+        }
+    }
+
+    #[test]
+    fn param_number_mixed_with_literal_parses() {
+        // `(send _ :foo %1 %2)` — 1st-arg slot and 2nd-arg slot both
+        // referenced positionally; sym in selector position is a literal.
+        let p = parse("(send _ :foo %1 %2)").expect("must parse");
+        assert!(matches!(&p.root.kind, PatKind::Node { .. }));
+        if let PatKind::Node { children, .. } = &p.root.kind {
+            assert!(matches!(children[1].kind, PatKind::Lit(_)));
+            assert!(matches!(
+                children[2].kind,
+                PatKind::ParamNumber { index: 1 }
+            ));
+            assert!(matches!(
+                children[3].kind,
+                PatKind::ParamNumber { index: 2 }
+            ));
+        }
+    }
+
+    #[test]
+    fn param_has_no_captures() {
+        for src in ["%method", "%1", "(send _ %method %1)"] {
+            let p = parse(src).unwrap_or_else(|e| panic!("`{src}` must parse: {e:?}"));
+            assert_eq!(p.n_captures(), 0, "`{src}` must not create capture slots");
+        }
     }
 }
