@@ -99,10 +99,10 @@ impl<'a> LocRef<'a> {
     pub fn keyword(&self) -> Range {
         let target = self.expression.start;
         let idx = self.sorted_tokens.partition_point(|t| t.range.start < target);
-        if let Some(tok) = self.sorted_tokens.get(idx) {
-            if tok.range.start == target {
-                return tok.range;
-            }
+        if let Some(tok) = self.sorted_tokens.get(idx)
+            && tok.range.start == target
+        {
+            return tok.range;
         }
         Range::ZERO
     }
@@ -1718,36 +1718,14 @@ mod tests {
 
     #[test]
     fn loc_keyword_def() {
-        // `def foo; end` — the `def` keyword starts at offset 0 and is 3 bytes.
-        let source = "def foo; end";
-        let mut b = AstBuilder::new(source.to_string(), "t.rb".to_string());
-        let sym = b.intern_symbol("foo");
-        let args = b.push(
-            NodeKind::Args(murphy_ast::NodeList::EMPTY),
-            Range { start: 4, end: 7 },
-        );
-        let root = b.push_named(
-            NodeKind::Def {
-                receiver: OptNodeId::NONE,
-                name: sym,
-                args,
-                body: OptNodeId::NONE,
-            },
-            Range { start: 0, end: source.len() as u32 },
-            Range { start: 4, end: 7 },
-        );
-        // Add the `def` keyword token so keyword() can find it.
-        b.add_source_token(murphy_ast::SourceToken {
-            kind: murphy_ast::SourceTokenKind::Other,
-            range: Range { start: 0, end: 3 },
-        });
-        let ast = b.finish(root);
+        let ast = murphy_translate::translate("def foo; end", "t.rb");
         let fns = FnTable {
             emit_offense: noop_offense,
             emit_edit: noop_edit,
         };
         let raw = cx_raw_for(&ast, &fns);
         let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
         let kw = cx.loc(root).keyword();
         assert_eq!(kw, Range { start: 0, end: 3 });
         assert_eq!(cx.raw_source(kw), "def");
