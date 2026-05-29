@@ -40,8 +40,9 @@ unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
 pub struct LocRef<'a> {
     pub expression: Range,
     pub name: Range,
-    // Private: precomputed for dot()
+    // Private: precomputed for dot() and keyword()
     receiver_end: Option<u32>,
+    keyword_bearing: bool,
     sorted_tokens: &'a [SourceToken],
     source: &'a [u8],
 }
@@ -104,6 +105,9 @@ impl<'a> LocRef<'a> {
     /// **Limitation:** modifier-form control flow (`x if cond`) places the
     /// keyword *after* the expression start — returns `Range::ZERO` for those.
     pub fn keyword(&self) -> Range {
+        if !self.keyword_bearing {
+            return Range::ZERO;
+        }
         let target = self.expression.start;
         let idx = self
             .sorted_tokens
@@ -212,11 +216,29 @@ impl<'a> Cx<'a> {
             }
             _ => None,
         };
+        let keyword_bearing = matches!(
+            node.kind,
+            NodeKind::Def { .. }
+                | NodeKind::Defs { .. }
+                | NodeKind::Class { .. }
+                | NodeKind::Module { .. }
+                | NodeKind::Case { .. }
+                | NodeKind::When { .. }
+                | NodeKind::Begin(_)
+                | NodeKind::Kwbegin(_)
+                | NodeKind::Return(_)
+                | NodeKind::Break(_)
+                | NodeKind::Next(_)
+                | NodeKind::Yield(_)
+                | NodeKind::For { .. }
+                | NodeKind::Rescue { .. }
+        );
         let src: &'a [u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
         LocRef {
             expression: node.loc.expression,
             name: node.loc.name,
             receiver_end,
+            keyword_bearing,
             sorted_tokens: self.sorted_tokens(),
             source: src,
         }
@@ -1793,6 +1815,21 @@ mod tests {
         };
         let raw = cx_raw_for(&ast, &fns);
         let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(cx.loc(root).keyword(), Range::ZERO);
+    }
+
+    #[test]
+    fn loc_keyword_zero_for_send_real_parse() {
+        // Real prism parse: `foo` identifier token is at expression.start
+        // but keyword() must return ZERO because Send is not keyword_bearing.
+        let ast = murphy_translate::translate("foo.bar", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let root = ast.root();
         assert_eq!(cx.loc(root).keyword(), Range::ZERO);
     }
 
