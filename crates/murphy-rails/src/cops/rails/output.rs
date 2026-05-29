@@ -29,8 +29,9 @@
 //! - **bare call only** for output methods: `receiver == OptNodeId::NONE`.
 //! - **stdio receiver** for io_output methods.
 //! - **Not flagged** when the node's parent is a Send/Csend (the `p` is
-//!   a receiver, not a debug call), or when the parent is a Block/Numblock/
-//!   Itblock (DSL usage), or when any argument is a Hash or BlockPass.
+//!   a receiver, not a debug call), or when the node IS the call of its
+//!   parent Block/Numblock/Itblock (DSL usage like `p { 'text' }`), or
+//!   when any argument is a Hash or BlockPass.
 //!
 //! ## No autocorrect
 //!
@@ -91,19 +92,26 @@ impl Output {
 
         // Gate 2: skip when the parent is a Send/Csend (this `p` is
         // the receiver of another call, e.g. `p.do_something`), or when
-        // the parent is a Block/Numblock/Itblock (DSL usage pattern like
-        // `div do p { 'text' } end`).
-        if let Some(pid) = cx.parent(node).get()
-            && matches!(
-                *cx.kind(pid),
-                NodeKind::Send { .. }
-                    | NodeKind::Csend { .. }
-                    | NodeKind::Block { .. }
-                    | NodeKind::Numblock { .. }
-                    | NodeKind::Itblock { .. }
-            )
-        {
-            return;
+        // this node is the *call* child of a parent Block/Numblock/Itblock
+        // (DSL block call like `p { 'text' }` — mirrors RuboCop's
+        // `node.block_node` check). Note: a send that is merely in the
+        // *body* of a block (e.g. `foo do; puts "x"; end`) is not the
+        // block's call — it still fires.
+        if let Some(pid) = cx.parent(node).get() {
+            let is_block_call = match *cx.kind(pid) {
+                NodeKind::Block { call, .. } => call == node,
+                NodeKind::Numblock { send, .. } => send == node,
+                NodeKind::Itblock { send, .. } => send == node,
+                _ => false,
+            };
+            if is_block_call
+                || matches!(
+                    *cx.kind(pid),
+                    NodeKind::Send { .. } | NodeKind::Csend { .. }
+                )
+            {
+                return;
+            }
         }
 
         // Gate 3: skip when any argument is a Hash (DSL keyword args
@@ -202,6 +210,18 @@ mod tests {
             "#});
     }
 
+    // === puts in a block body still flags (it is the body, not the call) ===
+
+    #[test]
+    fn flags_puts_in_block_body() {
+        test::<Output>().expect_offense(indoc! {r#"
+                foo do
+                  puts "x"
+                  ^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+                end
+            "#});
+    }
+
     // === explicit-receiver cases (should NOT flag) ===
 
     #[test]
@@ -292,12 +312,12 @@ mod tests {
         test::<Output>().expect_no_offenses("p&.do_something\n");
     }
 
-    // === block-node guard (false positives) ===
+    // === block-call guard (node IS the block's call, not body) ===
 
     #[test]
     fn does_not_flag_p_with_block() {
-        // `p { 'text' }` inside a DSL block — the `p` has an associated
-        // block, so it is not bare debug output.
+        // `p { 'text' }` — `p` is the *call* of the block node, so it
+        // is a DSL usage. RuboCop uses `node.block_node` for this check.
         test::<Output>().expect_no_offenses(indoc! {r#"
                 div do
                   p { 'text' }
