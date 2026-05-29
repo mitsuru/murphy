@@ -349,6 +349,55 @@ impl<'a> Cx<'a> {
         self.call_receiver(id).get().is_some() && self.method_name(id) == Some("!")
     }
 
+    /// `literal?` — the node is one of RuboCop's `LITERALS`
+    /// (`TRUTHY_LITERALS + FALSEY_LITERALS`): string/xstring/dstring,
+    /// symbol/dsymbol, integer/float/rational/complex, array, hash,
+    /// regexp (+ its `regopt`), range, and `true`/`false`/`nil`.
+    ///
+    /// RuboCop distinguishes `irange`/`erange`; Murphy folds both into
+    /// [`NodeKind::RangeExpr`], which is sound here because both are
+    /// literals.
+    pub fn is_literal(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::Str(..)
+                | NodeKind::Dstr(..)
+                | NodeKind::Xstr(..)
+                | NodeKind::Int(..)
+                | NodeKind::Float(..)
+                | NodeKind::Sym(..)
+                | NodeKind::Dsym(..)
+                | NodeKind::Array(..)
+                | NodeKind::Hash(..)
+                | NodeKind::Regexp { .. }
+                | NodeKind::Regopt(..)
+                | NodeKind::True_
+                | NodeKind::False_
+                | NodeKind::Nil
+                | NodeKind::RangeExpr { .. }
+                | NodeKind::Rational(..)
+                | NodeKind::Complex(..)
+        )
+    }
+
+    /// The number of source lines the node's expression range spans —
+    /// Murphy's analog of RuboCop's `node.line_count`
+    /// (`last_line - first_line + 1`), computed from the expression
+    /// range's source text.
+    fn line_count(&self, id: NodeId) -> usize {
+        self.raw_source(self.range(id)).matches('\n').count() + 1
+    }
+
+    /// `single_line?` — the node's expression spans exactly one line.
+    pub fn is_single_line(&self, id: NodeId) -> bool {
+        self.line_count(id) == 1
+    }
+
+    /// `multiline?` — the node's expression spans more than one line.
+    pub fn is_multiline(&self, id: NodeId) -> bool {
+        self.line_count(id) > 1
+    }
+
     /// The file's comments, in source order.
     pub fn comments(&self) -> &'a [Comment] {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
@@ -1282,5 +1331,71 @@ mod tests {
         let raw = cx_raw_for(&ast, &fns);
         let cx = unsafe { Cx::from_raw(&raw) };
         assert!(!cx.is_negation_method(call));
+    }
+
+    #[test]
+    fn literal_predicate_matches_literal_node_kinds() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // An Int literal.
+        let mut b = AstBuilder::new("42".to_string(), "t.rb".to_string());
+        let root = b.push(NodeKind::Int(42), Range { start: 0, end: 2 });
+        let ast = b.finish(root);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_literal(root));
+
+        // A `nil` literal.
+        let mut b = AstBuilder::new("nil".to_string(), "t.rb".to_string());
+        let root = b.push(NodeKind::Nil, Range { start: 0, end: 3 });
+        let ast = b.finish(root);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_literal(root));
+
+        // A Send is not a literal.
+        let (ast, call) = build_call_with(None, "foo", &[]);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.is_literal(call));
+    }
+
+    #[test]
+    fn single_and_multiline_count_expression_lines() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+
+        // `42` — one line.
+        let mut b = AstBuilder::new("42".to_string(), "t.rb".to_string());
+        let root = b.push(NodeKind::Int(42), Range { start: 0, end: 2 });
+        let ast = b.finish(root);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_single_line(root));
+        assert!(!cx.is_multiline(root));
+
+        // `[\n1,\n2,\n]` — the Array expression spans four lines.
+        let src = "[\n1,\n2,\n]";
+        let mut b = AstBuilder::new(src.to_string(), "t.rb".to_string());
+        let one = b.push(NodeKind::Int(1), Range { start: 2, end: 3 });
+        let two = b.push(NodeKind::Int(2), Range { start: 5, end: 6 });
+        let elems = b.push_list(&[one, two]);
+        let root = b.push(
+            NodeKind::Array(elems),
+            Range {
+                start: 0,
+                end: src.len() as u32,
+            },
+        );
+        let ast = b.finish(root);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.is_multiline(root));
+        assert!(!cx.is_single_line(root));
     }
 }
