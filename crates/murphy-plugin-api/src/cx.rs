@@ -345,6 +345,23 @@ impl<'a> Cx<'a> {
         })
     }
 
+    /// Ancestors of `id` whose kind matches a pattern node-type name or alias
+    /// group such as `call`, `any_block`, `numeric`, or `any_str`.
+    pub fn ancestors_of_type(
+        &self,
+        id: NodeId,
+        type_name: &str,
+    ) -> impl Iterator<Item = NodeId> + 'a {
+        let tags = murphy_ast::tags_for_type_name(type_name);
+        let mut ancestors = (!tags.is_empty()).then(|| self.ancestors(id));
+        let cx = *self;
+        std::iter::from_fn(move || {
+            ancestors
+                .as_mut()?
+                .find(|&ancestor| tags.contains(&cx.kind(ancestor).tag()))
+        })
+    }
+
     /// All descendants of `id` in DFS pre-order, excluding `id`. Allocates
     /// one `Vec` per call (plus per-node `Vec`s via [`Self::children`]); an
     /// allocation-free iterator variant could be added later if profiling
@@ -2252,6 +2269,75 @@ mod tests {
         assert_eq!(
             cx.raw_source(cx.range(root)),
             ast.raw_source(ast.range(root))
+        );
+    }
+
+    #[test]
+    fn ancestors_of_type_filters_by_pattern_name_and_alias_group() {
+        let mut b = AstBuilder::new("def m; foo { 1 }; end", "t.rb".to_string());
+        let method = b.intern_symbol("m");
+        let foo = b.intern_symbol("foo");
+        let one = b.push(NodeKind::Int(1), Range { start: 14, end: 15 });
+        let block_args = b.push(
+            NodeKind::Args(murphy_ast::NodeList::EMPTY),
+            Range { start: 10, end: 10 },
+        );
+        let def_args = b.push(
+            NodeKind::Args(murphy_ast::NodeList::EMPTY),
+            Range { start: 5, end: 5 },
+        );
+        let send = b.push(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method: foo,
+                args: murphy_ast::NodeList::EMPTY,
+            },
+            Range { start: 7, end: 10 },
+        );
+        let block = b.push(
+            NodeKind::Block {
+                call: send,
+                args: block_args,
+                body: OptNodeId::some(one),
+            },
+            Range { start: 7, end: 17 },
+        );
+        let root = b.push(
+            NodeKind::Def {
+                receiver: OptNodeId::NONE,
+                name: method,
+                args: def_args,
+                body: OptNodeId::some(block),
+            },
+            Range { start: 0, end: 21 },
+        );
+        let ast = b.finish(root);
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(
+            cx.ancestors_of_type(one, "block").collect::<Vec<_>>(),
+            vec![block]
+        );
+        assert_eq!(
+            cx.ancestors_of_type(one, "any_block").collect::<Vec<_>>(),
+            vec![block]
+        );
+        assert_eq!(
+            cx.ancestors_of_type(one, "def").collect::<Vec<_>>(),
+            vec![root]
+        );
+        assert_eq!(
+            cx.ancestors_of_type(one, "call").collect::<Vec<_>>(),
+            Vec::new()
+        );
+        assert_eq!(
+            cx.ancestors_of_type(one, "sned").collect::<Vec<_>>(),
+            Vec::new()
         );
     }
 

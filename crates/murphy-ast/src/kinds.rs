@@ -152,12 +152,143 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("blocknilarg", 100),
 ];
 
+/// RuboCop-compatible type-name aliases for APIs that accept parser node
+/// families rather than exactly one node kind.
+pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
+    ("nil", &[NodeKindTag(1)]),
+    ("true", &[NodeKindTag(2)]),
+    ("false", &[NodeKindTag(3)]),
+    ("self", &[NodeKindTag(4)]),
+    ("int", &[NodeKindTag(5)]),
+    ("float", &[NodeKindTag(6)]),
+    ("str", &[NodeKindTag(7)]),
+    ("sym", &[NodeKindTag(8)]),
+    ("lvar", &[NodeKindTag(9)]),
+    ("ivar", &[NodeKindTag(10)]),
+    ("cvar", &[NodeKindTag(11)]),
+    ("gvar", &[NodeKindTag(12)]),
+    ("const", &[NodeKindTag(13)]),
+    ("lvasgn", &[NodeKindTag(14)]),
+    ("ivasgn", &[NodeKindTag(15)]),
+    ("casgn", &[NodeKindTag(16)]),
+    ("send", &[NodeKindTag(17)]),
+    ("csend", &[NodeKindTag(18)]),
+    ("block", &[NodeKindTag(19)]),
+    ("block_pass", &[NodeKindTag(20)]),
+    ("splat", &[NodeKindTag(21)]),
+    ("array", &[NodeKindTag(22)]),
+    ("hash", &[NodeKindTag(23)]),
+    ("pair", &[NodeKindTag(24)]),
+    ("if", &[NodeKindTag(25)]),
+    ("case", &[NodeKindTag(26)]),
+    ("when", &[NodeKindTag(27)]),
+    ("begin", &[NodeKindTag(28)]),
+    ("return", &[NodeKindTag(29)]),
+    ("and", &[NodeKindTag(30)]),
+    ("or", &[NodeKindTag(31)]),
+    ("def", &[NodeKindTag(32)]),
+    ("class", &[NodeKindTag(33)]),
+    ("module", &[NodeKindTag(34)]),
+    ("args", &[NodeKindTag(35)]),
+    ("arg", &[NodeKindTag(36)]),
+    ("gvasgn", &[NodeKindTag(38)]),
+    ("cvasgn", &[NodeKindTag(39)]),
+    ("optarg", &[NodeKindTag(40)]),
+    ("restarg", &[NodeKindTag(41)]),
+    ("kwarg", &[NodeKindTag(42)]),
+    ("kwoptarg", &[NodeKindTag(43)]),
+    ("kwrestarg", &[NodeKindTag(44)]),
+    ("blockarg", &[NodeKindTag(45)]),
+    ("kwsplat", &[NodeKindTag(46)]),
+    ("while", &[NodeKindTag(47)]),
+    ("until", &[NodeKindTag(48)]),
+    ("range", &[NodeKindTag(49)]),
+    ("sclass", &[NodeKindTag(50)]),
+    ("break", &[NodeKindTag(51)]),
+    ("next", &[NodeKindTag(52)]),
+    ("yield", &[NodeKindTag(53)]),
+    ("super", &[NodeKindTag(54)]),
+    ("zsuper", &[NodeKindTag(55)]),
+    ("defined", &[NodeKindTag(56)]),
+    ("rescue", &[NodeKindTag(57)]),
+    ("resbody", &[NodeKindTag(58)]),
+    ("ensure", &[NodeKindTag(59)]),
+    ("op_asgn", &[NodeKindTag(60)]),
+    ("or_asgn", &[NodeKindTag(61)]),
+    ("and_asgn", &[NodeKindTag(62)]),
+    ("dstr", &[NodeKindTag(63)]),
+    ("dsym", &[NodeKindTag(64)]),
+    ("xstr", &[NodeKindTag(65)]),
+    ("regexp", &[NodeKindTag(66)]),
+    ("masgn", &[NodeKindTag(67)]),
+    ("mlhs", &[NodeKindTag(68)]),
+    ("for", &[NodeKindTag(69)]),
+    ("lambda", &[NodeKindTag(70)]),
+    ("defs", &[NodeKindTag(71)]),
+    ("index", &[NodeKindTag(72)]),
+    ("indexasgn", &[NodeKindTag(73)]),
+    ("kwbegin", &[NodeKindTag(74)]),
+    ("cbase", &[NodeKindTag(75)]),
+    ("regopt", &[NodeKindTag(76)]),
+    ("rational", &[NodeKindTag(77)]),
+    ("complex", &[NodeKindTag(78)]),
+    ("not", &[NodeKindTag(79)]),
+    ("retry", &[NodeKindTag(80)]),
+    ("redo", &[NodeKindTag(81)]),
+    ("numblock", &[NodeKindTag(82)]),
+    ("procarg0", &[NodeKindTag(83)]),
+    ("forward_args", &[NodeKindTag(84)]),
+    ("forwarded_args", &[NodeKindTag(85)]),
+    ("case_match", &[NodeKindTag(86)]),
+    ("in_pattern", &[NodeKindTag(87)]),
+    ("array_pattern", &[NodeKindTag(88)]),
+    ("hash_pattern", &[NodeKindTag(89)]),
+    ("match_var", &[NodeKindTag(90)]),
+    ("itblock", &[NodeKindTag(91)]),
+    ("alias", &[NodeKindTag(92)]),
+    ("undef", &[NodeKindTag(93)]),
+    ("preexe", &[NodeKindTag(94)]),
+    ("postexe", &[NodeKindTag(95)]),
+    ("back_ref", &[NodeKindTag(96)]),
+    ("nth_ref", &[NodeKindTag(97)]),
+    ("shadowarg", &[NodeKindTag(98)]),
+    ("kwnilarg", &[NodeKindTag(99)]),
+    ("blocknilarg", &[NodeKindTag(100)]),
+    ("call", &[NodeKindTag(17), NodeKindTag(18)]),
+    (
+        "any_block",
+        &[NodeKindTag(19), NodeKindTag(82), NodeKindTag(91)],
+    ),
+    (
+        "numeric",
+        &[
+            NodeKindTag(5),
+            NodeKindTag(6),
+            NodeKindTag(77),
+            NodeKindTag(78),
+        ],
+    ),
+    (
+        "any_str",
+        &[NodeKindTag(7), NodeKindTag(63), NodeKindTag(65)],
+    ),
+];
+
 /// Resolve a pattern node-type name to its tag. `None` for unknown names.
 pub fn tag_from_pattern_name(name: &str) -> Option<NodeKindTag> {
     KIND_PATTERN_NAMES
         .iter()
         .find(|(n, _)| *n == name)
         .map(|(_, t)| NodeKindTag(*t))
+}
+
+/// Resolve a pattern node-type name or alias group to one or more tags.
+pub fn tags_for_type_name(name: &str) -> &'static [NodeKindTag] {
+    GROUP_FOR_TYPE
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, tags)| *tags)
+        .unwrap_or(&[])
 }
 
 /// The pattern node-type name for a tag (diagnostics / reverse lookup).
@@ -581,6 +712,34 @@ mod tests {
         assert_eq!(pattern_name(NodeKindTag(17)), Some("send"));
         assert_eq!(tag_from_pattern_name("sned"), None);
         assert_eq!(tag_from_pattern_name("error"), None);
+    }
+
+    #[test]
+    fn tags_for_type_name_resolves_alias_groups_and_pattern_names() {
+        assert_eq!(tags_for_type_name("range"), &[NodeKindTag(49)]);
+        assert_eq!(
+            tags_for_type_name("call"),
+            &[NodeKindTag(17), NodeKindTag(18)]
+        );
+        assert_eq!(
+            tags_for_type_name("any_block"),
+            &[NodeKindTag(19), NodeKindTag(82), NodeKindTag(91)]
+        );
+        assert_eq!(
+            tags_for_type_name("numeric"),
+            &[
+                NodeKindTag(5),
+                NodeKindTag(6),
+                NodeKindTag(77),
+                NodeKindTag(78)
+            ]
+        );
+        assert_eq!(
+            tags_for_type_name("any_str"),
+            &[NodeKindTag(7), NodeKindTag(63), NodeKindTag(65)]
+        );
+        assert_eq!(tags_for_type_name("send"), &[NodeKindTag(17)]);
+        assert_eq!(tags_for_type_name("sned"), &[]);
     }
 
     #[test]
