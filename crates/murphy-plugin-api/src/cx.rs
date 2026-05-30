@@ -1116,6 +1116,25 @@ impl<'a> Cx<'a> {
         matches!(self.kind(call), NodeKind::Lambda)
     }
 
+    /// `numblock_type?` — a numbered-parameter block (`foo { _1 }`).
+    pub fn is_numblock(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Numblock { .. })
+    }
+
+    /// `itblock_type?` — an `it`-parameter block (`foo { it }`, Ruby 3.4).
+    pub fn is_itblock(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Itblock { .. })
+    }
+
+    /// `BlockNode#numbered_arguments?` — the highest numbered parameter
+    /// (`_2` → 2) of a numbered block, or `None` for a non-numblock node.
+    pub fn numblock_max(&self, id: NodeId) -> Option<u8> {
+        match *self.kind(id) {
+            NodeKind::Numblock { max_n, .. } => Some(max_n),
+            _ => None,
+        }
+    }
+
     /// `ArrayNode#values` — the array's element nodes. Empty slice for a
     /// non-`Array` node.
     pub fn array_elements(&self, id: NodeId) -> &'a [NodeId] {
@@ -3098,6 +3117,29 @@ mod tests {
             assert!(!cx.is_modifier_form(root));
             // Non-For projects to NONE.
             assert!(cx.for_variable(coll).get().is_none());
+        });
+    }
+
+    #[test]
+    fn numblock_itblock_on_real_parse() {
+        // Numbered-parameter block → Numblock; method_name delegates to
+        // the inner call; numblock_max gives the highest `_n`.
+        with_parsed("foo.map { _1 + _2 }", |cx, root| {
+            assert!(cx.is_numblock(root));
+            assert_eq!(cx.numblock_max(root), Some(2));
+            assert_eq!(cx.method_name(root), Some("map"));
+            assert!(!cx.is_itblock(root));
+        });
+        // `it`-parameter block → Itblock.
+        with_parsed("foo { it.bar }", |cx, root| {
+            assert!(cx.is_itblock(root));
+            assert_eq!(cx.method_name(root), Some("foo"));
+            assert!(cx.numblock_max(root).is_none());
+        });
+        // An ordinary block is neither.
+        with_parsed("foo { |x| x }", |cx, root| {
+            assert!(!cx.is_numblock(root));
+            assert!(!cx.is_itblock(root));
         });
     }
 
