@@ -68,13 +68,19 @@ fn check_no_space_style(cx: &Cx<'_>) {
             // A newline immediately after `(` means the call is multiline —
             // the gap to the newline token is trailing whitespace on that line,
             // not "space inside parentheses".  TrailingWhitespace owns that.
-            (SourceTokenKind::LeftParen, SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline) => {}
+            (
+                SourceTokenKind::LeftParen,
+                SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline,
+            ) => {}
             (SourceTokenKind::LeftParen, _) => {
                 emit_inline_gap(cx, left.range.end, right.range.start)
             }
             // A newline token just before `)` means `)` is on its own indented
             // line.  The gap is the indentation, not inline "space inside parens".
-            (SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline, SourceTokenKind::RightParen) => {}
+            (
+                SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline,
+                SourceTokenKind::RightParen,
+            ) => {}
             (_, SourceTokenKind::RightParen) if left.kind != SourceTokenKind::LeftParen => {
                 emit_inline_gap(cx, left.range.end, right.range.start);
             }
@@ -160,9 +166,13 @@ fn can_ignore_missing_space(cx: &Cx<'_>, left: SourceToken, right: SourceToken) 
     // RuboCop's `space`/`compact` styles don't require inline spaces across
     // line breaks: `(` followed immediately by a newline, or `)` preceded
     // directly by a newline token, are both exempt.
-    if matches!(left.kind, SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline)
-        || matches!(right.kind, SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline)
-    {
+    if matches!(
+        left.kind,
+        SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline
+    ) || matches!(
+        right.kind,
+        SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline
+    ) {
         return true;
     }
     !same_line_gap(cx, left.range.end, right.range.start)
@@ -285,7 +295,9 @@ mod tests {
         let opts = SpaceInsideParensOptions {
             enforced_style: SpaceInsideParensStyle::Space,
         };
-        test::<SpaceInsideParens>().with_options(&opts).expect_no_offenses(indoc! {r#"
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
             def foo
               a_request(
                 :post,
@@ -302,7 +314,9 @@ mod tests {
         let opts = SpaceInsideParensOptions {
             enforced_style: SpaceInsideParensStyle::Compact,
         };
-        test::<SpaceInsideParens>().with_options(&opts).expect_no_offenses(indoc! {r#"
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
             def foo
               a_request(
                 :post,
