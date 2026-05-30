@@ -710,6 +710,25 @@ impl Translator {
             let body = self.translate_stmts_opt(f.statements());
             return self.builder.push(NodeKind::For { var, iter, body }, range);
         }
+        if let Some(lam) = node.as_lambda_node() {
+            // Stabby lambda `-> (params) { body }` → `(block (lambda) (args)
+            // body)`, mirroring the parser gem. The `Lambda` marker's range
+            // is the `->` operator so it stays distinct from a `lambda {}`
+            // method call (which is a `Block` over a `send nil :lambda`).
+            let call = self
+                .builder
+                .push(NodeKind::Lambda, Self::range(&lam.operator_loc()));
+            let params_node = lam.parameters().and_then(|p| {
+                p.as_block_parameters_node()
+                    .and_then(|bp| bp.parameters())
+                    .or_else(|| p.as_parameters_node())
+            });
+            let args = self.translate_parameters(params_node, range);
+            let body = self.translate_body(lam.body());
+            return self
+                .builder
+                .push(NodeKind::Block { call, args, body }, range);
+        }
 
         // --- logical operators ---
         if let Some(a) = node.as_and_node() {

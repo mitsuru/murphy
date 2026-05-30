@@ -1088,6 +1088,34 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// `BlockNode#lambda?` — the block is a lambda, in either spelling:
+    /// the stabby `-> { … }` (a `Block` over the [`NodeKind::Lambda`]
+    /// marker) or the `lambda { … }` method call (a block over a
+    /// receiverless `lambda` send). `false` for an ordinary block or a
+    /// non-block node.
+    pub fn is_lambda(&self, id: NodeId) -> bool {
+        let call = match *self.kind(id) {
+            NodeKind::Block { call, .. } => call,
+            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => send,
+            _ => return false,
+        };
+        matches!(self.kind(call), NodeKind::Lambda)
+            || (self.call_receiver(call).get().is_none()
+                && self.method_name(call) == Some("lambda"))
+    }
+
+    /// `lambda_literal?` — the stabby `-> { … }` lambda specifically (not
+    /// the `lambda { … }` method form). True only when the block's call is
+    /// the [`NodeKind::Lambda`] marker.
+    pub fn is_lambda_literal(&self, id: NodeId) -> bool {
+        let call = match *self.kind(id) {
+            NodeKind::Block { call, .. } => call,
+            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => send,
+            _ => return false,
+        };
+        matches!(self.kind(call), NodeKind::Lambda)
+    }
+
     /// `ArrayNode#values` — the array's element nodes. Empty slice for a
     /// non-`Array` node.
     pub fn array_elements(&self, id: NodeId) -> &'a [NodeId] {
@@ -3070,6 +3098,32 @@ mod tests {
             assert!(!cx.is_modifier_form(root));
             // Non-For projects to NONE.
             assert!(cx.for_variable(coll).get().is_none());
+        });
+    }
+
+    #[test]
+    fn lambda_predicates_on_real_parse() {
+        // Stabby lambda — emitted as a Block over the Lambda marker.
+        with_parsed("-> { 1 }", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Block { .. }));
+            assert!(cx.is_lambda(root));
+            assert!(cx.is_lambda_literal(root));
+        });
+        // Params/body of a stabby lambda translate (previously Unknown).
+        with_parsed("->(x) { x }", |cx, root| {
+            assert!(cx.is_lambda_literal(root));
+            assert!(cx.block_arguments(root).get().is_some());
+            assert!(cx.block_body(root).get().is_some());
+        });
+        // `lambda { }` method form — a lambda, but not a lambda *literal*.
+        with_parsed("lambda { 1 }", |cx, root| {
+            assert!(cx.is_lambda(root));
+            assert!(!cx.is_lambda_literal(root));
+        });
+        // An ordinary block is neither.
+        with_parsed("foo { 1 }", |cx, root| {
+            assert!(!cx.is_lambda(root));
+            assert!(!cx.is_lambda_literal(root));
         });
     }
 
