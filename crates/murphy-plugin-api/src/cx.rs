@@ -748,6 +748,302 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// `mutable_literal?` — RuboCop's `MUTABLE_LITERALS`
+    /// (`str dstr xstr array hash regexp irange erange`): a literal whose
+    /// evaluation yields a fresh mutable object. Murphy folds
+    /// `irange`/`erange` into [`NodeKind::RangeExpr`] (both mutable, so the
+    /// fold is sound).
+    pub fn is_mutable_literal(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::Str(..)
+                | NodeKind::Dstr(..)
+                | NodeKind::Xstr(..)
+                | NodeKind::Array(..)
+                | NodeKind::Hash(..)
+                | NodeKind::Regexp { .. }
+                | NodeKind::RangeExpr { .. }
+        )
+    }
+
+    /// `immutable_literal?` — RuboCop's `IMMUTABLE_LITERALS`
+    /// (`LITERALS - MUTABLE_LITERALS`): a literal that is not mutable
+    /// (numerics, `sym`/`dsym`, `true`/`false`/`nil`, `regopt`). Defined as
+    /// the set complement so the partition stays exact by construction.
+    pub fn is_immutable_literal(&self, id: NodeId) -> bool {
+        self.is_literal(id) && !self.is_mutable_literal(id)
+    }
+
+    /// `falsey_literal?` — RuboCop's `FALSEY_LITERALS` (`false`, `nil`).
+    pub fn is_falsey_literal(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::False_ | NodeKind::Nil)
+    }
+
+    /// `truthy_literal?` — RuboCop's `TRUTHY_LITERALS`: every literal except
+    /// `false`/`nil`. Defined as `literal? && !falsey_literal?`, pinning
+    /// `LITERALS = TRUTHY ⊔ FALSEY`.
+    pub fn is_truthy_literal(&self, id: NodeId) -> bool {
+        self.is_literal(id) && !self.is_falsey_literal(id)
+    }
+
+    /// `recursive_literal?` — RuboCop's
+    /// `def_recursive_literal_predicate :literal`: the `literal?` twin of
+    /// [`Self::is_recursive_basic_literal`]. Same `send`/composite recursion,
+    /// but the leaf arm is [`Self::is_literal`] instead of `basic_literal?`,
+    /// so composite literals (`array`/`hash`/range/…) qualify at the leaf.
+    pub fn is_recursive_literal(&self, id: NodeId) -> bool {
+        const LITERAL_RECURSIVE_METHODS: &[&str] =
+            &["==", "===", "!=", "<=", ">=", ">", "<", "*", "!", "<=>"];
+        match self.kind(id) {
+            NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+                let Some(name) = self.method_name(id) else {
+                    return false;
+                };
+                LITERAL_RECURSIVE_METHODS.contains(&name)
+                    && self
+                        .call_receiver(id)
+                        .get()
+                        .is_some_and(|r| self.is_recursive_literal(r))
+                    && self
+                        .call_arguments(id)
+                        .iter()
+                        .all(|&a| self.is_recursive_literal(a))
+            }
+            NodeKind::And { .. }
+            | NodeKind::Or { .. }
+            | NodeKind::Dstr(..)
+            | NodeKind::Xstr(..)
+            | NodeKind::Dsym(..)
+            | NodeKind::Array(..)
+            | NodeKind::Hash(..)
+            | NodeKind::RangeExpr { .. }
+            | NodeKind::Regexp { .. }
+            | NodeKind::Begin(..)
+            | NodeKind::Pair { .. } => self
+                .children(id)
+                .iter()
+                .all(|&c| self.is_recursive_literal(c)),
+            _ => self.is_literal(id),
+        }
+    }
+
+    /// `operator_keyword?` — RuboCop's `OPERATOR_KEYWORDS` (`and`, `or`).
+    pub fn is_operator_keyword(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::And { .. } | NodeKind::Or { .. })
+    }
+
+    /// `post_condition_loop?` — RuboCop's `POST_CONDITION_LOOP_TYPES`
+    /// (`while_post`, `until_post`): a do-while / do-until. Murphy folds the
+    /// post forms into [`NodeKind::While`]/[`NodeKind::Until`] with
+    /// `post: true`.
+    pub fn is_post_condition_loop(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::While { post: true, .. } | NodeKind::Until { post: true, .. }
+        )
+    }
+
+    /// `loop_keyword?` — RuboCop's `LOOP_TYPES` (`while until for` + the post
+    /// forms): any `while`/`until`/`for`, regardless of pre/post form.
+    pub fn is_loop_keyword(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::While { .. } | NodeKind::Until { .. } | NodeKind::For { .. }
+        )
+    }
+
+    /// `basic_conditional?` — RuboCop's `BASIC_CONDITIONALS`
+    /// (`if while until`). RuboCop's set excludes `while_post`/`until_post`,
+    /// so Murphy's folded `While`/`Until` qualify only with `post: false`.
+    pub fn is_basic_conditional(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::If { .. }
+                | NodeKind::While { post: false, .. }
+                | NodeKind::Until { post: false, .. }
+        )
+    }
+
+    /// `conditional?` — RuboCop's `CONDITIONALS`
+    /// (`BASIC_CONDITIONALS + case case_match`). Loop forms follow the same
+    /// `post: false` restriction as [`Self::is_basic_conditional`].
+    pub fn is_conditional(&self, id: NodeId) -> bool {
+        self.is_basic_conditional(id)
+            || matches!(
+                self.kind(id),
+                NodeKind::Case { .. } | NodeKind::CaseMatch { .. }
+            )
+    }
+
+    /// `boolean_type?` — RuboCop's `:boolean` group (`true`, `false`).
+    pub fn is_boolean_type(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::True_ | NodeKind::False_)
+    }
+
+    /// `range_type?` — RuboCop's `:range` group (`irange`, `erange`), folded
+    /// into [`NodeKind::RangeExpr`] in Murphy.
+    pub fn is_range_type(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::RangeExpr { .. })
+    }
+
+    /// `any_block_type?` — RuboCop's `:any_block` group
+    /// (`block`, `numblock`, `itblock`).
+    pub fn is_any_block_type(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. }
+        )
+    }
+
+    /// `any_def_type?` — RuboCop's `:any_def` group (`def`, `defs`).
+    pub fn is_any_def_type(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Def { .. } | NodeKind::Defs { .. })
+    }
+
+    /// `variable?` — RuboCop's `VARIABLES` (`ivar gvar cvar lvar`): a
+    /// variable *read* (not a write/assignment).
+    pub fn is_variable(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::Lvar(..) | NodeKind::Ivar(..) | NodeKind::Cvar(..) | NodeKind::Gvar(..)
+        )
+    }
+
+    /// `equals_asgn?` — RuboCop's `EQUALS_ASSIGNMENTS`
+    /// (`lvasgn ivasgn cvasgn gvasgn casgn masgn`): a plain `=` write.
+    pub fn is_equals_asgn(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::Lvasgn { .. }
+                | NodeKind::Ivasgn { .. }
+                | NodeKind::Cvasgn { .. }
+                | NodeKind::Gvasgn { .. }
+                | NodeKind::Casgn { .. }
+                | NodeKind::Masgn { .. }
+        )
+    }
+
+    /// `shorthand_asgn?` — RuboCop's `SHORTHAND_ASSIGNMENTS`
+    /// (`op_asgn or_asgn and_asgn`): `+=`, `||=`, `&&=`, etc.
+    pub fn is_shorthand_asgn(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::OpAsgn { .. } | NodeKind::OrAsgn { .. } | NodeKind::AndAsgn { .. }
+        )
+    }
+
+    /// `assignment?` — RuboCop's `ASSIGNMENTS`
+    /// (`EQUALS_ASSIGNMENTS ⊔ SHORTHAND_ASSIGNMENTS`). Does **not** include
+    /// `index_asgn` — RuboCop's set is exactly these nine kinds.
+    pub fn is_assignment(&self, id: NodeId) -> bool {
+        self.is_equals_asgn(id) || self.is_shorthand_asgn(id)
+    }
+
+    /// `chained?` — RuboCop's `chained?`
+    /// (`parent&.call_type? && eql?(parent.receiver)`): the node is the
+    /// receiver of its parent call (`Send` *or* `Csend`). Identity is by
+    /// `NodeId`.
+    pub fn is_chained(&self, id: NodeId) -> bool {
+        let Some(parent) = self.parent(id).get() else {
+            return false;
+        };
+        matches!(
+            self.kind(parent),
+            NodeKind::Send { .. } | NodeKind::Csend { .. }
+        ) && self.call_receiver(parent).get() == Some(id)
+    }
+
+    /// `argument?` — RuboCop's `argument?`
+    /// (`parent&.send_type? && parent.arguments.include?(self)`): the node is
+    /// an argument of its parent `Send`. Note the asymmetry with
+    /// [`Self::is_chained`] — RuboCop restricts this to `send` (not `csend`).
+    pub fn is_argument(&self, id: NodeId) -> bool {
+        let Some(parent) = self.parent(id).get() else {
+            return false;
+        };
+        if !matches!(self.kind(parent), NodeKind::Send { .. }) {
+            return false;
+        }
+        self.call_arguments(parent).contains(&id)
+    }
+
+    /// `source_length` — RuboCop's `Node#source_length`
+    /// (`source_range ? source_range.size : 0`): the node's expression length
+    /// in **characters** (not bytes). A zero range is `0`.
+    pub fn source_length(&self, id: NodeId) -> usize {
+        let r = self.range(id);
+        if r == Range::ZERO {
+            return 0;
+        }
+        self.raw_source(r).chars().count()
+    }
+
+    /// `const_name` — RuboCop's `Node#const_name` for `const`/`casgn`: the
+    /// fully-qualified constant name joined by `::`, recursing through the
+    /// scope. `None` for any other node kind.
+    ///
+    /// **Murphy divergence:** the translator folds a top-level `::Foo` path
+    /// to `Const { scope: None }` (no `cbase` scope node), so `::Foo` reports
+    /// `"Foo"` — identical to RuboCop's output, which also drops the leading
+    /// `::`. A `cbase` scope (should one appear) is likewise dropped.
+    pub fn const_name(&self, id: NodeId) -> Option<String> {
+        let (scope, name) = match *self.kind(id) {
+            NodeKind::Const { scope, name } => (scope, name),
+            NodeKind::Casgn { scope, name, .. } => (scope, name),
+            _ => return None,
+        };
+        let short = self.symbol_str(name);
+        // RuboCop: `if namespace && !namespace.cbase_type?` → join, else short.
+        match scope.get() {
+            Some(s) if !matches!(self.kind(s), NodeKind::Cbase) => {
+                // RuboCop interpolates `namespace.const_name` (nil → "") for a
+                // non-const namespace, yielding a leading `::`.
+                let prefix = self.const_name(s).unwrap_or_default();
+                Some(format!("{prefix}::{short}"))
+            }
+            _ => Some(short.to_string()),
+        }
+    }
+
+    /// `double_colon?` — **Murphy-specific** (no rubocop-ast equivalent): a
+    /// call (`Send`/`Csend`) whose call operator is `::` rather than `.`/`&.`
+    /// (e.g. `Foo::bar`). Decided by the delimited operator gap between the
+    /// receiver's expression end and the selector's `loc.name` start — its
+    /// trimmed text equals `"::"`. `false` for receiverless calls,
+    /// operator/index methods, and non-call kinds.
+    pub fn is_double_colon(&self, id: NodeId) -> bool {
+        if !matches!(
+            self.kind(id),
+            NodeKind::Send { .. } | NodeKind::Csend { .. }
+        ) {
+            return false;
+        }
+        let Some(recv) = self.call_receiver(id).get() else {
+            return false;
+        };
+        let name = self.loc(id).name;
+        let recv_end = self.range(recv).end;
+        if name.start <= recv_end {
+            return false;
+        }
+        let gap = Range {
+            start: recv_end,
+            end: name.start,
+        };
+        self.raw_source(gap).trim() == "::"
+    }
+
+    /// `arithmetic_operation?` — RuboCop's
+    /// `MethodDispatchNode#arithmetic_operation?`
+    /// (`ARITHMETIC_OPERATORS.include?(method_name)`, where
+    /// `ARITHMETIC_OPERATORS = %i[+ - * / % **]`): a `Send`/`Csend` (or block
+    /// delegating to one) whose selector is a binary arithmetic operator.
+    pub fn is_arithmetic_operation(&self, id: NodeId) -> bool {
+        const ARITHMETIC_OPERATORS: &[&str] = &["+", "-", "*", "/", "%", "**"];
+        self.method_name(id)
+            .is_some_and(|name| ARITHMETIC_OPERATORS.contains(&name))
+    }
+
     /// `pure?` — the node is free of side effects: a pure value leaf
     /// (literals, variable reads, `const`, `defined?`) or a composite
     /// (`and`/`or`/`if`/`case`/`begin`/`array`/`hash`/range/`while`/… ) all
@@ -3158,5 +3454,580 @@ mod tests {
         with_parsed("def f(a)\nend", |cx, root| {
             assert!(!cx.is_argument_forwarding(root))
         });
+    }
+
+    // ── es99.25 tests ──────────────────────────────────────────────
+
+    #[test]
+    fn mutable_and_immutable_literals_partition_literals() {
+        // MUTABLE_LITERALS = str dstr xstr array hash regexp irange erange
+        for src in [
+            "\"s\"",
+            "\"a#{b}\"",
+            "`c`",
+            "[1]",
+            "{a: 1}",
+            "/re/",
+            "1..2",
+            "1...2",
+        ] {
+            with_parsed(src, |cx, root| {
+                assert!(cx.is_mutable_literal(root), "{src} is a mutable literal");
+                assert!(cx.is_literal(root), "{src} is a literal");
+                assert!(
+                    !cx.is_immutable_literal(root),
+                    "{src} must not also be immutable",
+                );
+            });
+        }
+        // IMMUTABLE = LITERALS - MUTABLE: numerics, sym/dsym, true/false/nil.
+        for src in [
+            "1",
+            "1.5",
+            "1r",
+            "1i",
+            ":s",
+            ":\"a#{b}\"",
+            "true",
+            "false",
+            "nil",
+        ] {
+            with_parsed(src, |cx, root| {
+                assert!(
+                    cx.is_immutable_literal(root),
+                    "{src} is an immutable literal"
+                );
+                assert!(cx.is_literal(root), "{src} is a literal");
+                assert!(!cx.is_mutable_literal(root), "{src} must not be mutable");
+            });
+        }
+        // Non-literals are neither.
+        with_parsed("foo", |cx, root| {
+            assert!(!cx.is_mutable_literal(root));
+            assert!(!cx.is_immutable_literal(root));
+        });
+    }
+
+    #[test]
+    fn truthy_and_falsey_literals_partition_literals() {
+        // FALSEY_LITERALS = false nil.
+        for src in ["false", "nil"] {
+            with_parsed(src, |cx, root| {
+                assert!(cx.is_falsey_literal(root), "{src} is falsey");
+                assert!(!cx.is_truthy_literal(root), "{src} is not truthy");
+                assert!(cx.is_literal(root));
+            });
+        }
+        // Everything else literal is truthy (TRUTHY ⊔ FALSEY = LITERALS).
+        for src in ["1", "\"s\"", ":s", "[1]", "{a: 1}", "/re/", "1..2", "true"] {
+            with_parsed(src, |cx, root| {
+                assert!(cx.is_truthy_literal(root), "{src} is truthy");
+                assert!(!cx.is_falsey_literal(root), "{src} is not falsey");
+                assert!(cx.is_literal(root));
+            });
+        }
+        // A non-literal is neither.
+        with_parsed("foo", |cx, root| {
+            assert!(!cx.is_truthy_literal(root));
+            assert!(!cx.is_falsey_literal(root));
+        });
+    }
+
+    #[test]
+    fn recursive_literal_includes_composite_leaves() {
+        // Composite literal whose children recurse — qualifies under
+        // recursive_literal? but not recursive_basic_literal?.
+        with_parsed("[1, 2]", |cx, root| {
+            assert!(
+                cx.is_recursive_literal(root),
+                "[1, 2] is a recursive literal"
+            );
+            assert!(
+                cx.is_recursive_basic_literal(root),
+                "[1, 2]'s leaves are basic too",
+            );
+        });
+        // An array containing a composite leaf: literal-recursive yes,
+        // basic-recursive yes (arrays recurse in both). Use a hash leaf to
+        // separate them: a bare `{a: 1}` is composite — recursive_literal?
+        // (its pair recurses to int) but its element is not "basic".
+        with_parsed("[[1], {a: 2}]", |cx, root| {
+            assert!(cx.is_recursive_literal(root));
+        });
+        // Literal-operator send on composite operands — recurse via send arm.
+        // `[1]`/`[2]` are arrays of basic ints, so they qualify as recursive
+        // *basic* literals too (the array arm recurses over its int children).
+        with_parsed("[1] == [2]", |cx, root| {
+            assert!(
+                cx.is_recursive_literal(root),
+                "[1] == [2] recurses on literals"
+            );
+            assert!(cx.is_recursive_basic_literal(root));
+        });
+        // The recursive_literal/basic split shows on a composite *leaf*: a
+        // bare hash `{a: 1}` is a recursive literal but NOT a recursive basic
+        // literal (hash ∈ COMPOSITE_LITERALS, excluded from BASIC_LITERALS),
+        // yet both predicates recurse through hash, so the discriminator is
+        // the leaf int — equal here. Use a string-receiver send to separate:
+        // `[1].foo` — `foo` ∉ LITERAL_RECURSIVE_METHODS → both false.
+        with_parsed("[1].foo", |cx, root| {
+            assert!(
+                !cx.is_recursive_literal(root),
+                "foo is not a literal-recursive method"
+            );
+        });
+        // A variable read is not a recursive literal.
+        with_parsed("[x]", |cx, root| {
+            assert!(!cx.is_recursive_literal(root), "[x] holds a non-literal");
+        });
+    }
+
+    #[test]
+    fn operator_keyword_is_and_or() {
+        with_parsed("a and b", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::And { .. }));
+            assert!(cx.is_operator_keyword(root));
+        });
+        with_parsed("a or b", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Or { .. }));
+            assert!(cx.is_operator_keyword(root));
+        });
+        with_parsed("a && b", |cx, root| assert!(cx.is_operator_keyword(root)));
+        with_parsed("a + b", |cx, root| assert!(!cx.is_operator_keyword(root)));
+    }
+
+    #[test]
+    fn loop_and_post_condition_predicates() {
+        // Post forms (post: true) — both loop_keyword? and post_condition_loop?.
+        with_parsed("begin; x; end while y", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::While { post: true, .. }));
+            assert!(cx.is_post_condition_loop(root));
+            assert!(cx.is_loop_keyword(root));
+            // RuboCop's BASIC_CONDITIONALS excludes while_post.
+            assert!(
+                !cx.is_basic_conditional(root),
+                "while_post is not a basic conditional"
+            );
+            assert!(!cx.is_conditional(root));
+        });
+        with_parsed("begin; x; end until y", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Until { post: true, .. }));
+            assert!(cx.is_post_condition_loop(root));
+            assert!(cx.is_loop_keyword(root));
+        });
+        // Pre forms (post: false) — loop_keyword? + basic_conditional?, but
+        // not post_condition_loop?.
+        with_parsed("x while y", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::While { post: false, .. }));
+            assert!(!cx.is_post_condition_loop(root));
+            assert!(cx.is_loop_keyword(root));
+            assert!(cx.is_basic_conditional(root));
+            assert!(cx.is_conditional(root));
+        });
+        with_parsed("for i in a; end", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::For { .. }));
+            assert!(cx.is_loop_keyword(root), "for is a loop keyword");
+            assert!(!cx.is_post_condition_loop(root));
+            assert!(!cx.is_basic_conditional(root), "for is not a conditional");
+        });
+    }
+
+    #[test]
+    fn conditional_predicates() {
+        with_parsed("if a; end", |cx, root| {
+            assert!(cx.is_basic_conditional(root));
+            assert!(cx.is_conditional(root));
+        });
+        with_parsed("case a; when 1; end", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Case { .. }));
+            assert!(
+                !cx.is_basic_conditional(root),
+                "case is conditional but not basic"
+            );
+            assert!(cx.is_conditional(root));
+        });
+        // case/in (CaseMatch) — the translator does not yet emit CaseMatch
+        // from real source (`case a; in 1; end` parses to Unknown), so the
+        // predicate is exercised against a hand-built CaseMatch fixture.
+        {
+            let mut b = AstBuilder::new("case a; in 1; end", "t.rb".to_string());
+            let subj = b.push(NodeKind::Nil, Range { start: 5, end: 6 });
+            let pat = b.push(NodeKind::Int(1), Range { start: 11, end: 12 });
+            let inp = b.push(
+                NodeKind::InPattern {
+                    pattern: pat,
+                    guard: OptNodeId::NONE,
+                    body: OptNodeId::NONE,
+                },
+                Range { start: 8, end: 12 },
+            );
+            let ins = b.push_list(&[inp]);
+            let root = b.push(
+                NodeKind::CaseMatch {
+                    subject: subj,
+                    in_patterns: ins,
+                    else_body: OptNodeId::NONE,
+                },
+                Range { start: 0, end: 17 },
+            );
+            let ast = b.finish(root);
+            let fns = FnTable {
+                emit_offense: noop_offense,
+                emit_edit: noop_edit,
+            };
+            let raw = cx_raw_for(&ast, &fns);
+            let cx = unsafe { Cx::from_raw(&raw) };
+            assert!(matches!(cx.kind(root), NodeKind::CaseMatch { .. }));
+            assert!(!cx.is_basic_conditional(root));
+            assert!(cx.is_conditional(root), "case/in is a conditional");
+        }
+        with_parsed("foo", |cx, root| {
+            assert!(!cx.is_basic_conditional(root));
+            assert!(!cx.is_conditional(root));
+        });
+    }
+
+    #[test]
+    fn type_group_predicates() {
+        // boolean_type? = true/false (not nil).
+        with_parsed("true", |cx, root| assert!(cx.is_boolean_type(root)));
+        with_parsed("false", |cx, root| assert!(cx.is_boolean_type(root)));
+        with_parsed("nil", |cx, root| assert!(!cx.is_boolean_type(root)));
+        // range_type? = irange/erange (folded RangeExpr).
+        with_parsed("1..2", |cx, root| assert!(cx.is_range_type(root)));
+        with_parsed("1...2", |cx, root| assert!(cx.is_range_type(root)));
+        with_parsed("1", |cx, root| assert!(!cx.is_range_type(root)));
+        // any_block_type? = block/numblock/itblock. The translator emits a
+        // plain Block for `foo { }`; Numblock/Itblock are not produced from
+        // real source yet, so those two arms use hand-built fixtures.
+        with_parsed("foo { }", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Block { .. }));
+            assert!(cx.is_any_block_type(root));
+        });
+        {
+            // Numblock fixture: `foo { _1 }`.
+            let mut b = AstBuilder::new("foo { _1 }", "t.rb".to_string());
+            let m = b.intern_symbol("foo");
+            let send = b.push(
+                NodeKind::Send {
+                    receiver: OptNodeId::NONE,
+                    method: m,
+                    args: murphy_ast::NodeList::EMPTY,
+                },
+                Range { start: 0, end: 3 },
+            );
+            let root = b.push(
+                NodeKind::Numblock {
+                    send,
+                    max_n: 1,
+                    body: OptNodeId::NONE,
+                },
+                Range { start: 0, end: 10 },
+            );
+            let ast = b.finish(root);
+            let fns = FnTable {
+                emit_offense: noop_offense,
+                emit_edit: noop_edit,
+            };
+            let raw = cx_raw_for(&ast, &fns);
+            let cx = unsafe { Cx::from_raw(&raw) };
+            assert!(matches!(cx.kind(root), NodeKind::Numblock { .. }));
+            assert!(cx.is_any_block_type(root));
+        }
+        {
+            // Itblock fixture: `foo { it }`.
+            let mut b = AstBuilder::new("foo { it }", "t.rb".to_string());
+            let m = b.intern_symbol("foo");
+            let send = b.push(
+                NodeKind::Send {
+                    receiver: OptNodeId::NONE,
+                    method: m,
+                    args: murphy_ast::NodeList::EMPTY,
+                },
+                Range { start: 0, end: 3 },
+            );
+            let root = b.push(
+                NodeKind::Itblock {
+                    send,
+                    body: OptNodeId::NONE,
+                },
+                Range { start: 0, end: 10 },
+            );
+            let ast = b.finish(root);
+            let fns = FnTable {
+                emit_offense: noop_offense,
+                emit_edit: noop_edit,
+            };
+            let raw = cx_raw_for(&ast, &fns);
+            let cx = unsafe { Cx::from_raw(&raw) };
+            assert!(matches!(cx.kind(root), NodeKind::Itblock { .. }));
+            assert!(cx.is_any_block_type(root), "itblock is an any_block type");
+        }
+        with_parsed("foo", |cx, root| assert!(!cx.is_any_block_type(root)));
+        // any_def_type? = def/defs.
+        with_parsed("def f; end", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Def { .. }));
+            assert!(cx.is_any_def_type(root));
+        });
+        // Defs (`def self.f`) — the translator currently lowers singleton
+        // defs to a `Def` with a self receiver, so the Defs arm is pinned
+        // against a hand-built fixture.
+        {
+            let mut b = AstBuilder::new("def self.f; end", "t.rb".to_string());
+            let recv = b.push(NodeKind::SelfExpr, Range { start: 4, end: 8 });
+            let name = b.intern_symbol("f");
+            let args = b.push(
+                NodeKind::Args(murphy_ast::NodeList::EMPTY),
+                Range { start: 9, end: 10 },
+            );
+            let root = b.push(
+                NodeKind::Defs {
+                    receiver: recv,
+                    name,
+                    args,
+                    body: OptNodeId::NONE,
+                },
+                Range { start: 0, end: 15 },
+            );
+            let ast = b.finish(root);
+            let fns = FnTable {
+                emit_offense: noop_offense,
+                emit_edit: noop_edit,
+            };
+            let raw = cx_raw_for(&ast, &fns);
+            let cx = unsafe { Cx::from_raw(&raw) };
+            assert!(matches!(cx.kind(root), NodeKind::Defs { .. }));
+            assert!(cx.is_any_def_type(root));
+        }
+        with_parsed("foo", |cx, root| assert!(!cx.is_any_def_type(root)));
+    }
+
+    #[test]
+    fn variable_reads() {
+        // VARIABLES = ivar gvar cvar lvar.
+        with_parsed("@i", |cx, root| assert!(cx.is_variable(root)));
+        with_parsed("$g", |cx, root| assert!(cx.is_variable(root)));
+        with_parsed("@@c", |cx, root| assert!(cx.is_variable(root)));
+        // A bare local read only parses as lvar after an assignment is seen.
+        with_parsed("x = 1\nx", |cx, root| {
+            let stmts = cx.children(root);
+            let last = *stmts.last().unwrap();
+            assert!(matches!(cx.kind(last), NodeKind::Lvar(..)));
+            assert!(cx.is_variable(last));
+        });
+        // A constant read is not a "variable".
+        with_parsed("Foo", |cx, root| assert!(!cx.is_variable(root)));
+        // An assignment is a write, not a variable read.
+        with_parsed("@i = 1", |cx, root| assert!(!cx.is_variable(root)));
+    }
+
+    #[test]
+    fn assignment_predicates() {
+        // EQUALS_ASSIGNMENTS.
+        for src in [
+            "a = 1",
+            "@a = 1",
+            "@@a = 1",
+            "$a = 1",
+            "A = 1",
+            "a, b = 1, 2",
+        ] {
+            with_parsed(src, |cx, root| {
+                assert!(cx.is_equals_asgn(root), "{src} is an equals assignment");
+                assert!(cx.is_assignment(root), "{src} is an assignment");
+                assert!(!cx.is_shorthand_asgn(root), "{src} is not shorthand");
+            });
+        }
+        // SHORTHAND_ASSIGNMENTS.
+        for src in ["a += 1", "a ||= 1", "a &&= 1"] {
+            with_parsed(src, |cx, root| {
+                assert!(
+                    cx.is_shorthand_asgn(root),
+                    "{src} is a shorthand assignment"
+                );
+                assert!(cx.is_assignment(root), "{src} is an assignment");
+                assert!(
+                    !cx.is_equals_asgn(root),
+                    "{src} is not an equals assignment"
+                );
+            });
+        }
+        // index_asgn is NOT in RuboCop's ASSIGNMENTS set. (The translator
+        // currently lowers `a[0] = 1` to a `Send :[]=`, which is likewise
+        // not an assignment — either way the predicate is false.)
+        with_parsed("a[0] = 1", |cx, root| {
+            assert!(
+                !cx.is_assignment(root),
+                "index assignment is not in ASSIGNMENTS"
+            );
+            assert!(!cx.is_equals_asgn(root));
+        });
+        // Hand-built IndexAsgn fixture pins the predicate against the actual
+        // node kind too, independent of the translator's lowering choice.
+        {
+            let mut b = AstBuilder::new("a[0] = 1", "t.rb".to_string());
+            let m = b.intern_symbol("a");
+            let recv = b.push(
+                NodeKind::Send {
+                    receiver: OptNodeId::NONE,
+                    method: m,
+                    args: murphy_ast::NodeList::EMPTY,
+                },
+                Range { start: 0, end: 1 },
+            );
+            let idx = b.push(NodeKind::Int(0), Range { start: 2, end: 3 });
+            let args = b.push_list(&[idx]);
+            let val = b.push(NodeKind::Int(1), Range { start: 7, end: 8 });
+            let root = b.push(
+                NodeKind::IndexAsgn {
+                    receiver: recv,
+                    args,
+                    value: val,
+                },
+                Range { start: 0, end: 8 },
+            );
+            let ast = b.finish(root);
+            let fns = FnTable {
+                emit_offense: noop_offense,
+                emit_edit: noop_edit,
+            };
+            let raw = cx_raw_for(&ast, &fns);
+            let cx = unsafe { Cx::from_raw(&raw) };
+            assert!(matches!(cx.kind(root), NodeKind::IndexAsgn { .. }));
+            assert!(!cx.is_assignment(root), "index_asgn is not in ASSIGNMENTS");
+            assert!(!cx.is_equals_asgn(root));
+        }
+        with_parsed("foo", |cx, root| {
+            assert!(!cx.is_assignment(root));
+            assert!(!cx.is_equals_asgn(root));
+            assert!(!cx.is_shorthand_asgn(root));
+        });
+    }
+
+    #[test]
+    fn chained_and_argument_predicates() {
+        // chained? — node is the receiver of its parent call.
+        with_parsed("a.b.c", |cx, root| {
+            // root is `(a.b).c`; its receiver `a.b` is chained.
+            let recv = cx.call_receiver(root).get().expect("a.b");
+            assert!(cx.is_chained(recv), "a.b is the receiver of .c");
+            assert!(!cx.is_chained(root), "the outermost call is not chained");
+        });
+        // chained? holds across csend (call_type? includes csend).
+        with_parsed("a&.b.c", |cx, root| {
+            let recv = cx.call_receiver(root).get().expect("a&.b");
+            assert!(cx.is_chained(recv), "a&.b is the receiver of .c");
+        });
+        // argument? — node is an argument of its parent send.
+        with_parsed("foo(bar, baz)", |cx, root| {
+            let args = cx.call_arguments(root);
+            assert_eq!(args.len(), 2);
+            assert!(cx.is_argument(args[0]), "bar is an argument");
+            assert!(cx.is_argument(args[1]), "baz is an argument");
+            // The receiver position is not an argument; the call itself isn't.
+            assert!(!cx.is_argument(root));
+        });
+        // argument? is send-only: a csend argument is still an argument
+        // (its parent is the csend), but the receiver of a csend is NOT an
+        // argument. Pin the asymmetry: chained holds, argument does not.
+        with_parsed("a&.b", |cx, root| {
+            let recv = cx.call_receiver(root).get().expect("a");
+            assert!(cx.is_chained(recv), "a is the receiver of a&.b");
+            assert!(!cx.is_argument(recv), "a csend receiver is not an argument");
+        });
+    }
+
+    #[test]
+    fn source_length_counts_characters() {
+        with_parsed("foo", |cx, root| assert_eq!(cx.source_length(root), 3));
+        // Multi-byte: a 3-char string literal "あい" spans 8 source bytes
+        // ("あい" = 6 bytes + 2 quote bytes) but 4 characters.
+        with_parsed("\"\u{3042}\u{3044}\"", |cx, root| {
+            assert_eq!(cx.raw_source(cx.range(root)), "\"\u{3042}\u{3044}\"");
+            assert_eq!(
+                cx.source_length(root),
+                4,
+                "2 chars + 2 quotes = 4 characters"
+            );
+        });
+        with_parsed("1 + 2", |cx, root| assert_eq!(cx.source_length(root), 5));
+    }
+
+    #[test]
+    fn const_name_qualifies_through_scope() {
+        with_parsed("Foo", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Const { .. }));
+            assert_eq!(cx.const_name(root).as_deref(), Some("Foo"));
+        });
+        with_parsed("A::B", |cx, root| {
+            assert_eq!(cx.const_name(root).as_deref(), Some("A::B"));
+        });
+        with_parsed("A::B::C", |cx, root| {
+            assert_eq!(cx.const_name(root).as_deref(), Some("A::B::C"));
+        });
+        // Murphy divergence: ::Foo folds to scope=None, so const_name drops
+        // the leading `::` — matching RuboCop's output for cbase paths.
+        with_parsed("::Foo", |cx, root| {
+            assert_eq!(cx.const_name(root).as_deref(), Some("Foo"));
+        });
+        // casgn also yields a const_name.
+        with_parsed("A::B = 1", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Casgn { .. }));
+            assert_eq!(cx.const_name(root).as_deref(), Some("A::B"));
+        });
+        // Non-const → None.
+        with_parsed("foo", |cx, root| assert_eq!(cx.const_name(root), None));
+    }
+
+    #[test]
+    fn double_colon_detects_path_call_operator() {
+        with_parsed("Foo::bar", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Send { .. }));
+            assert!(
+                cx.is_double_colon(root),
+                "Foo::bar uses :: as call operator"
+            );
+        });
+        // Plain dot is not double-colon.
+        with_parsed("Foo.bar", |cx, root| {
+            assert!(!cx.is_double_colon(root));
+        });
+        // Safe-navigation is not double-colon.
+        with_parsed("a&.b", |cx, root| assert!(!cx.is_double_colon(root)));
+        // Operator send: the gap is whitespace, not `::`.
+        with_parsed("a + b", |cx, root| assert!(!cx.is_double_colon(root)));
+        // Receiverless call has no operator gap.
+        with_parsed("foo", |cx, root| assert!(!cx.is_double_colon(root)));
+        // A constant path read (not a call) is not a double-colon *call*.
+        with_parsed("Foo::Bar", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Const { .. }));
+            assert!(
+                !cx.is_double_colon(root),
+                "Foo::Bar is a const read, not a call"
+            );
+        });
+    }
+
+    #[test]
+    fn arithmetic_operation_matches_binary_operators() {
+        for src in ["a + b", "a - b", "a * b", "a / b", "a % b", "a ** b"] {
+            with_parsed(src, |cx, root| {
+                assert!(cx.is_arithmetic_operation(root), "{src} is arithmetic");
+            });
+        }
+        // Non-arithmetic operators / methods are excluded.
+        with_parsed("a == b", |cx, root| {
+            assert!(!cx.is_arithmetic_operation(root))
+        });
+        with_parsed("a << b", |cx, root| {
+            assert!(!cx.is_arithmetic_operation(root))
+        });
+        with_parsed("a.foo", |cx, root| {
+            assert!(!cx.is_arithmetic_operation(root))
+        });
+        // Unary minus parses as `-@`, not the binary `-`.
+        with_parsed("-a", |cx, root| assert!(!cx.is_arithmetic_operation(root)));
+        // A non-call node is not an arithmetic operation.
+        with_parsed("1", |cx, root| assert!(!cx.is_arithmetic_operation(root)));
     }
 }
