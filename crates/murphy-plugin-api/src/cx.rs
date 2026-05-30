@@ -49,7 +49,7 @@ pub struct LocRef<'a> {
 
 /// A parsed `murphy:`/`rubocop:` directive comment.
 ///
-/// `cops.is_empty()` means the directive applies to all cops. Ranges are byte
+/// `cop == None` means the directive applies to all cops. Ranges are byte
 /// ranges into [`Cx::source`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentDirective<'a> {
@@ -58,7 +58,7 @@ pub struct CommentDirective<'a> {
     pub comment_range: Range,
     pub line_range: Range,
     pub affected_range: Range,
-    pub cops: Vec<&'a str>,
+    pub cop: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,7 +101,7 @@ fn prefix_has_code(source: &str, end: usize) -> bool {
     })
 }
 
-fn parse_comment_directive<'a>(text: &'a str) -> Option<(CommentDirectiveKind, Vec<&'a str>)> {
+fn parse_comment_directive<'a>(text: &'a str) -> Option<(CommentDirectiveKind, &'a str)> {
     let comment = text.strip_prefix('#')?.trim_start();
     let rest = comment
         .strip_prefix("murphy:")
@@ -117,32 +117,21 @@ fn parse_comment_directive<'a>(text: &'a str) -> Option<(CommentDirectiveKind, V
         _ => return None,
     };
     let cops_text = tail.split_once("--").map_or(tail, |(cops, _)| cops).trim();
-    let cops = if cops_text.eq_ignore_ascii_case("all") || cops_text.is_empty() {
-        Vec::new()
-    } else {
-        cops_text
-            .split(',')
-            .map(str::trim)
-            .filter(|cop| !cop.is_empty())
-            .collect()
-    };
-    Some((kind, cops))
+    Some((kind, cops_text))
 }
 
-fn first_fully_enabled_line(disabled_cops: &[&str], later: &[CommentDirective<'_>]) -> Option<u32> {
-    let mut remaining = disabled_cops.to_vec();
+fn first_fully_enabled_line(
+    disabled_cop: Option<&str>,
+    later: &[CommentDirective<'_>],
+) -> Option<u32> {
     for candidate in later {
         if candidate.kind != CommentDirectiveKind::Enable {
             continue;
         }
-        if candidate.cops.is_empty() {
+        if candidate.cop.is_none() {
             return Some(candidate.line_range.start);
         }
-        if remaining.is_empty() {
-            continue;
-        }
-        remaining.retain(|disabled| !candidate.cops.iter().any(|enabled| enabled == disabled));
-        if remaining.is_empty() {
+        if candidate.cop == disabled_cop {
             return Some(candidate.line_range.start);
         }
     }
@@ -154,60 +143,69 @@ pub fn comment_directives_from_comments<'a>(
     source: &'a str,
     comments: &'a [Comment],
 ) -> Vec<CommentDirective<'a>> {
-    let mut directives: Vec<CommentDirective<'a>> = comments
-        .iter()
-        .flat_map(|comment| {
-            if comment.kind != murphy_ast::CommentKind::Inline {
-                return Vec::new();
-            }
-            let comment_text = &source[comment.range.start as usize..comment.range.end as usize];
-            let Some((kind, cops)) = parse_comment_directive(comment_text) else {
-                return Vec::new();
-            };
-            let line_range = line_range(source, comment.range.start as usize);
-            let before_comment = &source[line_range.start as usize..comment.range.start as usize];
-            let same_line = !before_comment.trim().is_empty();
-            let scope = if !same_line
-                && kind == CommentDirectiveKind::Disable
-                && cops.is_empty()
-                && !prefix_has_code(source, line_range.start as usize)
+    let mut directives = Vec::new();
+    for comment in comments {
+        if comment.kind != murphy_ast::CommentKind::Inline {
+            continue;
+        }
+        let comment_text = &source[comment.range.start as usize..comment.range.end as usize];
+        let Some((kind, cops_text)) = parse_comment_directive(comment_text) else {
+            continue;
+        };
+        let applies_to_all = cops_text.eq_ignore_ascii_case("all") || cops_text.is_empty();
+        let line_range = line_range(source, comment.range.start as usize);
+        let before_comment = &source[line_range.start as usize..comment.range.start as usize];
+        let same_line = !before_comment.trim().is_empty();
+        let scope = if !same_line
+            && kind == CommentDirectiveKind::Disable
+            && applies_to_all
+            && !prefix_has_code(source, line_range.start as usize)
+        {
+            CommentDirectiveScope::File
+        } else if same_line {
+            CommentDirectiveScope::SameLine
+        } else {
+            CommentDirectiveScope::Block
+        };
+        let affected_range = match scope {
+            CommentDirectiveScope::File => Range {
+                start: 0,
+                end: source.len() as u32,
+            },
+            CommentDirectiveScope::SameLine => line_range,
+            CommentDirectiveScope::Block if kind == CommentDirectiveKind::Disable => Range {
+                start: line_range.end,
+                end: source.len() as u32,
+            },
+            CommentDirectiveScope::Block => line_range,
+        };
+
+        if applies_to_all {
+            directives.push(CommentDirective {
+                kind,
+                scope,
+                comment_range: comment.range,
+                line_range,
+                affected_range,
+                cop: None,
+            });
+        } else {
+            for cop in cops_text
+                .split(',')
+                .map(str::trim)
+                .filter(|cop| !cop.is_empty())
             {
-                CommentDirectiveScope::File
-            } else if same_line {
-                CommentDirectiveScope::SameLine
-            } else {
-                CommentDirectiveScope::Block
-            };
-            let affected_range = match scope {
-                CommentDirectiveScope::File => Range {
-                    start: 0,
-                    end: source.len() as u32,
-                },
-                CommentDirectiveScope::SameLine => line_range,
-                CommentDirectiveScope::Block if kind == CommentDirectiveKind::Disable => Range {
-                    start: line_range.end,
-                    end: source.len() as u32,
-                },
-                CommentDirectiveScope::Block => line_range,
-            };
-            let cop_groups: Vec<Vec<&'a str>> = if cops.len() > 1 {
-                cops.into_iter().map(|cop| vec![cop]).collect()
-            } else {
-                vec![cops]
-            };
-            cop_groups
-                .into_iter()
-                .map(|cops| CommentDirective {
+                directives.push(CommentDirective {
                     kind,
                     scope,
                     comment_range: comment.range,
                     line_range,
                     affected_range,
-                    cops,
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
+                    cop: Some(cop),
+                });
+            }
+        }
+    }
 
     for i in 0..directives.len() {
         if directives[i].kind != CommentDirectiveKind::Disable
@@ -216,7 +214,7 @@ pub fn comment_directives_from_comments<'a>(
             continue;
         }
         let Some(enable_line_start) =
-            first_fully_enabled_line(&directives[i].cops, &directives[i + 1..])
+            first_fully_enabled_line(directives[i].cop, &directives[i + 1..])
         else {
             continue;
         };
@@ -2550,7 +2548,7 @@ mod tests {
         assert_eq!(directives.len(), 5);
         assert_eq!(directives[0].kind, CommentDirectiveKind::Disable);
         assert_eq!(directives[0].scope, CommentDirectiveScope::SameLine);
-        assert_eq!(directives[0].cops, vec!["Murphy/NoReceiverPuts"]);
+        assert_eq!(directives[0].cop, Some("Murphy/NoReceiverPuts"));
         assert_eq!(
             cx.raw_source(directives[0].affected_range),
             "puts 'x' # murphy:disable Murphy/NoReceiverPuts\n"
@@ -2558,12 +2556,12 @@ mod tests {
 
         assert_eq!(directives[1].kind, CommentDirectiveKind::Disable);
         assert_eq!(directives[1].scope, CommentDirectiveScope::Block);
-        assert_eq!(directives[1].cops, vec!["Layout/LineLength"]);
+        assert_eq!(directives[1].cop, Some("Layout/LineLength"));
         assert_eq!(cx.raw_source(directives[1].affected_range), "puts \"y\"\n");
 
         assert_eq!(directives[2].kind, CommentDirectiveKind::Disable);
         assert_eq!(directives[2].scope, CommentDirectiveScope::Block);
-        assert_eq!(directives[2].cops, vec!["Style/StringLiterals"]);
+        assert_eq!(directives[2].cop, Some("Style/StringLiterals"));
         assert_eq!(
             cx.raw_source(directives[2].affected_range),
             "puts \"y\"\n# murphy:enable Layout/LineLength\nputs \"z\"\n"
@@ -2571,11 +2569,11 @@ mod tests {
 
         assert_eq!(directives[3].kind, CommentDirectiveKind::Enable);
         assert_eq!(directives[3].scope, CommentDirectiveScope::Block);
-        assert_eq!(directives[3].cops, vec!["Layout/LineLength"]);
+        assert_eq!(directives[3].cop, Some("Layout/LineLength"));
 
         assert_eq!(directives[4].kind, CommentDirectiveKind::Enable);
         assert_eq!(directives[4].scope, CommentDirectiveScope::Block);
-        assert_eq!(directives[4].cops, vec!["Style/StringLiterals"]);
+        assert_eq!(directives[4].cop, Some("Style/StringLiterals"));
     }
 
     #[test]
@@ -2594,7 +2592,7 @@ mod tests {
         assert_eq!(directives.len(), 1);
         assert_eq!(directives[0].kind, CommentDirectiveKind::Disable);
         assert_eq!(directives[0].scope, CommentDirectiveScope::File);
-        assert!(directives[0].cops.is_empty());
+        assert_eq!(directives[0].cop, None);
         assert_eq!(cx.raw_source(directives[0].affected_range), source);
     }
 
