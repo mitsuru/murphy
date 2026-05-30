@@ -47,6 +47,183 @@ pub struct LocRef<'a> {
     source: &'a [u8],
 }
 
+/// A parsed `murphy:`/`rubocop:` directive comment.
+///
+/// `cop == None` means the directive applies to all cops. Ranges are byte
+/// ranges into [`Cx::source`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentDirective<'a> {
+    pub kind: CommentDirectiveKind,
+    pub scope: CommentDirectiveScope,
+    pub comment_range: Range,
+    pub line_range: Range,
+    pub affected_range: Range,
+    pub cop: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommentDirectiveKind {
+    Disable,
+    Enable,
+    Todo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommentDirectiveScope {
+    /// End-of-line directive; affects only the line containing the comment.
+    SameLine,
+    /// Own-line directive; affects following source until a matching enable.
+    Block,
+    /// File-top disable-all directive; affects the entire file.
+    File,
+}
+
+fn line_range(source: &str, offset: usize) -> Range {
+    let bytes = source.as_bytes();
+    let start = bytes[..offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |pos| pos + 1);
+    let end = bytes[offset..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(source.len(), |pos| offset + pos + 1);
+    Range {
+        start: start as u32,
+        end: end as u32,
+    }
+}
+
+fn prefix_has_code(source: &str, end: usize) -> bool {
+    source[..end].lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    })
+}
+
+fn parse_comment_directive<'a>(text: &'a str) -> Option<(CommentDirectiveKind, &'a str)> {
+    let comment = text.strip_prefix('#')?.trim_start();
+    let rest = comment
+        .strip_prefix("murphy:")
+        .or_else(|| comment.strip_prefix("rubocop:"))?;
+    let rest = rest.trim_start();
+    let (keyword, tail) = rest
+        .split_once(char::is_whitespace)
+        .map_or((rest, ""), |(keyword, tail)| (keyword, tail));
+    let kind = match keyword {
+        "disable" => CommentDirectiveKind::Disable,
+        "enable" => CommentDirectiveKind::Enable,
+        "todo" => CommentDirectiveKind::Todo,
+        _ => return None,
+    };
+    let cops_text = tail.split_once("--").map_or(tail, |(cops, _)| cops).trim();
+    Some((kind, cops_text))
+}
+
+fn first_fully_enabled_line(
+    disabled_cop: Option<&str>,
+    later: &[CommentDirective<'_>],
+) -> Option<u32> {
+    for candidate in later {
+        if candidate.kind != CommentDirectiveKind::Enable {
+            continue;
+        }
+        if candidate.cop.is_none() {
+            return Some(candidate.line_range.start);
+        }
+        if candidate.cop == disabled_cop {
+            return Some(candidate.line_range.start);
+        }
+    }
+    None
+}
+
+/// Parse all directive comments from an already-translated comment table.
+pub fn comment_directives_from_comments<'a>(
+    source: &'a str,
+    comments: &'a [Comment],
+) -> Vec<CommentDirective<'a>> {
+    let mut directives = Vec::new();
+    for comment in comments {
+        if comment.kind != murphy_ast::CommentKind::Inline {
+            continue;
+        }
+        let comment_text = &source[comment.range.start as usize..comment.range.end as usize];
+        let Some((kind, cops_text)) = parse_comment_directive(comment_text) else {
+            continue;
+        };
+        let applies_to_all = cops_text.eq_ignore_ascii_case("all") || cops_text.is_empty();
+        let line_range = line_range(source, comment.range.start as usize);
+        let before_comment = &source[line_range.start as usize..comment.range.start as usize];
+        let same_line = !before_comment.trim().is_empty();
+        let scope = if !same_line
+            && kind == CommentDirectiveKind::Disable
+            && applies_to_all
+            && !prefix_has_code(source, line_range.start as usize)
+        {
+            CommentDirectiveScope::File
+        } else if same_line {
+            CommentDirectiveScope::SameLine
+        } else {
+            CommentDirectiveScope::Block
+        };
+        let affected_range = match scope {
+            CommentDirectiveScope::File => Range {
+                start: 0,
+                end: source.len() as u32,
+            },
+            CommentDirectiveScope::SameLine => line_range,
+            CommentDirectiveScope::Block if kind == CommentDirectiveKind::Disable => Range {
+                start: line_range.end,
+                end: source.len() as u32,
+            },
+            CommentDirectiveScope::Block => line_range,
+        };
+
+        if applies_to_all {
+            directives.push(CommentDirective {
+                kind,
+                scope,
+                comment_range: comment.range,
+                line_range,
+                affected_range,
+                cop: None,
+            });
+        } else {
+            for cop in cops_text
+                .split(',')
+                .map(str::trim)
+                .filter(|cop| !cop.is_empty())
+            {
+                directives.push(CommentDirective {
+                    kind,
+                    scope,
+                    comment_range: comment.range,
+                    line_range,
+                    affected_range,
+                    cop: Some(cop),
+                });
+            }
+        }
+    }
+
+    for i in 0..directives.len() {
+        if directives[i].kind != CommentDirectiveKind::Disable
+            || directives[i].scope == CommentDirectiveScope::SameLine
+        {
+            continue;
+        }
+        let Some(enable_line_start) =
+            first_fully_enabled_line(directives[i].cop, &directives[i + 1..])
+        else {
+            continue;
+        };
+        directives[i].affected_range.end = enable_line_start;
+    }
+
+    directives
+}
+
 impl<'a> LocRef<'a> {
     /// The call-operator range: `.` for `Send`, `&.` for `Csend`.
     /// Returns `Range::ZERO` when the node has no receiver (bare method
@@ -2066,6 +2243,12 @@ impl<'a> Cx<'a> {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
     }
 
+    /// Parsed `murphy:`/`rubocop:` disable, enable, and todo directives from
+    /// the file's comment table.
+    pub fn comment_directives(&self) -> Vec<CommentDirective<'a>> {
+        comment_directives_from_comments(self.source(), self.comments())
+    }
+
     /// The file's source tokens, in source order.
     pub fn sorted_tokens(&self) -> &'a [SourceToken] {
         unsafe { slice(self.raw.sorted_tokens, self.raw.sorted_tokens_len) }
@@ -2360,6 +2543,7 @@ mod tests {
             Range { start: 0, end: 21 },
         );
         let ast = b.finish(root);
+
         let fns = FnTable {
             emit_offense: noop_offense,
             emit_edit: noop_edit,
@@ -2387,6 +2571,77 @@ mod tests {
             cx.ancestors_of_type(one, "sned").collect::<Vec<_>>(),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn comment_directives_expose_same_line_and_block_ranges() {
+        let source = concat!(
+            "puts 'x' # murphy:disable Murphy/NoReceiverPuts\n",
+            "# murphy:disable Layout/LineLength, Style/StringLiterals\n",
+            "puts \"y\"\n",
+            "# murphy:enable Layout/LineLength\n",
+            "puts \"z\"\n",
+            "# murphy:enable Style/StringLiterals\n",
+        );
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let directives = cx.comment_directives();
+
+        assert_eq!(directives.len(), 5);
+        assert_eq!(directives[0].kind, CommentDirectiveKind::Disable);
+        assert_eq!(directives[0].scope, CommentDirectiveScope::SameLine);
+        assert_eq!(directives[0].cop, Some("Murphy/NoReceiverPuts"));
+        assert_eq!(
+            cx.raw_source(directives[0].affected_range),
+            "puts 'x' # murphy:disable Murphy/NoReceiverPuts\n"
+        );
+
+        assert_eq!(directives[1].kind, CommentDirectiveKind::Disable);
+        assert_eq!(directives[1].scope, CommentDirectiveScope::Block);
+        assert_eq!(directives[1].cop, Some("Layout/LineLength"));
+        assert_eq!(cx.raw_source(directives[1].affected_range), "puts \"y\"\n");
+
+        assert_eq!(directives[2].kind, CommentDirectiveKind::Disable);
+        assert_eq!(directives[2].scope, CommentDirectiveScope::Block);
+        assert_eq!(directives[2].cop, Some("Style/StringLiterals"));
+        assert_eq!(
+            cx.raw_source(directives[2].affected_range),
+            "puts \"y\"\n# murphy:enable Layout/LineLength\nputs \"z\"\n"
+        );
+
+        assert_eq!(directives[3].kind, CommentDirectiveKind::Enable);
+        assert_eq!(directives[3].scope, CommentDirectiveScope::Block);
+        assert_eq!(directives[3].cop, Some("Layout/LineLength"));
+
+        assert_eq!(directives[4].kind, CommentDirectiveKind::Enable);
+        assert_eq!(directives[4].scope, CommentDirectiveScope::Block);
+        assert_eq!(directives[4].cop, Some("Style/StringLiterals"));
+    }
+
+    #[test]
+    fn comment_directives_classify_file_top_disable_all() {
+        let source = "# murphy:disable\nputs 'x'\n";
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let directives = cx.comment_directives();
+
+        assert_eq!(directives.len(), 1);
+        assert_eq!(directives[0].kind, CommentDirectiveKind::Disable);
+        assert_eq!(directives[0].scope, CommentDirectiveScope::File);
+        assert_eq!(directives[0].cop, None);
+        assert_eq!(cx.raw_source(directives[0].affected_range), source);
     }
 
     #[test]
