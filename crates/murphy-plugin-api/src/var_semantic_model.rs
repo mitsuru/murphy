@@ -85,6 +85,8 @@ fn is_branch_barrier(ast: &Ast, node: NodeId) -> bool {
         NodeKind::If { .. }
             | NodeKind::Case { .. }
             | NodeKind::When { .. }
+            | NodeKind::CaseMatch { .. }
+            | NodeKind::InPattern { .. }
             | NodeKind::While { .. }
             | NodeKind::Until { .. }
     )
@@ -548,19 +550,8 @@ impl VarSemanticModel {
 
                 // ── `for x in iter; body; end` ──────────────────────────────
                 NodeKind::For { var, iter, body } => {
-                    if let NodeKind::Lvasgn { name, .. } = *ast.kind(var)
-                        && !Self::is_underscore_prefix(name, ast)
-                    {
-                        let end = ast.range(var).end;
-                        let scope_info = scopes.get_mut(&scope).expect("scope must exist");
-                        let v = Self::find_or_declare_local(scope_info, name, var);
-                        v.assignments.push(Assignment {
-                            node_id: var,
-                            end,
-                            is_referenced: false,
-                        });
-                    }
-                    // Recurse into iter and body (var itself has no sub-children).
+                    Self::collect_for_var(ast, &mut scopes, scope, var);
+                    // Recurse into iter and body (var targets have no sub-children).
                     stack.push(WorkItem { node: iter, scope });
                     if let Some(b) = body.get() {
                         stack.push(WorkItem { node: b, scope });
@@ -684,6 +675,29 @@ impl VarSemanticModel {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Handle `For { var, .. }` — var may be a plain `Lvasgn` or an `Mlhs`
+    /// for destructuring loops (`for a, b in list`).
+    fn collect_for_var(
+        ast: &Ast,
+        scopes: &mut HashMap<NodeId, ScopeInfo>,
+        scope: NodeId,
+        var: NodeId,
+    ) {
+        match *ast.kind(var) {
+            NodeKind::Lvasgn { name, .. } if !Self::is_underscore_prefix(name, ast) => {
+                let end = ast.range(var).end;
+                let scope_info = scopes.get_mut(&scope).expect("scope must exist");
+                let v = Self::find_or_declare_local(scope_info, name, var);
+                v.assignments.push(Assignment { node_id: var, end, is_referenced: false });
+            }
+            NodeKind::Mlhs(_) => {
+                // Destructuring: `for a, b in list` — walk Mlhs children.
+                Self::collect_mlhs_targets(ast, var, var, scope, scopes);
+            }
+            _ => {}
         }
     }
 }
@@ -964,5 +978,43 @@ mod tests {
             x.assignments[1].is_referenced,
             "second assignment that is read should be referenced"
         );
+    }
+
+    #[test]
+    fn case_in_branches_are_exclusive_barriers() {
+        // x = 1 in the first `in` arm is overwritten by x = 2 in the second arm,
+        // but they're exclusive, so both assignments should be is_referenced = true.
+        let ast = translate(
+            "def foo(v); case v; in 1; x = 1; in 2; x = 2; end; puts x; end",
+            "test.rb",
+        );
+        let model = VarSemanticModel::build(&ast);
+        let def_id =
+            find_scope_node(&ast, ast.root(), |k| matches!(k, NodeKind::Def { .. })).unwrap();
+        let scope = model.scope(def_id).unwrap();
+        let x = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "x")
+            .unwrap();
+        assert!(
+            x.assignments.iter().all(|a| a.is_referenced),
+            "both in-pattern arms should be referenced (exclusive branches)"
+        );
+    }
+
+    #[test]
+    fn for_mlhs_destructuring_tracked() {
+        // `for a, b in [[1, 2]]` — both a and b should be declared in the scope.
+        let ast = translate("for a, b in [[1, 2]]; puts a; end", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let root_scope = model.scope(ast.root()).unwrap();
+        let names: Vec<&str> = root_scope
+            .variables
+            .iter()
+            .map(|v| ast.interner().resolve(v.name.0))
+            .collect();
+        assert!(names.contains(&"a"), "a should be tracked; got {names:?}");
+        assert!(names.contains(&"b"), "b should be tracked; got {names:?}");
     }
 }
