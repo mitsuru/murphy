@@ -353,9 +353,13 @@ impl<'a> Cx<'a> {
         type_name: &str,
     ) -> impl Iterator<Item = NodeId> + 'a {
         let tags = murphy_ast::tags_for_type_name(type_name);
+        let mut ancestors = (!tags.is_empty()).then(|| self.ancestors(id));
         let cx = *self;
-        self.ancestors(id)
-            .filter(move |ancestor| tags.contains(&cx.kind(*ancestor).tag()))
+        std::iter::from_fn(move || {
+            ancestors
+                .as_mut()?
+                .find(|&ancestor| tags.contains(&cx.kind(ancestor).tag()))
+        })
     }
 
     /// All descendants of `id` in DFS pre-order, excluding `id`. Allocates
