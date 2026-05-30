@@ -271,7 +271,6 @@ impl VarSemanticModel {
         // Push in reverse order so that `pop()` yields source-order nodes.
         let mut stack: Vec<WorkItem> = if root_is_scope {
             ast.children(root)
-                .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
                 .map(|node| WorkItem { node, scope: root })
@@ -369,8 +368,7 @@ impl VarSemanticModel {
                         },
                     );
                     // Children of this boundary belong to the NEW scope.
-                    let children: Vec<NodeId> = ast.children(node).collect();
-                    for child in children.into_iter().rev() {
+                    for child in ast.children(node).into_iter().rev() {
                         stack.push(WorkItem {
                             node: child,
                             scope: node,
@@ -538,8 +536,7 @@ impl VarSemanticModel {
                     }
                     // Recurse into exception class list and body, but NOT the
                     // var node (it's a value-less Lvasgn already handled above).
-                    let all_children: Vec<NodeId> = ast.children(node).collect();
-                    for child in all_children.into_iter().rev() {
+                    for child in ast.children(node).into_iter().rev() {
                         if var.get() == Some(child) {
                             // Skip the var: already classified above.
                             continue;
@@ -571,8 +568,7 @@ impl VarSemanticModel {
 
                 // ── All other nodes: classify children under the same scope ──
                 _ => {
-                    let children: Vec<NodeId> = ast.children(node).collect();
-                    for child in children.into_iter().rev() {
+                    for child in ast.children(node).into_iter().rev() {
                         stack.push(WorkItem { node: child, scope });
                     }
                 }
@@ -732,8 +728,7 @@ mod tests {
             if pred(ast.kind(id)) {
                 return Some(id);
             }
-            let children: Vec<NodeId> = ast.children(id).collect();
-            for c in children.into_iter().rev() {
+            for c in ast.children(id).into_iter().rev() {
                 stack.push(c);
             }
         }
@@ -849,8 +844,7 @@ mod tests {
             if pred(ast.kind(node)) {
                 return Some(node);
             }
-            let children: Vec<NodeId> = ast.children(node).collect();
-            for c in children.into_iter().rev() {
+            for c in ast.children(node).into_iter().rev() {
                 stack.push(c);
             }
         }
