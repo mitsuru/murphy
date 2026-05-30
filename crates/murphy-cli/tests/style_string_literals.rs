@@ -143,6 +143,125 @@ fn config_disabled_silences_the_cop() {
 }
 
 #[test]
+fn cop_include_scope_silences_explicit_files_outside_scope() {
+    let dir = tempdir().expect("create tempdir");
+    fs::write(
+        dir.path().join(".murphy.yml"),
+        "Style/StringLiterals:\n  Include:\n    - 'spec/**/*.rb'\n",
+    )
+    .expect("write .murphy.yml");
+    fs::write(dir.path().join("t.rb"), "x = \"hello\"\n").expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("t.rb")
+        .assert();
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be JSON");
+    assert!(
+        offenses_named(&parsed, "Style/StringLiterals").is_empty(),
+        "cop-level Include must skip explicit files outside scope; got {parsed:?}",
+    );
+}
+
+#[test]
+fn cop_exclude_scope_silences_matching_explicit_files() {
+    let dir = tempdir().expect("create tempdir");
+    fs::write(
+        dir.path().join(".murphy.yml"),
+        "Style/StringLiterals:\n  Exclude:\n    - 'spec/support/**'\n",
+    )
+    .expect("write .murphy.yml");
+    fs::create_dir_all(dir.path().join("spec/support")).expect("create spec/support");
+    fs::write(dir.path().join("spec/support/t.rb"), "x = \"hello\"\n").expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("spec/support/t.rb")
+        .assert();
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be JSON");
+    assert!(
+        offenses_named(&parsed, "Style/StringLiterals").is_empty(),
+        "cop-level Exclude must skip matching explicit files; got {parsed:?}",
+    );
+}
+
+#[test]
+fn cop_include_scope_allows_matching_explicit_files() {
+    let dir = tempdir().expect("create tempdir");
+    fs::write(
+        dir.path().join(".murphy.yml"),
+        "Style/StringLiterals:\n  Include:\n    - 'spec/**/*.rb'\n",
+    )
+    .expect("write .murphy.yml");
+    fs::create_dir_all(dir.path().join("spec/models")).expect("create spec/models");
+    fs::write(
+        dir.path().join("spec/models/user_spec.rb"),
+        "x = \"hello\"\n",
+    )
+    .expect("write source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("spec/models/user_spec.rb")
+        .assert();
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be JSON");
+    assert_eq!(
+        offenses_named(&parsed, "Style/StringLiterals").len(),
+        1,
+        "cop-level Include must allow matching explicit files; got {parsed:?}",
+    );
+}
+
+#[test]
+fn cop_include_scope_is_respected_for_identical_content_files() {
+    let dir = tempdir().expect("create tempdir");
+    fs::write(
+        dir.path().join(".murphy.yml"),
+        "Style/StringLiterals:\n  Include:\n    - 'spec/**/*.rb'\n",
+    )
+    .expect("write .murphy.yml");
+    fs::create_dir_all(dir.path().join("app/models")).expect("create app/models");
+    fs::create_dir_all(dir.path().join("spec/models")).expect("create spec/models");
+    let source = "x = \"hello\"\n";
+    fs::write(dir.path().join("app/models/user.rb"), source).expect("write app source");
+    fs::write(dir.path().join("spec/models/user_spec.rb"), source).expect("write spec source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("app/models/user.rb")
+        .arg("spec/models/user_spec.rb")
+        .assert();
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be JSON");
+    let style = offenses_named(&parsed, "Style/StringLiterals");
+    assert_eq!(
+        style.len(),
+        1,
+        "only the spec file should be in scope; got {parsed:?}"
+    );
+    assert_eq!(style[0]["file"], "spec/models/user_spec.rb");
+}
+
+#[test]
 fn options_schema_advertises_enum_values() {
     // The §12c `cops list --format=json` exposes only NAME/NAMESPACE/STATUS/
     // SOURCE_PACK — not the schema. The schema lives on `PluginCopV1`
