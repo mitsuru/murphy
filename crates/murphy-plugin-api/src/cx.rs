@@ -5313,6 +5313,13 @@ mod tests {
         with_parsed("def foo\nend", |cx, root| {
             assert!(!cx.is_void_context(root));
         });
+        // A comparison operator def ends with `=` but is NOT an assignment
+        // method (assignment_method? = !comparison_method? && ends_with `=`),
+        // so it is not a void context. Pins the load-bearing exclusion.
+        with_parsed("def ==(o)\nend", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Def { .. }));
+            assert!(!cx.is_void_context(root), "`def ==` is not assignment/void");
+        });
         // ForNode: always void.
         with_parsed("for i in a\nend", |cx, root| {
             assert!(cx.is_void_context(root));
