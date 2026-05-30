@@ -65,9 +65,22 @@ fn check_no_space_style(cx: &Cx<'_>) {
 
         match (left.kind, right.kind) {
             (SourceTokenKind::LeftParen, SourceTokenKind::Comment) => {}
+            // A newline immediately after `(` means the call is multiline —
+            // the gap to the newline token is trailing whitespace on that line,
+            // not "space inside parentheses".  TrailingWhitespace owns that.
+            (
+                SourceTokenKind::LeftParen,
+                SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline,
+            ) => {}
             (SourceTokenKind::LeftParen, _) => {
                 emit_inline_gap(cx, left.range.end, right.range.start)
             }
+            // A newline token just before `)` means `)` is on its own indented
+            // line.  The gap is the indentation, not inline "space inside parens".
+            (
+                SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline,
+                SourceTokenKind::RightParen,
+            ) => {}
             (_, SourceTokenKind::RightParen) if left.kind != SourceTokenKind::LeftParen => {
                 emit_inline_gap(cx, left.range.end, right.range.start);
             }
@@ -147,6 +160,19 @@ fn can_ignore_missing_space(cx: &Cx<'_>, left: SourceToken, right: SourceToken) 
         return true;
     }
     if right.kind == SourceTokenKind::Comment {
+        return true;
+    }
+    // A newline token directly bounding the paren means the call is multiline.
+    // RuboCop's `space`/`compact` styles don't require inline spaces across
+    // line breaks: `(` followed immediately by a newline, or `)` preceded
+    // directly by a newline token, are both exempt.
+    if matches!(
+        left.kind,
+        SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline
+    ) || matches!(
+        right.kind,
+        SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline
+    ) {
         return true;
     }
     !same_line_gap(cx, left.range.end, right.range.start)
@@ -229,7 +255,7 @@ fn has_space_after(cx: &Cx<'_>, start: u32, end: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::SpaceInsideParens;
+    use super::{SpaceInsideParens, SpaceInsideParensOptions, SpaceInsideParensStyle};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -248,5 +274,57 @@ mod tests {
     #[test]
     fn leaves_clean_parentheses_without_corrections() {
         test::<SpaceInsideParens>().expect_no_corrections("foo(1, 2)\nbar()\n");
+    }
+
+    #[test]
+    fn does_not_flag_indented_closing_paren_in_method_body() {
+        test::<SpaceInsideParens>().expect_no_offenses(indoc! {r#"
+            def foo
+              a_request(
+                :post,
+                endpoint
+              ).with(
+                headers: {}
+              )
+            end
+        "#});
+    }
+
+    #[test]
+    fn space_style_does_not_flag_multiline_calls() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Space,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+            def foo
+              a_request(
+                :post,
+                endpoint
+              ).with(
+                headers: {}
+              )
+            end
+        "#});
+    }
+
+    #[test]
+    fn compact_style_does_not_flag_multiline_calls() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+            def foo
+              a_request(
+                :post,
+                endpoint
+              ).with(
+                headers: {}
+              )
+            end
+        "#});
     }
 }
