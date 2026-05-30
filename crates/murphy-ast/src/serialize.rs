@@ -1540,11 +1540,11 @@ impl Ast {
 
 #[cfg(test)]
 mod tests {
+    use crate::SerError;
     use crate::builder::AstBuilder;
     use crate::node::{
         CommentKind, NodeKind, NodeList, OptNodeId, Range, SourceToken, SourceTokenKind,
     };
-    use crate::SerError;
 
     fn r(a: u32, b: u32) -> Range {
         Range { start: a, end: b }
