@@ -1588,6 +1588,63 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// `CaseMatchNode#subject` — the matched value of `case subj; in …; end`.
+    /// `OptNodeId::NONE` for a non-`CaseMatch` node. Unlike `case/when`, a
+    /// `case/in` always has a subject, so this is `Some` for any real
+    /// `CaseMatch` (the `Option` only encodes the non-`CaseMatch` miss).
+    pub fn case_match_subject(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::CaseMatch { subject, .. } => OptNodeId::some(subject),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `CaseMatchNode#in_pattern_branches` — the `InPattern` child nodes.
+    /// Empty slice for a non-`CaseMatch` node.
+    pub fn in_pattern_branches(&self, id: NodeId) -> &'a [NodeId] {
+        match *self.kind(id) {
+            NodeKind::CaseMatch { in_patterns, .. } => self.list(in_patterns),
+            _ => &[],
+        }
+    }
+
+    /// `CaseMatchNode#else_branch` — the `else` body, or `OptNodeId::NONE`
+    /// (no `else`, or a non-`CaseMatch` node).
+    pub fn case_match_else_branch(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::CaseMatch { else_body, .. } => else_body,
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `InPatternNode#pattern` — the pattern matched by an `in` clause.
+    /// `OptNodeId::NONE` for a non-`InPattern` node.
+    pub fn in_pattern_pattern(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::InPattern { pattern, .. } => OptNodeId::some(pattern),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `InPatternNode#guard` — the `if`/`unless` guard expression of an `in`
+    /// clause, or `OptNodeId::NONE` (no guard, or a non-`InPattern` node).
+    /// The if/unless distinction is not preserved (see `NodeKind::InPattern`).
+    pub fn in_pattern_guard(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::InPattern { guard, .. } => guard,
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `InPatternNode#body` — the branch body, or `OptNodeId::NONE` for an
+    /// empty body or a non-`InPattern` node.
+    pub fn in_pattern_body(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::InPattern { body, .. } => body,
+            _ => OptNodeId::NONE,
+        }
+    }
+
     /// The file's comments, in source order.
     pub fn comments(&self) -> &'a [Comment] {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
@@ -4293,6 +4350,47 @@ mod tests {
             assert_eq!(cx.sibling_index(root), None);
             assert_eq!(cx.left_sibling(root), OptNodeId::NONE);
             assert_eq!(cx.right_sibling(root), OptNodeId::NONE);
+        });
+    }
+
+    #[test]
+    fn case_match_and_in_pattern_accessors_on_real_parse() {
+        // `case x; in [a]; a; end` — the translator now emits CaseMatch /
+        // InPattern (previously Unknown), so the accessors project real
+        // children.
+        with_parsed("case x\nin [a]\n  a\nend\n", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::CaseMatch { .. }));
+            // subject is always present for a case/in.
+            assert!(cx.case_match_subject(root).get().is_some());
+            let branches = cx.in_pattern_branches(root);
+            assert_eq!(branches.len(), 1, "one in-clause");
+            let in_branch = branches[0];
+            assert!(matches!(cx.kind(in_branch), NodeKind::InPattern { .. }));
+            // pattern is an ArrayPattern; no guard; body present.
+            let pat = cx.in_pattern_pattern(in_branch).get().unwrap();
+            assert!(matches!(cx.kind(pat), NodeKind::ArrayPattern(..)));
+            assert!(cx.in_pattern_guard(in_branch).get().is_none());
+            assert!(cx.in_pattern_body(in_branch).get().is_some());
+            // No `else`.
+            assert!(cx.case_match_else_branch(root).get().is_none());
+            // Wrong-node projections are NONE / empty.
+            assert!(cx.case_match_subject(pat).get().is_none());
+            assert!(cx.in_pattern_branches(pat).is_empty());
+            assert!(cx.in_pattern_pattern(root).get().is_none());
+        });
+    }
+
+    #[test]
+    fn in_pattern_guard_and_else_accessors_on_real_parse() {
+        // Guard is hoisted into the dedicated guard slot; `else` lands in the
+        // case_match else branch.
+        with_parsed("case x\nin [a] if a\n  a\nelse\n  0\nend\n", |cx, root| {
+            assert!(cx.case_match_else_branch(root).get().is_some());
+            let in_branch = cx.in_pattern_branches(root)[0];
+            assert!(
+                cx.in_pattern_guard(in_branch).get().is_some(),
+                "guard expression must be present"
+            );
         });
     }
 }

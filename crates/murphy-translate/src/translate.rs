@@ -935,8 +935,149 @@ impl Translator {
             return self.builder.push(NodeKind::Masgn { lhs, rhs }, range);
         }
 
+        // --- pattern matching (case/in) ---
+        if let Some(cm) = node.as_case_match_node() {
+            // `predicate()` is `Option` defensively, but a `case ... in`
+            // always has a subject; fall back to Unknown if ever absent so
+            // the required `subject: NodeId` slot stays well-formed.
+            let subject = match cm.predicate() {
+                Some(p) => self.translate_node(&p),
+                None => self.builder.push(NodeKind::Unknown, range),
+            };
+            let in_ids: Vec<NodeId> = cm
+                .conditions()
+                .iter()
+                .map(|c| self.translate_node(&c))
+                .collect();
+            let in_patterns = self.builder.push_list(&in_ids);
+            let else_body = match cm.else_clause() {
+                Some(els) => self.translate_stmts_opt(els.statements()),
+                None => OptNodeId::NONE,
+            };
+            return self.builder.push(
+                NodeKind::CaseMatch {
+                    subject,
+                    in_patterns,
+                    else_body,
+                },
+                range,
+            );
+        }
+        if let Some(in_node) = node.as_in_node() {
+            // Guard interception: prism has no dedicated guard node (1.9.0).
+            // `in <pat> if <g>` parses as `InNode { pattern: IfNode {
+            // predicate: g, statements: [pat] } }`; `unless` uses an
+            // `UnlessNode`. We hoist the guard expression into the dedicated
+            // `guard` slot and translate the wrapped pattern directly.
+            //
+            // NodeKind::InPattern drops the if/unless distinction by design
+            // (see node.rs) — both lower to a bare guard expression.
+            let raw_pattern = in_node.pattern();
+            let (pattern_node, guard) = if let Some(iff) = raw_pattern.as_if_node() {
+                (
+                    iff.statements(),
+                    Some(self.translate_node(&iff.predicate())),
+                )
+            } else if let Some(unl) = raw_pattern.as_unless_node() {
+                (
+                    unl.statements(),
+                    Some(self.translate_node(&unl.predicate())),
+                )
+            } else {
+                (None, None)
+            };
+            let pattern = match (pattern_node, guard.is_some()) {
+                // Guard form: the wrapper's `statements` holds exactly the
+                // pattern. Pull the single inner node out (no Begin wrap).
+                (Some(stmts), true) => match stmts.body().iter().next() {
+                    Some(inner) => self.translate_pattern(&inner),
+                    None => self.builder.push(NodeKind::Unknown, range),
+                },
+                // No guard: the InNode pattern is the pattern itself.
+                _ => self.translate_pattern(&raw_pattern),
+            };
+            let guard = guard.map(OptNodeId::some).unwrap_or(OptNodeId::NONE);
+            let body = self.translate_stmts_opt(in_node.statements());
+            return self.builder.push(
+                NodeKind::InPattern {
+                    pattern,
+                    guard,
+                    body,
+                },
+                range,
+            );
+        }
+
         // Task 17 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
+    }
+
+    /// Translate a pattern-matching pattern node (the thing after `in`).
+    ///
+    /// v1 supports `ArrayPatternNode` / `HashPatternNode` and the bindings
+    /// inside them (`LocalVariableTargetNode` → `MatchVar`). Unsupported
+    /// pattern kinds — `FindPatternNode`, `MatchAsNode` (`=> x`),
+    /// `AlternationPatternNode` (`a | b`), splat rest (`*rest`), and pins
+    /// (`^x`) — have no dedicated `NodeKind` variant yet and fall back to
+    /// `translate_node`, which lands them on `Unknown` (documented deferred).
+    fn translate_pattern(&mut self, node: &prism::Node<'_>) -> NodeId {
+        let range = Self::node_range(node);
+        if let Some(ap) = node.as_array_pattern_node() {
+            // parser-gem: `(array_pattern <elem>...)`. `requireds` + `posts`
+            // are the bracketed elements; `rest` (`*x`) has no NodeKind so we
+            // route it through `translate_node` (Unknown) to stay honest.
+            let mut ids: Vec<NodeId> = ap
+                .requireds()
+                .iter()
+                .map(|e| self.translate_pattern_element(&e))
+                .collect();
+            if let Some(rest) = ap.rest() {
+                ids.push(self.translate_node(&rest));
+            }
+            ids.extend(
+                ap.posts()
+                    .iter()
+                    .map(|e| self.translate_pattern_element(&e)),
+            );
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::ArrayPattern(list), range);
+        }
+        if let Some(hp) = node.as_hash_pattern_node() {
+            // parser-gem: `(hash_pattern <pair>...)`. Lean on the existing
+            // Assoc translation for `{a:, b: x}` elements; rest is Unknown.
+            let mut ids: Vec<NodeId> = hp
+                .elements()
+                .iter()
+                .map(|e| self.translate_pattern_element(&e))
+                .collect();
+            if let Some(rest) = hp.rest() {
+                ids.push(self.translate_node(&rest));
+            }
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::HashPattern(list), range);
+        }
+        // Bare top-level pattern (e.g. `in x` with no brackets is wrapped in
+        // an ArrayPattern by prism, so this path is for atoms / unsupported
+        // kinds): route through the element translator.
+        self.translate_pattern_element(node)
+    }
+
+    /// Translate a single element inside a pattern (an array/hash pattern
+    /// member). A `LocalVariableTargetNode` is a binding → `MatchVar`
+    /// (parser-gem `(match_var :name)`). Everything else (literals, nested
+    /// patterns, unsupported kinds) routes through the general translators.
+    fn translate_pattern_element(&mut self, node: &prism::Node<'_>) -> NodeId {
+        if let Some(t) = node.as_local_variable_target_node() {
+            let name = self.sym(&t.name());
+            return self
+                .builder
+                .push(NodeKind::MatchVar(name), Self::node_range(node));
+        }
+        if node.as_array_pattern_node().is_some() || node.as_hash_pattern_node().is_some() {
+            return self.translate_pattern(node);
+        }
+        // Literals / nested constants / unsupported kinds.
+        self.translate_node(node)
     }
 
     /// 多重代入左辺（lefts + rest + rights）→ `Mlhs` ノード。
@@ -2909,6 +3050,100 @@ mod tests {
                 );
             }
             other => panic!("expected bare Splat for implicit rest, got {other:?}"),
+        }
+    }
+
+    // ── murphy-es99.13: case/in pattern matching ────────────────────
+
+    #[test]
+    fn translates_case_in_array_pattern() {
+        // `case x; in [a]; a; end` — previously the whole CaseMatch fell to
+        // Unknown. Now: (case_match (send) (in_pattern (array_pattern
+        // (match_var :a)) nil (send)) nil).
+        let ast = translate("case x\nin [a]\n  a\nend\n", "t.rb");
+        assert_eq!(
+            murphy_ast::ast_to_sexp(&ast),
+            "(case_match\n  (send :x\n    nil)\n  (in_pattern\n    (array_pattern\n      (match_var :a))\n    nil\n    (lvar a))\n  nil)"
+        );
+    }
+
+    #[test]
+    fn translates_case_in_with_guard() {
+        // `in [a] if a` — prism wraps the pattern in an IfNode whose
+        // predicate is the guard. The translator intercepts that wrapper so
+        // the guard slot carries the condition and the pattern slot carries
+        // the array pattern (not the IfNode).
+        let ast = translate("case x\nin [a] if a\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(in_pattern\n    (array_pattern\n      (match_var :a))\n    (lvar a)\n"),
+            "guard must be hoisted into the guard slot: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_case_in_with_unless_guard() {
+        // `unless` guard — prism wraps in an UnlessNode. The translator
+        // intercepts it the same way; the if/unless distinction is dropped
+        // (documented v1 limitation, see NodeKind::InPattern).
+        let ast = translate("case x\nin [a] unless a\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(in_pattern\n    (array_pattern\n      (match_var :a))\n    (lvar a)\n"),
+            "unless guard must be hoisted into the guard slot: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_case_in_with_else() {
+        // `else` branch lands in the case_match else slot.
+        let ast = translate("case x\nin [a]\n  a\nelse\n  0\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(sexp.starts_with("(case_match\n"), "{sexp}");
+        assert!(
+            sexp.trim_end().ends_with("(int 0))"),
+            "else body present: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_case_in_hash_pattern() {
+        // `in {a:}` — HashPattern with an Assoc child (the binding side is
+        // an implicit match-var; we lean on the existing Assoc translation).
+        let ast = translate("case x\nin {a:}\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(hash_pattern"),
+            "hash_pattern present: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_case_in_array_pattern_multiple_bindings() {
+        // `in a, b` — bare (no brackets) array pattern with two match-vars.
+        let ast = translate("case x\nin a, b\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(array_pattern\n      (match_var :a)\n      (match_var :b))"),
+            "two match_vars: {sexp}"
+        );
+    }
+
+    #[test]
+    fn unsupported_pattern_kinds_fall_to_unknown() {
+        // FindPattern / MatchAs / MatchAlt / MatchRest / Pin have no NodeKind
+        // variant in v1, so the in-clause pattern is Unknown (documented
+        // deferred). The surrounding case_match/in_pattern still translate.
+        for src in [
+            "case x\nin [*, a, *]\n  a\nend\n",    // find pattern
+            "case x\nin Integer => n\n  n\nend\n", // match-as / capture
+            "case x\nin 1 | 2\n  a\nend\n",        // alternation
+            "case x\nin ^foo\n  a\nend\n",         // pin
+        ] {
+            let ast = translate(src, "t.rb");
+            let sexp = murphy_ast::ast_to_sexp(&ast);
+            assert!(sexp.starts_with("(case_match\n"), "{src}: {sexp}");
+            assert!(sexp.contains("(in_pattern"), "{src}: {sexp}");
         }
     }
 }
