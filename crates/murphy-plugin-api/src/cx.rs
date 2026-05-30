@@ -3374,7 +3374,7 @@ mod tests {
 
     #[test]
     fn block_node_finds_the_block_wrapping_a_send() {
-        with_parsed("foo.each { _1 }", |cx, root| {
+        with_parsed("foo.each { bar }", |cx, root| {
             let NodeKind::Block { call, .. } = *cx.kind(root) else {
                 panic!("expected block root");
             };
