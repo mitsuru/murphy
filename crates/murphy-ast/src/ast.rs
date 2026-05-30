@@ -311,6 +311,384 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
     }
 }
 
+#[inline]
+fn slot_phantom(out: &mut Vec<Option<NodeId>>) {
+    out.push(None);
+}
+
+#[inline]
+fn slot_opt(out: &mut Vec<Option<NodeId>>, o: OptNodeId) {
+    out.push(o.get());
+}
+
+#[inline]
+fn slot_node(out: &mut Vec<Option<NodeId>>, id: NodeId) {
+    out.push(Some(id));
+}
+
+#[inline]
+fn slot_list(out: &mut Vec<Option<NodeId>>, lists: &[NodeId], l: NodeList) {
+    let start = l.start as usize;
+    out.extend(
+        lists[start..start + l.len as usize]
+            .iter()
+            .map(|&id| Some(id)),
+    );
+}
+
+/// Append every parser-gem **child slot** of `kind`, in source order, to
+/// `out` — one entry per slot, `Some(child)` for node children present in the
+/// AST and `None` for slots that hold no returnable [`NodeId`].
+///
+/// Unlike [`collect_children`] (which packs only the node children, skipping
+/// `None`/non-node positions), this reconstructs RuboCop/parser-gem's *full*
+/// `node.children` array so that `Node#sibling_index` / `#left_sibling` /
+/// `#right_sibling` match parser-gem exactly. Two kinds of slot are filled
+/// with `None`:
+///
+/// * **phantom slots** — non-node values parser-gem stores as children:
+///   selector symbols (`send`/`csend`), the def/casgn/const name symbol, the
+///   `op_asgn` operator symbol, the `numblock` count integer, etc.
+/// * **absent nil slots** — optional node children that are absent in this
+///   parse (`X = 1` keeps `Casgn`'s `scope` slot even though it is `nil`).
+///
+/// The load-bearing rule: a nilable *node* slot always occupies its position
+/// whether or not it is present, so `X = 1`'s value lands at slot 2, not 0.
+///
+/// `Def` is two parser-gem nodes collapsed into one variant: with a receiver
+/// it is parser-gem `defs` (`[definee, :name, args, body]`); without, it is
+/// `def` (`[:name, args, body]`). The arm branches on receiver presence so the
+/// indices stay faithful for ported cops, which reason in parser-gem terms.
+///
+/// The `match` is exhaustive on purpose: a new `NodeKind` variant will not
+/// compile until its slot layout is declared here, exactly like
+/// [`collect_children`].
+///
+/// **Known limitation — `Resbody`.** parser-gem wraps a `resbody`'s exception
+/// classes in a single `array` child (`(resbody (array …) var body)`, always
+/// three slots). Murphy stores them flattened in the `exceptions` `NodeList`,
+/// so when exception classes are present the trailing `var`/`body` slots are
+/// shifted relative to parser-gem and `sibling_index` diverges there. This is
+/// pre-existing (`collect_children` flattens identically); faithful indexing
+/// for `resbody` would need an AST/translate change. `when` conds, by
+/// contrast, *are* flattened in parser-gem too, so those stay faithful.
+pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeId>>) {
+    match *kind {
+        // Leaves with no children at all (no slots in parser-gem either).
+        NodeKind::Error
+        | NodeKind::Nil
+        | NodeKind::True_
+        | NodeKind::False_
+        | NodeKind::SelfExpr
+        | NodeKind::Unknown
+        | NodeKind::Zsuper
+        | NodeKind::Lambda
+        | NodeKind::Cbase
+        | NodeKind::Retry
+        | NodeKind::Redo
+        | NodeKind::ForwardArgs
+        | NodeKind::ForwardedArgs
+        | NodeKind::Kwnilarg
+        | NodeKind::Blocknilarg => {}
+
+        // Leaves whose single parser-gem child is a non-node scalar
+        // (literal value / name symbol). They never parent a node, but the
+        // phantom slot is declared for faithfulness.
+        NodeKind::Int(_)
+        | NodeKind::Float(_)
+        | NodeKind::Str(_)
+        | NodeKind::Sym(_)
+        | NodeKind::Lvar(_)
+        | NodeKind::Ivar(_)
+        | NodeKind::Cvar(_)
+        | NodeKind::Gvar(_)
+        | NodeKind::Arg(_)
+        | NodeKind::Restarg(_)
+        | NodeKind::Kwarg(_)
+        | NodeKind::Kwrestarg(_)
+        | NodeKind::Blockarg(_)
+        | NodeKind::Rational(_)
+        | NodeKind::Complex(_)
+        | NodeKind::Regopt(_)
+        | NodeKind::MatchVar(_)
+        | NodeKind::BackRef(_)
+        | NodeKind::NthRef(_)
+        | NodeKind::Shadowarg(_) => slot_phantom(out),
+
+        // `(const scope :name)` — scope slot then name phantom.
+        NodeKind::Const { scope, .. } => {
+            slot_opt(out, scope);
+            slot_phantom(out);
+        }
+
+        // `(lvasgn :name value)` — name phantom then value slot.
+        NodeKind::Lvasgn { value, .. }
+        | NodeKind::Ivasgn { value, .. }
+        | NodeKind::Gvasgn { value, .. }
+        | NodeKind::Cvasgn { value, .. } => {
+            slot_phantom(out);
+            slot_opt(out, value);
+        }
+
+        // `(casgn scope :name value)`.
+        NodeKind::Casgn { scope, value, .. } => {
+            slot_opt(out, scope);
+            slot_phantom(out);
+            slot_opt(out, value);
+        }
+
+        // `(send receiver :selector *args)` / `(csend ...)`.
+        NodeKind::Send { receiver, args, .. } => {
+            slot_opt(out, receiver);
+            slot_phantom(out);
+            slot_list(out, lists, args);
+        }
+        NodeKind::Csend { receiver, args, .. } => {
+            slot_node(out, receiver);
+            slot_phantom(out);
+            slot_list(out, lists, args);
+        }
+
+        // `(block call args body)` — no phantom; all node slots.
+        NodeKind::Block { call, args, body } => {
+            slot_node(out, call);
+            slot_node(out, args);
+            slot_opt(out, body);
+        }
+
+        NodeKind::BlockPass(o)
+        | NodeKind::Splat(o)
+        | NodeKind::Return(o)
+        | NodeKind::Kwsplat(o)
+        | NodeKind::Break(o)
+        | NodeKind::Next(o) => slot_opt(out, o),
+
+        NodeKind::Array(l)
+        | NodeKind::Hash(l)
+        | NodeKind::Begin(l)
+        | NodeKind::Args(l)
+        | NodeKind::Yield(l)
+        | NodeKind::Super(l)
+        | NodeKind::Dstr(l)
+        | NodeKind::Dsym(l)
+        | NodeKind::Xstr(l)
+        | NodeKind::Mlhs(l) => slot_list(out, lists, l),
+
+        NodeKind::Pair { key, value } => {
+            slot_node(out, key);
+            slot_node(out, value);
+        }
+
+        NodeKind::If { cond, then_, else_ } => {
+            slot_node(out, cond);
+            slot_opt(out, then_);
+            slot_opt(out, else_);
+        }
+
+        NodeKind::Case {
+            subject,
+            whens,
+            else_,
+        } => {
+            slot_opt(out, subject);
+            slot_list(out, lists, whens);
+            slot_opt(out, else_);
+        }
+
+        NodeKind::When { conds, body } => {
+            slot_list(out, lists, conds);
+            slot_opt(out, body);
+        }
+
+        NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
+            slot_node(out, lhs);
+            slot_node(out, rhs);
+        }
+
+        // `Def` with no receiver -> parser-gem `def`: `[:name, args, body]`.
+        // `Def` with a receiver -> parser-gem `defs`: `[definee, :name, args, body]`.
+        NodeKind::Def {
+            receiver,
+            args,
+            body,
+            ..
+        } => {
+            if let Some(definee) = receiver.get() {
+                slot_node(out, definee);
+            }
+            slot_phantom(out);
+            slot_node(out, args);
+            slot_opt(out, body);
+        }
+
+        // `(defs definee :name args body)`.
+        NodeKind::Defs {
+            receiver,
+            args,
+            body,
+            ..
+        } => {
+            slot_node(out, receiver);
+            slot_phantom(out);
+            slot_node(out, args);
+            slot_opt(out, body);
+        }
+
+        NodeKind::Class {
+            name,
+            superclass,
+            body,
+        } => {
+            slot_node(out, name);
+            slot_opt(out, superclass);
+            slot_opt(out, body);
+        }
+
+        NodeKind::Module { name, body } => {
+            slot_node(out, name);
+            slot_opt(out, body);
+        }
+
+        // `(optarg :name default)` / `(kwoptarg :name default)`.
+        NodeKind::Optarg { default, .. } | NodeKind::Kwoptarg { default, .. } => {
+            slot_phantom(out);
+            slot_node(out, default);
+        }
+
+        NodeKind::While { cond, body, .. } | NodeKind::Until { cond, body, .. } => {
+            slot_node(out, cond);
+            slot_opt(out, body);
+        }
+
+        NodeKind::RangeExpr { begin_, end_, .. } => {
+            slot_opt(out, begin_);
+            slot_opt(out, end_);
+        }
+
+        NodeKind::Sclass { expr, body } => {
+            slot_node(out, expr);
+            slot_opt(out, body);
+        }
+
+        NodeKind::Defined(n) => slot_node(out, n),
+
+        NodeKind::Rescue {
+            body,
+            resbodies,
+            else_,
+        } => {
+            slot_opt(out, body);
+            slot_list(out, lists, resbodies);
+            slot_opt(out, else_);
+        }
+
+        NodeKind::Resbody {
+            exceptions,
+            var,
+            body,
+        } => {
+            slot_list(out, lists, exceptions);
+            slot_opt(out, var);
+            slot_opt(out, body);
+        }
+
+        NodeKind::Ensure { body, ensure_ } => {
+            slot_opt(out, body);
+            slot_opt(out, ensure_);
+        }
+
+        // `(op_asgn target :op value)` — operator symbol phantom at slot 1.
+        NodeKind::OpAsgn { target, value, .. } => {
+            slot_node(out, target);
+            slot_phantom(out);
+            slot_node(out, value);
+        }
+
+        NodeKind::OrAsgn { target, value } | NodeKind::AndAsgn { target, value } => {
+            slot_node(out, target);
+            slot_node(out, value);
+        }
+
+        NodeKind::Regexp { parts, .. } => slot_list(out, lists, parts),
+
+        NodeKind::Masgn { lhs, rhs } => {
+            slot_node(out, lhs);
+            slot_node(out, rhs);
+        }
+
+        // `(for var iter body)` — no phantom; var at 0, body at 2.
+        NodeKind::For { var, iter, body } => {
+            slot_node(out, var);
+            slot_node(out, iter);
+            slot_opt(out, body);
+        }
+
+        NodeKind::Index { receiver, args } => {
+            slot_node(out, receiver);
+            slot_list(out, lists, args);
+        }
+
+        NodeKind::IndexAsgn {
+            receiver,
+            args,
+            value,
+        } => {
+            slot_node(out, receiver);
+            slot_list(out, lists, args);
+            slot_node(out, value);
+        }
+
+        NodeKind::Kwbegin(l) | NodeKind::Procarg0(l) => slot_list(out, lists, l),
+
+        NodeKind::Not(n) => slot_node(out, n),
+
+        // `(numblock call count body)` — the `count` integer is a phantom slot.
+        NodeKind::Numblock { send, body, .. } => {
+            slot_node(out, send);
+            slot_phantom(out);
+            slot_opt(out, body);
+        }
+
+        NodeKind::CaseMatch {
+            subject,
+            in_patterns,
+            else_body,
+        } => {
+            slot_node(out, subject);
+            slot_list(out, lists, in_patterns);
+            slot_opt(out, else_body);
+        }
+
+        NodeKind::InPattern {
+            pattern,
+            guard,
+            body,
+        } => {
+            slot_node(out, pattern);
+            slot_opt(out, guard);
+            slot_opt(out, body);
+        }
+
+        NodeKind::ArrayPattern(l) | NodeKind::HashPattern(l) => slot_list(out, lists, l),
+
+        // `(itblock call :it body)` — `:it` marker is a phantom slot.
+        NodeKind::Itblock { send, body } => {
+            slot_node(out, send);
+            slot_phantom(out);
+            slot_opt(out, body);
+        }
+
+        NodeKind::Alias { new_name, old_name } => {
+            slot_node(out, new_name);
+            slot_node(out, old_name);
+        }
+
+        NodeKind::Undef(l) => slot_list(out, lists, l),
+
+        NodeKind::Preexe(o) | NodeKind::Postexe(o) => slot_opt(out, o),
+    }
+}
+
 /// An owned, flat, parser-shaped, typed AST for one file. See ADR 0037.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ast {
@@ -374,6 +752,16 @@ impl Ast {
         let mut out = Vec::new();
         collect_children(self.kind(id), &self.node_lists, &mut out);
         out.into_iter()
+    }
+
+    /// The parser-gem child **slots** of `id`, in source order — see
+    /// [`slot_layout`]. Each slot is `Some(child)` for a present node child or
+    /// `None` for a phantom/absent slot, so positions match RuboCop's
+    /// `node.children` (and thus `Node#sibling_index`).
+    pub fn slot_layout(&self, id: NodeId) -> Vec<Option<NodeId>> {
+        let mut out = Vec::new();
+        slot_layout(self.kind(id), &self.node_lists, &mut out);
+        out
     }
 
     /// The ancestors of `id`, nearest first, up to (and including) the root.
@@ -634,5 +1022,180 @@ mod tests {
             ]
         );
         assert_eq!(ast.raw_parts().sorted_tokens, ast.sorted_tokens());
+    }
+
+    // ── slot_layout: parser-gem child-slot reconstruction ──────────────
+
+    fn slots(kind: NodeKind, lists: &[NodeId]) -> Vec<Option<NodeId>> {
+        let mut out = Vec::new();
+        slot_layout(&kind, lists, &mut out);
+        out
+    }
+
+    #[test]
+    fn slot_layout_send_no_receiver_arg_at_slot_two() {
+        // `foo(1)` → [recv:none, :selector phantom, arg]; the arg sits at slot 2.
+        let lists = vec![NodeId(7)];
+        let s = slots(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method: Symbol(0),
+                args: NodeList { start: 0, len: 1 },
+            },
+            &lists,
+        );
+        assert_eq!(s, vec![None, None, Some(NodeId(7))]);
+    }
+
+    #[test]
+    fn slot_layout_send_with_receiver_keeps_selector_phantom() {
+        // `recv.foo(a, b)` → [recv, :foo, a, b].
+        let lists = vec![NodeId(8), NodeId(9)];
+        let s = slots(
+            NodeKind::Send {
+                receiver: OptNodeId::some(NodeId(2)),
+                method: Symbol(0),
+                args: NodeList { start: 0, len: 2 },
+            },
+            &lists,
+        );
+        assert_eq!(
+            s,
+            vec![Some(NodeId(2)), None, Some(NodeId(8)), Some(NodeId(9))]
+        );
+    }
+
+    #[test]
+    fn slot_layout_casgn_value_at_slot_two_even_without_scope() {
+        // `X = 1` → [scope:none, :name phantom, value]; value at slot 2.
+        let s = slots(
+            NodeKind::Casgn {
+                scope: OptNodeId::NONE,
+                name: Symbol(0),
+                value: OptNodeId::some(NodeId(3)),
+            },
+            &[],
+        );
+        assert_eq!(s, vec![None, None, Some(NodeId(3))]);
+    }
+
+    #[test]
+    fn slot_layout_op_asgn_operator_phantom_at_slot_one() {
+        // `a += b` → [target, :op phantom, value]; value at slot 2.
+        let s = slots(
+            NodeKind::OpAsgn {
+                target: NodeId(4),
+                op: Symbol(0),
+                value: NodeId(5),
+            },
+            &[],
+        );
+        assert_eq!(s, vec![Some(NodeId(4)), None, Some(NodeId(5))]);
+    }
+
+    #[test]
+    fn slot_layout_lvasgn_value_at_slot_one() {
+        // `x = v` → [:name phantom, value].
+        let s = slots(
+            NodeKind::Lvasgn {
+                name: Symbol(0),
+                value: OptNodeId::some(NodeId(6)),
+            },
+            &[],
+        );
+        assert_eq!(s, vec![None, Some(NodeId(6))]);
+    }
+
+    #[test]
+    fn slot_layout_const_scope_then_name_phantom() {
+        // `A::B` → [scope(A), :B phantom]; scope at slot 0.
+        let s = slots(
+            NodeKind::Const {
+                scope: OptNodeId::some(NodeId(1)),
+                name: Symbol(0),
+            },
+            &[],
+        );
+        assert_eq!(s, vec![Some(NodeId(1)), None]);
+    }
+
+    #[test]
+    fn slot_layout_def_no_receiver_is_parser_def_shape() {
+        // `def m; end` → parser `def`: [:name phantom, args, body].
+        let s = slots(
+            NodeKind::Def {
+                receiver: OptNodeId::NONE,
+                name: Symbol(0),
+                args: NodeId(10),
+                body: OptNodeId::NONE,
+            },
+            &[],
+        );
+        // args at slot 1, body slot 2 (absent → None).
+        assert_eq!(s, vec![None, Some(NodeId(10)), None]);
+    }
+
+    #[test]
+    fn slot_layout_def_with_receiver_is_parser_defs_shape() {
+        // `def self.foo(a); x; end` → parser `defs`:
+        // [definee, :name phantom, args, body].
+        let s = slots(
+            NodeKind::Def {
+                receiver: OptNodeId::some(NodeId(11)),
+                name: Symbol(0),
+                args: NodeId(12),
+                body: OptNodeId::some(NodeId(13)),
+            },
+            &[],
+        );
+        assert_eq!(
+            s,
+            vec![Some(NodeId(11)), None, Some(NodeId(12)), Some(NodeId(13))]
+        );
+    }
+
+    #[test]
+    fn slot_layout_numblock_count_phantom_at_slot_one() {
+        // numblock → [call, count phantom, body].
+        let s = slots(
+            NodeKind::Numblock {
+                send: NodeId(14),
+                max_n: 2,
+                body: OptNodeId::some(NodeId(15)),
+            },
+            &[],
+        );
+        assert_eq!(s, vec![Some(NodeId(14)), None, Some(NodeId(15))]);
+    }
+
+    #[test]
+    fn slot_layout_for_has_no_phantom_body_at_slot_two() {
+        // `for v in it; b; end` → [var, iter, body]; body at slot 2.
+        let s = slots(
+            NodeKind::For {
+                var: NodeId(16),
+                iter: NodeId(17),
+                body: OptNodeId::some(NodeId(18)),
+            },
+            &[],
+        );
+        assert_eq!(
+            s,
+            vec![Some(NodeId(16)), Some(NodeId(17)), Some(NodeId(18))]
+        );
+    }
+
+    #[test]
+    fn slot_layout_if_cond_at_slot_zero() {
+        // `if c then t else e end` → [cond, then, else]; cond slot 0.
+        let s = slots(
+            NodeKind::If {
+                cond: NodeId(19),
+                then_: OptNodeId::some(NodeId(20)),
+                else_: OptNodeId::NONE,
+            },
+            &[],
+        );
+        assert_eq!(s, vec![Some(NodeId(19)), Some(NodeId(20)), None]);
     }
 }

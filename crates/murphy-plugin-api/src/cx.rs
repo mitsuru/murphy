@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use murphy_ast::{
     AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind,
-    collect_children,
+    collect_children, slot_layout,
 };
 
 use crate::abi::CxRaw;
@@ -1097,15 +1097,64 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// The position of `id` among its parent's children, or `None` if it
-    /// is the root. Murphy's `cx.children` skips absent (`None`) optional
-    /// children, so indices match RuboCop's `sibling_index` for the
-    /// fixed-position cases used by [`Self::is_value_used`]
-    /// (condition = 0, `for` body = 2) and for the last-child test on
-    /// `begin`/`kwbegin` (whose children are all present statements).
-    fn sibling_index(&self, id: NodeId) -> Option<usize> {
+    /// The parser-gem child **slots** of `id` (see
+    /// [`murphy_ast::slot_layout`]): one entry per slot, `Some(child)` for a
+    /// present node child and `None` for a phantom (selector / name / operator
+    /// symbol, numblock count …) or absent optional slot. Positions match
+    /// RuboCop's `node.children`.
+    pub fn slot_layout(&self, id: NodeId) -> Vec<Option<NodeId>> {
+        let mut out = Vec::new();
+        slot_layout(self.kind(id), self.lists(), &mut out);
+        out
+    }
+
+    /// `Node#sibling_index` — the zero-based position of `id` within its
+    /// parent's parser-gem child-slot array, or `None` if `id` is the root.
+    ///
+    /// Faithful to RuboCop: the index counts **phantom** slots (the `:selector`
+    /// of a `send`, the def/casgn name symbol, the `op_asgn` operator, the
+    /// `numblock` count) and **absent** optional slots, so e.g. the sole
+    /// argument of `foo(1)` reports index 2 (receiver slot 0 + selector slot 1),
+    /// exactly as parser-gem's `node.children.index` would.
+    pub fn sibling_index(&self, id: NodeId) -> Option<usize> {
         let parent = self.parent(id).get()?;
-        self.children(parent).iter().position(|&c| c == id)
+        self.slot_layout(parent)
+            .iter()
+            .position(|slot| *slot == Some(id))
+    }
+
+    /// `Node#left_sibling` — the node immediately preceding `id` among its
+    /// parent's child slots, or `None` if `id` is the root, is the first slot,
+    /// or the preceding slot is a phantom/absent (non-node) slot.
+    pub fn left_sibling(&self, id: NodeId) -> OptNodeId {
+        let Some(parent) = self.parent(id).get() else {
+            return OptNodeId::NONE;
+        };
+        let slots = self.slot_layout(parent);
+        let Some(index) = slots.iter().position(|slot| *slot == Some(id)) else {
+            return OptNodeId::NONE;
+        };
+        match index.checked_sub(1).and_then(|i| slots[i]) {
+            Some(node) => OptNodeId::some(node),
+            None => OptNodeId::NONE,
+        }
+    }
+
+    /// `Node#right_sibling` — the node immediately following `id` among its
+    /// parent's child slots, or `None` if `id` is the root, is the last slot,
+    /// or the following slot is a phantom/absent (non-node) slot.
+    pub fn right_sibling(&self, id: NodeId) -> OptNodeId {
+        let Some(parent) = self.parent(id).get() else {
+            return OptNodeId::NONE;
+        };
+        let slots = self.slot_layout(parent);
+        let Some(index) = slots.iter().position(|slot| *slot == Some(id)) else {
+            return OptNodeId::NONE;
+        };
+        match slots.get(index + 1).copied().flatten() {
+            Some(node) => OptNodeId::some(node),
+            None => OptNodeId::NONE,
+        }
     }
 
     /// `value_used?` — whether the result of evaluating `id` is consumed
@@ -4071,5 +4120,179 @@ mod tests {
         with_parsed("-a", |cx, root| assert!(!cx.is_arithmetic_operation(root)));
         // A non-call node is not an arithmetic operation.
         with_parsed("1", |cx, root| assert!(!cx.is_arithmetic_operation(root)));
+    }
+
+    /// Find the first descendant (or `root` itself) whose kind matches
+    /// `pred`, in DFS pre-order.
+    fn find_node(cx: &Cx<'_>, root: NodeId, pred: impl Fn(&NodeKind) -> bool) -> NodeId {
+        if pred(cx.kind(root)) {
+            return root;
+        }
+        cx.descendants(root)
+            .into_iter()
+            .find(|&n| pred(cx.kind(n)))
+            .expect("no matching node")
+    }
+
+    #[test]
+    fn sibling_index_send_arg_skips_receiver_and_selector_slots() {
+        // `foo(1)` — receiver is nil (slot 0), selector `:foo` is the phantom
+        // slot 1, so the lone `1` argument lands at parser-gem index 2.
+        with_parsed("foo(1)", |cx, root| {
+            let send = find_node(cx, root, |k| matches!(k, NodeKind::Send { .. }));
+            let NodeKind::Send { args, .. } = *cx.kind(send) else {
+                unreachable!()
+            };
+            let arg = cx.list(args)[0];
+            assert!(matches!(cx.kind(arg), NodeKind::Int(_)));
+            assert_eq!(cx.sibling_index(arg), Some(2));
+            // slot 1 is the `:foo` selector phantom → no node left sibling.
+            assert_eq!(cx.left_sibling(arg), OptNodeId::NONE);
+            assert_eq!(cx.right_sibling(arg), OptNodeId::NONE);
+        });
+    }
+
+    #[test]
+    fn sibling_index_two_args_are_adjacent_after_phantom() {
+        // `foo(a, b)` — args at indices 2 and 3; `a`.left == None (selector),
+        // `b`.left == `a`, `a`.right == `b`.
+        with_parsed("foo(a, b)", |cx, root| {
+            let send = find_node(cx, root, |k| matches!(k, NodeKind::Send { .. }));
+            let NodeKind::Send { args, .. } = *cx.kind(send) else {
+                unreachable!()
+            };
+            let list = cx.list(args).to_vec();
+            let (a, b) = (list[0], list[1]);
+            assert_eq!(cx.sibling_index(a), Some(2));
+            assert_eq!(cx.sibling_index(b), Some(3));
+            assert_eq!(cx.left_sibling(a), OptNodeId::NONE);
+            assert_eq!(cx.left_sibling(b), OptNodeId::some(a));
+            assert_eq!(cx.right_sibling(a), OptNodeId::some(b));
+            assert_eq!(cx.right_sibling(b), OptNodeId::NONE);
+        });
+    }
+
+    #[test]
+    fn sibling_index_method_receiver_at_slot_zero() {
+        // `recv.foo(arg)` — the receiver is slot 0, the selector phantom is
+        // slot 1, the argument slot 2.
+        with_parsed("recv.foo(arg)", |cx, root| {
+            let send = find_node(cx, root, |k| matches!(k, NodeKind::Send { .. }));
+            let NodeKind::Send { receiver, args, .. } = *cx.kind(send) else {
+                unreachable!()
+            };
+            let recv = receiver.get().expect("explicit receiver");
+            let arg = cx.list(args)[0];
+            assert_eq!(cx.sibling_index(recv), Some(0));
+            assert_eq!(cx.sibling_index(arg), Some(2));
+            // The receiver's right neighbour is the selector phantom → None.
+            assert_eq!(cx.right_sibling(recv), OptNodeId::NONE);
+        });
+    }
+
+    #[test]
+    fn sibling_index_casgn_value_at_slot_two() {
+        // `X = 1` — scope is nil (slot 0), `:X` phantom (slot 1), value slot 2.
+        with_parsed("X = 1", |cx, root| {
+            let casgn = find_node(cx, root, |k| matches!(k, NodeKind::Casgn { .. }));
+            let NodeKind::Casgn { value, .. } = *cx.kind(casgn) else {
+                unreachable!()
+            };
+            let v = value.get().expect("rhs present");
+            assert_eq!(cx.sibling_index(v), Some(2));
+            assert_eq!(cx.left_sibling(v), OptNodeId::NONE);
+        });
+    }
+
+    #[test]
+    fn sibling_index_op_asgn_value_after_operator_phantom() {
+        // `a += b` — target slot 0, `:+` operator phantom slot 1, value slot 2.
+        with_parsed("a += b", |cx, root| {
+            let op = find_node(cx, root, |k| matches!(k, NodeKind::OpAsgn { .. }));
+            let NodeKind::OpAsgn { target, value, .. } = *cx.kind(op) else {
+                unreachable!()
+            };
+            assert_eq!(cx.sibling_index(target), Some(0));
+            assert_eq!(cx.sibling_index(value), Some(2));
+            assert_eq!(cx.left_sibling(value), OptNodeId::NONE);
+            assert_eq!(cx.right_sibling(target), OptNodeId::NONE);
+        });
+    }
+
+    #[test]
+    fn sibling_index_def_without_receiver_body_at_slot_one() {
+        // `def m; x; end` — parser `def`: [:name phantom, args(0->1), body(2)].
+        with_parsed("def m\n  x\nend", |cx, root| {
+            let def = find_node(cx, root, |k| matches!(k, NodeKind::Def { .. }));
+            let NodeKind::Def { args, body, .. } = *cx.kind(def) else {
+                unreachable!()
+            };
+            assert_eq!(cx.sibling_index(args), Some(1));
+            let b = body.get().expect("body present");
+            assert_eq!(cx.sibling_index(b), Some(2));
+            // args left neighbour is the `:m` name phantom → None.
+            assert_eq!(cx.left_sibling(args), OptNodeId::NONE);
+            assert_eq!(cx.right_sibling(args), OptNodeId::some(b));
+        });
+    }
+
+    #[test]
+    fn sibling_index_def_with_receiver_is_parser_defs_layout() {
+        // `def self.foo(a); x; end` — parser `defs`:
+        // [definee(0), :name phantom(1), args(2), body(3)].
+        with_parsed("def self.foo(a)\n  x\nend", |cx, root| {
+            let def = find_node(cx, root, |k| matches!(k, NodeKind::Def { .. }));
+            let NodeKind::Def {
+                receiver,
+                args,
+                body,
+                ..
+            } = *cx.kind(def)
+            else {
+                unreachable!()
+            };
+            let definee = receiver.get().expect("singleton receiver");
+            assert_eq!(cx.sibling_index(definee), Some(0));
+            assert_eq!(cx.sibling_index(args), Some(2));
+            let b = body.get().expect("body present");
+            assert_eq!(cx.sibling_index(b), Some(3));
+            assert_eq!(cx.left_sibling(args), OptNodeId::NONE);
+            assert_eq!(cx.right_sibling(definee), OptNodeId::NONE);
+        });
+    }
+
+    #[test]
+    fn sibling_index_if_condition_at_slot_zero() {
+        // Guards the `is_value_used` invariant: the `if` condition is slot 0.
+        with_parsed("if cond\n  body\nend", |cx, root| {
+            let if_node = find_node(cx, root, |k| matches!(k, NodeKind::If { .. }));
+            let NodeKind::If { cond, .. } = *cx.kind(if_node) else {
+                unreachable!()
+            };
+            assert_eq!(cx.sibling_index(cond), Some(0));
+        });
+    }
+
+    #[test]
+    fn sibling_index_for_body_at_slot_two() {
+        // Guards the `is_value_used` invariant: `for` body is slot 2 (no phantom).
+        with_parsed("for v in items\n  body\nend", |cx, root| {
+            let for_node = find_node(cx, root, |k| matches!(k, NodeKind::For { .. }));
+            let NodeKind::For { var, body, .. } = *cx.kind(for_node) else {
+                unreachable!()
+            };
+            assert_eq!(cx.sibling_index(var), Some(0));
+            let b = body.get().expect("body present");
+            assert_eq!(cx.sibling_index(b), Some(2));
+        });
+    }
+
+    #[test]
+    fn sibling_index_root_has_no_siblings() {
+        with_parsed("x", |cx, root| {
+            assert_eq!(cx.sibling_index(root), None);
+            assert_eq!(cx.left_sibling(root), OptNodeId::NONE);
+            assert_eq!(cx.right_sibling(root), OptNodeId::NONE);
+        });
     }
 }
