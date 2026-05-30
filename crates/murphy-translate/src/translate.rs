@@ -233,6 +233,12 @@ impl Translator {
             let name = self.sym(&v.name());
             return self.builder.push(NodeKind::Lvar(name), range);
         }
+        if node.as_it_local_variable_read_node().is_some() {
+            // `it` inside a parameterless block (Ruby 3.4) reads as the
+            // implicit `it` local — parser-gem's `(lvar :it)`.
+            let name = self.builder.intern_symbol("it");
+            return self.builder.push(NodeKind::Lvar(name), range);
+        }
         if let Some(v) = node.as_instance_variable_read_node() {
             let name = self.sym(&v.name());
             return self.builder.push(NodeKind::Ivar(name), range);
@@ -1251,9 +1257,28 @@ impl Translator {
         call: NodeId,
         range: Range,
     ) -> NodeId {
+        // body は foundational helper `translate_body`（`StatementsNode` を畳む）。
+        let body = self.translate_body(block.body());
         // `parameters()` は `Option<Node>`。`BlockParametersNode`（`|...|` 構文）
-        // か、numbered（`_1`）/`it` パラメータノードのことがある。後者は v1 では
-        // params 空 Args として扱う（Unknown を避ける）。
+        // のほか、numbered（`_1`）/`it` パラメータノードがある。後者は専用の
+        // `Numblock`/`Itblock` へ（`_1` 本体は通常の lvar、`it` は下の専用 arm）。
+        if let Some(params) = block.parameters() {
+            if let Some(np) = params.as_numbered_parameters_node() {
+                return self.builder.push(
+                    NodeKind::Numblock {
+                        send: call,
+                        max_n: np.maximum(),
+                        body,
+                    },
+                    range,
+                );
+            }
+            if params.as_it_parameters_node().is_some() {
+                return self
+                    .builder
+                    .push(NodeKind::Itblock { send: call, body }, range);
+            }
+        }
         let params_node = block.parameters().and_then(|p| {
             p.as_block_parameters_node()
                 .and_then(|bp| bp.parameters())
@@ -1261,8 +1286,6 @@ impl Translator {
         });
         let block_loc = Self::range(&block.location());
         let args = self.translate_parameters(params_node, block_loc);
-        // body は foundational helper `translate_body`（`StatementsNode` を畳む）。
-        let body = self.translate_body(block.body());
         self.builder
             .push(NodeKind::Block { call, args, body }, range)
     }
@@ -1697,16 +1720,22 @@ mod tests {
     }
 
     #[test]
-    fn translates_numbered_param_block_to_empty_args() {
-        // `_1` 数値パラメータブロック → Args 空（Unknown を避ける）。
-        let ast = translate("foo { _1 }", "t.rb");
+    fn translates_numbered_and_it_param_blocks() {
+        // `_1` 数値パラメータブロック → Numblock { max_n }, 本体の `_1` は lvar。
+        let ast = translate("foo.map { _1 + _2 }", "t.rb");
         match ast.kind(ast.root()) {
-            NodeKind::Block { args, .. } => match ast.kind(*args) {
-                NodeKind::Args(l) => assert_eq!(l.len, 0),
-                other => panic!("expected Args, got {other:?}"),
-            },
-            other => panic!("expected Block, got {other:?}"),
+            NodeKind::Numblock { max_n, body, .. } => {
+                assert_eq!(*max_n, 2);
+                assert!(body.get().is_some());
+            }
+            other => panic!("expected Numblock, got {other:?}"),
         }
+        // `it` パラメータブロック → Itblock, 本体の `it` は lvar。
+        let it = translate("foo { it.bar }", "t.rb");
+        let NodeKind::Itblock { body, .. } = it.kind(it.root()) else {
+            panic!("expected Itblock");
+        };
+        assert!(body.get().is_some());
     }
 
     #[test]
