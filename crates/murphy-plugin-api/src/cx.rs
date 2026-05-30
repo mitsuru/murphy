@@ -1040,6 +1040,54 @@ impl<'a> Cx<'a> {
         )
     }
 
+    /// `WhileNode#inverse_keyword` / `UntilNode#inverse_keyword`: the opposite
+    /// loop keyword — `until` for a `while`, `while` for an `until`, and empty
+    /// for anything else. Unlike [`Self::if_inverse_keyword`] this is pure
+    /// `NodeKind` dispatch, not a token-text lookup: the modifier form
+    /// (`x while y`) has no `loc.keyword()`, so dispatch on the folded
+    /// `While`/`Until` variant is the only faithful path. `for` has no inverse
+    /// in RuboCop, so it returns empty.
+    pub fn loop_inverse_keyword(&self, id: NodeId) -> &'static str {
+        match self.kind(id) {
+            NodeKind::While { .. } => "until",
+            NodeKind::Until { .. } => "while",
+            _ => "",
+        }
+    }
+
+    /// `void_context?` — RuboCop defines this on four typed nodes; every other
+    /// node is `false`. Verbatim (rubocop-ast):
+    /// - `DefNode`: `(def_type? && method?(:initialize)) || assignment_method?`
+    /// - `ForNode`: `true`
+    /// - `BlockNode`: `VOID_CONTEXT_METHODS.include?(method_name)` where
+    ///   `VOID_CONTEXT_METHODS = %i[each tap]` (the BlockNode class also backs
+    ///   numblocks and itblocks, so Murphy's `Numblock`/`Itblock` share it)
+    /// - `EnsureNode`: `true`
+    ///
+    /// `def_type?` distinguishes an instance `def` from a singleton `defs`.
+    /// Murphy folds `def self.foo` into [`NodeKind::Def`] with a `receiver`, so
+    /// `def_type?` is "receiver is absent"; a present receiver (or the
+    /// [`NodeKind::Defs`] variant) is `defs` and fails the `initialize` clause
+    /// but still honours the `assignment_method?` clause (`def self.foo=`).
+    pub fn is_void_context(&self, id: NodeId) -> bool {
+        match *self.kind(id) {
+            NodeKind::Def { receiver, name, .. } => {
+                let def_type = receiver.is_none();
+                let name = self.symbol_str(name);
+                (def_type && name == "initialize")
+                    || crate::method_predicates::is_assignment_method(name)
+            }
+            NodeKind::Defs { name, .. } => {
+                crate::method_predicates::is_assignment_method(self.symbol_str(name))
+            }
+            NodeKind::For { .. } | NodeKind::Ensure { .. } => true,
+            NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. } => self
+                .method_name(id)
+                .is_some_and(|name| name == "each" || name == "tap"),
+            _ => false,
+        }
+    }
+
     /// `basic_conditional?` — RuboCop's `BASIC_CONDITIONALS`
     /// (`if while until`). RuboCop's set excludes `while_post`/`until_post`,
     /// so Murphy's folded `While`/`Until` qualify only with `post: false`.
@@ -5202,5 +5250,111 @@ mod tests {
                 "guard expression must be present"
             );
         });
+    }
+
+    #[test]
+    fn loop_inverse_keyword_dispatches_on_while_until() {
+        // `while` ⇄ `until`, both in keyword and modifier (post) form. The
+        // modifier form has no `loc.keyword()`, so this must be NodeKind
+        // dispatch, not token text.
+        with_parsed("while x\n  y\nend", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::While { post: false, .. }));
+            assert_eq!(cx.loop_inverse_keyword(root), "until");
+        });
+        with_parsed("until x\n  y\nend", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Until { post: false, .. }));
+            assert_eq!(cx.loop_inverse_keyword(root), "while");
+        });
+        with_parsed("begin; x; end while y", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::While { post: true, .. }));
+            assert_eq!(cx.loop_inverse_keyword(root), "until");
+        });
+        with_parsed("begin; x; end until y", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Until { post: true, .. }));
+            assert_eq!(cx.loop_inverse_keyword(root), "while");
+        });
+        // `for` is a loop but RuboCop has no inverse for it.
+        with_parsed("for i in a\nend", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::For { .. }));
+            assert_eq!(cx.loop_inverse_keyword(root), "");
+        });
+        // Non-loop nodes return empty.
+        with_parsed("if x\nend", |cx, root| {
+            assert_eq!(cx.loop_inverse_keyword(root), "");
+        });
+        with_parsed("1", |cx, root| {
+            assert_eq!(cx.loop_inverse_keyword(root), "")
+        });
+    }
+
+    #[test]
+    fn void_context_on_def_for_block_ensure() {
+        // DefNode: (def_type? && method?(:initialize)) || assignment_method?.
+        // Instance `def initialize` — def_type? true, name initialize → void.
+        with_parsed("def initialize\nend", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Def { .. }));
+            assert!(cx.is_void_context(root));
+        });
+        // Singleton `def self.initialize` folds to Def with a receiver →
+        // def_type? false → the initialize clause does not fire, and
+        // `initialize` is not an assignment method → not void.
+        with_parsed("def self.initialize\nend", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Def { .. }));
+            assert!(!cx.is_void_context(root));
+        });
+        // assignment_method? clause: a setter is void regardless of receiver.
+        with_parsed("def foo=(v)\nend", |cx, root| {
+            assert!(cx.is_void_context(root));
+        });
+        with_parsed("def self.foo=(v)\nend", |cx, root| {
+            assert!(cx.is_void_context(root));
+        });
+        // Ordinary instance method — not void.
+        with_parsed("def foo\nend", |cx, root| {
+            assert!(!cx.is_void_context(root));
+        });
+        // A comparison operator def ends with `=` but is NOT an assignment
+        // method (assignment_method? = !comparison_method? && ends_with `=`),
+        // so it is not a void context. Pins the load-bearing exclusion.
+        with_parsed("def ==(o)\nend", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Def { .. }));
+            assert!(!cx.is_void_context(root), "`def ==` is not assignment/void");
+        });
+        // ForNode: always void.
+        with_parsed("for i in a\nend", |cx, root| {
+            assert!(cx.is_void_context(root));
+        });
+        // BlockNode: VOID_CONTEXT_METHODS = each/tap (also numblock/itblock).
+        with_parsed("[1].each { |x| x }", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Block { .. }));
+            assert!(cx.is_void_context(root));
+        });
+        with_parsed("foo.tap { |x| x }", |cx, root| {
+            assert!(cx.is_void_context(root));
+        });
+        with_parsed("foo.map { |x| x }", |cx, root| {
+            assert!(
+                !cx.is_void_context(root),
+                "map is not a void-context method"
+            );
+        });
+        with_parsed("[1].each { _1 }", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Numblock { .. }));
+            assert!(cx.is_void_context(root), "numblock each is void");
+        });
+        with_parsed("[1].each { it }", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::Itblock { .. }));
+            assert!(cx.is_void_context(root), "itblock each is void");
+        });
+        with_parsed("foo.map { _1 }", |cx, root| {
+            assert!(!cx.is_void_context(root));
+        });
+        // EnsureNode: always void. The `ensure` node is nested inside `begin`.
+        with_parsed("begin\n  a\nensure\n  b\nend", |cx, root| {
+            let ens = find_node(cx, root, |k| matches!(k, NodeKind::Ensure { .. }));
+            assert!(cx.is_void_context(ens));
+        });
+        // A plain expression is not a void context.
+        with_parsed("1", |cx, root| assert!(!cx.is_void_context(root)));
     }
 }
