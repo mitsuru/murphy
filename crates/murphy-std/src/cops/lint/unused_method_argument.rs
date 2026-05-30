@@ -112,7 +112,11 @@ impl UnusedMethodArgument {
             return;
         }
 
-        let reads = lvar_reads(cx, body);
+        // Collect cross-scope Lvar reads lazily: only built when the model
+        // doesn't already show the argument as referenced in the def scope.
+        // This handles args that are read only inside nested blocks/lambdas
+        // (the model tracks references per-scope and would miss those).
+        let mut lvar_fallback: Option<HashSet<&str>> = None;
 
         let NodeKind::Args(list) = *cx.kind(args) else {
             return;
@@ -124,9 +128,31 @@ impl UnusedMethodArgument {
                 continue;
             };
             let name_str = cx.symbol_str(name);
-            if name_str.is_empty() || name_str.starts_with('_') || reads.contains(name_str) {
+            if name_str.is_empty() || name_str.starts_with('_') {
                 continue;
             }
+
+            // Primary check: use VarSemanticModel for same-scope references.
+            // This correctly handles `x += 1` (OpAsgn implicit read) which
+            // `Lvar` scanning misses.
+            let model_used = cx.var_model()
+                .and_then(|m| m.scope(node))
+                .and_then(|s| s.variables().iter().find(|v| v.name == name && v.is_argument))
+                .map(|v| !v.references.is_empty())
+                .unwrap_or(false);
+
+            // Fallback: scan all body descendants for Lvar reads. This catches
+            // cross-scope reads (e.g. args used only inside a nested block),
+            // which the model won't see in the def scope.
+            let is_used = model_used || {
+                let reads = lvar_fallback.get_or_insert_with(|| lvar_reads(cx, body));
+                reads.contains(name_str)
+            };
+
+            if is_used {
+                continue;
+            }
+
             // `&blk` on a method that yields is implicitly used.
             if has_yield && matches!(param_kind, NodeKind::Blockarg(_)) {
                 continue;
@@ -554,6 +580,31 @@ mod tests {
         test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
             def method(arg)
               fail
+            end
+        "#});
+    }
+
+    // VarSemanticModel migration: cross-scope read — arg used inside a block.
+    // The model only tracks same-scope references; the lvar-scan fallback
+    // handles this case so no false-positive offense is emitted.
+    #[test]
+    fn arg_used_only_inside_nested_block_is_not_flagged() {
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
+            def foo(x)
+              [1].each { puts x }
+            end
+        "#});
+    }
+
+    // VarSemanticModel migration: compound-assign is an implicit read.
+    // `x += 1` parses as OpAsgn with no explicit Lvar node, so the old
+    // lvar-scan missed it.  The model's reference tracking catches it.
+    #[test]
+    fn arg_used_via_op_assign_is_not_flagged() {
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
+            def foo(x)
+              x += 1
+              x
             end
         "#});
     }
