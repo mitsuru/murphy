@@ -138,7 +138,8 @@ impl AstBuilder {
         // with the standalone newline token).
         self.source_tokens
             .sort_by_key(|t| (t.range.start, t.range.end));
-        self.call_closing_locs.sort_by_key(|entry| entry.node.0);
+        self.call_closing_locs
+            .sort_unstable_by_key(|entry| entry.node.0);
         Ast {
             nodes: self.nodes,
             node_lists: self.node_lists,
