@@ -3072,10 +3072,13 @@ mod tests {
             let macro_call = first_send_named(cx, root, "macro_call");
             assert!(cx.is_in_macro_scope(macro_call));
         });
-        with_parsed("def build\n  Class.new do\n    not_macro\n  end\nend", |cx, root| {
-            let not_macro = first_send_named(cx, root, "not_macro");
-            assert!(!cx.is_in_macro_scope(not_macro));
-        });
+        with_parsed(
+            "def build\n  Class.new do\n    not_macro\n  end\nend",
+            |cx, root| {
+                let not_macro = first_send_named(cx, root, "not_macro");
+                assert!(!cx.is_in_macro_scope(not_macro));
+            },
+        );
         with_parsed("foo(argument_call)", |cx, root| {
             let argument_call = first_send_named(cx, root, "argument_call");
             assert!(!cx.is_in_macro_scope(argument_call));
