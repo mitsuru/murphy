@@ -1072,7 +1072,7 @@ impl<'a> Cx<'a> {
     pub fn is_void_context(&self, id: NodeId) -> bool {
         match *self.kind(id) {
             NodeKind::Def { receiver, name, .. } => {
-                let def_type = receiver.get().is_none();
+                let def_type = receiver.is_none();
                 let name = self.symbol_str(name);
                 (def_type && name == "initialize")
                     || crate::method_predicates::is_assignment_method(name)
