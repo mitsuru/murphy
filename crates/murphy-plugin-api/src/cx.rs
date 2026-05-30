@@ -569,6 +569,140 @@ impl<'a> Cx<'a> {
         self.call_receiver(id).get().is_some() && self.method_name(id) == Some("!")
     }
 
+    /// `global_const?(name)` — a constant with no namespace or an explicit
+    /// top-level `::` namespace. Mirrors RuboCop's
+    /// `(const {nil? cbase} %1)` node pattern.
+    pub fn is_global_const(&self, id: NodeId, name: &str) -> bool {
+        match *self.kind(id) {
+            NodeKind::Const { scope, name: sym } if self.symbol_str(sym) == name => scope
+                .get()
+                .is_none_or(|s| matches!(self.kind(s), NodeKind::Cbase)),
+            _ => false,
+        }
+    }
+
+    fn is_global_const_any(&self, id: NodeId, names: &[&str]) -> bool {
+        names.iter().any(|name| self.is_global_const(id, name))
+    }
+
+    /// `class_constructor?` — `Class.new` / `Module.new` / `Struct.new`,
+    /// `Data.define`, or a block wrapped around those calls. Mirrors
+    /// RuboCop's hand-written use of `#global_const?` inside the
+    /// `class_constructor?` node pattern.
+    pub fn is_class_constructor(&self, id: NodeId) -> bool {
+        match *self.kind(id) {
+            NodeKind::Block { call, .. }
+            | NodeKind::Numblock { send: call, .. }
+            | NodeKind::Itblock { send: call, .. } => self.is_class_constructor(call),
+            NodeKind::Send { receiver, .. } => {
+                let Some(receiver) = receiver.get() else {
+                    return false;
+                };
+                match self.method_name(id) {
+                    Some("new") => {
+                        self.is_global_const_any(receiver, &["Class", "Module", "Struct"])
+                    }
+                    Some("define") => self.is_global_const(receiver, "Data"),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// `in_macro_scope?` — true for root nodes, direct children of
+    /// class-like scopes, and children inside RuboCop's wrapper nodes
+    /// (`begin`/`kwbegin`/any block/if branches) when the wrapper is itself
+    /// in macro scope. The condition child of an `if` is deliberately
+    /// excluded, matching RuboCop's `(if _condition <%0 _>)` pattern.
+    pub fn is_in_macro_scope(&self, id: NodeId) -> bool {
+        let Some(parent) = self.parent(id).get() else {
+            return true;
+        };
+        match self.kind(parent) {
+            NodeKind::Class { .. } | NodeKind::Module { .. } | NodeKind::Sclass { .. } => true,
+            _ if self.is_class_constructor(parent) => self.is_in_macro_scope(parent),
+            NodeKind::Begin(..) | NodeKind::Kwbegin(..) | NodeKind::Block { .. } => {
+                self.is_in_macro_scope(parent)
+            }
+            NodeKind::Numblock { .. } | NodeKind::Itblock { .. } => self.is_in_macro_scope(parent),
+            NodeKind::If { .. } if self.sibling_index(id) != Some(0) => {
+                self.is_in_macro_scope(parent)
+            }
+            _ => false,
+        }
+    }
+
+    /// `macro?` — a receiverless method dispatch in macro scope. Mirrors
+    /// RuboCop's `!receiver && in_macro_scope?`.
+    pub fn is_macro(&self, id: NodeId) -> bool {
+        matches!(*self.kind(id), NodeKind::Send { receiver, .. } if receiver.get().is_none())
+            && self.is_in_macro_scope(id)
+    }
+
+    fn is_access_modifier_name(name: &str) -> bool {
+        matches!(name, "public" | "protected" | "private" | "module_function")
+    }
+
+    /// `bare_access_modifier?` — a macro call to an access modifier with no
+    /// arguments, affecting following method definitions.
+    pub fn is_bare_access_modifier(&self, id: NodeId) -> bool {
+        self.is_macro(id)
+            && self
+                .method_name(id)
+                .is_some_and(Self::is_access_modifier_name)
+            && self.call_arguments(id).is_empty()
+    }
+
+    /// `non_bare_access_modifier?` — a macro call to an access modifier with
+    /// at least one argument, affecting only the named methods.
+    pub fn is_non_bare_access_modifier(&self, id: NodeId) -> bool {
+        self.is_macro(id)
+            && self
+                .method_name(id)
+                .is_some_and(Self::is_access_modifier_name)
+            && !self.call_arguments(id).is_empty()
+    }
+
+    /// `access_modifier?` — bare or non-bare `public`/`protected`/`private`/
+    /// `module_function` in macro scope.
+    pub fn is_access_modifier(&self, id: NodeId) -> bool {
+        self.is_bare_access_modifier(id) || self.is_non_bare_access_modifier(id)
+    }
+
+    /// `special_modifier?` — a bare `private` or `protected` modifier.
+    pub fn is_special_modifier(&self, id: NodeId) -> bool {
+        self.is_bare_access_modifier(id)
+            && matches!(self.method_name(id), Some("private" | "protected"))
+    }
+
+    fn is_any_def(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Def { .. } | NodeKind::Defs { .. })
+    }
+
+    /// `def_modifier` — for `private def foo; end` and nested modifier
+    /// chains, returns the `def`/`defs` node being modified. Mirrors
+    /// RuboCop's recursive `def_modifier(node = self)` helper.
+    pub fn def_modifier(&self, id: NodeId) -> OptNodeId {
+        if !matches!(*self.kind(id), NodeKind::Send { receiver, .. } if receiver.get().is_none()) {
+            return OptNodeId::NONE;
+        }
+        let Some(&arg) = self.call_arguments(id).first() else {
+            return OptNodeId::NONE;
+        };
+        if self.is_any_def(arg) {
+            OptNodeId::some(arg)
+        } else {
+            self.def_modifier(arg)
+        }
+    }
+
+    /// `def_modifier?` — whether this send participates in a modifier chain
+    /// for a `def`/`defs` node.
+    pub fn is_def_modifier(&self, id: NodeId) -> bool {
+        self.def_modifier(id).get().is_some()
+    }
+
     /// `dot?` — the call uses the `.` operator. Mirrors RuboCop's
     /// `node.dot?` (`loc_is?(:dot, '.')`). Uses es99.6's [`LocRef::dot`],
     /// which returns `Range::ZERO` for operator sends (`a + b`) and for
@@ -3345,6 +3479,154 @@ mod tests {
             let kids = cx.children(root);
             assert!(cx.is_value_used(kids[0]), "while condition is used");
             assert!(!cx.is_value_used(kids[1]), "while body value is discarded");
+        });
+    }
+
+    fn first_send_named(cx: &Cx<'_>, root: murphy_ast::NodeId, name: &str) -> murphy_ast::NodeId {
+        std::iter::once(root)
+            .chain(cx.descendants(root))
+            .find(|&id| {
+                matches!(cx.kind(id), NodeKind::Send { .. }) && cx.method_name(id) == Some(name)
+            })
+            .unwrap_or_else(|| panic!("expected to find send `{name}`"))
+    }
+
+    #[test]
+    fn global_const_matches_unscoped_and_cbase_constants() {
+        with_parsed("Class.new", |cx, root| {
+            let receiver = cx.call_receiver(root).get().unwrap();
+            assert!(cx.is_global_const(receiver, "Class"));
+            assert!(!cx.is_global_const(receiver, "Struct"));
+        });
+        with_parsed("::Class.new", |cx, root| {
+            let receiver = cx.call_receiver(root).get().unwrap();
+            assert!(cx.is_global_const(receiver, "Class"));
+        });
+        with_parsed("A::Class.new", |cx, root| {
+            let receiver = cx.call_receiver(root).get().unwrap();
+            assert!(!cx.is_global_const(receiver, "Class"));
+        });
+    }
+
+    #[test]
+    fn class_constructor_matches_new_and_define_forms() {
+        for src in ["Class.new", "Module.new", "Struct.new", "Data.define(:id)"] {
+            with_parsed(src, |cx, root| {
+                assert!(cx.is_class_constructor(root), "{src}")
+            });
+        }
+        with_parsed("Class.new do\n  foo\nend", |cx, root| {
+            assert!(
+                cx.is_class_constructor(root),
+                "block form is a class constructor"
+            );
+            assert!(cx.is_class_constructor(cx.block_call(root).get().unwrap()));
+        });
+        with_parsed("Object.new", |cx, root| {
+            assert!(!cx.is_class_constructor(root))
+        });
+        with_parsed("Class.define(:id)", |cx, root| {
+            assert!(!cx.is_class_constructor(root))
+        });
+    }
+
+    #[test]
+    fn in_macro_scope_follows_rubocop_wrapper_rules() {
+        with_parsed("top_level_macro", |cx, root| {
+            assert!(cx.is_in_macro_scope(root))
+        });
+        with_parsed(
+            "class C\n  macro_call\n  if condition\n    nested_macro\n  end\nend",
+            |cx, root| {
+                let macro_call = first_send_named(cx, root, "macro_call");
+                let condition = first_send_named(cx, root, "condition");
+                let nested_macro = first_send_named(cx, root, "nested_macro");
+
+                assert!(cx.is_in_macro_scope(macro_call));
+                assert!(!cx.is_in_macro_scope(condition));
+                assert!(cx.is_in_macro_scope(nested_macro));
+            },
+        );
+        with_parsed("Class.new do\n  macro_call\nend", |cx, root| {
+            let macro_call = first_send_named(cx, root, "macro_call");
+            assert!(cx.is_in_macro_scope(macro_call));
+        });
+        with_parsed(
+            "def build\n  Class.new do\n    not_macro\n  end\nend",
+            |cx, root| {
+                let not_macro = first_send_named(cx, root, "not_macro");
+                assert!(!cx.is_in_macro_scope(not_macro));
+            },
+        );
+        with_parsed("foo(argument_call)", |cx, root| {
+            let argument_call = first_send_named(cx, root, "argument_call");
+            assert!(!cx.is_in_macro_scope(argument_call));
+        });
+    }
+
+    #[test]
+    fn macro_predicate_requires_implicit_receiver_in_macro_scope() {
+        with_parsed(
+            "class C\n  macro_call\n  self.not_macro\nend",
+            |cx, root| {
+                let macro_call = first_send_named(cx, root, "macro_call");
+                let not_macro = first_send_named(cx, root, "not_macro");
+                assert!(cx.is_macro(macro_call));
+                assert!(!cx.is_macro(not_macro));
+            },
+        );
+        with_parsed("foo(argument_call)", |cx, root| {
+            let argument_call = first_send_named(cx, root, "argument_call");
+            assert!(!cx.is_macro(argument_call));
+        });
+    }
+
+    #[test]
+    fn access_modifier_predicates_match_bare_and_non_bare_forms() {
+        with_parsed(
+            "class C\n  private\n  protected :foo\n  public(:bar)\n  module_function :baz\nend",
+            |cx, root| {
+                let private = first_send_named(cx, root, "private");
+                let protected = first_send_named(cx, root, "protected");
+                let public = first_send_named(cx, root, "public");
+                let module_function = first_send_named(cx, root, "module_function");
+
+                assert!(cx.is_bare_access_modifier(private));
+                assert!(!cx.is_non_bare_access_modifier(private));
+                assert!(cx.is_special_modifier(private));
+
+                assert!(!cx.is_bare_access_modifier(protected));
+                assert!(cx.is_non_bare_access_modifier(protected));
+                assert!(!cx.is_special_modifier(protected));
+
+                assert!(cx.is_access_modifier(public));
+                assert!(cx.is_access_modifier(module_function));
+            },
+        );
+        with_parsed("private", |cx, root| assert!(cx.is_access_modifier(root)));
+        with_parsed("obj.private", |cx, root| {
+            assert!(!cx.is_access_modifier(root))
+        });
+    }
+
+    #[test]
+    fn def_modifier_finds_def_argument_through_modifier_chain() {
+        with_parsed("private def foo\nend", |cx, root| {
+            let modified = cx.def_modifier(root).get().expect("def modifier target");
+            assert!(matches!(cx.kind(modified), NodeKind::Def { .. }));
+            assert!(cx.is_def_modifier(root));
+        });
+        with_parsed("private protected def foo\nend", |cx, root| {
+            let modified = cx
+                .def_modifier(root)
+                .get()
+                .expect("nested def modifier target");
+            assert!(matches!(cx.kind(modified), NodeKind::Def { .. }));
+            assert!(cx.is_def_modifier(root));
+        });
+        with_parsed("private :foo", |cx, root| {
+            assert!(cx.def_modifier(root).get().is_none());
+            assert!(!cx.is_def_modifier(root));
         });
     }
 
