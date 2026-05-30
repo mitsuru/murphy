@@ -425,10 +425,16 @@ fn run_mruby_user_cops(
     if mruby_cops.is_empty() {
         return Vec::new();
     }
-    let ctx = AstContext::new(source.as_bytes().to_vec());
-    mruby_cops
+    let applicable_cops: Vec<_> = mruby_cops
         .iter()
         .filter(|cop| config.cop_applies_to_file(&cop.name, Path::new(file)))
+        .collect();
+    if applicable_cops.is_empty() {
+        return Vec::new();
+    }
+    let ctx = AstContext::new(source.as_bytes().to_vec());
+    applicable_cops
+        .into_iter()
         .flat_map(|cop| run_mruby_cop_isolated(&ctx, &cop.source, &cop.name, file))
         .collect()
 }
@@ -450,12 +456,12 @@ fn scoped_native_cops<'a>(
 ) -> Vec<&'a PluginCopV1> {
     cops.iter()
         .copied()
-        .filter(|cop| config.cop_applies_to_file(&plugin_cop_name(cop), Path::new(file)))
+        .filter(|cop| config.cop_applies_to_file(plugin_cop_name(cop), Path::new(file)))
         .collect()
 }
 
-fn plugin_cop_name(cop: &PluginCopV1) -> String {
-    String::from_utf8_lossy(unsafe { cop.name.as_bytes() }).into_owned()
+fn plugin_cop_name(cop: &PluginCopV1) -> &str {
+    std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("")
 }
 
 #[cfg(feature = "mruby-user-cops")]

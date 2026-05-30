@@ -331,14 +331,36 @@ fn parse_cop_rule(map: yaml_rust2::yaml::Hash) -> CopRule {
 }
 
 fn globset_matches(patterns: &[String], path: &Path) -> bool {
-    let mut builder = globset::GlobSetBuilder::new();
-    for pattern in patterns {
-        let Ok(glob) = globset::Glob::new(pattern) else {
-            continue;
-        };
-        builder.add(glob);
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    thread_local! {
+        static GLOBSET_CACHE: RefCell<HashMap<Vec<String>, Arc<globset::GlobSet>>> =
+            RefCell::new(HashMap::new());
     }
-    builder.build().is_ok_and(|set| set.is_match(path))
+
+    GLOBSET_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let set = if let Some(set) = cache.get(patterns) {
+            Arc::clone(set)
+        } else {
+            let mut builder = globset::GlobSetBuilder::new();
+            for pattern in patterns {
+                let Ok(glob) = globset::Glob::new(pattern) else {
+                    continue;
+                };
+                builder.add(glob);
+            }
+            let Ok(set) = builder.build() else {
+                return false;
+            };
+            let set = Arc::new(set);
+            cache.insert(patterns.to_vec(), Arc::clone(&set));
+            set
+        };
+        set.is_match(path)
+    })
 }
 
 fn validate_glob_patterns(patterns: &[String]) -> Result<(), ConfigError> {
