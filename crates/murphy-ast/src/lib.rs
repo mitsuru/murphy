@@ -17,7 +17,10 @@ mod sexp;
 pub use ast::{Ancestors, Ast, AstRawParts, collect_children, slot_layout};
 pub use builder::AstBuilder;
 pub use interner::Interner;
-pub use kinds::{KIND_PATTERN_NAMES, NodeKindTag, pattern_name, tag_from_pattern_name};
+pub use kinds::{
+    GROUP_FOR_TYPE, KIND_PATTERN_NAMES, NodeKindTag, pattern_name, tag_from_pattern_name,
+    tags_for_type_name,
+};
 pub use node::{
     AstNode, CallClosingLoc, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId,
     Range, SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
