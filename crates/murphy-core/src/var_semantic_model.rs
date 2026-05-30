@@ -95,15 +95,68 @@ impl VarSemanticModel {
         while let Some(WorkItem { node, scope }) = stack.pop() {
             match *ast.kind(node) {
                 // ── Scope boundaries ────────────────────────────────────────
+
+                // Block: `call` belongs to the PARENT scope (e.g. the receiver
+                // `foo` in `foo.bar { |x| x }` is read in the outer scope).
+                // Only `args` and `body` belong to the new block scope.
+                NodeKind::Block { call, args, body } => {
+                    scopes.insert(
+                        node,
+                        ScopeInfo {
+                            parent_scope: Some(scope),
+                            variables: Vec::new(),
+                        },
+                    );
+                    // call → parent scope
+                    stack.push(WorkItem { node: call, scope });
+                    // args and body → new block scope (body first so args pops first)
+                    if let Some(body_id) = body.get() {
+                        stack.push(WorkItem { node: body_id, scope: node });
+                    }
+                    stack.push(WorkItem { node: args, scope: node });
+                }
+
+                // Numblock: numbered-parameter block; `send` belongs to parent scope.
+                NodeKind::Numblock { send, body, .. } => {
+                    scopes.insert(
+                        node,
+                        ScopeInfo {
+                            parent_scope: Some(scope),
+                            variables: Vec::new(),
+                        },
+                    );
+                    // send → parent scope
+                    stack.push(WorkItem { node: send, scope });
+                    // body → new block scope
+                    if let Some(body_id) = body.get() {
+                        stack.push(WorkItem { node: body_id, scope: node });
+                    }
+                }
+
+                // Itblock: `it`-parameter block; `send` belongs to parent scope.
+                NodeKind::Itblock { send, body } => {
+                    scopes.insert(
+                        node,
+                        ScopeInfo {
+                            parent_scope: Some(scope),
+                            variables: Vec::new(),
+                        },
+                    );
+                    // send → parent scope
+                    stack.push(WorkItem { node: send, scope });
+                    // body → new block scope
+                    if let Some(body_id) = body.get() {
+                        stack.push(WorkItem { node: body_id, scope: node });
+                    }
+                }
+
+                // Other scope boundaries: all children belong to the new scope.
                 NodeKind::Def { .. }
                 | NodeKind::Defs { .. }
-                | NodeKind::Block { .. }
                 | NodeKind::Lambda
                 | NodeKind::Class { .. }
                 | NodeKind::Module { .. }
-                | NodeKind::Sclass { .. }
-                | NodeKind::Numblock { .. }
-                | NodeKind::Itblock { .. } => {
+                | NodeKind::Sclass { .. } => {
                     // Create a new scope keyed by this boundary node.
                     scopes.insert(
                         node,
@@ -130,6 +183,18 @@ impl VarSemanticModel {
                         Self::find_or_declare_arg(scope_info, name, node);
                     }
                     // These are leaf nodes; no children to push.
+                }
+
+                // ── Shadow arg: `|x; y|` where `y` is block-local ───────────
+                // Declares a variable in the current (block) scope so that
+                // Lint/ShadowingOuterLocalVariable can detect when a shadow arg
+                // shadows an outer variable.
+                NodeKind::Shadowarg(name) => {
+                    if !Self::is_underscore_prefix(name, ast) {
+                        let scope_info = scopes.get_mut(&scope).expect("scope must exist");
+                        Self::find_or_declare_arg(scope_info, name, node);
+                    }
+                    // Leaf node; no children.
                 }
 
                 NodeKind::Optarg { name, default } => {
@@ -475,5 +540,39 @@ mod tests {
             Some(def_id),
             "block scope parent should be the def scope"
         );
+    }
+
+    /// Block.call (e.g. the receiver `arr` in `arr.each { |x| x }`) must be
+    /// attributed to the OUTER scope, not the block scope.
+    #[test]
+    fn block_call_attributed_to_outer_scope() {
+        // `arr` is assigned in the outer (def) scope, then used as the receiver
+        // of `.each`.  The `Lvar arr` read is part of `Block.call`, so it must
+        // land in the def scope, not in the block scope.
+        let ast = translate("def foo; arr = [1]; arr.each { |x| x }; end", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+
+        let def_id = find_node(&ast, |k| matches!(k, NodeKind::Def { .. }))
+            .expect("def node");
+        let block_id = find_node(&ast, |k| matches!(k, NodeKind::Block { .. }))
+            .expect("block node");
+
+        let def_scope = model.scope(def_id).expect("def scope");
+        let block_scope = model.scope(block_id).expect("block scope");
+
+        // `arr` should appear in the def scope (1 assignment + 1 reference).
+        let arr_in_def = def_scope.variables.iter().find(|v| {
+            ast.interner().resolve(v.name.0) == "arr"
+        });
+        assert!(arr_in_def.is_some(), "`arr` must be tracked in the def scope");
+        let arr = arr_in_def.unwrap();
+        assert_eq!(arr.assignments.len(), 1, "`arr` has one assignment");
+        assert_eq!(arr.references.len(), 1, "`arr` has one reference (the block call)");
+
+        // `arr` must NOT appear in the block scope.
+        let arr_in_block = block_scope.variables.iter().find(|v| {
+            ast.interner().resolve(v.name.0) == "arr"
+        });
+        assert!(arr_in_block.is_none(), "`arr` must NOT appear in the block scope");
     }
 }
