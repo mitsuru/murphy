@@ -38,6 +38,8 @@ pub const fn build_cop<C: NodeCop + Default>() -> PluginCopV1 {
         dispatch: dispatch_thunk::<C>,
         send_methods_ptr: <C as NodeCop>::SEND_METHODS.as_ptr(),
         send_methods_len: <C as NodeCop>::SEND_METHODS.len(),
+        safe: tristate_to_wire(C::SAFE),
+        safe_autocorrect: tristate_to_wire(C::SAFE_AUTOCORRECT),
     }
 }
 
@@ -155,6 +157,8 @@ mod tests {
             Severity::to_wire(Some(Severity::Warning))
         );
         assert_eq!(cop.default_enabled, tristate_to_wire(None));
+        assert_eq!(cop.safe, tristate_to_wire(None));
+        assert_eq!(cop.safe_autocorrect, tristate_to_wire(None));
         assert_eq!(cop.kinds_len, 1);
         assert_eq!(cop.options_len, 0);
         assert_eq!(cop.size, std::mem::size_of::<PluginCopV1>());

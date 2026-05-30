@@ -10,6 +10,8 @@ struct FullMeta;
     description = "a cop with all args set",
     default_severity = "warning",
     default_enabled = true,
+    safe = true,
+    safe_autocorrect = false,
     options = NoOptions,
 )]
 impl FullMeta {

@@ -33,7 +33,7 @@ use murphy_core::{
     aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
     migrate_rubocop_yml_to_murphy_yml, parse, parse_with_cache, run_to_fixpoint,
 };
-use murphy_plugin_api::{PluginCopV1, PluginRegistration};
+use murphy_plugin_api::{PluginCopV1, PluginRegistration, tristate_from_wire};
 use murphy_reporting::{OutputFormat, format_lint_output};
 
 /// The standard built-in cop pack (`murphy-std`), unpacked once and
@@ -130,8 +130,11 @@ enum CliCommand {
 #[derive(Debug, clap::Args)]
 struct LintArgs {
     /// Apply safe autocorrections and write files back.
-    #[arg(short = 'a', long = "fix")]
+    #[arg(short = 'a', long = "fix", conflicts_with = "fix_all")]
     fix: bool,
+    /// Apply all autocorrections, including unsafe ones, and write files back.
+    #[arg(short = 'A', long = "fix-all", conflicts_with = "fix")]
+    fix_all: bool,
     /// Print developer timing and pipeline diagnostics to stderr.
     #[arg(long)]
     debug: bool,
@@ -462,6 +465,23 @@ fn scoped_native_cops<'a>(
 
 fn plugin_cop_name(cop: &PluginCopV1) -> &str {
     std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixMode {
+    Safe,
+    All,
+}
+
+fn cops_for_fix_mode<'a>(cops: &'a [&'a PluginCopV1], mode: FixMode) -> Vec<&'a PluginCopV1> {
+    match mode {
+        FixMode::All => cops.to_vec(),
+        FixMode::Safe => cops
+            .iter()
+            .copied()
+            .filter(|cop| tristate_from_wire(cop.safe_autocorrect).unwrap_or(true))
+            .collect(),
+    }
 }
 
 #[cfg(feature = "mruby-user-cops")]
@@ -858,7 +878,13 @@ fn run_cops(args: &CopsArgs) -> Result<u8, AppError> {
 }
 
 fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
-    let fix = args.fix;
+    let fix_mode = if args.fix_all {
+        Some(FixMode::All)
+    } else if args.fix {
+        Some(FixMode::Safe)
+    } else {
+        None
+    };
     let debug = args.debug;
     let no_cache = args.no_cache;
     let output_format = OutputFormat::from(args.format);
@@ -1006,7 +1032,9 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     let mut sources_for_lint = sources;
 
     // ── --fix: fixpoint autocorrect + write-back ───────────────────────────
-    if fix {
+    if let Some(fix_mode) = fix_mode {
+        let fix_cops = cops_for_fix_mode(cops, fix_mode);
+        let fix_cops: &[&PluginCopV1] = &fix_cops;
         if debug {
             eprintln!(
                 "murphy: debug: fixpoint start elapsed_ms={}",
@@ -1017,7 +1045,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
         for (path, source) in &sources_for_lint {
             let outcome = run_to_fixpoint(
                 source,
-                |s| lint_closure_edits(s, path, cops, mruby_cops, &config, cache_ref),
+                |s| lint_closure_edits(s, path, fix_cops, mruby_cops, &config, cache_ref),
                 MAX_FIX_ITERATIONS,
             );
             if outcome.corrected != *source {
@@ -1094,4 +1122,65 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     }
 
     Ok(exit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use murphy_plugin_api::{RawSlice, SEVERITY_UNSET, TRISTATE_UNSET, tristate_to_wire};
+
+    static EMPTY_KINDS: &[murphy_plugin_api::NodeKindTag] = &[];
+
+    unsafe extern "C" fn noop_dispatch(
+        _node: murphy_plugin_api::NodeId,
+        _cx: *const murphy_plugin_api::CxRaw,
+    ) -> i32 {
+        0
+    }
+
+    const fn test_cop(name: &'static str, safe_autocorrect: u8) -> PluginCopV1 {
+        PluginCopV1 {
+            size: std::mem::size_of::<PluginCopV1>(),
+            name: RawSlice::from_str(name),
+            description: RawSlice::EMPTY,
+            default_severity: SEVERITY_UNSET,
+            default_enabled: TRISTATE_UNSET,
+            safe: TRISTATE_UNSET,
+            safe_autocorrect,
+            options_ptr: std::ptr::null(),
+            options_len: 0,
+            kinds_ptr: EMPTY_KINDS.as_ptr(),
+            kinds_len: EMPTY_KINDS.len(),
+            dispatch: noop_dispatch,
+            send_methods_ptr: std::ptr::null(),
+            send_methods_len: 0,
+        }
+    }
+
+    static SAFE_FIX_COP: PluginCopV1 = test_cop("Test/SafeFix", tristate_to_wire(Some(true)));
+    static UNSAFE_FIX_COP: PluginCopV1 = test_cop("Test/UnsafeFix", tristate_to_wire(Some(false)));
+    static UNSPECIFIED_FIX_COP: PluginCopV1 = test_cop("Test/UnspecifiedFix", TRISTATE_UNSET);
+
+    #[test]
+    fn safe_fix_mode_skips_unsafe_autocorrect_cops() {
+        let all = [&SAFE_FIX_COP, &UNSAFE_FIX_COP, &UNSPECIFIED_FIX_COP];
+
+        let selected = cops_for_fix_mode(&all, FixMode::Safe);
+        let names: Vec<&str> = selected.iter().map(|cop| plugin_cop_name(cop)).collect();
+
+        assert_eq!(names, vec!["Test/SafeFix", "Test/UnspecifiedFix"]);
+    }
+
+    #[test]
+    fn all_fix_mode_keeps_unsafe_autocorrect_cops() {
+        let all = [&SAFE_FIX_COP, &UNSAFE_FIX_COP, &UNSPECIFIED_FIX_COP];
+
+        let selected = cops_for_fix_mode(&all, FixMode::All);
+        let names: Vec<&str> = selected.iter().map(|cop| plugin_cop_name(cop)).collect();
+
+        assert_eq!(
+            names,
+            vec!["Test/SafeFix", "Test/UnsafeFix", "Test/UnspecifiedFix"]
+        );
+    }
 }

@@ -182,7 +182,10 @@ pub struct CxRaw {
 /// is tail-only (existing discriminants unchanged), but a plugin built
 /// against v1 must still be rejected so it never observes a token kind it
 /// cannot decode.
-pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 2;
+///
+/// Bumped to 3 (murphy-es99.4): `PluginCopV1` gained `safe` and
+/// `safe_autocorrect` tail fields, increasing the descriptor size.
+pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 3;
 
 /// The dispatch entry for one cop: invoked once per matching node.
 ///
@@ -228,6 +231,10 @@ pub struct PluginCopV1 {
     /// macro parse site, not here.
     pub send_methods_ptr: *const RawSlice,
     pub send_methods_len: usize,
+    /// Safe lint execution tristate byte.
+    pub safe: u8,
+    /// Safe autocorrect tristate byte.
+    pub safe_autocorrect: u8,
 }
 
 // Safety: PluginCopV1 is an immutable descriptor of non-owning views and
@@ -345,11 +352,13 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_two() {
+    fn abi_version_is_three() {
         // Bumped from 1 → 2 in murphy-es99.8 (SourceTokenKind gained
         // Comma/LeftBrace/RightBrace; additive but the loader must still
         // reject v1 plugins that predate the new token kinds).
-        assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 2);
+        // Bumped from 2 → 3 in murphy-es99.4 (PluginCopV1 gained safe
+        // metadata tail fields; size mismatch must reject old plugins).
+        assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 3);
     }
 
     #[test]
@@ -373,7 +382,9 @@ mod tests {
         // catch divergent struct layouts.
         assert_eq!(offset_of!(PluginCopV1, send_methods_ptr), 88);
         assert_eq!(offset_of!(PluginCopV1, send_methods_len), 96);
-        assert_eq!(size_of::<PluginCopV1>(), 104);
+        assert_eq!(offset_of!(PluginCopV1, safe), 104);
+        assert_eq!(offset_of!(PluginCopV1, safe_autocorrect), 105);
+        assert_eq!(size_of::<PluginCopV1>(), 112);
     }
 
     #[test]
