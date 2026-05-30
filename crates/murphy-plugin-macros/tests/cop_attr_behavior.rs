@@ -180,6 +180,8 @@ struct T5;
     description = "Catches T5 issues.",
     default_severity = "warning",
     default_enabled = false,
+    safe = false,
+    safe_autocorrect = false,
     options = NoOptions
 )]
 impl T5 {
@@ -430,6 +432,12 @@ fn cop_metadata_propagates_to_trait_consts() {
         Some(false),
         "default_enabled should be Some(false)"
     );
+    assert_eq!(<T5 as Cop>::SAFE, Some(false), "safe should be Some(false)");
+    assert_eq!(
+        <T5 as Cop>::SAFE_AUTOCORRECT,
+        Some(false),
+        "safe_autocorrect should be Some(false)"
+    );
     // NoOptions has an empty SCHEMA.
     assert_eq!(
         <<T5 as Cop>::Options as CopOptions>::SCHEMA.len(),
@@ -451,6 +459,16 @@ fn register_cops_integration_emits_pluginv1_table_via_internal_build_cop() {
         std::str::from_utf8(name_bytes).unwrap(),
         "Plugin/T6",
         "cop name must be Plugin/T6"
+    );
+    assert_eq!(
+        cop_v1.safe,
+        murphy_plugin_api::tristate_to_wire(None),
+        "safe metadata defaults to unset"
+    );
+    assert_eq!(
+        cop_v1.safe_autocorrect,
+        murphy_plugin_api::tristate_to_wire(None),
+        "safe_autocorrect metadata defaults to unset"
     );
 
     // kinds_len == 1 (only "send")

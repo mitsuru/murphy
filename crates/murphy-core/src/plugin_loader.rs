@@ -414,6 +414,8 @@ mod tests {
             description: RawSlice::from_str(""),
             default_severity: SEVERITY_UNSET,
             default_enabled: 255,
+            safe: 255,
+            safe_autocorrect: 255,
             options_ptr: std::ptr::null(),
             options_len: 0,
             kinds_ptr: FAKE_KINDS.as_ptr(),

@@ -586,7 +586,15 @@ fn lint_help_describes_key_flags() {
         .code(0);
 
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    for expected in ["--fix", "-a", "--debug", "--no-cache", "--format"] {
+    for expected in [
+        "--fix",
+        "-a",
+        "--fix-all",
+        "-A",
+        "--debug",
+        "--no-cache",
+        "--format",
+    ] {
         assert!(
             stdout.contains(expected),
             "lint help should mention {expected:?}, got:\n{stdout}"

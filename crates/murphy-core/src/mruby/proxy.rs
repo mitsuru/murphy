@@ -53,6 +53,7 @@ use std::os::raw::c_char;
 use murphy_ast::{AstNode, NodeId, NodeKind, NodeList, OptNodeId, Symbol};
 use murphy_plugin_api::{
     CxRaw, DispatchFn, FnTable, NodeKindTag, PluginCopV1, RawEdit, RawOffense, RawSlice,
+    TRISTATE_UNSET,
 };
 
 use mruby3_sys::{
@@ -377,6 +378,8 @@ pub fn build_mruby_cop(proxy: &MrubyCopProxy) -> PluginCopV1 {
         },
         default_severity: proxy.default_severity,
         default_enabled: proxy.default_enabled,
+        safe: TRISTATE_UNSET,
+        safe_autocorrect: TRISTATE_UNSET,
         options_ptr: std::ptr::null(),
         options_len: 0,
         kinds_ptr: proxy.kinds.as_ptr(),

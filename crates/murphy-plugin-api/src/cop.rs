@@ -29,6 +29,14 @@ pub trait Cop: Send + Sync + 'static {
 
     /// Default enablement. `None` keeps Murphy's built-in default.
     const DEFAULT_ENABLED: Option<bool> = None;
+
+    /// Whether normal lint execution should treat this cop as safe.
+    /// `None` keeps Murphy's default, currently safe.
+    const SAFE: Option<bool> = None;
+
+    /// Whether `murphy lint -a` may apply this cop's autocorrections.
+    /// `None` keeps Murphy's default, currently safe.
+    const SAFE_AUTOCORRECT: Option<bool> = None;
 }
 
 #[cfg(test)]
@@ -50,5 +58,7 @@ mod tests {
             Some(crate::Severity::Warning)
         );
         assert_eq!(<Stub as Cop>::DEFAULT_ENABLED, None); // default
+        assert_eq!(<Stub as Cop>::SAFE, None); // default
+        assert_eq!(<Stub as Cop>::SAFE_AUTOCORRECT, None); // default
     }
 }

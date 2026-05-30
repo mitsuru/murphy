@@ -209,6 +209,10 @@ pub struct PluginCopV1 {
     pub default_severity: u8,
     /// Default enablement tristate byte.
     pub default_enabled: u8,
+    /// Safe lint execution tristate byte.
+    pub safe: u8,
+    /// Safe autocorrect tristate byte.
+    pub safe_autocorrect: u8,
     /// `CopOptions::SCHEMA`.
     pub options_ptr: *const OptionSpec,
     pub options_len: usize,
@@ -362,6 +366,8 @@ mod tests {
         assert_eq!(offset_of!(PluginCopV1, description), 24);
         assert_eq!(offset_of!(PluginCopV1, default_severity), 40);
         assert_eq!(offset_of!(PluginCopV1, default_enabled), 41);
+        assert_eq!(offset_of!(PluginCopV1, safe), 42);
+        assert_eq!(offset_of!(PluginCopV1, safe_autocorrect), 43);
         assert_eq!(offset_of!(PluginCopV1, options_ptr), 48);
         assert_eq!(offset_of!(PluginCopV1, options_len), 56);
         assert_eq!(offset_of!(PluginCopV1, kinds_ptr), 64);

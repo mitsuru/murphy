@@ -31,6 +31,8 @@ pub const fn build_cop<C: NodeCop + Default>() -> PluginCopV1 {
         description: RawSlice::from_str(C::DESCRIPTION),
         default_severity: Severity::to_wire(C::DEFAULT_SEVERITY),
         default_enabled: tristate_to_wire(C::DEFAULT_ENABLED),
+        safe: tristate_to_wire(C::SAFE),
+        safe_autocorrect: tristate_to_wire(C::SAFE_AUTOCORRECT),
         options_ptr: <C::Options as CopOptions>::SCHEMA.as_ptr(),
         options_len: <C::Options as CopOptions>::SCHEMA.len(),
         kinds_ptr: <C as NodeCop>::KINDS.as_ptr(),
@@ -155,6 +157,8 @@ mod tests {
             Severity::to_wire(Some(Severity::Warning))
         );
         assert_eq!(cop.default_enabled, tristate_to_wire(None));
+        assert_eq!(cop.safe, tristate_to_wire(None));
+        assert_eq!(cop.safe_autocorrect, tristate_to_wire(None));
         assert_eq!(cop.kinds_len, 1);
         assert_eq!(cop.options_len, 0);
         assert_eq!(cop.size, std::mem::size_of::<PluginCopV1>());

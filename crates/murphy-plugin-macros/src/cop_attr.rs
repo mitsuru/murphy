@@ -43,6 +43,8 @@ struct CopArgs {
     /// Parsed severity literal and its resolved variant name ("Warning" / "Error").
     default_severity: Option<(LitStr, &'static str)>,
     default_enabled: Option<LitBool>,
+    safe: Option<LitBool>,
+    safe_autocorrect: Option<LitBool>,
     options: Option<Path>,
 }
 
@@ -128,7 +130,7 @@ fn require_path(key: &Ident, value: &syn::Expr, errors: &mut Option<Error>) -> O
 /// Parse `#[cop(name = "...", ...)]` arguments.
 ///
 /// Accepted keys: `name` (required), `description`, `default_severity`,
-/// `default_enabled`, `options`.
+/// `default_enabled`, `safe`, `safe_autocorrect`, `options`.
 fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
     // Collect all key=value arguments as a comma-separated list.
     let pairs: syn::punctuated::Punctuated<KvArg, Token![,]> =
@@ -140,6 +142,8 @@ fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
     let mut description_lit: Option<LitStr> = None;
     let mut default_severity: Option<(LitStr, &'static str)> = None;
     let mut default_enabled: Option<LitBool> = None;
+    let mut safe: Option<LitBool> = None;
+    let mut safe_autocorrect: Option<LitBool> = None;
     let mut options_path: Option<Path> = None;
     let mut errors: Option<Error> = None;
 
@@ -203,6 +207,26 @@ fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
                     default_enabled = Some(b);
                 }
             }
+            "safe" => {
+                if safe.is_some() {
+                    push_error(
+                        &mut errors,
+                        Error::new_spanned(key, "#[cop]: duplicate argument 'safe'"),
+                    );
+                } else if let Some(b) = require_bool_lit(key, &pair.value, &mut errors) {
+                    safe = Some(b);
+                }
+            }
+            "safe_autocorrect" => {
+                if safe_autocorrect.is_some() {
+                    push_error(
+                        &mut errors,
+                        Error::new_spanned(key, "#[cop]: duplicate argument 'safe_autocorrect'"),
+                    );
+                } else if let Some(b) = require_bool_lit(key, &pair.value, &mut errors) {
+                    safe_autocorrect = Some(b);
+                }
+            }
             "options" => {
                 if options_path.is_some() {
                     push_error(
@@ -238,6 +262,8 @@ fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
         description: description_lit,
         default_severity,
         default_enabled,
+        safe,
+        safe_autocorrect,
         options: options_path,
     })
 }
@@ -1088,6 +1114,23 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
         quote! {}
     };
 
+    let safe_const: TokenStream = if let Some(lit) = &args.safe {
+        quote! {
+            const SAFE: ::core::option::Option<bool> = ::core::option::Option::Some(#lit);
+        }
+    } else {
+        quote! {}
+    };
+
+    let safe_autocorrect_const: TokenStream = if let Some(lit) = &args.safe_autocorrect {
+        quote! {
+            const SAFE_AUTOCORRECT: ::core::option::Option<bool> =
+                ::core::option::Option::Some(#lit);
+        }
+    } else {
+        quote! {}
+    };
+
     // `type Options` — use the caller-specified path, or fall back to NoOptions.
     let options_type: TokenStream = if let Some(path) = &args.options {
         quote! { type Options = #path; }
@@ -1116,6 +1159,8 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
             #description_const
             #default_severity_const
             #default_enabled_const
+            #safe_const
+            #safe_autocorrect_const
         }
     };
 
