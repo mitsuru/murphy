@@ -3,8 +3,8 @@
 use std::marker::PhantomData;
 
 use murphy_ast::{
-    AstNode, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind,
-    collect_children, slot_layout,
+    AstNode, CallClosingLoc, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken,
+    SourceTokenKind, collect_children, slot_layout,
 };
 
 use crate::abi::CxRaw;
@@ -223,6 +223,10 @@ impl<'a> Cx<'a> {
 
     fn lists(&self) -> &'a [NodeId] {
         unsafe { slice(self.raw.lists, self.raw.lists_len) }
+    }
+
+    fn call_closing_locs(&self) -> &'a [CallClosingLoc] {
+        unsafe { slice(self.raw.call_closing_locs, self.raw.call_closing_locs_len) }
     }
 
     /// The arena root node.
@@ -722,18 +726,15 @@ impl<'a> Cx<'a> {
     }
 
     /// `parenthesized?` — the call's argument list is wrapped in parens.
-    /// Mirrors RuboCop's `parenthesized?` (`loc_is?(:end, ')')`) via
-    /// es99.6's [`LocRef::end`], which returns the matching `)` token or
-    /// `Range::ZERO`.
-    ///
-    /// **Limitation (inherited from es99.6's token-scan `begin`/`end`):**
-    /// a command call with a parenthesized *argument* — `foo (1)` (note
-    /// the space) — is reported `true`, whereas RuboCop's parser-provided
-    /// `loc.end` makes it `false`. Distinguishing the two needs the call's
-    /// own `(` location, which the token scan cannot recover. Tracked
-    /// against es99.6.
+    /// Mirrors RuboCop's `parenthesized?` (`loc_is?(:end, ')')`) using
+    /// Prism's parser-provided `CallNode::closing_loc()` recorded by the
+    /// translator. This intentionally differs from token scanning: command
+    /// calls like `foo (1)` have a parenthesized argument, not a
+    /// parenthesized call, so they have no call closing loc.
     pub fn is_parenthesized(&self, id: NodeId) -> bool {
-        self.loc(id).end() != Range::ZERO
+        self.call_closing_locs()
+            .binary_search_by_key(&id.0, |entry| entry.node.0)
+            .is_ok()
     }
 
     /// `prefix_not?` — a negation written as the `not` keyword (`not x`).
@@ -2080,6 +2081,8 @@ mod tests {
             sorted_tokens: p.sorted_tokens.as_ptr(),
             sorted_tokens_len: p.sorted_tokens.len(),
             options_json: RawSlice::from_str("{}"),
+            call_closing_locs: p.call_closing_locs.as_ptr(),
+            call_closing_locs_len: p.call_closing_locs.len(),
         }
     }
 
@@ -3247,15 +3250,13 @@ mod tests {
         with_parsed("foo(1)", |cx, root| assert!(cx.is_parenthesized(root)));
         with_parsed("foo", |cx, root| assert!(!cx.is_parenthesized(root)));
         with_parsed("foo()", |cx, root| assert!(cx.is_parenthesized(root)));
-        // Documented limitation: a command call with a parenthesized
-        // *argument* (`foo (1)`, note the space) is reported `true`,
-        // whereas RuboCop's parser-provided loc.end makes it `false`.
-        // Pinned here so the divergence is visible, not silent — tracked
-        // against es99.6's token-scan begin()/end().
+        // A command call with a parenthesized *argument* (`foo (1)`, note
+        // the space) has no parser-provided call closing paren. RuboCop's
+        // `loc.end` therefore makes `parenthesized?` false.
         with_parsed("foo (1)", |cx, root| {
             assert!(
-                cx.is_parenthesized(root),
-                "known es99.6 token-scan limitation: command + paren-arg reads as parenthesized",
+                !cx.is_parenthesized(root),
+                "command + parenthesized argument is not a parenthesized call",
             );
         });
     }

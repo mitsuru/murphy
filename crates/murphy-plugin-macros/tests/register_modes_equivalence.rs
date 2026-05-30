@@ -96,6 +96,8 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable, cop_name: RawSlice) -> CxRaw {
         sorted_tokens: p.sorted_tokens.as_ptr(),
         sorted_tokens_len: p.sorted_tokens.len(),
         options_json: RawSlice::from_str("{}"),
+        call_closing_locs: p.call_closing_locs.as_ptr(),
+        call_closing_locs_len: p.call_closing_locs.len(),
     }
 }
 

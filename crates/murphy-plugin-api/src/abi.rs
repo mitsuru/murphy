@@ -5,7 +5,7 @@
 
 use std::ffi::c_void;
 
-use murphy_ast::{AstNode, Comment, NodeId, NodeKindTag, Range, SourceToken};
+use murphy_ast::{AstNode, CallClosingLoc, Comment, NodeId, NodeKindTag, Range, SourceToken};
 
 /// The ABI's borrowed-slice primitive: a `#[repr(C)]` pointer+length pair.
 ///
@@ -169,6 +169,9 @@ pub struct CxRaw {
     pub sorted_tokens_len: usize,
     /// JSON object for the current cop's runtime options.
     pub options_json: RawSlice,
+    /// Sparse parser-provided closing parens for call nodes.
+    pub call_closing_locs: *const CallClosingLoc,
+    pub call_closing_locs_len: usize,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -311,7 +314,9 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, sorted_tokens), 136);
         assert_eq!(offset_of!(CxRaw, sorted_tokens_len), 144);
         assert_eq!(offset_of!(CxRaw, options_json), 152);
-        assert_eq!(size_of::<CxRaw>(), 168);
+        assert_eq!(offset_of!(CxRaw, call_closing_locs), 168);
+        assert_eq!(offset_of!(CxRaw, call_closing_locs_len), 176);
+        assert_eq!(size_of::<CxRaw>(), 184);
     }
 
     #[test]

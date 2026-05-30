@@ -1361,7 +1361,7 @@ impl Translator {
         }
         let args = self.builder.push_list(&arg_ids);
 
-        match (receiver, call.is_safe_navigation()) {
+        let id = match (receiver, call.is_safe_navigation()) {
             (Some(r), true) => {
                 let recv = self.translate_node(&r);
                 self.builder.push_named(
@@ -1388,7 +1388,11 @@ impl Translator {
                     selector_range,
                 )
             }
+        };
+        if let Some(closing) = call.closing_loc() {
+            self.builder.add_call_closing_loc(id, Self::range(&closing));
         }
+        id
     }
 
     /// `BlockNode`（`{ }`/`do end`）+ 既に翻訳済みの call `NodeId` → `Block` ノード。

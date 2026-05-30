@@ -733,6 +733,8 @@ fn cx_raw_for(
         sorted_tokens: p.sorted_tokens.as_ptr(),
         sorted_tokens_len: p.sorted_tokens.len(),
         options_json,
+        call_closing_locs: p.call_closing_locs.as_ptr(),
+        call_closing_locs_len: p.call_closing_locs.len(),
     }
 }
 
