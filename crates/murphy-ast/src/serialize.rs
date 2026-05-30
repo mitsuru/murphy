@@ -12,8 +12,8 @@
 use crate::ast::Ast;
 use crate::interner::Interner;
 use crate::node::{
-    AstNode, CallClosingLoc, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId,
-    Range, SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, NodeId, NodeKind, NodeList,
+    NodeLoc, OptNodeId, Range, SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
 };
 use sha2::{Digest, Sha256};
 
@@ -37,7 +37,11 @@ pub const MAGIC: &[u8; 8] = b"MURPHYAS";
 /// Version 6 (murphy-es99.8): adds the `SourceTokenKind` discriminants
 /// 8/9/10 (Comma / LeftBrace / RightBrace). Old readers must reject
 /// blobs that carry the new token kinds, so the layout is retired.
-pub const FORMAT_VERSION: u32 = 6;
+///
+/// Version 7: adds the `call_operator_locs` sparse table after the existing
+/// `call_closing_locs` table. Header validation still rejects older format
+/// versions before reading the body.
+pub const FORMAT_VERSION: u32 = 7;
 
 /// Total header size in bytes. The body immediately follows. Downstream
 /// (cache, mmap) code can rely on this offset being fixed.
@@ -915,6 +919,20 @@ fn read_call_closing_loc(cur: &mut &[u8]) -> Result<CallClosingLoc, SerError> {
     })
 }
 
+const CALL_OPERATOR_LOC_SERIALIZED_LEN: usize = 12;
+
+fn write_call_operator_loc(entry: CallOperatorLoc, out: &mut Vec<u8>) {
+    put_u32(out, entry.node.0);
+    write_range(entry.operator, out);
+}
+
+fn read_call_operator_loc(cur: &mut &[u8]) -> Result<CallOperatorLoc, SerError> {
+    Ok(CallOperatorLoc {
+        node: NodeId(get_u32(cur)?),
+        operator: read_range(cur)?,
+    })
+}
+
 fn write_node_list(l: NodeList, out: &mut Vec<u8>) {
     put_u32(out, l.start);
     put_u32(out, l.len);
@@ -1357,6 +1375,9 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
     for entry in &ast.call_closing_locs {
         check_node(entry.node.0)?;
     }
+    for entry in &ast.call_operator_locs {
+        check_node(entry.node.0)?;
+    }
     if ast.root.0 >= node_count {
         return Err(SerError::BadRoot {
             id: ast.root.0,
@@ -1426,12 +1447,16 @@ impl Ast {
         // 9. root
         put_u32(&mut out, self.root.0);
 
-        // 10. call closing-loc sparse table. This optional tail preserves
-        // FORMAT_VERSION: old readers ignore it, and new readers default old
-        // cache entries to an empty table.
+        // 10. call closing-loc sparse table.
         put_u64(&mut out, self.call_closing_locs.len() as u64);
         for entry in &self.call_closing_locs {
             write_call_closing_loc(*entry, &mut out);
+        }
+
+        // 11. call operator-loc sparse table.
+        put_u64(&mut out, self.call_operator_locs.len() as u64);
+        for entry in &self.call_operator_locs {
+            write_call_operator_loc(*entry, &mut out);
         }
 
         Ok(out)
@@ -1512,8 +1537,8 @@ impl Ast {
         // 9. root
         let root = NodeId(get_u32(&mut cur)?);
 
-        // 10. call closing-loc sparse table. Absent in FORMAT_VERSION 6
-        // buffers written before this additive tail was introduced.
+        // 10. call closing-loc sparse table. If this same-version tail is
+        // absent, the required call operator-loc table below reports EOF.
         let mut call_closing_locs = Vec::new();
         if !cur.is_empty() {
             let count = usize::try_from(get_u64(&mut cur)?).map_err(|_| SerError::UnexpectedEof)?;
@@ -1523,6 +1548,20 @@ impl Ast {
             }
         }
 
+        // 11. call operator-loc sparse table. Version 7 buffers must include
+        // this table, even when empty, so truncation is reported as EOF.
+        let count = usize::try_from(get_u64(&mut cur)?).map_err(|_| SerError::UnexpectedEof)?;
+        if count
+            .checked_mul(CALL_OPERATOR_LOC_SERIALIZED_LEN)
+            .is_none_or(|needed| needed > cur.len())
+        {
+            return Err(SerError::UnexpectedEof);
+        }
+        let mut call_operator_locs = Vec::with_capacity(count);
+        for _ in 0..count {
+            call_operator_locs.push(read_call_operator_loc(&mut cur)?);
+        }
+
         let ast = Ast {
             nodes,
             node_lists,
@@ -1530,6 +1569,7 @@ impl Ast {
             comments,
             source_tokens,
             call_closing_locs,
+            call_operator_locs,
             source: SourceBuffer { text, path },
             root,
         };
@@ -2101,13 +2141,51 @@ mod tests {
     }
 
     #[test]
-    fn from_bytes_accepts_pre_call_closing_loc_tail_buffers() {
+    fn round_trip_call_operator_locs() {
+        let mut b = AstBuilder::new("foo.bar", "t.rb");
+        let receiver_name = b.intern_symbol("foo");
+        let receiver = b.push(NodeKind::Lvar(receiver_name), r(0, 3));
+        let method = b.intern_symbol("bar");
+        let args = b.push_list(&[]);
+        let root = b.push_named(
+            NodeKind::Send {
+                receiver: OptNodeId::some(receiver),
+                method,
+                args,
+            },
+            r(0, 7),
+            r(4, 7),
+        );
+        b.add_call_operator_loc(root, r(3, 4));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
+        assert_eq!(restored.call_operator_locs(), ast.call_operator_locs());
+    }
+
+    #[test]
+    fn from_bytes_rejects_current_version_without_call_operator_loc_tail() {
         let ast = simple_ast();
         let mut bytes = ast.to_bytes().unwrap();
         bytes.truncate(bytes.len() - std::mem::size_of::<u64>());
 
-        let restored = crate::Ast::from_bytes(&bytes).expect("old cache body without tail");
-        assert!(restored.call_closing_locs().is_empty());
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_call_operator_loc_count_exceeding_remaining_bytes() {
+        let ast = simple_ast();
+        let mut bytes = ast.to_bytes().unwrap();
+        let count_offset = bytes.len() - std::mem::size_of::<u64>();
+        bytes[count_offset..].copy_from_slice(&u64::MAX.to_le_bytes());
+
+        assert!(matches!(
+            crate::Ast::from_bytes(&bytes),
+            Err(SerError::UnexpectedEof)
+        ));
     }
 
     #[test]

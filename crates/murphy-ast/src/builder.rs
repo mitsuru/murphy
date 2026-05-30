@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crate::ast::{Ast, collect_children};
 use crate::interner::InternBuilder;
 use crate::node::{
-    AstNode, CallClosingLoc, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId,
-    Range, SourceBuffer, SourceToken, StringId, Symbol,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, NodeId, NodeKind, NodeList,
+    NodeLoc, OptNodeId, Range, SourceBuffer, SourceToken, StringId, Symbol,
 };
 
 /// Builds an [`Ast`]. Push nodes and lists; `finish` computes parent links
@@ -18,6 +18,7 @@ pub struct AstBuilder {
     comments: Vec<Comment>,
     source_tokens: Vec<SourceToken>,
     call_closing_locs: Vec<CallClosingLoc>,
+    call_operator_locs: Vec<CallOperatorLoc>,
     source: SourceBuffer,
 }
 
@@ -31,6 +32,7 @@ impl AstBuilder {
             comments: Vec::new(),
             source_tokens: Vec::new(),
             call_closing_locs: Vec::new(),
+            call_operator_locs: Vec::new(),
             source: SourceBuffer {
                 text: source_text.into(),
                 path: path.into(),
@@ -112,6 +114,12 @@ impl AstBuilder {
             .push(CallClosingLoc { node, closing });
     }
 
+    /// Record Prism's parser-provided `CallNode::call_operator_loc()` for a call.
+    pub fn add_call_operator_loc(&mut self, node: NodeId, operator: Range) {
+        self.call_operator_locs
+            .push(CallOperatorLoc { node, operator });
+    }
+
     /// Finish building. Computes every node's `parent` from the structure
     /// in one pass, then returns the immutable [`Ast`]. `root` keeps
     /// `parent == NONE`.
@@ -140,6 +148,8 @@ impl AstBuilder {
             .sort_by_key(|t| (t.range.start, t.range.end));
         self.call_closing_locs
             .sort_unstable_by_key(|entry| entry.node.0);
+        self.call_operator_locs
+            .sort_unstable_by_key(|entry| entry.node.0);
         Ast {
             nodes: self.nodes,
             node_lists: self.node_lists,
@@ -147,6 +157,7 @@ impl AstBuilder {
             comments: self.comments,
             source_tokens: self.source_tokens,
             call_closing_locs: self.call_closing_locs,
+            call_operator_locs: self.call_operator_locs,
             source: self.source,
             root,
         }

@@ -257,6 +257,8 @@ mod tests {
             options_json: RawSlice::from_str("{}"),
             call_closing_locs: p.call_closing_locs.as_ptr(),
             call_closing_locs_len: p.call_closing_locs.len(),
+            call_operator_locs: p.call_operator_locs.as_ptr(),
+            call_operator_locs_len: p.call_operator_locs.len(),
         }
     }
 
