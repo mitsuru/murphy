@@ -1139,6 +1139,33 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// `ForNode#variable` — the loop variable target of `for v in …`
+    /// (an `Lvasgn`/`Mlhs` write target), or `OptNodeId::NONE` for a
+    /// non-`For` node. Mirrors RuboCop's `ForNode#variable`.
+    pub fn for_variable(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::For { var, .. } => OptNodeId::some(var),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `ForNode#collection` — the enumerable iterated over (`for … in coll`).
+    pub fn for_collection(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::For { iter, .. } => OptNodeId::some(iter),
+            _ => OptNodeId::NONE,
+        }
+    }
+
+    /// `ForNode#body` — the loop body, or `OptNodeId::NONE` for an empty
+    /// body or non-`For` node.
+    pub fn for_body(&self, id: NodeId) -> OptNodeId {
+        match *self.kind(id) {
+            NodeKind::For { body, .. } => body,
+            _ => OptNodeId::NONE,
+        }
+    }
+
     /// The file's comments, in source order.
     pub fn comments(&self) -> &'a [Comment] {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
@@ -2993,6 +3020,26 @@ mod tests {
                 .iter()
                 .any(|t| cx.token_text(*t) == "::");
             assert!(has_colon_colon, "Foo::Bar contains a `::` token");
+        });
+    }
+
+    #[test]
+    fn for_node_accessors_on_real_parse() {
+        // `for x in [1, 2]; x; end` — the translator now emits a `For`
+        // (previously `Unknown`), so the accessors and the dependent
+        // value/pure paths see a real node.
+        with_parsed("for x in [1, 2]\n  x\nend", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::For { .. }));
+            // variable is an Lvasgn target, collection an Array, body present.
+            let var = cx.for_variable(root).get().unwrap();
+            assert!(matches!(cx.kind(var), NodeKind::Lvasgn { .. }));
+            let coll = cx.for_collection(root).get().unwrap();
+            assert!(matches!(cx.kind(coll), NodeKind::Array(..)));
+            assert!(cx.for_body(root).get().is_some());
+            // `for` is a loop construct, not a ternary/modifier.
+            assert!(!cx.is_modifier_form(root));
+            // Non-For projects to NONE.
+            assert!(cx.for_variable(coll).get().is_none());
         });
     }
 }

@@ -679,6 +679,16 @@ impl Translator {
                 range,
             );
         }
+        if let Some(f) = node.as_for_node() {
+            // `for <var> in <iter>; <body>; end` → `For { var, iter, body }`.
+            // `index()` is an assignment target (`LocalVariableTargetNode` /
+            // `MultiTargetNode`), translated value-less like RuboCop's
+            // `(for (lvasgn :x) <iter> <body>)`.
+            let var = self.translate_target(&f.index());
+            let iter = self.translate_node(&f.collection());
+            let body = self.translate_stmts_opt(f.statements());
+            return self.builder.push(NodeKind::For { var, iter, body }, range);
+        }
 
         // --- logical operators ---
         if let Some(a) = node.as_and_node() {
@@ -1879,6 +1889,27 @@ mod tests {
         // `until c ... end` → Until。
         let u = translate("until c\n  x\nend", "t.rb");
         assert!(matches!(u.kind(u.root()), NodeKind::Until { .. }));
+    }
+
+    #[test]
+    fn translates_for_to_for_node() {
+        // `for x in [1, 2]; x; end` → For { var: Lvasgn, iter: Array, body }
+        // (previously fell through to Unknown).
+        let f = translate("for x in [1, 2]\n  x\nend", "t.rb");
+        match f.kind(f.root()) {
+            NodeKind::For { var, iter, body } => {
+                assert!(matches!(f.kind(*var), NodeKind::Lvasgn { .. }));
+                assert!(matches!(f.kind(*iter), NodeKind::Array(..)));
+                assert!(body.get().is_some());
+            }
+            other => panic!("expected For, got {other:?}"),
+        }
+        // Multi-target `for a, b in h` → var is an Mlhs of value-less writes.
+        let m = translate("for a, b in h\n  a\nend", "t.rb");
+        let NodeKind::For { var, .. } = m.kind(m.root()) else {
+            panic!("expected For");
+        };
+        assert!(matches!(m.kind(*var), NodeKind::Mlhs(..)));
     }
 
     #[test]
