@@ -31,8 +31,6 @@ pub const fn build_cop<C: NodeCop + Default>() -> PluginCopV1 {
         description: RawSlice::from_str(C::DESCRIPTION),
         default_severity: Severity::to_wire(C::DEFAULT_SEVERITY),
         default_enabled: tristate_to_wire(C::DEFAULT_ENABLED),
-        safe: tristate_to_wire(C::SAFE),
-        safe_autocorrect: tristate_to_wire(C::SAFE_AUTOCORRECT),
         options_ptr: <C::Options as CopOptions>::SCHEMA.as_ptr(),
         options_len: <C::Options as CopOptions>::SCHEMA.len(),
         kinds_ptr: <C as NodeCop>::KINDS.as_ptr(),
@@ -40,6 +38,8 @@ pub const fn build_cop<C: NodeCop + Default>() -> PluginCopV1 {
         dispatch: dispatch_thunk::<C>,
         send_methods_ptr: <C as NodeCop>::SEND_METHODS.as_ptr(),
         send_methods_len: <C as NodeCop>::SEND_METHODS.len(),
+        safe: tristate_to_wire(C::SAFE),
+        safe_autocorrect: tristate_to_wire(C::SAFE_AUTOCORRECT),
     }
 }
 
