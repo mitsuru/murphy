@@ -283,6 +283,9 @@ impl<'a> Cx<'a> {
                 | NodeKind::Break(_)
                 | NodeKind::Next(_)
                 | NodeKind::Yield(_)
+                | NodeKind::Super(_)
+                | NodeKind::Zsuper
+                | NodeKind::Defined(_)
                 | NodeKind::For { .. }
                 | NodeKind::Rescue { .. }
         ) || matches!(
@@ -393,6 +396,39 @@ impl<'a> Cx<'a> {
             _ => return None,
         };
         Some(self.symbol_str(sym))
+    }
+
+    /// The selector source range for method-like nodes. For calls and defs
+    /// this is `loc.name`; for keyword-call nodes (`yield`, `super`,
+    /// `defined?`) this is the leading keyword token.
+    pub fn selector(&self, id: NodeId) -> Range {
+        match *self.kind(id) {
+            NodeKind::Send { .. }
+            | NodeKind::Csend { .. }
+            | NodeKind::Def { .. }
+            | NodeKind::Defs { .. } => self.loc(id).name,
+            NodeKind::Yield(_) | NodeKind::Super(_) | NodeKind::Zsuper | NodeKind::Defined(_) => {
+                self.loc(id).keyword()
+            }
+            NodeKind::Block { call, .. } => self.selector(call),
+            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => self.selector(send),
+            _ => Range::ZERO,
+        }
+    }
+
+    /// The block node wrapping this send-like node, if the block is the
+    /// node's immediate parent. Mirrors RuboCop's `send_node.block_node`.
+    pub fn block_node(&self, id: NodeId) -> OptNodeId {
+        let Some(parent) = self.parent(id).get() else {
+            return OptNodeId::NONE;
+        };
+        match *self.kind(parent) {
+            NodeKind::Block { call, .. } if call == id => OptNodeId::some(parent),
+            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } if send == id => {
+                OptNodeId::some(parent)
+            }
+            _ => OptNodeId::NONE,
+        }
     }
 
     /// `comparison_method?` for the node's selector — see
@@ -2579,6 +2615,54 @@ mod tests {
         // Numbered-parameter block `foo.map { _1 }`.
         with_parsed("foo.map { _1 }", |cx, root| {
             assert_eq!(cx.method_name(root), Some("map"));
+        });
+    }
+
+    #[test]
+    fn selector_resolves_call_and_keyword_like_nodes_on_real_parses() {
+        with_parsed("foo.bar", |cx, root| {
+            assert_eq!(cx.raw_source(cx.selector(root)), "bar");
+        });
+        with_parsed("foo&.bar", |cx, root| {
+            assert_eq!(cx.raw_source(cx.selector(root)), "bar");
+        });
+        with_parsed("def m; yield(1); end", |cx, root| {
+            let yield_node = cx
+                .descendants(root)
+                .into_iter()
+                .find(|&id| matches!(cx.kind(id), NodeKind::Yield(_)))
+                .expect("expected yield node");
+            assert_eq!(cx.raw_source(cx.selector(yield_node)), "yield");
+        });
+        with_parsed("def m; super(1); end", |cx, root| {
+            let super_node = cx
+                .descendants(root)
+                .into_iter()
+                .find(|&id| matches!(cx.kind(id), NodeKind::Super(_)))
+                .expect("expected super node");
+            assert_eq!(cx.raw_source(cx.selector(super_node)), "super");
+        });
+        with_parsed("def m; super; end", |cx, root| {
+            let zsuper_node = cx
+                .descendants(root)
+                .into_iter()
+                .find(|&id| matches!(cx.kind(id), NodeKind::Zsuper))
+                .expect("expected zsuper node");
+            assert_eq!(cx.raw_source(cx.selector(zsuper_node)), "super");
+        });
+        with_parsed("defined?(foo)", |cx, root| {
+            assert_eq!(cx.raw_source(cx.selector(root)), "defined?");
+        });
+    }
+
+    #[test]
+    fn block_node_finds_the_block_wrapping_a_send() {
+        with_parsed("foo.each { _1 }", |cx, root| {
+            let NodeKind::Block { call, .. } = *cx.kind(root) else {
+                panic!("expected block root");
+            };
+            assert_eq!(cx.block_node(call), OptNodeId::some(root));
+            assert_eq!(cx.block_node(root), OptNodeId::NONE);
         });
     }
 
