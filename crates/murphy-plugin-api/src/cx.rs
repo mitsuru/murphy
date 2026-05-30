@@ -885,19 +885,17 @@ impl<'a> Cx<'a> {
         }
     }
 
-    fn token_outside_children(&self, id: NodeId, tok: SourceToken) -> bool {
-        self.children(id).into_iter().all(|child| {
-            let r = self.range(child);
-            tok.range.start < r.start || tok.range.end > r.end
-        })
-    }
-
     fn find_if_token_text(&self, id: NodeId, texts: &[&str]) -> Range {
         if !matches!(self.kind(id), NodeKind::If { .. }) {
             return Range::ZERO;
         }
+        let children = self.children(id);
         for tok in self.tokens_in(self.range(id)) {
-            if self.token_outside_children(id, *tok) && texts.contains(&self.token_text(*tok)) {
+            let outside_children = children.iter().all(|&child| {
+                let r = self.range(child);
+                tok.range.start < r.start || tok.range.end > r.end
+            });
+            if outside_children && texts.contains(&self.token_text(*tok)) {
                 return tok.range;
             }
         }
