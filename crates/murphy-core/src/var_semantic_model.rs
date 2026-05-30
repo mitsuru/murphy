@@ -189,8 +189,12 @@ impl VarSemanticModel {
                             end: asgn_end,
                             is_referenced: false,
                         });
+                        // Value-less Lvasgn has no sub-children; only push value.
+                    } else {
+                        // Non-local target (e.g. attr/index write): recurse into
+                        // target so any lvar reads inside it are collected.
+                        stack.push(WorkItem { node: target, scope });
                     }
-                    // Recurse into the RHS value (target has no sub-children for Lvasgn).
                     stack.push(WorkItem { node: value, scope });
                 }
 
@@ -210,6 +214,10 @@ impl VarSemanticModel {
                             end: asgn_end,
                             is_referenced: false,
                         });
+                        // Value-less Lvasgn has no sub-children; only push value.
+                    } else {
+                        // Non-local target: recurse so inner lvar reads are collected.
+                        stack.push(WorkItem { node: target, scope });
                     }
                     stack.push(WorkItem { node: value, scope });
                 }
