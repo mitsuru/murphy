@@ -608,6 +608,28 @@ fn lint_help_describes_key_flags() {
     }
 }
 
+#[test]
+fn lint_fix_and_fix_all_are_mutually_exclusive() {
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--fix")
+        .arg("--fix-all")
+        .assert()
+        .code(2);
+
+    assert!(
+        assert.get_output().stdout.is_empty(),
+        "bad CLI usage must not write stdout, got {:?}",
+        assert.get_output().stdout
+    );
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("conflict"),
+        "conflicting fix flags should produce a conflict error, got: {stderr:?}"
+    );
+}
+
 // --- Phase 2 Task 6: directory / zero-arg discovery ---
 
 /// `murphy lint <dir>` discovers `.rb` files under the dir (default

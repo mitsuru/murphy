@@ -182,7 +182,10 @@ pub struct CxRaw {
 /// is tail-only (existing discriminants unchanged), but a plugin built
 /// against v1 must still be rejected so it never observes a token kind it
 /// cannot decode.
-pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 2;
+///
+/// Bumped to 3 (murphy-es99.4): `PluginCopV1` gained `safe` and
+/// `safe_autocorrect` tail fields, increasing the descriptor size.
+pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 3;
 
 /// The dispatch entry for one cop: invoked once per matching node.
 ///
@@ -349,11 +352,13 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_two() {
+    fn abi_version_is_three() {
         // Bumped from 1 → 2 in murphy-es99.8 (SourceTokenKind gained
         // Comma/LeftBrace/RightBrace; additive but the loader must still
         // reject v1 plugins that predate the new token kinds).
-        assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 2);
+        // Bumped from 2 → 3 in murphy-es99.4 (PluginCopV1 gained safe
+        // metadata tail fields; size mismatch must reject old plugins).
+        assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 3);
     }
 
     #[test]

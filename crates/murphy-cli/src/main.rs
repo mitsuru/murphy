@@ -130,10 +130,10 @@ enum CliCommand {
 #[derive(Debug, clap::Args)]
 struct LintArgs {
     /// Apply safe autocorrections and write files back.
-    #[arg(short = 'a', long = "fix")]
+    #[arg(short = 'a', long = "fix", conflicts_with = "fix_all")]
     fix: bool,
     /// Apply all autocorrections, including unsafe ones, and write files back.
-    #[arg(short = 'A', long = "fix-all")]
+    #[arg(short = 'A', long = "fix-all", conflicts_with = "fix")]
     fix_all: bool,
     /// Print developer timing and pipeline diagnostics to stderr.
     #[arg(long)]
