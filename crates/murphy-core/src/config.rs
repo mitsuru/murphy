@@ -48,6 +48,8 @@ pub struct PluginDetailed {
 pub struct CopRule {
     pub enabled: Option<bool>,
     pub severity: Option<Severity>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
     pub options: BTreeMap<String, serde_json::Value>,
 }
 
@@ -167,6 +169,13 @@ impl MurphyConfig {
             include = default_include();
         }
 
+        validate_glob_patterns(&include)?;
+        validate_glob_patterns(&exclude)?;
+        for rule in rules.values() {
+            validate_glob_patterns(&rule.include)?;
+            validate_glob_patterns(&rule.exclude)?;
+        }
+
         Ok(MurphyConfig {
             files: FilesConfig { include, exclude },
             cops: CopsConfig {
@@ -204,6 +213,15 @@ impl MurphyConfig {
 
     pub fn severity_override(&self, name: &str) -> Option<Severity> {
         self.cops.rules.get(name).and_then(|rule| rule.severity)
+    }
+
+    pub fn cop_applies_to_file(&self, name: &str, file: &Path) -> bool {
+        let Some(rule) = self.cops.rules.get(name) else {
+            return true;
+        };
+        let file = file.strip_prefix(".").unwrap_or(file);
+        (rule.include.is_empty() || globset_matches(&rule.include, file))
+            && (rule.exclude.is_empty() || !globset_matches(&rule.exclude, file))
     }
 
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
@@ -289,6 +307,12 @@ fn parse_cop_rule(map: yaml_rust2::yaml::Hash) -> CopRule {
                     };
                 }
             }
+            "Include" => {
+                rule.include = yaml_string_list(&value);
+            }
+            "Exclude" => {
+                rule.exclude = yaml_string_list(&value);
+            }
             other => {
                 if let Some(json_val) = yaml_to_json(value) {
                     rule.options.insert(other.to_string(), json_val);
@@ -297,6 +321,30 @@ fn parse_cop_rule(map: yaml_rust2::yaml::Hash) -> CopRule {
         }
     }
     rule
+}
+
+fn globset_matches(patterns: &[String], path: &Path) -> bool {
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in patterns {
+        let Ok(glob) = globset::Glob::new(pattern) else {
+            continue;
+        };
+        builder.add(glob);
+    }
+    builder.build().is_ok_and(|set| set.is_match(path))
+}
+
+fn validate_glob_patterns(patterns: &[String]) -> Result<(), ConfigError> {
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = globset::Glob::new(pattern)
+            .map_err(|e| ConfigError::BadGlob(format!("{pattern:?}: {e}")))?;
+        builder.add(glob);
+    }
+    builder
+        .build()
+        .map(|_| ())
+        .map_err(|e| ConfigError::BadGlob(e.to_string()))
 }
 
 /// Convert a yaml-rust2 `Yaml` value to a `serde_json::Value`.
@@ -691,11 +739,72 @@ Style/StringLiterals:
             rule.options.get("MaxCount"),
             Some(&serde_json::Value::Number(3.into()))
         );
-        assert_eq!(
-            rule.options.get("Exclude"),
-            Some(&serde_json::Value::Array(vec![serde_json::Value::String(
-                "db/schema.rb".to_string()
-            )]))
+        assert_eq!(rule.exclude, vec!["db/schema.rb"]);
+        assert!(!rule.options.contains_key("Exclude"));
+    }
+
+    #[test]
+    fn parses_cop_rule_include_exclude_as_path_scope() {
+        let cfg = MurphyConfig::from_yaml_str(
+            r#"
+Style/StringLiterals:
+  Include:
+    - spec/**/*.rb
+  Exclude:
+    - spec/support/**
+  EnforcedStyle: single_quotes
+"#,
+        )
+        .expect("config parses");
+
+        let rule = cfg
+            .cops
+            .rules
+            .get("Style/StringLiterals")
+            .expect("rule exists");
+        assert_eq!(rule.include, vec!["spec/**/*.rb"]);
+        assert_eq!(rule.exclude, vec!["spec/support/**"]);
+        assert!(rule.options.contains_key("EnforcedStyle"));
+        assert!(!rule.options.contains_key("Include"));
+        assert!(!rule.options.contains_key("Exclude"));
+    }
+
+    #[test]
+    fn cop_applies_to_file_honors_rule_include_exclude() {
+        let cfg = MurphyConfig::from_yaml_str(
+            r#"
+Style/StringLiterals:
+  Include:
+    - spec/**/*.rb
+  Exclude:
+    - spec/support/**
+"#,
+        )
+        .expect("config parses");
+
+        assert!(cfg.cop_applies_to_file(
+            "Style/StringLiterals",
+            Path::new("spec/models/user_spec.rb")
+        ));
+        assert!(!cfg.cop_applies_to_file("Style/StringLiterals", Path::new("app/models/user.rb")));
+        assert!(
+            !cfg.cop_applies_to_file("Style/StringLiterals", Path::new("spec/support/factory.rb"))
+        );
+    }
+
+    #[test]
+    fn cop_rule_bad_glob_is_config_error() {
+        let err = MurphyConfig::from_yaml_str(
+            r#"
+Style/StringLiterals:
+  Include:
+    - '[bad'
+"#,
+        )
+        .expect_err("bad cop-level glob should error");
+        assert!(
+            matches!(err, ConfigError::BadGlob(_)),
+            "expected BadGlob, got {err:?}"
         );
     }
 

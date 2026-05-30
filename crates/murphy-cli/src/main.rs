@@ -395,11 +395,12 @@ fn lint_source(
     let mut offenses = match parse_with_cache(source, file, cache) {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
-            dispatch::run_cops_with_options(&ast, cops, &mut sink, |name| {
+            let scoped_cops = scoped_native_cops(cops, config, file);
+            dispatch::run_cops_with_options(&ast, &scoped_cops, &mut sink, |name| {
                 config.cop_options_json(name)
             });
             let mut offenses = sink.into_offenses();
-            offenses.extend(run_mruby_user_cops(source, file, mruby_cops));
+            offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
             offenses
         }
         Err(err) => vec![Offense::new(
@@ -415,20 +416,46 @@ fn lint_source(
 }
 
 #[cfg(feature = "mruby-user-cops")]
-fn run_mruby_user_cops(source: &str, file: &str, mruby_cops: &[MrubyCopSource]) -> Vec<Offense> {
+fn run_mruby_user_cops(
+    source: &str,
+    file: &str,
+    mruby_cops: &[MrubyCopSource],
+    config: &MurphyConfig,
+) -> Vec<Offense> {
     if mruby_cops.is_empty() {
         return Vec::new();
     }
     let ctx = AstContext::new(source.as_bytes().to_vec());
     mruby_cops
         .iter()
+        .filter(|cop| config.cop_applies_to_file(&cop.name, Path::new(file)))
         .flat_map(|cop| run_mruby_cop_isolated(&ctx, &cop.source, &cop.name, file))
         .collect()
 }
 
 #[cfg(not(feature = "mruby-user-cops"))]
-fn run_mruby_user_cops(_source: &str, _file: &str, _mruby_cops: &[MrubyCopSource]) -> Vec<Offense> {
+fn run_mruby_user_cops(
+    _source: &str,
+    _file: &str,
+    _mruby_cops: &[MrubyCopSource],
+    _config: &MurphyConfig,
+) -> Vec<Offense> {
     Vec::new()
+}
+
+fn scoped_native_cops<'a>(
+    cops: &'a [&'a PluginCopV1],
+    config: &MurphyConfig,
+    file: &str,
+) -> Vec<&'a PluginCopV1> {
+    cops.iter()
+        .copied()
+        .filter(|cop| config.cop_applies_to_file(&plugin_cop_name(cop), Path::new(file)))
+        .collect()
+}
+
+fn plugin_cop_name(cop: &PluginCopV1) -> String {
+    String::from_utf8_lossy(unsafe { cop.name.as_bytes() }).into_owned()
 }
 
 #[cfg(feature = "mruby-user-cops")]
@@ -480,11 +507,12 @@ fn lint_source_timed(
     let offenses = match parsed {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
-            dispatch::run_cops_with_options(&ast, cops, &mut sink, |name| {
+            let scoped_cops = scoped_native_cops(cops, config, file);
+            dispatch::run_cops_with_options(&ast, &scoped_cops, &mut sink, |name| {
                 config.cop_options_json(name)
             });
             let mut offenses = sink.into_offenses();
-            offenses.extend(run_mruby_user_cops(source, file, mruby_cops));
+            offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
             offenses
         }
         Err(err) => vec![Offense::new(
@@ -891,7 +919,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
         let discovered = if root == Path::new(".") {
             discover_with_config(root, &config).map_err(|e| AppError::setup(e.to_string()))?
         } else {
-            // For non-cwd roots, load the root-local murphy.toml.
+            // For non-cwd roots, load the root-local .murphy.yml.
             let local_config =
                 MurphyConfig::load(root).map_err(|e| AppError::setup(e.to_string()))?;
             discover_with_config(root, &local_config).map_err(|e| AppError::setup(e.to_string()))?
