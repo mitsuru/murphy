@@ -1394,6 +1394,109 @@ impl<'a> Cx<'a> {
         }
     }
 
+    fn find_if_token_text(&self, id: NodeId, texts: &[&str]) -> Range {
+        if !matches!(self.kind(id), NodeKind::If { .. }) {
+            return Range::ZERO;
+        }
+        let children = self.children(id);
+        for tok in self.tokens_in(self.range(id)) {
+            let outside_children = children.iter().all(|&child| {
+                let r = self.range(child);
+                tok.range.start < r.start || tok.range.end > r.end
+            });
+            if outside_children && texts.contains(&self.token_text(*tok)) {
+                return tok.range;
+            }
+        }
+        Range::ZERO
+    }
+
+    /// `IfNode#keyword` token range (`if`, `unless`, or `elsif`). The scan is
+    /// bounded to this `If` node and ignores direct child ranges, so nested
+    /// conditionals in the predicate/branches cannot contaminate the result.
+    pub fn if_keyword_loc(&self, id: NodeId) -> Range {
+        self.find_if_token_text(id, &["if", "unless", "elsif"])
+    }
+
+    /// `IfNode#keyword` (`"if"`, `"unless"`, or `"elsif"`), or `""` for
+    /// non-`If` nodes / malformed ranges.
+    pub fn if_keyword(&self, id: NodeId) -> &'a str {
+        let loc = self.if_keyword_loc(id);
+        if loc == Range::ZERO {
+            ""
+        } else {
+            self.raw_source(loc)
+        }
+    }
+
+    /// `IfNode#inverse_keyword`: `unless` for `if`, `if` for `unless`, and
+    /// empty for `elsif` / ternary-like malformed ranges.
+    pub fn if_inverse_keyword(&self, id: NodeId) -> &'static str {
+        match self.if_keyword(id) {
+            "if" => "unless",
+            "unless" => "if",
+            _ => "",
+        }
+    }
+
+    /// `if?` — source keyword is `if`, not `elsif`/`unless`.
+    pub fn is_if(&self, id: NodeId) -> bool {
+        self.if_keyword(id) == "if"
+    }
+
+    /// `unless?` — source keyword is `unless`.
+    pub fn is_unless(&self, id: NodeId) -> bool {
+        self.if_keyword(id) == "unless"
+    }
+
+    /// `elsif?` — source keyword is `elsif`.
+    pub fn is_elsif(&self, id: NodeId) -> bool {
+        self.if_keyword(id) == "elsif"
+    }
+
+    /// `then?` — this `If` node has a source-level `then` separator.
+    pub fn is_then(&self, id: NodeId) -> bool {
+        self.find_if_token_text(id, &["then"]) != Range::ZERO
+    }
+
+    /// `else?` — this `If` node has a source-level `else` keyword.
+    pub fn is_else(&self, id: NodeId) -> bool {
+        self.find_if_token_text(id, &["else"]) != Range::ZERO
+            || self
+                .if_else_branch(id)
+                .get()
+                .is_some_and(|else_| self.is_elsif(else_))
+    }
+
+    /// `nested_conditional?` — shallowly scans this node's branches for nested
+    /// non-`elsif` `If` nodes.
+    pub fn is_nested_conditional(&self, id: NodeId) -> bool {
+        if !matches!(self.kind(id), NodeKind::If { .. }) {
+            return false;
+        }
+        [self.if_branch(id), self.else_branch(id)]
+            .into_iter()
+            .filter_map(OptNodeId::get)
+            .any(|branch| {
+                (matches!(self.kind(branch), NodeKind::If { .. }) && !self.is_elsif(branch))
+                    || self.descendants(branch).into_iter().any(|nested| {
+                        matches!(self.kind(nested), NodeKind::If { .. }) && !self.is_elsif(nested)
+                    })
+            })
+    }
+
+    /// `IfNode#if_branch` — the condition-true branch. For `unless`, the
+    /// translator has already applied parser-gem's then/else swap.
+    pub fn if_branch(&self, id: NodeId) -> OptNodeId {
+        self.if_then_branch(id)
+    }
+
+    /// `IfNode#else_branch` — the condition-false branch. For `unless`, the
+    /// translator has already applied parser-gem's then/else swap.
+    pub fn else_branch(&self, id: NodeId) -> OptNodeId {
+        self.if_else_branch(id)
+    }
+
     /// First token in the **gap** `[from, to)` whose source text is
     /// exactly `text`. Prism delimits tokens, so this is an exact-token
     /// match (`b"="` never matches the `=` in `==` or inside a string).
@@ -3299,6 +3402,102 @@ mod tests {
         });
         // Ternary lacks `end` but is excluded by the ternary? guard.
         with_parsed("a ? b : c", |cx, root| assert!(!cx.is_modifier_form(root)));
+    }
+
+    #[test]
+    fn if_keyword_predicates_distinguish_if_unless_elsif_and_modifiers() {
+        with_parsed("if a then b end", |cx, root| {
+            assert_eq!(cx.if_keyword(root), "if");
+            assert_eq!(cx.raw_source(cx.if_keyword_loc(root)), "if");
+            assert!(cx.is_if(root));
+            assert!(!cx.is_unless(root));
+            assert!(!cx.is_elsif(root));
+            assert!(cx.is_then(root));
+            assert!(!cx.is_else(root));
+            assert_eq!(cx.if_inverse_keyword(root), "unless");
+        });
+
+        with_parsed("b unless a", |cx, root| {
+            assert_eq!(cx.if_keyword(root), "unless");
+            assert_eq!(cx.raw_source(cx.if_keyword_loc(root)), "unless");
+            assert!(!cx.is_if(root));
+            assert!(cx.is_unless(root));
+            assert!(cx.is_modifier_form(root));
+            assert_eq!(cx.if_inverse_keyword(root), "if");
+        });
+
+        with_parsed("if a then b elsif c then d else e end", |cx, root| {
+            assert!(cx.is_else(root));
+            let nested = cx.if_else_branch(root).get().expect("elsif is nested if");
+            assert_eq!(cx.if_keyword(nested), "elsif");
+            assert_eq!(cx.raw_source(cx.if_keyword_loc(nested)), "elsif");
+            assert_eq!(cx.if_inverse_keyword(nested), "");
+            assert!(cx.is_elsif(nested));
+            assert!(!cx.is_nested_conditional(nested));
+            assert!(cx.is_then(nested));
+            assert!(cx.is_else(nested));
+        });
+
+        with_parsed("if a then b elsif c then d end", |cx, root| {
+            assert!(cx.is_else(root), "else? is true for elsif clauses");
+        });
+    }
+
+    #[test]
+    fn nested_conditional_detects_non_elsif_if_inside_branches() {
+        with_parsed("if a then foo(if b then c end) end", |cx, root| {
+            assert!(cx.is_nested_conditional(root));
+        });
+
+        with_parsed("if a then b elsif c then d end", |cx, root| {
+            let nested = cx.if_else_branch(root).get().expect("elsif is nested if");
+            assert!(!cx.is_nested_conditional(root));
+            assert!(!cx.is_nested_conditional(nested));
+        });
+    }
+
+    #[test]
+    fn if_keyword_scan_ignores_child_conditionals() {
+        with_parsed("if foo(if a then b end) then c end", |cx, root| {
+            assert_eq!(cx.if_keyword(root), "if");
+            assert_eq!(cx.raw_source(cx.if_keyword_loc(root)), "if");
+
+            let cond = cx.if_condition(root).get().expect("outer condition");
+            let inner = cx
+                .descendants(cond)
+                .into_iter()
+                .find(|&id| matches!(cx.kind(id), NodeKind::If { .. }))
+                .expect("nested if in parenthesized condition");
+            assert_eq!(cx.if_keyword(inner), "if");
+            assert_ne!(cx.if_keyword_loc(root), cx.if_keyword_loc(inner));
+        });
+    }
+
+    #[test]
+    fn if_branch_accessors_preserve_translator_unless_swap() {
+        with_parsed("unless a then b else c end", |cx, root| {
+            assert!(cx.is_unless(root));
+            assert_eq!(
+                cx.raw_source(cx.range(cx.if_branch(root).get().unwrap())),
+                "c"
+            );
+            assert_eq!(
+                cx.raw_source(cx.range(cx.else_branch(root).get().unwrap())),
+                "b"
+            );
+        });
+
+        with_parsed("if a then b else c end", |cx, root| {
+            assert!(cx.is_if(root));
+            assert_eq!(
+                cx.raw_source(cx.range(cx.if_branch(root).get().unwrap())),
+                "b"
+            );
+            assert_eq!(
+                cx.raw_source(cx.range(cx.else_branch(root).get().unwrap())),
+                "c"
+            );
+        });
     }
 
     #[test]
