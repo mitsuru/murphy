@@ -60,8 +60,12 @@
 //!   `Lint/ItWithoutArgumentsInBlock` interplay is not yet wired.
 //! - **Pattern-matching `in`-clauses (`case .. in`).** Match-var,
 //!   array-pattern, and hash-pattern names are not collected into
-//!   scope yet, so `self.x` inside a pattern body where `x` is the
-//!   matched name is flagged when it shouldn't be.
+//!   scope yet, and capture (`=> x`) patterns are not lowered. To avoid
+//!   a meaning-changing autocorrect, the cop conservatively skips every
+//!   self-send under an `InPattern` (pattern / guard / body), trading a
+//!   possible missed offense for safety. The `case` subject is still
+//!   checked (it runs before any binding). Real match-var scope handling
+//!   is deferred.
 
 use murphy_plugin_api::method_predicates::{is_camel_case_method, is_operator_method};
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
@@ -254,6 +258,25 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // `node.parent&.mlhs_type?`; we walk the immediate parent only.
     if let Some(parent) = cx.parent(node).get()
         && matches!(cx.kind(parent), NodeKind::Mlhs(_))
+    {
+        return;
+    }
+
+    // Pattern matching (`case .. in`) binds match-vars (`in Integer => x`,
+    // `in [a, b]`) as locals visible in the clause's pattern, guard, and
+    // body. RuboCop tracks those bindings via `on_in_pattern` and skips
+    // `self.x` when `x` is bound. Murphy v1 cannot fully resolve match-var
+    // scope — `MatchAs`/capture patterns are not even lowered yet (Unknown)
+    // — so a binding may be invisible to `scope_introduces_name`.
+    // Conservatively skip any self-send under an `InPattern` (pattern /
+    // guard / body): a missed offense is far safer than an autocorrect that
+    // rewrites `self.x` (a method call) into `x` (a local read) and changes
+    // the program's meaning. The `case` subject is deliberately *not*
+    // covered — it is evaluated before any binding exists, so `case self.foo`
+    // is still flagged. See follow-up for real match-var scope handling.
+    if cx
+        .ancestors(node)
+        .any(|a| matches!(cx.kind(a), NodeKind::InPattern { .. }))
     {
         return;
     }
@@ -634,21 +657,36 @@ mod tests {
     // ----- v1 known-limitation pins --------------------------------
 
     #[test]
-    fn pattern_matching_in_clause_is_skipped_via_parser_unknown() {
-        // `case .. in` pattern-matching expressions parse to
-        // `NodeKind::Unknown` in Murphy v1 — the `Send` inside the
-        // pattern body never reaches dispatch, so the cop never
-        // sees it. The lack-of-offense matches RuboCop's expected
-        // behaviour (RuboCop's `on_in_pattern` would collect the
-        // match-var name into scope and skip the Send). Pinned so
-        // a future translator upgrade that lowers pattern matching
-        // into visible nodes flips this test alongside the cop
-        // logic — at which point the cop needs to grow real
-        // match-var scope handling.
+    fn pattern_matching_in_clause_is_skipped_conservatively() {
+        // As of murphy-es99.13 the translator lowers `case .. in` into
+        // visible `CaseMatch` / `InPattern` nodes, so the `self.bar` Send
+        // now reaches dispatch. `bar` is a match-var bound by
+        // `in Integer => bar`, so `self.bar` is NOT redundant — but the
+        // `MatchAs`/capture pattern is not yet lowered (Unknown), so the
+        // binding is invisible to scope resolution. The cop therefore
+        // skips any self-send inside a `case/in` conservatively: a missed
+        // offense is safer than an autocorrect that would rewrite the
+        // method call `self.bar` into the local read `bar`. Real match-var
+        // scope handling is deferred (follow-up issue).
         test::<RedundantSelf>().expect_no_offenses(indoc! {"
             case foo
             in Integer => bar
               self.bar
+            end
+        "});
+    }
+
+    #[test]
+    fn case_match_subject_self_is_still_checked() {
+        // The `case` subject runs before any match-var binding exists, so a
+        // redundant `self.foo` there is still flagged (the InPattern skip
+        // only covers pattern/guard/body, not the subject). No local named
+        // `foo` is in scope, so `self.foo` is genuinely redundant.
+        test::<RedundantSelf>().expect_offense(indoc! {"
+            case self.foo
+                 ^^^^ Redundant `self` detected.
+            in Integer
+              1
             end
         "});
     }
