@@ -3,8 +3,8 @@
 use std::marker::PhantomData;
 
 use murphy_ast::{
-    AstNode, CallClosingLoc, Comment, NodeId, NodeKind, OptNodeId, Range, SourceToken,
-    SourceTokenKind, collect_children, slot_layout,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, NodeId, NodeKind, OptNodeId, Range,
+    SourceToken, SourceTokenKind, collect_children, slot_layout,
 };
 
 use crate::abi::CxRaw;
@@ -35,13 +35,13 @@ unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
 
 /// Lazy source-location view for a node — Murphy's analog of rubocop-ast's
 /// `node.loc`. `expression` and `name` are plain fields (zero-cost); all
-/// other sub-ranges are computed on demand from the arena's sorted token
-/// list and source bytes.
+/// other sub-ranges come from parser-provided side tables or are computed on
+/// demand from the arena's sorted token list and source bytes.
 pub struct LocRef<'a> {
     pub expression: Range,
     pub name: Range,
     // Private: precomputed for dot() and keyword()
-    receiver_end: Option<u32>,
+    call_operator: Range,
     keyword_bearing: bool,
     sorted_tokens: &'a [SourceToken],
     source: &'a [u8],
@@ -101,7 +101,7 @@ fn prefix_has_code(source: &str, end: usize) -> bool {
     })
 }
 
-fn parse_comment_directive<'a>(text: &'a str) -> Option<(CommentDirectiveKind, &'a str)> {
+fn parse_comment_directive(text: &str) -> Option<(CommentDirectiveKind, &str)> {
     let comment = text.strip_prefix('#')?.trim_start();
     let rest = comment
         .strip_prefix("murphy:")
@@ -225,53 +225,10 @@ pub fn comment_directives_from_comments<'a>(
 }
 
 impl<'a> LocRef<'a> {
-    /// The call-operator range: `.` for `Send`, `&.` for `Csend`.
-    /// Returns `Range::ZERO` when the node has no receiver (bare method
-    /// call), or when called on a non-Send/Csend node.
+    /// Parser-provided call-operator range: `.` for `Send`, `&.` for `Csend`.
+    /// Returns `Range::ZERO` when Prism provided no call operator for the node.
     pub fn dot(&self) -> Range {
-        let Some(recv_end) = self.receiver_end else {
-            return Range::ZERO;
-        };
-        let name_start = self.name.start;
-        if recv_end >= name_start {
-            return Range::ZERO;
-        }
-        let window = &self.source[recv_end as usize..name_start as usize];
-        let mut i = 0;
-        let mut in_comment = false;
-        while i < window.len() {
-            let b = window[i];
-            if b == b'\n' {
-                in_comment = false;
-                i += 1;
-                continue;
-            }
-            if in_comment {
-                i += 1;
-                continue;
-            }
-            if b == b'#' {
-                in_comment = true;
-                i += 1;
-                continue;
-            }
-            if b == b'&' && i + 1 < window.len() && window[i + 1] == b'.' {
-                let start = recv_end + i as u32;
-                return Range {
-                    start,
-                    end: start + 2,
-                };
-            }
-            if b == b'.' {
-                let start = recv_end + i as u32;
-                return Range {
-                    start,
-                    end: start + 1,
-                };
-            }
-            i += 1;
-        }
-        Range::ZERO
+        self.call_operator
     }
 
     /// The leading keyword token range (`def`, `class`, `if`, `while`, …).
@@ -406,6 +363,18 @@ impl<'a> Cx<'a> {
         unsafe { slice(self.raw.call_closing_locs, self.raw.call_closing_locs_len) }
     }
 
+    fn call_operator_locs(&self) -> &'a [CallOperatorLoc] {
+        unsafe { slice(self.raw.call_operator_locs, self.raw.call_operator_locs_len) }
+    }
+
+    fn call_operator_range(&self, id: NodeId) -> Range {
+        let call_operator_locs = self.call_operator_locs();
+        call_operator_locs
+            .binary_search_by_key(&id.0, |entry| entry.node.0)
+            .map(|idx| call_operator_locs[idx].operator)
+            .unwrap_or(Range::ZERO)
+    }
+
     /// The arena root node.
     pub fn root(&self) -> NodeId {
         self.raw.root
@@ -429,14 +398,11 @@ impl<'a> Cx<'a> {
 
     /// The source-location view for `id`. `expression` and `name` are plain
     /// fields. Call `.dot()`, `.keyword()`, `.begin()`, `.end()` for sub-ranges
-    /// — they compute only when used.
+    /// — most compute only when used; `.dot()` returns the parser-provided
+    /// call operator side-table entry captured here.
     pub fn loc(&self, id: NodeId) -> LocRef<'a> {
         let node = &self.nodes()[id.0 as usize];
-        let receiver_end = match node.kind {
-            NodeKind::Send { receiver, .. } => receiver.get().map(|r| self.range(r).end),
-            NodeKind::Csend { receiver, .. } => Some(self.range(receiver).end),
-            _ => None,
-        };
+        let call_operator = self.call_operator_range(id);
         let src: &'a [u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
         // For conditionals/loops that have both block-form (`if cond; end`) and
         // modifier-form (`body if cond`), detect block-form by checking whether
@@ -476,7 +442,7 @@ impl<'a> Cx<'a> {
         LocRef {
             expression: node.loc.expression,
             name: node.loc.name,
-            receiver_end,
+            call_operator,
             keyword_bearing,
             sorted_tokens: self.sorted_tokens(),
             source: src,
@@ -938,10 +904,9 @@ impl<'a> Cx<'a> {
     }
 
     /// `dot?` — the call uses the `.` operator. Mirrors RuboCop's
-    /// `node.dot?` (`loc_is?(:dot, '.')`). Uses es99.6's [`LocRef::dot`],
-    /// which returns `Range::ZERO` for operator sends (`a + b`) and for
-    /// `&.` calls, so this is `false` for both — not merely "Send with a
-    /// receiver".
+    /// `node.dot?` (`loc_is?(:dot, '.')`). [`LocRef::dot`] returns Prism's
+    /// parser-provided call operator (`.` or `&.`), so this checks the range's
+    /// source text and returns `false` for safe navigation and operator sends.
     pub fn is_dot(&self, id: NodeId) -> bool {
         let dot = self.loc(id).dot();
         dot != Range::ZERO && self.raw_source(dot) == "."
@@ -2328,24 +2293,17 @@ impl<'a> Cx<'a> {
     }
 
     /// Source range of the `.` or `&.` operator for an explicit-dot call
-    /// — the parser-gem `node.loc.dot` analog, computed on demand.
+    /// — the parser-gem `node.loc.dot` analog from Prism's parser-provided
+    /// call operator side table.
     ///
     /// Returns `None` for:
     /// - non-call kinds (anything but `Send` / `Csend`),
     /// - implicit `Send` (no receiver, e.g. a bare `foo` resolved as
     ///   `Kernel#foo`),
-    /// - operator and bracket methods (`a + b`, `a[b]`) — the source
-    ///   between receiver and selector holds no dot,
-    /// - implicit-call `foo.()` where the call has no selector range,
-    ///   so the scan window degenerates to empty.
-    ///
-    /// Scans the bytes between `receiver.expression.end` and the
-    /// selector's `loc.name.start`, ignoring `#` line comments. The
-    /// window is short in practice (avg 0.6 byte, max ≈ a multi-line
-    /// chain), so this is cheaper than maintaining a side-table that
-    /// every `Ast` would pay for. Cops that never call it pay nothing.
+    /// - operator and bracket methods (`a + b`, `a[b]`),
+    /// - implicit-call `foo.()` where Prism provides no call operator.
     pub fn call_operator_loc(&self, id: NodeId) -> Option<Range> {
-        let r = self.loc(id).dot();
+        let r = self.call_operator_range(id);
         if r == Range::ZERO { None } else { Some(r) }
     }
 
@@ -2444,6 +2402,8 @@ mod tests {
             options_json: RawSlice::from_str("{}"),
             call_closing_locs: p.call_closing_locs.as_ptr(),
             call_closing_locs_len: p.call_closing_locs.len(),
+            call_operator_locs: p.call_operator_locs.as_ptr(),
+            call_operator_locs_len: p.call_operator_locs.len(),
         }
     }
 
@@ -2707,6 +2667,7 @@ mod tests {
         source: &str,
         recv: Option<Range>,
         name: Range,
+        call_operator: Option<Range>,
         is_csend: bool,
     ) -> (Ast, murphy_ast::NodeId) {
         let mut b = AstBuilder::new(source.to_string(), "t.rb".to_string());
@@ -2749,6 +2710,9 @@ mod tests {
                 name,
             )
         };
+        if let Some(operator) = call_operator {
+            b.add_call_operator_loc(root, operator);
+        }
         (b.finish(root), root)
     }
 
@@ -2758,6 +2722,7 @@ mod tests {
             "foo.bar",
             Some(Range { start: 0, end: 3 }),
             Range { start: 4, end: 7 },
+            Some(Range { start: 3, end: 4 }),
             false,
         );
         let fns = FnTable {
@@ -2778,6 +2743,7 @@ mod tests {
             "foo.bar",
             Some(Range { start: 0, end: 3 }),
             Range { start: 4, end: 7 },
+            Some(Range { start: 3, end: 4 }),
             false,
         );
         let fns = FnTable {
@@ -2795,6 +2761,7 @@ mod tests {
             "foo&.bar",
             Some(Range { start: 0, end: 3 }),
             Range { start: 5, end: 8 },
+            Some(Range { start: 3, end: 5 }),
             true,
         );
         let fns = FnTable {
@@ -2809,7 +2776,7 @@ mod tests {
     #[test]
     fn loc_dot_zero_for_no_receiver() {
         // bare `puts 'x'` — Send with no receiver
-        let (ast, root) = build_call("puts", None, Range { start: 0, end: 4 }, false);
+        let (ast, root) = build_call("puts", None, Range { start: 0, end: 4 }, None, false);
         let fns = FnTable {
             emit_offense: noop_offense,
             emit_edit: noop_edit,
@@ -2826,6 +2793,7 @@ mod tests {
             "foo.bar",
             Some(Range { start: 0, end: 3 }),
             Range { start: 4, end: 7 },
+            Some(Range { start: 3, end: 4 }),
             false,
         );
         let fns = FnTable {
@@ -2845,6 +2813,7 @@ mod tests {
             "foo&.bar",
             Some(Range { start: 0, end: 3 }),
             Range { start: 5, end: 8 },
+            Some(Range { start: 3, end: 5 }),
             true,
         );
         let fns = FnTable {
@@ -2864,6 +2833,7 @@ mod tests {
             "foo\n  .bar",
             Some(Range { start: 0, end: 3 }),
             Range { start: 7, end: 10 },
+            Some(Range { start: 6, end: 7 }),
             false,
         );
         let fns = FnTable {
@@ -2876,13 +2846,15 @@ mod tests {
     }
 
     #[test]
-    fn call_operator_loc_skips_dots_inside_line_comments() {
-        // `foo # x.y\n  .bar` — the `.` in the comment must not match.
-        let src = "foo # x.y\n  .bar";
+    fn call_operator_loc_uses_parser_provided_operator_range() {
+        // Synthetic malformed spacing: byte scanning would find the first dot,
+        // but the plugin API must expose Prism's parser-provided operator loc.
+        let src = "foo..bar";
         let (ast, root) = build_call(
             src,
             Some(Range { start: 0, end: 3 }),
-            Range { start: 13, end: 16 },
+            Range { start: 5, end: 8 },
+            Some(Range { start: 4, end: 5 }),
             false,
         );
         let fns = FnTable {
@@ -2891,17 +2863,14 @@ mod tests {
         };
         let raw = cx_raw_for(&ast, &fns);
         let cx = unsafe { Cx::from_raw(&raw) };
-        assert_eq!(
-            cx.call_operator_loc(root),
-            Some(Range { start: 12, end: 13 })
-        );
+        assert_eq!(cx.call_operator_loc(root), Some(Range { start: 4, end: 5 }));
         assert_eq!(cx.raw_source(cx.call_operator_loc(root).unwrap()), ".");
     }
 
     #[test]
     fn call_operator_loc_returns_none_for_implicit_send() {
         // bare `foo` — Send with receiver = None
-        let (ast, root) = build_call("foo", None, Range { start: 0, end: 3 }, false);
+        let (ast, root) = build_call("foo", None, Range { start: 0, end: 3 }, None, false);
         let fns = FnTable {
             emit_offense: noop_offense,
             emit_edit: noop_edit,
@@ -2913,11 +2882,12 @@ mod tests {
 
     #[test]
     fn call_operator_loc_returns_none_for_operator_method() {
-        // `foo + bar` — Send with method `:+`. Window is " " (no dot).
+        // `foo + bar` — Send with method `:+`; Prism provides no call operator.
         let (ast, root) = build_call(
             "foo + bar",
             Some(Range { start: 0, end: 3 }),
             Range { start: 4, end: 5 },
+            None,
             false,
         );
         let fns = FnTable {
@@ -2931,12 +2901,12 @@ mod tests {
 
     #[test]
     fn call_operator_loc_returns_none_for_bracket_method() {
-        // `a[b]` — Send with method `:[]`, name range starts at the
-        // bracket (= receiver end). Empty window ⇒ None.
+        // `a[b]` — Send with method `:[]`; Prism provides no call operator.
         let (ast, root) = build_call(
             "a[b]",
             Some(Range { start: 0, end: 1 }),
             Range { start: 1, end: 3 },
+            None,
             false,
         );
         let fns = FnTable {
@@ -3103,6 +3073,7 @@ mod tests {
             "a == b",
             Some(Range { start: 0, end: 1 }),
             Range { start: 2, end: 4 },
+            None,
             false,
         );
         let fns = FnTable {
@@ -3118,6 +3089,7 @@ mod tests {
             "a&.foo",
             Some(Range { start: 0, end: 1 }),
             Range { start: 3, end: 6 },
+            Some(Range { start: 1, end: 3 }),
             true,
         );
         let raw = cx_raw_for(&ast, &fns);
@@ -3158,6 +3130,7 @@ mod tests {
             "a == b",
             Some(Range { start: 0, end: 1 }),
             Range { start: 2, end: 4 },
+            None,
             false,
         );
         let raw = cx_raw_for(&ast, &fns);
@@ -3179,6 +3152,7 @@ mod tests {
             "a.foo?",
             Some(Range { start: 0, end: 1 }),
             Range { start: 2, end: 6 },
+            Some(Range { start: 1, end: 2 }),
             false,
         );
         let raw = cx_raw_for(&ast, &fns);
@@ -3187,7 +3161,7 @@ mod tests {
         assert!(!cx.is_bang_method(pred));
 
         // `Foo()` → camel-case method.
-        let (ast, camel) = build_call("Foo()", None, Range { start: 0, end: 3 }, false);
+        let (ast, camel) = build_call("Foo()", None, Range { start: 0, end: 3 }, None, false);
         let raw = cx_raw_for(&ast, &fns);
         let cx = unsafe { Cx::from_raw(&raw) };
         assert!(cx.is_camel_case_method(camel));
@@ -3225,6 +3199,7 @@ mod tests {
             "a.map",
             Some(Range { start: 0, end: 1 }),
             Range { start: 2, end: 5 },
+            Some(Range { start: 1, end: 2 }),
             false,
         );
         let raw = cx_raw_for(&ast, &fns);
@@ -3237,6 +3212,7 @@ mod tests {
             "a.each_slice",
             Some(Range { start: 0, end: 1 }),
             Range { start: 2, end: 12 },
+            Some(Range { start: 1, end: 2 }),
             false,
         );
         let raw = cx_raw_for(&ast, &fns);
@@ -3248,6 +3224,7 @@ mod tests {
             "a.merge",
             Some(Range { start: 0, end: 1 }),
             Range { start: 2, end: 7 },
+            Some(Range { start: 1, end: 2 }),
             false,
         );
         let raw = cx_raw_for(&ast, &fns);
@@ -3259,6 +3236,7 @@ mod tests {
             "a + b",
             Some(Range { start: 0, end: 1 }),
             Range { start: 2, end: 3 },
+            None,
             false,
         );
         let raw = cx_raw_for(&ast, &fns);
@@ -3679,6 +3657,7 @@ mod tests {
             "foo.bar",
             Some(Range { start: 0, end: 3 }),
             Range { start: 4, end: 7 },
+            Some(Range { start: 3, end: 4 }),
             false,
         );
         let fns = FnTable {

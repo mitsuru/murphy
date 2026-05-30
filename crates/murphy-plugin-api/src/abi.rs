@@ -5,7 +5,9 @@
 
 use std::ffi::c_void;
 
-use murphy_ast::{AstNode, CallClosingLoc, Comment, NodeId, NodeKindTag, Range, SourceToken};
+use murphy_ast::{
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, NodeId, NodeKindTag, Range, SourceToken,
+};
 
 /// The ABI's borrowed-slice primitive: a `#[repr(C)]` pointer+length pair.
 ///
@@ -172,6 +174,13 @@ pub struct CxRaw {
     /// Sparse parser-provided closing parens for call nodes.
     pub call_closing_locs: *const CallClosingLoc,
     pub call_closing_locs_len: usize,
+    /// Sparse parser-provided call operators for call nodes.
+    ///
+    /// These trailing fields were added under ABI v2 without a numeric ABI bump
+    /// by explicit project decision. During this evolving ABI phase, v2 assumes
+    /// host/plugin lockstep rather than cross-version layout compatibility.
+    pub call_operator_locs: *const CallOperatorLoc,
+    pub call_operator_locs_len: usize,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -185,6 +194,11 @@ pub struct CxRaw {
 ///
 /// Bumped to 3 (murphy-es99.4): `PluginCopV1` gained `safe` and
 /// `safe_autocorrect` tail fields, increasing the descriptor size.
+///
+/// ABI v3 is still evolving under a host/plugin lockstep assumption. The
+/// trailing `CxRaw::call_operator_locs` fields were added without changing this
+/// number by explicit project decision; do not infer full v3 layout stability
+/// until that policy changes.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 3;
 
 /// The dispatch entry for one cop: invoked once per matching node.
@@ -323,7 +337,9 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, options_json), 152);
         assert_eq!(offset_of!(CxRaw, call_closing_locs), 168);
         assert_eq!(offset_of!(CxRaw, call_closing_locs_len), 176);
-        assert_eq!(size_of::<CxRaw>(), 184);
+        assert_eq!(offset_of!(CxRaw, call_operator_locs), 184);
+        assert_eq!(offset_of!(CxRaw, call_operator_locs_len), 192);
+        assert_eq!(size_of::<CxRaw>(), 200);
     }
 
     #[test]

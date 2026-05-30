@@ -1392,6 +1392,10 @@ impl Translator {
         if let Some(closing) = call.closing_loc() {
             self.builder.add_call_closing_loc(id, Self::range(&closing));
         }
+        if let Some(operator) = call.call_operator_loc() {
+            self.builder
+                .add_call_operator_loc(id, Self::range(&operator));
+        }
         id
     }
 
@@ -1794,6 +1798,26 @@ mod tests {
             }
             other => panic!("expected Csend, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn translates_call_operator_locs() {
+        let dot = translate("foo.bar", "t.rb");
+        assert_eq!(dot.call_operator_locs().len(), 1);
+        assert_eq!(dot.raw_source(dot.call_operator_locs()[0].operator), ".");
+
+        let safe_nav = translate("foo&.bar", "t.rb");
+        assert_eq!(safe_nav.call_operator_locs().len(), 1);
+        assert_eq!(
+            safe_nav.raw_source(safe_nav.call_operator_locs()[0].operator),
+            "&."
+        );
+
+        let operator_method = translate("foo + bar", "t.rb");
+        assert!(operator_method.call_operator_locs().is_empty());
+
+        let bare_call = translate("bar", "t.rb");
+        assert!(bare_call.call_operator_locs().is_empty());
     }
 
     #[test]

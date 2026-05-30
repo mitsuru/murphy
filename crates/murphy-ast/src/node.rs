@@ -99,6 +99,17 @@ pub struct CallClosingLoc {
     pub closing: Range,
 }
 
+/// Parser-provided call operator for a call node (`.` or `&.`).
+///
+/// Stored out-of-line so [`NodeLoc`] stays compact and call nodes without an
+/// explicit operator pay no per-node storage cost.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallOperatorLoc {
+    pub node: NodeId,
+    pub operator: Range,
+}
+
 /// A compact source token for RuboCop-style layout cops.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
