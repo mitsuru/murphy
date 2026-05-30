@@ -181,6 +181,8 @@ pub struct CxRaw {
     /// host/plugin lockstep rather than cross-version layout compatibility.
     pub call_operator_locs: *const CallOperatorLoc,
     pub call_operator_locs_len: usize,
+    /// File-level variable scope model. Always non-null during native cop dispatch.
+    pub var_model: *const crate::var_semantic_model::VarSemanticModel,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -194,12 +196,13 @@ pub struct CxRaw {
 ///
 /// Bumped to 3 (murphy-es99.4): `PluginCopV1` gained `safe` and
 /// `safe_autocorrect` tail fields, increasing the descriptor size.
+/// `CxRaw::call_operator_locs` fields were also added under v3 lockstep.
 ///
-/// ABI v3 is still evolving under a host/plugin lockstep assumption. The
-/// trailing `CxRaw::call_operator_locs` fields were added without changing this
-/// number by explicit project decision; do not infer full v3 layout stability
-/// until that policy changes.
-pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 3;
+/// Bumped to 4 (es99.5): `CxRaw` gained the `var_model` field — a
+/// `*const VarSemanticModel` tail-appended at offset 200. Plugins built
+/// against v1–v3 must be rejected so they never observe a layout they
+/// were not compiled against.
+pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// The dispatch entry for one cop: invoked once per matching node.
 ///
@@ -339,7 +342,9 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, call_closing_locs_len), 176);
         assert_eq!(offset_of!(CxRaw, call_operator_locs), 184);
         assert_eq!(offset_of!(CxRaw, call_operator_locs_len), 192);
-        assert_eq!(size_of::<CxRaw>(), 200);
+        // es99.5: var_model appended after call_operator_locs_len
+        assert_eq!(offset_of!(CxRaw, var_model), 200);
+        assert_eq!(size_of::<CxRaw>(), 208);
     }
 
     #[test]
@@ -374,7 +379,8 @@ mod tests {
         // reject v1 plugins that predate the new token kinds).
         // Bumped from 2 → 3 in murphy-es99.4 (PluginCopV1 gained safe
         // metadata tail fields; size mismatch must reject old plugins).
-        assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 3);
+        // Bumped from 3 → 4 in es99.5 (CxRaw gained `var_model` at offset 200).
+        assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 4);
     }
 
     #[test]

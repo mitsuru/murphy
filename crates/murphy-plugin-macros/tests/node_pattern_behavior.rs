@@ -50,6 +50,7 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable) -> CxRaw {
         call_closing_locs_len: p.call_closing_locs.len(),
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
+        var_model: std::ptr::null(),
     }
 }
 

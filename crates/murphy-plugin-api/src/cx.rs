@@ -351,6 +351,18 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Access the file-level variable scope analysis model.
+    ///
+    /// Returns `None` only when the host passes a null pointer — in
+    /// practice `None` is unreachable during normal cop dispatch, because
+    /// `murphy-core`'s dispatcher always sets this to a freshly-built
+    /// model. Test harnesses that construct `CxRaw` by hand may leave it
+    /// null; cops should treat `None` as "model unavailable" and skip
+    /// any var-semantic checks.
+    pub fn var_model(&self) -> Option<&'a crate::var_semantic_model::VarSemanticModel> {
+        unsafe { self.raw.var_model.as_ref() }
+    }
+
     fn nodes(&self) -> &'a [AstNode] {
         unsafe { slice(self.raw.nodes, self.raw.nodes_len) }
     }
@@ -2404,6 +2416,7 @@ mod tests {
             call_closing_locs_len: p.call_closing_locs.len(),
             call_operator_locs: p.call_operator_locs.as_ptr(),
             call_operator_locs_len: p.call_operator_locs.len(),
+            var_model: std::ptr::null(),
         }
     }
 
