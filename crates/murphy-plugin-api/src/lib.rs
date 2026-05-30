@@ -42,7 +42,10 @@ pub use abi::{
 };
 pub use config_error::{ConfigError, ConfigErrorKind};
 pub use cop::Cop;
-pub use cx::{Cx, LocRef};
+pub use cx::{
+    CommentDirective, CommentDirectiveKind, CommentDirectiveScope, Cx, LocRef,
+    comment_directives_from_comments,
+};
 pub use node_cop::NodeCop;
 pub use options::{CopOptionEnum, CopOptions, NoOptions};
 pub use severity::{
