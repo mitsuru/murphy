@@ -228,6 +228,40 @@ fn cop_include_scope_allows_matching_explicit_files() {
 }
 
 #[test]
+fn cop_include_scope_is_respected_for_identical_content_files() {
+    let dir = tempdir().expect("create tempdir");
+    fs::write(
+        dir.path().join(".murphy.yml"),
+        "Style/StringLiterals:\n  Include:\n    - 'spec/**/*.rb'\n",
+    )
+    .expect("write .murphy.yml");
+    fs::create_dir_all(dir.path().join("app/models")).expect("create app/models");
+    fs::create_dir_all(dir.path().join("spec/models")).expect("create spec/models");
+    let source = "x = \"hello\"\n";
+    fs::write(dir.path().join("app/models/user.rb"), source).expect("write app source");
+    fs::write(dir.path().join("spec/models/user_spec.rb"), source).expect("write spec source");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("app/models/user.rb")
+        .arg("spec/models/user_spec.rb")
+        .assert();
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be JSON");
+    let style = offenses_named(&parsed, "Style/StringLiterals");
+    assert_eq!(
+        style.len(),
+        1,
+        "only the spec file should be in scope; got {parsed:?}"
+    );
+    assert_eq!(style[0]["file"], "spec/models/user_spec.rb");
+}
+
+#[test]
 fn options_schema_advertises_enum_values() {
     // The §12c `cops list --format=json` exposes only NAME/NAMESPACE/STATUS/
     // SOURCE_PACK — not the schema. The schema lives on `PluginCopV1`

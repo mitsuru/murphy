@@ -721,6 +721,15 @@ fn lint_files_memoized(
     config: &MurphyConfig,
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
+    if config.has_cop_path_scopes() {
+        return sources
+            .par_iter()
+            .flat_map_iter(|(path, content)| {
+                lint_source(content, path, cops, mruby_cops, config, cache)
+            })
+            .collect();
+    }
+
     // Group paths by content so identical-content files share one lint.
     let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (path, content) in sources {

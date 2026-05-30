@@ -224,6 +224,13 @@ impl MurphyConfig {
             && (rule.exclude.is_empty() || !globset_matches(&rule.exclude, file))
     }
 
+    pub fn has_cop_path_scopes(&self) -> bool {
+        self.cops
+            .rules
+            .values()
+            .any(|rule| !rule.include.is_empty() || !rule.exclude.is_empty())
+    }
+
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
         let Some(rule) = self.cops.rules.get(name) else {
             return b"{}".to_vec();
