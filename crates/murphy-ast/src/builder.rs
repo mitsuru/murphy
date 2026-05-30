@@ -46,6 +46,13 @@ impl AstBuilder {
         StringId(self.interner.intern(s))
     }
 
+    /// The source text covered by `range`. Used during translation to
+    /// capture the raw text of literals whose payload is the source
+    /// itself (e.g. rational `1r` / imaginary `1i`).
+    pub fn raw_source(&self, range: Range) -> &str {
+        &self.source.text[range.start as usize..range.end as usize]
+    }
+
     /// Append a node. `parent` is left as `NONE` until [`AstBuilder::finish`].
     /// `loc.name` defaults to [`Range::ZERO`]; use [`AstBuilder::push_named`]
     /// to record an identifier range alongside the expression range.

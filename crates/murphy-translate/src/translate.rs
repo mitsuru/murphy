@@ -204,6 +204,18 @@ impl Translator {
         if let Some(f) = node.as_float_node() {
             return self.builder.push(NodeKind::Float(f.value()), range);
         }
+        if node.as_rational_node().is_some() {
+            // Payload is the raw literal text (`1r`, `2/3r`).
+            let text = self.builder.raw_source(range).to_string();
+            let id = self.builder.intern_string(&text);
+            return self.builder.push(NodeKind::Rational(id), range);
+        }
+        if node.as_imaginary_node().is_some() {
+            // Imaginary/complex literal — payload is the raw text (`1i`).
+            let text = self.builder.raw_source(range).to_string();
+            let id = self.builder.intern_string(&text);
+            return self.builder.push(NodeKind::Complex(id), range);
+        }
         if let Some(s) = node.as_string_node() {
             let text = String::from_utf8_lossy(s.unescaped());
             let id = self.builder.intern_string(&text);
@@ -232,6 +244,15 @@ impl Translator {
         if let Some(v) = node.as_global_variable_read_node() {
             let name = self.sym(&v.name());
             return self.builder.push(NodeKind::Gvar(name), range);
+        }
+        if let Some(n) = node.as_numbered_reference_read_node() {
+            // `$1`, `$2`, … — regexp capture references.
+            return self.builder.push(NodeKind::NthRef(n.number()), range);
+        }
+        if let Some(b) = node.as_back_reference_read_node() {
+            // `$&`, `$~`, `$'`, … — regexp back references.
+            let name = self.sym(&b.name());
+            return self.builder.push(NodeKind::BackRef(name), range);
         }
         if let Some(c) = node.as_constant_read_node() {
             let name = self.sym(&c.name());
@@ -1305,6 +1326,9 @@ impl Translator {
                 NodeKind::Blockarg(self.opt_sym(p.name())),
                 Self::opt_loc_range(p.name_loc()),
             )
+        } else if node.as_forwarding_parameter_node().is_some() {
+            // `def f(...)` — the forward-all `...` parameter.
+            (NodeKind::ForwardArgs, range)
         } else {
             // `MultiTargetNode`（分割代入パラメータ）等は Task 16 / Unknown。
             return self.builder.push(NodeKind::Unknown, range);
