@@ -6,8 +6,7 @@
 //! upstream_cop: Lint/UnusedBlockArgument
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-qaio
+//! gap_issues: []
 //! notes: >
 //!   Known gaps: IgnoreEmptyBlocks (RuboCop default true: skip empty-bodied
 //!   blocks) is not yet implemented — empty-bodied blocks will still flag
