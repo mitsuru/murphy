@@ -1680,6 +1680,65 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// `PairNode#operator` — the hash pair delimiter (`=>` or `:`), or
+    /// `Range::ZERO` for a non-`Pair`. Searched only in the gap between
+    /// key and value, so nested delimiters inside either side cannot leak in.
+    pub fn pair_operator_loc(&self, id: NodeId) -> Range {
+        let (Some(key), Some(value)) = (self.pair_key(id).get(), self.pair_value(id).get()) else {
+            return Range::ZERO;
+        };
+        let key_end = self.range(key).end;
+        let value_start = self.range(value).start;
+        let rocket = self.find_token_text_in(key_end, value_start, b"=>");
+        if rocket != Range::ZERO {
+            return rocket;
+        }
+        let key_range = self.range(key);
+        if key_range.start < key_range.end {
+            let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
+            let colon_start = key_range.end - 1;
+            if src[colon_start as usize] == b':' {
+                return Range {
+                    start: colon_start,
+                    end: key_range.end,
+                };
+            }
+        }
+        self.find_token_text_in(key_end, value_start, b":")
+    }
+
+    /// `hash_rocket?` — this pair uses the `=>` delimiter.
+    pub fn is_hash_rocket(&self, id: NodeId) -> bool {
+        let op = self.pair_operator_loc(id);
+        op != Range::ZERO && self.raw_source(op) == "=>"
+    }
+
+    /// `colon?` — this pair uses the `:` delimiter.
+    pub fn is_colon(&self, id: NodeId) -> bool {
+        let op = self.pair_operator_loc(id);
+        op != Range::ZERO && self.raw_source(op) == ":"
+    }
+
+    /// `mixed_delimiters?` — this hash contains both `:` and `=>` pairs.
+    pub fn is_mixed_delimiters(&self, id: NodeId) -> bool {
+        let NodeKind::Hash(list) = *self.kind(id) else {
+            return false;
+        };
+        let mut has_colon = false;
+        let mut has_rocket = false;
+        for &pair in self.list(list) {
+            if !matches!(self.kind(pair), NodeKind::Pair { .. }) {
+                continue;
+            }
+            has_colon |= self.is_colon(pair);
+            has_rocket |= self.is_hash_rocket(pair);
+            if has_colon && has_rocket {
+                return true;
+            }
+        }
+        false
+    }
+
     /// `BlockNode#send_node` — the call the block is attached to.
     /// `OptNodeId::NONE` if not a `Block`.
     pub fn block_call(&self, id: NodeId) -> OptNodeId {
@@ -1761,6 +1820,24 @@ impl<'a> Cx<'a> {
             NodeKind::Array(list) => self.list(list),
             _ => &[],
         }
+    }
+
+    /// `percent_literal?` — the array was written with a percent-literal
+    /// opener such as `%w[`/`%i(`.
+    pub fn is_percent_literal(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Array(_))
+            && self.raw_source(self.range(id)).starts_with('%')
+    }
+
+    /// `square_brackets?` — the array was written with `[`/`]` delimiters.
+    pub fn is_square_brackets(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::Array(_))
+            && self.raw_source(self.range(id)).starts_with('[')
+    }
+
+    /// `bracketed?` — the array has an explicit array delimiter.
+    pub fn is_bracketed(&self, id: NodeId) -> bool {
+        self.is_square_brackets(id) || self.is_percent_literal(id)
     }
 
     /// `CaseNode#condition` — the subject of a `case subj; when …`, or
@@ -3071,6 +3148,87 @@ mod tests {
         // Non-matching kinds project empty.
         assert!(cx.hash_pairs(pair).is_empty());
         assert!(cx.pair_key(hash).get().is_none());
+    }
+
+    #[test]
+    fn pair_operator_predicates_distinguish_hash_rocket_and_colon() {
+        with_parsed("{ a => b }", |cx, root| {
+            let pair = cx.hash_pairs(root)[0];
+            let op = cx.pair_operator_loc(pair);
+            assert_eq!(cx.raw_source(op), "=>");
+            assert!(cx.is_hash_rocket(pair));
+            assert!(!cx.is_colon(pair));
+        });
+        with_parsed("{ a: b }", |cx, root| {
+            let pair = cx.hash_pairs(root)[0];
+            let op = cx.pair_operator_loc(pair);
+            assert_eq!(cx.raw_source(op), ":");
+            assert!(cx.is_colon(pair));
+            assert!(!cx.is_hash_rocket(pair));
+        });
+        with_parsed("{ a: { b => c } }", |cx, root| {
+            let pair = cx.hash_pairs(root)[0];
+            assert!(cx.is_colon(pair), "outer pair uses the colon delimiter");
+        });
+        with_parsed("foo", |cx, root| {
+            assert_eq!(cx.pair_operator_loc(root), Range::ZERO);
+            assert!(!cx.is_hash_rocket(root));
+            assert!(!cx.is_colon(root));
+        });
+    }
+
+    #[test]
+    fn pair_operator_loc_does_not_slice_multibyte_key_as_utf8() {
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let src = "あい 1";
+        let mut b = AstBuilder::new(src.to_string(), "t.rb".to_string());
+        let key_text = b.intern_string("あい");
+        let key = b.push(NodeKind::Str(key_text), Range { start: 0, end: 6 });
+        let value = b.push(NodeKind::Int(1), Range { start: 7, end: 8 });
+        let pair = b.push(NodeKind::Pair { key, value }, Range { start: 0, end: 8 });
+        let ast = b.finish(pair);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(cx.pair_operator_loc(pair), Range::ZERO);
+    }
+
+    #[test]
+    fn hash_mixed_delimiters_detects_colon_and_hash_rocket_pairs() {
+        with_parsed("{ a: 1, b => 2 }", |cx, root| {
+            assert!(cx.is_mixed_delimiters(root));
+        });
+        with_parsed("{ a: 1, b: 2 }", |cx, root| {
+            assert!(!cx.is_mixed_delimiters(root));
+        });
+        with_parsed("{ a => 1, b => 2 }", |cx, root| {
+            assert!(!cx.is_mixed_delimiters(root));
+        });
+        with_parsed("foo", |cx, root| {
+            assert!(!cx.is_mixed_delimiters(root));
+        });
+    }
+
+    #[test]
+    fn array_delimiter_predicates_distinguish_percent_and_square_brackets() {
+        with_parsed("[1, 2]", |cx, root| {
+            assert!(cx.is_square_brackets(root));
+            assert!(cx.is_bracketed(root));
+            assert!(!cx.is_percent_literal(root));
+        });
+        with_parsed("%w[a b]", |cx, root| {
+            assert!(cx.is_percent_literal(root));
+            assert!(cx.is_bracketed(root));
+            assert!(!cx.is_square_brackets(root));
+        });
+        with_parsed("foo", |cx, root| {
+            assert!(!cx.is_percent_literal(root));
+            assert!(!cx.is_square_brackets(root));
+            assert!(!cx.is_bracketed(root));
+        });
     }
 
     #[test]
