@@ -33,7 +33,9 @@ impl ShadowingOuterLocalVariable {
     #[on_node(kind = "block")]
     fn check(&self, node: NodeId, cx: &Cx<'_>) {
         let Some(model) = cx.var_model() else { return };
-        let Some(scope) = model.scope(node) else { return };
+        let Some(scope) = model.scope(node) else {
+            return;
+        };
 
         for var in scope.variables().iter().filter(|v| v.is_argument) {
             // Walk up the scope chain to find outer scopes.

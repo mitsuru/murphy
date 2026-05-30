@@ -43,7 +43,9 @@ impl UnusedBlockArgument {
         };
 
         let Some(model) = cx.var_model() else { return };
-        let Some(scope) = model.scope(node) else { return };
+        let Some(scope) = model.scope(node) else {
+            return;
+        };
 
         // Lazily built fallback: all Lvar names reachable in this block body
         // (including nested scopes). Handles cross-scope reads of block args,
@@ -94,7 +96,13 @@ impl UnusedBlockArgument {
                 None,
             );
             // Autocorrect: prefix name with `_`.
-            cx.emit_edit(Range { start: range.start, end: range.start }, "_");
+            cx.emit_edit(
+                Range {
+                    start: range.start,
+                    end: range.start,
+                },
+                "_",
+            );
         }
     }
 }

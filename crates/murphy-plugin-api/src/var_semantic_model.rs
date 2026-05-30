@@ -300,9 +300,15 @@ impl VarSemanticModel {
                     stack.push(WorkItem { node: call, scope });
                     // args and body → new block scope (body first so args pops first)
                     if let Some(body_id) = body.get() {
-                        stack.push(WorkItem { node: body_id, scope: node });
+                        stack.push(WorkItem {
+                            node: body_id,
+                            scope: node,
+                        });
                     }
-                    stack.push(WorkItem { node: args, scope: node });
+                    stack.push(WorkItem {
+                        node: args,
+                        scope: node,
+                    });
                 }
 
                 // Numblock: numbered-parameter block; `send` belongs to parent scope.
@@ -318,7 +324,10 @@ impl VarSemanticModel {
                     stack.push(WorkItem { node: send, scope });
                     // body → new block scope
                     if let Some(body_id) = body.get() {
-                        stack.push(WorkItem { node: body_id, scope: node });
+                        stack.push(WorkItem {
+                            node: body_id,
+                            scope: node,
+                        });
                     }
                 }
 
@@ -335,7 +344,10 @@ impl VarSemanticModel {
                     stack.push(WorkItem { node: send, scope });
                     // body → new block scope
                     if let Some(body_id) = body.get() {
-                        stack.push(WorkItem { node: body_id, scope: node });
+                        stack.push(WorkItem {
+                            node: body_id,
+                            scope: node,
+                        });
                     }
                 }
 
@@ -357,7 +369,10 @@ impl VarSemanticModel {
                     // Children of this boundary belong to the NEW scope.
                     let children: Vec<NodeId> = ast.children(node).collect();
                     for child in children.into_iter().rev() {
-                        stack.push(WorkItem { node: child, scope: node });
+                        stack.push(WorkItem {
+                            node: child,
+                            scope: node,
+                        });
                     }
                 }
 
@@ -392,7 +407,10 @@ impl VarSemanticModel {
                         Self::find_or_declare_arg(scope_info, name, node);
                     }
                     // Recurse into the default expression.
-                    stack.push(WorkItem { node: default, scope });
+                    stack.push(WorkItem {
+                        node: default,
+                        scope,
+                    });
                 }
 
                 NodeKind::Kwoptarg { name, default } => {
@@ -400,7 +418,10 @@ impl VarSemanticModel {
                         let scope_info = scopes.get_mut(&scope).expect("scope must exist");
                         Self::find_or_declare_arg(scope_info, name, node);
                     }
-                    stack.push(WorkItem { node: default, scope });
+                    stack.push(WorkItem {
+                        node: default,
+                        scope,
+                    });
                 }
 
                 // ── Plain assignment: `x = expr` ────────────────────────────
@@ -420,7 +441,10 @@ impl VarSemanticModel {
                             });
                         }
                         // Recurse into the value expression.
-                        stack.push(WorkItem { node: val_id, scope });
+                        stack.push(WorkItem {
+                            node: val_id,
+                            scope,
+                        });
                     }
                     // Value-less targets have no children to recurse into.
                 }
@@ -429,7 +453,9 @@ impl VarSemanticModel {
                 NodeKind::OpAsgn { target, value, .. } => {
                     // Target is always a value-less write node; for Lvasgn:
                     // push a Reference (read side) + an Assignment (write side).
-                    if let NodeKind::Lvasgn { name, .. } = *ast.kind(target) && !Self::is_underscore_prefix(name, ast) {
+                    if let NodeKind::Lvasgn { name, .. } = *ast.kind(target)
+                        && !Self::is_underscore_prefix(name, ast)
+                    {
                         let target_range = ast.range(target);
                         let asgn_end = ast.range(node).end;
                         let scope_info = scopes.get_mut(&scope).expect("scope must exist");
@@ -447,14 +473,19 @@ impl VarSemanticModel {
                     } else {
                         // Non-local target (e.g. attr/index write): recurse into
                         // target so any lvar reads inside it are collected.
-                        stack.push(WorkItem { node: target, scope });
+                        stack.push(WorkItem {
+                            node: target,
+                            scope,
+                        });
                     }
                     stack.push(WorkItem { node: value, scope });
                 }
 
                 // ── ||= / &&= ────────────────────────────────────────────────
                 NodeKind::OrAsgn { target, value } | NodeKind::AndAsgn { target, value } => {
-                    if let NodeKind::Lvasgn { name, .. } = *ast.kind(target) && !Self::is_underscore_prefix(name, ast) {
+                    if let NodeKind::Lvasgn { name, .. } = *ast.kind(target)
+                        && !Self::is_underscore_prefix(name, ast)
+                    {
                         let target_range = ast.range(target);
                         let asgn_end = ast.range(node).end;
                         let scope_info = scopes.get_mut(&scope).expect("scope must exist");
@@ -471,7 +502,10 @@ impl VarSemanticModel {
                         // Value-less Lvasgn has no sub-children; only push value.
                     } else {
                         // Non-local target: recurse so inner lvar reads are collected.
-                        stack.push(WorkItem { node: target, scope });
+                        stack.push(WorkItem {
+                            node: target,
+                            scope,
+                        });
                     }
                     stack.push(WorkItem { node: value, scope });
                 }
@@ -514,7 +548,9 @@ impl VarSemanticModel {
 
                 // ── `for x in iter; body; end` ──────────────────────────────
                 NodeKind::For { var, iter, body } => {
-                    if let NodeKind::Lvasgn { name, .. } = *ast.kind(var) && !Self::is_underscore_prefix(name, ast) {
+                    if let NodeKind::Lvasgn { name, .. } = *ast.kind(var)
+                        && !Self::is_underscore_prefix(name, ast)
+                    {
                         let end = ast.range(var).end;
                         let scope_info = scopes.get_mut(&scope).expect("scope must exist");
                         let v = Self::find_or_declare_local(scope_info, name, var);
@@ -578,7 +614,11 @@ impl VarSemanticModel {
     }
 
     /// Find or insert an argument variable in `scope_info`.
-    fn find_or_declare_arg(scope_info: &mut ScopeInfo, name: Symbol, node: NodeId) -> &mut Variable {
+    fn find_or_declare_arg(
+        scope_info: &mut ScopeInfo,
+        name: Symbol,
+        node: NodeId,
+    ) -> &mut Variable {
         let pos = scope_info.variables.iter().position(|v| v.name == name);
         if let Some(idx) = pos {
             &mut scope_info.variables[idx]
@@ -595,7 +635,11 @@ impl VarSemanticModel {
     }
 
     /// Find or insert a local-variable entry in `scope_info`.
-    fn find_or_declare_local(scope_info: &mut ScopeInfo, name: Symbol, node: NodeId) -> &mut Variable {
+    fn find_or_declare_local(
+        scope_info: &mut ScopeInfo,
+        name: Symbol,
+        node: NodeId,
+    ) -> &mut Variable {
         let pos = scope_info.variables.iter().position(|v| v.name == name);
         if let Some(idx) = pos {
             &mut scope_info.variables[idx]
@@ -688,8 +732,7 @@ mod tests {
         let model = VarSemanticModel::build(&ast);
 
         // Root IS the Def node for a single-statement file.
-        let def_id = find_node(&ast, |k| matches!(k, NodeKind::Def { .. }))
-            .expect("def node");
+        let def_id = find_node(&ast, |k| matches!(k, NodeKind::Def { .. })).expect("def node");
 
         let scope = model.scope(def_id).expect("scope for def");
         assert_eq!(scope.variables.len(), 1, "should have variable x");
@@ -703,8 +746,7 @@ mod tests {
         let ast = translate("def foo(x); end", "test.rb");
         let model = VarSemanticModel::build(&ast);
 
-        let def_id = find_node(&ast, |k| matches!(k, NodeKind::Def { .. }))
-            .expect("def node");
+        let def_id = find_node(&ast, |k| matches!(k, NodeKind::Def { .. })).expect("def node");
 
         let scope = model.scope(def_id).expect("scope for def");
         assert_eq!(scope.variables.len(), 1);
@@ -723,10 +765,9 @@ mod tests {
         );
 
         // The block scope should have a parent pointing to the def scope.
-        let def_id = find_node(&ast, |k| matches!(k, NodeKind::Def { .. }))
-            .expect("def node");
-        let block_id = find_node(&ast, |k| matches!(k, NodeKind::Block { .. }))
-            .expect("block node");
+        let def_id = find_node(&ast, |k| matches!(k, NodeKind::Def { .. })).expect("def node");
+        let block_id =
+            find_node(&ast, |k| matches!(k, NodeKind::Block { .. })).expect("block node");
 
         let block_scope = model.scope(block_id).expect("block scope");
         assert_eq!(
@@ -746,28 +787,39 @@ mod tests {
         let ast = translate("def foo; arr = [1]; arr.each { |x| x }; end", "test.rb");
         let model = VarSemanticModel::build(&ast);
 
-        let def_id = find_node(&ast, |k| matches!(k, NodeKind::Def { .. }))
-            .expect("def node");
-        let block_id = find_node(&ast, |k| matches!(k, NodeKind::Block { .. }))
-            .expect("block node");
+        let def_id = find_node(&ast, |k| matches!(k, NodeKind::Def { .. })).expect("def node");
+        let block_id =
+            find_node(&ast, |k| matches!(k, NodeKind::Block { .. })).expect("block node");
 
         let def_scope = model.scope(def_id).expect("def scope");
         let block_scope = model.scope(block_id).expect("block scope");
 
         // `arr` should appear in the def scope (1 assignment + 1 reference).
-        let arr_in_def = def_scope.variables.iter().find(|v| {
-            ast.interner().resolve(v.name.0) == "arr"
-        });
-        assert!(arr_in_def.is_some(), "`arr` must be tracked in the def scope");
+        let arr_in_def = def_scope
+            .variables
+            .iter()
+            .find(|v| ast.interner().resolve(v.name.0) == "arr");
+        assert!(
+            arr_in_def.is_some(),
+            "`arr` must be tracked in the def scope"
+        );
         let arr = arr_in_def.unwrap();
         assert_eq!(arr.assignments.len(), 1, "`arr` has one assignment");
-        assert_eq!(arr.references.len(), 1, "`arr` has one reference (the block call)");
+        assert_eq!(
+            arr.references.len(),
+            1,
+            "`arr` has one reference (the block call)"
+        );
 
         // `arr` must NOT appear in the block scope.
-        let arr_in_block = block_scope.variables.iter().find(|v| {
-            ast.interner().resolve(v.name.0) == "arr"
-        });
-        assert!(arr_in_block.is_none(), "`arr` must NOT appear in the block scope");
+        let arr_in_block = block_scope
+            .variables
+            .iter()
+            .find(|v| ast.interner().resolve(v.name.0) == "arr");
+        assert!(
+            arr_in_block.is_none(),
+            "`arr` must NOT appear in the block scope"
+        );
     }
 
     // ── is_referenced tests ───────────────────────────────────────────────────
@@ -792,7 +844,7 @@ mod tests {
     }
 
     /// Helper: resolve a `Symbol` to its string.
-    fn resolve_sym<'a>(ast: &'a Ast, sym: Symbol) -> &'a str {
+    fn resolve_sym(ast: &Ast, sym: Symbol) -> &str {
         ast.interner().resolve(sym.0)
     }
 
@@ -843,7 +895,10 @@ mod tests {
             .iter()
             .find(|v| resolve_sym(&ast, v.name) == "x")
             .unwrap();
-        assert!(!x.assignments[0].is_referenced, "unused x should not be referenced");
+        assert!(
+            !x.assignments[0].is_referenced,
+            "unused x should not be referenced"
+        );
     }
 
     #[test]
@@ -858,14 +913,19 @@ mod tests {
             .iter()
             .find(|v| resolve_sym(&ast, v.name) == "x")
             .unwrap();
-        assert!(x.assignments[0].is_referenced, "used x should be referenced");
+        assert!(
+            x.assignments[0].is_referenced,
+            "used x should be referenced"
+        );
     }
 
     #[test]
     fn exclusive_branches_both_referenced() {
         // Both branches assign x; after the if, x is read — both writes are referenced.
-        let ast =
-            translate("def foo(c); if c; x = 1; else; x = 2; end; puts x; end", "test.rb");
+        let ast = translate(
+            "def foo(c); if c; x = 1; else; x = 2; end; puts x; end",
+            "test.rb",
+        );
         let model = VarSemanticModel::build(&ast);
         let def_id =
             find_scope_node(&ast, ast.root(), |k| matches!(k, NodeKind::Def { .. })).unwrap();

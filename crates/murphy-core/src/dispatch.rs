@@ -31,11 +31,11 @@
 use std::ffi::c_void;
 
 use murphy_ast::{Ast, NodeId, NodeKind};
+use murphy_plugin_api::var_semantic_model::VarSemanticModel;
 use murphy_plugin_api::{
     CxRaw, FnTable, NodeKindTag as PluginNodeKindTag, PluginCopV1, RawEdit, RawOffense, RawSlice,
     SEVERITY_UNSET,
 };
-use murphy_plugin_api::var_semantic_model::VarSemanticModel;
 
 /// The `NodeKindTag` for [`NodeKind::Send`] (frozen by ADR 0037).
 /// Mirrors `murphy-plugin-api::NodeKindTag::of(&NodeKind::Send {…})`

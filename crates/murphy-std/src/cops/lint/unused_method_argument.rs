@@ -135,9 +135,14 @@ impl UnusedMethodArgument {
             // Primary check: use VarSemanticModel for same-scope references.
             // This correctly handles `x += 1` (OpAsgn implicit read) which
             // `Lvar` scanning misses.
-            let model_used = cx.var_model()
+            let model_used = cx
+                .var_model()
                 .and_then(|m| m.scope(node))
-                .and_then(|s| s.variables().iter().find(|v| v.name == name && v.is_argument))
+                .and_then(|s| {
+                    s.variables()
+                        .iter()
+                        .find(|v| v.name == name && v.is_argument)
+                })
                 .map(|v| !v.references.is_empty())
                 .unwrap_or(false);
 
