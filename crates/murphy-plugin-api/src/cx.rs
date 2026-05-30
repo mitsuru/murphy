@@ -668,6 +668,36 @@ impl<'a> Cx<'a> {
         )
     }
 
+    /// `numeric_type?` — an integer, float, rational, or complex literal.
+    pub fn is_numeric(&self, id: NodeId) -> bool {
+        matches!(
+            self.kind(id),
+            NodeKind::Int(..)
+                | NodeKind::Float(..)
+                | NodeKind::Rational(..)
+                | NodeKind::Complex(..)
+        )
+    }
+
+    /// `reference?` — a regexp reference: a numbered (`$1`) or back
+    /// (`$&`/`$~`) reference read.
+    pub fn is_reference(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::NthRef(..) | NodeKind::BackRef(..))
+    }
+
+    /// `DefNode#argument_forwarding?` — the method is defined with a
+    /// forward-all `...` parameter (`def f(...)`). `false` for a non-def
+    /// node. Mirrors RuboCop's `DefNode#argument_forwarding?`.
+    pub fn is_argument_forwarding(&self, id: NodeId) -> bool {
+        let args = match *self.kind(id) {
+            NodeKind::Def { args, .. } | NodeKind::Defs { args, .. } => args,
+            _ => return false,
+        };
+        self.children(args)
+            .iter()
+            .any(|&c| matches!(self.kind(c), NodeKind::ForwardArgs))
+    }
+
     /// `recursive_basic_literal?` — the node is a basic literal, a
     /// recursively-composed literal (`[1, 2]`, `{a: 1}`, `1..2`, `"a" "b"`,
     /// `a && b`, …) whose every child is itself a recursive basic literal,
@@ -3040,6 +3070,39 @@ mod tests {
             assert!(!cx.is_modifier_form(root));
             // Non-For projects to NONE.
             assert!(cx.for_variable(coll).get().is_none());
+        });
+    }
+
+    #[test]
+    fn numeric_reference_forwarding_on_real_parse() {
+        // numeric_type? — int/float/rational/complex (1r/1i now emit real
+        // Rational/Complex nodes instead of Unknown).
+        for src in ["42", "1.5", "1r", "1i"] {
+            with_parsed(src, |cx, root| {
+                assert!(cx.is_numeric(root), "{src} is numeric")
+            });
+        }
+        for src in ["\"s\"", ":x", "nil"] {
+            with_parsed(src, |cx, root| {
+                assert!(!cx.is_numeric(root), "{src} is not numeric")
+            });
+        }
+        // reference? — numbered ($1) and back ($&) references.
+        with_parsed("$1", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::NthRef(..)));
+            assert!(cx.is_reference(root));
+        });
+        with_parsed("$&", |cx, root| {
+            assert!(matches!(cx.kind(root), NodeKind::BackRef(..)));
+            assert!(cx.is_reference(root));
+        });
+        with_parsed("@x", |cx, root| assert!(!cx.is_reference(root)));
+        // argument_forwarding? — `def f(...)`.
+        with_parsed("def f(...)\nend", |cx, root| {
+            assert!(cx.is_argument_forwarding(root))
+        });
+        with_parsed("def f(a)\nend", |cx, root| {
+            assert!(!cx.is_argument_forwarding(root))
         });
     }
 }
