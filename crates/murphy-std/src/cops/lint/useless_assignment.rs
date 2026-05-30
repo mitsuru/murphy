@@ -29,38 +29,27 @@
 //!
 //! ## Flow-sensitive dataflow (murphy-xek)
 //!
-//! The cop runs a single-pass intra-scope dataflow:
+//! The flow-sensitive analysis now lives in the shared
+//! [`VarSemanticModel`](murphy_plugin_api::var_semantic_model). The cop reads
+//! [`cx.var_model()`](murphy_plugin_api::Cx::var_model) and flags every
+//! [`Assignment`](murphy_plugin_api::var_semantic_model::Assignment) whose
+//! `is_referenced` flag is `false` — i.e. no later read on a compatible
+//! control-flow path can observe the write, *or* a dominating overwrite
+//! reaches before any such read.
 //!
-//! 1. Collect every write (`Lvasgn`, `Masgn` target, `OpAsgn`/`OrAsgn`/
-//!    `AndAsgn`, `Resbody.var`) and every read (`Lvar`, plus the implicit
-//!    read inside `OpAsgn`/`OrAsgn`/`AndAsgn`) with byte positions.
-//! 2. For each write `w` to a variable named `n`:
-//!    a. If there is no later read of `n`, flag `w`.
-//!    b. Else find the first later read of `n` and the first later write
-//!    of `n`. If the later write happens *before* the later read **and**
-//!    lies on the same control-flow path as `w`, flag `w` as
-//!    overwrite-before-read.
+//! The model collects writes (`Lvasgn`, `Masgn` target, `OpAsgn`/`OrAsgn`/
+//! `AndAsgn`, `Resbody.var`, `For.var`) and reads (`Lvar`, plus the implicit
+//! read inside `OpAsgn`/`OrAsgn`/`AndAsgn`) per scope and computes
+//! `is_referenced` via a branch-aware dominance analysis: `If` / `Case` /
+//! `When` / `While` / `Until` introduce exclusive-branch barriers, while
+//! `Resbody` / `Rescue` / `Ensure` are *not* barriers (exception flow carries
+//! partial begin-body writes into the rescue handler). See that module for the
+//! barrier-chain details.
 //!
-//! "Same control-flow path" is computed by walking up via `cx.parent` and
-//! collecting branch-introducing ancestors (`If` / `Case` / `When` /
-//! `While` / `Until`). `Resbody` / `Rescue` / `Ensure` are *not*
-//! barriers — exception flow carries partial begin-body writes into
-//! the rescue handler, so treating those as exclusive arms would
-//! produce false positives. Each chain entry is a pair
-//! `(barrier_node, branch_child)` — the child of the barrier on the
-//! path from the node — so two writes in different arms of the same
-//! `if` get distinct chain entries even though they share the `If`
-//! barrier.
-//!
-//! Two checks use these chains:
-//!
-//! * **Dominating overwrite** (for `w'` to *always* overwrite `w`): `w'`'s
-//!   chain must be a prefix (outermost-first) of `w`'s. Same chunk or
-//!   shallower-than-`w` qualifies; sibling sequential `if`s do not.
-//! * **Read observation** (for `r` to *possibly* observe `w`): no shared
-//!   barrier disagrees on its arm. Sequential `if`s are compatible
-//!   (both can run on `a && b`); sibling arms of the same `if` are
-//!   not (mutually exclusive at runtime).
+//! This cop keeps only the offense-shaping concerns: mapping each
+//! unreferenced assignment node back to a `WriteKind` (for the message and
+//! autocorrect), the "Did you mean?" suggestion (which additionally scans
+//! bare method calls the model does not track), and the autocorrect edits.
 //!
 //! ### Known v1 limitations
 //!
@@ -74,8 +63,10 @@
 //!
 //! ## Known v1 limitations (Phase 4 — escalate to extend the AST)
 //!
-//! - `for x in xs` — Murphy's AST has no `For` node yet, so the iteration
-//!   variable cannot be inspected.
+//! - `for x in xs` — an unused iteration variable is now flagged (the model
+//!   records `For.var` as an assignment), matching RuboCop. Murphy reports the
+//!   offense but does not autocorrect it to `_` (RuboCop does); the offense is
+//!   the parity-relevant behavior.
 //! - Pattern-match captures (`case ... in [a, b]`) — Murphy has no
 //!   pattern-match nodes yet.
 //! - Regexp implicit named captures (`/(?<name>…)/ =~ str`) — needs a
@@ -90,6 +81,7 @@
 //! rewrite can change local-variable declaration semantics or produce
 //! invalid Ruby.
 
+use murphy_plugin_api::var_semantic_model::{Assignment, Variable};
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
 
 #[derive(Default)]
@@ -105,17 +97,124 @@ pub struct UselessAssignment;
 impl UselessAssignment {
     #[on_new_investigation]
     fn check_file(&self, cx: &Cx<'_>) {
-        visit_scope(cx, cx.root());
+        let Some(model) = cx.var_model() else {
+            return;
+        };
+        for (scope_node, scope) in model.scopes() {
+            // Bare method calls (`environment` with no receiver/args) feed the
+            // "Did you mean?" suggestion but are not tracked by the model, so
+            // collect them with a scope-local walk.
+            let candidates = collect_candidates(cx, scope_node);
+            for var in scope.variables() {
+                for asgn in &var.assignments {
+                    if asgn.is_referenced {
+                        continue;
+                    }
+                    let write = make_write(cx, var, asgn);
+                    emit_useless_assignment(cx, &write, scope.variables(), &candidates);
+                }
+            }
+        }
     }
 }
 
-fn visit_scope(cx: &Cx<'_>, root: NodeId) {
-    analyze_scope(cx, root);
-    for node in scope_nodes(cx, root) {
-        if node != root && is_scope(cx, node) {
-            visit_scope(cx, node);
+/// Build the offense-emission `Write` for an unreferenced assignment by
+/// inspecting the assignment node's kind. The model stores the *target* node
+/// for compound assignments / rescue vars and the assignment node itself for
+/// plain `Lvasgn`, so the range and `WriteKind` are derived per shape.
+fn make_write(cx: &Cx<'_>, var: &Variable, asgn: &Assignment) -> Write {
+    let name = var.name;
+    let name_str = cx.symbol_str(name);
+    match *cx.kind(asgn.node_id) {
+        NodeKind::Lvasgn { value, .. } if value.get().is_some() => Write {
+            name,
+            end: asgn.end,
+            range: assignment_name_range(cx, asgn.node_id, name_str),
+            kind: WriteKind::Local { value },
+            node: asgn.node_id,
+        },
+        NodeKind::OpAsgn { target, .. } => Write {
+            name,
+            end: asgn.end,
+            range: cx.range(target),
+            kind: WriteKind::Operator {
+                op: operator_text(cx, asgn.node_id),
+                autocorrect: true,
+            },
+            node: asgn.node_id,
+        },
+        NodeKind::OrAsgn { target, .. } => Write {
+            name,
+            end: asgn.end,
+            range: cx.range(target),
+            kind: WriteKind::Operator {
+                op: "||",
+                autocorrect: false,
+            },
+            node: asgn.node_id,
+        },
+        NodeKind::AndAsgn { target, .. } => Write {
+            name,
+            end: asgn.end,
+            range: cx.range(target),
+            kind: WriteKind::Operator {
+                op: "&&",
+                autocorrect: false,
+            },
+            node: asgn.node_id,
+        },
+        // Value-less `Lvasgn`: either a `Masgn` target or an exception/`for`
+        // binding. The model records the var node directly, so the immediate
+        // parent disambiguates: `Resbody`/`For` → exception binding (name
+        // range, no autocorrect), otherwise a multiple-assignment target.
+        NodeKind::Lvasgn { value, .. } if value.get().is_none() => {
+            let is_exception = matches!(
+                cx.parent(asgn.node_id).get().map(|p| cx.kind(p)),
+                Some(NodeKind::Resbody { .. } | NodeKind::For { .. })
+            );
+            let kind = if is_exception {
+                WriteKind::Exception
+            } else {
+                WriteKind::Multiple
+            };
+            Write {
+                name,
+                end: asgn.end,
+                range: assignment_name_range(cx, asgn.node_id, name_str),
+                kind,
+                node: asgn.node_id,
+            }
+        }
+        // Defensive fallback: treat anything else as an exception-style write
+        // (name range, no autocorrect).
+        _ => Write {
+            name,
+            end: asgn.end,
+            range: assignment_name_range(cx, asgn.node_id, name_str),
+            kind: WriteKind::Exception,
+            node: asgn.node_id,
+        },
+    }
+}
+
+/// Collect bare method-call names (`Send` with no receiver and no args) within
+/// the scope rooted at `scope_node`, not descending into nested scopes. These
+/// feed the "Did you mean?" suggestion alongside the scope's variables.
+fn collect_candidates(cx: &Cx<'_>, scope_node: NodeId) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
+    for id in scope_nodes(cx, scope_node) {
+        if let NodeKind::Send {
+            receiver,
+            method,
+            args,
+        } = *cx.kind(id)
+            && receiver == OptNodeId::NONE
+            && cx.list(args).is_empty()
+        {
+            candidates.push(Candidate { name: method });
         }
     }
+    candidates
 }
 
 const MSG_PREFIX: &str = "Useless assignment to variable";
@@ -141,100 +240,14 @@ enum WriteKind {
     Exception,
 }
 
-struct Read {
-    name: Symbol,
-    /// Byte position of the read.
-    pos: u32,
-    /// Node id used to compute the read's control-flow barrier chain so
-    /// we can ask "is this read reachable from a particular write?"
-    node: NodeId,
-}
-
 struct Candidate {
     name: Symbol,
-}
-
-fn analyze_scope(cx: &Cx<'_>, root: NodeId) {
-    let mut writes: Vec<Write> = Vec::new();
-    let mut reads: Vec<Read> = Vec::new();
-    let mut candidates: Vec<Candidate> = Vec::new();
-    for id in scope_nodes(cx, root) {
-        classify(cx, id, &mut writes, &mut reads, &mut candidates);
-    }
-    // Pre-compute each write's and read's branch chain so we don't pay
-    // for the `cx.parent` walk in the O(W^2) / O(W*R) loops below.
-    let write_chains: Vec<Vec<(NodeId, NodeId)>> = writes
-        .iter()
-        .map(|w| barrier_chain(cx, root, w.node))
-        .collect();
-    let read_chains: Vec<Vec<(NodeId, NodeId)>> = reads
-        .iter()
-        .map(|r| barrier_chain(cx, root, r.node))
-        .collect();
-
-    for (i, write) in writes.iter().enumerate() {
-        // Earliest later read of the same name that's actually on a
-        // control-flow path reachable from this write. A read inside
-        // an exclusive branch (e.g. the `else` arm when the write is
-        // in the `then`) can't observe the write, so it must not
-        // suppress an overwrite-before-read flag. The compatibility
-        // test is *either direction* of prefix: a read at the same
-        // level as the write or deeper-into-a-conditional (write's
-        // chain is a prefix of read's) is reachable when that branch
-        // runs; a read in a shallower chunk (read's chain is a prefix
-        // of write's) is reachable after exiting w's branches.
-        let next_read_pos = reads
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.name == write.name && r.pos > write.end)
-            .filter(|(k, _)| paths_compatible(&read_chains[*k], &write_chains[i]))
-            .map(|(_, r)| r.pos)
-            .min();
-
-        // Earliest later write of the same name whose chain is a
-        // prefix of `write`'s — i.e. it is in the same chunk as `write`
-        // or in a shallower one that `write` *must* fall through to.
-        // Compare on `end` so the OpAsgn self-read at the same byte
-        // position as the OpAsgn's start doesn't shadow its own write.
-        //
-        // Writes inside a `begin`/`rescue`/`ensure`-protected body are
-        // not eligible dominators: an exception in the body can skip
-        // the rest of it, so we can't guarantee the candidate actually
-        // executes. This is conservative — purely-side-effect-free
-        // writes between two assignments wouldn't really raise — but
-        // it keeps us false-positive-free against exception flow.
-        let dominating_overwrite = writes
-            .iter()
-            .enumerate()
-            .filter(|(j, w)| *j != i && w.name == write.name && w.end > write.end)
-            .filter(|(j, _)| chain_is_prefix(&write_chains[*j], &write_chains[i]))
-            .filter(|(_, w)| !is_in_protected_begin_body(cx, root, w.node))
-            .min_by_key(|(_, w)| w.end);
-
-        match (next_read_pos, dominating_overwrite) {
-            (None, _) => {
-                // No later read of this name anywhere — classic useless
-                // write (whether or not an overwrite follows).
-                emit_useless_assignment(cx, write, &writes, &reads, &candidates);
-            }
-            (Some(r), Some((_, w))) if w.end <= r => {
-                // Dominating overwrite reaches before any read — this
-                // write's value can never be observed.
-                emit_useless_assignment(cx, write, &writes, &reads, &candidates);
-            }
-            (Some(_), _) => {
-                // A later read exists and no dominating overwrite
-                // precedes it — the value is (potentially) used.
-            }
-        }
-    }
 }
 
 fn emit_useless_assignment(
     cx: &Cx<'_>,
     write: &Write,
-    writes: &[Write],
-    reads: &[Read],
+    variables: &[Variable],
     candidates: &[Candidate],
 ) {
     let name = cx.symbol_str(write.name);
@@ -249,7 +262,7 @@ fn emit_useless_assignment(
             message.push_str(&format!(" Use `{op}` instead of `{op}=`."));
         }
         WriteKind::Local { .. } | WriteKind::Exception => {
-            if let Some(similar) = similar_name(cx, name, writes, reads, candidates) {
+            if let Some(similar) = similar_name(cx, name, variables, candidates) {
                 message.push_str(&format!(" Did you mean `{similar}`?"));
             }
         }
@@ -340,15 +353,13 @@ fn contains_assignment(cx: &Cx<'_>, node: NodeId) -> bool {
 fn similar_name<'a>(
     cx: &'a Cx<'_>,
     name: &str,
-    writes: &'a [Write],
-    reads: &'a [Read],
+    variables: &'a [Variable],
     candidates: &'a [Candidate],
 ) -> Option<&'a str> {
     let mut best: Option<(&str, usize)> = None;
-    for candidate in writes
+    for candidate in variables
         .iter()
-        .map(|w| cx.symbol_str(w.name))
-        .chain(reads.iter().map(|r| cx.symbol_str(r.name)))
+        .map(|v| cx.symbol_str(v.name))
         .chain(candidates.iter().map(|c| cx.symbol_str(c.name)))
     {
         if candidate == name
@@ -379,236 +390,6 @@ fn levenshtein(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut curr);
     }
     prev[b_chars.len()]
-}
-
-/// Walk up from `node` via `cx.parent`, collecting `(barrier, child)`
-/// pairs at every branch-introducing ancestor up to (but not including)
-/// the scope `root`. `child` is the direct child of `barrier` on the
-/// path from `node`, so two writes in different arms of the same `if`
-/// produce distinct chains even though they share the `If` barrier.
-/// Returned chain is outermost-first so prefix comparisons read
-/// naturally ("less-nested" ↔ "shorter prefix").
-fn barrier_chain(cx: &Cx<'_>, root: NodeId, node: NodeId) -> Vec<(NodeId, NodeId)> {
-    let mut chain: Vec<(NodeId, NodeId)> = Vec::new();
-    let mut current = node;
-    while let Some(parent) = cx.parent(current).get() {
-        if parent == root {
-            break;
-        }
-        if is_branch_barrier(cx, parent) {
-            chain.push((parent, current));
-        }
-        current = parent;
-    }
-    chain.reverse();
-    chain
-}
-
-fn is_branch_barrier(cx: &Cx<'_>, node: NodeId) -> bool {
-    // `Rescue` / `Resbody` / `Ensure` are *not* barriers. A write in
-    // the begin body can be observed by a read in the rescue handler
-    // (exception flow carries the partially-executed body state into
-    // the handler), so treating them as exclusive arms would produce
-    // false positives — the cop would flag the begin write as never
-    // observed even though the rescue read sees it. The known v1
-    // limitation is that two writes in different resbodies of the
-    // same Rescue are *not* recognised as mutually exclusive; that
-    // sits in the doc-comment so users see it.
-    matches!(
-        *cx.kind(node),
-        NodeKind::If { .. }
-            | NodeKind::Case { .. }
-            | NodeKind::When { .. }
-            | NodeKind::While { .. }
-            | NodeKind::Until { .. }
-    )
-}
-
-/// `short` is a prefix of `long` (outermost-first comparison). When
-/// `short = chain(w')` and `long = chain(w)`, this returns true iff
-/// `w'` is guaranteed to be reached after `w` — either same chunk
-/// (chains equal) or a strictly shallower chunk that `w` falls back
-/// out to.
-fn chain_is_prefix(short: &[(NodeId, NodeId)], long: &[(NodeId, NodeId)]) -> bool {
-    short.len() <= long.len() && short == &long[..short.len()]
-}
-
-/// Whether `node` is inside the `body` arm of an enclosing `Rescue` or
-/// `Ensure`. A write here can be interrupted by an exception, so we
-/// can't claim it always executes — exclude it from dominating-overwrite
-/// candidates.
-fn is_in_protected_begin_body(cx: &Cx<'_>, root: NodeId, node: NodeId) -> bool {
-    let mut current = node;
-    while let Some(parent) = cx.parent(current).get() {
-        if parent == root {
-            return false;
-        }
-        let parent_kind = *cx.kind(parent);
-        let body = match parent_kind {
-            NodeKind::Rescue { body, .. } | NodeKind::Ensure { body, .. } => body,
-            _ => {
-                current = parent;
-                continue;
-            }
-        };
-        if body.get() == Some(current) {
-            return true;
-        }
-        current = parent;
-    }
-    false
-}
-
-/// Two chains describe compatible control-flow paths iff no shared
-/// branch barrier disagrees on which arm each chain is inside.
-/// Sequential `if`s (different barriers) are compatible; sibling
-/// arms of the *same* barrier are not.
-fn paths_compatible(a: &[(NodeId, NodeId)], b: &[(NodeId, NodeId)]) -> bool {
-    for (barrier_a, arm_a) in a {
-        for (barrier_b, arm_b) in b {
-            if barrier_a == barrier_b && arm_a != arm_b {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-fn classify(
-    cx: &Cx<'_>,
-    id: NodeId,
-    writes: &mut Vec<Write>,
-    reads: &mut Vec<Read>,
-    candidates: &mut Vec<Candidate>,
-) {
-    match *cx.kind(id) {
-        NodeKind::Lvasgn { name, value } if value.get().is_some() => {
-            // Plain `x = 1` (and the per-target `Lvasgn` nodes inside an
-            // `Mlhs`, since `translate_target` emits a value-less form
-            // for those — they are picked up in the `Masgn` arm).
-            push_local_write(cx, id, name, value, cx.range(id).end, writes);
-        }
-        NodeKind::OpAsgn { target, .. }
-        | NodeKind::OrAsgn { target, .. }
-        | NodeKind::AndAsgn { target, .. } => {
-            // `x op= rhs` is semantically `x = x op rhs`: record the read
-            // of `x` and a write whose offense range is the variable name.
-            if let NodeKind::Lvasgn { name, .. } = *cx.kind(target) {
-                reads.push(Read {
-                    name,
-                    pos: cx.range(target).start,
-                    node: target,
-                });
-                if !cx.symbol_str(name).starts_with('_') {
-                    writes.push(Write {
-                        name,
-                        end: cx.range(id).end,
-                        range: cx.range(target),
-                        kind: WriteKind::Operator {
-                            op: operator_text(cx, id),
-                            autocorrect: matches!(*cx.kind(id), NodeKind::OpAsgn { .. }),
-                        },
-                        node: id,
-                    });
-                }
-            }
-        }
-        NodeKind::Masgn { lhs, .. } => {
-            let asgn_end = cx.range(id).end;
-            collect_mlhs_targets(cx, lhs, asgn_end, writes);
-        }
-        NodeKind::Resbody { var, .. } => {
-            if let Some(var_id) = var.get()
-                && let NodeKind::Lvasgn { name, .. } = *cx.kind(var_id)
-                && !cx.symbol_str(name).starts_with('_')
-            {
-                writes.push(Write {
-                    name,
-                    end: cx.range(var_id).end,
-                    range: cx.range(var_id),
-                    kind: WriteKind::Exception,
-                    node: var_id,
-                });
-            }
-        }
-        NodeKind::Lvar(name) => {
-            reads.push(Read {
-                name,
-                pos: cx.range(id).start,
-                node: id,
-            });
-        }
-        NodeKind::Send {
-            receiver,
-            method,
-            args,
-        } if receiver == OptNodeId::NONE && cx.list(args).is_empty() => {
-            candidates.push(Candidate { name: method });
-        }
-        _ => {}
-    }
-}
-
-/// Walk an `Mlhs` (or anything that decomposes into target write nodes)
-/// and push every `Lvasgn` target as a local-variable write. Nested
-/// destructuring `a, (b, c) = …` produces nested `Mlhs`, so this
-/// recurses through inner `Mlhs` nodes.
-fn collect_mlhs_targets(cx: &Cx<'_>, lhs: NodeId, asgn_end: u32, writes: &mut Vec<Write>) {
-    match *cx.kind(lhs) {
-        NodeKind::Mlhs(list) => {
-            for &target in cx.list(list) {
-                collect_mlhs_targets(cx, target, asgn_end, writes);
-            }
-        }
-        NodeKind::Lvasgn { name, .. } => {
-            push_multiple_write(cx, lhs, name, asgn_end, writes);
-        }
-        _ => {
-            // Other target kinds (`Ivasgn`, `Casgn`, …) are not local
-            // variables, so this cop does not flag them.
-        }
-    }
-}
-
-fn push_local_write(
-    cx: &Cx<'_>,
-    node: NodeId,
-    name: Symbol,
-    value: OptNodeId,
-    asgn_end: u32,
-    writes: &mut Vec<Write>,
-) {
-    let name_str = cx.symbol_str(name);
-    if name_str.starts_with('_') {
-        return;
-    }
-    writes.push(Write {
-        name,
-        end: asgn_end,
-        range: assignment_name_range(cx, node, name_str),
-        kind: WriteKind::Local { value },
-        node,
-    });
-}
-
-fn push_multiple_write(
-    cx: &Cx<'_>,
-    node: NodeId,
-    name: Symbol,
-    asgn_end: u32,
-    writes: &mut Vec<Write>,
-) {
-    let name_str = cx.symbol_str(name);
-    if name_str.starts_with('_') {
-        return;
-    }
-    writes.push(Write {
-        name,
-        end: asgn_end,
-        range: assignment_name_range(cx, node, name_str),
-        kind: WriteKind::Multiple,
-        node,
-    });
 }
 
 fn operator_text(cx: &Cx<'_>, node: NodeId) -> &'static str {
@@ -887,6 +668,36 @@ mod tests {
                   :rescued
                 end
             "#});
+    }
+
+    // For-loop iteration variable: now inspected via VarSemanticModel's
+    // `For.var` assignment tracking (matches RuboCop). Reported, not
+    // autocorrected.
+
+    #[test]
+    fn for_loop_variable_flags_when_unused() {
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            for i in [1, 2]
+                ^ Useless assignment to variable - `i`.
+              do_something
+            end
+        "#});
+    }
+
+    #[test]
+    fn for_loop_variable_used_is_not_flagged() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+                for i in [1, 2]
+                  puts i
+                end
+            "#});
+    }
+
+    #[test]
+    fn for_loop_unused_variable_is_not_autocorrected() {
+        // RuboCop rewrites the index to `_`; Murphy reports without a fix.
+        let run = run_cop_with_edits::<UselessAssignment>("for i in [1, 2]\n  do_something\nend\n");
+        assert_eq!(run.edits.len(), 0);
     }
 
     // murphy-xek: flow-sensitive dataflow — overwrite-before-read +

@@ -246,15 +246,40 @@ impl VarSemanticModel {
             },
         );
 
-        // Seed the work stack with the root's children, all owned by root.
+        // Seed the work stack.  When the root node is itself a scope boundary
+        // (the common `def foo; … end` shape), its scope is already inserted
+        // above, so seed its children under the root scope.  When the root is
+        // a plain semantic node — e.g. a one-statement file `x = 1` whose root
+        // is the `Lvasgn` itself — push the root node so it flows through its
+        // own match arm and the assignment is recorded.  Pushing root into a
+        // scope-creating arm would self-parent the root scope, so only the
+        // non-scope case takes the single-node path.
+        let root_is_scope = matches!(
+            *ast.kind(root),
+            NodeKind::Block { .. }
+                | NodeKind::Numblock { .. }
+                | NodeKind::Itblock { .. }
+                | NodeKind::Def { .. }
+                | NodeKind::Defs { .. }
+                | NodeKind::Lambda
+                | NodeKind::Class { .. }
+                | NodeKind::Module { .. }
+                | NodeKind::Sclass { .. }
+        );
         // Push in reverse order so that `pop()` yields source-order nodes.
-        let mut stack: Vec<WorkItem> = ast
-            .children(root)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|node| WorkItem { node, scope: root })
-            .collect();
+        let mut stack: Vec<WorkItem> = if root_is_scope {
+            ast.children(root)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|node| WorkItem { node, scope: root })
+                .collect()
+        } else {
+            vec![WorkItem {
+                node: root,
+                scope: root,
+            }]
+        };
 
         while let Some(WorkItem { node, scope }) = stack.pop() {
             match *ast.kind(node) {
@@ -769,6 +794,41 @@ mod tests {
     /// Helper: resolve a `Symbol` to its string.
     fn resolve_sym<'a>(ast: &'a Ast, sym: Symbol) -> &'a str {
         ast.interner().resolve(sym.0)
+    }
+
+    #[test]
+    fn root_lvasgn_assignment_is_collected() {
+        // One-statement file: the root node IS the `Lvasgn`, not a scope
+        // boundary. `build` must still record the assignment in the root scope.
+        let ast = translate("x = 1", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let scope = model.scope(ast.root()).expect("root scope");
+        let x = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "x")
+            .expect("x must be collected when the root node is the assignment");
+        assert_eq!(x.assignments.len(), 1);
+        assert!(
+            !x.assignments[0].is_referenced,
+            "unused root assignment should not be referenced"
+        );
+    }
+
+    #[test]
+    fn root_masgn_targets_are_collected() {
+        // Root is the `Masgn` itself; both targets must be recorded.
+        let ast = translate("a, b = 1, 2", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let scope = model.scope(ast.root()).expect("root scope");
+        for name in ["a", "b"] {
+            let v = scope
+                .variables
+                .iter()
+                .find(|v| resolve_sym(&ast, v.name) == name)
+                .unwrap_or_else(|| panic!("`{name}` must be collected"));
+            assert_eq!(v.assignments.len(), 1);
+        }
     }
 
     #[test]
