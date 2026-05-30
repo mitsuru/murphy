@@ -17,10 +17,23 @@
 //!   handled by VarSemanticModel which never records them).
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
 #[derive(Default)]
 pub struct ShadowingOuterLocalVariable;
+
+/// Hard scope boundaries in Ruby: def, def self.foo, class, module, singleton class.
+/// Blocks and lambdas are closures — they can see outer locals.
+fn is_hard_scope_boundary(cx: &Cx<'_>, scope_node: NodeId) -> bool {
+    matches!(
+        *cx.kind(scope_node),
+        NodeKind::Def { .. }
+            | NodeKind::Defs { .. }
+            | NodeKind::Class { .. }
+            | NodeKind::Module { .. }
+            | NodeKind::Sclass { .. }
+    )
+}
 
 #[cop(
     name = "Lint/ShadowingOuterLocalVariable",
@@ -38,10 +51,19 @@ impl ShadowingOuterLocalVariable {
         };
 
         for var in scope.variables().iter().filter(|v| v.is_argument) {
-            // Walk up the scope chain to find outer scopes.
-            let mut outer = scope.parent_scope(model);
-            while let Some(s) = outer {
-                if s.variables().iter().any(|v| v.name == var.name) {
+            // Walk up the scope chain, stopping at hard scope boundaries.
+            // In Ruby, `def`, `class`, `module`, and `singleton class` are hard
+            // boundaries — blocks inside them cannot close over variables from
+            // outside those boundaries.
+            let mut current_id = node;
+            loop {
+                let Some(current_scope) = model.scope(current_id) else { break };
+                let Some(parent_id) = current_scope.parent_scope else { break };
+                let Some(parent_scope) = model.scope(parent_id) else { break };
+
+                // Check for shadowing in the parent scope first (a block CAN
+                // close over its enclosing def's locals).
+                if parent_scope.variables().iter().any(|v| v.name == var.name) {
                     let name_str = cx.symbol_str(var.name);
                     let range = cx.node(var.declaration_node).loc.name;
                     cx.emit_offense(
@@ -51,7 +73,14 @@ impl ShadowingOuterLocalVariable {
                     );
                     break;
                 }
-                outer = s.parent_scope(model);
+
+                // Stop walking AFTER checking the parent scope — don't look
+                // beyond a hard boundary (variables don't leak across def/class/etc.).
+                if is_hard_scope_boundary(cx, parent_id) {
+                    break;
+                }
+
+                current_id = parent_id;
             }
         }
     }
@@ -100,6 +129,30 @@ mod tests {
               x = 1
               [1].each do |x|
                            ^ Shadowing outer local variable - `x`.
+                puts x
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn no_offense_when_outer_variable_is_across_def_boundary() {
+        test::<ShadowingOuterLocalVariable>().expect_no_offenses(indoc! {r#"
+            x = 1
+            def m
+              [1].each do |x|
+                puts x
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn no_offense_when_outer_variable_is_across_class_boundary() {
+        test::<ShadowingOuterLocalVariable>().expect_no_offenses(indoc! {r#"
+            x = 1
+            class Foo
+              [1].each do |x|
                 puts x
               end
             end

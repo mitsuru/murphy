@@ -157,7 +157,7 @@ For each `Variable`, for each `Assignment w`:
 
 **Branch chain** — for a node `n`, walk `n.parent` up to the scope root,
 collecting `(barrier, child)` pairs at each branch-introducing ancestor:
-`If`, `Case`, `When`, `Rescue`, `Resbody`, `And`, `Or`.
+`If`, `Case`, `When`, `While`, `Until`.
 
 **Exclusive branches** — two nodes are in exclusive branches when their
 branch chains diverge at the same barrier but in different children.
