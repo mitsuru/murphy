@@ -7,4 +7,5 @@ pub mod duplicate_hash_key;
 pub mod empty_when;
 pub mod unreachable_code;
 pub mod unused_method_argument;
+pub mod underscore_prefixed_variable_name;
 pub mod useless_assignment;

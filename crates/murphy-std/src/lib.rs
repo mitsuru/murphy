@@ -37,6 +37,7 @@ use crate::cops::lint::deprecated_class_methods::DeprecatedClassMethods;
 use crate::cops::lint::duplicate_hash_key::DuplicateHashKey;
 use crate::cops::lint::empty_when::EmptyWhen;
 use crate::cops::lint::unreachable_code::UnreachableCode;
+use crate::cops::lint::underscore_prefixed_variable_name::UnderscorePrefixedVariableName;
 use crate::cops::lint::unused_method_argument::UnusedMethodArgument;
 use crate::cops::lint::useless_assignment::UselessAssignment;
 use crate::cops::murphy::no_receiver_puts::NoReceiverPuts;
@@ -54,6 +55,7 @@ murphy_plugin_api::register_cops!(
     DuplicateHashKey,
     EmptyWhen,
     UnreachableCode,
+    UnderscorePrefixedVariableName,
     UnusedMethodArgument,
     UselessAssignment,
     HashSyntax,
