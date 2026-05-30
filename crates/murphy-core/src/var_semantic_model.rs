@@ -43,7 +43,8 @@ pub struct Assignment {
     pub node_id: NodeId,
     /// Byte position of the assignment's end (exclusive).
     pub end: u32,
-    /// Placeholder for Task 2 branch analysis; always `false` here.
+    /// `true` when at least one later read of this variable can observe this
+    /// write (branch-aware: exclusive-branch reads are excluded).
     pub is_referenced: bool,
 }
 
@@ -53,6 +54,169 @@ pub struct Reference {
     pub node_id: NodeId,
     /// Byte position of the reference start.
     pub pos: u32,
+}
+
+// ── Branch-aware dominance analysis ──────────────────────────────────────────
+
+/// Walk up from `node` to `root` via `ast.parent()`, collecting
+/// `(parent, child)` pairs at each branch-introducing ancestor.
+/// Returns the chain reversed (outermost first).
+fn barrier_chain(ast: &Ast, root: NodeId, node: NodeId) -> Vec<(NodeId, NodeId)> {
+    let mut chain: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == root {
+            break;
+        }
+        if is_branch_barrier(ast, parent) {
+            chain.push((parent, current));
+        }
+        current = parent;
+    }
+    chain.reverse();
+    chain
+}
+
+/// Returns `true` for nodes that introduce exclusive branches.
+/// `Rescue`/`Resbody`/`Ensure` are intentionally NOT barriers.
+fn is_branch_barrier(ast: &Ast, node: NodeId) -> bool {
+    matches!(
+        *ast.kind(node),
+        NodeKind::If { .. }
+            | NodeKind::Case { .. }
+            | NodeKind::When { .. }
+            | NodeKind::While { .. }
+            | NodeKind::Until { .. }
+    )
+}
+
+/// Returns `true` if `short` is a prefix of `long` (outermost-first).
+/// When `short = chain(w')` and `long = chain(w)`, this means `w'` is
+/// in the same chunk as `w` or a shallower one that `w` must fall through to.
+fn chain_is_prefix(short: &[(NodeId, NodeId)], long: &[(NodeId, NodeId)]) -> bool {
+    short.len() <= long.len() && short == &long[..short.len()]
+}
+
+/// Returns `false` if any shared barrier has conflicting arm choices
+/// (i.e. the two nodes are in exclusive branches).
+fn paths_compatible(a: &[(NodeId, NodeId)], b: &[(NodeId, NodeId)]) -> bool {
+    for (barrier_a, arm_a) in a {
+        for (barrier_b, arm_b) in b {
+            if barrier_a == barrier_b && arm_a != arm_b {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Returns `true` if `node` is inside the `body` arm of an enclosing `Rescue`
+/// or `Ensure`. Writes here can be interrupted by exceptions, so they don't
+/// dominate later writes.
+fn is_in_protected_begin_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == root {
+            return false;
+        }
+        let parent_kind = *ast.kind(parent);
+        let body = match parent_kind {
+            NodeKind::Rescue { body, .. } | NodeKind::Ensure { body, .. } => body,
+            _ => {
+                current = parent;
+                continue;
+            }
+        };
+        if body.get() == Some(current) {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// Returns `true` if `node` is inside the loop body of an enclosing `While`,
+/// `Until`, or `For`. Assignments here are conservatively marked as referenced
+/// since the next loop iteration may read them.
+fn is_in_loop_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    loop {
+        let parent = match ast.parent(current).get() {
+            Some(p) => p,
+            None => return false,
+        };
+        if parent == root {
+            return false;
+        }
+        match *ast.kind(parent) {
+            NodeKind::While { body, .. } | NodeKind::Until { body, .. }
+                if body.get() == Some(current) =>
+            {
+                return true;
+            }
+            NodeKind::For { body, .. } if body.get() == Some(current) => {
+                return true;
+            }
+            _ => {}
+        }
+        current = parent;
+    }
+}
+
+/// Compute `is_referenced` for every `Assignment` in `scope` once the DFS
+/// has fully populated the scope's variables, assignments, and references.
+fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeInfo) {
+    for var in &mut scope.variables {
+        // Pre-compute branch chains for all assignments and references.
+        let asgn_chains: Vec<Vec<(NodeId, NodeId)>> = var
+            .assignments
+            .iter()
+            .map(|a| barrier_chain(ast, scope_root, a.node_id))
+            .collect();
+        let ref_chains: Vec<Vec<(NodeId, NodeId)>> = var
+            .references
+            .iter()
+            .map(|r| barrier_chain(ast, scope_root, r.node_id))
+            .collect();
+
+        for i in 0..var.assignments.len() {
+            let asgn_node = var.assignments[i].node_id;
+            let asgn_end = var.assignments[i].end;
+
+            // Loop body: always referenced (next iteration may read it).
+            if is_in_loop_body(ast, scope_root, asgn_node) {
+                var.assignments[i].is_referenced = true;
+                continue;
+            }
+
+            // Earliest later read that is on a compatible control-flow path.
+            let next_read_pos = var
+                .references
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.pos > asgn_end)
+                .filter(|(k, _)| paths_compatible(&ref_chains[*k], &asgn_chains[i]))
+                .map(|(_, r)| r.pos)
+                .min();
+
+            // Earliest later write that dominates this write (same or shallower
+            // branch), not in a protected begin body.
+            let dominating_overwrite = var
+                .assignments
+                .iter()
+                .enumerate()
+                .filter(|(j, w)| *j != i && w.end > asgn_end)
+                .filter(|(j, _)| chain_is_prefix(&asgn_chains[*j], &asgn_chains[i]))
+                .filter(|(_, w)| !is_in_protected_begin_body(ast, scope_root, w.node_id))
+                .min_by_key(|(_, w)| w.end);
+
+            var.assignments[i].is_referenced = match (next_read_pos, dominating_overwrite) {
+                (None, _) => false,
+                (Some(r), Some((_, w))) if w.end <= r => false,
+                (Some(_), _) => true,
+            };
+        }
+    }
 }
 
 // ── Internal work item ────────────────────────────────────────────────────────
@@ -363,6 +527,11 @@ impl VarSemanticModel {
             }
         }
 
+        // Post-pass: compute is_referenced for every assignment in every scope.
+        for (&root_id, scope) in scopes.iter_mut() {
+            analyze_scope_is_referenced(ast, root_id, scope);
+        }
+
         VarSemanticModel { scopes }
     }
 
@@ -574,5 +743,106 @@ mod tests {
             ast.interner().resolve(v.name.0) == "arr"
         });
         assert!(arr_in_block.is_none(), "`arr` must NOT appear in the block scope");
+    }
+
+    // ── is_referenced tests ───────────────────────────────────────────────────
+
+    /// Helper: find the first scope node matching a predicate.
+    fn find_scope_node(
+        ast: &Ast,
+        root: NodeId,
+        pred: impl Fn(&NodeKind) -> bool,
+    ) -> Option<NodeId> {
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if pred(ast.kind(node)) {
+                return Some(node);
+            }
+            let children: Vec<NodeId> = ast.children(node).collect();
+            for c in children.into_iter().rev() {
+                stack.push(c);
+            }
+        }
+        None
+    }
+
+    /// Helper: resolve a `Symbol` to its string.
+    fn resolve_sym<'a>(ast: &'a Ast, sym: Symbol) -> &'a str {
+        ast.interner().resolve(sym.0)
+    }
+
+    #[test]
+    fn unused_assignment_not_referenced() {
+        let ast = translate("def foo; x = 1; end", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let def_id =
+            find_scope_node(&ast, ast.root(), |k| matches!(k, NodeKind::Def { .. })).unwrap();
+        let scope = model.scope(def_id).unwrap();
+        let x = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "x")
+            .unwrap();
+        assert!(!x.assignments[0].is_referenced, "unused x should not be referenced");
+    }
+
+    #[test]
+    fn used_assignment_is_referenced() {
+        let ast = translate("def foo; x = 1; puts x; end", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let def_id =
+            find_scope_node(&ast, ast.root(), |k| matches!(k, NodeKind::Def { .. })).unwrap();
+        let scope = model.scope(def_id).unwrap();
+        let x = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "x")
+            .unwrap();
+        assert!(x.assignments[0].is_referenced, "used x should be referenced");
+    }
+
+    #[test]
+    fn exclusive_branches_both_referenced() {
+        // Both branches assign x; after the if, x is read — both writes are referenced.
+        let ast =
+            translate("def foo(c); if c; x = 1; else; x = 2; end; puts x; end", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let def_id =
+            find_scope_node(&ast, ast.root(), |k| matches!(k, NodeKind::Def { .. })).unwrap();
+        let scope = model.scope(def_id).unwrap();
+        let x = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "x")
+            .unwrap();
+        assert!(
+            x.assignments.iter().all(|a| a.is_referenced),
+            "both branch assignments should be referenced"
+        );
+    }
+
+    #[test]
+    fn overwrite_before_read_not_referenced() {
+        // x = 1; x = 2; puts x — first assignment is overwritten before read.
+        let ast = translate("def foo; x = 1; x = 2; puts x; end", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let def_id =
+            find_scope_node(&ast, ast.root(), |k| matches!(k, NodeKind::Def { .. })).unwrap();
+        let scope = model.scope(def_id).unwrap();
+        let x = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "x")
+            .unwrap();
+        // First assignment (x = 1) should NOT be referenced (overwritten before read).
+        assert!(
+            !x.assignments[0].is_referenced,
+            "first overwritten assignment should not be referenced"
+        );
+        // Second assignment (x = 2) SHOULD be referenced.
+        assert!(
+            x.assignments[1].is_referenced,
+            "second assignment that is read should be referenced"
+        );
     }
 }
