@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crate::ast::{Ast, collect_children};
 use crate::interner::InternBuilder;
 use crate::node::{
-    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range,
-    SourceBuffer, SourceToken, StringId, Symbol,
+    AstNode, CallClosingLoc, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId,
+    Range, SourceBuffer, SourceToken, StringId, Symbol,
 };
 
 /// Builds an [`Ast`]. Push nodes and lists; `finish` computes parent links
@@ -17,6 +17,7 @@ pub struct AstBuilder {
     interner: InternBuilder,
     comments: Vec<Comment>,
     source_tokens: Vec<SourceToken>,
+    call_closing_locs: Vec<CallClosingLoc>,
     source: SourceBuffer,
 }
 
@@ -29,6 +30,7 @@ impl AstBuilder {
             interner: InternBuilder::default(),
             comments: Vec::new(),
             source_tokens: Vec::new(),
+            call_closing_locs: Vec::new(),
             source: SourceBuffer {
                 text: source_text.into(),
                 path: path.into(),
@@ -104,6 +106,12 @@ impl AstBuilder {
         self.source_tokens.push(token);
     }
 
+    /// Record Prism's parser-provided `CallNode::closing_loc()` for a call.
+    pub fn add_call_closing_loc(&mut self, node: NodeId, closing: Range) {
+        self.call_closing_locs
+            .push(CallClosingLoc { node, closing });
+    }
+
     /// Finish building. Computes every node's `parent` from the structure
     /// in one pass, then returns the immutable [`Ast`]. `root` keeps
     /// `parent == NONE`.
@@ -130,12 +138,14 @@ impl AstBuilder {
         // with the standalone newline token).
         self.source_tokens
             .sort_by_key(|t| (t.range.start, t.range.end));
+        self.call_closing_locs.sort_by_key(|entry| entry.node.0);
         Ast {
             nodes: self.nodes,
             node_lists: self.node_lists,
             interner: self.interner.finish(),
             comments: self.comments,
             source_tokens: self.source_tokens,
+            call_closing_locs: self.call_closing_locs,
             source: self.source,
             root,
         }

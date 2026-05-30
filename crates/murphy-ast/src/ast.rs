@@ -2,8 +2,8 @@
 
 use crate::interner::Interner;
 use crate::node::{
-    AstNode, Comment, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range, SourceBuffer,
-    SourceToken,
+    AstNode, CallClosingLoc, Comment, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range,
+    SourceBuffer, SourceToken,
 };
 
 #[inline]
@@ -697,6 +697,7 @@ pub struct Ast {
     pub(crate) interner: Interner,
     pub(crate) comments: Vec<Comment>,
     pub(crate) source_tokens: Vec<SourceToken>,
+    pub(crate) call_closing_locs: Vec<CallClosingLoc>,
     pub(crate) source: SourceBuffer,
     pub(crate) root: NodeId,
 }
@@ -819,6 +820,11 @@ impl Ast {
         &self.source_tokens
     }
 
+    /// Sparse parser-provided closing parens for call nodes.
+    pub fn call_closing_locs(&self) -> &[CallClosingLoc] {
+        &self.call_closing_locs
+    }
+
     /// The string interner.
     pub fn interner(&self) -> &Interner {
         &self.interner
@@ -839,6 +845,7 @@ impl Ast {
             interner_offsets: &self.interner.offsets,
             comments: &self.comments,
             sorted_tokens: &self.source_tokens,
+            call_closing_locs: &self.call_closing_locs,
             source: &self.source.text,
             root: self.root,
         }
@@ -861,6 +868,8 @@ pub struct AstRawParts<'a> {
     pub comments: &'a [Comment],
     /// The source tokens, in source order.
     pub sorted_tokens: &'a [SourceToken],
+    /// Sparse parser-provided closing parens for call nodes.
+    pub call_closing_locs: &'a [CallClosingLoc],
     /// The full source text (UTF-8).
     pub source: &'a str,
     /// The arena root node.

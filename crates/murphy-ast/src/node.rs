@@ -88,6 +88,17 @@ pub struct NodeLoc {
     pub name: Range,
 }
 
+/// Parser-provided closing paren for a call node's own argument list.
+///
+/// Stored out-of-line so [`NodeLoc`] stays ABI-stable and non-call nodes pay
+/// no per-node storage cost.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallClosingLoc {
+    pub node: NodeId,
+    pub closing: Range,
+}
+
 /// A compact source token for RuboCop-style layout cops.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

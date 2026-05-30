@@ -19,8 +19,8 @@ pub use builder::AstBuilder;
 pub use interner::Interner;
 pub use kinds::{KIND_PATTERN_NAMES, NodeKindTag, pattern_name, tag_from_pattern_name};
 pub use node::{
-    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range,
-    SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
+    AstNode, CallClosingLoc, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId,
+    Range, SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
 };
 pub use serialize::{FORMAT_VERSION, HEADER_LEN, MAGIC, SerError, content_hash};
 pub use sexp::ast_to_sexp;

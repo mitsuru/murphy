@@ -12,8 +12,8 @@
 use crate::ast::Ast;
 use crate::interner::Interner;
 use crate::node::{
-    AstNode, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range,
-    SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
+    AstNode, CallClosingLoc, Comment, CommentKind, NodeId, NodeKind, NodeList, NodeLoc, OptNodeId,
+    Range, SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
 };
 use sha2::{Digest, Sha256};
 
@@ -903,6 +903,18 @@ fn read_range(cur: &mut &[u8]) -> Result<Range, SerError> {
     })
 }
 
+fn write_call_closing_loc(entry: CallClosingLoc, out: &mut Vec<u8>) {
+    put_u32(out, entry.node.0);
+    write_range(entry.closing, out);
+}
+
+fn read_call_closing_loc(cur: &mut &[u8]) -> Result<CallClosingLoc, SerError> {
+    Ok(CallClosingLoc {
+        node: NodeId(get_u32(cur)?),
+        closing: read_range(cur)?,
+    })
+}
+
 fn write_node_list(l: NodeList, out: &mut Vec<u8>) {
     put_u32(out, l.start);
     put_u32(out, l.len);
@@ -1342,6 +1354,9 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
     for id in &ast.node_lists {
         check_node(id.0)?;
     }
+    for entry in &ast.call_closing_locs {
+        check_node(entry.node.0)?;
+    }
     if ast.root.0 >= node_count {
         return Err(SerError::BadRoot {
             id: ast.root.0,
@@ -1410,6 +1425,14 @@ impl Ast {
 
         // 9. root
         put_u32(&mut out, self.root.0);
+
+        // 10. call closing-loc sparse table. This optional tail preserves
+        // FORMAT_VERSION: old readers ignore it, and new readers default old
+        // cache entries to an empty table.
+        put_u64(&mut out, self.call_closing_locs.len() as u64);
+        for entry in &self.call_closing_locs {
+            write_call_closing_loc(*entry, &mut out);
+        }
 
         Ok(out)
     }
@@ -1489,12 +1512,24 @@ impl Ast {
         // 9. root
         let root = NodeId(get_u32(&mut cur)?);
 
+        // 10. call closing-loc sparse table. Absent in FORMAT_VERSION 6
+        // buffers written before this additive tail was introduced.
+        let mut call_closing_locs = Vec::new();
+        if !cur.is_empty() {
+            let count = usize::try_from(get_u64(&mut cur)?).map_err(|_| SerError::UnexpectedEof)?;
+            call_closing_locs = Vec::with_capacity(count);
+            for _ in 0..count {
+                call_closing_locs.push(read_call_closing_loc(&mut cur)?);
+            }
+        }
+
         let ast = Ast {
             nodes,
             node_lists,
             interner: Interner { blob, offsets },
             comments,
             source_tokens,
+            call_closing_locs,
             source: SourceBuffer { text, path },
             root,
         };
@@ -1505,11 +1540,11 @@ impl Ast {
 
 #[cfg(test)]
 mod tests {
-    use crate::SerError;
     use crate::builder::AstBuilder;
     use crate::node::{
         CommentKind, NodeKind, NodeList, OptNodeId, Range, SourceToken, SourceTokenKind,
     };
+    use crate::SerError;
 
     fn r(a: u32, b: u32) -> Range {
         Range { start: a, end: b }
@@ -2045,6 +2080,37 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_call_closing_locs() {
+        let mut b = AstBuilder::new("foo(1)", "t.rb");
+        let method = b.intern_symbol("foo");
+        let args = b.push_list(&[]);
+        let root = b.push_named(
+            NodeKind::Send {
+                receiver: OptNodeId::NONE,
+                method,
+                args,
+            },
+            r(0, 6),
+            r(0, 3),
+        );
+        b.add_call_closing_loc(root, r(5, 6));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
+        assert_eq!(restored.call_closing_locs(), ast.call_closing_locs());
+    }
+
+    #[test]
+    fn from_bytes_accepts_pre_call_closing_loc_tail_buffers() {
+        let ast = simple_ast();
+        let mut bytes = ast.to_bytes().unwrap();
+        bytes.truncate(bytes.len() - std::mem::size_of::<u64>());
+
+        let restored = crate::Ast::from_bytes(&bytes).expect("old cache body without tail");
+        assert!(restored.call_closing_locs().is_empty());
+    }
+
+    #[test]
     fn round_trip_all_source_token_kinds() {
         // Pin every discriminant — especially the tail-added Comma/LeftBrace/
         // RightBrace (es99.8) — through a serialize → deserialize cycle so a
@@ -2307,10 +2373,11 @@ mod tests {
     fn from_bytes_rejects_non_utf8_path() {
         let ast = simple_ast();
         let mut bytes = ast.to_bytes().unwrap();
-        // The path is the last variable-length field before the 4-byte root.
-        // Mutate the final byte of the path payload to an invalid UTF-8 lead.
-        let root_at = bytes.len() - 4;
-        bytes[root_at - 1] = 0xFF;
+        let path_at = bytes
+            .windows(b"t.rb".len())
+            .position(|window| window == b"t.rb")
+            .expect("encoded source path present");
+        bytes[path_at] = 0xFF;
         assert!(matches!(
             crate::Ast::from_bytes(&bytes),
             Err(SerError::PathNotUtf8)
