@@ -26,13 +26,14 @@
 //!
 //! ## Autocorrect
 //!
-//! - `recv == nil` → `recv.nil?`: single surgical edit replacing `[recv.end..node.end]`
-//!   with `.nil?`.
-//! - `recv != nil` → `!recv.nil?`: whole-node replacement with `!<recv_src>.nil?`.
-//!   This is a structural rewrite (adding a `!` prefix), so whole-node interpolation
-//!   is the cleaner choice per `.claude/rules/autocorrect-pattern.md`.
+//! - `recv == nil` → `(recv).nil?`: whole-node replacement wrapping the receiver
+//!   in parentheses for safety with compound receivers (e.g. `a + b == nil` → `(a + b).nil?`).
+//! - `recv != nil` → `!(recv).nil?`: whole-node replacement adding a `!` prefix with the
+//!   receiver wrapped in parentheses for safety.
+//!   Both use whole-node interpolation as per `.claude/rules/autocorrect-pattern.md`
+//!   (structural rewrites, not simple surgical deletes).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
 
 const MSG: &str = "Prefer the use of the `nil?` predicate.";
 
@@ -88,14 +89,15 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     match method_name {
         "==" => {
-            // recv == nil → recv.nil?
-            // Surgical edit: replace everything after the receiver with `.nil?`
-            let tail = Range {
-                start: recv_range.end,
-                end: node_range.end,
-            };
+            // recv == nil → (recv).nil?
+            // Whole-node replacement wrapping the receiver in parentheses to
+            // preserve semantics for compound receivers:
+            //   `a + b == nil` → `(a + b).nil?` rather than `a + b.nil?`
+            // For simple receivers like `x`, `(x).nil?` is valid Ruby.
+            let recv_src = cx.raw_source(recv_range);
+            let replacement = format!("({recv_src}).nil?");
             cx.emit_offense(node_range, MSG, None);
-            cx.emit_edit(tail, ".nil?");
+            cx.emit_edit(node_range, &replacement);
         }
         "!=" => {
             // recv != nil → !recv.nil?
@@ -132,7 +134,7 @@ mod tests {
                 x == nil
                 ^^^^^^^^ Prefer the use of the `nil?` predicate.
             "},
-            "x.nil?\n",
+            "(x).nil?\n",
         );
     }
 
@@ -143,7 +145,7 @@ mod tests {
                 foo.bar == nil
                 ^^^^^^^^^^^^^^ Prefer the use of the `nil?` predicate.
             "},
-            "foo.bar.nil?\n",
+            "(foo.bar).nil?\n",
         );
     }
 
@@ -157,7 +159,7 @@ mod tests {
                 end
             "},
             indoc! {"
-                if x.nil?
+                if (x).nil?
                   y
                 end
             "},
@@ -188,7 +190,18 @@ mod tests {
         );
     }
 
-    // -----  with complex receiver — parens wrap for safety -----
+    // ----- `==` and `!=` with complex receivers — parens wrap for safety -----
+
+    #[test]
+    fn flags_eq_nil_with_operator_receiver() {
+        // Receiver is an operator call — wrapping in parens preserves semantics.
+        // Without parens: `a + b.nil?` has wrong precedence.
+        // With parens: `(a + b).nil?` is correct.
+        test::<NilComparison>().expect_offense(indoc! {"
+            a + b == nil
+            ^^^^^^^^^^^^ Prefer the use of the `nil?` predicate.
+        "});
+    }
 
     #[test]
     fn flags_neq_nil_with_operator_receiver() {
@@ -205,7 +218,7 @@ mod tests {
 
     #[test]
     fn accepts_nil_predicate() {
-        test::<NilComparison>().expect_no_offenses("x.nil?\n");
+        test::<NilComparison>().expect_no_offenses("(x).nil?\n");
     }
 
     #[test]
