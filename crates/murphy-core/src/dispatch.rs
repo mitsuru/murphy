@@ -192,8 +192,6 @@ fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink, var_model: &VarSemanticModel)
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
         var_model: var_model as *const VarSemanticModel,
-        magic_comments: p.magic_comments.as_ptr(),
-        magic_comments_len: p.magic_comments.len(),
     }
 }
 

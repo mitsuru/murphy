@@ -3,8 +3,9 @@
 use std::marker::PhantomData;
 
 use murphy_ast::{
-    AstNode, CallClosingLoc, CallOperatorLoc, Comment, MagicComment, MagicCommentKind, NodeId,
-    NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind, collect_children, slot_layout,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, MagicComment, MagicCommentKind,
+    NodeId, NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind, collect_children,
+    slot_layout,
 };
 
 use crate::abi::CxRaw;
@@ -485,10 +486,98 @@ impl<'a> Cx<'a> {
         unsafe { slice(self.raw.call_operator_locs, self.raw.call_operator_locs_len) }
     }
 
-    fn find_magic_comment(&self, kind: MagicCommentKind) -> Option<&'a MagicComment> {
+    fn find_magic_comment(&self, kind: MagicCommentKind) -> Option<MagicComment> {
         self.magic_comments()
-            .iter()
+            .into_iter()
             .find(|comment| comment.kind == kind)
+    }
+
+    fn source_line_range_without_newline(&self, offset: usize) -> Range {
+        let source = self.source().as_bytes();
+        let start = source[..offset]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |pos| pos + 1);
+        let mut end = source[offset..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(source.len(), |pos| offset + pos);
+        if end > start && source[end - 1] == b'\r' {
+            end -= 1;
+        }
+        Range {
+            start: start as u32,
+            end: end as u32,
+        }
+    }
+
+    fn magic_comment_kind(key: &str) -> Option<MagicCommentKind> {
+        let normalized = key.replace('-', "_").to_ascii_lowercase();
+        match normalized.as_str() {
+            "frozen_string_literal" => Some(MagicCommentKind::FrozenStringLiteral),
+            "encoding" => Some(MagicCommentKind::Encoding),
+            _ => None,
+        }
+    }
+
+    fn parse_magic_comment(&self, comment: Comment) -> Option<MagicComment> {
+        if comment.kind != CommentKind::Inline {
+            return None;
+        }
+        let text = self.raw_source(comment.range);
+        let bytes = text.as_bytes();
+        if bytes.first() != Some(&b'#') {
+            return None;
+        }
+        let mut key_start = 1;
+        while key_start < bytes.len() && bytes[key_start].is_ascii_whitespace() {
+            key_start += 1;
+        }
+        let mut key_end = key_start;
+        while key_end < bytes.len()
+            && (bytes[key_end].is_ascii_alphanumeric()
+                || bytes[key_end] == b'_'
+                || bytes[key_end] == b'-')
+        {
+            key_end += 1;
+        }
+        if key_start == key_end {
+            return None;
+        }
+        let mut sep = key_end;
+        while sep < bytes.len() && bytes[sep].is_ascii_whitespace() {
+            sep += 1;
+        }
+        if !matches!(bytes.get(sep), Some(b':' | b'=')) {
+            return None;
+        }
+        let mut value_start = sep + 1;
+        while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+            value_start += 1;
+        }
+        let mut value_end = bytes.len();
+        while value_end > value_start && bytes[value_end - 1].is_ascii_whitespace() {
+            value_end -= 1;
+        }
+
+        let kind = Self::magic_comment_kind(&text[key_start..key_end])?;
+        let base = comment.range.start;
+        let value = &text[value_start..value_end];
+        Some(MagicComment {
+            range: comment.range,
+            key_range: Range {
+                start: base + key_start as u32,
+                end: base + key_end as u32,
+            },
+            value_range: Range {
+                start: base + value_start as u32,
+                end: base + value_end as u32,
+            },
+            kind,
+            value_bool: u8::from(
+                kind == MagicCommentKind::FrozenStringLiteral && value.eq_ignore_ascii_case("true"),
+            ),
+        })
     }
 
     fn call_operator_range(&self, id: NodeId) -> Range {
@@ -2333,22 +2422,38 @@ impl<'a> Cx<'a> {
     }
 
     /// The file's structured magic comments, in source order.
-    pub fn magic_comments(&self) -> &'a [MagicComment] {
-        unsafe { slice(self.raw.magic_comments, self.raw.magic_comments_len) }
+    pub fn magic_comments(&self) -> Vec<MagicComment> {
+        let mut comments = Vec::new();
+        if self.source().as_bytes().starts_with(b"#!") {
+            comments.push(MagicComment {
+                range: self.source_line_range_without_newline(0),
+                key_range: Range::ZERO,
+                value_range: Range::ZERO,
+                kind: MagicCommentKind::Shebang,
+                value_bool: 0,
+            });
+        }
+        comments.extend(
+            self.comments()
+                .iter()
+                .filter_map(|comment| self.parse_magic_comment(*comment)),
+        );
+        comments.sort_by_key(|comment| comment.range.start);
+        comments
     }
 
     /// The file's shebang line, if present.
-    pub fn shebang(&self) -> Option<&'a MagicComment> {
+    pub fn shebang(&self) -> Option<MagicComment> {
         self.find_magic_comment(MagicCommentKind::Shebang)
     }
 
     /// The file's `frozen_string_literal` magic comment, if present.
-    pub fn frozen_string_literal_comment(&self) -> Option<&'a MagicComment> {
+    pub fn frozen_string_literal_comment(&self) -> Option<MagicComment> {
         self.find_magic_comment(MagicCommentKind::FrozenStringLiteral)
     }
 
     /// The file's `encoding` magic comment, if present.
-    pub fn encoding_comment(&self) -> Option<&'a MagicComment> {
+    pub fn encoding_comment(&self) -> Option<MagicComment> {
         self.find_magic_comment(MagicCommentKind::Encoding)
     }
 
@@ -2638,8 +2743,6 @@ mod tests {
             call_operator_locs: p.call_operator_locs.as_ptr(),
             call_operator_locs_len: p.call_operator_locs.len(),
             var_model: std::ptr::null(),
-            magic_comments: p.magic_comments.as_ptr(),
-            magic_comments_len: p.magic_comments.len(),
         }
     }
 
