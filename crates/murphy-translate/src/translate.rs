@@ -1459,11 +1459,15 @@ impl Translator {
         // Pin operator: `^x` (PinnedVariableNode) or `^(expr)` (PinnedExpressionNode).
         if let Some(pv) = node.as_pinned_variable_node() {
             let inner = self.translate_node(&pv.variable());
-            return self.builder.push(NodeKind::Pin(inner), Self::node_range(node));
+            return self
+                .builder
+                .push(NodeKind::Pin(inner), Self::node_range(node));
         }
         if let Some(pe) = node.as_pinned_expression_node() {
             let inner = self.translate_node(&pe.expression());
-            return self.builder.push(NodeKind::Pin(inner), Self::node_range(node));
+            return self
+                .builder
+                .push(NodeKind::Pin(inner), Self::node_range(node));
         }
         // Literals / nested constants / unsupported kinds (MatchAs etc).
         self.translate_node(node)
@@ -3620,8 +3624,10 @@ mod tests {
         let ast = translate("case x\nin Integer if x > 0\n  :pos\nend\n", "t.rb");
         let sexp = murphy_ast::ast_to_sexp(&ast);
         assert!(
-            sexp.contains("(if_guard
-"),
+            sexp.contains(
+                "(if_guard
+"
+            ),
             "if_guard must appear in the guard slot: {sexp}"
         );
         assert!(
@@ -3633,11 +3639,16 @@ mod tests {
     #[test]
     fn translates_unless_guard() {
         // `in Integer unless x.nil?` — guard wrapped in (unless_guard ...)
-        let ast = translate("case x\nin Integer unless x.nil?\n  :present\nend\n", "t.rb");
+        let ast = translate(
+            "case x\nin Integer unless x.nil?\n  :present\nend\n",
+            "t.rb",
+        );
         let sexp = murphy_ast::ast_to_sexp(&ast);
         assert!(
-            sexp.contains("(unless_guard
-"),
+            sexp.contains(
+                "(unless_guard
+"
+            ),
             "unless_guard must appear in the guard slot: {sexp}"
         );
         assert!(
