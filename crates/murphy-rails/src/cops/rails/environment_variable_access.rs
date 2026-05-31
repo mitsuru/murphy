@@ -12,7 +12,10 @@
 //!   AllowReads/AllowWrites options, ::ENV handling (cbase-qualified form),
 //!   read/write-specific messages, and ENV const offense range implemented
 //!   (murphy-dls6). Remaining gap: Rails include/exclude path gating
-//!   (no file-path infrastructure yet, murphy-j28r).
+//!   (no file-path infrastructure yet, murphy-j28r). RuboCop default.yml
+//!   restricts this cop to app/**/*.rb, config/initializers/**/*.rb,
+//!   lib/**/*.rb (excluding lib/**/*.rake); Murphy fires in all files.
+//!   Users can disable per-directory via .murphy.yml.
 //! ```
 //!
 //! environment variables through the top-level `ENV` constant
