@@ -298,16 +298,23 @@ impl SpaceAroundOperators {
 
     #[on_node(kind = "masgn")]
     fn check_masgn(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Masgn { lhs: _, rhs } = *cx.kind(node) else {
+        let NodeKind::Masgn { lhs, rhs } = *cx.kind(node) else {
             return;
         };
-        // The Mlhs node's range covers the entire multi-assignment expression,
-        // not just the LHS targets. Search from the node start (before the first
-        // target) to the RHS start — the gap contains only targets, commas,
-        // spaces, and the `=` token, none of which are a bare `=` except the
-        // assignment operator.
+        // The Mlhs range covers the entire multi-assignment node, not just the
+        // LHS targets. Use the last LHS target's range end to bound the search
+        // so that inner assignments inside complex targets (e.g. `a[i=1], b =
+        // rhs`) do not produce a false positive by matching the inner `=`.
+        let NodeKind::Mlhs(list) = *cx.kind(lhs) else {
+            return;
+        };
+        let lhs_end = cx
+            .list(list)
+            .last()
+            .map(|&t| cx.range(t).end)
+            .unwrap_or(cx.range(node).start);
         let gap = Range {
-            start: cx.range(node).start,
+            start: lhs_end,
             end: cx.range(rhs).start,
         };
         if let Some(op_range) = find_op_in_gap(cx, gap, &["="]) {
@@ -965,6 +972,15 @@ mod tests {
             a, b=1, 2
                 ^ Surrounding space missing for operator `=`.
         "#});
+    }
+
+    #[test]
+    fn masgn_does_not_flag_inner_assignment_in_complex_target() {
+        // `a[i], b = rhs` has an index target before `b`; the `=` inside
+        // any complex subscript must not be mistaken for the masgn separator.
+        // Using the last Mlhs child's range end bounds the search correctly.
+        test::<SpaceAroundOperators>().expect_no_offenses("a[i], b = 1
+");
     }
 
     #[test]
