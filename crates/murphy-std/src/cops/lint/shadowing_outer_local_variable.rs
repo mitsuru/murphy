@@ -57,9 +57,15 @@ impl ShadowingOuterLocalVariable {
             // outside those boundaries.
             let mut current_id = node;
             loop {
-                let Some(current_scope) = model.scope(current_id) else { break };
-                let Some(parent_id) = current_scope.parent_scope else { break };
-                let Some(parent_scope) = model.scope(parent_id) else { break };
+                let Some(current_scope) = model.scope(current_id) else {
+                    break;
+                };
+                let Some(parent_id) = current_scope.parent_scope else {
+                    break;
+                };
+                let Some(parent_scope) = model.scope(parent_id) else {
+                    break;
+                };
 
                 // Check for shadowing in the parent scope first (a block CAN
                 // close over its enclosing def's locals).
