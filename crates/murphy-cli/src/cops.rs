@@ -223,22 +223,20 @@ fn write_json<W: Write>(out: &mut W, listings: &[Listing]) -> std::io::Result<()
 /// the diagnostic surfaces even on a zero-file run. Skipping the cop
 /// itself happens for free — it has no `PluginCopV1` to dispatch.
 pub fn warn_user_enabled_disabled(config: &MurphyConfig, registry: &murphy_core::CopRegistry) {
-    // Warn when a cop disabled by default (via bundled defaults or PluginCopV1.default_enabled)
-    // has been explicitly enabled by the user. The cop is honoured but does not run.
-    for (cop, _) in registry.all_cops_with_packs() {
-        let name = String::from_utf8_lossy(unsafe { cop.name.as_bytes() });
+    // Warn only for stubs from dynamic packs (e.g. murphy-rails) where the cop's
+    // default_enabled tristate says false — meaning it has no real implementation yet.
+    // Fully-implemented cops that are disabled by default in default.yml (e.g.
+    // Style/CollectionMethods) will work fine if the user enables them, so no warning.
+    for (cop, pack_name) in registry.all_cops_with_packs() {
         let cop_default = murphy_plugin_api::tristate_from_wire(cop.default_enabled);
-        let disabled_by_default = cop_default == Some(false)
-            || config
-                .base_defaults
-                .cop_rules
-                .get(name.as_ref())
-                .and_then(|r| r.enabled)
-                == Some(false);
-        if disabled_by_default && config.is_explicitly_enabled(name.as_ref()) {
+        if cop_default == Some(false)
+            && let Ok(name) = std::str::from_utf8(unsafe { cop.name.as_bytes() })
+            && config.is_explicitly_enabled(name)
+        {
             eprintln!(
-                "warning: cop `{name}` is disabled by default; \
-                 `Enabled: true` in .murphy.yml is honoured but the cop will not run"
+                "warning: cop `{name}` is a stub in the '{pack_name}' pack; \
+                 `Enabled: true` in .murphy.yml is honoured \
+                 but the cop has no implementation yet"
             );
         }
     }

@@ -438,26 +438,32 @@ impl MurphyConfig {
     pub fn cop_applies_to_file(&self, name: &str, file: &Path) -> bool {
         let file = file.strip_prefix(".").unwrap_or(file);
 
-        // User-level Include/Exclude takes precedence if set.
-        if let Some(rule) = self.cops.rules.get(name)
-            && (!rule.include.is_empty() || !rule.exclude.is_empty())
-        {
-            return (rule.include.is_empty() || globset_matches(&rule.include, file))
-                && (rule.exclude.is_empty() || !globset_matches(&rule.exclude, file));
-        }
+        let rule = self.cops.rules.get(name);
+        let default_rule = self.base_defaults.cop_rules.get(name);
 
-        // Fall through to base_defaults per-cop Include/Exclude
-        // (e.g. Bundler cops apply only to Gemfile/gemspec by default).
-        if let Some(default_rule) = self.base_defaults.cop_rules.get(name)
-            && (!default_rule.include.is_empty() || !default_rule.exclude.is_empty())
-        {
-            return (default_rule.include.is_empty()
-                || globset_matches(&default_rule.include, file))
-                && (default_rule.exclude.is_empty()
-                    || !globset_matches(&default_rule.exclude, file));
-        }
+        // Resolve Include and Exclude independently: user setting wins per-field;
+        // fall back to base_defaults for each field individually. This prevents
+        // a user-level Exclude from accidentally disabling a default Include scope.
+        let include = rule
+            .map(|r| &r.include)
+            .filter(|inc| !inc.is_empty())
+            .or_else(|| default_rule.map(|r| &r.include));
 
-        true
+        let exclude = rule
+            .map(|r| &r.exclude)
+            .filter(|exc| !exc.is_empty())
+            .or_else(|| default_rule.map(|r| &r.exclude));
+
+        let matches_include = match include {
+            Some(inc) if !inc.is_empty() => globset_matches(inc, file),
+            _ => true,
+        };
+        let matches_exclude = match exclude {
+            Some(exc) if !exc.is_empty() => globset_matches(exc, file),
+            _ => false,
+        };
+
+        matches_include && !matches_exclude
     }
 
     pub fn has_cop_path_scopes(&self) -> bool {
@@ -468,15 +474,18 @@ impl MurphyConfig {
     }
 
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
+        let default_opts = self.base_defaults.cop_rules.get(name).map(|r| &r.options);
+        let user_opts = self.cops.rules.get(name).map(|r| &r.options);
+
+        // Fast path: skip cloning and serializing when both are empty (common case).
+        if default_opts.is_none_or(|o| o.is_empty()) && user_opts.is_none_or(|o| o.is_empty()) {
+            return b"{}".to_vec();
+        }
+
         // Start from base defaults, then overlay user options (user wins per key).
-        let mut merged = self
-            .base_defaults
-            .cop_rules
-            .get(name)
-            .map(|r| r.options.clone())
-            .unwrap_or_default();
-        if let Some(rule) = self.cops.rules.get(name) {
-            merged.extend(rule.options.clone());
+        let mut merged = default_opts.cloned().unwrap_or_default();
+        if let Some(opts) = user_opts {
+            merged.extend(opts.clone());
         }
         serde_json::to_vec(&merged).unwrap_or_else(|_| b"{}".to_vec())
     }

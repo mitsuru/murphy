@@ -48,8 +48,6 @@
 //!   NOT emit an autocorrect edit, because removing trailing whitespace
 //!   from inside a heredoc body changes the string's runtime value.
 
-use std::collections::VecDeque;
-
 use murphy_plugin_api::{CopOptions, Cx, Range, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
