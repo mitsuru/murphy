@@ -100,8 +100,17 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         "!=" => {
             // recv != nil → !recv.nil?
             // Structural rewrite: insert `!` prefix and change operator.
+            //
+            // The receiver source is wrapped in parentheses unconditionally so
+            // that complex expressions (e.g., operator calls like `a + b != nil`,
+            // logical expressions, or other compound forms) produce valid Ruby
+            // with preserved semantics: `!(a + b).nil?` rather than the
+            // ambiguous/wrong `!a + b.nil?`.
+            //
+            // For simple receivers like `x` or `x.foo`, `!(x).nil?` is valid Ruby
+            // and semantically identical to `!x.nil?`.
             let recv_src = cx.raw_source(recv_range);
-            let replacement = format!("!{recv_src}.nil?");
+            let replacement = format!("!({recv_src}).nil?");
             cx.emit_offense(node_range, MSG, None);
             cx.emit_edit(node_range, &replacement);
         }
@@ -164,7 +173,7 @@ mod tests {
                 x != nil
                 ^^^^^^^^ Prefer the use of the `nil?` predicate.
             "},
-            "!x.nil?\n",
+            "!(x).nil?\n",
         );
     }
 
@@ -175,8 +184,21 @@ mod tests {
                 foo.bar != nil
                 ^^^^^^^^^^^^^^ Prefer the use of the `nil?` predicate.
             "},
-            "!foo.bar.nil?\n",
+            "!(foo.bar).nil?\n",
         );
+    }
+
+    // -----  with complex receiver — parens wrap for safety -----
+
+    #[test]
+    fn flags_neq_nil_with_operator_receiver() {
+        // Receiver is an operator call — wrapping in parens preserves semantics.
+        // Without parens: "!a + b.nil?" has wrong precedence.
+        // With parens: "!(a + b).nil?" is correct.
+        test::<NilComparison>().expect_offense(indoc! {"
+            a + b != nil
+            ^^^^^^^^^^^^ Prefer the use of the `nil?` predicate.
+        "});
     }
 
     // ----- Negative cases -----
