@@ -275,11 +275,22 @@ fn check_shorthand_never(cx: &Cx<'_>, list: NodeList) {
         let offense_range = cx.range(key);
         cx.emit_offense(offense_range, MSG_INCLUDE_HASH_VALUE, None);
         // Autocorrect: expand `foo:` to `foo: foo`.
-        // key_src is like `foo:` — strip the trailing colon, add `: foo`.
+        // The inserted value must be the symbol name (an identifier), not the
+        // raw key source text. For quoted labels like `{ "foo bar": }` or
+        // `{ "t o": }`, raw key source would include the quotes — yielding
+        // `{ "t o": "t o" }` (string literal) instead of `{ "t o": t_o }`.
+        // However, quoted-label symbols whose names are not valid bare
+        // identifiers can't be shorthand anyway (Ruby only allows valid local
+        // variable names), so in practice the symbol name is always a plain
+        // identifier here. Use `cx.symbol_str` to derive the value safely.
+        let sym_name = match *cx.kind(key) {
+            NodeKind::Sym(sym) => cx.symbol_str(sym),
+            _ => continue,
+        };
         let key_src = cx.raw_source(offense_range);
-        if let Some(bare_name) = key_src.strip_suffix(':') {
-            let bare_name = bare_name.trim_end();
-            cx.emit_edit(offense_range, &format!("{bare_name}: {bare_name}"));
+        if key_src.ends_with(':') {
+            let key_part = key_src.trim_end_matches(':').trim_end();
+            cx.emit_edit(offense_range, &format!("{key_part}: {sym_name}"));
         }
     }
 }
