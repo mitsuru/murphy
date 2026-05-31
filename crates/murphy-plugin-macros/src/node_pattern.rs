@@ -775,6 +775,38 @@ static WHILE_SLOTS: &[Slot] = &[
 ];
 static UNTIL_SLOTS: &[Slot] = WHILE_SLOTS; // identical shape
 
+// `CaseMatch { subject: NodeId, in_patterns: NodeList, else_body: OptNodeId }`:
+// `else_body` follows the `NodeList`, so it is omitted from the schema
+// (covers_all_fields = false) — mirrors the same `Case::else_` omission.
+static CASE_MATCH_SLOTS: &[Slot] = &[
+    Slot {
+        field: FieldRef::Named("subject"),
+        ty: SlotTy::Node,
+    },
+    Slot {
+        field: FieldRef::Named("in_patterns"),
+        ty: SlotTy::List,
+    },
+];
+// `InPattern { pattern: NodeId, guard: OptNodeId, body: OptNodeId }`:
+// three fixed slots (pattern=Node, guard=OptNode, body=OptNode).
+static IN_PATTERN_SLOTS: &[Slot] = &[
+    Slot {
+        field: FieldRef::Named("pattern"),
+        ty: SlotTy::Node,
+    },
+    Slot {
+        field: FieldRef::Named("guard"),
+        ty: SlotTy::OptNode,
+    },
+    Slot {
+        field: FieldRef::Named("body"),
+        ty: SlotTy::OptNode,
+    },
+];
+// `MatchVar(Symbol)`: single-element tuple, same shape as `Lvar`/`Gvar`.
+// Declared after `VAR_SYM_SLOTS` is defined; alias set below.
+
 // `Lvar(Symbol)` / `Ivar(Symbol)` / `Cvar(Symbol)` / `Gvar(Symbol)`: tuple
 // variants, arity 1, index 0. The single field is a `Symbol` payload — a
 // pattern child supplied at the sym slot filters on the variable name
@@ -785,6 +817,7 @@ static VAR_SYM_SLOTS: &[Slot] = &[Slot {
     field: FieldRef::Pos(1, 0),
     ty: SlotTy::Sym,
 }];
+static MATCH_VAR_SLOTS: &[Slot] = VAR_SYM_SLOTS;
 
 /// The full v1 `def_node_matcher!` schema table, keyed by `NodeKindTag` `u8`.
 ///
@@ -1025,6 +1058,33 @@ static SCHEMA_TABLE: &[(u8, KindSchema)] = &[
             variant: "Until",
             slots: UNTIL_SLOTS,
             covers_all_fields: false,
+        },
+    ),
+    (
+        // `CaseMatch` omits `else_body`: it follows the `in_patterns` NodeList.
+        86,
+        KindSchema {
+            variant: "CaseMatch",
+            slots: CASE_MATCH_SLOTS,
+            covers_all_fields: false,
+        },
+    ),
+    (
+        // `InPattern { pattern, guard, body }`: all three slots exposed.
+        87,
+        KindSchema {
+            variant: "InPattern",
+            slots: IN_PATTERN_SLOTS,
+            covers_all_fields: true,
+        },
+    ),
+    (
+        // `MatchVar(Symbol)`: single sym slot — same shape as `Lvar`/`Gvar`.
+        90,
+        KindSchema {
+            variant: "MatchVar",
+            slots: MATCH_VAR_SLOTS,
+            covers_all_fields: true,
         },
     ),
 ];

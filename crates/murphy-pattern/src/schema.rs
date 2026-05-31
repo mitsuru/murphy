@@ -43,6 +43,8 @@ const SUPPORTED_TAGS: &[u8] = &[
     32, 33, 34, // Def / Class / Module
     38, 39, // Gvasgn / Cvasgn
     47, 48, // While / Until
+    86, 87, // CaseMatch / InPattern (murphy-j1j2 PM-F)
+    90,     // MatchVar (single sym slot, same shape as lvar/gvar)
 ];
 
 /// `true` iff `(<kind>)` Node patterns are supported for `tag`.
@@ -88,6 +90,14 @@ pub fn node_child_allows_bare_predicate(tag: murphy_ast::NodeKindTag, child_idx:
         32 => child_idx == 1 || child_idx == 2, // def (Sym, Node, OptNode — Sym at 0)
         33 => child_idx <= 2, // class (3 fixed, no trailing list)
         34 => child_idx <= 1, // module (2 fixed, no trailing list)
+
+        // pattern-match nodes (murphy-j1j2 PM-F)
+        // `case_match`: slot 0 = subject (Node), slot 1+ = in_patterns (List)
+        86 => true,
+        // `in_pattern`: slots 0-2 are pattern/guard/body (Node/OptNode/OptNode)
+        87 => child_idx <= 2,
+        // `match_var`: single sym slot — bare predicates not allowed
+        90 => false,
 
         // Nothing else is supported in v1.
         _ => false,
@@ -251,6 +261,22 @@ pub fn pattern_children<'a>(kind: &'a NodeKind, lists: &'a [NodeId]) -> Option<V
         NodeKind::While { cond, body, .. } | NodeKind::Until { cond, body, .. } => {
             vec![PatChild::Node(cond), PatChild::OptNode(opt(body))]
         }
+
+        // ── Pattern-match family (murphy-j1j2 PM-F) ─────────────────────────
+        // `CaseMatch { subject, in_patterns, else_body }`: `else_body` follows
+        // the `NodeList`, so it is omitted (covers_all_fields = false).
+        NodeKind::CaseMatch { subject, in_patterns, .. } => vec![
+            PatChild::Node(subject),
+            PatChild::List(list(in_patterns, lists)),
+        ],
+        // `InPattern { pattern, guard, body }`: three fixed slots.
+        NodeKind::InPattern { pattern, guard, body } => vec![
+            PatChild::Node(pattern),
+            PatChild::OptNode(opt(guard)),
+            PatChild::OptNode(opt(body)),
+        ],
+        // `MatchVar(Symbol)`: single sym slot — same shape as `Lvar`/`Gvar`.
+        NodeKind::MatchVar(name) => vec![PatChild::Sym(name)],
 
         // The early `supports_node_pattern` gate above has already returned
         // `None` for every other variant; reaching this arm means a tag was
@@ -654,6 +680,30 @@ mod tests {
             r(),
         );
         add(&mut b, 48, until_);
+
+        // pattern-match family (murphy-j1j2 PM-F)
+        let in_pats_list = b.push_list(&[]);
+        let case_match = b.push(
+            NodeKind::CaseMatch {
+                subject: a,
+                in_patterns: in_pats_list,
+                else_body: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 86, case_match);
+        let in_pat = b.push(
+            NodeKind::InPattern {
+                pattern: a,
+                guard: OptNodeId::NONE,
+                body: OptNodeId::NONE,
+            },
+            r(),
+        );
+        add(&mut b, 87, in_pat);
+        let mv_sym = b.intern_symbol("x");
+        let match_var = b.push(NodeKind::MatchVar(mv_sym), r());
+        add(&mut b, 90, match_var);
 
         let ast = b.finish(a);
         (ast, out)
