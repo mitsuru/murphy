@@ -344,6 +344,9 @@ fn node_kind_discriminants_are_frozen() {
         },
         107,
     );
+    // murphy-j1j2 PM-D advanced patterns
+    freeze(NodeKind::MatchAs { value: NodeId(0), name: NodeId(0) }, 108);
+    freeze(NodeKind::ConstPattern { const_: NodeId(0), pattern: NodeId(0) }, 109);
 }
 
 /// Catch the failure mode that `node_kind_discriminants_are_frozen` would
