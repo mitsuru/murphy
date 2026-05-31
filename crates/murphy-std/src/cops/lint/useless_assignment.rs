@@ -789,7 +789,11 @@ mod tests {
             "/(?<name>foo)/ =~ value\n",
         ] {
             let run = run_cop_with_edits::<UselessAssignment>(src);
-            assert_eq!(run.edits.len(), 0, "captures must not be autocorrected: {src}");
+            assert_eq!(
+                run.edits.len(),
+                0,
+                "captures must not be autocorrected: {src}"
+            );
         }
     }
 
