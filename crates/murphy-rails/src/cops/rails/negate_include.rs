@@ -45,9 +45,12 @@
 //!
 //! Upstream ships this cop as `Enabled: pending`, which means "off
 //! until explicitly enabled, with a warning otherwise". Murphy doesn't
-//! model `pending` — we default to `default_enabled = true`, matching
-//! the project convention used for the other upstream-`pending` cops
-//! that Murphy ports (e.g. `Rails/I18nLocaleAssignment`).
+//! model `pending` consistently. For this cop specifically, the
+//! convenience choice is `default_enabled = true` — the `exclude?`
+//! rewrite is unambiguously desirable in Rails codebases that use
+//! ActiveSupport. Other upstream-`pending` cops may differ; see
+//! `Rails/I18nLocaleAssignment`, which maps `pending` to
+//! `default_enabled = false`.
 //!
 //! ## Autocorrect (unsafe upstream)
 //!
