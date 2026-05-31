@@ -356,7 +356,9 @@ fn parse_ruby_version(yaml: &yaml_rust2::Yaml) -> Option<RubyVersion> {
         }
         _ => return None,
     };
-    let (major, minor) = raw.split_once('.').unwrap_or((raw, "0"));
+    let mut parts = raw.split('.');
+    let major = parts.next()?;
+    let minor = parts.next().unwrap_or("0");
     Some(RubyVersion::new(major.parse().ok()?, minor.parse().ok()?))
 }
 
@@ -740,6 +742,10 @@ mod tests {
         let cfg = MurphyConfig::from_yaml_str("AllCops:\n  TargetRubyVersion: 2.7\n")
             .expect("config parses");
         assert_eq!(cfg.target_ruby_version, RubyVersion::new(2, 7));
+
+        let cfg = MurphyConfig::from_yaml_str("AllCops:\n  TargetRubyVersion: 3.2.2\n")
+            .expect("config parses");
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 2));
     }
 
     #[test]

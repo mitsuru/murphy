@@ -219,7 +219,14 @@ impl RubyVersion {
 
     pub const fn to_wire(version: Option<Self>) -> u16 {
         match version {
-            Some(v) => v.major * 100 + v.minor,
+            Some(v) => {
+                let wire = (v.major as u32) * 100 + (v.minor as u32);
+                if wire > u16::MAX as u32 {
+                    u16::MAX
+                } else {
+                    wire as u16
+                }
+            }
             None => 0,
         }
     }
@@ -323,6 +330,14 @@ mod tests {
         let s = RawSlice::from_str("send");
         assert_eq!(unsafe { s.as_bytes() }, b"send");
         assert_eq!(unsafe { RawSlice::EMPTY.as_bytes() }, b"");
+    }
+
+    #[test]
+    fn ruby_version_to_wire_saturates_on_overflow() {
+        assert_eq!(
+            RubyVersion::to_wire(Some(RubyVersion::new(700, 0))),
+            u16::MAX
+        );
     }
 
     #[test]
