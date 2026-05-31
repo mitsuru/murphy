@@ -31,7 +31,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::ptr::NonNull;
 
-use murphy_plugin_api::PluginCopV1;
+use murphy_plugin_api::{PluginCopV1, RubyVersion};
 
 use crate::ConfigError;
 use crate::MurphyConfig;
@@ -212,16 +212,18 @@ impl CopRegistry {
             )));
         }
 
-        // Apply the `Enabled: false` filter from `.murphy.yml` cop rules to
-        // build the dispatch view, leaving `all_cops_ptrs` unfiltered
-        // for the catalogue (`murphy cops list`).
+        // Apply per-cop enablement and TargetRubyVersion gates to build the
+        // dispatch view, leaving `all_cops_ptrs` unfiltered for the catalogue
+        // (`murphy cops list`).
         let cops_ptrs: Vec<NonNull<PluginCopV1>> = all_cops_ptrs
             .iter()
             .filter(|cop| {
                 // Safety: same as the collision check above.
-                let name_bytes = unsafe { cop.as_ref().name.as_bytes() };
+                let cop = unsafe { cop.as_ref() };
+                let name_bytes = unsafe { cop.name.as_bytes() };
                 let name = String::from_utf8_lossy(name_bytes);
                 config.cop_enabled(&name)
+                    && cop_supports_target_ruby_version(cop, config.target_ruby_version)
             })
             .copied()
             .collect();
@@ -300,6 +302,10 @@ impl CopRegistry {
     }
 }
 
+fn cop_supports_target_ruby_version(cop: &PluginCopV1, target: RubyVersion) -> bool {
+    RubyVersion::from_wire(cop.minimum_target_ruby_version).is_none_or(|minimum| target >= minimum)
+}
+
 /// Enumerate `<root>/<cops_path>/*.rb` (flat, non-recursive), filtered
 /// to regular files with a `.rb` extension, sorted. Absent dir → empty
 /// vec (no error); a real I/O error → [`ConfigError::Io`]. The contract
@@ -355,13 +361,30 @@ mod tests {
         const NAME: &'static str = "Stub/Builtin";
     }
 
+    #[derive(Default)]
+    struct Ruby32Builtin;
+
+    impl Cop for Ruby32Builtin {
+        type Options = NoOptions;
+        const NAME: &'static str = "Stub/Ruby32";
+        const MINIMUM_TARGET_RUBY_VERSION: Option<murphy_plugin_api::RubyVersion> =
+            Some(murphy_plugin_api::RubyVersion::new(3, 2));
+    }
+
     impl NodeCop for StubBuiltin {
+        const KINDS: &'static [NodeKindTag] = &[];
+        fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
+    }
+
+    impl NodeCop for Ruby32Builtin {
         const KINDS: &'static [NodeKindTag] = &[];
         fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
     }
 
     static STUB_BUILTIN_COP: PluginCopV1 =
         murphy_plugin_api::__internal::build_cop::<StubBuiltin>();
+    static RUBY32_BUILTIN_COP: PluginCopV1 =
+        murphy_plugin_api::__internal::build_cop::<Ruby32Builtin>();
     static STUB_BUILTINS: &[&PluginCopV1] = &[&STUB_BUILTIN_COP];
 
     #[test]
@@ -403,5 +426,20 @@ mod tests {
             names.is_empty(),
             "an enabled = false rule must exclude the built-in: got {names:?}"
         );
+    }
+
+    #[test]
+    fn discover_skips_cops_above_target_ruby_version() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::fs::write(
+            dir.path().join(".murphy.yml"),
+            "AllCops:\n  TargetRubyVersion: 3.1\n",
+        )
+        .expect("write .murphy.yml");
+        let builtins = &[&STUB_BUILTIN_COP, &RUBY32_BUILTIN_COP];
+
+        let reg = CopRegistry::discover(dir.path(), builtins).expect("discover Ok");
+
+        assert_eq!(reg.cop_names(), vec!["Stub/Builtin".to_string()]);
     }
 }

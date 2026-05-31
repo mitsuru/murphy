@@ -1147,6 +1147,7 @@ mod tests {
             default_enabled: TRISTATE_UNSET,
             safe: TRISTATE_UNSET,
             safe_autocorrect,
+            minimum_target_ruby_version: 0,
             options_ptr: std::ptr::null(),
             options_len: 0,
             kinds_ptr: EMPTY_KINDS.as_ptr(),

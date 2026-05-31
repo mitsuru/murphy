@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use murphy_ast::{AstBuilder, NodeId, NodeKind, NodeList, OptNodeId, Range};
 use murphy_plugin_api::{
     Cop, CopOptions, Cx, CxRaw, FnTable, NoOptions, NodeCop, NodeKindTag, RawEdit, RawOffense,
-    RawSlice, Severity,
+    RawSlice, RubyVersion, Severity,
 };
 use murphy_plugin_macros::cop;
 
@@ -183,6 +183,7 @@ struct T5;
     description = "Catches T5 issues.",
     default_severity = "warning",
     default_enabled = false,
+    minimum_target_ruby_version = "3.2",
     safe = false,
     safe_autocorrect = false,
     options = NoOptions
@@ -436,6 +437,11 @@ fn cop_metadata_propagates_to_trait_consts() {
         "default_enabled should be Some(false)"
     );
     assert_eq!(<T5 as Cop>::SAFE, Some(false), "safe should be Some(false)");
+    assert_eq!(
+        <T5 as Cop>::MINIMUM_TARGET_RUBY_VERSION,
+        Some(RubyVersion::new(3, 2)),
+        "minimum_target_ruby_version should be 3.2"
+    );
     assert_eq!(
         <T5 as Cop>::SAFE_AUTOCORRECT,
         Some(false),

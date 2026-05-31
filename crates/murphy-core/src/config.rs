@@ -1,4 +1,5 @@
 use crate::Severity;
+use murphy_plugin_api::RubyVersion;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +7,7 @@ use crate::ConfigError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MurphyConfig {
+    pub target_ruby_version: RubyVersion,
     pub files: FilesConfig,
     pub cops: CopsConfig,
     pub plugins: Vec<PluginConfig>,
@@ -61,9 +63,14 @@ fn default_cops_path() -> PathBuf {
     PathBuf::from("cops")
 }
 
+fn default_target_ruby_version() -> RubyVersion {
+    RubyVersion::new(3, 1)
+}
+
 impl Default for MurphyConfig {
     fn default() -> Self {
         Self {
+            target_ruby_version: default_target_ruby_version(),
             files: FilesConfig {
                 include: default_include(),
                 exclude: Vec::new(),
@@ -126,6 +133,7 @@ impl MurphyConfig {
         let mut include = default_include();
         let mut exclude: Vec<String> = Vec::new();
         let mut cops_path = default_cops_path();
+        let mut target_ruby_version = default_target_ruby_version();
         let mut rules: BTreeMap<String, CopRule> = BTreeMap::new();
         let mut plugins: Vec<PluginConfig> = Vec::new();
         let mut saw_include = false;
@@ -149,6 +157,12 @@ impl MurphyConfig {
                             all_cops.get(&Yaml::String("CopsPath".to_string()))
                         {
                             cops_path = PathBuf::from(p);
+                        }
+                        if let Some(v) =
+                            all_cops.get(&Yaml::String("TargetRubyVersion".to_string()))
+                            && let Some(parsed) = parse_ruby_version(v)
+                        {
+                            target_ruby_version = parsed;
                         }
                     }
                 }
@@ -177,6 +191,7 @@ impl MurphyConfig {
         }
 
         Ok(MurphyConfig {
+            target_ruby_version,
             files: FilesConfig { include, exclude },
             cops: CopsConfig {
                 path: cops_path,
@@ -328,6 +343,23 @@ fn parse_cop_rule(map: yaml_rust2::yaml::Hash) -> CopRule {
         }
     }
     rule
+}
+
+fn parse_ruby_version(yaml: &yaml_rust2::Yaml) -> Option<RubyVersion> {
+    use yaml_rust2::Yaml;
+    let raw = match yaml {
+        Yaml::String(s) | Yaml::Real(s) => s.as_str(),
+        Yaml::Integer(i) => {
+            return u16::try_from(*i)
+                .ok()
+                .map(|major| RubyVersion::new(major, 0));
+        }
+        _ => return None,
+    };
+    let mut parts = raw.split('.');
+    let major = parts.next()?;
+    let minor = parts.next().unwrap_or("0");
+    Some(RubyVersion::new(major.parse().ok()?, minor.parse().ok()?))
 }
 
 fn globset_matches(patterns: &[String], path: &Path) -> bool {
@@ -701,7 +733,19 @@ mod tests {
         let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
         assert_eq!(cfg.files.include, vec!["**/*.rb"]);
         assert_eq!(cfg.cops.path, PathBuf::from("cops"));
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 1));
         assert!(cfg.cops.rules.is_empty());
+    }
+
+    #[test]
+    fn parses_target_ruby_version_from_all_cops() {
+        let cfg = MurphyConfig::from_yaml_str("AllCops:\n  TargetRubyVersion: 2.7\n")
+            .expect("config parses");
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(2, 7));
+
+        let cfg = MurphyConfig::from_yaml_str("AllCops:\n  TargetRubyVersion: 3.2.2\n")
+            .expect("config parses");
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 2));
     }
 
     #[test]
@@ -736,6 +780,7 @@ mod tests {
         assert_eq!(cfg.files.include, vec!["lib/**/*.rb"]);
         assert_eq!(cfg.files.exclude, vec!["vendor/**"]);
         assert_eq!(cfg.cops.path, PathBuf::from("custom_cops"));
+        assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 1));
     }
 
     #[test]
