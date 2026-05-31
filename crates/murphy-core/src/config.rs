@@ -602,6 +602,7 @@ fn is_cop_disabled_by_default(name: &str) -> bool {
             | "Rails/WhereNot"
             | "Rails/WhereNotWithMultipleConditions"
             | "Rails/WhereRange"
+            | "Style/FrozenStringLiteralComment"
     )
 }
 

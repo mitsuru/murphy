@@ -43,9 +43,11 @@ use crate::cops::lint::unused_block_argument::UnusedBlockArgument;
 use crate::cops::lint::unused_method_argument::UnusedMethodArgument;
 use crate::cops::lint::useless_assignment::UselessAssignment;
 use crate::cops::murphy::no_receiver_puts::NoReceiverPuts;
+use crate::cops::style::frozen_string_literal_comment::FrozenStringLiteralComment;
 use crate::cops::style::hash_syntax::HashSyntax;
 use crate::cops::style::redundant_self::RedundantSelf;
 use crate::cops::style::string_literals::StringLiterals;
+use crate::cops::style::symbol_array::SymbolArray;
 
 // `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
 // single Murphy-prefixed runtime dependency by design.
@@ -62,9 +64,11 @@ murphy_plugin_api::register_cops!(
     UnusedBlockArgument,
     UnusedMethodArgument,
     UselessAssignment,
+    FrozenStringLiteralComment,
     HashSyntax,
     RedundantSelf,
     StringLiterals,
+    SymbolArray,
     TrailingWhitespace,
     SpaceInsideParens,
     SpaceAroundOperators,
