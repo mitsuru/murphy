@@ -2,6 +2,7 @@
 //! counterpart.
 
 pub mod and_or;
+pub mod empty_case_condition;
 pub mod frozen_string_literal_comment;
 pub mod hash_syntax;
 pub mod if_unless_modifier;

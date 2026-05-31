@@ -3573,3 +3573,133 @@ fn param_named_type_mismatch_agrees() {
     assert!(!b, "B must miss type-mismatched (i64 vs Sym)");
     assert_c_matches_with_params("%threshold", &ast, node, b, &params);
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// 14. Pattern-matching nodes — `case_match`, `in_pattern`, `match_var`
+//     (murphy-j1j2 PM-F). Both backends must agree on patterns headed by
+//     the new PM-family kinds added to SCHEMA_TABLE / SUPPORTED_TAGS.
+// ────────────────────────────────────────────────────────────────────────
+
+// `(case_match _ in_patterns*)`: subject is `_`, trailing list accepts any
+// in-pattern count. `...` is Rest (B-backend "not yet supported"), so use
+// `case_match` bare kind plus a specific subject + zero-or-more list.
+def_node_matcher!(b_case_match_kind, "case_match");
+def_node_matcher!(b_in_pattern_kind, "in_pattern");
+def_node_matcher!(b_match_var_x, "(match_var :x)");
+def_node_matcher!(b_match_var_any, "(match_var _)");
+// Patterns with fixed slots (no rest/list portion tested):
+def_node_matcher!(b_case_match_wildcard_subject, "(case_match _)");
+def_node_matcher!(b_in_pattern_wildcard, "(in_pattern _ _ _)");
+
+/// Build a minimal `case <subject> in <pattern>; end` AST.
+/// Returns `(ast, case_match_node, in_pattern_node, match_var_node)`.
+fn case_match_ast() -> (
+    murphy_ast::Ast,
+    murphy_ast::NodeId,
+    murphy_ast::NodeId,
+    murphy_ast::NodeId,
+) {
+    use murphy_ast::{AstBuilder, NodeKind, OptNodeId, Range};
+    let r = || Range { start: 0, end: 1 };
+    let mut b = AstBuilder::new("case foo; in x; end", "t.rb");
+    let sym = b.intern_symbol("foo");
+    let subject = b.push(NodeKind::Lvar(sym), r());
+    let mv_sym = b.intern_symbol("x");
+    let match_var = b.push(NodeKind::MatchVar(mv_sym), r());
+    let in_pat = b.push(
+        NodeKind::InPattern {
+            pattern: match_var,
+            guard: OptNodeId::NONE,
+            body: OptNodeId::NONE,
+        },
+        r(),
+    );
+    let in_pats_list = b.push_list(&[in_pat]);
+    let case_m = b.push(
+        NodeKind::CaseMatch {
+            subject,
+            in_patterns: in_pats_list,
+            else_body: OptNodeId::NONE,
+        },
+        r(),
+    );
+    let ast = b.finish(case_m);
+    (ast, case_m, in_pat, match_var)
+}
+
+#[test]
+fn case_match_kind_head_matches_consistently() {
+    // `case_match` bare kind must hit a CaseMatch node and miss InPattern.
+    let (ast, case_m, in_pat, _mv) = case_match_ast();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // Hit: CaseMatch node.
+    assert_c_matches("case_match", &ast, case_m, b_case_match_kind(case_m, &cx));
+    // Miss: InPattern is not CaseMatch.
+    assert_c_matches("case_match", &ast, in_pat, b_case_match_kind(in_pat, &cx));
+    // `(case_match _)` — subject slot with wildcard.
+    assert_c_matches(
+        "(case_match _)",
+        &ast,
+        case_m,
+        b_case_match_wildcard_subject(case_m, &cx),
+    );
+}
+
+#[test]
+fn in_pattern_kind_head_matches_consistently() {
+    // `in_pattern` bare kind must hit an InPattern node and miss CaseMatch.
+    let (ast, case_m, in_pat, _mv) = case_match_ast();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // Hit: InPattern node.
+    assert_c_matches("in_pattern", &ast, in_pat, b_in_pattern_kind(in_pat, &cx));
+    // Miss: CaseMatch is not InPattern.
+    assert_c_matches("in_pattern", &ast, case_m, b_in_pattern_kind(case_m, &cx));
+    // `(in_pattern _ _ _)` — three wildcard slots.
+    assert_c_matches(
+        "(in_pattern _ _ _)",
+        &ast,
+        in_pat,
+        b_in_pattern_wildcard(in_pat, &cx),
+    );
+}
+
+#[test]
+fn match_var_sym_slot_matches_consistently() {
+    // `(match_var :x)` must hit MatchVar(:x) and miss MatchVar(:y) and
+    // non-MatchVar nodes like Lvar(:x).
+    let (ast, _case_m, _in_pat, match_var) = case_match_ast();
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // Hit: MatchVar(:x) with exact sym match.
+    assert_c_matches("(match_var :x)", &ast, match_var, b_match_var_x(match_var, &cx));
+    // Wildcard sym slot matches any MatchVar name.
+    assert_c_matches("(match_var _)", &ast, match_var, b_match_var_any(match_var, &cx));
+}
+
+#[test]
+fn match_var_wrong_name_misses() {
+    // `(match_var :y)` must miss MatchVar(:x), and C-backend must agree.
+    use murphy_ast::{AstBuilder, NodeKind, Range};
+    let r = || Range { start: 0, end: 1 };
+    let mut b = AstBuilder::new(":x", "t.rb");
+    let sym_x = b.intern_symbol("x");
+    let mv = b.push(NodeKind::MatchVar(sym_x), r());
+    let ast = b.finish(mv);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    def_node_matcher!(b_match_var_y, "(match_var :y)");
+    // `:y` pattern must miss MatchVar(:x).
+    assert_c_matches("(match_var :y)", &ast, mv, b_match_var_y(mv, &cx));
+    // `:x` pattern must hit.
+    assert_c_matches("(match_var :x)", &ast, mv, b_match_var_x(mv, &cx));
+}
