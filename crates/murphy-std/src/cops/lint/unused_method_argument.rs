@@ -155,8 +155,18 @@ impl UnusedMethodArgument {
         };
         let params: &[NodeId] = cx.list(list);
 
-        // Pre-compute usage for each param so we can determine whether all
-        // args are unused (needed for the "(*)"-suffix in the offense message).
+        // Pre-compute usage for each param.
+        //
+        // `usages[i]` reflects suppression logic (underscore convention,
+        // blockarg-with-yield, kwarg-allow) — used to decide whether to
+        // emit an offense for parameter `i`.
+        //
+        // `any_referenced` mirrors RuboCop's `all_arguments.none?(&:referenced?)`:
+        // it checks only whether a param is *actually read* (model + lvar scan),
+        // ignoring suppression rules. This drives the "(*)"-suffix in the
+        // offense message. Example: `def foo(_x, y)` — `_x` is suppressed
+        // by convention but not referenced, `y` is unused; both count as
+        // unreferenced, so `(*)` appears in the `y` message.
         let usages: Vec<bool> = params
             .iter()
             .map(|&param| {
@@ -192,7 +202,30 @@ impl UnusedMethodArgument {
             })
             .collect();
 
-        let all_unused = usages.iter().all(|&used| !used);
+        // Whether any param is actually *referenced* (model + lvar scan),
+        // ignoring underscore-convention suppression. Mirrors RuboCop's
+        // `all_arguments.none?(&:referenced?)` for the `(*)` clause.
+        let any_referenced = params.iter().any(|&param| {
+            let Some((name, _)) = param_name_and_range(cx, param) else {
+                return false;
+            };
+            let name_str = cx.symbol_str(name);
+            if name_str.is_empty() {
+                return false;
+            }
+            let model_used = cx
+                .var_model()
+                .and_then(|m| m.scope(node))
+                .and_then(|s| {
+                    s.variables()
+                        .iter()
+                        .find(|v| v.name == name && v.is_argument)
+                })
+                .map(|v| !v.references.is_empty())
+                .unwrap_or(false);
+            model_used || lvar_reads_excluding_shadowed(cx, body, name)
+        });
+        let all_unused = !any_referenced;
         let method_name_str = cx.symbol_str(method_name);
 
         for (i, &param) in params.iter().enumerate() {
@@ -748,5 +781,19 @@ mod tests {
     fn kwarg_is_flagged_at_default() {
         let run = run_cop_with_edits::<UnusedMethodArgument>("def foo(bar:)\n  1\nend\n");
         assert_eq!(run.offenses.len(), 1, "kwarg should be flagged at default");
+    }
+
+    /// RuboCop computes the `(*)` clause from `all_arguments.none?(&:referenced?)`,
+    /// not from which args would be suppressed by convention. An underscore-prefixed
+    /// arg (`_x`) is not referenced, so when it coexists with an unused regular arg
+    /// (`y`), the `(*)` clause still appears in the `y` message.
+    #[test]
+    fn all_unused_clause_present_when_underscore_arg_coexists_with_unused_arg() {
+        test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
+            def foo(_x, y)
+                        ^ Unused method argument - `y`. If it's necessary, use `_` or `_y` as an argument name to indicate that it won't be used. If it's unnecessary, remove it. You can also write as `foo(*)` if you want the method to accept any arguments but don't care about them.
+              1
+            end
+        "#});
     }
 }
