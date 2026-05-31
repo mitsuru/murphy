@@ -8,8 +8,27 @@
 //! status: partial
 //! gap_issues:
 //!   - murphy-90zo
+//!   - murphy-o0gk
 //! notes: >
-//!   Known gaps remain around shorthand syntax, target Ruby version behavior, and call-context autocorrect.
+//!   EnforcedShorthandSyntax modes 'always' and 'never' are implemented
+//!   for detection. Autocorrect for 'never' (expanding {foo:} to {foo: foo})
+//!   is safe and implemented. Autocorrect for modes that omit the value
+//!   ('always', 'consistent', 'either_consistent' omit direction) is NOT
+//!   implemented: when the hash is a bare method argument, omitting the value
+//!   changes parse semantics and requires inserting braces (e.g.
+//!   foo(x: x) -> foo({x:})). Detecting whether a hash is a bare argument
+//!   requires parent-context inspection, which the murphy-plugin-api Cx ABI
+//!   does not currently expose (no is_argument_hash / is_braced helper).
+//!   Modes 'consistent' and 'either_consistent' flag mixed-shorthand hashes
+//!   but do not autocorrect the omit direction.
+//!   TargetRubyVersion gating is not applied per-option: Murphy's
+//!   minimum_target_ruby_version cop attribute gates the entire cop, not
+//!   individual options, so the shorthand check fires regardless of target
+//!   Ruby version (a no-op on Ruby < 3.1 since such files won't use {foo:}).
+//!   Value-omitted pairs ({foo:}) are detected via the ABI signal that
+//!   the value NodeKind is Unknown with value_range.start < key_range.end —
+//!   this is an imprecise signal (Unknown is a generic fallback sentinel),
+//!   but is the only available indicator without a dedicated AST node.
 //! ```
 //!
 //! RuboCop's same-named cop for the core hash-rocket / Ruby 1.9 styles.
@@ -22,11 +41,10 @@
 //!
 //! ## Known v1 limitations
 //!
-//! Ruby 3.1 hash value omission (`{foo:}` / `{foo: foo}`) is not enforced
-//! yet, so this port intentionally does not expose RuboCop's
-//! `EnforcedShorthandSyntax` option. That mode needs additional call-context
-//! autocorrection to avoid changing parse semantics for argument hashes.
+//! `EnforcedShorthandSyntax` modes `consistent` and `either_consistent`
+//! autocorrect is not implemented for the omit direction (call-context ABI gap).
 
+use murphy_plugin_api::NodeList;
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
 #[derive(Default)]
@@ -54,6 +72,13 @@ pub struct HashSyntaxOptions {
         description = "Keep hash rockets for symbols ending in non-alphanumeric punctuation."
     )]
     pub prefer_hash_rockets_for_non_alnum_ending_symbols: bool,
+
+    #[option(
+        name = "EnforcedShorthandSyntax",
+        default = "either",
+        description = "Ruby 3.1 hash value omission enforcement style."
+    )]
+    pub enforced_shorthand_syntax: ShorthandSyntax,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,6 +92,32 @@ pub enum HashSyntaxStyle {
     #[option(value = "ruby19_no_mixed_keys")]
     Ruby19NoMixedKeys,
 }
+
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ShorthandSyntax {
+    /// Accept both shorthand and explicit syntax (no offenses). Default.
+    #[option(value = "either")]
+    Either,
+    /// Flag Ruby 3.1 shorthand `{foo:}`, require explicit `{foo: foo}`.
+    #[option(value = "never")]
+    Never,
+    /// Flag explicit `{foo: foo}` when value can be omitted, require `{foo:}`.
+    #[option(value = "always")]
+    Always,
+    /// Require consistent use of shorthand: all-or-none when all omittable.
+    #[option(value = "consistent")]
+    Consistent,
+    /// Accept either form, but require consistency within each hash.
+    #[option(value = "either_consistent")]
+    EitherConsistent,
+}
+
+const MSG_INCLUDE_HASH_VALUE: &str = "Include the hash value.";
+const MSG_OMIT_HASH_VALUE: &str = "Omit the hash value.";
+const MSG_DO_NOT_MIX_OMIT: &str =
+    "Do not mix explicit and implicit hash values. Omit the hash value.";
+const MSG_DO_NOT_MIX_EXPLICIT: &str =
+    "Do not mix explicit and implicit hash values. Include the hash value.";
 
 #[cop(
     name = "Style/HashSyntax",
@@ -82,6 +133,11 @@ impl HashSyntax {
             return;
         };
         let opts = cx.options_or_default::<HashSyntaxOptions>();
+
+        // Shorthand check is orthogonal to the key-syntax check; run it first
+        // over all raw pairs (including value-omitted ones that PairInfo skips).
+        check_shorthand(cx, list, &opts);
+
         let pairs: Vec<PairInfo<'_>> = cx
             .list(list)
             .iter()
@@ -125,6 +181,227 @@ impl HashSyntax {
                 } else {
                     check_no_mixed_keys(cx, &pairs);
                 }
+            }
+        }
+    }
+}
+
+/// Classifies each raw pair for shorthand analysis.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShorthandPairKind {
+    /// Uses Ruby 3.1 value omission (`{foo:}`).
+    Omitted,
+    /// Has an explicit value that *could* be omitted (`{foo: foo}`).
+    Omittable,
+    /// Has an explicit value that *cannot* be omitted (`{foo: bar}`).
+    Required,
+}
+
+/// Returns true if this pair uses Ruby 3.1 value omission syntax.
+///
+/// Detected by: value NodeKind is `Unknown` AND value range starts before key
+/// range ends (the ABI signal for an implicit/omitted value node from prism).
+fn is_value_omitted(pair: NodeId, cx: &Cx<'_>) -> bool {
+    let NodeKind::Pair { key, value } = *cx.kind(pair) else {
+        return false;
+    };
+    if !matches!(*cx.kind(value), NodeKind::Unknown) {
+        return false;
+    }
+    let key_range = cx.range(key);
+    let value_range = cx.range(value);
+    value_range.start < key_range.end
+}
+
+/// Returns true if the pair's value can be omitted in Ruby 3.1 shorthand.
+///
+/// A value is omittable when:
+/// - The key is a symbol whose name does NOT end in `!` or `?`.
+/// - The value is a bare local-variable read (`lvar`) or an implicit send
+///   (no receiver, no args) whose name equals the key symbol name.
+fn is_value_omittable(pair: NodeId, cx: &Cx<'_>) -> bool {
+    let NodeKind::Pair { key, value } = *cx.kind(pair) else {
+        return false;
+    };
+    let key_name = match *cx.kind(key) {
+        NodeKind::Sym(sym) => cx.symbol_str(sym),
+        _ => return false,
+    };
+    // RuboCop: `hash_key_source.end_with?('!', '?')` → require hash value.
+    if key_name.ends_with('!') || key_name.ends_with('?') {
+        return false;
+    }
+    match *cx.kind(value) {
+        NodeKind::Lvar(sym) => cx.symbol_str(sym) == key_name,
+        NodeKind::Send {
+            receiver,
+            method,
+            args,
+        } => receiver.is_none() && cx.list(args).is_empty() && cx.symbol_str(method) == key_name,
+        _ => false,
+    }
+}
+
+/// Classifies a single raw pair for shorthand analysis.
+fn classify_shorthand(pair: NodeId, cx: &Cx<'_>) -> ShorthandPairKind {
+    if is_value_omitted(pair, cx) {
+        ShorthandPairKind::Omitted
+    } else if is_value_omittable(pair, cx) {
+        ShorthandPairKind::Omittable
+    } else {
+        ShorthandPairKind::Required
+    }
+}
+
+fn check_shorthand(cx: &Cx<'_>, list: NodeList, opts: &HashSyntaxOptions) {
+    match opts.enforced_shorthand_syntax {
+        ShorthandSyntax::Either => {}
+        ShorthandSyntax::Never => check_shorthand_never(cx, list),
+        ShorthandSyntax::Always => check_shorthand_always(cx, list),
+        ShorthandSyntax::Consistent => check_shorthand_consistent(cx, list),
+        ShorthandSyntax::EitherConsistent => check_shorthand_either_consistent(cx, list),
+    }
+}
+
+/// "never" mode: flag every omitted pair and expand it to explicit form.
+fn check_shorthand_never(cx: &Cx<'_>, list: NodeList) {
+    for &pair in cx.list(list) {
+        if !is_value_omitted(pair, cx) {
+            continue;
+        }
+        let NodeKind::Pair { key, .. } = *cx.kind(pair) else {
+            continue;
+        };
+        let offense_range = cx.range(key);
+        cx.emit_offense(offense_range, MSG_INCLUDE_HASH_VALUE, None);
+        // Autocorrect: expand `foo:` to `foo: foo`.
+        // key_src is like `foo:` — strip the trailing colon, add `: foo`.
+        let key_src = cx.raw_source(offense_range);
+        if let Some(bare_name) = key_src.strip_suffix(':') {
+            let bare_name = bare_name.trim_end();
+            cx.emit_edit(offense_range, &format!("{bare_name}: {bare_name}"));
+        }
+    }
+}
+
+/// "always" mode: flag every pair whose value can be omitted.
+///
+/// Detection only — autocorrect for the omit direction is not implemented.
+/// See murphy-parity notes for the call-context ABI limitation.
+fn check_shorthand_always(cx: &Cx<'_>, list: NodeList) {
+    for &pair in cx.list(list) {
+        if !is_value_omittable(pair, cx) {
+            continue;
+        }
+        let NodeKind::Pair { key, value } = *cx.kind(pair) else {
+            continue;
+        };
+        let offense_range = Range {
+            start: cx.range(key).start,
+            end: cx.range(value).end,
+        };
+        cx.emit_offense(offense_range, MSG_OMIT_HASH_VALUE, None);
+    }
+}
+
+/// "consistent" mode: all-or-none shorthand when all pairs are omittable.
+///
+/// Autocorrect for the omit direction is not implemented (call-context ABI gap).
+fn check_shorthand_consistent(cx: &Cx<'_>, list: NodeList) {
+    let pairs: Vec<NodeId> = cx.list(list).to_vec();
+    let kinds: Vec<ShorthandPairKind> = pairs.iter().map(|&p| classify_shorthand(p, cx)).collect();
+
+    let has_omitted = kinds.contains(&ShorthandPairKind::Omitted);
+    let has_omittable = kinds.contains(&ShorthandPairKind::Omittable);
+    let has_required = kinds.contains(&ShorthandPairKind::Required);
+
+    if has_omitted && (has_omittable || has_required) {
+        // Mixed: some omitted, some not.
+        if has_required {
+            // Can't omit all → expand the omitted ones.
+            for (&pair, &kind) in pairs.iter().zip(kinds.iter()) {
+                if kind == ShorthandPairKind::Omitted {
+                    let NodeKind::Pair { key, .. } = *cx.kind(pair) else {
+                        continue;
+                    };
+                    cx.emit_offense(cx.range(key), MSG_DO_NOT_MIX_EXPLICIT, None);
+                }
+            }
+        } else {
+            // All non-omitted are omittable → flag them to omit.
+            for (&pair, &kind) in pairs.iter().zip(kinds.iter()) {
+                if kind == ShorthandPairKind::Omittable {
+                    let NodeKind::Pair { key, value } = *cx.kind(pair) else {
+                        continue;
+                    };
+                    cx.emit_offense(
+                        Range {
+                            start: cx.range(key).start,
+                            end: cx.range(value).end,
+                        },
+                        MSG_DO_NOT_MIX_OMIT,
+                        None,
+                    );
+                }
+            }
+        }
+    } else if !has_omitted && !has_required && has_omittable {
+        // All pairs are omittable but none use shorthand: flag them.
+        for &pair in &pairs {
+            let NodeKind::Pair { key, value } = *cx.kind(pair) else {
+                continue;
+            };
+            cx.emit_offense(
+                Range {
+                    start: cx.range(key).start,
+                    end: cx.range(value).end,
+                },
+                MSG_OMIT_HASH_VALUE,
+                None,
+            );
+        }
+    }
+}
+
+/// "either_consistent" mode: accept both forms, but flag mixed hashes.
+fn check_shorthand_either_consistent(cx: &Cx<'_>, list: NodeList) {
+    let pairs: Vec<NodeId> = cx.list(list).to_vec();
+    let kinds: Vec<ShorthandPairKind> = pairs.iter().map(|&p| classify_shorthand(p, cx)).collect();
+
+    let has_omitted = kinds.contains(&ShorthandPairKind::Omitted);
+    let has_omittable = kinds.contains(&ShorthandPairKind::Omittable);
+    let has_required = kinds.contains(&ShorthandPairKind::Required);
+
+    if !has_omitted || (!has_omittable && !has_required) {
+        return;
+    }
+
+    // Mixed explicit and shorthand.
+    if has_required {
+        // Can't omit all → expand the omitted ones.
+        for (&pair, &kind) in pairs.iter().zip(kinds.iter()) {
+            if kind == ShorthandPairKind::Omitted {
+                let NodeKind::Pair { key, .. } = *cx.kind(pair) else {
+                    continue;
+                };
+                cx.emit_offense(cx.range(key), MSG_DO_NOT_MIX_EXPLICIT, None);
+            }
+        }
+    } else {
+        // All non-omitted are omittable → flag them to omit.
+        for (&pair, &kind) in pairs.iter().zip(kinds.iter()) {
+            if kind == ShorthandPairKind::Omittable {
+                let NodeKind::Pair { key, value } = *cx.kind(pair) else {
+                    continue;
+                };
+                cx.emit_offense(
+                    Range {
+                        start: cx.range(key).start,
+                        end: cx.range(value).end,
+                    },
+                    MSG_DO_NOT_MIX_OMIT,
+                    None,
+                );
             }
         }
     }
@@ -335,7 +612,7 @@ fn skip_inline_space(cx: &Cx<'_>, start: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{HashSyntax, HashSyntaxOptions, HashSyntaxStyle};
+    use super::{HashSyntax, HashSyntaxOptions, HashSyntaxStyle, ShorthandSyntax};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -344,7 +621,133 @@ mod tests {
         assert_eq!(opts.enforced_style, HashSyntaxStyle::Ruby19);
         assert!(!opts.use_hash_rockets_with_symbol_values);
         assert!(!opts.prefer_hash_rockets_for_non_alnum_ending_symbols);
+        assert_eq!(opts.enforced_shorthand_syntax, ShorthandSyntax::Either);
     }
+
+    // --- EnforcedShorthandSyntax tests ---
+
+    #[test]
+    fn shorthand_either_accepts_both_explicit_and_shorthand() {
+        // default "either" mode: no offense for shorthand or explicit
+        test::<HashSyntax>().expect_no_offenses("foo = 1\nx = { foo: }\n");
+        test::<HashSyntax>().expect_no_offenses("foo = 1\nx = { foo: foo }\n");
+    }
+
+    #[test]
+    fn shorthand_never_flags_value_omission() {
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_shorthand_syntax: ShorthandSyntax::Never,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_correction(
+                indoc! {r#"
+                    foo = 1
+                    x = { foo: }
+                          ^^^^ Include the hash value.
+                "#},
+                "foo = 1\nx = { foo: foo }\n",
+            );
+    }
+
+    #[test]
+    fn shorthand_never_accepts_explicit_syntax() {
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_shorthand_syntax: ShorthandSyntax::Never,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_no_offenses("foo = 1\nx = { foo: foo }\n");
+    }
+
+    #[test]
+    fn shorthand_always_flags_omittable_explicit_value() {
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_shorthand_syntax: ShorthandSyntax::Always,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_offense(indoc! {r#"
+                    foo = 1
+                    x = { foo: foo }
+                          ^^^^^^^^ Omit the hash value.
+                "#});
+    }
+
+    #[test]
+    fn shorthand_always_accepts_shorthand() {
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_shorthand_syntax: ShorthandSyntax::Always,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_no_offenses("foo = 1\nx = { foo: }\n");
+    }
+
+    #[test]
+    fn shorthand_always_accepts_non_omittable_value() {
+        // value is a different name: cannot omit
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_shorthand_syntax: ShorthandSyntax::Always,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_no_offenses("x = { foo: bar }\n");
+    }
+
+    #[test]
+    fn shorthand_always_accepts_predicate_method_keys() {
+        // key ending in ? must keep the explicit value (Ruby syntax restriction)
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_shorthand_syntax: ShorthandSyntax::Always,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_no_offenses("valid = true\nx = { \"valid?\": valid }\n");
+    }
+
+    #[test]
+    fn shorthand_consistent_flags_all_omittable_when_none_omitted() {
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_shorthand_syntax: ShorthandSyntax::Consistent,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_offense(indoc! {r#"
+                    foo = 1
+                    bar = 2
+                    x = { foo: foo, bar: bar }
+                          ^^^^^^^^ Omit the hash value.
+                                    ^^^^^^^^ Omit the hash value.
+                "#});
+    }
+
+    #[test]
+    fn shorthand_consistent_accepts_mixed_when_some_required() {
+        // When some values can't be omitted, the hash is accepted as-is
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_shorthand_syntax: ShorthandSyntax::Consistent,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_no_offenses("foo = 1\nx = { foo: foo, bar: baz }\n");
+    }
+
+    #[test]
+    fn shorthand_either_consistent_flags_mixed_omitted_and_required() {
+        test::<HashSyntax>()
+            .with_options(&HashSyntaxOptions {
+                enforced_shorthand_syntax: ShorthandSyntax::EitherConsistent,
+                ..HashSyntaxOptions::default()
+            })
+            .expect_offense(indoc! {r#"
+                    foo = 1
+                    x = { foo:, bar: baz }
+                          ^^^^ Do not mix explicit and implicit hash values. Include the hash value.
+                "#});
+    }
+
+    // --- Existing key-style tests (unchanged) ---
 
     #[test]
     fn ruby19_flags_and_corrects_hash_rockets_when_all_keys_can_use_new_syntax() {
