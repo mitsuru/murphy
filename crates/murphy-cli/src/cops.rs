@@ -234,9 +234,10 @@ pub fn warn_user_enabled_disabled(config: &MurphyConfig, registry: &murphy_core:
             && config.is_explicitly_enabled(name)
         {
             eprintln!(
-                "warning: cop `{name}` is a stub in the '{pack_name}' pack; \
-                 `Enabled: true` in .murphy.yml is honoured \
-                 but the cop has no implementation yet"
+                "warning: cop `{name}` is a stub in the '{pack_name}' pack \
+                 with a no-op check; `Enabled: true` in .murphy.yml is \
+                 honoured and the cop is dispatched, but no offenses will \
+                 be reported until the implementation ships"
             );
         }
     }
