@@ -303,6 +303,11 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
 
         NodeKind::ArrayPatternWithTail(l) => push_list(out, lists, l),
 
+        NodeKind::MatchPatternP { value, pattern } | NodeKind::MatchPattern { value, pattern } => {
+            out.push(value);
+            out.push(pattern);
+        }
+
         NodeKind::Itblock { send, body } => {
             out.push(send);
             push_opt(out, body);
@@ -699,6 +704,11 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
         }
 
         NodeKind::ArrayPatternWithTail(l) => slot_list(out, lists, l),
+
+        NodeKind::MatchPatternP { value, pattern } | NodeKind::MatchPattern { value, pattern } => {
+            slot_node(out, value);
+            slot_node(out, pattern);
+        }
 
         // `(itblock call :it body)` — `:it` marker is a phantom slot.
         NodeKind::Itblock { send, body } => {
