@@ -5,8 +5,9 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/EmptyWhen
 //! upstream_version_checked: 1.86.2
-//! status: verified
-//! gap_issues: []
+//! status: partial
+//! gap_issues:
+//!   - murphy-9cr.9
 //! notes: >
 //!   Message text aligned with RuboCop MSG. AllowComments default (true) matches RuboCop. AllowComments:false option override is ABI-blocked (options not wired through Cx until murphy-9cr.9).
 //! ```
