@@ -328,11 +328,35 @@ fn node_kind_discriminants_are_frozen() {
     freeze(NodeKind::MatchNilPattern, 104);
     freeze(NodeKind::ArrayPatternWithTail(NodeList::EMPTY), 105);
     // murphy-j1j2 PM-C one-liner forms
-    freeze(NodeKind::MatchPatternP { value: NodeId(0), pattern: NodeId(0) }, 106);
-    freeze(NodeKind::MatchPattern { value: NodeId(0), pattern: NodeId(0) }, 107);
+    freeze(
+        NodeKind::MatchPatternP {
+            value: NodeId(0),
+            pattern: NodeId(0),
+        },
+        106,
+    );
+    freeze(
+        NodeKind::MatchPattern {
+            value: NodeId(0),
+            pattern: NodeId(0),
+        },
+        107,
+    );
     // murphy-j1j2 PM-D advanced patterns
-    freeze(NodeKind::MatchAs { value: NodeId(0), name: NodeId(0) }, 108);
-    freeze(NodeKind::ConstPattern { const_: NodeId(0), pattern: NodeId(0) }, 109);
+    freeze(
+        NodeKind::MatchAs {
+            value: NodeId(0),
+            name: NodeId(0),
+        },
+        108,
+    );
+    freeze(
+        NodeKind::ConstPattern {
+            const_: NodeId(0),
+            pattern: NodeId(0),
+        },
+        109,
+    );
     // murphy-j1j2 PM-E pin & guard
     freeze(NodeKind::Pin(NodeId(0)), 110);
     freeze(NodeKind::IfGuard(NodeId(0)), 111);

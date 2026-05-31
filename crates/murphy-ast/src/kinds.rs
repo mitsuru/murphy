@@ -578,11 +578,20 @@ mod tests {
             NodeKind::MatchNilPattern,
             NodeKind::ArrayPatternWithTail(NodeList::EMPTY),
             // murphy-j1j2 PM-C one-liner pattern matching (tags 106-107)
-            NodeKind::MatchPatternP { value: n, pattern: n },
-            NodeKind::MatchPattern { value: n, pattern: n },
+            NodeKind::MatchPatternP {
+                value: n,
+                pattern: n,
+            },
+            NodeKind::MatchPattern {
+                value: n,
+                pattern: n,
+            },
             // murphy-j1j2 PM-D advanced patterns (tags 108-109)
             NodeKind::MatchAs { value: n, name: n },
-            NodeKind::ConstPattern { const_: n, pattern: n },
+            NodeKind::ConstPattern {
+                const_: n,
+                pattern: n,
+            },
             // murphy-j1j2 PM-E pin & guard (tags 110-112)
             NodeKind::Pin(n),
             NodeKind::IfGuard(n),
