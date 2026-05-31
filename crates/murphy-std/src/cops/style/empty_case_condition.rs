@@ -13,9 +13,10 @@
 //!   Autocorrect (converting to if/elsif chains) is intentionally omitted:
 //!   deriving the correct `if` condition from each `when` branch requires
 //!   non-trivial source transformation that cannot be done surgically.
-//!   RuboCop also guards on parent node type (:return/:break/:next/:send/:csend)
-//!   and on when-branch "return type" structure; these guards are omitted in
-//!   Murphy v1 since without autocorrect they only suppress noise-free reports.
+//!   RuboCop's `NOT_SUPPORTED_PARENT_TYPES` guard (:return/:break/:next/:send/:csend)
+//!   is omitted: Murphy will flag `foo(case; when x; end)` where RuboCop would not,
+//!   producing a false-positive divergence. The when-branch "return type" guard is
+//!   also omitted for the same reason. These are v1 scope decisions.
 //! ```
 //!
 //! ## Matched shapes
@@ -148,6 +149,66 @@ mod tests {
             case foo
             in Integer
               :int
+            end
+        "});
+    }
+
+    // ----- on_case_match dispatch PoC (murphy-j1j2 PM-F) ------------------
+
+    /// Minimal cop that fires on every `CaseMatch` node (`case/in` form).
+    /// Used as a PoC that `#[on_node(kind = "case_match")]` dispatch works.
+    #[derive(Default)]
+    struct CaseMatchProbe;
+
+    #[murphy_plugin_api::cop(
+        name = "Test/CaseMatchProbe",
+        description = "Proof-of-concept: fires on case_match nodes.",
+        default_severity = "warning",
+        default_enabled = true,
+        options = murphy_plugin_api::NoOptions,
+    )]
+    impl CaseMatchProbe {
+        #[on_node(kind = "case_match")]
+        fn on_case_match(&self, node: murphy_plugin_api::NodeId, cx: &murphy_plugin_api::Cx<'_>) {
+            // Offense range: the `case` keyword token at the node start.
+            // `CaseMatch` is not in `keyword_bearing`, so we find the token
+            // by searching from the node's expression start.
+            use murphy_plugin_api::{Range, SourceTokenKind};
+            let node_start = cx.range(node).start;
+            let kw_range = cx
+                .token_after(node_start)
+                .filter(|t| {
+                    t.range.start == node_start
+                        && t.kind == SourceTokenKind::Other
+                        && cx.raw_source(t.range) == "case"
+                })
+                .map(|t| t.range)
+                .unwrap_or(cx.range(node));
+            cx.emit_offense(kw_range, "case_match dispatched", None);
+        }
+    }
+
+    #[test]
+    fn on_case_match_dispatch_fires_on_case_in() {
+        // Verify that `#[on_node(kind = "case_match")]` dispatches to the
+        // handler when the walker visits a `case/in` expression.
+        test::<CaseMatchProbe>().expect_offense(indoc! {"
+            case foo
+            ^^^^ case_match dispatched
+            in Integer
+              :int
+            end
+        "});
+    }
+
+    #[test]
+    fn on_case_match_dispatch_does_not_fire_on_case_when() {
+        // `case/when` produces a `Case` node (tag 26), not a `CaseMatch`
+        // (tag 86) — the handler must not be triggered.
+        test::<CaseMatchProbe>().expect_no_offenses(indoc! {"
+            case x
+            when 1
+              :one
             end
         "});
     }
