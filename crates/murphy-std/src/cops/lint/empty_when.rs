@@ -113,9 +113,7 @@ fn empty_when_body_region(cx: &Cx<'_>, when_id: NodeId) -> Option<Range> {
 }
 
 fn region_has_comment(cx: &Cx<'_>, region: Range) -> bool {
-    cx.comments()
-        .iter()
-        .any(|c| c.range.start >= region.start && c.range.start < region.end)
+    !cx.comments_in_range(region).is_empty()
 }
 
 #[cfg(test)]

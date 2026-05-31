@@ -2494,6 +2494,22 @@ impl<'a> Cx<'a> {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
     }
 
+    /// Comments fully contained in `range`, in source order.
+    pub fn comments_in_range(&self, range: Range) -> Vec<Comment> {
+        self.comments()
+            .iter()
+            .copied()
+            .filter(|comment| comment.range.start >= range.start && comment.range.end <= range.end)
+            .collect()
+    }
+
+    /// Comments associated with `id`, using Murphy's current CommentsHelp
+    /// association: immediately preceding own-line comments plus comments
+    /// inside the node's source range.
+    pub fn comments_for_node(&self, id: NodeId) -> Vec<Comment> {
+        self.comments_in_range(self.range_with_comments(id))
+    }
+
     /// The file's structured magic comments, in source order.
     pub fn magic_comments(&self) -> Vec<MagicComment> {
         let mut comments = Vec::new();
@@ -3265,6 +3281,63 @@ mod tests {
         let range = cx.range_with_comments(cx.root());
 
         assert_eq!(cx.raw_source(range), "def m\nend");
+    }
+
+    #[test]
+    fn comments_help_comments_in_range_returns_contained_comments() {
+        let source = concat!(
+            "# outside\n",
+            "case value\n",
+            "when 1\n",
+            "  # body\n",
+            "when 2\n",
+            "  :ok\n",
+            "end\n"
+        );
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let when = cx
+            .descendants(cx.root())
+            .into_iter()
+            .find(|&id| matches!(cx.kind(id), NodeKind::When { .. }))
+            .expect("when node");
+        let region = Range {
+            start: cx.range(when).end,
+            end: cx.range(cx.root()).end,
+        };
+
+        let comments = cx.comments_in_range(region);
+
+        assert_eq!(comments.len(), 1);
+        assert_eq!(cx.raw_source(comments[0].range), "# body");
+    }
+
+    #[test]
+    fn comments_help_comments_for_node_includes_leading_and_inner_comments() {
+        let source = concat!(
+            "class C\n",
+            "  # doc\n",
+            "  def m\n",
+            "    # body\n",
+            "    puts 1\n",
+            "  end\n",
+            "end\n"
+        );
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let def = cx
+            .descendants(cx.root())
+            .into_iter()
+            .find(|&id| matches!(cx.kind(id), NodeKind::Def { .. }))
+            .expect("def node");
+
+        let comments = cx.comments_for_node(def);
+
+        assert_eq!(comments.len(), 2);
+        assert_eq!(cx.raw_source(comments[0].range), "# doc");
+        assert_eq!(cx.raw_source(comments[1].range), "# body");
     }
 
     #[test]
