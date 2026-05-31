@@ -45,6 +45,8 @@ use crate::cops::lint::useless_assignment::UselessAssignment;
 use crate::cops::murphy::no_receiver_puts::NoReceiverPuts;
 use crate::cops::style::frozen_string_literal_comment::FrozenStringLiteralComment;
 use crate::cops::style::hash_syntax::HashSyntax;
+use crate::cops::style::if_unless_modifier::IfUnlessModifier;
+use crate::cops::style::nil_comparison::NilComparison;
 use crate::cops::style::redundant_self::RedundantSelf;
 use crate::cops::style::string_literals::StringLiterals;
 use crate::cops::style::symbol_array::SymbolArray;
@@ -73,6 +75,8 @@ murphy_plugin_api::register_cops!(
     SpaceInsideParens,
     SpaceAroundOperators,
     DotPosition,
+    IfUnlessModifier,
+    NilComparison,
 );
 
 /// Standard cops that have **not yet been migrated** to the arena AST /
