@@ -6,12 +6,14 @@ description: >-
   murphy-*", "RuboCop の cop を移植", "X cop を移植して", or otherwise wants to
   translate a RuboCop, RuboCop-RSpec, or RuboCop-Rails rule into a Murphy
   plugin cop using the single-surface ABI from
-  docs/guides/plugin-cop-infrastructure.md. Runs the full porting workflow
-  end-to-end: read the RuboCop source, implement against the guide, add and
-  maintain the cop's source-near murphy-parity metadata block, analyse the gap
-  to the RuboCop original, escalate gaps the guide cannot cover, iterate
-  through roborev-refine review until passing, then open a PR and merge after
-  CI is green.
+  docs/guides/plugin-cop-infrastructure.md. Also use when the user asks to
+  "fill the gap in", "close the parity gap for", "murphy-xxxx の gap を埋めて",
+  or "fix the partial parity" of an already-implemented cop. Runs the full
+  porting workflow end-to-end: read the RuboCop source, implement against the
+  guide, add and maintain the cop's source-near murphy-parity metadata block,
+  analyse the gap to the RuboCop original, escalate gaps the guide cannot
+  cover, iterate through roborev-refine review until passing, then open a PR
+  and merge after CI is green.
 ---
 
 # Porting a RuboCop cop to Murphy
@@ -28,16 +30,34 @@ common source of build failures because the macro surface has churned.
 ## When to use this skill
 
 Trigger on requests that name a RuboCop (or RuboCop-RSpec / RuboCop-Rails)
-cop and ask to bring it into Murphy. Typical phrasings:
+cop and ask to bring it into Murphy, or fill a parity gap in an existing one.
+Typical phrasings:
 
 - "Port `RSpec/EmptyExampleGroup` to murphy-rspec."
 - "Add `Lint/UselessAssignment` as a Murphy std cop."
 - "`Style/RedundantReturn` を Murphy に移植して — autocorrect 込みで。"
 - "Translate this rubocop-rails rule into murphy-rails."
+- "Fill the gap in `Rails/Pick` from issue murphy-gu5d."
+- "Close the parity gap in `RSpec/ExampleLength`."
+- "`murphy-juee` の gap を埋めて。"
+- "Implement the missing autocorrect for `Rails/AssertNot`."
 
 If the request is "write a brand-new cop with no RuboCop ancestor", most of
 the same steps apply — Phase 1 (read the RuboCop source) is optional;
 start from Phase 2.
+
+**Entry modes.** This skill handles three entry points; the six phases are
+the same for all three — only which sub-steps apply changes:
+
+- **New cop port** — the cop does not exist in Murphy yet. Run all phases.
+- **Gap fill** — the cop exists with `status: partial` in its `murphy-parity`
+  block and open `gap_issues`. Start by reading the beads issue
+  (`bd show <issue-id>`) and the existing cop file; narrow Phase 1 to the
+  gap shapes; skip or shorten Phases 2.1, 2.2, and 2.4; close the beads
+  issue in Phase 3 when all gaps are resolved. Per-phase notes appear
+  inline below.
+- **Greenfield** — no RuboCop ancestor. Phase 1 is a hand-written spec.
+  See the closing note of Phase 1.
 
 ## Workflow
 
@@ -101,6 +121,17 @@ implementation against this list, so keep it explicit:
   guard, autocorrect input/output. Phase 2.5 (tests) will mirror this
   list.
 
+**Gap-fill entry point.** When the cop already exists, narrow Phase 1 to the
+specific gap rather than re-capturing every axis. Two reads are sufficient:
+
+1. Read the existing Murphy cop file. The `murphy-parity` block names what is
+   missing; `bd show <issue-id>` provides the original gap description.
+2. Read the RuboCop source focused on the gap shapes only — the dispatch
+   hooks, patterns, options, and spec examples that the Murphy port does not
+   yet cover.
+
+Carry these into Phase 3's scoped re-audit rather than a full re-diff.
+
 For greenfield cops (no RuboCop ancestor), Phase 1 reduces to writing a
 short spec by hand: matched shapes, option keys, autocorrect stance,
 test cases.
@@ -111,6 +142,10 @@ The implementation phase has six sub-steps. Each points to the infra
 guide section and to an in-tree example cop.
 
 ### Phase 2.1: identify the target pack and the Murphy cop name
+
+> **Gap fill:** skip this step. Locate the existing cop file
+> (`find crates -name '<cop_snake_case>.rs'`) and read it to understand the current
+> implementation before continuing to Phase 2.2.
 
 Two facts to nail down before scaffolding:
 
@@ -132,6 +167,12 @@ conventions (helpers, `is_example_call`-style gates, doc-comment style)
 should be reused rather than reinvented.
 
 ### Phase 2.2: decide the dispatch shape
+
+> **Gap fill:** only revisit if the gap requires a new dispatch handler — for
+> example, the existing cop has `kind = "send"` but the gap is the `on_csend`
+> (safe-navigation) shape, requiring an added `#[on_node(kind = "csend")]`
+> handler. If the gap is in options, autocorrect, or test coverage only, skip
+> to Phase 2.3.
 
 This is the single most important design choice. The infra guide §3
 lists all valid forms.
@@ -168,6 +209,11 @@ to `#[on_node(kind = …)]` is the Murphy-canonical form (`"send"`,
 `"str"`, etc., per the infra guide's RSpec / std examples).
 
 ### Phase 2.3: scaffold the cop file
+
+> **Gap fill:** modify the existing file rather than creating a new one. The
+> file is already under `crates/<pack>/src/cops/<namespace>/` and the
+> `mod.rs` re-export is already in place. Add the missing handler, option
+> field, or autocorrect logic to the existing `impl` block.
 
 For an existing pack, add one file per cop under
 `crates/<pack>/src/cops/<namespace>/<cop_snake_case>.rs` and re-export it
@@ -236,6 +282,13 @@ alongside `emit_offense`; see `references/autocorrect.md`.
 
 ### Phase 2.3a: add the `murphy-parity` metadata block
 
+> **Gap fill:** update the existing `murphy-parity` block rather than writing
+> a new one. As you implement each gap shape:
+> - Drop the fixed beads ID from `gap_issues` once its work is code-complete.
+> - Update `notes` to briefly describe what changed.
+> - Do **not** set `status: verified` here — that happens in Phase 3 after
+>   the scoped re-audit confirms no remaining gaps.
+
 Every RuboCop-derived cop file must keep a machine-readable
 `murphy-parity` fenced block in its top module doc comment. This block
 is the source of truth for AI agents, reviewers, future validation
@@ -286,6 +339,8 @@ known gaps after the audit, set `status: verified` and keep
 
 ### Phase 2.4: register the cop with the pack
 
+> **Gap fill:** skip — the cop is already registered.
+
 Add the cop to the pack's `register_cops!` invocation in
 `crates/<pack>/src/lib.rs`. The macro mode (`static` vs `dynamic`) is
 already set by the existing call — just add the new struct to the list,
@@ -327,6 +382,10 @@ directly, and the cop struct is reached via the use line at the top of
 `lib.rs` (`use crate::cops::<namespace>::<file>::CopName;`).
 
 ### Phase 2.5: write tests against the test-support harness
+
+> **Gap fill:** add tests only for the gap shapes. The existing test suite
+> must continue to pass — run the full cop test suite (`cargo test -p <pack>
+> <cop_name>`), not just the new cases, to confirm no regression.
 
 Every cop ships its tests in the same file, inside `#[cfg(test)] mod
 tests` and using `murphy_plugin_api::test_support`. The pack must
@@ -486,6 +545,20 @@ Output of Phase 3 is one of:
   Phase 2.x and finish, then re-run Phase 3.
 - **Gaps the guide / ABI cannot cover.** Go to Phase 4.
 
+**Gap-fill closing loop.** When running in gap-fill mode, scope the Phase 3
+audit to the gap shapes from Phase 1 rather than re-diffing every axis:
+
+- **All targeted gaps resolved and no new ones found.** Set
+  `status: verified`, clear `gap_issues: []`, update `notes`, and close
+  the beads issue: `bd close <issue-id>`. Continue to Phase 5.
+- **Only some gaps resolved.** Drop the fixed issue id from `gap_issues`,
+  close the resolved beads issue (`bd close <resolved-issue-id>`),
+  update `notes` to describe what changed, keep `status: partial`, and
+  continue to Phase 5 with the remaining gaps documented. If the audit
+  surfaces a previously-untracked gap, file a new beads issue for it and
+  add its id to `gap_issues`.
+- **No progress possible.** Go to Phase 4 for escalation.
+
 ## Phase 4: escalate gaps the guide cannot cover
 
 Some gaps cannot be closed by writing more Rust against the existing
@@ -529,7 +602,8 @@ Escalation format — bring this to the user in one short report:
 If the user agrees to degrade and ship with the limitation, document
 it in the cop file's `murphy-parity` block (`status: partial`, gap issue
 id in `gap_issues`, concise `notes`) and continue to Phase 5. If the user
-agrees to extend the ABI, file a bd issue for the extension, add that
+agrees to extend the ABI, file a bd issue for the extension **with the
+`infra` label** (`bd create ...` then `bd label add <id> infra`), add that
 issue id to `gap_issues`, and pause the port until that work lands.
 
 ## Phase 5: pass `roborev-refine` review
@@ -557,11 +631,13 @@ Ship the work:
 
 1. **Push the worktree branch** if it is not already on origin:
    `git push -u origin <branch>`.
-2. **Open a PR** with `gh pr create`. Title: `feat(<pack>-<cop-id>): port Pack/CopName from RuboCop`
-   (or `feat(murphy-std-…)` etc., matching the commit-message convention
-   visible in `git log --oneline main`). Body: short summary (1–3
-   bullets — what the cop does, dispatch shape, autocorrect stance) and
-   a test plan checklist (the Phase 2.5 / Phase 3 outcomes).
+2. **Open a PR** with `gh pr create`. Title convention depends on entry mode:
+   - **New cop port:** `feat(<pack>-<cop-id>): port Pack/CopName from RuboCop`
+   - **Gap fill:** `fix(<pack>-<issue-id>): close parity gap in Pack/CopName`
+   (Match the `<pack>` prefix style visible in `git log --oneline main`, e.g.
+   `murphy-std`, `rails`, `rspec`.) Body: short summary (1–3 bullets — what
+   gap was closed, which shapes / options / autocorrect were added) and a
+   test plan checklist (the Phase 2.5 / Phase 3 outcomes).
 3. **Wait for CI.** Use `gh pr checks --watch` or poll periodically. Do
    not merge until every required check is green. If a check fails,
    triage the failure: a `dep_boundary` regression goes back to Phase
