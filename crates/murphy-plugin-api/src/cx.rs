@@ -2460,7 +2460,15 @@ impl<'a> Cx<'a> {
                 continue;
             }
             let comment_line = line_range(source, comment.range.start as usize);
-            if comment_line.end != result.start {
+            let result_line_start = line_range(source, result.start as usize).start;
+            let comment_line_end = if comment_line.end < source.len() as u32
+                && source.as_bytes()[comment_line.end as usize] == b'\n'
+            {
+                comment_line.end + 1
+            } else {
+                comment_line.end
+            };
+            if comment_line_end != result_line_start {
                 break;
             }
             result.start = comment_line.start;
@@ -2889,6 +2897,34 @@ mod tests {
         assert_eq!(
             cx.raw_source(range),
             "# doc one\n# doc two\ndef m\n  puts 1\nend"
+        );
+    }
+
+    #[test]
+    fn range_help_range_with_comments_includes_comments_for_non_root_node() {
+        let source = concat!(
+            "class C\n",
+            "  # doc one\n",
+            "  # doc two\n",
+            "  def m\n",
+            "    puts 1\n",
+            "  end\n",
+            "end\n"
+        );
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let def = cx
+            .descendants(cx.root())
+            .into_iter()
+            .find(|&id| matches!(cx.kind(id), NodeKind::Def { .. }))
+            .expect("def node");
+
+        let range = cx.range_with_comments(def);
+
+        assert_eq!(
+            cx.raw_source(range),
+            "  # doc one\n  # doc two\n  def m\n    puts 1\n  end"
         );
     }
 
