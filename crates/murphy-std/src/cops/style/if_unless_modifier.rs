@@ -105,6 +105,16 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    // Condition must also be single-line. A multi-line condition (e.g. a
+    // method call spanning multiple lines) would produce invalid/broken Ruby
+    // in modifier form: `baz if foo(\n  bar\n)`.
+    let NodeKind::If { cond, .. } = *cx.kind(node) else {
+        return;
+    };
+    if !cx.is_single_line(cond) {
+        return;
+    }
+
     // Body must not be a Begin node (multi-statement body).
     if matches!(cx.kind(body), NodeKind::Begin(..)) {
         return;
@@ -125,9 +135,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     // Build the modifier-form candidate to check length.
-    let NodeKind::If { cond, .. } = *cx.kind(node) else {
-        return;
-    };
+    // `cond` was already extracted earlier in this function.
     let cond_src = cx.raw_source(cx.range(cond));
     let body_src = cx.raw_source(cx.range(body));
 
@@ -279,6 +287,18 @@ mod tests {
         let long_cond = "b".repeat(60);
         let src = format!("if {long_cond}\n  {long_body}\nend\n");
         test::<IfUnlessModifier>().expect_no_offenses(&src);
+    }
+
+    #[test]
+    fn accepts_multiline_condition() {
+        // A multi-line condition would produce broken modifier form.
+        test::<IfUnlessModifier>().expect_no_offenses(indoc! {"
+            if foo(
+              bar
+            )
+              baz
+            end
+        "});
     }
 
     #[test]
