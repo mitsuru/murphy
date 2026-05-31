@@ -159,16 +159,17 @@ fn make_write(cx: &Cx<'_>, var: &Variable, asgn: &Assignment) -> Write {
             },
             node: asgn.node_id,
         },
-        // Value-less `Lvasgn`: either a `Masgn` target or an exception/`for`
-        // binding. The model records the var node directly, so the immediate
-        // parent disambiguates: `Resbody`/`For` → exception binding (name
-        // range, no autocorrect), otherwise a multiple-assignment target.
+        // Value-less `Lvasgn`: either a `Masgn` target or a binding whose
+        // source cannot be safely autocorrected (exception, `for`, or regexp
+        // named capture). The model records the var node directly, so ancestry
+        // disambiguates report-only bindings from multiple-assignment targets.
         NodeKind::Lvasgn { value, .. } if value.get().is_none() => {
             // Walk ancestors, threading through any `Mlhs` wrappers, to decide
-            // whether this value-less target is an exception/`for` binding
-            // (name range, no autocorrect) or a multiple-assignment target.
+            // whether this value-less target is a report-only binding (name
+            // range, no autocorrect) or a multiple-assignment target.
             // `for a, b in xs` wraps each target in an `Mlhs` whose parent is
-            // the `For`, so the immediate parent alone is not enough.
+            // the `For`, so the immediate parent alone is not enough. Regexp
+            // named captures are lowered under a `Begin` wrapper.
             let is_exception = {
                 let mut current = asgn.node_id;
                 let mut found = false;
