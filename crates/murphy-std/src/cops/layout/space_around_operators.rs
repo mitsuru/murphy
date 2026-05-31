@@ -369,7 +369,10 @@ impl SpaceAroundOperators {
 
     #[on_node(kind = "resbody")]
     fn check_resbody(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Resbody { exceptions, var, .. } = *cx.kind(node) else {
+        let NodeKind::Resbody {
+            exceptions, var, ..
+        } = *cx.kind(node)
+        else {
             return;
         };
         let Some(var_id) = var.get() else {
