@@ -43,6 +43,7 @@ struct CopArgs {
     /// Parsed severity literal and its resolved variant name ("Warning" / "Error").
     default_severity: Option<(LitStr, &'static str)>,
     default_enabled: Option<LitBool>,
+    minimum_target_ruby_version: Option<(LitStr, u16, u16)>,
     safe: Option<LitBool>,
     safe_autocorrect: Option<LitBool>,
     options: Option<Path>,
@@ -127,10 +128,17 @@ fn require_path(key: &Ident, value: &syn::Expr, errors: &mut Option<Error>) -> O
     }
 }
 
+fn parse_version_literal(lit: &LitStr) -> Option<(u16, u16)> {
+    let value = lit.value();
+    let (major, minor) = value.split_once('.')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
 /// Parse `#[cop(name = "...", ...)]` arguments.
 ///
 /// Accepted keys: `name` (required), `description`, `default_severity`,
-/// `default_enabled`, `safe`, `safe_autocorrect`, `options`.
+/// `default_enabled`, `minimum_target_ruby_version`, `safe`,
+/// `safe_autocorrect`, `options`.
 fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
     // Collect all key=value arguments as a comma-separated list.
     let pairs: syn::punctuated::Punctuated<KvArg, Token![,]> =
@@ -142,6 +150,7 @@ fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
     let mut description_lit: Option<LitStr> = None;
     let mut default_severity: Option<(LitStr, &'static str)> = None;
     let mut default_enabled: Option<LitBool> = None;
+    let mut minimum_target_ruby_version: Option<(LitStr, u16, u16)> = None;
     let mut safe: Option<LitBool> = None;
     let mut safe_autocorrect: Option<LitBool> = None;
     let mut options_path: Option<Path> = None;
@@ -207,6 +216,30 @@ fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
                     default_enabled = Some(b);
                 }
             }
+            "minimum_target_ruby_version" => {
+                if minimum_target_ruby_version.is_some() {
+                    push_error(
+                        &mut errors,
+                        Error::new_spanned(
+                            key,
+                            "#[cop]: duplicate argument 'minimum_target_ruby_version'",
+                        ),
+                    );
+                } else if let Some(lit) = require_str_lit(key, &pair.value, &mut errors) {
+                    match parse_version_literal(&lit) {
+                        Some((major, minor)) => {
+                            minimum_target_ruby_version = Some((lit, major, minor));
+                        }
+                        None => push_error(
+                            &mut errors,
+                            Error::new_spanned(
+                                &lit,
+                                "#[cop]: minimum_target_ruby_version must be a string like \"3.1\"",
+                            ),
+                        ),
+                    }
+                }
+            }
             "safe" => {
                 if safe.is_some() {
                     push_error(
@@ -262,6 +295,7 @@ fn parse_cop_args(args: TokenStream) -> syn::Result<CopArgs> {
         description: description_lit,
         default_severity,
         default_enabled,
+        minimum_target_ruby_version,
         safe,
         safe_autocorrect,
         options: options_path,
@@ -1114,6 +1148,19 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
         quote! {}
     };
 
+    let minimum_target_ruby_version_const: TokenStream =
+        if let Some((_lit, major, minor)) = &args.minimum_target_ruby_version {
+            quote! {
+                const MINIMUM_TARGET_RUBY_VERSION:
+                    ::core::option::Option<::murphy_plugin_api::RubyVersion> =
+                    ::core::option::Option::Some(
+                        ::murphy_plugin_api::RubyVersion::new(#major, #minor)
+                    );
+            }
+        } else {
+            quote! {}
+        };
+
     let safe_const: TokenStream = if let Some(lit) = &args.safe {
         quote! {
             const SAFE: ::core::option::Option<bool> = ::core::option::Option::Some(#lit);
@@ -1159,6 +1206,7 @@ fn lower_cop_impl(args: CopArgs, cop_methods: &[CopMethod], item_impl: ItemImpl)
             #description_const
             #default_severity_const
             #default_enabled_const
+            #minimum_target_ruby_version_const
             #safe_const
             #safe_autocorrect_const
         }

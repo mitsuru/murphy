@@ -1,5 +1,6 @@
 //! The `Cop` trait — a cop's compile-time metadata.
 
+use crate::RubyVersion;
 use crate::options::CopOptions;
 use crate::severity::Severity;
 
@@ -37,6 +38,10 @@ pub trait Cop: Send + Sync + 'static {
     /// Whether `murphy lint -a` may apply this cop's autocorrections.
     /// `None` keeps Murphy's default, currently safe.
     const SAFE_AUTOCORRECT: Option<bool> = None;
+
+    /// Minimum `AllCops.TargetRubyVersion` required for this cop to run.
+    /// `None` means no version gating.
+    const MINIMUM_TARGET_RUBY_VERSION: Option<RubyVersion> = None;
 }
 
 #[cfg(test)]
@@ -60,5 +65,6 @@ mod tests {
         assert_eq!(<Stub as Cop>::DEFAULT_ENABLED, None); // default
         assert_eq!(<Stub as Cop>::SAFE, None); // default
         assert_eq!(<Stub as Cop>::SAFE_AUTOCORRECT, None); // default
+        assert_eq!(<Stub as Cop>::MINIMUM_TARGET_RUBY_VERSION, None); // default
     }
 }

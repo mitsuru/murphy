@@ -38,7 +38,7 @@ pub mod test_support;
 
 pub use abi::{
     CxRaw, DispatchFn, FnTable, MURPHY_PLUGIN_ABI_VERSION, MurphyPluginRegister, OptionSpec,
-    PluginCopV1, PluginRegistration, RawEdit, RawOffense, RawSlice,
+    PluginCopV1, PluginRegistration, RawEdit, RawOffense, RawSlice, RubyVersion,
 };
 pub use config_error::{ConfigError, ConfigErrorKind};
 pub use cop::Cop;

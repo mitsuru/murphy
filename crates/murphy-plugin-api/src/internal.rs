@@ -9,7 +9,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use murphy_ast::NodeId;
 
-use crate::abi::{CxRaw, PluginCopV1, RawSlice};
+use crate::abi::{CxRaw, PluginCopV1, RawSlice, RubyVersion};
 use crate::cx::Cx;
 use crate::node_cop::NodeCop;
 use crate::options::CopOptions;
@@ -40,6 +40,7 @@ pub const fn build_cop<C: NodeCop + Default>() -> PluginCopV1 {
         send_methods_len: <C as NodeCop>::SEND_METHODS.len(),
         safe: tristate_to_wire(C::SAFE),
         safe_autocorrect: tristate_to_wire(C::SAFE_AUTOCORRECT),
+        minimum_target_ruby_version: RubyVersion::to_wire(C::MINIMUM_TARGET_RUBY_VERSION),
     }
 }
 
