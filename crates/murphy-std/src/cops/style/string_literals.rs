@@ -64,27 +64,34 @@
 //! violation stands) but skips the edit so the user can hand-fix without
 //! risk of a wrong autocorrect.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, Range, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, Range, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct StringLiterals;
 
-/// Cop options for [`StringLiterals`]. The `EnforcedStyle` value is
-/// constrained to the `single_quotes` / `double_quotes` enum by the generated
-/// [`OptionSpec::enum_values_json`](murphy_plugin_api::OptionSpec); the
-/// `#[derive(CopOptions)]` macro builds the JSON schema entry that the
-/// validation gate (murphy-9cr.9) reads. Values and key name match
-/// RuboCop's `Style/StringLiterals` cop.
+/// Preferred quote style for plain string literals.
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EnforcedStyle {
+    #[default]
+    #[option(value = "single_quotes")]
+    SingleQuotes,
+    #[option(value = "double_quotes")]
+    DoubleQuotes,
+}
+
+/// Cop options for [`StringLiterals`]. Values and key name match
+/// RuboCop's `Style/StringLiterals` cop. Using [`CopOptionEnum`] for
+/// `EnforcedStyle` makes the struct `Copy`-friendly, eliminating heap
+/// allocations in the hot `check_str` path.
 #[derive(CopOptions)]
 pub struct StringLiteralsOptions {
     #[option(
         name = "EnforcedStyle",
         default = "single_quotes",
-        enum_values = ["single_quotes", "double_quotes"],
         description = "Preferred quote style for plain string literals."
     )]
-    pub enforced_style: String,
+    pub enforced_style: EnforcedStyle,
 }
 
 #[cop(
@@ -98,7 +105,7 @@ impl StringLiterals {
     #[on_node(kind = "str")]
     fn check_str(&self, node: NodeId, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<StringLiteralsOptions>();
-        let prefer_single = opts.enforced_style == "single_quotes";
+        let prefer_single = opts.enforced_style == EnforcedStyle::SingleQuotes;
 
         let range = cx.range(node);
         let src = cx.raw_source(range);
@@ -376,12 +383,11 @@ mod tests {
     #[test]
     fn enforced_style_double_quotes_from_config_json() {
         // Config JSON uses RuboCop's `EnforcedStyle` key and `double_quotes` value.
-        // In double_quotes mode, single-quoted strings should be flagged.
         use murphy_plugin_api::CopOptions;
         let opts =
             StringLiteralsOptions::from_config_json(br#"{"EnforcedStyle": "double_quotes"}"#)
                 .expect("valid config");
-        assert_eq!(opts.enforced_style, "double_quotes");
+        assert_eq!(opts.enforced_style, EnforcedStyle::DoubleQuotes);
     }
 
     #[test]
@@ -391,14 +397,14 @@ mod tests {
         let opts =
             StringLiteralsOptions::from_config_json(br#"{"EnforcedStyle": "single_quotes"}"#)
                 .expect("valid config");
-        assert_eq!(opts.enforced_style, "single_quotes");
+        assert_eq!(opts.enforced_style, EnforcedStyle::SingleQuotes);
     }
 
     #[test]
     fn enforced_style_default_is_single_quotes() {
         // Default must be `single_quotes` to match RuboCop.
         let opts = StringLiteralsOptions::default();
-        assert_eq!(opts.enforced_style, "single_quotes");
+        assert_eq!(opts.enforced_style, EnforcedStyle::SingleQuotes);
     }
 
     #[test]
@@ -406,7 +412,7 @@ mod tests {
         use murphy_plugin_api::test_support::{indoc, test};
         test::<StringLiterals>()
             .with_options(&StringLiteralsOptions {
-                enforced_style: "double_quotes".to_string(),
+                enforced_style: EnforcedStyle::DoubleQuotes,
             })
             .expect_offense(indoc! {r#"
                 x = 'hello'
@@ -428,7 +434,7 @@ mod tests {
         use murphy_plugin_api::test_support::test;
         test::<StringLiterals>()
             .with_options(&StringLiteralsOptions {
-                enforced_style: "double_quotes".to_string(),
+                enforced_style: EnforcedStyle::DoubleQuotes,
             })
             .expect_no_offenses("x = \"hello #{name}\"\n");
     }
