@@ -40,4 +40,17 @@
         (match_nil_pattern))
       nil
       (lvar host))
+    nil)
+  (case_match
+    (send :opts
+      nil)
+    (in_pattern
+      (hash_pattern
+        (pair
+          (sym :host)
+          (match_var :host))
+        (match_rest
+          (match_var :rest)))
+      nil
+      (lvar rest))
     nil))

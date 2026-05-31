@@ -1262,6 +1262,19 @@ impl Translator {
                 let rest_id = if rest.as_no_keywords_parameter_node().is_some() {
                     self.builder
                         .push(NodeKind::MatchNilPattern, Self::node_range(&rest))
+                } else if let Some(assoc_splat) = rest.as_assoc_splat_node() {
+                    // `**rest` in a hash pattern → match_rest with optional match_var.
+                    let inner = assoc_splat.value().and_then(|v| {
+                        v.as_local_variable_target_node().map(|t| {
+                            let name = self.sym(&t.name());
+                            self.builder
+                                .push(NodeKind::MatchVar(name), Self::node_range(&v))
+                        })
+                    });
+                    self.builder.push(
+                        NodeKind::MatchRest(murphy_ast::OptNodeId::from(inner)),
+                        Self::node_range(&rest),
+                    )
                 } else {
                     self.translate_node(&rest)
                 };
