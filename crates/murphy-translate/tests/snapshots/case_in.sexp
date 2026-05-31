@@ -8,8 +8,9 @@
     (sym :matched))
   (in_pattern
     (match_var :y)
-    (send :>
-      (lvar y)
-      (int 0))
+    (if_guard
+      (send :>
+        (lvar y)
+        (int 0)))
     (sym :positive))
   (sym :other))
