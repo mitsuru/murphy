@@ -85,18 +85,24 @@ impl Translator {
     }
 
     fn magic_comment_kind(key: &[u8]) -> Option<MagicCommentKind> {
-        let normalized: Vec<u8> = key
-            .iter()
-            .map(|b| match b {
-                b'-' => b'_',
-                b'A'..=b'Z' => b + 32,
-                _ => *b,
-            })
-            .collect();
-        match normalized.as_slice() {
-            b"frozen_string_literal" => Some(MagicCommentKind::FrozenStringLiteral),
-            b"encoding" => Some(MagicCommentKind::Encoding),
-            _ => None,
+        fn eq_normalized(actual: &[u8], expected: &[u8]) -> bool {
+            actual.len() == expected.len()
+                && actual.iter().zip(expected).all(|(&actual, &expected)| {
+                    let actual = if actual == b'-' {
+                        b'_'
+                    } else {
+                        actual.to_ascii_lowercase()
+                    };
+                    actual == expected
+                })
+        }
+
+        if eq_normalized(key, b"frozen_string_literal") {
+            Some(MagicCommentKind::FrozenStringLiteral)
+        } else if eq_normalized(key, b"encoding") {
+            Some(MagicCommentKind::Encoding)
+        } else {
+            None
         }
     }
 

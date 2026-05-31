@@ -512,11 +512,27 @@ impl<'a> Cx<'a> {
     }
 
     fn magic_comment_kind(key: &str) -> Option<MagicCommentKind> {
-        let normalized = key.replace('-', "_").to_ascii_lowercase();
-        match normalized.as_str() {
-            "frozen_string_literal" => Some(MagicCommentKind::FrozenStringLiteral),
-            "encoding" => Some(MagicCommentKind::Encoding),
-            _ => None,
+        fn eq_normalized(actual: &str, expected: &str) -> bool {
+            actual.len() == expected.len()
+                && actual
+                    .bytes()
+                    .zip(expected.bytes())
+                    .all(|(actual, expected)| {
+                        let actual = if actual == b'-' {
+                            b'_'
+                        } else {
+                            actual.to_ascii_lowercase()
+                        };
+                        actual == expected
+                    })
+        }
+
+        if eq_normalized(key, "frozen_string_literal") {
+            Some(MagicCommentKind::FrozenStringLiteral)
+        } else if eq_normalized(key, "encoding") {
+            Some(MagicCommentKind::Encoding)
+        } else {
+            None
         }
     }
 
@@ -533,8 +549,22 @@ impl<'a> Cx<'a> {
         while key_start < bytes.len() && bytes[key_start].is_ascii_whitespace() {
             key_start += 1;
         }
+        let mut parse_end = bytes.len();
+        if bytes[key_start..].starts_with(b"-*-") {
+            key_start += 3;
+            while key_start < bytes.len() && bytes[key_start].is_ascii_whitespace() {
+                key_start += 1;
+            }
+            if let Some(suffix_start) = bytes[key_start..]
+                .windows(3)
+                .rposition(|window| window == b"-*-")
+                .map(|pos| key_start + pos)
+            {
+                parse_end = suffix_start;
+            }
+        }
         let mut key_end = key_start;
-        while key_end < bytes.len()
+        while key_end < parse_end
             && (bytes[key_end].is_ascii_alphanumeric()
                 || bytes[key_end] == b'_'
                 || bytes[key_end] == b'-')
@@ -545,17 +575,17 @@ impl<'a> Cx<'a> {
             return None;
         }
         let mut sep = key_end;
-        while sep < bytes.len() && bytes[sep].is_ascii_whitespace() {
+        while sep < parse_end && bytes[sep].is_ascii_whitespace() {
             sep += 1;
         }
         if !matches!(bytes.get(sep), Some(b':' | b'=')) {
             return None;
         }
         let mut value_start = sep + 1;
-        while value_start < bytes.len() && bytes[value_start].is_ascii_whitespace() {
+        while value_start < parse_end && bytes[value_start].is_ascii_whitespace() {
             value_start += 1;
         }
-        let mut value_end = bytes.len();
+        let mut value_end = parse_end;
         while value_end > value_start && bytes[value_end - 1].is_ascii_whitespace() {
             value_end -= 1;
         }
@@ -2769,6 +2799,25 @@ mod tests {
         assert_eq!(frozen.value_bool, 1);
         let encoding = cx.encoding_comment().expect("encoding comment");
         assert_eq!(cx.raw_source(encoding.value_range), "utf-8");
+    }
+
+    #[test]
+    fn magic_comment_helpers_parse_emacs_style_comments() {
+        let src = "# -*- frozen_string_literal: true -*-\nnil\n";
+        let ast = murphy_translate::translate(src, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let frozen = cx
+            .frozen_string_literal_comment()
+            .expect("frozen_string_literal comment");
+        assert_eq!(cx.raw_source(frozen.key_range), "frozen_string_literal");
+        assert_eq!(cx.raw_source(frozen.value_range), "true");
+        assert_eq!(frozen.value_bool, 1);
     }
 
     #[derive(Default)]

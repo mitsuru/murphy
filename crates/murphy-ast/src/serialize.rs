@@ -936,7 +936,7 @@ fn read_call_operator_loc(cur: &mut &[u8]) -> Result<CallOperatorLoc, SerError> 
     })
 }
 
-const MAGIC_COMMENT_SERIALIZED_LEN: usize = 25;
+const MAGIC_COMMENT_SERIALIZED_LEN: usize = 26;
 
 fn write_magic_comment(comment: MagicComment, out: &mut Vec<u8>) {
     write_range(comment.range, out);
@@ -1634,6 +1634,7 @@ impl Ast {
 
 #[cfg(test)]
 mod tests {
+    use super::MAGIC_COMMENT_SERIALIZED_LEN;
     use crate::SerError;
     use crate::builder::AstBuilder;
     use crate::node::{
@@ -2293,6 +2294,11 @@ mod tests {
 
         let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(restored.magic_comments(), ast.magic_comments());
+    }
+
+    #[test]
+    fn magic_comment_serialized_len_matches_encoded_fields() {
+        assert_eq!(MAGIC_COMMENT_SERIALIZED_LEN, 26);
     }
 
     #[test]
