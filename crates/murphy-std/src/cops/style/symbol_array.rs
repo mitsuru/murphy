@@ -78,8 +78,18 @@ impl SymbolArray {
             return;
         };
 
-        let opts = cx.options_or_default::<SymbolArrayOptions>();
         let elements = cx.list(list);
+
+        // Cheap early-exit: empty arrays and arrays whose first element is not
+        // a symbol are the common case — skip before loading options.
+        if elements.is_empty() {
+            return;
+        }
+        if !matches!(cx.kind(elements[0]), NodeKind::Sym(_)) {
+            return;
+        }
+
+        let opts = cx.options_or_default::<SymbolArrayOptions>();
 
         // MinSize guard.
         if elements.len() < opts.min_size as usize {
@@ -93,23 +103,34 @@ impl SymbolArray {
         }
 
         // All elements must be plain Sym nodes with simple identifier names.
-        let mut names: Vec<&str> = Vec::with_capacity(elements.len());
-        for &elem in elements {
-            let NodeKind::Sym(sym) = *cx.kind(elem) else {
-                return;
-            };
-            let name = cx.symbol_str(sym);
-            if !is_simple_identifier(name) {
-                return;
+        // Non-allocating check first; only build the replacement string if we
+        // will actually emit an offense.
+        let all_simple = elements.iter().all(|&elem| {
+            if let NodeKind::Sym(sym) = *cx.kind(elem) {
+                is_simple_identifier(cx.symbol_str(sym))
+            } else {
+                false
             }
-            names.push(name);
+        });
+        if !all_simple {
+            return;
         }
 
         let range = cx.range(node);
         cx.emit_offense(range, "Use `%i` or `%I` for an array of symbols.", None);
 
         // Autocorrect: whole-node replacement with percent literal.
-        let replacement = format!("%i[{}]", names.join(" "));
+        let mut replacement = String::from("%i[");
+        for (i, &elem) in elements.iter().enumerate() {
+            if i > 0 {
+                replacement.push(' ');
+            }
+            let NodeKind::Sym(sym) = *cx.kind(elem) else {
+                unreachable!("checked above")
+            };
+            replacement.push_str(cx.symbol_str(sym));
+        }
+        replacement.push(']');
         cx.emit_edit(range, &replacement);
     }
 }
@@ -131,7 +152,7 @@ fn is_simple_identifier(name: &str) -> bool {
     }
     // Check optional trailing `!` or `?`.
     let (body, tail) = match bytes.last() {
-        Some(b'!' | b'?') => (&bytes[1..bytes.len() - 1], true),
+        Some(b'!' | b'?') if bytes.len() > 1 => (&bytes[1..bytes.len() - 1], true),
         _ => (&bytes[1..], false),
     };
     let _ = tail; // informational only

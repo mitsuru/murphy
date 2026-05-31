@@ -120,7 +120,10 @@ fn insertion_point(cx: &Cx<'_>) -> u32 {
             // After the shebang line (include the newline).
             let src = cx.source().as_bytes();
             let after = sh.range.end as usize;
-            if src.get(after) == Some(&b'\n') {
+            let tail = &src[after..];
+            if tail.starts_with(b"\r\n") {
+                (after + 2) as u32
+            } else if tail.starts_with(b"\n") {
                 (after + 1) as u32
             } else {
                 after as u32
@@ -139,7 +142,10 @@ fn insertion_point(cx: &Cx<'_>) -> u32 {
             // After the encoding comment line.
             let src = cx.source().as_bytes();
             let after = enc.range.end as usize;
-            if src.get(after) == Some(&b'\n') {
+            let tail = &src[after..];
+            if tail.starts_with(b"\r\n") {
+                (after + 2) as u32
+            } else if tail.starts_with(b"\n") {
                 (after + 1) as u32
             } else {
                 after as u32
