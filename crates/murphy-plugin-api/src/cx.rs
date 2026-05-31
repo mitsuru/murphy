@@ -2406,11 +2406,17 @@ impl<'a> Cx<'a> {
             .iter()
             .rposition(|&b| b == b'\n')
             .map_or(0, |pos| pos + 1);
-        let mut end = bytes[range.end as usize..]
+        let end_anchor = if range.end > range.start {
+            range.end as usize - 1
+        } else {
+            range.end as usize
+        };
+        let mut end = bytes[end_anchor..]
             .iter()
             .position(|&b| b == b'\n')
-            .map_or(bytes.len(), |pos| range.end as usize + pos);
-        if include_final_newline && end < bytes.len() && bytes[end] == b'\n' {
+            .map_or(bytes.len(), |pos| end_anchor + pos);
+        if end < bytes.len() && bytes[end] == b'\n' && (include_final_newline || end == end_anchor)
+        {
             end += 1;
         }
         Range {
@@ -2844,6 +2850,18 @@ mod tests {
 
         assert_eq!(range, Range { start: 6, end: 13 });
         assert_eq!(cx.raw_source(range), "  beta\n");
+    }
+
+    #[test]
+    fn range_help_range_by_whole_lines_respects_half_open_line_boundary_end() {
+        let (ast, fns) = cx_for_source("alpha\nbeta\n");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_by_whole_lines(Range { start: 0, end: 6 }, false);
+
+        assert_eq!(range, Range { start: 0, end: 6 });
+        assert_eq!(cx.raw_source(range), "alpha\n");
     }
 
     #[test]
