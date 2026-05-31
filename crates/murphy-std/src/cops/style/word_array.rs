@@ -70,7 +70,7 @@ impl WordArray {
 
         let opts = cx.options_or_default::<WordArrayOptions>();
 
-        let children: Vec<NodeId> = cx.list(list).to_vec();
+        let children = cx.list(list);
 
         // Minimum size guard.
         if children.len() < opts.min_size as usize {
@@ -86,7 +86,7 @@ impl WordArray {
         // All children must be plain Str (no Dstr, Int, Sym, etc.).
         // Collect string values while checking.
         let mut words: Vec<&str> = Vec::with_capacity(children.len());
-        for &child in &children {
+        for &child in children {
             let NodeKind::Str(string_id) = *cx.kind(child) else {
                 return;
             };

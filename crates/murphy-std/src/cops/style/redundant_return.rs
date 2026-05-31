@@ -20,6 +20,9 @@
 //!   (return a, b → Return(Array)) are always skipped.
 //!   return [a, b] is indistinguishable from return a, b at the AST level;
 //!   both are skipped.
+//!   return(value): offense is emitted but no autocorrect (parens form parses
+//!   as Unknown in Murphy's translator; deleting the prefix would leave a
+//!   dangling `)` — user must hand-fix).
 //!   Autocorrect: `return value` → delete `return ` prefix (from return node
 //!   start to value node start). Bare `return` → replace with `nil`.
 //!   def/defs (singleton method definitions): both handled via separate hooks.
@@ -147,13 +150,21 @@ fn check_return(node: NodeId, cx: &Cx<'_>) {
             // `return value` — offense; autocorrect deletes "return " prefix.
             let return_range = cx.range(node);
             let value_range = cx.range(val_id);
-            // Offense range covers the `return` keyword only.
+            cx.emit_offense(return_range, "Redundant `return` detected.", None);
+
+            // Skip autocorrect for Unknown values: `return(expr)` parses the
+            // parenthesised form as Unknown; deleting the prefix blindly would
+            // leave the `)` behind. Emit the offense only so the user can
+            // hand-fix without risking a corrupt autocorrect.
+            if matches!(cx.kind(val_id), NodeKind::Unknown) {
+                return;
+            }
+
+            // Delete from return-node start to value start (removes "return ").
             let keyword_range = Range {
                 start: return_range.start,
                 end: value_range.start,
             };
-            cx.emit_offense(return_range, "Redundant `return` detected.", None);
-            // Delete from return-node start to value start (removes "return ").
             cx.emit_edit(keyword_range, "");
         }
     }
@@ -351,6 +362,22 @@ mod tests {
             def foo
               return 1 if something
               do_something_else
+            end
+        "#});
+    }
+
+    // --- Parenthesised return form ---
+
+    #[test]
+    fn flags_offense_but_no_autocorrect_for_return_parens() {
+        // `return(value)` parses as Return(Unknown) in Murphy's translator.
+        // The cop flags it (it IS redundant) but must NOT attempt to delete
+        // the prefix, because the parenthesised form would leave a dangling `)`.
+        // The user must hand-fix.
+        test::<RedundantReturn>().expect_offense(indoc! {r#"
+            def foo
+              return(42)
+              ^^^^^^^^^^ Redundant `return` detected.
             end
         "#});
     }
