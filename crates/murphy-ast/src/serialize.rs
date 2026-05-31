@@ -942,7 +942,12 @@ fn write_magic_comment(comment: MagicComment, out: &mut Vec<u8>) {
     write_range(comment.range, out);
     write_range(comment.key_range, out);
     write_range(comment.value_range, out);
-    put_u8(out, comment.kind as u8);
+    let kind = match comment.kind {
+        MagicCommentKind::Shebang => 0,
+        MagicCommentKind::FrozenStringLiteral => 1,
+        MagicCommentKind::Encoding => 2,
+    };
+    put_u8(out, kind);
     put_u8(out, comment.value_bool);
 }
 

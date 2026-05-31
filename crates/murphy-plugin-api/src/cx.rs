@@ -529,11 +529,54 @@ impl<'a> Cx<'a> {
 
         if eq_normalized(key, "frozen_string_literal") {
             Some(MagicCommentKind::FrozenStringLiteral)
-        } else if eq_normalized(key, "encoding") {
+        } else if eq_normalized(key, "encoding") || eq_normalized(key, "coding") {
             Some(MagicCommentKind::Encoding)
         } else {
             None
         }
+    }
+
+    fn leading_comment_region_end(&self) -> usize {
+        let source = self.source().as_bytes();
+        let mut line_start = 0;
+        while line_start < source.len() {
+            let line_end = source[line_start..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(source.len(), |pos| line_start + pos);
+            let mut content_end = line_end;
+            if content_end > line_start && source[content_end - 1] == b'\r' {
+                content_end -= 1;
+            }
+
+            if line_start == 0 && source.starts_with(b"#!") {
+                line_start = line_end.saturating_add(1);
+                continue;
+            }
+
+            let mut first = line_start;
+            while first < content_end && source[first].is_ascii_whitespace() {
+                first += 1;
+            }
+            if first < content_end && source[first] == b'#' {
+                line_start = line_end.saturating_add(1);
+                continue;
+            }
+            return line_start;
+        }
+        source.len()
+    }
+
+    fn is_own_line_comment(&self, comment: Comment) -> bool {
+        let source = self.source().as_bytes();
+        let start = comment.range.start as usize;
+        let line_start = source[..start]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |pos| pos + 1);
+        source[line_start..start]
+            .iter()
+            .all(|byte| byte.is_ascii_whitespace())
     }
 
     fn parse_magic_comment(&self, comment: Comment) -> Option<MagicComment> {
@@ -2454,6 +2497,7 @@ impl<'a> Cx<'a> {
     /// The file's structured magic comments, in source order.
     pub fn magic_comments(&self) -> Vec<MagicComment> {
         let mut comments = Vec::new();
+        let leading_comment_region_end = self.leading_comment_region_end();
         if self.source().as_bytes().starts_with(b"#!") {
             comments.push(MagicComment {
                 range: self.source_line_range_without_newline(0),
@@ -2466,7 +2510,12 @@ impl<'a> Cx<'a> {
         comments.extend(
             self.comments()
                 .iter()
-                .filter_map(|comment| self.parse_magic_comment(*comment)),
+                .copied()
+                .filter(|comment| {
+                    comment.range.start as usize <= leading_comment_region_end
+                        && self.is_own_line_comment(*comment)
+                })
+                .filter_map(|comment| self.parse_magic_comment(comment)),
         );
         comments.sort_by_key(|comment| comment.range.start);
         comments
@@ -2818,6 +2867,38 @@ mod tests {
         assert_eq!(cx.raw_source(frozen.key_range), "frozen_string_literal");
         assert_eq!(cx.raw_source(frozen.value_range), "true");
         assert_eq!(frozen.value_bool, 1);
+    }
+
+    #[test]
+    fn magic_comment_helpers_treat_coding_as_encoding() {
+        let src = "# coding: utf-8\nnil\n";
+        let ast = murphy_translate::translate(src, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let encoding = cx.encoding_comment().expect("encoding comment");
+        assert_eq!(cx.raw_source(encoding.key_range), "coding");
+        assert_eq!(cx.raw_source(encoding.value_range), "utf-8");
+    }
+
+    #[test]
+    fn magic_comment_helpers_ignore_comments_after_code() {
+        let src = "puts 1 # frozen_string_literal: true\n# encoding: utf-8\n";
+        let ast = murphy_translate::translate(src, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert!(cx.magic_comments().is_empty());
+        assert!(cx.frozen_string_literal_comment().is_none());
+        assert!(cx.encoding_comment().is_none());
     }
 
     #[derive(Default)]

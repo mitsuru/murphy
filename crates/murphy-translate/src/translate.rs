@@ -99,7 +99,7 @@ impl Translator {
 
         if eq_normalized(key, b"frozen_string_literal") {
             Some(MagicCommentKind::FrozenStringLiteral)
-        } else if eq_normalized(key, b"encoding") {
+        } else if eq_normalized(key, b"encoding") || eq_normalized(key, b"coding") {
             Some(MagicCommentKind::Encoding)
         } else {
             None
@@ -1684,6 +1684,19 @@ mod tests {
 
         assert_eq!(ast.raw_source(comment.value_range), "false");
         assert_eq!(comment.value_bool, 0);
+    }
+
+    #[test]
+    fn translates_coding_alias_as_encoding_magic_comment() {
+        let ast = translate("# coding: utf-8\nnil\n", "t.rb");
+        let comment = ast
+            .magic_comments()
+            .iter()
+            .find(|comment| comment.kind == MagicCommentKind::Encoding)
+            .expect("encoding comment");
+
+        assert_eq!(ast.raw_source(comment.key_range), "coding");
+        assert_eq!(ast.raw_source(comment.value_range), "utf-8");
     }
 
     #[test]
