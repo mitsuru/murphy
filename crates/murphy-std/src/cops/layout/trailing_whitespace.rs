@@ -123,6 +123,7 @@ impl TrailingWhitespace {
 /// Tokens in `sorted_tokens` are ordered by start position. We match the
 /// k-th `HeredocStart` with the k-th `HeredocEnd` (document order).
 fn collect_heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
+    let source = cx.source().as_bytes();
     let tokens = cx.sorted_tokens();
     let mut starts: Vec<u32> = Vec::new();
     let mut ends: Vec<u32> = Vec::new();
@@ -130,7 +131,16 @@ fn collect_heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
     for tok in tokens {
         match tok.kind {
             SourceTokenKind::HeredocStart => starts.push(tok.range.end),
-            SourceTokenKind::HeredocEnd => ends.push(tok.range.start),
+            SourceTokenKind::HeredocEnd => {
+                // The body ends at the start of the terminator line, not
+                // at HeredocEnd.start. For squiggly heredocs, the terminator
+                // may be indented (e.g., `  RUBY`), so HeredocEnd.start
+                // points to `RUBY` while the line starts a few bytes earlier.
+                // Using the line start avoids misidentifying the terminator
+                // line as a body line in byte_in_heredoc_body.
+                let terminator_line_start = terminator_line_start(source, tok.range.start);
+                ends.push(terminator_line_start);
+            }
             _ => {}
         }
     }
@@ -147,6 +157,18 @@ fn collect_heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
             (body_start, end_before_closer)
         })
         .collect()
+}
+
+/// The byte offset of the first byte on the line that contains `pos`.
+/// Scans backwards from `pos` to find the preceding `\n` (or BOF).
+fn terminator_line_start(source: &[u8], pos: u32) -> u32 {
+    let pos = pos as usize;
+    // Scan backwards to find the newline that ends the previous line.
+    source[..pos]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0) as u32
 }
 
 /// Returns true when `byte_offset` falls within any heredoc body range.
@@ -290,5 +312,31 @@ mod tests {
         test::<TrailingWhitespace>()
             .with_options(&allow_in_heredoc())
             .expect_no_offenses("x = <<~A\n  hello   \nA\ny = <<~B\n  world   \nB\n");
+    }
+
+    // ----- Indented heredoc terminator (squiggly heredoc) ----------
+
+    #[test]
+    fn flags_trailing_space_on_opener_line_with_squiggly_heredoc() {
+        // Verify trailing whitespace on the *opener* line is still flagged
+        // when AllowInHeredoc: true (the opener is not part of the body).
+        // Source: "x = <<~RUBY   \n  hello   \nRUBY\n"
+        // Opener trailing ws at bytes 11-13 (after RUBY), annotated 11 spaces + 3 carets.
+        test::<TrailingWhitespace>()
+            .with_options(&allow_in_heredoc())
+            .expect_offense(
+                "x = <<~RUBY   \n           ^^^ Trailing whitespace detected.\n  hello   \nRUBY\n",
+            );
+    }
+
+    #[test]
+    fn indented_terminator_not_treated_as_body_with_allow_in_heredoc() {
+        // When AllowInHeredoc: true, verify that a squiggly heredoc with an
+        // indented terminator correctly excludes the terminator line from the
+        // body exemption. Source: "x = <<~RUBY\n  hello   \n  RUBY\n"
+        // The body (hello   ) is exempt; the terminator (  RUBY) is not body.
+        test::<TrailingWhitespace>()
+            .with_options(&allow_in_heredoc())
+            .expect_no_offenses("x = <<~RUBY\n  hello   \n  RUBY\n");
     }
 }
