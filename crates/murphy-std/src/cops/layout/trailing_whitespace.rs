@@ -122,10 +122,13 @@ impl TrailingWhitespace {
 /// in the file. Body bytes run from `heredoc_start.end + 1` (skipping the
 /// newline after the opener) to the start of the terminator line.
 ///
-/// Uses a FIFO queue so that multiple heredocs on the same line are paired
-/// correctly: Ruby emits heredoc bodies in the order the openers appear, so
-/// the first `HeredocEnd` belongs to the first `HeredocStart`.
+/// Uses a FIFO queue so that multiple heredocs opened on the same line are
+/// matched in the order their openers appear. Ruby reads heredoc bodies
+/// sequentially: the first `HeredocEnd` terminates the earliest unmatched
+/// `HeredocStart`, not the most recently opened one (LIFO would mismatch
+/// openers and terminators when multiple heredocs are opened on one line).
 fn collect_heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
+    use std::collections::VecDeque;
     let source = cx.source().as_bytes();
     let tokens = cx.sorted_tokens();
     let mut starts: VecDeque<u32> = VecDeque::new();
@@ -337,14 +340,27 @@ mod tests {
             .expect_no_offenses("x = <<~RUBY\n  hello   \n  RUBY\n");
     }
 
+    // ----- Same-line multiple heredocs (FIFO ordering) ----------
+
     #[test]
-    fn allows_trailing_space_in_multiple_heredocs_on_same_line() {
-        // Two heredocs on the same opener line: `foo(<<~A, <<~B)`.
-        // Ruby emits bodies in FIFO order (A first, then B), so the
-        // first HeredocEnd must pair with <<~A, not <<~B.
-        // Both bodies should be exempt when AllowInHeredoc: true.
+    fn allows_trailing_space_in_same_line_multiple_heredoc_bodies_with_allow_in_heredoc() {
+        // Ruby: `a = <<A; b = <<B` opens A first, then B.
+        // Bodies appear in FIFO order: A body first, then B body.
+        // With AllowInHeredoc: true, both bodies should be exempt.
+        // Source: "a = <<A; b = <<B\nbody_a   \nA\nbody_b   \nB\n"
         test::<TrailingWhitespace>()
             .with_options(&allow_in_heredoc())
-            .expect_no_offenses("foo(<<~A, <<~B)\nA body   \nA\nB body   \nB\n");
+            .expect_no_offenses("a = <<A; b = <<B\nbody_a   \nA\nbody_b   \nB\n");
+    }
+
+    #[test]
+    fn flags_trailing_space_on_opener_line_of_same_line_multiple_heredocs() {
+        // The opener line itself (`a = <<A; b = <<B   `) is not a heredoc body —
+        // trailing whitespace on the opener line must still be flagged.
+        test::<TrailingWhitespace>()
+            .with_options(&allow_in_heredoc())
+            .expect_offense(
+                "a = <<A; b = <<B   \n                ^^^ Trailing whitespace detected.\nbody_a\nA\nbody_b\nB\n",
+            );
     }
 }

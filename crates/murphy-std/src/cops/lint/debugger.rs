@@ -217,11 +217,15 @@ impl Debugger {
         }
 
         // Mirror RuboCop's `assumed_usage_context?`: suppress when the
-        // debugger call (no args) is used as an argument to another call
-        // and is not inside a block/proc/lambda. This avoids false positives
+        // debugger call (no args, no receiver) is used as an argument to another
+        // call and is not inside a block/proc/lambda. This avoids false positives
         // for patterns like `let(:p) { foo }; expect(do_something(p)).to eq bar`
         // where `p` is a variable, not the `Kernel#p` debugger entrypoint.
-        if cx.list(args).is_empty() && assumed_usage_context(cx, node) {
+        //
+        // The guard intentionally applies only to bare calls (no receiver).
+        // Receiver-qualified calls like `binding.pry` or `Kernel.debugger`
+        // are always unambiguous debugger entrypoints and must not be suppressed.
+        if cx.list(args).is_empty() && receiver.get().is_none() && assumed_usage_context(cx, node) {
             return;
         }
 
@@ -601,6 +605,25 @@ mod tests {
         test::<Debugger>().expect_offense(indoc! {r#"
             foo(bar { pry })
                       ^^^ Remove debugger entry point `pry`.
+        "#});
+    }
+
+    /// Receiver-qualified debugger calls (binding.pry, Kernel.debugger) passed
+    /// as arguments must NOT be suppressed by assumed_usage_context. These are
+    /// always unambiguous debugger entrypoints regardless of context.
+    #[test]
+    fn flags_receiver_qualified_debugger_as_argument() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+            puts(binding.pry)
+                 ^^^^^^^^^^^ Remove debugger entry point `binding.pry`.
+        "#});
+    }
+
+    #[test]
+    fn flags_kernel_debugger_as_argument() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+            foo(Kernel.debugger)
+                ^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.debugger`.
         "#});
     }
 }
