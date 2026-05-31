@@ -118,45 +118,39 @@ impl TrailingWhitespace {
 
 /// Collect (body_start, body_end) byte-offset pairs for all heredoc bodies
 /// in the file. Body bytes run from `heredoc_start.end + 1` (skipping the
-/// newline after the opener) to `heredoc_end.start`.
+/// newline after the opener) to the start of the terminator line.
 ///
-/// Tokens in `sorted_tokens` are ordered by start position. We match the
-/// k-th `HeredocStart` with the k-th `HeredocEnd` (document order).
+/// Uses a LIFO stack so that nested heredocs are handled correctly:
+/// each `HeredocEnd` is paired with the most recent unmatched `HeredocStart`.
 fn collect_heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
     let source = cx.source().as_bytes();
     let tokens = cx.sorted_tokens();
     let mut starts: Vec<u32> = Vec::new();
-    let mut ends: Vec<u32> = Vec::new();
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
 
     for tok in tokens {
         match tok.kind {
-            SourceTokenKind::HeredocStart => starts.push(tok.range.end),
+            SourceTokenKind::HeredocStart => {
+                // +1 to skip the `\n` at the end of the opener line.
+                starts.push(tok.range.end + 1);
+            }
             SourceTokenKind::HeredocEnd => {
-                // The body ends at the start of the terminator line, not
-                // at HeredocEnd.start. For squiggly heredocs, the terminator
-                // may be indented (e.g., `  RUBY`), so HeredocEnd.start
-                // points to `RUBY` while the line starts a few bytes earlier.
-                // Using the line start avoids misidentifying the terminator
-                // line as a body line in byte_in_heredoc_body.
-                let terminator_line_start = terminator_line_start(source, tok.range.start);
-                ends.push(terminator_line_start);
+                if let Some(body_start) = starts.pop() {
+                    // The body ends at the start of the terminator line, not
+                    // at HeredocEnd.start. For squiggly heredocs, the terminator
+                    // may be indented (e.g., `  RUBY`), so HeredocEnd.start
+                    // points to `RUBY` while the line starts a few bytes earlier.
+                    // Using the line start avoids misidentifying the terminator
+                    // line as a body line in byte_in_heredoc_body.
+                    let terminator_line_start = terminator_line_start(source, tok.range.start);
+                    ranges.push((body_start, terminator_line_start));
+                }
             }
             _ => {}
         }
     }
 
-    starts
-        .into_iter()
-        .zip(ends)
-        .map(|(start_after_opener, end_before_closer)| {
-            // Skip the newline that immediately follows the heredoc opener.
-            // The opener line looks like: `x = <<~RUBY\n` -- the HeredocStart
-            // token covers up to and including the `Y`; the `\n` at the end
-            // of the opener line is NOT part of the body.
-            let body_start = start_after_opener + 1; // skip `\n`
-            (body_start, end_before_closer)
-        })
-        .collect()
+    ranges
 }
 
 /// The byte offset of the first byte on the line that contains `pos`.
