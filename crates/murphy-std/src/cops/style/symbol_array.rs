@@ -74,11 +74,7 @@ pub struct SymbolArrayOptions {
 impl SymbolArray {
     #[on_node(kind = "array")]
     fn check_array(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Array(list) = *cx.kind(node) else {
-            return;
-        };
-
-        let elements = cx.list(list);
+        let elements = cx.array_elements(node);
 
         // Cheap early-exit: empty arrays and arrays whose first element is not
         // a symbol are the common case — skip before loading options.

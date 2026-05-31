@@ -73,18 +73,12 @@ pub struct RedundantReturn;
 impl RedundantReturn {
     #[on_node(kind = "def")]
     fn check_def(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Def { body, .. } = *cx.kind(node) else {
-            return;
-        };
-        check_method_body(body, cx);
+        check_method_body(cx.def_body(node), cx);
     }
 
     #[on_node(kind = "defs")]
     fn check_defs(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Defs { body, .. } = *cx.kind(node) else {
-            return;
-        };
-        check_method_body(body, cx);
+        check_method_body(cx.def_body(node), cx);
     }
 }
 

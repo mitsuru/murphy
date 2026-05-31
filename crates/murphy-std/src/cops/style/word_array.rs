@@ -64,13 +64,9 @@ pub struct WordArrayOptions {
 impl WordArray {
     #[on_node(kind = "array")]
     fn check_array(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Array(list) = *cx.kind(node) else {
-            return;
-        };
-
         let opts = cx.options_or_default::<WordArrayOptions>();
 
-        let children = cx.list(list);
+        let children = cx.array_elements(node);
 
         // Minimum size guard.
         if children.len() < opts.min_size as usize {

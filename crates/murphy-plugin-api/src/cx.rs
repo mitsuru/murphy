@@ -1479,6 +1479,28 @@ impl<'a> Cx<'a> {
         matches!(self.kind(id), NodeKind::And { .. } | NodeKind::Or { .. })
     }
 
+    /// `guard_clause?` — a single-line flow-control expression commonly used
+    /// as an early exit. For operator-keyword nodes (`and`/`or`), RuboCop tests
+    /// the RHS (`condition or return`); otherwise it tests the node itself.
+    pub fn is_guard_clause(&self, id: NodeId) -> bool {
+        let node = match *self.kind(id) {
+            NodeKind::And { rhs, .. } | NodeKind::Or { rhs, .. } => rhs,
+            _ => id,
+        };
+
+        if !self.is_single_line(node) {
+            return false;
+        }
+
+        match *self.kind(node) {
+            NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Next(_) => true,
+            NodeKind::Send {
+                receiver, method, ..
+            } => receiver == OptNodeId::NONE && matches!(self.symbol_str(method), "raise" | "fail"),
+            _ => false,
+        }
+    }
+
     /// `post_condition_loop?` — RuboCop's `POST_CONDITION_LOOP_TYPES`
     /// (`while_post`, `until_post`): a do-while / do-until. Murphy folds the
     /// post forms into [`NodeKind::While`]/[`NodeKind::Until`] with
@@ -4301,6 +4323,57 @@ mod tests {
         // Non-matching kinds project empty.
         assert!(cx.hash_pairs(pair).is_empty());
         assert!(cx.pair_key(hash).get().is_none());
+    }
+
+    #[test]
+    fn demand_driven_typed_accessors_project_common_children() {
+        with_parsed("[a, b]", |cx, root| {
+            let elements = cx.array_elements(root);
+            assert_eq!(elements.len(), 2);
+            assert!(cx.array_elements(elements[0]).is_empty());
+        });
+
+        with_parsed("case x\nwhen a then b\nelse c\nend", |cx, root| {
+            let subject = cx.case_subject(root).get().unwrap();
+            let whens = cx.case_when_branches(root);
+            assert_eq!(cx.method_name(subject), Some("x"));
+            assert_eq!(whens.len(), 1);
+            assert_eq!(cx.when_conditions(whens[0]).len(), 1);
+            assert!(cx.when_body(whens[0]).get().is_some());
+            assert!(cx.case_else_branch(root).get().is_some());
+        });
+
+        with_parsed("def f(a)\n  a\nend", |cx, root| {
+            assert_eq!(cx.method_name(root), Some("f"));
+            assert!(cx.def_receiver(root).get().is_none());
+            assert!(matches!(
+                cx.kind(cx.def_arguments(root).get().unwrap()),
+                NodeKind::Args(_)
+            ));
+            assert!(cx.def_body(root).get().is_some());
+        });
+    }
+
+    #[test]
+    fn guard_clause_matches_single_line_jump_expressions() {
+        with_parsed("return if cond", |cx, root| {
+            let guard = cx.if_then_branch(root).get().unwrap();
+            assert!(cx.is_guard_clause(guard));
+        });
+        with_parsed("raise 'boom'", |cx, root| assert!(cx.is_guard_clause(root)));
+        with_parsed("ok or return", |cx, root| assert!(cx.is_guard_clause(root)));
+        with_parsed("ok and fail", |cx, root| assert!(cx.is_guard_clause(root)));
+    }
+
+    #[test]
+    fn guard_clause_rejects_multiline_and_non_guard_expressions() {
+        with_parsed("raise(\n  'boom'\n)", |cx, root| {
+            assert!(!cx.is_guard_clause(root))
+        });
+        with_parsed("foo or bar", |cx, root| assert!(!cx.is_guard_clause(root)));
+        with_parsed("Kernel.raise", |cx, root| {
+            assert!(!cx.is_guard_clause(root))
+        });
     }
 
     #[test]

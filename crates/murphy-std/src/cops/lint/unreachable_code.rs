@@ -155,6 +155,10 @@ fn is_flow_terminator(
     match cx.kind(node) {
         NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Next(_) => true,
 
+        NodeKind::And { rhs, .. } | NodeKind::Or { rhs, .. } => {
+            cx.is_guard_clause(node) && is_flow_terminator(*rhs, cx, redefined, in_instance_eval)
+        }
+
         // Forward-compat: translator currently emits Unknown for redo (and
         // parse-errors on retry), but these arms are correct when they arrive.
         NodeKind::Retry | NodeKind::Redo => true,
@@ -401,6 +405,17 @@ mod tests {
         test::<UnreachableCode>().expect_offense(indoc! {r#"
             def foo
               abort
+              bar
+              ^^^ Unreachable code detected.
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_dead_code_after_operator_keyword_guard_clause() {
+        test::<UnreachableCode>().expect_offense(indoc! {r#"
+            def foo
+              ok or return
               bar
               ^^^ Unreachable code detected.
             end
