@@ -2,6 +2,7 @@
 //! RuboCop counterpart.
 
 pub mod dot_position;
+pub mod empty_lines;
 pub mod space_around_operators;
 pub mod space_inside_parens;
 pub mod trailing_whitespace;
