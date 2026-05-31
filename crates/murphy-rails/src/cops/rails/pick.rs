@@ -79,11 +79,21 @@
 //! `current` is the source from the pluck selector start to the first
 //! selector end (e.g. `pluck(:a)&.first`, not `x.pluck(:a)&.first`).
 //!
-//! ## No autocorrect
+//! ## Autocorrect
 //!
 //! Mechanically rewriting `pluck(:x).first` → `pick(:x)` is safe in
-//! Rails 6+, but v1 ships as detect-only; ADR 0006 requires a deliberate
-//! fix block per cop. Tracked as a follow-up.
+//! Rails 6+. Two surgical edits:
+//!
+//! 1. Rename the inner `pluck` selector to `pick`.
+//! 2. Delete the trailing `.first` / `&.first` (from inner range end
+//!    to outer range end).
+//!
+//! ## Rails version note
+//!
+//! `pick` was introduced in Rails 6.0. Murphy currently has no
+//! `TargetRailsVersion` gating infrastructure, so this cop will fire
+//! regardless of the configured rails version. If you are on Rails < 6.0,
+//! disable the cop via `Rails/Pick: {Enabled: false}` in `.murphy.yml`.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
 
@@ -206,6 +216,19 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     let msg = format!("Prefer `pick({args_str})` over `{current_str}`.");
     cx.emit_offense(cx.range(node), &msg, None);
+
+    // Autocorrect: two surgical edits.
+    // Edit 1: rename `pluck` → `pick` (inner selector).
+    cx.emit_edit(cx.loc(inner).name, "pick");
+    // Edit 2: delete from inner range end to outer range end, removing
+    // `.first` or `&.first`.
+    cx.emit_edit(
+        Range {
+            start: cx.range(inner).end,
+            end: cx.range(node).end,
+        },
+        "",
+    );
 }
 
 #[cfg(test)]
@@ -332,5 +355,60 @@ mod tests {
     fn does_not_flag_pluck_without_first() {
         // No terminator — just `pluck`, no chain to rewrite.
         test::<Pick>().expect_no_offenses("Post.pluck(:id)\n");
+    }
+
+    // === autocorrect cases ===
+
+    #[test]
+    fn corrects_pluck_id_first_to_pick_id() {
+        test::<Pick>()
+            .expect_correction(
+                indoc! {r#"
+                    Post.pluck(:id).first
+                    ^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:id)` over `pluck(:id).first`.
+                "#},
+                "Post.pick(:id)\n",
+            )
+            .expect_no_offenses("Post.pick(:id)\n");
+    }
+
+    #[test]
+    fn corrects_chain_pluck_first_to_pick() {
+        test::<Pick>()
+            .expect_correction(
+                indoc! {r#"
+                    User.where(active: true).pluck(:name).first
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:name)` over `pluck(:name).first`.
+                "#},
+                "User.where(active: true).pick(:name)\n",
+            )
+            .expect_no_offenses("User.where(active: true).pick(:name)\n");
+    }
+
+    #[test]
+    fn corrects_csend_outer_to_pick() {
+        // `x.pluck(:a)&.first` → `x.pick(:a)`
+        test::<Pick>()
+            .expect_correction(
+                indoc! {r#"
+                    x.pluck(:a)&.first
+                    ^^^^^^^^^^^^^^^^^^ Prefer `pick(:a)` over `pluck(:a)&.first`.
+                "#},
+                "x.pick(:a)\n",
+            )
+            .expect_no_offenses("x.pick(:a)\n");
+    }
+
+    #[test]
+    fn corrects_multi_column_pluck_first() {
+        test::<Pick>()
+            .expect_correction(
+                indoc! {r#"
+                    Post.pluck(:id, :name).first
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:id, :name)` over `pluck(:id, :name).first`.
+                "#},
+                "Post.pick(:id, :name)\n",
+            )
+            .expect_no_offenses("Post.pick(:id, :name)\n");
     }
 }
