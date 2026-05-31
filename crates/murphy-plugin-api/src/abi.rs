@@ -135,6 +135,12 @@ pub struct FnTable {
 // guaranteed by the ADR 0038 safety contract.
 unsafe impl Sync for FnTable {}
 
+/// Host allocator for short-lived `NodeId` slices returned from generated
+/// matchers. The returned pointer must stay valid for the enclosing dispatch
+/// call's `Cx<'a>` lifetime.
+pub type AllocNodeSliceFn =
+    unsafe extern "C" fn(*mut c_void, *const NodeId, usize) -> *const NodeId;
+
 /// `#[repr(C)]` bundle the host passes per dispatch call. `Cx<'a>` is
 /// the safe wrapper built from a borrowed `&CxRaw`.
 #[repr(C)]
@@ -183,6 +189,10 @@ pub struct CxRaw {
     pub call_operator_locs_len: usize,
     /// File-level variable scope model. Always non-null during native cop dispatch.
     pub var_model: *const crate::var_semantic_model::VarSemanticModel,
+    /// Opaque host arena used for derived matcher result slices.
+    pub node_slice_arena: *mut c_void,
+    /// Copy `len` node ids from `ptr` into `node_slice_arena` and return the copy.
+    pub alloc_node_slice: AllocNodeSliceFn,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -202,6 +212,10 @@ pub struct CxRaw {
 /// `*const VarSemanticModel` tail-appended at offset 200. Plugins built
 /// against v1–v3 must be rejected so they never observe a layout they
 /// were not compiled against.
+///
+/// `CxRaw::node_slice_arena` and `alloc_node_slice` were tail-appended under
+/// ABI v4 lockstep for murphy-7nze. Per project policy, do not bump the
+/// numeric ABI without explicit approval.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -394,7 +408,9 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, call_operator_locs_len), 192);
         // es99.5: var_model appended after call_operator_locs_len
         assert_eq!(offset_of!(CxRaw, var_model), 200);
-        assert_eq!(size_of::<CxRaw>(), 208);
+        assert_eq!(offset_of!(CxRaw, node_slice_arena), 208);
+        assert_eq!(offset_of!(CxRaw, alloc_node_slice), 216);
+        assert_eq!(size_of::<CxRaw>(), 224);
     }
 
     #[test]
@@ -423,13 +439,15 @@ mod tests {
     }
 
     #[test]
-    fn abi_version_is_three() {
+    fn abi_version_is_four() {
         // Bumped from 1 → 2 in murphy-es99.8 (SourceTokenKind gained
         // Comma/LeftBrace/RightBrace; additive but the loader must still
         // reject v1 plugins that predate the new token kinds).
         // Bumped from 2 → 3 in murphy-es99.4 (PluginCopV1 gained safe
         // metadata tail fields; size mismatch must reject old plugins).
         // Bumped from 3 → 4 in es99.5 (CxRaw gained `var_model` at offset 200).
+        // Kept at 4 for murphy-7nze by explicit project policy despite
+        // tail-appending CxRaw node-slice allocator fields.
         assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 4);
     }
 

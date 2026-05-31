@@ -34,6 +34,14 @@ unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
     }
 }
 
+pub unsafe extern "C" fn unavailable_alloc_node_slice(
+    _: *mut std::ffi::c_void,
+    _: *const NodeId,
+    _: usize,
+) -> *const NodeId {
+    panic!("CxRaw::alloc_node_slice is required for `$...` captured rest inside `<...>`")
+}
+
 /// Lazy source-location view for a node — Murphy's analog of rubocop-ast's
 /// `node.loc`. `expression` and `name` are plain fields (zero-cost); all
 /// other sub-ranges come from parser-provided side tables or are computed on
@@ -468,6 +476,25 @@ impl<'a> Cx<'a> {
     /// any var-semantic checks.
     pub fn var_model(&self) -> Option<&'a crate::var_semantic_model::VarSemanticModel> {
         unsafe { self.raw.var_model.as_ref() }
+    }
+
+    /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
+    pub fn alloc_node_slice(&self, elements: &[NodeId]) -> &'a [NodeId] {
+        if elements.is_empty() {
+            return &[];
+        }
+        let ptr = unsafe {
+            (self.raw.alloc_node_slice)(
+                self.raw.node_slice_arena,
+                elements.as_ptr(),
+                elements.len(),
+            )
+        };
+        assert!(
+            !ptr.is_null(),
+            "CxRaw::alloc_node_slice returned null for non-empty input"
+        );
+        unsafe { std::slice::from_raw_parts(ptr, elements.len()) }
     }
 
     fn nodes(&self) -> &'a [AstNode] {
@@ -2838,6 +2865,8 @@ mod tests {
             call_operator_locs: p.call_operator_locs.as_ptr(),
             call_operator_locs_len: p.call_operator_locs.len(),
             var_model: std::ptr::null(),
+            node_slice_arena: std::ptr::null_mut(),
+            alloc_node_slice: unavailable_alloc_node_slice,
         }
     }
 
