@@ -135,7 +135,7 @@ inter-procedural taint tracking. These could be designed together with
 
 Deliberately deferred. The analysis layers are:
 
-```
+```text
 Level 1: VarSemanticModel   — intra-scope local variable tracking (this ADR)
 Level 2: ClassModel         — class-level method/ivar aggregation (Reek)
 Level 3: ProgramModel       — cross-file call index (Brakeman)
