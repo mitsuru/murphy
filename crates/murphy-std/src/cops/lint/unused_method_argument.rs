@@ -11,15 +11,19 @@
 //! notes: >
 //!   Fixed logic false positives: zero-arity super (Zsuper), zero-arity binding,
 //!   and fail-with-any-args asymmetry now match RuboCop v1.86.2 behavior.
-//!   Known gaps remain around option parity (AllowUnusedKeywordArguments,
-//!   IgnoreEmptyMethods toggle, NotImplementedExceptions custom classes),
-//!   message text detail, and autocorrect for kwarg/kwoptarg.
+//!   murphy-qaio: aligned offense message with RuboCop (name, hint, `(*)`
+//!   clause); added AllowUnusedKeywordArguments and IgnoreEmptyMethods options
+//!   to schema. Option override wiring deferred to murphy-9cr.9.
 //! ```
 //!
 //! read inside the method body.
 //!
 //! ## Defaults that mirror RuboCop
 //!
+//! - **`IgnoreEmptyMethods`** (default true): skip the cop when the
+//!   method body is absent (empty method body like `def foo(x); end`).
+//!   Disable via `ignore_empty_methods = false` to opt back into
+//!   reporting on those methods.
 //! - **`IgnoreNotImplementedMethods`** (default true): skip the cop when
 //!   the body is a single statement (or a `Begin` whose last statement
 //!   is) a `raise <NotImplementedException>` (or `.new(...)`), where the
@@ -29,25 +33,37 @@
 //!   RuboCop's `not_implemented?` pattern.
 //!   Disable via `ignore_not_implemented_methods = false` to opt back
 //!   into reporting on those methods.
+//! - **`AllowUnusedKeywordArguments`** (default false): when true, unused
+//!   keyword arguments (`bar:`, `bar: 1`) are not flagged.
 //! - **`block_argument_with_yield`**: when the body uses `yield`, the
 //!   `&blk` argument is implicitly used; do not flag it.
 //!
+//! ## Message format
+//!
+//! Matches RuboCop's format:
+//! - Base: `Unused method argument - \`NAME\`.`
+//! - Hint (for non-keyword args): ` If it's necessary, use \`_\` or
+//!   \`_NAME\` as an argument name to indicate that it won't be used.
+//!   If it's unnecessary, remove it.`
+//! - All-unused clause (when no argument in the method is referenced):
+//!   ` You can also write as \`METHODNAME(*)\` if you want the method to
+//!   accept any arguments but don't care about them.`
+//!
 //! ## Known v1 limitation: option overrides not wired through `Cx`
 //!
-//! Both `ignore_not_implemented_methods` and `not_implemented_exceptions`
-//! are exported via `#[derive(CopOptions)]` so the host validates the
+//! `ignore_not_implemented_methods`, `not_implemented_exceptions`,
+//! `ignore_empty_methods`, and `allow_unused_keyword_arguments` are
+//! exported via `#[derive(CopOptions)]` so the host validates the
 //! schema, but runtime reads still come from `Options::default()`.
 //! `murphy-9cr.9` will route `[cops.rules."Lint/UnusedMethodArgument"]`
 //! overrides through `Cx`; until then setting these keys in
-//! `murphy.toml` has no effect at dispatch time. See
-//! `references/options.md` in the port-rubocop-cop skill for the same
-//! limitation in `RSpec/ExampleLength`.
+//! `murphy.toml` has no effect at dispatch time.
 //!
 //! ## Autocorrect
 //!
 //! - Positional / optional / rest / kwrest args: prefix the name with
 //!   `_` (idempotent because `_` names are skipped on re-run).
-//! - **Kwarg / Kwoptarg**: no autocorrect — renaming a keyword argument
+//! - **Kwarg / Kwoptarg**: no autocorrect -- renaming a keyword argument
 //!   breaks every caller using the keyword.
 //! - **Blockarg**: remove the whole `&blk` (and the preceding comma if
 //!   any), matching RuboCop's blockarg autocorrect.
@@ -71,6 +87,16 @@ pub struct Options {
         description = "Exception classes whose `raise`/`fail` calls in a method body bypass the cop."
     )]
     pub not_implemented_exceptions: Vec<String>,
+    #[option(
+        default = true,
+        description = "When true, skip the cop on methods with an empty body (no statements)."
+    )]
+    pub ignore_empty_methods: bool,
+    #[option(
+        default = false,
+        description = "When true, unused keyword arguments (kwarg/kwoptarg) are not flagged."
+    )]
+    pub allow_unused_keyword_arguments: bool,
 }
 
 #[cop(
@@ -83,14 +109,28 @@ pub struct Options {
 impl UnusedMethodArgument {
     #[on_node(kind = "def")]
     fn check_def(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Def { args, body, .. } = *cx.kind(node) else {
-            return;
-        };
-        let Some(body) = body.get() else {
+        let NodeKind::Def {
+            name: method_name,
+            args,
+            body,
+            ..
+        } = *cx.kind(node)
+        else {
             return;
         };
 
         let opts = Options::default();
+
+        // IgnoreEmptyMethods: when true (default), skip methods with no body.
+        if opts.ignore_empty_methods && body.get().is_none() {
+            return;
+        }
+        let Some(body) = body.get() else {
+            // ignore_empty_methods is false -- but we still need a body to
+            // do lvar scanning. If body is absent, there are no reads.
+            return;
+        };
+
         if opts.ignore_not_implemented_methods
             && is_not_implemented_body(cx, body, &opts.not_implemented_exceptions)
         {
@@ -104,7 +144,7 @@ impl UnusedMethodArgument {
             return;
         }
 
-        // `binding` with no arguments captures the full local scope —
+        // `binding` with no arguments captures the full local scope --
         // every local variable (including method parameters) is referenced.
         if body_contains_zero_arity_binding(cx, body) {
             return;
@@ -114,49 +154,83 @@ impl UnusedMethodArgument {
             return;
         };
         let params: &[NodeId] = cx.list(list);
+
+        // Pre-compute usage for each param so we can determine whether all
+        // args are unused (needed for the "(*)"-suffix in the offense message).
+        let usages: Vec<bool> = params
+            .iter()
+            .map(|&param| {
+                let param_kind = *cx.kind(param);
+                let Some((name, _range)) = param_name_and_range(cx, param) else {
+                    return true; // unknown param shape -- treat as used
+                };
+                let name_str = cx.symbol_str(name);
+                if name_str.is_empty() || name_str.starts_with('_') {
+                    return true; // already suppressed by convention
+                }
+                // `&blk` on a method that yields is implicitly used.
+                if has_yield && matches!(param_kind, NodeKind::Blockarg(_)) {
+                    return true;
+                }
+                // AllowUnusedKeywordArguments: treat kwarg/kwoptarg as used.
+                if opts.allow_unused_keyword_arguments
+                    && matches!(param_kind, NodeKind::Kwarg(_) | NodeKind::Kwoptarg { .. })
+                {
+                    return true;
+                }
+                let model_used = cx
+                    .var_model()
+                    .and_then(|m| m.scope(node))
+                    .and_then(|s| {
+                        s.variables()
+                            .iter()
+                            .find(|v| v.name == name && v.is_argument)
+                    })
+                    .map(|v| !v.references.is_empty())
+                    .unwrap_or(false);
+                model_used || lvar_reads_excluding_shadowed(cx, body, name)
+            })
+            .collect();
+
+        let all_unused = usages.iter().all(|&used| !used);
+        let method_name_str = cx.symbol_str(method_name);
+
         for (i, &param) in params.iter().enumerate() {
+            if usages[i] {
+                continue;
+            }
             let param_kind = *cx.kind(param);
             let Some((name, range)) = param_name_and_range(cx, param) else {
                 continue;
             };
             let name_str = cx.symbol_str(name);
-            if name_str.is_empty() || name_str.starts_with('_') {
-                continue;
-            }
 
-            // Primary check: use VarSemanticModel for same-scope references.
-            // This correctly handles `x += 1` (OpAsgn implicit read) which
-            // `Lvar` scanning misses.
-            let model_used = cx
-                .var_model()
-                .and_then(|m| m.scope(node))
-                .and_then(|s| {
-                    s.variables()
-                        .iter()
-                        .find(|v| v.name == name && v.is_argument)
-                })
-                .map(|v| !v.references.is_empty())
-                .unwrap_or(false);
+            // Build the RuboCop-compatible message.
+            let is_kwarg = matches!(param_kind, NodeKind::Kwarg(_) | NodeKind::Kwoptarg { .. });
+            let msg = build_message(name_str, is_kwarg, all_unused, method_name_str);
 
-            // Fallback: scan body descendants for Lvar reads. This catches
-            // cross-scope reads (e.g. args used only inside a nested block),
-            // which the model won't see in the def scope. Reads inside a
-            // nested scope that re-declares `name` as an argument are skipped
-            // — there the name shadows this method argument.
-            let is_used = model_used || lvar_reads_excluding_shadowed(cx, body, name);
-
-            if is_used {
-                continue;
-            }
-
-            // `&blk` on a method that yields is implicitly used.
-            if has_yield && matches!(param_kind, NodeKind::Blockarg(_)) {
-                continue;
-            }
-            cx.emit_offense(range, "Unused method argument", None);
+            cx.emit_offense(range, &msg, None);
             emit_autocorrect(cx, param, &param_kind, range, params, i);
         }
     }
+}
+
+/// Build the offense message matching RuboCop's format.
+fn build_message(name: &str, is_kwarg: bool, all_unused: bool, method_name: &str) -> String {
+    let mut msg = format!("Unused method argument - `{name}`.");
+    if !is_kwarg {
+        msg.push_str(&format!(
+            " If it's necessary, use `_` or `_{name}` as an argument name \
+             to indicate that it won't be used. If it's unnecessary, remove it."
+        ));
+    }
+    if all_unused {
+        msg.push_str(&format!(
+            " You can also write as `{method_name}(*)` if you want the method \
+             to accept any arguments but don't care about them."
+        ));
+    }
+    msg
 }
 
 fn emit_autocorrect(
@@ -199,7 +273,7 @@ fn emit_autocorrect(
     }
 }
 
-/// Whether `body` contains an `Lvar` read of `name`, skipping reads inside
+/// Whether `body` (a method body) contains an `Lvar` read of `name`, skipping reads inside
 /// nested scopes that re-declare `name` as an argument (shadowing). Those
 /// reads refer to the inner argument, not the method argument under test, so
 /// they must not mark the method argument as used. Requires the
@@ -250,7 +324,7 @@ fn lvar_reads_excluding_shadowed(cx: &Cx<'_>, body: NodeId, name: Symbol) -> boo
 
 /// Whether `body` (a method body) contains a `yield` that would
 /// dispatch to *this* method's block. `yield` inside a nested method
-/// definition (`def …` or `def self.…`, both encoded as `Def` with a
+/// definition (`def ...` or `def self....`, both encoded as `Def` with a
 /// possible `receiver`) belongs to that inner method's block, not the
 /// outer's, so the walk stops at those boundaries. Blocks / lambdas /
 /// class / module bodies do *not* break `yield` scope, so the walk
@@ -260,7 +334,7 @@ fn body_contains_yield(cx: &Cx<'_>, body: NodeId) -> bool {
     while let Some(id) = stack.pop() {
         match *cx.kind(id) {
             NodeKind::Yield(_) => return true,
-            // Skip every nested method definition — that yield belongs
+            // Skip every nested method definition -- that yield belongs
             // to the inner method's block, not the outer's. This applies
             // even when the outer body *is itself* a `Def` (the outer
             // method's only statement is defining the inner one).
@@ -321,13 +395,13 @@ fn body_contains_zero_arity_binding(cx: &Cx<'_>, body: NodeId) -> bool {
 /// Whether `body` consists of nothing but a single `raise` / `fail`
 /// call whose first argument is `Const(name)` or `Const(name).new(...)`
 /// with `name` in `exceptions`. A multi-statement body like
-/// `do_something; raise NotImplementedError` is *not* matched —
+/// `do_something; raise NotImplementedError` is *not* matched --
 /// `do_something` could legitimately use the method's arguments, and a
 /// trailing exception should not silence the cop on the whole method.
 fn is_not_implemented_body(cx: &Cx<'_>, body: NodeId, exceptions: &[String]) -> bool {
     let target = match *cx.kind(body) {
         // `Begin` with a single child is the parser sometimes wrapping a
-        // lone statement (`def foo(_); raise X; end` → `Begin([Send])`).
+        // lone statement (`def foo(_); raise X; end` -> `Begin([Send])`).
         // More than one statement means there is real code besides the
         // raise; in that case the method isn't "just unimplemented".
         NodeKind::Begin(list) => match cx.list(list) {
@@ -366,7 +440,7 @@ fn is_not_implemented_body(cx: &Cx<'_>, body: NodeId, exceptions: &[String]) -> 
 }
 
 /// Match `<Const>` or `<Const>.new(...)` against the configured exception
-/// class names. The lookup is by leaf name only — `::NotImplementedError`,
+/// class names. The lookup is by leaf name only -- `::NotImplementedError`,
 /// `Foo::NotImplementedError`, and plain `NotImplementedError` all
 /// resolve through the same `Const.name`.
 fn exception_const_matches(cx: &Cx<'_>, node: NodeId, exceptions: &[String]) -> bool {
@@ -416,7 +490,7 @@ mod tests {
     fn flags_unused_method_arguments() {
         test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
             def call(used, unused, _ignored)
-                           ^^^^^^ Unused method argument
+                           ^^^^^^ Unused method argument - `unused`. If it's necessary, use `_` or `_unused` as an argument name to indicate that it won't be used. If it's unnecessary, remove it.
               used
             end
         "#});
@@ -465,7 +539,7 @@ mod tests {
         // Only NotImplementedError-class raises trigger the bypass.
         test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
                 def foo(x)
-                        ^ Unused method argument
+                        ^ Unused method argument - `x`. If it's necessary, use `_` or `_x` as an argument name to indicate that it won't be used. If it's unnecessary, remove it. You can also write as `foo(*)` if you want the method to accept any arguments but don't care about them.
                   raise ArgumentError
                 end
             "#});
@@ -476,10 +550,10 @@ mod tests {
         // Only methods whose body is *just* `raise NotImplementedError`
         // bypass the cop. A real implementation that happens to end with
         // an unimplemented-class raise should still report unused args
-        // — `do_something` could legitimately consume them.
+        // -- `do_something` could legitimately consume them.
         test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
                 def foo(unused)
-                        ^^^^^^ Unused method argument
+                        ^^^^^^ Unused method argument - `unused`. If it's necessary, use `_` or `_unused` as an argument name to indicate that it won't be used. If it's unnecessary, remove it. You can also write as `foo(*)` if you want the method to accept any arguments but don't care about them.
                   do_something
                   raise NotImplementedError
                 end
@@ -499,7 +573,7 @@ mod tests {
     fn block_arg_without_yield_is_still_flagged() {
         test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
                 def foo(&blk)
-                         ^^^ Unused method argument
+                         ^^^ Unused method argument - `blk`. If it's necessary, use `_` or `_blk` as an argument name to indicate that it won't be used. If it's unnecessary, remove it. You can also write as `foo(*)` if you want the method to accept any arguments but don't care about them.
                   1
                 end
             "#});
@@ -540,12 +614,12 @@ mod tests {
 
     #[test]
     fn yield_inside_nested_def_does_not_save_outer_blockarg() {
-        // The nested `def inner; yield; end` has its own block scope —
+        // The nested `def inner; yield; end` has its own block scope --
         // its `yield` refers to `inner`'s block, not `outer`'s. So the
         // outer `&blk` is still unused.
         test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
                 def outer(&blk)
-                           ^^^ Unused method argument
+                           ^^^ Unused method argument - `blk`. If it's necessary, use `_` or `_blk` as an argument name to indicate that it won't be used. If it's unnecessary, remove it. You can also write as `outer(*)` if you want the method to accept any arguments but don't care about them.
                   def inner
                     yield
                   end
@@ -619,7 +693,7 @@ mod tests {
         "#});
     }
 
-    // VarSemanticModel migration: cross-scope read — arg used inside a block.
+    // VarSemanticModel migration: cross-scope read -- arg used inside a block.
     // The model only tracks same-scope references; the lvar-scan fallback
     // handles this case so no false-positive offense is emitted.
     #[test]
@@ -632,13 +706,13 @@ mod tests {
     }
 
     // VarSemanticModel migration: a method arg shadowed by an inner block
-    // parameter of the same name is still unused — the read inside the block
+    // parameter of the same name is still unused -- the read inside the block
     // refers to the inner `|x|`, not the method's `x`.
     #[test]
     fn arg_shadowed_by_inner_block_is_flagged() {
         test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
             def foo(x)
-                    ^ Unused method argument
+                    ^ Unused method argument - `x`. If it's necessary, use `_` or `_x` as an argument name to indicate that it won't be used. If it's unnecessary, remove it. You can also write as `foo(*)` if you want the method to accept any arguments but don't care about them.
               [1].each do |x|
                 puts x
               end
@@ -657,5 +731,22 @@ mod tests {
               x
             end
         "#});
+    }
+
+    // --- murphy-qaio option schema tests ---
+
+    /// IgnoreEmptyMethods (default true): method with no body is skipped.
+    #[test]
+    fn ignores_method_with_empty_body() {
+        // `def foo(x); end` has no body (body is None in the AST).
+        test::<UnusedMethodArgument>().expect_no_offenses("def foo(x); end\n");
+    }
+
+    /// AllowUnusedKeywordArguments (default false): kwarg IS flagged at default.
+    /// This test verifies the default-false behavior (kwarg is reported).
+    #[test]
+    fn kwarg_is_flagged_at_default() {
+        let run = run_cop_with_edits::<UnusedMethodArgument>("def foo(bar:)\n  1\nend\n");
+        assert_eq!(run.offenses.len(), 1, "kwarg should be flagged at default");
     }
 }

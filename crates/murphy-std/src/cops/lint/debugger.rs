@@ -14,7 +14,9 @@
 //!   save_screenshot, page.save_*, Kernel.binding.* variants, debug/start).
 //!   Cbase handling not needed: Murphy translates ::X to Const{scope:None}
 //!   same as X, so ::Pry.rescue and ::Kernel.debugger already match.
-//!   Remaining gap: assumed_usage_context guard (deferred to murphy-rjwo).
+//!   assumed_usage_context guard implemented (murphy-rjwo).
+//!   ABI blockers: DebuggerMethods hash-of-arrays config format and custom
+//!   method dispatch are not yet wired (murphy-9cr.9). See cop doc comment.
 //! ```
 //!
 //! `require`s that load one. Defaults mirror RuboCop's `DebuggerMethods`
@@ -25,7 +27,7 @@
 //!
 //! - **Bare** debugger entrypoints: `debugger`, `byebug`, `remote_byebug`,
 //!   `pry`, `save_and_open_page`, `save_and_open_screenshot`, `save_page`,
-//!   `save_screenshot`, `jard`, …
+//!   `save_screenshot`, `jard`, ...
 //! - **Chained** entrypoints: `binding.irb`, `binding.pry`,
 //!   `binding.remote_pry`, `binding.pry_remote`, `binding.b`,
 //!   `binding.break`, `binding.console`, and the `Kernel.binding.*` forms.
@@ -46,12 +48,12 @@
 //!
 //! ## Options
 //!
-//! - **`DebuggerMethods`** — replaces the default set of debugger
+//! - **`DebuggerMethods`** -- replaces the default set of debugger
 //!   entrypoints to match. Each entry is either a bare method name
 //!   (`"debugger"`) or a `<receiver>.<method>` signature
 //!   (`"binding.pry"`, `"Kernel.debugger"`). Constant receivers can be
 //!   nested (`"Foo::Bar.method"`).
-//! - **`DebuggerRequires`** — replaces the default set of required
+//! - **`DebuggerRequires`** -- replaces the default set of required
 //!   libraries that trigger an offense.
 //!
 //! ## Known v1 limitation: option overrides not wired through `Cx`
@@ -62,6 +64,24 @@
 //! `murphy-9cr.9` will route overrides through `Cx`; until then
 //! `[cops.rules."Lint/Debugger"]` overrides have no effect at dispatch
 //! time. This matches the v1 contract on every other cop with options.
+//!
+//! ## ABI blockers (Phase 4 -- murphy-rjwo)
+//!
+//! **`DebuggerMethods` hash-of-arrays format**: RuboCop supports
+//! `DebuggerMethods` as either a flat array or a hash-of-arrays
+//! (`category => [method, ...]`). The `#[derive(CopOptions)]` macro
+//! only handles `Vec<String>` (flat list). Supporting the hash form
+//! requires either a hand-rolled `CopOptions::from_config_json` that
+//! flattens `hash.values.flatten`, or a new `CopOptionHashOfArrays`
+//! derive variant. This is blocked on a murphy-plugin-api ABI change
+//! and deferred beyond v1.
+//!
+//! **Custom method dispatch**: the `#[on_node(methods=[...])]` list is
+//! static at compile time. User-configured extra debugger methods that
+//! introduce a new right-of-`.` selector not already in the list will
+//! not be dispatched. This requires either dynamic dispatch wiring
+//! through `Cx` or a catch-all `on_node(kind="send")` handler, both
+//! of which are deferred to murphy-9cr.9.
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
 
@@ -196,6 +216,15 @@ impl Debugger {
             return;
         }
 
+        // Mirror RuboCop's `assumed_usage_context?`: suppress when the
+        // debugger call (no args) is used as an argument to another call
+        // and is not inside a block/proc/lambda. This avoids false positives
+        // for patterns like `let(:p) { foo }; expect(do_something(p)).to eq bar`
+        // where `p` is a variable, not the `Kernel#p` debugger entrypoint.
+        if cx.list(args).is_empty() && assumed_usage_context(cx, node) {
+            return;
+        }
+
         // Build the call's canonical signature and look it up in the
         // configured `debugger_methods` list.
         let Some(sig) = call_signature(cx, receiver, method_str) else {
@@ -203,7 +232,7 @@ impl Debugger {
         };
         if opts.debugger_methods.iter().any(|e| e == &sig) {
             // Suppress this match if the parent Send will produce a longer
-            // match — prevents double-flagging e.g. both `Kernel.binding`
+            // match -- prevents double-flagging e.g. both `Kernel.binding`
             // and `Kernel.binding.irb` when the latter is what is written.
             if parent_will_match(cx, node, &sig, &opts) {
                 return;
@@ -218,9 +247,84 @@ impl Debugger {
     }
 }
 
+/// Mirror RuboCop's `assumed_usage_context?`.
+///
+/// Suppresses the offense when all three conditions hold: (1) the node
+/// has no args (checked by caller); (2) there is a call (Send) ancestor;
+/// and (3) either the immediate parent is a direct call/literal/pair, or
+/// no ancestor is a block/numblock/itblock/kwbegin/lambda.
+///
+/// Returns `false` (flag the offense) when there is no call ancestor
+/// (standalone statement, assignment RHS, etc.) or a block ancestor
+/// breaks the condition.
+fn assumed_usage_context(cx: &Cx<'_>, node: NodeId) -> bool {
+    // Condition 2: must have at least one call (Send) ancestor.
+    if !has_call_ancestor(cx, node) {
+        return false;
+    }
+    // Condition 3a: immediate parent is a call or literal or pair.
+    if is_assumed_argument(cx, node) {
+        return true;
+    }
+    // Condition 3b: no ancestor is a block/kwbegin/lambda_or_proc.
+    no_block_ancestor(cx, node)
+}
+
+/// Returns `true` if `node` has any Send ancestor in the parent chain.
+fn has_call_ancestor(cx: &Cx<'_>, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent_id) = cx.parent(current).get() {
+        if matches!(*cx.kind(parent_id), NodeKind::Send { .. }) {
+            return true;
+        }
+        current = parent_id;
+    }
+    false
+}
+
+/// Returns `true` if the immediate parent of `node` is a call (Send),
+/// a literal (Str/Sym/Int/Float/True_/False_/Nil), or a Pair.
+/// This mirrors RuboCop's `assumed_argument?(node)`.
+fn is_assumed_argument(cx: &Cx<'_>, node: NodeId) -> bool {
+    let Some(parent_id) = cx.parent(node).get() else {
+        return false;
+    };
+    matches!(
+        *cx.kind(parent_id),
+        NodeKind::Send { .. }
+            | NodeKind::Str(_)
+            | NodeKind::Sym(_)
+            | NodeKind::Int(_)
+            | NodeKind::Float(_)
+            | NodeKind::True_
+            | NodeKind::False_
+            | NodeKind::Nil
+            | NodeKind::Pair { .. }
+    )
+}
+
+/// Returns `true` if no ancestor of `node` is a block, numblock,
+/// itblock, kwbegin, or lambda. This is a conservative approximation
+/// of RuboCop's `ancestor.type?(:any_block, :kwbegin) || ancestor.lambda_or_proc?`.
+fn no_block_ancestor(cx: &Cx<'_>, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent_id) = cx.parent(current).get() {
+        match *cx.kind(parent_id) {
+            NodeKind::Block { .. }
+            | NodeKind::Numblock { .. }
+            | NodeKind::Itblock { .. }
+            | NodeKind::Kwbegin(_)
+            | NodeKind::Lambda => return false,
+            _ => {}
+        }
+        current = parent_id;
+    }
+    true
+}
+
 /// Canonical `<receiver>.<method>` signature, or just `<method>` for a
 /// bare call. Returns `None` when the receiver shape is not something the
-/// configured `DebuggerMethods` syntax can spell — anonymous receivers
+/// configured `DebuggerMethods` syntax can spell -- anonymous receivers
 /// like `(some + expr).pry` are out of scope.
 fn call_signature(cx: &Cx<'_>, receiver: OptNodeId, method: &str) -> Option<String> {
     let Some(recv_id) = receiver.get() else {
@@ -234,8 +338,8 @@ fn receiver_signature(cx: &Cx<'_>, id: NodeId) -> Option<String> {
     match *cx.kind(id) {
         // No-arg Send call, e.g. `binding` or `page`. Recurse into the
         // receiver so multi-level chains like `Kernel.binding.irb` work:
-        // `irb`'s receiver is `binding` (Send, recv=Const(Kernel)) →
-        // recurse → "Kernel.binding"; outer result → "Kernel.binding.irb".
+        // `irb`'s receiver is `binding` (Send, recv=Const(Kernel)) ->
+        // recurse -> "Kernel.binding"; outer result -> "Kernel.binding.irb".
         NodeKind::Send {
             receiver,
             method,
@@ -392,7 +496,7 @@ mod tests {
 
     #[test]
     fn ignores_unrelated_receiver_with_same_method_name() {
-        // `foo.b` is not `binding.b` — the receiver must literally be
+        // `foo.b` is not `binding.b` -- the receiver must literally be
         // the `binding` no-arg call.
         test::<Debugger>().expect_no_offenses("foo.b\nfoo.break\nfoo.irb\n");
     }
@@ -494,5 +598,40 @@ mod tests {
                 ::Pry.rescue
                 ^^^^^^^^^^^^ Remove debugger entry point `::Pry.rescue`.
             "#});
+    }
+
+    // --- assumed_usage_context? guard (murphy-rjwo) ---
+
+    /// Debugger call passed as a positional argument to another method should
+    /// be suppressed -- it's likely a variable reference (e.g. `let(:p) { foo }`)
+    /// used as an argument, not a deliberate debugger entrypoint.
+    #[test]
+    fn suppresses_debugger_as_method_argument() {
+        test::<Debugger>().expect_no_offenses("puts(pry)\n");
+    }
+
+    /// Debugger call as a keyword argument value is also suppressed.
+    #[test]
+    fn suppresses_debugger_as_keyword_argument_value() {
+        test::<Debugger>().expect_no_offenses("foo(k: pry)\n");
+    }
+
+    /// Standalone debugger calls are still flagged even with the guard.
+    #[test]
+    fn still_flags_standalone_debugger() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+            pry
+            ^^^ Remove debugger entry point `pry`.
+        "#});
+    }
+
+    /// Debugger inside a block body that is itself passed as an argument to a
+    /// call is still flagged -- the block boundary breaks the guard condition.
+    #[test]
+    fn still_flags_debugger_inside_block_passed_to_call() {
+        test::<Debugger>().expect_offense(indoc! {r#"
+            foo(bar { pry })
+                      ^^^ Remove debugger entry point `pry`.
+        "#});
     }
 }
