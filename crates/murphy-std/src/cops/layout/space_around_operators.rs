@@ -7,12 +7,11 @@
 //! upstream_version_checked: 1.86.2
 //! status: partial
 //! gap_issues:
-//!   - murphy-9vwq
 //!   - murphy-70ej
 //!   - murphy-9jge
 //! notes: >
-//!   Remaining gaps: index/call op-assign lowering (murphy-9vwq),
-//!   setter-method = (murphy-70ej), pattern-match operators (murphy-9jge).
+//!   Remaining gaps: setter-method = (murphy-70ej), pattern-match operators
+//!   (murphy-9jge). Index/call op-assign resolved by murphy-9vwq.
 //! ```
 //!
 //! surrounding whitespace or have more than one space on either side,
@@ -1561,7 +1560,6 @@ mod tests {
         // Optarg defaults are handled by SpaceAroundEqualsInParameterDefault.
         // Pattern-match operators remain out of scope (no MatchPattern node yet).
         test::<SpaceAroundOperators>().expect_no_offenses("def f(x=0); end\n");
-
     }
 
     // ---------- multiple offenses + idempotent autocorrect ----------
