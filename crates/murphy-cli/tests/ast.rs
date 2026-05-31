@@ -143,3 +143,33 @@ fn ast_sexp_is_deterministic_across_runs() {
     // And the output must have at least one form (smoke).
     assert!(first.contains("(class"), "unexpected output: {first}");
 }
+
+#[test]
+fn ast_sexp_exposes_useless_assignment_parity_shapes() {
+    for (src, expected) in [
+        ("for item in items\nend\n", "(for\n"),
+        ("case value\nin {name: name}\nend\n", "(match_var :name)"),
+        ("/(?<name>foo)/ =~ value\n", "(send :=~"),
+    ] {
+        let assert = Command::cargo_bin("murphy")
+            .expect("murphy binary builds")
+            .arg("ast")
+            .arg("--format")
+            .arg("sexp")
+            .arg("-")
+            .write_stdin(src)
+            .assert()
+            .code(0);
+
+        let stdout =
+            String::from_utf8(assert.get_output().stdout.clone()).expect("stdout must be utf-8");
+        assert!(
+            !stdout.starts_with("(unknown)"),
+            "root must not be unknown for {src:?}: {stdout}"
+        );
+        assert!(
+            stdout.contains(expected),
+            "expected {expected:?} in AST for {src:?}: {stdout}"
+        );
+    }
+}

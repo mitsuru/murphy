@@ -63,14 +63,10 @@
 //!
 //! ## Known v1 limitations (Phase 4 — escalate to extend the AST)
 //!
-//! - `for x in xs` — an unused iteration variable is now flagged (the model
-//!   records `For.var` as an assignment), matching RuboCop. Murphy reports the
-//!   offense but does not autocorrect it to `_` (RuboCop does); the offense is
-//!   the parity-relevant behavior.
-//! - Pattern-match captures (`case ... in [a, b]`) — Murphy has no
-//!   pattern-match nodes yet.
-//! - Regexp implicit named captures (`/(?<name>…)/ =~ str`) — needs a
-//!   `MatchWithLvasgn`-equivalent node.
+//! - `for x in xs`, pattern-match captures (`case ... in [a, b]`), and regexp
+//!   implicit named captures (`/(?<name>…)/ =~ str`) are reported without
+//!   autocorrect. RuboCop may rewrite some of these to `_`; Murphy keeps the
+//!   parity-relevant offense behavior only.
 //!
 //! ## Autocorrect
 //!
@@ -163,16 +159,17 @@ fn make_write(cx: &Cx<'_>, var: &Variable, asgn: &Assignment) -> Write {
             },
             node: asgn.node_id,
         },
-        // Value-less `Lvasgn`: either a `Masgn` target or an exception/`for`
-        // binding. The model records the var node directly, so the immediate
-        // parent disambiguates: `Resbody`/`For` → exception binding (name
-        // range, no autocorrect), otherwise a multiple-assignment target.
+        // Value-less `Lvasgn`: either a `Masgn` target or a binding whose
+        // source cannot be safely autocorrected (exception, `for`, or regexp
+        // named capture). The model records the var node directly, so ancestry
+        // disambiguates report-only bindings from multiple-assignment targets.
         NodeKind::Lvasgn { value, .. } if value.get().is_none() => {
             // Walk ancestors, threading through any `Mlhs` wrappers, to decide
-            // whether this value-less target is an exception/`for` binding
-            // (name range, no autocorrect) or a multiple-assignment target.
+            // whether this value-less target is a report-only binding (name
+            // range, no autocorrect) or a multiple-assignment target.
             // `for a, b in xs` wraps each target in an `Mlhs` whose parent is
-            // the `For`, so the immediate parent alone is not enough.
+            // the `For`, so the immediate parent alone is not enough. Regexp
+            // named captures are lowered under a `Begin` wrapper.
             let is_exception = {
                 let mut current = asgn.node_id;
                 let mut found = false;
@@ -182,7 +179,7 @@ fn make_write(cx: &Cx<'_>, var: &Variable, asgn: &Assignment) -> Write {
                         break;
                     };
                     match *cx.kind(parent) {
-                        NodeKind::Resbody { .. } | NodeKind::For { .. } => {
+                        NodeKind::Resbody { .. } | NodeKind::For { .. } | NodeKind::Begin(_) => {
                             found = true;
                             break;
                         }
@@ -738,6 +735,67 @@ mod tests {
             "for-destructuring targets must not be autocorrected, got {:?}",
             run.edits
         );
+    }
+
+    #[test]
+    fn pattern_match_capture_flags_when_unused() {
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            case value
+            in {name: name}
+                      ^^^^ Useless assignment to variable - `name`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn pattern_match_capture_used_is_not_flagged() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+                case value
+                in {name: name}
+                  puts name
+                end
+            "#});
+    }
+
+    #[test]
+    fn pattern_match_shorthand_capture_flags_when_unused() {
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            case value
+            in {name:}
+                ^^^^ Useless assignment to variable - `name`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn regexp_named_capture_flags_when_unused() {
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            /(?<name>foo)/ =~ value
+                ^^^^ Useless assignment to variable - `name`.
+        "#});
+    }
+
+    #[test]
+    fn regexp_named_capture_used_is_not_flagged() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+                /(?<name>foo)/ =~ value
+                puts name
+            "#});
+    }
+
+    #[test]
+    fn pattern_and_regexp_captures_are_not_autocorrected() {
+        for src in [
+            "case value\nin {name: name}\nend\n",
+            "/(?<name>foo)/ =~ value\n",
+        ] {
+            let run = run_cop_with_edits::<UselessAssignment>(src);
+            assert_eq!(
+                run.edits.len(),
+                0,
+                "captures must not be autocorrected: {src}"
+            );
+        }
     }
 
     // murphy-xek: flow-sensitive dataflow — overwrite-before-read +
