@@ -155,13 +155,39 @@ impl UnusedMethodArgument {
         };
         let params: &[NodeId] = cx.list(list);
 
+        // Pre-compute raw reference check for each param (ignoring suppression
+        // rules). Used by both `usages` and `all_unused` to avoid O(N²) traversals.
+        let param_referenced: Vec<bool> = params
+            .iter()
+            .map(|&param| {
+                let Some((name, _)) = param_name_and_range(cx, param) else {
+                    return false;
+                };
+                let name_str = cx.symbol_str(name);
+                if name_str.is_empty() {
+                    return false;
+                }
+                let model_used = cx
+                    .var_model()
+                    .and_then(|m| m.scope(node))
+                    .and_then(|s| {
+                        s.variables()
+                            .iter()
+                            .find(|v| v.name == name && v.is_argument)
+                    })
+                    .map(|v| !v.references.is_empty())
+                    .unwrap_or(false);
+                model_used || lvar_reads_excluding_shadowed(cx, body, name)
+            })
+            .collect();
+
         // Pre-compute usage for each param.
         //
         // `usages[i]` reflects suppression logic (underscore convention,
         // blockarg-with-yield, kwarg-allow) — used to decide whether to
         // emit an offense for parameter `i`.
         //
-        // `any_referenced` mirrors RuboCop's `all_arguments.none?(&:referenced?)`:
+        // `all_unused` mirrors RuboCop's `all_arguments.none?(&:referenced?)`:
         // it checks only whether a param is *actually read* (model + lvar scan),
         // ignoring suppression rules. This drives the "(*)"-suffix in the
         // offense message. Example: `def foo(_x, y)` — `_x` is suppressed
@@ -169,7 +195,8 @@ impl UnusedMethodArgument {
         // unreferenced, so `(*)` appears in the `y` message.
         let usages: Vec<bool> = params
             .iter()
-            .map(|&param| {
+            .enumerate()
+            .map(|(i, &param)| {
                 let param_kind = *cx.kind(param);
                 let Some((name, _range)) = param_name_and_range(cx, param) else {
                     return true; // unknown param shape -- treat as used
@@ -188,44 +215,11 @@ impl UnusedMethodArgument {
                 {
                     return true;
                 }
-                let model_used = cx
-                    .var_model()
-                    .and_then(|m| m.scope(node))
-                    .and_then(|s| {
-                        s.variables()
-                            .iter()
-                            .find(|v| v.name == name && v.is_argument)
-                    })
-                    .map(|v| !v.references.is_empty())
-                    .unwrap_or(false);
-                model_used || lvar_reads_excluding_shadowed(cx, body, name)
+                param_referenced[i]
             })
             .collect();
 
-        // Whether any param is actually *referenced* (model + lvar scan),
-        // ignoring underscore-convention suppression. Mirrors RuboCop's
-        // `all_arguments.none?(&:referenced?)` for the `(*)` clause.
-        let any_referenced = params.iter().any(|&param| {
-            let Some((name, _)) = param_name_and_range(cx, param) else {
-                return false;
-            };
-            let name_str = cx.symbol_str(name);
-            if name_str.is_empty() {
-                return false;
-            }
-            let model_used = cx
-                .var_model()
-                .and_then(|m| m.scope(node))
-                .and_then(|s| {
-                    s.variables()
-                        .iter()
-                        .find(|v| v.name == name && v.is_argument)
-                })
-                .map(|v| !v.references.is_empty())
-                .unwrap_or(false);
-            model_used || lvar_reads_excluding_shadowed(cx, body, name)
-        });
-        let all_unused = !any_referenced;
+        let all_unused = !param_referenced.iter().any(|&r| r);
         let method_name_str = cx.symbol_str(method_name);
 
         for (i, &param) in params.iter().enumerate() {

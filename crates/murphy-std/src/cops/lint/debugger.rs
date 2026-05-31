@@ -247,79 +247,48 @@ impl Debugger {
     }
 }
 
-/// Mirror RuboCop's `assumed_usage_context?`.
-///
-/// Suppresses the offense when all three conditions hold: (1) the node
-/// has no args (checked by caller); (2) there is a call (Send) ancestor;
-/// and (3) either the immediate parent is a direct call/literal/pair, or
-/// no ancestor is a block/numblock/itblock/kwbegin/lambda.
-///
-/// Returns `false` (flag the offense) when there is no call ancestor
-/// (standalone statement, assignment RHS, etc.) or a block ancestor
-/// breaks the condition.
+/// Mirror RuboCop's `assumed_usage_context?`. Single-pass parent traversal.
 fn assumed_usage_context(cx: &Cx<'_>, node: NodeId) -> bool {
-    // Condition 2: must have at least one call (Send) ancestor.
-    if !has_call_ancestor(cx, node) {
-        return false;
-    }
-    // Condition 3a: immediate parent is a call or literal or pair.
-    if is_assumed_argument(cx, node) {
-        return true;
-    }
-    // Condition 3b: no ancestor is a block/kwbegin/lambda_or_proc.
-    no_block_ancestor(cx, node)
-}
-
-/// Returns `true` if `node` has any Send ancestor in the parent chain.
-fn has_call_ancestor(cx: &Cx<'_>, node: NodeId) -> bool {
+    let is_assumed = is_assumed_argument(cx, node);
     let mut current = node;
+    let mut has_send = false;
+    let mut has_block = false;
     while let Some(parent_id) = cx.parent(current).get() {
-        if matches!(*cx.kind(parent_id), NodeKind::Send { .. }) {
-            return true;
+        match *cx.kind(parent_id) {
+            NodeKind::Send { .. } => {
+                has_send = true;
+            }
+            NodeKind::Block { .. }
+            | NodeKind::Numblock { .. }
+            | NodeKind::Itblock { .. }
+            | NodeKind::Kwbegin(_)
+            | NodeKind::Lambda => {
+                has_block = true;
+            }
+            _ => {}
         }
         current = parent_id;
     }
-    false
+    if !has_send {
+        return false;
+    }
+    if is_assumed {
+        return true;
+    }
+    !has_block
 }
 
 /// Returns `true` if the immediate parent of `node` is a call (Send),
-/// a literal (Str/Sym/Int/Float/True_/False_/Nil), or a Pair.
-/// This mirrors RuboCop's `assumed_argument?(node)`.
+/// a literal, or a Pair. Uses `cx.is_literal()` for full literal coverage,
+/// matching RuboCop's `node.parent&.literal?` check.
 fn is_assumed_argument(cx: &Cx<'_>, node: NodeId) -> bool {
     let Some(parent_id) = cx.parent(node).get() else {
         return false;
     };
     matches!(
         *cx.kind(parent_id),
-        NodeKind::Send { .. }
-            | NodeKind::Str(_)
-            | NodeKind::Sym(_)
-            | NodeKind::Int(_)
-            | NodeKind::Float(_)
-            | NodeKind::True_
-            | NodeKind::False_
-            | NodeKind::Nil
-            | NodeKind::Pair { .. }
-    )
-}
-
-/// Returns `true` if no ancestor of `node` is a block, numblock,
-/// itblock, kwbegin, or lambda. This is a conservative approximation
-/// of RuboCop's `ancestor.type?(:any_block, :kwbegin) || ancestor.lambda_or_proc?`.
-fn no_block_ancestor(cx: &Cx<'_>, node: NodeId) -> bool {
-    let mut current = node;
-    while let Some(parent_id) = cx.parent(current).get() {
-        match *cx.kind(parent_id) {
-            NodeKind::Block { .. }
-            | NodeKind::Numblock { .. }
-            | NodeKind::Itblock { .. }
-            | NodeKind::Kwbegin(_)
-            | NodeKind::Lambda => return false,
-            _ => {}
-        }
-        current = parent_id;
-    }
-    true
+        NodeKind::Send { .. } | NodeKind::Pair { .. }
+    ) || cx.is_literal(parent_id)
 }
 
 /// Canonical `<receiver>.<method>` signature, or just `<method>` for a
