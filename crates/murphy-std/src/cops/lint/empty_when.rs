@@ -5,11 +5,10 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/EmptyWhen
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-vf0q
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Known gaps remain around comments, disable comments, runtime options, and message parity.
+//!   Message text aligned with RuboCop MSG. AllowComments default (true) matches RuboCop. AllowComments:false option override is ABI-blocked (options not wired through Cx until murphy-9cr.9).
 //! ```
 //!
 //!
@@ -81,7 +80,11 @@ impl EmptyWhen {
         {
             return;
         }
-        cx.emit_offense(cx.range(node), "Avoid empty when branches", None);
+        cx.emit_offense(
+            cx.range(node),
+            "Avoid `when` branches without a body.",
+            None,
+        );
     }
 }
 
@@ -126,7 +129,7 @@ mod tests {
         test::<EmptyWhen>().expect_offense(indoc! {r#"
             case value
             when 1
-            ^^^^^^ Avoid empty when branches
+            ^^^^^^ Avoid `when` branches without a body.
             when 2
               :ok
             end
@@ -181,7 +184,7 @@ mod tests {
         test::<EmptyWhen>().expect_offense(indoc! {r#"
                 case value
                 when 1
-                ^^^^^^ Avoid empty when branches
+                ^^^^^^ Avoid `when` branches without a body.
                 when 2
                   :ok
                 end
@@ -194,11 +197,22 @@ mod tests {
         test::<EmptyWhen>().expect_offense(indoc! {r#"
                 case value
                 when 1
-                ^^^^^^ Avoid empty when branches
+                ^^^^^^ Avoid `when` branches without a body.
                 when 2
                   # noop
                   :ok
                 end
             "#});
+    }
+
+    #[test]
+    fn offense_message_matches_rubocop_verbatim() {
+        // Pins RuboCop's MSG = 'Avoid `when` branches without a body.'
+        test::<EmptyWhen>().expect_offense(indoc! {r#"
+            case x
+            when 1
+            ^^^^^^ Avoid `when` branches without a body.
+            end
+        "#});
     }
 }

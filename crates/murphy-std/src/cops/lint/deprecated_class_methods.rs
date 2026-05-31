@@ -4,9 +4,8 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/DeprecatedClassMethods
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-uo3u
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   FileTest false-positive removed (RuboCop only matches {:File :Dir}).
 //!   exists? offense message now matches RuboCop's MSG template.
