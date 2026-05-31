@@ -174,9 +174,6 @@ fn is_flow_terminator(
                 if in_instance_eval {
                     return false;
                 }
-                if matches!(method_str, "raise" | "fail") {
-                    return cx.is_guard_clause(node);
-                }
                 return true;
             }
 
@@ -315,6 +312,19 @@ mod tests {
               raise 'bad'
               puts 'x'
               ^^^^^^^^^ Unreachable code detected.
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_dead_code_after_multiline_raise() {
+        test::<UnreachableCode>().expect_offense(indoc! {r#"
+            def foo
+              raise(
+                "boom"
+              )
+              bar
+              ^^^ Unreachable code detected.
             end
         "#});
     }
