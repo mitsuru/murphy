@@ -1312,6 +1312,34 @@ mod tests {
         );
     }
 
+    /// Fixture: emits two offenses at *different* columns on the same
+    /// source line — `[0, 1)` ('a') and `[2, 3)` ('c'). Motivating
+    /// case: a cop like SpaceAroundOperators flagging both `+` and `*`
+    /// in `a+b*c` as separate offenses on one row.
+    #[derive(Default)]
+    struct TwoColOnLineCop;
+    impl Cop for TwoColOnLineCop {
+        type Options = NoOptions;
+        const NAME: &'static str = "Test/TwoColOnLine";
+    }
+    impl NodeCop for TwoColOnLineCop {
+        const KINDS: &'static [NodeKindTag] = &[];
+        fn check(&self, _node: NodeId, cx: &Cx<'_>) {
+            cx.emit_offense(Range { start: 0, end: 1 }, "left", None);
+            cx.emit_offense(Range { start: 2, end: 3 }, "right", None);
+        }
+    }
+
+    #[test]
+    fn expect_offense_two_annotations_at_different_columns_same_line() {
+        // Two offenses at distinct columns on one source line: the
+        // sort+compare pipeline must handle them independently and the
+        // annotations must stack correctly under the source.
+        // Use a plain string (not `\` continuation) so leading whitespace
+        // in the annotation lines is preserved literally.
+        super::test::<TwoColOnLineCop>().expect_offense("abc\n^ left\n  ^ right\n");
+    }
+
     #[test]
     #[should_panic(
         expected = "expect_offense must contain at least one annotation; use expect_no_offenses instead"
