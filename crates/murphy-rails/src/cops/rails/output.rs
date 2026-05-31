@@ -5,13 +5,15 @@
 //! upstream: rubocop-rails
 //! upstream_cop: Rails/Output
 //! upstream_version_checked: 2.35.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-hfcg
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   output?/io_output? method-gating split and parent/block/hash/block_pass
-//!   guards are now closed. Autocorrect (logger rewrite) and file-gating
-//!   remain deferred per ADR 0006.
+//!   guards are complete. Cbase forms (::STDOUT/::STDERR) fold to scope=None
+//!   in Murphy's AST, so they are matched identically to bare STDOUT/STDERR.
+//!   Autocorrect (logger rewrite) is intentionally absent — the safe logger
+//!   receiver cannot be synthesised by the cop (ADR 0006). RuboCop Rails/Output
+//!   is global (no Include globs); Murphy matches that behaviour.
 //! ```
 //!
 //! (`puts`/`p`/`pp`/`print`/`pretty_print`/`ap` — bare only) and
@@ -384,5 +386,37 @@ mod tests {
         // `$stdout.puts` — output? requires nil? receiver; io_output?
         // does not list `puts`. Neither pattern matches RuboCop.
         test::<Output>().expect_no_offenses("$stdout.puts \"x\"\n");
+    }
+
+    // === cbase qualified forms (::STDOUT / ::STDERR) ===
+
+    #[test]
+    fn flags_cbase_stderr_write() {
+        // `::STDERR.write` — the cbase prefix (::) folds to scope=None
+        // in Murphy's AST, so ::STDERR is indistinguishable from bare
+        // STDERR and must trigger io_output?.
+        test::<Output>().expect_offense(indoc! {r#"
+                ::STDERR.write "x"
+                ^^^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#});
+    }
+
+    #[test]
+    fn flags_cbase_stdout_syswrite() {
+        // `::STDOUT.syswrite` — same cbase-folding reasoning as above.
+        test::<Output>().expect_offense(indoc! {r#"
+                ::STDOUT.syswrite "x"
+                ^^^^^^^^^^^^^^^^^^^^^ Do not write to stdout. Use Rails's logger if you want to log.
+            "#});
+    }
+
+    // === local-variable receiver: false-positive guard ===
+
+    #[test]
+    fn does_not_flag_local_variable_receiver_write() {
+        // `io.write(x)` where `io` is a local variable — the receiver
+        // is an Lvar node, not a Gvar or Const, so receiver_is_stdio
+        // returns false and no offense is emitted.
+        test::<Output>().expect_no_offenses("io = $stdout\nio.write(\"x\")\n");
     }
 }
