@@ -5,14 +5,14 @@
 //! upstream: rubocop
 //! upstream_cop: Style/StringLiterals
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-j59g
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Fixed: double_quotes_required? guard (false-positive offenses), runtime
-//!   option wiring via cx.options_or_default, and message text parity.
-//!   Remaining gap: ConsistentQuotesInMultiline / on_dstr (non-default,
-//!   deferred).
+//!   option wiring via cx.options_or_default, message text parity, and
+//!   EnforcedStyle/single_quotes/double_quotes config key alignment.
+//!   ConsistentQuotesInMultiline defaults to false; deferred (non-default feature).
+//!   dstr (interpolated strings) are never subscribed so they are never flagged.
 //! ```
 //!
 //! string literals. Mirrors RuboCop's same-named cop.
@@ -22,15 +22,15 @@
 //! cannot be expressed with single quotes at all, so they are never a
 //! `Style/StringLiterals` offense.
 //!
-//! ## Option (`preferred_quote`)
+//! ## Option (`EnforcedStyle`)
 //!
 //! Declared via `#[derive(CopOptions)]` and wired through the cop's
 //! `Cop::Options` associated type. v1 ships the default
-//! `preferred_quote = "single"` (matching RuboCop). The host-side
+//! `EnforcedStyle = "single_quotes"` (matching RuboCop). The host-side
 //! config-validation gate (murphy-9cr.9) consumes the generated
 //! `SCHEMA` to enforce the enum at config-load time; the runtime
-//! behaviour uses `cx.options_or_default` so `preferred_quote = "double"`
-//! is now reachable via `murphy.toml`.
+//! behaviour uses `cx.options_or_default` so `EnforcedStyle = "double_quotes"`
+//! is now reachable via `.murphy.yml`.
 //!
 //! ## Offense guard (`double_quotes_required?` parity)
 //!
@@ -70,19 +70,21 @@ use murphy_plugin_api::{CopOptions, Cx, NodeId, Range, cop};
 #[derive(Default)]
 pub struct StringLiterals;
 
-/// Cop options for [`StringLiterals`]. The `preferred_quote` value is
-/// constrained to the `single` / `double` enum by the generated
+/// Cop options for [`StringLiterals`]. The `EnforcedStyle` value is
+/// constrained to the `single_quotes` / `double_quotes` enum by the generated
 /// [`OptionSpec::enum_values_json`](murphy_plugin_api::OptionSpec); the
 /// `#[derive(CopOptions)]` macro builds the JSON schema entry that the
-/// validation gate (murphy-9cr.9) reads.
+/// validation gate (murphy-9cr.9) reads. Values and key name match
+/// RuboCop's `Style/StringLiterals` cop.
 #[derive(CopOptions)]
 pub struct StringLiteralsOptions {
     #[option(
-        default = "single",
-        enum_values = ["single", "double"],
+        name = "EnforcedStyle",
+        default = "single_quotes",
+        enum_values = ["single_quotes", "double_quotes"],
         description = "Preferred quote style for plain string literals."
     )]
-    pub preferred_quote: String,
+    pub enforced_style: String,
 }
 
 #[cop(
@@ -96,7 +98,7 @@ impl StringLiterals {
     #[on_node(kind = "str")]
     fn check_str(&self, node: NodeId, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<StringLiteralsOptions>();
-        let prefer_single = opts.preferred_quote == "single";
+        let prefer_single = opts.enforced_style == "single_quotes";
 
         let range = cx.range(node);
         let src = cx.raw_source(range);
@@ -367,5 +369,67 @@ mod tests {
     fn sqr_escaped_single_quote_not_required() {
         // `'\''` -- `\'` escape (next byte is `'`) -> false
         assert!(!single_quotes_required("'\\''"));
+    }
+
+    // --- RuboCop parity: EnforcedStyle config key and enum values ---
+
+    #[test]
+    fn enforced_style_double_quotes_from_config_json() {
+        // Config JSON uses RuboCop's `EnforcedStyle` key and `double_quotes` value.
+        // In double_quotes mode, single-quoted strings should be flagged.
+        use murphy_plugin_api::CopOptions;
+        let opts =
+            StringLiteralsOptions::from_config_json(br#"{"EnforcedStyle": "double_quotes"}"#)
+                .expect("valid config");
+        assert_eq!(opts.enforced_style, "double_quotes");
+    }
+
+    #[test]
+    fn enforced_style_single_quotes_from_config_json() {
+        // Config JSON uses RuboCop's `EnforcedStyle` key and `single_quotes` value.
+        use murphy_plugin_api::CopOptions;
+        let opts =
+            StringLiteralsOptions::from_config_json(br#"{"EnforcedStyle": "single_quotes"}"#)
+                .expect("valid config");
+        assert_eq!(opts.enforced_style, "single_quotes");
+    }
+
+    #[test]
+    fn enforced_style_default_is_single_quotes() {
+        // Default must be `single_quotes` to match RuboCop.
+        let opts = StringLiteralsOptions::default();
+        assert_eq!(opts.enforced_style, "single_quotes");
+    }
+
+    #[test]
+    fn double_quotes_mode_flags_single_quoted_string() {
+        use murphy_plugin_api::test_support::{indoc, test};
+        test::<StringLiterals>()
+            .with_options(&StringLiteralsOptions {
+                enforced_style: "double_quotes".to_string(),
+            })
+            .expect_offense(indoc! {r#"
+                x = 'hello'
+                    ^^^^^^^ Prefer double-quoted strings unless you need single quotes to avoid extra backslashes for escaping.
+            "#});
+    }
+
+    #[test]
+    fn dstr_not_flagged_in_single_quotes_mode() {
+        // Interpolated strings (`dstr`) must never be flagged in single mode —
+        // they cannot be expressed with single quotes.
+        use murphy_plugin_api::test_support::test;
+        test::<StringLiterals>().expect_no_offenses("x = \"hello #{name}\"\n");
+    }
+
+    #[test]
+    fn dstr_not_flagged_in_double_quotes_mode() {
+        // Interpolated strings must also not be flagged in double mode.
+        use murphy_plugin_api::test_support::test;
+        test::<StringLiterals>()
+            .with_options(&StringLiteralsOptions {
+                enforced_style: "double_quotes".to_string(),
+            })
+            .expect_no_offenses("x = \"hello #{name}\"\n");
     }
 }
