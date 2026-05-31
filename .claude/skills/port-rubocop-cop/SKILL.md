@@ -144,7 +144,7 @@ guide section and to an in-tree example cop.
 ### Phase 2.1: identify the target pack and the Murphy cop name
 
 > **Gap fill:** skip this step. Locate the existing cop file
-> (`find crates -name '<cop_snake>.rs'`) and read it to understand the current
+> (`find crates -name '<cop_snake_case>.rs'`) and read it to understand the current
 > implementation before continuing to Phase 2.2.
 
 Two facts to nail down before scaffolding:
@@ -552,6 +552,7 @@ audit to the gap shapes from Phase 1 rather than re-diffing every axis:
   `status: verified`, clear `gap_issues: []`, update `notes`, and close
   the beads issue: `bd close <issue-id>`. Continue to Phase 5.
 - **Only some gaps resolved.** Drop the fixed issue id from `gap_issues`,
+  close the resolved beads issue (`bd close <resolved-issue-id>`),
   update `notes` to describe what changed, keep `status: partial`, and
   continue to Phase 5 with the remaining gaps documented. If the audit
   surfaces a previously-untracked gap, file a new beads issue for it and
