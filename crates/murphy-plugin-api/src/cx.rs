@@ -2415,8 +2415,7 @@ impl<'a> Cx<'a> {
             .iter()
             .position(|&b| b == b'\n')
             .map_or(bytes.len(), |pos| end_anchor + pos);
-        if end < bytes.len() && bytes[end] == b'\n' && (include_final_newline || end == end_anchor)
-        {
+        if end < bytes.len() && bytes[end] == b'\n' && include_final_newline {
             end += 1;
         }
         Range {
@@ -2467,13 +2466,7 @@ impl<'a> Cx<'a> {
             }
             let comment_line = line_range(source, comment.range.start as usize);
             let result_line_start = line_range(source, result.start as usize).start;
-            let comment_line_end = if comment_line.end < source.len() as u32
-                && source.as_bytes()[comment_line.end as usize] == b'\n'
-            {
-                comment_line.end + 1
-            } else {
-                comment_line.end
-            };
+            let comment_line_end = comment_line.end;
             if comment_line_end != result_line_start {
                 break;
             }
@@ -2860,8 +2853,8 @@ mod tests {
 
         let range = cx.range_by_whole_lines(Range { start: 0, end: 6 }, false);
 
-        assert_eq!(range, Range { start: 0, end: 6 });
-        assert_eq!(cx.raw_source(range), "alpha\n");
+        assert_eq!(range, Range { start: 0, end: 5 });
+        assert_eq!(cx.raw_source(range), "alpha");
     }
 
     #[test]
@@ -2974,6 +2967,18 @@ mod tests {
         let range = cx.range_with_comments(cx.root());
 
         assert_eq!(cx.raw_source(range), "foo # inline\nbar");
+    }
+
+    #[test]
+    fn range_help_range_with_comments_stops_at_blank_line() {
+        let source = concat!("# doc\n", "\n", "def m\n", "end\n");
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_with_comments(cx.root());
+
+        assert_eq!(cx.raw_source(range), "def m\nend");
     }
 
     #[test]
