@@ -55,6 +55,125 @@ pub struct CopRule {
     pub options: BTreeMap<String, serde_json::Value>,
 }
 
+/// Metadata keys from RuboCop's default.yml that are NOT cop options.
+/// These are stripped when building the options map so cops don't receive them.
+const METADATA_KEYS: &[&str] = &[
+    "Description",
+    "VersionAdded",
+    "VersionChanged",
+    "VersionRemoved",
+    "StyleGuide",
+    "References",
+    "Safe",
+    "SafeAutoCorrect",
+];
+
+/// Per-cop defaults extracted from a bundled `default.yml`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DefaultCopRule {
+    pub enabled: Option<bool>,
+    pub severity: Option<Severity>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub options: BTreeMap<String, serde_json::Value>,
+}
+
+/// The full set of defaults parsed from a bundled `default.yml`
+/// (e.g. `rubocop/config/default.yml` in murphy-std).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DefaultCopsData {
+    /// `AllCops.Include` patterns from the YAML.
+    pub allcops_include: Vec<String>,
+    /// `AllCops.Exclude` patterns from the YAML.
+    pub allcops_exclude: Vec<String>,
+    /// Per-cop defaults keyed by cop name.
+    pub cop_rules: BTreeMap<String, DefaultCopRule>,
+}
+
+impl DefaultCopsData {
+    /// Parse a RuboCop-format default.yml string into structured defaults.
+    ///
+    /// Unrecognised top-level keys are silently ignored.
+    /// Parse failures are silently skipped.
+    pub fn from_yaml(text: &str) -> Self {
+        use yaml_rust2::{Yaml, YamlLoader};
+
+        let docs = match YamlLoader::load_from_str(text) {
+            Ok(d) => d,
+            Err(_) => return Self::default(),
+        };
+        let doc = match docs.into_iter().next() {
+            Some(Yaml::Hash(h)) => h,
+            _ => return Self::default(),
+        };
+
+        let mut result = Self::default();
+
+        for (key, value) in doc {
+            let Yaml::String(section) = key else { continue };
+
+            if section == "AllCops" {
+                if let Yaml::Hash(all_cops) = value {
+                    if let Some(inc) = all_cops.get(&Yaml::String("Include".to_string())) {
+                        result.allcops_include = yaml_string_list(inc);
+                    }
+                    if let Some(exc) = all_cops.get(&Yaml::String("Exclude".to_string())) {
+                        result.allcops_exclude = yaml_string_list(exc);
+                    }
+                }
+                continue;
+            }
+
+            // Treat as a cop section (e.g. "Style/Foo").
+            if let Yaml::Hash(cop_map) = value {
+                let rule = parse_default_cop_rule(cop_map);
+                result.cop_rules.insert(section, rule);
+            }
+        }
+
+        result
+    }
+}
+
+fn parse_default_cop_rule(map: yaml_rust2::yaml::Hash) -> DefaultCopRule {
+    use yaml_rust2::Yaml;
+    let mut rule = DefaultCopRule::default();
+    for (key, value) in map {
+        let Yaml::String(k) = key else { continue };
+        match k.as_str() {
+            "Enabled" => {
+                if let Yaml::Boolean(b) = value {
+                    rule.enabled = Some(b);
+                }
+            }
+            "Severity" => {
+                if let Yaml::String(s) = value {
+                    rule.severity = match s.as_str() {
+                        "warning" => Some(Severity::Warning),
+                        "error" => Some(Severity::Error),
+                        _ => None,
+                    };
+                }
+            }
+            "Include" => {
+                rule.include = yaml_string_list(&value);
+            }
+            "Exclude" => {
+                rule.exclude = yaml_string_list(&value);
+            }
+            other if METADATA_KEYS.contains(&other) => {
+                // Skip documentation/metadata keys.
+            }
+            other => {
+                if let Some(json_val) = yaml_to_json(value) {
+                    rule.options.insert(other.to_string(), json_val);
+                }
+            }
+        }
+    }
+    rule
+}
+
 fn default_include() -> Vec<String> {
     vec!["**/*.rb".to_string()]
 }
@@ -1095,5 +1214,53 @@ Style/StringLiterals:
             out.contains("# unsupported plugin entry: <empty or non-string key>"),
             "empty mapping:\n{out}"
         );
+    }
+
+    #[test]
+    fn default_cops_data_parses_enabled_false() {
+        let yaml = "Style/Foo:\n  Enabled: false\n  EnforcedStyle: single_quotes\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        let rule = data.cop_rules.get("Style/Foo").expect("rule exists");
+        assert_eq!(rule.enabled, Some(false));
+        assert_eq!(
+            rule.options.get("EnforcedStyle"),
+            Some(&serde_json::Value::String("single_quotes".to_string()))
+        );
+    }
+
+    #[test]
+    fn default_cops_data_parses_allcops_include_exclude() {
+        let yaml = "AllCops:\n  Include:\n    - '**/*.rb'\n    - '**/Gemfile'\n  Exclude:\n    - 'vendor/**'\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        assert!(data.allcops_include.contains(&"**/*.rb".to_string()));
+        assert!(data.allcops_include.contains(&"**/Gemfile".to_string()));
+        assert_eq!(data.allcops_exclude, vec!["vendor/**"]);
+    }
+
+    #[test]
+    fn default_cops_data_strips_metadata_keys() {
+        let yaml = "Style/Foo:\n  Description: 'Some cop'\n  Enabled: true\n  VersionAdded: '1.0'\n  EnforcedStyle: compact\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        let rule = data.cop_rules.get("Style/Foo").expect("rule");
+        assert!(!rule.options.contains_key("Description"), "Description must not be in options");
+        assert!(!rule.options.contains_key("VersionAdded"), "VersionAdded must not be in options");
+        assert!(rule.options.contains_key("EnforcedStyle"), "EnforcedStyle must be in options");
+    }
+
+    #[test]
+    fn default_cops_data_parses_per_cop_include_exclude() {
+        let yaml = "Bundler/Foo:\n  Enabled: true\n  Include:\n    - '**/Gemfile'\n  Exclude:\n    - 'vendor/**'\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        let rule = data.cop_rules.get("Bundler/Foo").expect("rule");
+        assert_eq!(rule.include, vec!["**/Gemfile"]);
+        assert_eq!(rule.exclude, vec!["vendor/**"]);
+    }
+
+    #[test]
+    fn default_cops_data_parses_severity() {
+        let yaml = "Bundler/Foo:\n  Enabled: true\n  Severity: warning\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        let rule = data.cop_rules.get("Bundler/Foo").expect("rule");
+        assert_eq!(rule.severity, Some(crate::Severity::Warning));
     }
 }
