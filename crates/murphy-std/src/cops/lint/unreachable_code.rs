@@ -5,16 +5,15 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/UnreachableCode
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-py6a
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Remaining gaps (translator-blocked): retry/redo nodes are not emitted
-//!   by the translator (retry causes parse errors, redo translates to
-//!   Unknown), so those keyword terminator arms are forward-compat only.
+//!   Translator-blocked items (not cop gaps): retry/redo nodes are not
+//!   emitted by the translator (retry causes parse errors, redo translates
+//!   to Unknown), so those keyword terminator arms are forward-compat only.
 //!   case/in (CaseMatch) also translates to Unknown; a forward-compat arm
 //!   mirrors the Case arm but is similarly untestable today. All other
-//!   gaps from the original survey are fixed: message parity, first-only
+//!   RuboCop parity items are implemented: message parity, first-only
 //!   reporting, fail/throw/exit/exit!/abort method terminators, Kernel.*
 //!   receiver form, if/case all-branches check, nested begin recursion,
 //!   sibling def-redefinition suppression, and instance_eval suppression.
