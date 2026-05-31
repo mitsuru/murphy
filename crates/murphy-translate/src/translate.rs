@@ -3735,21 +3735,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unsupported_pattern_kinds_fall_to_unknown() {
-        // MatchAs(`=>`) / Pin(`^x`) have no prism binding in v1, so they
-        // remain Unknown. The surrounding case_match/in_pattern still translate.
-        // MatchRest (`*rest`) is now lowered to match_rest (murphy-j1j2 PM-B).
-        for src in [
-            "case x\nin Integer => n\n  n\nend\n", // match-as / capture (no prism binding)
-            "case x\nin ^foo\n  a\nend\n",         // pin (no prism binding)
-        ] {
-            let ast = translate(src, "t.rb");
-            let sexp = murphy_ast::ast_to_sexp(&ast);
-            assert!(sexp.starts_with("(case_match\n"), "{src}: {sexp}");
-            assert!(sexp.contains("(in_pattern"), "{src}: {sexp}");
-        }
-    }
+    // Note: match_as (`Integer => n`) and pin (`^foo`) were previously unknown
+    // and listed here. They are now properly lowered in PM-D and PM-E respectively.
+    // See translates_capture_pattern_match_as and translates_pin_operator.
 
     #[test]
     fn translates_match_rest_named() {
