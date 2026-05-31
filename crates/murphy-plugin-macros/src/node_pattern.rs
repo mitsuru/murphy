@@ -2322,7 +2322,7 @@ fn emit_anyorder_step(
             };
             let assign = capture_assign(slot, quote!(cx.alloc_node_slice(&#leftover)), ctx);
             quote! {
-                let mut #leftover: ::std::vec::Vec<::murphy_plugin_api::NodeId> = ::std::vec::Vec::new();
+                let mut #leftover: ::std::vec::Vec<::murphy_plugin_api::NodeId> = ::std::vec::Vec::with_capacity(#consume);
                 for #idx in 0..#consume {
                     if !(#assigned_check) {
                         #leftover.push(#list_val[#cur + #idx]);
