@@ -63,7 +63,7 @@
 //! path gating in v1; the cop fires on all files. This is a known gap
 //! tracked in `murphy-juee`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, Range, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent:
 //   `(send nil? :assert (send !nil? :!) ...)`
@@ -110,14 +110,7 @@ fn emit_correction(node: NodeId, cx: &Cx<'_>) {
     let Some(inner_bang) = cx.first_argument(node).get() else {
         return;
     };
-    let NodeKind::Send {
-        receiver: bang_receiver,
-        ..
-    } = *cx.kind(inner_bang)
-    else {
-        return;
-    };
-    let Some(inner_receiver) = bang_receiver.get() else {
+    let Some(inner_receiver) = cx.call_receiver(inner_bang).get() else {
         return;
     };
 
