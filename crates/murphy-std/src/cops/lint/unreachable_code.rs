@@ -317,6 +317,19 @@ mod tests {
     }
 
     #[test]
+    fn flags_dead_code_after_multiline_raise() {
+        test::<UnreachableCode>().expect_offense(indoc! {r#"
+            def foo
+              raise(
+                "boom"
+              )
+              bar
+              ^^^ Unreachable code detected.
+            end
+        "#});
+    }
+
+    #[test]
     fn does_not_flag_explicit_receiver_raise() {
         test::<UnreachableCode>()
             .expect_no_offenses("def foo\n  obj.raise 'msg'\n  puts 'still runs'\nend\n");
@@ -403,6 +416,16 @@ mod tests {
               abort
               bar
               ^^^ Unreachable code detected.
+            end
+        "#});
+    }
+
+    #[test]
+    fn does_not_flag_after_operator_keyword_guard_clause() {
+        test::<UnreachableCode>().expect_no_offenses(indoc! {r#"
+            def foo
+              ok or return
+              bar
             end
         "#});
     }

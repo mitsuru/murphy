@@ -68,10 +68,7 @@ pub struct Options {
 impl EmptyWhen {
     #[on_node(kind = "when")]
     fn check_when(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::When { body, .. } = *cx.kind(node) else {
-            return;
-        };
-        if body.get().is_some() {
+        if cx.when_body(node).get().is_some() {
             return;
         }
         let opts = Options::default();
@@ -94,14 +91,14 @@ impl EmptyWhen {
 /// sibling. `None` if the parent shape is unexpected.
 fn empty_when_body_region(cx: &Cx<'_>, when_id: NodeId) -> Option<Range> {
     let parent_id = cx.parent(when_id).get()?;
-    let NodeKind::Case { whens, else_, .. } = *cx.kind(parent_id) else {
+    if !matches!(cx.kind(parent_id), NodeKind::Case { .. }) {
         return None;
-    };
-    let when_list = cx.list(whens);
+    }
+    let when_list = cx.case_when_branches(parent_id);
     let idx = when_list.iter().position(|&w| w == when_id)?;
     let next_start = if idx + 1 < when_list.len() {
         cx.range(when_list[idx + 1]).start
-    } else if let Some(else_id) = else_.get() {
+    } else if let Some(else_id) = cx.case_else_branch(parent_id).get() {
         cx.range(else_id).start
     } else {
         // No next sibling — the `end` keyword closes the `case`. Murphy
