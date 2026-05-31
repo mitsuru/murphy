@@ -582,6 +582,16 @@ pub enum NodeKind {
         left: NodeId,
         right: NodeId,
     },
+    // ── murphy-j1j2 PM-B pattern-match array/hash extensions ────────────
+    /// `*rest` または bare `*` in array pattern (parser-gem `match_rest`)。
+    /// inner は `Some(MatchVar)` (named) or `None` (bare `*`).
+    MatchRest(OptNodeId),
+    /// `**nil` in hash pattern — no-other-keys constraint
+    /// (parser-gem `match_nil_pattern`)。marker。
+    MatchNilPattern,
+    /// `[a, b,]` — array pattern with trailing comma
+    /// (parser-gem `array_pattern_with_tail`)。children はコンマ前の要素。
+    ArrayPatternWithTail(NodeList),
     /// `it { ... }` block (Ruby 3.4+; parser-gem `itblock`)。`send` は block
     /// の receiver call、`body` は block 本体。`:it` marker は variant 自身。
     Itblock {
@@ -785,6 +795,10 @@ impl NodeKind {
             // murphy-jw5t pattern-match lowering extensions
             NodeKind::FindPattern(_) => 101,
             NodeKind::MatchAlt { .. } => 102,
+            // murphy-j1j2 PM-B pattern-match array/hash extensions
+            NodeKind::MatchRest(_) => 103,
+            NodeKind::MatchNilPattern => 104,
+            NodeKind::ArrayPatternWithTail(_) => 105,
         };
         crate::NodeKindTag(t)
     }

@@ -153,6 +153,10 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     // murphy-jw5t pattern-match lowering extensions
     ("find_pattern", 101),
     ("match_alt", 102),
+    // murphy-j1j2 PM-B array/hash pattern extensions
+    ("match_rest", 103),
+    ("match_nil_pattern", 104),
+    ("array_pattern_with_tail", 105),
 ];
 
 /// RuboCop-compatible type-name aliases for APIs that accept parser node
@@ -559,6 +563,10 @@ mod tests {
             // murphy-jw5t pattern-match lowering extensions (tags 101, 102)
             NodeKind::FindPattern(NodeList::EMPTY),
             NodeKind::MatchAlt { left: n, right: n },
+            // murphy-j1j2 PM-B array/hash pattern extensions (tags 103-105)
+            NodeKind::MatchRest(OptNodeId::NONE),
+            NodeKind::MatchNilPattern,
+            NodeKind::ArrayPatternWithTail(NodeList::EMPTY),
         ]
     }
 
@@ -706,6 +714,10 @@ mod tests {
             // murphy-jw5t pattern-match lowering extensions
             NodeKind::FindPattern(_) => "find_pattern",
             NodeKind::MatchAlt { .. } => "match_alt",
+            // murphy-j1j2 PM-B array/hash pattern extensions
+            NodeKind::MatchRest(_) => "match_rest",
+            NodeKind::MatchNilPattern => "match_nil_pattern",
+            NodeKind::ArrayPatternWithTail(_) => "array_pattern_with_tail",
         })
     }
 

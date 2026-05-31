@@ -47,3 +47,8 @@ fn golden_mixed() {
 fn golden_case_in() {
     check("case_in");
 }
+
+#[test]
+fn golden_case_in_pm_b() {
+    check("case_in_pm_b");
+}
