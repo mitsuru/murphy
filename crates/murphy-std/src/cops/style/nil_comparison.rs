@@ -33,7 +33,7 @@
 //!   Both use whole-node interpolation as per `.claude/rules/autocorrect-pattern.md`
 //!   (structural rewrites, not simple surgical deletes).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
 const MSG: &str = "Prefer the use of the `nil?` predicate.";
 
@@ -67,11 +67,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // Receiver must be present (guard against bare `== nil` with no receiver,
     // though the parser won't produce that in practice).
-    let OptNodeId(recv_idx) = receiver;
-    if recv_idx == u32::MAX {
+    let Some(recv_id) = receiver.get() else {
         return;
-    }
-    let recv_id = NodeId(recv_idx);
+    };
 
     // Exactly one argument, and it must be a nil literal.
     let arg_list = cx.list(args);

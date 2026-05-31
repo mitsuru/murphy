@@ -120,6 +120,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    // Body must not be a conditional or loop. Nesting modifier forms produces
+    // `do_something if cond2 if cond1` which is a syntax error in Ruby.
+    if cx.is_conditional(body) || cx.is_loop_keyword(body) {
+        return;
+    }
+
     // The whole if node must be multi-line (otherwise it already fits on one line
     // in block form and we don't need to suggest modifier form).
     if cx.is_single_line(node) {
@@ -287,6 +293,26 @@ mod tests {
         let long_cond = "b".repeat(60);
         let src = format!("if {long_cond}\n  {long_body}\nend\n");
         test::<IfUnlessModifier>().expect_no_offenses(&src);
+    }
+
+    #[test]
+    fn accepts_body_that_is_modifier_if() {
+        // `do_something if cond2 if cond1` is a syntax error in Ruby.
+        test::<IfUnlessModifier>().expect_no_offenses(indoc! {"
+            if condition
+              do_something if other_condition
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_body_that_is_while_loop() {
+        // Nested modifier loop is a syntax error.
+        test::<IfUnlessModifier>().expect_no_offenses(indoc! {"
+            if condition
+              i += 1 while i < 10
+            end
+        "});
     }
 
     #[test]
