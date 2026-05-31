@@ -7,10 +7,12 @@
 //! upstream_version_checked: 2.35.0
 //! status: partial
 //! gap_issues:
-//!   - murphy-dls6
+//!   - murphy-j28r
 //! notes: >
-//!   AllowReads/AllowWrites options, ::ENV handling, read/write messages,
-//!   and ENV const offense range are now implemented.
+//!   AllowReads/AllowWrites options, ::ENV handling (cbase-qualified form),
+//!   read/write-specific messages, and ENV const offense range implemented
+//!   (murphy-dls6). Remaining gap: Rails include/exclude path gating
+//!   (no file-path infrastructure yet, murphy-j28r).
 //! ```
 //!
 //! environment variables through the top-level `ENV` constant
@@ -223,7 +225,8 @@ mod tests {
     #[test]
     fn flags_cbase_env_bracket_read() {
         // `::ENV` folds to `Const { scope: None }` at translation time,
-        // so the same matcher fires. Offense range covers just `ENV`.
+        // so the same matcher fires. The Const node range covers `::ENV`
+        // (5 chars including the leading `::`).
         test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ::ENV["FOO"]
                 ^^^^^ Avoid reading directly from `ENV`.

@@ -7,11 +7,11 @@
 //! upstream_version_checked: 2.35.0
 //! status: partial
 //! gap_issues:
-//!   - murphy-gu5d
+//!   - murphy-as0h
 //! notes: >
-//!   csend (safe-navigation) outer/inner shapes and dynamic offense message
-//!   now match RuboCop. Remaining gap: target Rails version gating (6.0
-//!   minimum) is adr-deferred (murphy-gu5d).
+//!   csend shapes, offense message, and autocorrect (pluck→pick) implemented
+//!   (murphy-gu5d). Remaining gap: TargetRailsVersion 6.0 minimum gating —
+//!   no rails version infrastructure exists yet (murphy-as0h).
 //! ```
 //!
 //! Rails 6+ `pick(:col)` shorthand. `pick` materialises only the first
