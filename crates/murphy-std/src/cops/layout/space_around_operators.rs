@@ -67,23 +67,23 @@
 //! Users who hit a false positive can disable per project via
 //! `[cops.rules."Layout/SpaceAroundOperators"] enabled = false`.
 //!
-//! ## Options (frozen v1 surface — not yet honored at runtime)
+//! ## Options
 //!
-//! The cop's option struct declares the three RuboCop keys with their
-//! upstream defaults so `murphy.toml` can already reference them. The
-//! v1 check ignores the values and behaves as if all three were at
-//! their defaults; the schema is still exported so config validation
-//! (murphy-9cr.9) fails closed on bad values:
+//! - `AllowForAlignment` (`bool`, default `true`) — when `true`, extra spaces
+//!   that vertically align an operator with one on an adjacent line are
+//!   silently accepted. The check looks one line up and one line down: if the
+//!   same column holds a non-whitespace character on either neighbour, the
+//!   spacing is treated as intentional alignment.
+//! - `EnforcedStyleForExponentOperator` (`no_space` | `space`, default
+//!   `no_space`) — with `no_space` (default), any space around `**` is an
+//!   offense ("Space around operator `**` detected."); with `space`, missing
+//!   space is an offense ("Surrounding space missing for operator `**`.").
+//! - `EnforcedStyleForRationalLiterals` (`no_space` | `space`, default
+//!   `no_space`) — controls `/` when the right-hand side is a rational
+//!   literal (`1r`, `2.5r`). Same semantics as the exponent style.
 //!
-//! - `AllowForAlignment` (`bool`, default `true`).
-//! - `EnforcedStyleForExponentOperator` (`no_space` | `space`,
-//!   default `no_space`).
-//! - `EnforcedStyleForRationalLiterals` (`no_space` | `space`,
-//!   default `no_space`).
-//!
-//! Tracked follow-ups: option-to-logic wiring is `murphy-xszo`; lowering
-//! `IndexOperatorWriteNode` + `CallOperatorWriteNode` out of
-//! `NodeKind::Unknown` is `murphy-9vwq`.
+//! Tracked follow-up: lowering `IndexOperatorWriteNode` +
+//! `CallOperatorWriteNode` out of `NodeKind::Unknown` is `murphy-9vwq`.
 //!
 //! ## Autocorrect
 //!
@@ -152,14 +152,20 @@ pub enum SpaceAroundOperatorsBinaryStyle {
 )]
 impl SpaceAroundOperators {
     #[on_node(kind = "send", methods = [
-        "+", "-", "*", "/", "%",
+        "+", "-", "*", "**", "/", "%",
         "==", "!=", "===", "<=>",
         "<=", ">=", "<", ">",
         "&", "|", "^", "<<", ">>",
         "=~", "!~",
     ])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
+        let NodeKind::Send {
+            receiver,
+            method,
+            args,
+            ..
+        } = *cx.kind(node)
+        else {
             return;
         };
         // Unary `-x` / `+x` arrive with `receiver = NONE` and a `-@`/`+@`
@@ -193,7 +199,34 @@ impl SpaceAroundOperators {
                 return;
             }
         }
-        check_operator(cx, op_range);
+        let opts = cx.options_or_default::<SpaceAroundOperatorsOptions>();
+        let method_str = cx.symbol_str(method);
+        // `**` uses `EnforcedStyleForExponentOperator` (default `no_space`).
+        if method_str == "**" {
+            if opts.enforced_style_for_exponent_operator == SpaceAroundOperatorsBinaryStyle::NoSpace
+            {
+                check_operator_no_space(cx, op_range);
+            } else {
+                check_operator(cx, op_range, opts.allow_for_alignment);
+            }
+            return;
+        }
+        // `/` with a rational-literal RHS uses `EnforcedStyleForRationalLiterals`
+        // (default `no_space`): `a/1r` is correct, `a / 1r` is an offense.
+        if method_str == "/" {
+            let rhs_id = arg_ids[0];
+            if matches!(*cx.kind(rhs_id), NodeKind::Rational(_)) {
+                if opts.enforced_style_for_rational_literals
+                    == SpaceAroundOperatorsBinaryStyle::NoSpace
+                {
+                    check_operator_no_space(cx, op_range);
+                } else {
+                    check_operator(cx, op_range, opts.allow_for_alignment);
+                }
+                return;
+            }
+        }
+        check_operator(cx, op_range, opts.allow_for_alignment);
     }
 
     #[on_node(kind = "and")]
@@ -205,8 +238,11 @@ impl SpaceAroundOperators {
             start: cx.range(lhs).end,
             end: cx.range(rhs).start,
         };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         if let Some(op_range) = find_op_in_gap(cx, gap, &["&&", "and"]) {
-            check_operator(cx, op_range);
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -219,8 +255,11 @@ impl SpaceAroundOperators {
             start: cx.range(lhs).end,
             end: cx.range(rhs).start,
         };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         if let Some(op_range) = find_op_in_gap(cx, gap, &["||", "or"]) {
-            check_operator(cx, op_range);
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -238,9 +277,12 @@ impl SpaceAroundOperators {
             start: cx.range(target).end,
             end: cx.range(value).start,
         };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         let candidates = [full_op.as_str()];
         if let Some(op_range) = find_op_in_gap(cx, gap, &candidates) {
-            check_operator(cx, op_range);
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -252,7 +294,10 @@ impl SpaceAroundOperators {
             return;
         };
         if let Some(value_id) = value.get() {
-            check_plain_asgn(cx, node, value_id);
+            let afa = cx
+                .options_or_default::<SpaceAroundOperatorsOptions>()
+                .allow_for_alignment;
+            check_plain_asgn(cx, node, value_id, afa);
         }
     }
 
@@ -262,7 +307,10 @@ impl SpaceAroundOperators {
             return;
         };
         if let Some(value_id) = value.get() {
-            check_plain_asgn(cx, node, value_id);
+            let afa = cx
+                .options_or_default::<SpaceAroundOperatorsOptions>()
+                .allow_for_alignment;
+            check_plain_asgn(cx, node, value_id, afa);
         }
     }
 
@@ -272,7 +320,10 @@ impl SpaceAroundOperators {
             return;
         };
         if let Some(value_id) = value.get() {
-            check_plain_asgn(cx, node, value_id);
+            let afa = cx
+                .options_or_default::<SpaceAroundOperatorsOptions>()
+                .allow_for_alignment;
+            check_plain_asgn(cx, node, value_id, afa);
         }
     }
 
@@ -282,7 +333,10 @@ impl SpaceAroundOperators {
             return;
         };
         if let Some(value_id) = value.get() {
-            check_plain_asgn(cx, node, value_id);
+            let afa = cx
+                .options_or_default::<SpaceAroundOperatorsOptions>()
+                .allow_for_alignment;
+            check_plain_asgn(cx, node, value_id, afa);
         }
     }
 
@@ -292,7 +346,10 @@ impl SpaceAroundOperators {
             return;
         };
         if let Some(value_id) = value.get() {
-            check_plain_asgn(cx, node, value_id);
+            let afa = cx
+                .options_or_default::<SpaceAroundOperatorsOptions>()
+                .allow_for_alignment;
+            check_plain_asgn(cx, node, value_id, afa);
         }
     }
 
@@ -317,8 +374,11 @@ impl SpaceAroundOperators {
             start: lhs_end,
             end: cx.range(rhs).start,
         };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         if let Some(op_range) = find_op_in_gap(cx, gap, &["="]) {
-            check_operator(cx, op_range);
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -333,8 +393,11 @@ impl SpaceAroundOperators {
             start: cx.range(target).end,
             end: cx.range(value).start,
         };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         if let Some(op_range) = find_op_in_gap(cx, gap, &["||="]) {
-            check_operator(cx, op_range);
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -347,8 +410,11 @@ impl SpaceAroundOperators {
             start: cx.range(target).end,
             end: cx.range(value).start,
         };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         if let Some(op_range) = find_op_in_gap(cx, gap, &["&&="]) {
-            check_operator(cx, op_range);
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -361,7 +427,10 @@ impl SpaceAroundOperators {
         }
         let op_range = cx.pair_operator_loc(node);
         if op_range != Range::ZERO {
-            check_operator(cx, op_range);
+            let afa = cx
+                .options_or_default::<SpaceAroundOperatorsOptions>()
+                .allow_for_alignment;
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -389,8 +458,11 @@ impl SpaceAroundOperators {
             start: from,
             end: cx.range(var_id).start,
         };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         if let Some(op_range) = find_op_in_gap(cx, gap, &["=>"]) {
-            check_operator(cx, op_range);
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -411,8 +483,11 @@ impl SpaceAroundOperators {
             start: cx.range(name).end,
             end: cx.range(super_id).start,
         };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         if let Some(op_range) = find_op_in_gap(cx, gap, &["<"]) {
-            check_operator(cx, op_range);
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -428,8 +503,11 @@ impl SpaceAroundOperators {
             start: cx.range(node).start,
             end: cx.range(expr).start,
         };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         if let Some(op_range) = find_op_in_gap(cx, gap, &["<<"]) {
-            check_operator(cx, op_range);
+            check_operator(cx, op_range, afa);
         }
     }
 
@@ -440,13 +518,16 @@ impl SpaceAroundOperators {
         if !cx.is_ternary(node) {
             return;
         }
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
         let q_range = cx.ternary_question_loc(node);
         if q_range != Range::ZERO {
-            check_operator(cx, q_range);
+            check_operator(cx, q_range, afa);
         }
         let c_range = cx.ternary_colon_loc(node);
         if c_range != Range::ZERO {
-            check_operator(cx, c_range);
+            check_operator(cx, c_range, afa);
         }
     }
 }
@@ -458,22 +539,23 @@ impl SpaceAroundOperators {
 /// the `=` immediately after the target name (or scope path). The gap from
 /// `node.start` to `value.start` safely bounds the search because none of
 /// those names / paths can contain a bare `=` token.
-fn check_plain_asgn(cx: &Cx<'_>, node: NodeId, value_id: NodeId) {
+fn check_plain_asgn(cx: &Cx<'_>, node: NodeId, value_id: NodeId, allow_for_alignment: bool) {
     let gap = Range {
         start: cx.range(node).start,
         end: cx.range(value_id).start,
     };
     if let Some(op_range) = find_op_in_gap(cx, gap, &["="]) {
-        check_operator(cx, op_range);
+        check_operator(cx, op_range, allow_for_alignment);
     }
 }
 
 /// Inspect the operator at `op_range` and emit an offense + autocorrect
 /// edit if it is missing surrounding space or has more than one space on
 /// either side. Operators at the start of a line (continuation shape) are
-/// silently accepted, matching RuboCop's
-/// `with_space.source.start_with?("\n")` early return.
-fn check_operator(cx: &Cx<'_>, op_range: Range) {
+/// silently accepted. When `allow_for_alignment` is `true` (the default
+/// `AllowForAlignment` setting), extra spaces that vertically align the
+/// operator with one on an adjacent line are also accepted.
+fn check_operator(cx: &Cx<'_>, op_range: Range, allow_for_alignment: bool) {
     let src = cx.source().as_bytes();
     let op_start = op_range.start as usize;
     let op_end = op_range.end as usize;
@@ -521,6 +603,11 @@ fn check_operator(cx: &Cx<'_>, op_range: Range) {
             &format!("Surrounding space missing for operator `{op_text}`."),
         );
     } else if leading_count > 1 || (trailing_count > 1 && !at_eol) {
+        // AllowForAlignment: skip the offense when the extra space aligns the
+        // operator with one on an adjacent source line.
+        if allow_for_alignment && is_alignment_spacing(src, op_start) {
+            return;
+        }
         emit_fix(
             cx,
             op_range,
@@ -531,6 +618,102 @@ fn check_operator(cx: &Cx<'_>, op_range: Range) {
             &format!("Operator `{op_text}` should be surrounded by a single space."),
         );
     }
+}
+
+/// Emit an offense when there IS space around an operator that should have
+/// none (`EnforcedStyleForExponentOperator: no_space` for `**`, etc.).
+/// Autocorrect removes all surrounding spaces.
+fn check_operator_no_space(cx: &Cx<'_>, op_range: Range) {
+    let src = cx.source().as_bytes();
+    let op_start = op_range.start as usize;
+    let op_end = op_range.end as usize;
+    if op_start >= op_end || op_end > src.len() {
+        return;
+    }
+
+    let mut leading_start = op_start;
+    while leading_start > 0 && matches!(src[leading_start - 1], b' ' | b'\t') {
+        leading_start -= 1;
+    }
+    let mut trailing_end = op_end;
+    while trailing_end < src.len() && matches!(src[trailing_end], b' ' | b'\t') {
+        trailing_end += 1;
+    }
+
+    let leading_count = op_start - leading_start;
+    let trailing_count = trailing_end - op_end;
+    let at_eol = trailing_end >= src.len() || matches!(src[trailing_end], b'\n' | b'\r');
+
+    if leading_count == 0 && (trailing_count == 0 || at_eol) {
+        return;
+    }
+
+    let op_text = match std::str::from_utf8(&src[op_start..op_end]) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    cx.emit_offense(
+        op_range,
+        &format!("Space around operator `{op_text}` detected."),
+        None,
+    );
+    cx.emit_edit(
+        Range {
+            start: leading_start as u32,
+            end: trailing_end as u32,
+        },
+        op_text,
+    );
+}
+
+/// Returns `true` when extra spacing around an operator looks like vertical
+/// alignment: a non-whitespace character sits at the same column on the
+/// immediately preceding or following source line. Mirrors RuboCop's
+/// `AllowForAlignment` check.
+fn is_alignment_spacing(src: &[u8], op_start: usize) -> bool {
+    let line_start = src[..op_start]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let op_col = op_start - line_start;
+
+    let non_ws_at_col = |line: &[u8]| -> bool {
+        op_col < line.len() && !matches!(line[op_col], b' ' | b'\t' | b'\n' | b'\r')
+    };
+
+    // Check previous line.
+    if line_start > 0 {
+        let prev_end = line_start - 1;
+        let prev_start = src[..prev_end]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if non_ws_at_col(&src[prev_start..prev_end]) {
+            return true;
+        }
+    }
+
+    // Check next line.
+    let rest_start = src[op_start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| op_start + i + 1)
+        .unwrap_or(src.len());
+    if rest_start < src.len() {
+        let next_end = src[rest_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| rest_start + i)
+            .unwrap_or(src.len());
+        if non_ws_at_col(&src[rest_start..next_end]) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Emit the offense at the operator range and the autocorrect edit that
@@ -634,17 +817,124 @@ mod tests {
     }
 
     #[test]
-    fn options_are_accepted_but_not_yet_honored() {
+    fn allow_for_alignment_skips_extra_space_when_operator_is_aligned() {
+        // Default AllowForAlignment: true — extra spaces used for vertical
+        // alignment with an adjacent line are NOT flagged.
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+                x   = 1
+                foo = 2
+            "#});
+    }
+
+    #[test]
+    fn allow_for_alignment_false_flags_all_extra_spaces() {
         test::<SpaceAroundOperators>()
             .with_options(&SpaceAroundOperatorsOptions {
                 allow_for_alignment: false,
-                enforced_style_for_exponent_operator: SpaceAroundOperatorsBinaryStyle::Space,
-                enforced_style_for_rational_literals: SpaceAroundOperatorsBinaryStyle::Space,
+                ..Default::default()
             })
             .expect_offense(indoc! {r#"
-                a&&b
-                 ^^ Surrounding space missing for operator `&&`.
+                x   = 1
+                    ^ Operator `=` should be surrounded by a single space.
+                foo = 2
             "#});
+    }
+
+    #[test]
+    fn allow_for_alignment_still_flags_isolated_extra_space() {
+        // A single line with extra space but no aligned neighbour is always flagged.
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            a  +  b
+               ^ Operator `+` should be surrounded by a single space.
+        "#});
+    }
+
+    #[test]
+    fn exponent_operator_no_space_default_flags_space_around_star_star() {
+        // Default no_space style: `a ** b` has space → offense.
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                a ** b
+                  ^^ Space around operator `**` detected.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    a ** b
+                      ^^ Space around operator `**` detected.
+                "#},
+                "a**b
+",
+            );
+    }
+
+    #[test]
+    fn exponent_operator_no_space_default_accepts_no_space() {
+        test::<SpaceAroundOperators>().expect_no_offenses(
+            "a**b
+",
+        );
+    }
+
+    #[test]
+    fn exponent_operator_space_style_flags_missing_space_around_star_star() {
+        // space style: `a**b` missing space → offense.
+        test::<SpaceAroundOperators>()
+            .with_options(&SpaceAroundOperatorsOptions {
+                enforced_style_for_exponent_operator: SpaceAroundOperatorsBinaryStyle::Space,
+                ..Default::default()
+            })
+            .expect_offense(indoc! {r#"
+                a**b
+                 ^^ Surrounding space missing for operator `**`.
+            "#});
+    }
+
+    #[test]
+    fn rational_literals_no_space_default_flags_space_around_slash() {
+        // Default no_space: `a / 1r` has space → offense.
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                a / 1r
+                  ^ Space around operator `/` detected.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    a / 1r
+                      ^ Space around operator `/` detected.
+                "#},
+                "a/1r
+",
+            );
+    }
+
+    #[test]
+    fn rational_literals_no_space_default_accepts_no_space() {
+        test::<SpaceAroundOperators>().expect_no_offenses(
+            "a/1r
+",
+        );
+    }
+
+    #[test]
+    fn rational_literals_space_style_flags_missing_space_before_rational() {
+        test::<SpaceAroundOperators>()
+            .with_options(&SpaceAroundOperatorsOptions {
+                enforced_style_for_rational_literals: SpaceAroundOperatorsBinaryStyle::Space,
+                ..Default::default()
+            })
+            .expect_offense(indoc! {r#"
+                a/1r
+                 ^ Surrounding space missing for operator `/`.
+            "#});
+    }
+
+    #[test]
+    fn rational_literals_style_does_not_affect_regular_division() {
+        // Non-rational RHS: normal space rules apply regardless of style.
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            a/b
+             ^ Surrounding space missing for operator `/`.
+        "#});
     }
 
     // ---------- Send: binary operator method calls ----------
