@@ -67,6 +67,14 @@ redesign of the plugin ABI both possible and cheap. This ADR formalizes the
    reserved padding) applies only from the v1 ship date forward, not to the
    reboot itself.
 
+9. **Dispatch-lifetime derived slices.** The host may also pass an opaque
+   temporary allocator through `CxRaw` for matcher-derived `NodeId` slices
+   that are not contiguous in the arena list table. `Cx::alloc_node_slice`
+   copies a caller-provided slice into that host arena and returns a borrow
+   valid for the current dispatch lifetime. This keeps B-backend `$...`
+   captures inside `<...>` leak-free while preserving the `&'a [NodeId]`
+   capture type.
+
 ## Safety contract
 
 - **No retained pointers.** `Cx<'a>` carries a lifetime that forbids a

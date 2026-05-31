@@ -740,6 +740,8 @@ fn cx_raw_for(
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
         var_model: var_model as *const crate::var_semantic_model::VarSemanticModel,
+        node_slice_arena: std::ptr::null_mut(),
+        alloc_node_slice: crate::unavailable_alloc_node_slice,
     }
 }
 

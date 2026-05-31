@@ -1814,6 +1814,7 @@ fn sym_slot_alternatives(child: &murphy_pattern::Pat) -> syn::Result<Vec<&str>> 
 
 /// A rest-like `List`-slot pattern child: a bare `...` ([`PatKind::Rest`]) or
 /// a `$...` seq capture (a [`PatKind::Capture`] whose body is `Rest`).
+#[derive(Clone, Copy)]
 enum RestKind {
     /// Bare `...` — matches zero-or-more nodes, binds nothing.
     Bare,
@@ -2240,14 +2241,11 @@ fn emit_anyorder_step(
     len_val: &Ident,
     ctx: &mut Lower,
 ) -> syn::Result<TokenStream> {
-    use murphy_pattern::PatKind;
-
     // Separate rest from non-rest children.
-    let has_rest = children.iter().any(|c| matches!(&c.kind, PatKind::Rest));
-    let non_rest: Vec<&murphy_pattern::Pat> = children
-        .iter()
-        .filter(|c| !matches!(&c.kind, PatKind::Rest))
-        .collect();
+    let rest = children.iter().find_map(rest_kind);
+    let has_rest = rest.is_some();
+    let non_rest: Vec<&murphy_pattern::Pat> =
+        children.iter().filter(|c| rest_kind(c).is_none()).collect();
     let n = non_rest.len(); // compile-time known, ≤ 10
 
     // --- shared idents -----------------------------------------------
@@ -2311,6 +2309,30 @@ fn emit_anyorder_step(
             })
         })
         .collect::<syn::Result<_>>()?;
+    let rest_capture = match rest {
+        Some(RestKind::Capture(slot)) => {
+            let leftover = gensym(ctx, "__leftover");
+            let idx = gensym(ctx, "__idx");
+            let assigned: Vec<TokenStream> =
+                (0..n).map(|i| quote!(#assign_ident[#i] == #idx)).collect();
+            let assigned_check = if assigned.is_empty() {
+                quote!(false)
+            } else {
+                quote!(#(#assigned)||*)
+            };
+            let assign = capture_assign(slot, quote!(cx.alloc_node_slice(&#leftover)), ctx);
+            quote! {
+                let mut #leftover: ::std::vec::Vec<::murphy_plugin_api::NodeId> = ::std::vec::Vec::with_capacity(#consume);
+                for #idx in 0..#consume {
+                    if !(#assigned_check) {
+                        #leftover.push(#list_val[#cur + #idx]);
+                    }
+                }
+                #assign
+            }
+        }
+        Some(RestKind::Bare) | None => quote!(),
+    };
 
     // --- suffix continuation -----------------------------------------
     let suffix_cursor = quote!(#cur + #consume);
@@ -2360,6 +2382,7 @@ fn emit_anyorder_step(
         if #found_ident {
             let #sub: ::core::option::Option<()> = (|| -> ::core::option::Option<()> {
                 #(#commit_guards)*
+                #rest_capture
                 #suffix
             })();
             if #sub.is_some() {

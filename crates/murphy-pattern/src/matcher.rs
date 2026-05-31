@@ -658,6 +658,9 @@ fn match_list_from<P: PredicateHost + ?Sized>(
         // Try every possible count of elements that the AnyOrder block could
         // consume.  The block must consume at least as many elements as there
         // are non-rest children; if there is a rest, it can consume more.
+        let rest_capture_slot = child_ids
+            .iter()
+            .find_map(|id| rest_kind(ctx, *id).flatten());
         let has_rest = child_ids.iter().any(|id| rest_kind(ctx, *id).is_some());
         let non_rest_ids: Vec<IrNodeId> = child_ids
             .iter()
@@ -670,8 +673,15 @@ fn match_list_from<P: PredicateHost + ?Sized>(
         for consume in min_consume..=max_consume {
             let (block, suffix) = elems.split_at(consume);
             let mut trial = buf.clone();
-            if match_anyorder(ctx, &non_rest_ids, block, has_rest, &mut trial, predicates)
-                && match_list_from(ctx, rest, suffix, &mut trial, predicates)
+            if match_anyorder(
+                ctx,
+                &non_rest_ids,
+                block,
+                has_rest,
+                rest_capture_slot,
+                &mut trial,
+                predicates,
+            ) && match_list_from(ctx, rest, suffix, &mut trial, predicates)
             {
                 *buf = trial;
                 return true;
@@ -795,6 +805,7 @@ fn match_anyorder<P: PredicateHost + ?Sized>(
     patterns: &[IrNodeId],
     elems: &[NodeId],
     has_rest: bool,
+    rest_capture_slot: Option<u16>,
     buf: &mut CaptureBuf,
     predicates: &mut P,
 ) -> bool {
@@ -823,6 +834,15 @@ fn match_anyorder<P: PredicateHost + ?Sized>(
             // Phase-1 confirmed this matches; failure here is a defensive guard.
             return false;
         }
+    }
+
+    if let Some(slot) = rest_capture_slot {
+        let leftover = elems
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, node)| (!assignment[..n].contains(&idx)).then_some(*node))
+            .collect();
+        buf.set(slot, CaptureValue::Seq(leftover));
     }
 
     true

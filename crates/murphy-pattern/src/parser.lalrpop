@@ -264,22 +264,6 @@ AnyOrder: Pat = {
         })
     },
     <l:@L> "<" <children:AnyOrderChild+> ">" <r:@R> =>? {
-        // The "$... inside <...>" rejection lives here so the error span
-        // points at the offending child, matching the hand-written parser.
-        for child in &children {
-            if let PatKind::Capture { body, .. } = &child.kind {
-                if matches!(body.kind, PatKind::Rest) {
-                    return Err(lalrpop_util::ParseError::User {
-                        error: ParseError::new(
-                            "`$...` inside `<...>` is not supported in v1: \
-                             leftover-element captures require a runtime \
-                             allocator not yet plumbed through `Cx`",
-                            child.span,
-                        ),
-                    });
-                }
-            }
-        }
         // v1 limit: at most 10 non-rest children.
         let non_rest = children.iter().filter(|c| !matches!(c.kind, PatKind::Rest)).count();
         if non_rest > 10 {

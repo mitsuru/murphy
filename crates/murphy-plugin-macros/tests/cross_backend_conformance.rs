@@ -34,6 +34,24 @@ unsafe extern "C" fn noop_offense(
 }
 unsafe extern "C" fn noop_edit(_: *mut std::ffi::c_void, _: *const murphy_plugin_api::RawEdit) {}
 
+#[derive(Default)]
+struct NodeSliceArena {
+    slices: Vec<Box<[NodeId]>>,
+}
+
+unsafe extern "C" fn alloc_node_slice(
+    arena: *mut std::ffi::c_void,
+    ptr: *const NodeId,
+    len: usize,
+) -> *const NodeId {
+    let arena = unsafe { &mut *(arena as *mut NodeSliceArena) };
+    let elements = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let boxed = elements.to_vec().into_boxed_slice();
+    let out = boxed.as_ptr();
+    arena.slices.push(boxed);
+    out
+}
+
 fn fns() -> FnTable {
     FnTable {
         emit_offense: noop_offense,
@@ -68,7 +86,20 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable) -> CxRaw {
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
         var_model: std::ptr::null(),
+        node_slice_arena: std::ptr::null_mut(),
+        alloc_node_slice: murphy_plugin_api::unavailable_alloc_node_slice,
     }
+}
+
+fn cx_raw_for_with_node_slice_arena<'a>(
+    ast: &'a Ast,
+    fns: &'a FnTable,
+    arena: &'a mut NodeSliceArena,
+) -> CxRaw {
+    let mut raw = cx_raw_for(ast, fns);
+    raw.node_slice_arena = arena as *mut NodeSliceArena as *mut std::ffi::c_void;
+    raw.alloc_node_slice = alloc_node_slice;
+    raw
 }
 
 /// Same as [`cx_raw_for`] but stores `options_json` so the cop can decode
@@ -112,6 +143,8 @@ fn cx_raw_for_with_options_json<'a>(
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
         var_model: std::ptr::null(),
+        node_slice_arena: std::ptr::null_mut(),
+        alloc_node_slice: murphy_plugin_api::unavailable_alloc_node_slice,
     }
 }
 
@@ -1492,6 +1525,7 @@ def_node_matcher!(b_anyorder_then_suffix, "(array <int sym> int)");
 // the gensym, both blocks would emit the same `'__aos` label in the same
 // closure, causing a compile error).
 def_node_matcher!(b_anyorder_two_siblings, "(array <int sym> <str nil>)");
+def_node_matcher!(b_anyorder_captured_rest, "(array <int $...>)");
 
 #[test]
 fn b_anyorder_basic_both_orderings() {
@@ -2387,6 +2421,37 @@ fn anyorder_union_capture_sugar_agrees_across_backends() {
             assert_eq!(b_cap, c_id, "B↔C: capture id disagrees");
         }
         other => panic!("C: slot 0 expected Node, got {other:?}"),
+    }
+}
+
+#[test]
+fn anyorder_captured_rest_agrees_across_backends() {
+    let mut b = AstBuilder::new("[42, :foo, \"x\"]", "t.rb");
+    let int_node = b.push(NodeKind::Int(42), r());
+    let sym_name = b.intern_symbol("foo");
+    let sym_node = b.push(NodeKind::Sym(sym_name), r());
+    let str_name = b.intern_string("x");
+    let str_node = b.push(NodeKind::Str(str_name), r());
+    let elems = b.push_list(&[int_node, sym_node, str_node]);
+    let arr = b.push(NodeKind::Array(elems), r());
+    let ast = b.finish(arr);
+    let fns = fns();
+    let mut arena = NodeSliceArena::default();
+    let raw = cx_raw_for_with_node_slice_arena(&ast, &fns, &mut arena);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    let b_caps: Option<(&[NodeId],)> = b_anyorder_captured_rest(arr, &cx);
+    let c = assert_c_matches("(array <int $...>)", &ast, arr, b_caps.is_some());
+
+    let (b_rest,) = b_caps.expect("B must match and capture leftover elements");
+    assert_eq!(b_rest, &[sym_node, str_node]);
+
+    let c_caps = c.expect("C must also match");
+    match c_caps.get(0).cloned() {
+        Some(CaptureValue::Seq(c_rest)) => {
+            assert_eq!(b_rest, c_rest.as_slice(), "B↔C captured rest disagrees");
+        }
+        other => panic!("C: slot 0 expected Seq, got {other:?}"),
     }
 }
 

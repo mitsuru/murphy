@@ -138,6 +138,24 @@ static FNS: FnTable = FnTable {
     emit_edit: host_emit_edit,
 };
 
+#[derive(Default)]
+struct NodeSliceArena {
+    slices: Vec<Box<[NodeId]>>,
+}
+
+unsafe extern "C" fn alloc_node_slice(
+    arena: *mut c_void,
+    ptr: *const NodeId,
+    len: usize,
+) -> *const NodeId {
+    let arena = unsafe { &mut *(arena as *mut NodeSliceArena) };
+    let elements = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let boxed = elements.to_vec().into_boxed_slice();
+    let out = boxed.as_ptr();
+    arena.slices.push(boxed);
+    out
+}
+
 /// Per-kind node index over an arena: `nodes_by_kind[tag]` is every node id
 /// whose `NodeKind` discriminant byte is `tag`. Built once per arena.
 pub(crate) struct DispatchIndex {
@@ -165,7 +183,12 @@ impl DispatchIndex {
 
 /// Build the `CxRaw` template used for every dispatch call in one run. Only
 /// `cop_name` is restamped per cop (and `sink` is the host's, shared).
-fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink, var_model: &VarSemanticModel) -> CxRaw {
+fn build_cx_raw(
+    ast: &Ast,
+    sink: &mut OffenseSink,
+    var_model: &VarSemanticModel,
+    node_slice_arena: &mut NodeSliceArena,
+) -> CxRaw {
     let p = ast.raw_parts();
     CxRaw {
         nodes: p.nodes.as_ptr(),
@@ -192,6 +215,8 @@ fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink, var_model: &VarSemanticModel)
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
         var_model: var_model as *const VarSemanticModel,
+        node_slice_arena: node_slice_arena as *mut NodeSliceArena as *mut c_void,
+        alloc_node_slice,
     }
 }
 
@@ -230,7 +255,8 @@ pub fn run_cops_with_options(
 ) {
     let var_model = VarSemanticModel::build(ast);
     let index = DispatchIndex::build(ast);
-    let mut base = build_cx_raw(ast, sink, &var_model);
+    let mut node_slice_arena = NodeSliceArena::default();
+    let mut base = build_cx_raw(ast, sink, &var_model, &mut node_slice_arena);
     for cop in cops {
         base.cop_name = cop.name;
         let name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("");

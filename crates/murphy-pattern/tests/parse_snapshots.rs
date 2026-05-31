@@ -899,24 +899,11 @@ fn error_anyorder_duplicate_rest() {
 }
 
 #[test]
-fn error_anyorder_captured_rest_unsupported_in_v1() {
-    // `$...` inside `<...>` cannot be supported without a runtime allocator
-    // plumbed through `Cx` (leftover elements are non-contiguous), so v1
-    // rejects the construct at parse time. The error message must point users
-    // at the underlying reason rather than reading like a generic syntax error.
-    for src in [
-        "(array <int $...>)",
-        "(array <$... int>)",
-        "(array <$_ $...>)",
-    ] {
-        let err = parse(src).expect_err("`$...` inside `<...>` must be rejected in v1");
-        assert!(
-            err.message
-                .contains("`$...` inside `<...>` is not supported in v1"),
-            "expected the v1-unsupported `$...` error for {src:?}, got: {}",
-            err.message
-        );
-    }
+fn snapshot_anyorder_captured_rest_parses() {
+    let ast = parse("(array <int $...>)").expect("$... inside <...> must parse");
+    let root_kind = format!("{:#?}", ast.root.kind);
+    assert!(root_kind.contains("AnyOrder"), "got: {root_kind}");
+    assert_eq!(ast.captures, [murphy_pattern::CaptureKind::Seq]);
 }
 
 #[test]
