@@ -547,7 +547,7 @@ impl VarSemanticModel {
 
                 // ── `for x in iter; body; end` ──────────────────────────────
                 NodeKind::For { var, iter, body } => {
-                    Self::collect_for_var(ast, &mut scopes, scope, var);
+                    Self::collect_for_var(ast, &mut scopes, scope, var, iter);
                     // Recurse into iter and body (var targets have no sub-children).
                     stack.push(WorkItem { node: iter, scope });
                     if let Some(b) = body.get() {
@@ -589,8 +589,14 @@ impl VarSemanticModel {
     }
 
     /// Iterate over all scopes: `(boundary_node_id, &ScopeInfo)`.
+    ///
+    /// Sorted by `NodeId` so the iteration order is deterministic
+    /// (`HashMap` iteration order is not).
     pub fn scopes(&self) -> impl Iterator<Item = (NodeId, &ScopeInfo)> {
-        self.scopes.iter().map(|(&id, s)| (id, s))
+        let mut pairs: Vec<(NodeId, &ScopeInfo)> =
+            self.scopes.iter().map(|(&id, s)| (id, s)).collect();
+        pairs.sort_by_key(|(id, _)| id.0);
+        pairs.into_iter()
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -676,22 +682,34 @@ impl VarSemanticModel {
 
     /// Handle `For { var, .. }` — var may be a plain `Lvasgn` or an `Mlhs`
     /// for destructuring loops (`for a, b in list`).
+    ///
+    /// In `for x in iter`, Ruby evaluates `iter` *before* binding `x`, so the
+    /// assignment's `end` must sit *after* the iter expression's byte range —
+    /// we use `iter`'s end. Otherwise `x = [1]; for x in x; end` would wrongly
+    /// treat the earlier `x = [1]` as overwritten before its read inside
+    /// `iter`. Using the *whole* for-node's end would overshoot past the body
+    /// and exclude in-loop reads, so `iter`'s end is the right boundary.
     fn collect_for_var(
         ast: &Ast,
         scopes: &mut HashMap<NodeId, ScopeInfo>,
         scope: NodeId,
         var: NodeId,
+        iter: NodeId,
     ) {
         match *ast.kind(var) {
             NodeKind::Lvasgn { name, .. } if !Self::is_underscore_prefix(name, ast) => {
-                let end = ast.range(var).end;
+                let end = ast.range(iter).end;
                 let scope_info = scopes.get_mut(&scope).expect("scope must exist");
                 let v = Self::find_or_declare_local(scope_info, name, var);
-                v.assignments.push(Assignment { node_id: var, end, is_referenced: false });
+                v.assignments.push(Assignment {
+                    node_id: var,
+                    end,
+                    is_referenced: false,
+                });
             }
             NodeKind::Mlhs(_) => {
                 // Destructuring: `for a, b in list` — walk Mlhs children.
-                Self::collect_mlhs_targets(ast, var, var, scope, scopes);
+                Self::collect_mlhs_targets(ast, var, iter, scope, scopes);
             }
             _ => {}
         }
@@ -994,6 +1012,27 @@ mod tests {
         assert!(
             x.assignments.iter().all(|a| a.is_referenced),
             "both in-pattern arms should be referenced (exclusive branches)"
+        );
+    }
+
+    #[test]
+    fn for_var_does_not_overwrite_outer_assignment_read_in_iter() {
+        // `x = [1]; for x in x; end` — Ruby evaluates the iter `x` (reading
+        // `x = [1]`) before binding the loop variable. The for-var write must
+        // therefore end *after* the iter read, so `x = [1]` is observed and
+        // not flagged as overwritten-before-read.
+        let ast = translate("x = [1]\nfor x in x\nend\n", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let scope = model.scope(ast.root()).expect("root scope");
+        let x = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "x")
+            .expect("x must be tracked");
+        // First assignment is `x = [1]`; it is read by the iter expression.
+        assert!(
+            x.assignments[0].is_referenced,
+            "`x = [1]` is read by the for-loop iter and must be referenced"
         );
     }
 

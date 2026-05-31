@@ -168,10 +168,29 @@ fn make_write(cx: &Cx<'_>, var: &Variable, asgn: &Assignment) -> Write {
         // parent disambiguates: `Resbody`/`For` → exception binding (name
         // range, no autocorrect), otherwise a multiple-assignment target.
         NodeKind::Lvasgn { value, .. } if value.get().is_none() => {
-            let is_exception = matches!(
-                cx.parent(asgn.node_id).get().map(|p| cx.kind(p)),
-                Some(NodeKind::Resbody { .. } | NodeKind::For { .. })
-            );
+            // Walk ancestors, threading through any `Mlhs` wrappers, to decide
+            // whether this value-less target is an exception/`for` binding
+            // (name range, no autocorrect) or a multiple-assignment target.
+            // `for a, b in xs` wraps each target in an `Mlhs` whose parent is
+            // the `For`, so the immediate parent alone is not enough.
+            let is_exception = {
+                let mut current = asgn.node_id;
+                let mut found = false;
+                loop {
+                    let Some(parent) = cx.parent(current).get() else {
+                        break;
+                    };
+                    match *cx.kind(parent) {
+                        NodeKind::Resbody { .. } | NodeKind::For { .. } => {
+                            found = true;
+                            break;
+                        }
+                        NodeKind::Mlhs(_) => current = parent,
+                        _ => break,
+                    }
+                }
+                found
+            };
             let kind = if is_exception {
                 WriteKind::Exception
             } else {
@@ -698,6 +717,26 @@ mod tests {
         // RuboCop rewrites the index to `_`; Murphy reports without a fix.
         let run = run_cop_with_edits::<UselessAssignment>("for i in [1, 2]\n  do_something\nend\n");
         assert_eq!(run.edits.len(), 0);
+    }
+
+    #[test]
+    fn for_destructuring_unused_variable_is_not_autocorrected() {
+        // `for a, b in xs` wraps each target in an `Mlhs` whose parent is the
+        // `For`. The unused targets must be classified as exception-style
+        // writes (no autocorrect), not multiple-assignment targets (which
+        // would be rewritten to `_`).
+        let run =
+            run_cop_with_edits::<UselessAssignment>("for a, b in [[1, 2]]\n  do_something\nend\n");
+        assert!(
+            !run.offenses.is_empty(),
+            "unused for-destructuring targets should be flagged"
+        );
+        assert_eq!(
+            run.edits.len(),
+            0,
+            "for-destructuring targets must not be autocorrected, got {:?}",
+            run.edits
+        );
     }
 
     // murphy-xek: flow-sensitive dataflow — overwrite-before-read +

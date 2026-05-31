@@ -1,4 +1,7 @@
-//! `Lint/UnderscorePrefixedVariableName` — flag `_`-prefixed local
+//! `Lint/UnderscorePrefixedVariableName` — flag `_`-prefixed local variables
+//! (`_foo`) that are actually referenced (defeating the "intentionally
+//! unused" convention).
+//!
 //! ## RuboCop parity
 //!
 //! ```murphy-parity
@@ -16,9 +19,6 @@
 //!   read, outer scope assigned) are unlikely in practice; a future
 //!   scope-aware pass can refine if needed.
 //! ```
-//!
-//! variables (`_foo`) that are actually referenced (defeating the
-//! "intentionally unused" convention).
 //!
 //! ## Convention
 //!

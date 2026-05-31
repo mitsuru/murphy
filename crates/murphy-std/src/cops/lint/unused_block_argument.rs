@@ -1,4 +1,6 @@
-//! `Lint/UnusedBlockArgument` — flag block parameters that are never
+//! `Lint/UnusedBlockArgument` — flag block parameters that are never read
+//! inside the block body.
+//!
 //! ## RuboCop parity
 //!
 //! ```murphy-parity
@@ -13,8 +15,6 @@
 //!   unused args. Shadow args (`|x; y|`) are intentionally excluded from
 //!   reporting (they are the domain of Lint/ShadowingOuterLocalVariable).
 //! ```
-//!
-//! read inside the block body.
 //!
 //! ## Autocorrect
 //!

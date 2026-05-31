@@ -37,7 +37,8 @@ rubocop-performance, sevencop, and others) found exactly **9 cops** that join
 
 In:
 
-- `VarSemanticModel` built once per file in `murphy-core`, stored in `CxRaw`
+- `VarSemanticModel` implemented in `murphy-plugin-api`, built once per file,
+  stored in `CxRaw`
   as a raw pointer, accessible to cops via `cx.var_model()`
 - Branch-aware `is_referenced` pre-computed for every `Assignment`
 - Migration of `Lint/UselessAssignment` and `Lint/UnusedMethodArgument` to use

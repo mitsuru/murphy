@@ -32,7 +32,7 @@ Key properties:
 - `ScopeInfo` holds `parent_scope: Option<NodeId>` for scope chain traversal.
 - Each `Assignment` carries a pre-computed `is_referenced: bool` (branch-aware
   dominance analysis, ported from `useless_assignment.rs`).
-- Built in `murphy-core`, unconditionally, before the cop loop in
+- Built in `murphy-plugin-api`, unconditionally, before the cop loop in
   `run_cops_with_options`. No lazy initialization.
 - Cops query the model; no callback/hook protocol is exposed.
 
