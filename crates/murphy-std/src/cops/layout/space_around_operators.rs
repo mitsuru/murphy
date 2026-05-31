@@ -9,7 +9,9 @@
 //! gap_issues:
 //!   - murphy-lfn4
 //! notes: >
-//!   Known gaps remain around broad RuboCop shape coverage and related options.
+//!   Known gaps: index/call op-assign (Unknown nodes), setter-method `=`
+//!   (x.y=2), pattern-match operators, AllowForAlignment runtime wiring,
+//!   and EnforcedStyle* options.
 //! ```
 //!
 //! surrounding whitespace or have more than one space on either side,
@@ -24,22 +26,34 @@
 //! - `a && b` / `a and b` — `And`.
 //! - `a || b` / `a or b` — `Or`.
 //! - `a += b` (and other `op=` shapes Prism lowers to `OpAsgn`) — `OpAsgn`.
+//! - `x = 0` / `@a = 0` / `@@c = 0` / `$g = 0` / `A = 0` — plain local,
+//!   instance, class, global, and constant assignment (`Lvasgn`, `Ivasgn`,
+//!   `Cvasgn`, `Gvasgn`, `Casgn`). Value-less targets inside `OpAsgn` /
+//!   `OrAsgn` / `AndAsgn` / `Masgn` are skipped (no `=` token there).
+//! - `a, b = 1, 2` — multiple assignment (`Masgn`), the `=` between `Mlhs`
+//!   and the RHS.
+//! - `x ||= 0` / `x &&= 0` — conditional assignment (`OrAsgn`, `AndAsgn`).
+//! - `{ key => value }` — hash rocket pairs only (`Pair`; colon-style pairs
+//!   are ignored).
+//! - `rescue Exception => e` — rescue binding arrow (`Resbody`).
+//! - `class C < D` — class inheritance operator (`Class`).
+//! - `class << self` — singleton-class operator (`Sclass`).
+//! - `a ? b : c` — ternary `?` and `:` (`If` with ternary form).
 //!
-//! ## Out of scope (v1 limitations — see top of issue murphy-lpc.3.2)
+//! ## Out of scope (remaining v1 limitations)
 //!
-//! - Plain assignment `=`, conditional assignment `||=` / `&&=`, multiple
-//!   assignment `a, b = …` (`Lvasgn`, `Ivasgn`, `Cvasgn`, `Gvasgn`, `Casgn`,
-//!   `Masgn`, `OrAsgn`, `AndAsgn`). The dispatch list above does not include
-//!   these kinds, so they remain unchecked.
 //! - Index / call op-assign: `x[i] += 1` (`IndexOperatorWriteNode`) and
 //!   `x.y += 1` (`CallOperatorWriteNode`). `murphy-translate` lowers both
 //!   to `NodeKind::Unknown` in v1 so there is nothing for us to dispatch on.
-//! - Hash rocket `=>` in pairs (`Pair`) and rescue clauses (`Resbody`).
-//! - Class inheritance `<` (`Class`) and singleton-class `<<` (`Sclass`).
-//! - Ternary `? :` (`If` with ternary form).
-//! - Pattern-matching `in`/`=>` / `|` — Murphy has no `MatchPattern` hook yet
-//!   (see issue: AST mismatch for the cop's `on_match_pattern` / `on_match_alt`
-//!   / `on_match_as` handlers).
+//! - Setter-method assignment `x.y = 2` (a `Send` with a trailing-`=`
+//!   method name) — not in the binary-operator method list and not a plain
+//!   `Lvasgn`, so this shape is skipped.
+//! - Optional-parameter defaults `def f(x=0)` — handled by
+//!   `Style/SpaceAroundEqualsInParameterDefault` in RuboCop, so Murphy
+//!   deliberately leaves `Optarg` / `Kwoptarg` to a separate cop.
+//! - Pattern-matching `in`/`=>` / `|` — Murphy has no `MatchPattern` hook
+//!   yet (see issue: AST mismatch for the cop's `on_match_pattern` /
+//!   `on_match_alt` / `on_match_as` handlers).
 //! - `**` (exponent) and `/` followed by a rational literal — RuboCop's
 //!   defaults keep these flush; v1 does not honor
 //!   `EnforcedStyleForExponentOperator` / `EnforcedStyleForRationalLiterals`
@@ -67,9 +81,7 @@
 //! - `EnforcedStyleForRationalLiterals` (`no_space` | `space`,
 //!   default `no_space`).
 //!
-//! Tracked follow-ups: option-to-logic wiring is `murphy-xszo`; hook
-//! expansion to `=` / `||=` / `&&=` / `=>` / `class<` / `class<<` /
-//! ternary / match-pattern is `murphy-dvt8`; lowering
+//! Tracked follow-ups: option-to-logic wiring is `murphy-xszo`; lowering
 //! `IndexOperatorWriteNode` + `CallOperatorWriteNode` out of
 //! `NodeKind::Unknown` is `murphy-9vwq`.
 //!
@@ -231,6 +243,219 @@ impl SpaceAroundOperators {
             check_operator(cx, op_range);
         }
     }
+
+    // --- Plain assignment `=` ---
+
+    #[on_node(kind = "lvasgn")]
+    fn check_lvasgn(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Lvasgn { value, .. } = *cx.kind(node) else {
+            return;
+        };
+        if let Some(value_id) = value.get() {
+            check_plain_asgn(cx, node, value_id);
+        }
+    }
+
+    #[on_node(kind = "ivasgn")]
+    fn check_ivasgn(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Ivasgn { value, .. } = *cx.kind(node) else {
+            return;
+        };
+        if let Some(value_id) = value.get() {
+            check_plain_asgn(cx, node, value_id);
+        }
+    }
+
+    #[on_node(kind = "gvasgn")]
+    fn check_gvasgn(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Gvasgn { value, .. } = *cx.kind(node) else {
+            return;
+        };
+        if let Some(value_id) = value.get() {
+            check_plain_asgn(cx, node, value_id);
+        }
+    }
+
+    #[on_node(kind = "cvasgn")]
+    fn check_cvasgn(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Cvasgn { value, .. } = *cx.kind(node) else {
+            return;
+        };
+        if let Some(value_id) = value.get() {
+            check_plain_asgn(cx, node, value_id);
+        }
+    }
+
+    #[on_node(kind = "casgn")]
+    fn check_casgn(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Casgn { value, .. } = *cx.kind(node) else {
+            return;
+        };
+        if let Some(value_id) = value.get() {
+            check_plain_asgn(cx, node, value_id);
+        }
+    }
+
+    #[on_node(kind = "masgn")]
+    fn check_masgn(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Masgn { lhs: _, rhs } = *cx.kind(node) else {
+            return;
+        };
+        // The Mlhs node's range covers the entire multi-assignment expression,
+        // not just the LHS targets. Search from the node start (before the first
+        // target) to the RHS start — the gap contains only targets, commas,
+        // spaces, and the `=` token, none of which are a bare `=` except the
+        // assignment operator.
+        let gap = Range {
+            start: cx.range(node).start,
+            end: cx.range(rhs).start,
+        };
+        if let Some(op_range) = find_op_in_gap(cx, gap, &["="]) {
+            check_operator(cx, op_range);
+        }
+    }
+
+    // --- Conditional assignment `||=` / `&&=` ---
+
+    #[on_node(kind = "or_asgn")]
+    fn check_or_asgn(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::OrAsgn { target, value } = *cx.kind(node) else {
+            return;
+        };
+        let gap = Range {
+            start: cx.range(target).end,
+            end: cx.range(value).start,
+        };
+        if let Some(op_range) = find_op_in_gap(cx, gap, &["||="]) {
+            check_operator(cx, op_range);
+        }
+    }
+
+    #[on_node(kind = "and_asgn")]
+    fn check_and_asgn(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::AndAsgn { target, value } = *cx.kind(node) else {
+            return;
+        };
+        let gap = Range {
+            start: cx.range(target).end,
+            end: cx.range(value).start,
+        };
+        if let Some(op_range) = find_op_in_gap(cx, gap, &["&&="]) {
+            check_operator(cx, op_range);
+        }
+    }
+
+    // --- Hash rocket `=>` ---
+
+    #[on_node(kind = "pair")]
+    fn check_pair(&self, node: NodeId, cx: &Cx<'_>) {
+        if !cx.is_hash_rocket(node) {
+            return;
+        }
+        let op_range = cx.pair_operator_loc(node);
+        if op_range != Range::ZERO {
+            check_operator(cx, op_range);
+        }
+    }
+
+    // --- Rescue `=>` binding ---
+
+    #[on_node(kind = "resbody")]
+    fn check_resbody(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Resbody { exceptions, var, .. } = *cx.kind(node) else {
+            return;
+        };
+        let Some(var_id) = var.get() else {
+            return;
+        };
+        // Search from the last exception's end (or the node start when there
+        // are no exceptions) to the binding variable's start.
+        let from = cx
+            .list(exceptions)
+            .last()
+            .map(|&e| cx.range(e).end)
+            .unwrap_or_else(|| cx.range(node).start);
+        let gap = Range {
+            start: from,
+            end: cx.range(var_id).start,
+        };
+        if let Some(op_range) = find_op_in_gap(cx, gap, &["=>"]) {
+            check_operator(cx, op_range);
+        }
+    }
+
+    // --- Class inheritance `<` ---
+
+    #[on_node(kind = "class")]
+    fn check_class(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Class {
+            name, superclass, ..
+        } = *cx.kind(node)
+        else {
+            return;
+        };
+        let Some(super_id) = superclass.get() else {
+            return;
+        };
+        let gap = Range {
+            start: cx.range(name).end,
+            end: cx.range(super_id).start,
+        };
+        if let Some(op_range) = find_op_in_gap(cx, gap, &["<"]) {
+            check_operator(cx, op_range);
+        }
+    }
+
+    // --- Singleton-class `<<` ---
+
+    #[on_node(kind = "sclass")]
+    fn check_sclass(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Sclass { expr, .. } = *cx.kind(node) else {
+            return;
+        };
+        // Search from the node start (the `class` keyword) to the expression.
+        let gap = Range {
+            start: cx.range(node).start,
+            end: cx.range(expr).start,
+        };
+        if let Some(op_range) = find_op_in_gap(cx, gap, &["<<"]) {
+            check_operator(cx, op_range);
+        }
+    }
+
+    // --- Ternary `?` and `:` ---
+
+    #[on_node(kind = "if")]
+    fn check_if(&self, node: NodeId, cx: &Cx<'_>) {
+        if !cx.is_ternary(node) {
+            return;
+        }
+        let q_range = cx.ternary_question_loc(node);
+        if q_range != Range::ZERO {
+            check_operator(cx, q_range);
+        }
+        let c_range = cx.ternary_colon_loc(node);
+        if c_range != Range::ZERO {
+            check_operator(cx, c_range);
+        }
+    }
+}
+
+/// Find the `=` operator token in the gap between a plain-assignment node's
+/// start and the value's start, then check spacing around it.
+///
+/// Called for `Lvasgn`, `Ivasgn`, `Gvasgn`, `Cvasgn`, `Casgn` — all have
+/// the `=` immediately after the target name (or scope path). The gap from
+/// `node.start` to `value.start` safely bounds the search because none of
+/// those names / paths can contain a bare `=` token.
+fn check_plain_asgn(cx: &Cx<'_>, node: NodeId, value_id: NodeId) {
+    let gap = Range {
+        start: cx.range(node).start,
+        end: cx.range(value_id).start,
+    };
+    if let Some(op_range) = find_op_in_gap(cx, gap, &["="]) {
+        check_operator(cx, op_range);
+    }
 }
 
 /// Inspect the operator at `op_range` and emit an offense + autocorrect
@@ -386,9 +611,6 @@ mod tests {
 
     #[test]
     fn options_defaults_match_rubocop() {
-        // Pin the public defaults — `[cops.rules."Layout/SpaceAroundOperators"]`
-        // users today must see RuboCop-compatible defaults even though the
-        // runtime check ignores the values.
         let d = SpaceAroundOperatorsOptions::default();
         assert!(d.allow_for_alignment);
         assert_eq!(
@@ -403,13 +625,6 @@ mod tests {
 
     #[test]
     fn options_are_accepted_but_not_yet_honored() {
-        // The struct surface is frozen (murphy-lpc.3.2), the runtime
-        // wiring lands in murphy-xszo. Until then, the v1 contract is:
-        // setting `AllowForAlignment = false` or either `EnforcedStyle*`
-        // = `space` must not change observable behaviour. Pin that here
-        // through the tester's `with_options` clause so murphy-xszo's
-        // wiring shows up as a deliberate test flip rather than a silent
-        // change.
         test::<SpaceAroundOperators>()
             .with_options(&SpaceAroundOperatorsOptions {
                 allow_for_alignment: false,
@@ -426,9 +641,6 @@ mod tests {
 
     #[test]
     fn flags_and_corrects_missing_space_around_equals_equals() {
-        // Single tester drives both the offense set and the correction
-        // — the chain demonstrates the multi-expectation shape of the
-        // new API.
         test::<SpaceAroundOperators>()
             .expect_offense(indoc! {r#"
                 x==0
@@ -445,9 +657,6 @@ mod tests {
 
     #[test]
     fn flags_missing_space_around_each_basic_binary_op() {
-        // One operator per source line is no longer required by the
-        // parser, but keeping each on its own line here keeps the
-        // failure rendering for a specific op trivially scannable.
         test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
             a+b
              ^ Surrounding space missing for operator `+`.
@@ -470,9 +679,6 @@ mod tests {
 
     #[test]
     fn corrects_run_of_missing_spaces_on_one_line() {
-        // Multi-operator single-line — the parser anchors every `^...`
-        // line to the nearest source line, so the five offenses on
-        // `a+b-c*d/e%f` stack directly under the source line.
         test::<SpaceAroundOperators>().expect_correction(
             indoc! {r#"
                 a+b-c*d/e%f
@@ -540,8 +746,6 @@ mod tests {
 
     #[test]
     fn accepts_canonical_shapes() {
-        // Several no-offense scenarios share one tester — the chain
-        // saves the per-call ceremony.
         test::<SpaceAroundOperators>()
             .expect_no_offenses("a + b\nx == 0\nh & i\n")
             .expect_no_offenses("Date.today.+(1).to_s\n")
@@ -570,9 +774,6 @@ mod tests {
 
     #[test]
     fn flags_operator_at_end_of_line_when_missing_space_before_eol() {
-        // `a+\n b` — leading space missing; trailing newline is OK but the
-        // missing leading space is still flagged. Autocorrect should not
-        // introduce trailing whitespace.
         test::<SpaceAroundOperators>().expect_correction(
             indoc! {r#"
                 'a'+
@@ -627,11 +828,6 @@ mod tests {
 
     #[test]
     fn does_not_confuse_string_or_with_operator_or() {
-        // `find_op_in_gap` searches the gap between `lhs.end` and
-        // `rhs.start` for `||` then `or`. For an `Or` whose lhs is a
-        // parenthesised string containing the substring `"or"`, the gap
-        // does not include the string contents — it is just `) || `, so
-        // we still find `||` and not the embedded `or`. Pin the contract.
         test::<SpaceAroundOperators>().expect_no_offenses("(x = \"or\") || y\n");
     }
 
@@ -705,35 +901,369 @@ mod tests {
             );
     }
 
-    // ---------- documented v1 gaps — should not register offenses today ----------
+    // ---------- Plain assignment `=` ----------
+
+    #[test]
+    fn flags_and_corrects_missing_space_around_lvasgn() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                x=0
+                 ^ Surrounding space missing for operator `=`.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    x=0
+                     ^ Surrounding space missing for operator `=`.
+                "#},
+                "x = 0\n",
+            );
+    }
+
+    #[test]
+    fn flags_missing_space_around_ivasgn() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            @a=0
+              ^ Surrounding space missing for operator `=`.
+        "#});
+    }
+
+    #[test]
+    fn flags_missing_space_around_cvasgn() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            @@b=0
+               ^ Surrounding space missing for operator `=`.
+        "#});
+    }
+
+    #[test]
+    fn flags_missing_space_around_gvasgn() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            $g=0
+              ^ Surrounding space missing for operator `=`.
+        "#});
+    }
+
+    #[test]
+    fn flags_missing_space_around_casgn() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            A=0
+             ^ Surrounding space missing for operator `=`.
+        "#});
+    }
+
+    #[test]
+    fn flags_missing_space_around_scoped_casgn() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            Foo::BAR=0
+                    ^ Surrounding space missing for operator `=`.
+        "#});
+    }
+
+    #[test]
+    fn flags_missing_space_around_masgn() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            a, b=1, 2
+                ^ Surrounding space missing for operator `=`.
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_plain_assignments() {
+        test::<SpaceAroundOperators>()
+            .expect_no_offenses("x = 0\n")
+            .expect_no_offenses("@a = 0\n")
+            .expect_no_offenses("@@b = 0\n")
+            .expect_no_offenses("$g = 0\n")
+            .expect_no_offenses("A = 0\n")
+            .expect_no_offenses("Foo::BAR = 0\n")
+            .expect_no_offenses("a, b = 1, 2\n");
+    }
+
+    #[test]
+    fn skips_value_less_lvasgn_targets_inside_op_asgn() {
+        // `x += 1` is OpAsgn whose target is a value-less Lvasgn; the
+        // plain-assignment handler must not fire on that target.
+        test::<SpaceAroundOperators>().expect_no_offenses("x += 1\n");
+    }
+
+    // ---------- Conditional assignment `||=` / `&&=` ----------
+
+    #[test]
+    fn flags_and_corrects_missing_space_around_or_asgn() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                x||=0
+                 ^^^ Surrounding space missing for operator `||=`.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    x||=0
+                     ^^^ Surrounding space missing for operator `||=`.
+                "#},
+                "x ||= 0\n",
+            );
+    }
+
+    #[test]
+    fn flags_missing_space_around_and_asgn() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            y&&=0
+             ^^^ Surrounding space missing for operator `&&=`.
+        "#});
+    }
+
+    #[test]
+    fn flags_missing_space_around_ivar_or_asgn() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            @a||=0
+              ^^^ Surrounding space missing for operator `||=`.
+        "#});
+    }
+
+    #[test]
+    fn flags_extra_space_around_or_asgn() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x  ||=  0
+               ^^^ Operator `||=` should be surrounded by a single space.
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_conditional_assignments() {
+        test::<SpaceAroundOperators>()
+            .expect_no_offenses("x ||= 0\n")
+            .expect_no_offenses("y &&= 0\n");
+    }
+
+    // ---------- Hash rocket `=>` ----------
+
+    #[test]
+    fn flags_and_corrects_missing_space_around_hash_rocket() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                { 1=>2 }
+                   ^^ Surrounding space missing for operator `=>`.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    { 1=>2 }
+                       ^^ Surrounding space missing for operator `=>`.
+                "#},
+                "{ 1 => 2 }\n",
+            );
+    }
+
+    #[test]
+    fn flags_extra_space_around_hash_rocket() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            { 1  =>  2 }
+                 ^^ Operator `=>` should be surrounded by a single space.
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_hash_rocket() {
+        test::<SpaceAroundOperators>().expect_no_offenses("{ 1 => 2 }\n");
+    }
+
+    #[test]
+    fn ignores_colon_style_hash_pairs() {
+        test::<SpaceAroundOperators>().expect_no_offenses("{ a: 1, b: 2 }\n");
+    }
+
+    // ---------- Rescue `=>` ----------
+
+    #[test]
+    fn flags_and_corrects_missing_space_around_rescue_rocket() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                begin
+                rescue Exception=>e
+                                ^^ Surrounding space missing for operator `=>`.
+                end
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    begin
+                    rescue Exception=>e
+                                    ^^ Surrounding space missing for operator `=>`.
+                    end
+                "#},
+                "begin\nrescue Exception => e\nend\n",
+            );
+    }
+
+    #[test]
+    fn flags_missing_space_around_rescue_rocket_no_exception_class() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            begin
+            rescue=>e
+                  ^^ Surrounding space missing for operator `=>`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_rescue_rocket() {
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            begin
+            rescue Exception => e
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_rescue_without_binding() {
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            begin
+            rescue Exception
+            end
+        "#});
+    }
+
+    // ---------- Class inheritance `<` ----------
+
+    #[test]
+    fn flags_and_corrects_missing_space_around_class_lt() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                class C<D
+                       ^ Surrounding space missing for operator `<`.
+                end
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    class C<D
+                           ^ Surrounding space missing for operator `<`.
+                    end
+                "#},
+                "class C < D\nend\n",
+            );
+    }
+
+    #[test]
+    fn flags_extra_space_around_class_lt() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            class C  <  D
+                     ^ Operator `<` should be surrounded by a single space.
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_class_inheritance() {
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            class C < D
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_class_without_superclass() {
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            class C
+            end
+        "#});
+    }
+
+    // ---------- Singleton class `<<` ----------
+
+    #[test]
+    fn flags_and_corrects_missing_space_around_sclass_shovel() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                class<<self
+                     ^^ Surrounding space missing for operator `<<`.
+                end
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    class<<self
+                         ^^ Surrounding space missing for operator `<<`.
+                    end
+                "#},
+                "class << self\nend\n",
+            );
+    }
+
+    #[test]
+    fn flags_extra_space_around_sclass_shovel() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            class  <<  self
+                   ^^ Operator `<<` should be surrounded by a single space.
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_singleton_class() {
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            class << self
+            end
+        "#});
+    }
+
+    // ---------- Ternary `?` and `:` ----------
+
+    #[test]
+    fn flags_and_corrects_missing_space_around_ternary() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                x == 0?1:2
+                      ^ Surrounding space missing for operator `?`.
+                        ^ Surrounding space missing for operator `:`.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    x == 0?1:2
+                          ^ Surrounding space missing for operator `?`.
+                            ^ Surrounding space missing for operator `:`.
+                "#},
+                "x == 0 ? 1 : 2\n",
+            );
+    }
+
+    #[test]
+    fn flags_extra_space_around_ternary() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x == 0  ?  1  :  2
+                    ^ Operator `?` should be surrounded by a single space.
+                          ^ Operator `:` should be surrounded by a single space.
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_ternary() {
+        test::<SpaceAroundOperators>().expect_no_offenses("x == 0 ? 1 : 2\n");
+    }
+
+    #[test]
+    fn accepts_non_ternary_if() {
+        test::<SpaceAroundOperators>()
+            .expect_no_offenses(indoc! {r#"
+                if x == 0
+                  1
+                else
+                  2
+                end
+            "#})
+            .expect_no_offenses("1 if x == 0\n");
+    }
+
+    // ---------- remaining v1 gaps — should not register offenses ----------
 
     #[test]
     fn v1_gaps_are_silently_accepted() {
-        // RuboCop flags each of these shapes, but v1 does not dispatch
-        // on the underlying NodeKind (Lvasgn, Pair, OrAsgn, AndAsgn,
-        // Class, Sclass, If-ternary). The chain pins the v1 contract for
-        // the full list at once.
-        test::<SpaceAroundOperators>()
-            .expect_no_offenses("x=0\n")
-            .expect_no_offenses("{ 1=>2 }\n")
-            .expect_no_offenses("x||=0\ny&&=0\n")
-            .expect_no_offenses(indoc! {r#"
-                class C<D
-                end
-            "#})
-            .expect_no_offenses(indoc! {r#"
-                class<<self
-                end
-            "#})
-            .expect_no_offenses("x == 0?1:2\n");
+        // Optarg defaults are handled by SpaceAroundEqualsInParameterDefault.
+        // Pattern-match operators remain out of scope (no MatchPattern node yet).
+        test::<SpaceAroundOperators>().expect_no_offenses("def f(x=0); end\n");
+
     }
 
     // ---------- multiple offenses + idempotent autocorrect ----------
 
     #[test]
     fn corrects_run_of_op_asgn_and_binary() {
-        // The canonical RuboCop case `x+= a+b-c` has three operators on
-        // one line — annotations stack directly under it.
         test::<SpaceAroundOperators>().expect_correction(
             indoc! {r#"
                 x+= a+b-c
