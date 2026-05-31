@@ -50,6 +50,7 @@ use crate::cops::lint::unused_method_argument::UnusedMethodArgument;
 use crate::cops::lint::useless_assignment::UselessAssignment;
 use crate::cops::murphy::no_receiver_puts::NoReceiverPuts;
 use crate::cops::style::and_or::AndOr;
+use crate::cops::style::empty_case_condition::EmptyCaseCondition;
 use crate::cops::style::frozen_string_literal_comment::FrozenStringLiteralComment;
 use crate::cops::style::hash_syntax::HashSyntax;
 use crate::cops::style::if_unless_modifier::IfUnlessModifier;
@@ -85,6 +86,7 @@ murphy_plugin_api::register_cops!(
     SpaceAroundOperators,
     DotPosition,
     AndOr,
+    EmptyCaseCondition,
     EmptyLines,
     IfUnlessModifier,
     NilComparison,
