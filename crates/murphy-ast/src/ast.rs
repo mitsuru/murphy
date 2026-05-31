@@ -318,6 +318,11 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
             out.push(pattern);
         }
 
+        // murphy-j1j2 PM-E pin & guard
+        NodeKind::Pin(inner) | NodeKind::IfGuard(inner) | NodeKind::UnlessGuard(inner) => {
+            out.push(inner);
+        }
+
         NodeKind::Itblock { send, body } => {
             out.push(send);
             push_opt(out, body);
@@ -728,6 +733,11 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
         NodeKind::ConstPattern { const_, pattern } => {
             slot_node(out, const_);
             slot_node(out, pattern);
+        }
+
+        // murphy-j1j2 PM-E pin & guard
+        NodeKind::Pin(inner) | NodeKind::IfGuard(inner) | NodeKind::UnlessGuard(inner) => {
+            slot_node(out, inner);
         }
 
         // `(itblock call :it body)` — `:it` marker is a phantom slot.

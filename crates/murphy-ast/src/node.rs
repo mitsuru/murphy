@@ -664,6 +664,21 @@ pub enum NodeKind {
         const_: NodeId,
         pattern: NodeId,
     },
+
+    // ── murphy-j1j2 PM-E pin & guard (tags 110, 111, 112) ────────────────
+    /// `^x` — pin operator in pattern matching (Ruby 3.0+).
+    /// prism: `PinnedVariableNode` (lvar/ivar/cvar/gvar) または
+    /// `PinnedExpressionNode` (arbitrary expr in parentheses `^(expr)`).
+    /// parser-gem: `pin`. inner は pin 対象の変数/式ノード。
+    Pin(NodeId),
+    /// `if cond` — guard clause attached to an `in` arm (Ruby 3.0+).
+    /// prism: `IfNode` が `InNode` の pattern slot に挿入される形で出現。
+    /// parser-gem: `if_guard`. inner は guard 条件式。
+    IfGuard(NodeId),
+    /// `unless cond` — negated guard clause attached to an `in` arm (Ruby 3.0+).
+    /// prism: `UnlessNode` が `InNode` の pattern slot に挿入される形で出現。
+    /// parser-gem: `unless_guard`. inner は guard 条件式。
+    UnlessGuard(NodeId),
 }
 
 /// A source comment, stored outside the node tree.
@@ -839,6 +854,10 @@ impl NodeKind {
             // murphy-j1j2 PM-D advanced patterns
             NodeKind::MatchAs { .. } => 108,
             NodeKind::ConstPattern { .. } => 109,
+            // murphy-j1j2 PM-E pin & guard
+            NodeKind::Pin(_) => 110,
+            NodeKind::IfGuard(_) => 111,
+            NodeKind::UnlessGuard(_) => 112,
         };
         crate::NodeKindTag(t)
     }

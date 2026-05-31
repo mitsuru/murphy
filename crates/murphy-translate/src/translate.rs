@@ -1159,22 +1159,19 @@ impl Translator {
             // Guard interception: prism has no dedicated guard node (1.9.0).
             // `in <pat> if <g>` parses as `InNode { pattern: IfNode {
             // predicate: g, statements: [pat] } }`; `unless` uses an
-            // `UnlessNode`. We hoist the guard expression into the dedicated
-            // `guard` slot and translate the wrapped pattern directly.
-            //
-            // NodeKind::InPattern drops the if/unless distinction by design
-            // (see node.rs) — both lower to a bare guard expression.
+            // `UnlessNode`. We hoist the guard into the dedicated `guard` slot
+            // wrapped in `IfGuard`/`UnlessGuard` so cops can tell them apart.
             let raw_pattern = in_node.pattern();
             let (pattern_node, guard) = if let Some(iff) = raw_pattern.as_if_node() {
-                (
-                    iff.statements(),
-                    Some(self.translate_node(&iff.predicate())),
-                )
+                let guard_range = Self::node_range(&raw_pattern);
+                let cond = self.translate_node(&iff.predicate());
+                let guard_node = self.builder.push(NodeKind::IfGuard(cond), guard_range);
+                (iff.statements(), Some(guard_node))
             } else if let Some(unl) = raw_pattern.as_unless_node() {
-                (
-                    unl.statements(),
-                    Some(self.translate_node(&unl.predicate())),
-                )
+                let guard_range = Self::node_range(&raw_pattern);
+                let cond = self.translate_node(&unl.predicate());
+                let guard_node = self.builder.push(NodeKind::UnlessGuard(cond), guard_range);
+                (unl.statements(), Some(guard_node))
             } else {
                 (None, None)
             };
@@ -1205,13 +1202,17 @@ impl Translator {
             // `expr in pat` — `MatchPredicateNode` → `match_pattern_p`
             let value = self.translate_node(&mp.value());
             let pattern = self.translate_pattern(&mp.pattern());
-            return self.builder.push(NodeKind::MatchPatternP { value, pattern }, range);
+            return self
+                .builder
+                .push(NodeKind::MatchPatternP { value, pattern }, range);
         }
         if let Some(mr) = node.as_match_required_node() {
             // `expr => pat` — `MatchRequiredNode` → `match_pattern`
             let value = self.translate_node(&mr.value());
             let pattern = self.translate_pattern(&mr.pattern());
-            return self.builder.push(NodeKind::MatchPattern { value, pattern }, range);
+            return self
+                .builder
+                .push(NodeKind::MatchPattern { value, pattern }, range);
         }
 
         // Task 17 以降、ここに各ノード種の arm を足していく。
@@ -1274,7 +1275,13 @@ impl Translator {
                 };
                 let inner_id = self.builder.push(kind, inner_range);
                 let const_id = self.translate_node(&constant);
-                return self.builder.push(NodeKind::ConstPattern { const_: const_id, pattern: inner_id }, range);
+                return self.builder.push(
+                    NodeKind::ConstPattern {
+                        const_: const_id,
+                        pattern: inner_id,
+                    },
+                    range,
+                );
             }
             return self.builder.push(kind, range);
         }
@@ -1326,7 +1333,13 @@ impl Translator {
                 };
                 let inner_id = self.builder.push(NodeKind::HashPattern(list), inner_range);
                 let const_id = self.translate_node(&constant);
-                return self.builder.push(NodeKind::ConstPattern { const_: const_id, pattern: inner_id }, range);
+                return self.builder.push(
+                    NodeKind::ConstPattern {
+                        const_: const_id,
+                        pattern: inner_id,
+                    },
+                    range,
+                );
             }
             return self.builder.push(NodeKind::HashPattern(list), range);
         }
@@ -1356,7 +1369,13 @@ impl Translator {
                 };
                 let inner_id = self.builder.push(NodeKind::FindPattern(list), inner_range);
                 let const_id = self.translate_node(&constant);
-                return self.builder.push(NodeKind::ConstPattern { const_: const_id, pattern: inner_id }, range);
+                return self.builder.push(
+                    NodeKind::ConstPattern {
+                        const_: const_id,
+                        pattern: inner_id,
+                    },
+                    range,
+                );
             }
             return self.builder.push(NodeKind::FindPattern(list), range);
         }
@@ -1373,10 +1392,17 @@ impl Translator {
             let value = self.translate_pattern(&cap.value());
             let target = cap.target();
             let name = self.sym(&target.name());
-            let name_id = self
-                .builder
-                .push(NodeKind::MatchVar(name), Self::node_range(&target.as_node()));
-            return self.builder.push(NodeKind::MatchAs { value, name: name_id }, range);
+            let name_id = self.builder.push(
+                NodeKind::MatchVar(name),
+                Self::node_range(&target.as_node()),
+            );
+            return self.builder.push(
+                NodeKind::MatchAs {
+                    value,
+                    name: name_id,
+                },
+                range,
+            );
         }
         // Bare top-level pattern (e.g. `in x` with no brackets is wrapped in
         // an ArrayPattern by prism, so this path is for atoms / unsupported
@@ -1435,7 +1461,20 @@ impl Translator {
         if node.as_splat_node().is_some() {
             return self.translate_match_rest(node);
         }
-        // Literals / nested constants / unsupported kinds (MatchAs, Pin etc).
+        // Pin operator: `^x` (PinnedVariableNode) or `^(expr)` (PinnedExpressionNode).
+        if let Some(pv) = node.as_pinned_variable_node() {
+            let inner = self.translate_node(&pv.variable());
+            return self
+                .builder
+                .push(NodeKind::Pin(inner), Self::node_range(node));
+        }
+        if let Some(pe) = node.as_pinned_expression_node() {
+            let inner = self.translate_node(&pe.expression());
+            return self
+                .builder
+                .push(NodeKind::Pin(inner), Self::node_range(node));
+        }
+        // Literals / nested constants / unsupported kinds (MatchAs etc).
         self.translate_node(node)
     }
 
@@ -3550,26 +3589,76 @@ mod tests {
     fn translates_case_in_with_guard() {
         // `in [a] if a` — prism wraps the pattern in an IfNode whose
         // predicate is the guard. The translator intercepts that wrapper so
-        // the guard slot carries the condition and the pattern slot carries
-        // the array pattern (not the IfNode).
+        // the guard slot carries an (if_guard ...) wrapper and the pattern
+        // slot carries the array pattern (not the IfNode).
         let ast = translate("case x\nin [a] if a\n  a\nend\n", "t.rb");
         let sexp = murphy_ast::ast_to_sexp(&ast);
         assert!(
-            sexp.contains("(in_pattern\n    (array_pattern\n      (match_var :a))\n    (lvar a)\n"),
-            "guard must be hoisted into the guard slot: {sexp}"
+            sexp.contains("(in_pattern\n    (array_pattern\n      (match_var :a))\n    (if_guard\n      (lvar a))\n"),
+            "guard must be hoisted into if_guard wrapper: {sexp}"
         );
     }
 
     #[test]
     fn translates_case_in_with_unless_guard() {
         // `unless` guard — prism wraps in an UnlessNode. The translator
-        // intercepts it the same way; the if/unless distinction is dropped
-        // (documented v1 limitation, see NodeKind::InPattern).
+        // intercepts it and wraps the condition in (unless_guard ...) so cops
+        // can distinguish if-guard from unless-guard.
         let ast = translate("case x\nin [a] unless a\n  a\nend\n", "t.rb");
         let sexp = murphy_ast::ast_to_sexp(&ast);
         assert!(
-            sexp.contains("(in_pattern\n    (array_pattern\n      (match_var :a))\n    (lvar a)\n"),
-            "unless guard must be hoisted into the guard slot: {sexp}"
+            sexp.contains("(in_pattern\n    (array_pattern\n      (match_var :a))\n    (unless_guard\n      (lvar a))\n"),
+            "unless guard must be hoisted into unless_guard wrapper: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_pin_operator() {
+        // `^y` pin — PinnedVariableNode → (pin (lvar y))
+        let ast = translate("y = 1\ncase x\nin ^y\n  :pinned\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(pin\n        (lvar y))"),
+            "^y must translate to (pin (lvar y)): {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_if_guard() {
+        // `in Integer if x > 0` — guard wrapped in (if_guard ...)
+        let ast = translate("case x\nin Integer if x > 0\n  :pos\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains(
+                "(if_guard
+"
+            ),
+            "if_guard must appear in the guard slot: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown node expected: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_unless_guard() {
+        // `in Integer unless x.nil?` — guard wrapped in (unless_guard ...)
+        let ast = translate(
+            "case x\nin Integer unless x.nil?\n  :present\nend\n",
+            "t.rb",
+        );
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains(
+                "(unless_guard
+"
+            ),
+            "unless_guard must appear in the guard slot: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown node expected: {sexp}"
         );
     }
 
@@ -3646,21 +3735,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unsupported_pattern_kinds_fall_to_unknown() {
-        // MatchAs(`=>`) / Pin(`^x`) have no prism binding in v1, so they
-        // remain Unknown. The surrounding case_match/in_pattern still translate.
-        // MatchRest (`*rest`) is now lowered to match_rest (murphy-j1j2 PM-B).
-        for src in [
-            "case x\nin Integer => n\n  n\nend\n", // match-as / capture (no prism binding)
-            "case x\nin ^foo\n  a\nend\n",         // pin (no prism binding)
-        ] {
-            let ast = translate(src, "t.rb");
-            let sexp = murphy_ast::ast_to_sexp(&ast);
-            assert!(sexp.starts_with("(case_match\n"), "{src}: {sexp}");
-            assert!(sexp.contains("(in_pattern"), "{src}: {sexp}");
-        }
-    }
+    // Note: match_as (`Integer => n`) and pin (`^foo`) were previously unknown
+    // and listed here. They are now properly lowered in PM-D and PM-E respectively.
+    // See translates_capture_pattern_match_as and translates_pin_operator.
 
     #[test]
     fn translates_match_rest_named() {
@@ -3795,7 +3872,6 @@ mod tests {
         );
     }
 
-
     // ── murphy-j1j2 PM-C: one-liner pattern matching ─────────────────────────
 
     #[test]
@@ -3808,10 +3884,7 @@ mod tests {
             sexp.contains("(match_pattern_p"),
             "match_pattern_p expected: {sexp}"
         );
-        assert!(
-            sexp.contains("(lvar x)"),
-            "value lvar expected: {sexp}"
-        );
+        assert!(sexp.contains("(lvar x)"), "value lvar expected: {sexp}");
         assert!(
             sexp.contains("(const :Integer"),
             "pattern const expected: {sexp}"
@@ -3832,10 +3905,7 @@ mod tests {
             sexp.contains("(match_pattern"),
             "match_pattern expected: {sexp}"
         );
-        assert!(
-            sexp.contains("(lvar x)"),
-            "value lvar expected: {sexp}"
-        );
+        assert!(sexp.contains("(lvar x)"), "value lvar expected: {sexp}");
         assert!(
             sexp.contains("(const :Integer"),
             "pattern const expected: {sexp}"
@@ -3911,7 +3981,10 @@ mod tests {
         // `case x; in [Integer => n]; end` — nested capture in array pattern.
         let ast = translate("case x\nin [Integer => n]\n  n\nend\n", "t.rb");
         let sexp = murphy_ast::ast_to_sexp(&ast);
-        assert!(sexp.contains("(match_as"), "match_as expected in nested: {sexp}");
+        assert!(
+            sexp.contains("(match_as"),
+            "match_as expected in nested: {sexp}"
+        );
         assert!(
             !sexp.contains("(unknown)"),
             "no Unknown in nested capture pattern: {sexp}"
@@ -3927,10 +4000,7 @@ mod tests {
             sexp.contains("(const_pattern"),
             "const_pattern expected for Some(y): {sexp}"
         );
-        assert!(
-            sexp.contains("(const :Some"),
-            "Some const expected: {sexp}"
-        );
+        assert!(sexp.contains("(const :Some"), "Some const expected: {sexp}");
         assert!(
             sexp.contains("(array_pattern"),
             "inner array_pattern expected: {sexp}"
