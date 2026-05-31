@@ -48,6 +48,8 @@
 //!   NOT emit an autocorrect edit, because removing trailing whitespace
 //!   from inside a heredoc body changes the string's runtime value.
 
+use std::collections::VecDeque;
+
 use murphy_plugin_api::{CopOptions, Cx, Range, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
@@ -120,22 +122,23 @@ impl TrailingWhitespace {
 /// in the file. Body bytes run from `heredoc_start.end + 1` (skipping the
 /// newline after the opener) to the start of the terminator line.
 ///
-/// Uses a LIFO stack so that nested heredocs are handled correctly:
-/// each `HeredocEnd` is paired with the most recent unmatched `HeredocStart`.
+/// Uses a FIFO queue so that multiple heredocs on the same line are paired
+/// correctly: Ruby emits heredoc bodies in the order the openers appear, so
+/// the first `HeredocEnd` belongs to the first `HeredocStart`.
 fn collect_heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
     let source = cx.source().as_bytes();
     let tokens = cx.sorted_tokens();
-    let mut starts: Vec<u32> = Vec::new();
+    let mut starts: VecDeque<u32> = VecDeque::new();
     let mut ranges: Vec<(u32, u32)> = Vec::new();
 
     for tok in tokens {
         match tok.kind {
             SourceTokenKind::HeredocStart => {
                 // +1 to skip the `\n` at the end of the opener line.
-                starts.push(tok.range.end + 1);
+                starts.push_back(tok.range.end + 1);
             }
             SourceTokenKind::HeredocEnd => {
-                if let Some(body_start) = starts.pop() {
+                if let Some(body_start) = starts.pop_front() {
                     // The body ends at the start of the terminator line, not
                     // at HeredocEnd.start. For squiggly heredocs, the terminator
                     // may be indented (e.g., `  RUBY`), so HeredocEnd.start
@@ -332,5 +335,16 @@ mod tests {
         test::<TrailingWhitespace>()
             .with_options(&allow_in_heredoc())
             .expect_no_offenses("x = <<~RUBY\n  hello   \n  RUBY\n");
+    }
+
+    #[test]
+    fn allows_trailing_space_in_multiple_heredocs_on_same_line() {
+        // Two heredocs on the same opener line: `foo(<<~A, <<~B)`.
+        // Ruby emits bodies in FIFO order (A first, then B), so the
+        // first HeredocEnd must pair with <<~A, not <<~B.
+        // Both bodies should be exempt when AllowInHeredoc: true.
+        test::<TrailingWhitespace>()
+            .with_options(&allow_in_heredoc())
+            .expect_no_offenses("foo(<<~A, <<~B)\nA body   \nA\nB body   \nB\n");
     }
 }
