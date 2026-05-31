@@ -319,19 +319,25 @@ fn check_shorthand_always(cx: &Cx<'_>, list: NodeList) {
 ///
 /// Autocorrect for the omit direction is not implemented (call-context ABI gap).
 fn check_shorthand_consistent(cx: &Cx<'_>, list: NodeList) {
-    let pairs: Vec<NodeId> = cx.list(list).to_vec();
-    let kinds: Vec<ShorthandPairKind> = pairs.iter().map(|&p| classify_shorthand(p, cx)).collect();
+    let pairs = cx.list(list);
 
-    let has_omitted = kinds.contains(&ShorthandPairKind::Omitted);
-    let has_omittable = kinds.contains(&ShorthandPairKind::Omittable);
-    let has_required = kinds.contains(&ShorthandPairKind::Required);
+    let mut has_omitted = false;
+    let mut has_omittable = false;
+    let mut has_required = false;
+    for &pair in pairs {
+        match classify_shorthand(pair, cx) {
+            ShorthandPairKind::Omitted => has_omitted = true,
+            ShorthandPairKind::Omittable => has_omittable = true,
+            ShorthandPairKind::Required => has_required = true,
+        }
+    }
 
     if has_omitted && (has_omittable || has_required) {
         // Mixed: some omitted, some not.
         if has_required {
             // Can't omit all → expand the omitted ones.
-            for (&pair, &kind) in pairs.iter().zip(kinds.iter()) {
-                if kind == ShorthandPairKind::Omitted {
+            for &pair in pairs {
+                if classify_shorthand(pair, cx) == ShorthandPairKind::Omitted {
                     let NodeKind::Pair { key, .. } = *cx.kind(pair) else {
                         continue;
                     };
@@ -340,8 +346,8 @@ fn check_shorthand_consistent(cx: &Cx<'_>, list: NodeList) {
             }
         } else {
             // All non-omitted are omittable → flag them to omit.
-            for (&pair, &kind) in pairs.iter().zip(kinds.iter()) {
-                if kind == ShorthandPairKind::Omittable {
+            for &pair in pairs {
+                if classify_shorthand(pair, cx) == ShorthandPairKind::Omittable {
                     let NodeKind::Pair { key, value } = *cx.kind(pair) else {
                         continue;
                     };
@@ -358,7 +364,7 @@ fn check_shorthand_consistent(cx: &Cx<'_>, list: NodeList) {
         }
     } else if !has_omitted && !has_required && has_omittable {
         // All pairs are omittable but none use shorthand: flag them.
-        for &pair in &pairs {
+        for &pair in pairs {
             let NodeKind::Pair { key, value } = *cx.kind(pair) else {
                 continue;
             };
@@ -376,12 +382,18 @@ fn check_shorthand_consistent(cx: &Cx<'_>, list: NodeList) {
 
 /// "either_consistent" mode: accept both forms, but flag mixed hashes.
 fn check_shorthand_either_consistent(cx: &Cx<'_>, list: NodeList) {
-    let pairs: Vec<NodeId> = cx.list(list).to_vec();
-    let kinds: Vec<ShorthandPairKind> = pairs.iter().map(|&p| classify_shorthand(p, cx)).collect();
+    let pairs = cx.list(list);
 
-    let has_omitted = kinds.contains(&ShorthandPairKind::Omitted);
-    let has_omittable = kinds.contains(&ShorthandPairKind::Omittable);
-    let has_required = kinds.contains(&ShorthandPairKind::Required);
+    let mut has_omitted = false;
+    let mut has_omittable = false;
+    let mut has_required = false;
+    for &pair in pairs {
+        match classify_shorthand(pair, cx) {
+            ShorthandPairKind::Omitted => has_omitted = true,
+            ShorthandPairKind::Omittable => has_omittable = true,
+            ShorthandPairKind::Required => has_required = true,
+        }
+    }
 
     if !has_omitted || (!has_omittable && !has_required) {
         return;
@@ -390,8 +402,8 @@ fn check_shorthand_either_consistent(cx: &Cx<'_>, list: NodeList) {
     // Mixed explicit and shorthand.
     if has_required {
         // Can't omit all → expand the omitted ones.
-        for (&pair, &kind) in pairs.iter().zip(kinds.iter()) {
-            if kind == ShorthandPairKind::Omitted {
+        for &pair in pairs {
+            if classify_shorthand(pair, cx) == ShorthandPairKind::Omitted {
                 let NodeKind::Pair { key, .. } = *cx.kind(pair) else {
                     continue;
                 };
@@ -400,8 +412,8 @@ fn check_shorthand_either_consistent(cx: &Cx<'_>, list: NodeList) {
         }
     } else {
         // All non-omitted are omittable → flag them to omit.
-        for (&pair, &kind) in pairs.iter().zip(kinds.iter()) {
-            if kind == ShorthandPairKind::Omittable {
+        for &pair in pairs {
+            if classify_shorthand(pair, cx) == ShorthandPairKind::Omittable {
                 let NodeKind::Pair { key, value } = *cx.kind(pair) else {
                     continue;
                 };
