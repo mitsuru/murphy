@@ -52,7 +52,7 @@ impl EmptyLines {
         let mut prev_blank = false;
         let mut line_start = 0usize;
 
-        loop {
+        while line_start < bytes.len() {
             // Find the end of this line (exclusive of \n, or EOF).
             let line_end = bytes[line_start..]
                 .iter()
@@ -88,9 +88,6 @@ impl EmptyLines {
                 prev_blank = false;
             }
 
-            if line_end >= bytes.len() {
-                break;
-            }
             line_start = line_end + 1; // skip the \n
         }
     }
@@ -200,6 +197,14 @@ mod tests {
     fn accepts_consecutive_blank_lines_inside_heredoc() {
         // Two consecutive blank lines inside a heredoc body must not be flagged.
         test::<EmptyLines>().expect_no_offenses("x = <<~RUBY\n  hello\n\n\n  world\nRUBY\n");
+    }
+
+    #[test]
+    fn accepts_single_trailing_blank_line() {
+        // A file ending with exactly one trailing blank line must not be flagged.
+        // Regression test: the old `loop` implementation ran a final "virtual"
+        // iteration past the last \n, causing a false-positive offense.
+        test::<EmptyLines>().expect_no_offenses("foo\nbar\n\n");
     }
 
     #[test]

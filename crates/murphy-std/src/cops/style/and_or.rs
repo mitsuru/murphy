@@ -211,17 +211,22 @@ fn is_word_char(b: u8) -> bool {
 }
 
 /// Returns `true` when the parent of `id` is an assignment node, OR when
-/// one of the direct children of the `And`/`Or` is an assignment node.
+/// one of the direct children of the `And`/`Or` is an assignment-like node.
 ///
 /// This guards the autocorrect: replacing `and`/`or` with `&&`/`||`
 /// changes operator precedence, which can silently break programs.
 /// For example, `x = y and z` means `(x = y) and z` — the `&&` form
 /// would need parentheses: `(x = y) && z`. The conservative approach
 /// skips autocorrect whenever assignment is present in the expression.
+///
+/// Covers standard assignment nodes (lvasgn, ivasgn, gvasgn, cvasgn, casgn,
+/// op_asgn, or_asgn, and_asgn, masgn) plus setter method calls such as
+/// `self.foo = bar` (which parse as `Send` with a setter selector) to handle
+/// the `self.foo = bar and baz` → `self.foo = (bar && baz)` precedence trap.
 fn parent_is_assignment(id: NodeId, cx: &Cx<'_>) -> bool {
-    let is_asgn = |kind: &NodeKind| {
+    let is_asgn = |node_id: NodeId| {
         matches!(
-            kind,
+            cx.kind(node_id),
             NodeKind::Lvasgn { .. }
                 | NodeKind::Ivasgn { .. }
                 | NodeKind::Gvasgn { .. }
@@ -231,19 +236,17 @@ fn parent_is_assignment(id: NodeId, cx: &Cx<'_>) -> bool {
                 | NodeKind::OrAsgn { .. }
                 | NodeKind::AndAsgn { .. }
                 | NodeKind::Masgn { .. }
-        )
+        ) || cx.is_setter_method(node_id)
     };
 
     // Check immediate parent.
-    if cx.parent(id).get().is_some_and(|p| is_asgn(cx.kind(p))) {
+    if cx.parent(id).get().is_some_and(is_asgn) {
         return true;
     }
 
     // Check direct children (lhs / rhs).
     match cx.kind(id) {
-        NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
-            is_asgn(cx.kind(*lhs)) || is_asgn(cx.kind(*rhs))
-        }
+        NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => is_asgn(*lhs) || is_asgn(*rhs),
         _ => false,
     }
 }
@@ -391,6 +394,17 @@ mod tests {
                 enforced_style: EnforcedStyle::Always,
             })
             .expect_no_corrections("x = y and z\n");
+    }
+
+    #[test]
+    fn always_no_autocorrect_when_lhs_is_setter_method() {
+        // `self.foo = bar and baz` — lhs is a setter Send; autocorrect
+        // would silently change precedence to `self.foo = (bar && baz)`.
+        test::<AndOr>()
+            .with_options(&AndOrOptions {
+                enforced_style: EnforcedStyle::Always,
+            })
+            .expect_no_corrections("self.foo = bar and baz\n");
     }
 
     #[test]
