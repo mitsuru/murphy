@@ -176,6 +176,7 @@ fn make_write(cx: &Cx<'_>, var: &Variable, asgn: &Assignment) -> Write {
             let is_exception = {
                 let mut current = asgn.node_id;
                 let mut found = false;
+                #[allow(clippy::while_let_loop)]
                 loop {
                     let Some(parent) = cx.parent(current).get() else {
                         break;

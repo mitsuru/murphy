@@ -56,6 +56,7 @@ impl ShadowingOuterLocalVariable {
             // boundaries — blocks inside them cannot close over variables from
             // outside those boundaries.
             let mut current_id = node;
+            #[allow(clippy::while_let_loop)]
             loop {
                 let Some(current_scope) = model.scope(current_id) else {
                     break;

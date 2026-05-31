@@ -601,6 +601,15 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u8(out, 90);
             put_u32(out, s.0);
         }
+        NodeKind::FindPattern(l) => {
+            put_u8(out, 101);
+            write_node_list(l, out);
+        }
+        NodeKind::MatchAlt { left, right } => {
+            put_u8(out, 102);
+            put_u32(out, left.0);
+            put_u32(out, right.0);
+        }
         NodeKind::Itblock { send, body } => {
             put_u8(out, 91);
             put_u32(out, send.0);
@@ -893,6 +902,11 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         98 => NodeKind::Shadowarg(Symbol(get_u32(cur)?)),
         99 => NodeKind::Kwnilarg,
         100 => NodeKind::Blocknilarg,
+        101 => NodeKind::FindPattern(read_node_list(cur)?),
+        102 => NodeKind::MatchAlt {
+            left: NodeId(get_u32(cur)?),
+            right: NodeId(get_u32(cur)?),
+        },
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -1388,8 +1402,14 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
                 check_opt_node(guard)?;
                 check_opt_node(body)?;
             }
-            NodeKind::ArrayPattern(l) | NodeKind::HashPattern(l) => check_list(l)?,
+            NodeKind::ArrayPattern(l) | NodeKind::HashPattern(l) | NodeKind::FindPattern(l) => {
+                check_list(l)?
+            }
             NodeKind::MatchVar(s) => check_sym(s.0)?,
+            NodeKind::MatchAlt { left, right } => {
+                check_node(left.0)?;
+                check_node(right.0)?;
+            }
             NodeKind::Itblock { send, body } => {
                 check_node(send.0)?;
                 check_opt_node(body)?;

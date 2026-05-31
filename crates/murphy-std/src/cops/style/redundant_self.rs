@@ -262,23 +262,30 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // Pattern matching (`case .. in`) binds match-vars (`in Integer => x`,
-    // `in [a, b]`) as locals visible in the clause's pattern, guard, and
-    // body. RuboCop tracks those bindings via `on_in_pattern` and skips
-    // `self.x` when `x` is bound. Murphy v1 cannot fully resolve match-var
-    // scope — `MatchAs`/capture patterns are not even lowered yet (Unknown)
-    // — so a binding may be invisible to `scope_introduces_name`.
-    // Conservatively skip any self-send under an `InPattern` (pattern /
-    // guard / body): a missed offense is far safer than an autocorrect that
-    // rewrites `self.x` (a method call) into `x` (a local read) and changes
-    // the program's meaning. The `case` subject is deliberately *not*
-    // covered — it is evaluated before any binding exists, so `case self.foo`
-    // is still flagged. See follow-up for real match-var scope handling.
-    if cx
-        .ancestors(node)
-        .any(|a| matches!(cx.kind(a), NodeKind::InPattern { .. }))
-    {
-        return;
+    // Pattern matching (`case .. in`) binds match-vars as locals visible in
+    // the clause's pattern, guard, and body. Mirror RuboCop's `on_in_pattern`:
+    // collect every `MatchVar` descendant of the pattern slot and skip
+    // `self.x` only when `x` is among those bindings.
+    //
+    // When the enclosing `InPattern` contains an `Unknown` node (i.e. a
+    // pattern construct not yet lowered, like `MatchAs`/pin), a binding may
+    // be invisible — fall back to the conservative full-skip to avoid a
+    // meaning-changing autocorrect. The `case` subject is deliberately *not*
+    // covered — it runs before any binding, so `case self.foo` is still
+    // flagged.
+    for ancestor in cx.ancestors(node) {
+        if let NodeKind::InPattern { pattern, .. } = *cx.kind(ancestor) {
+            if pattern_has_unknown(cx, pattern) {
+                // A potentially invisible binding — skip conservatively.
+                return;
+            }
+            if pattern_binds_name(cx, pattern, method_name) {
+                return;
+            }
+            // Not bound by this in-clause — allow the offense check to
+            // continue (outer scopes / enclosing-scope logic applies).
+            break;
+        }
     }
 
     // Enclosing scope: the nearest `Def` / `Defs` / `Block` ancestor,
@@ -365,6 +372,31 @@ fn descendant_introduces_name(cx: &Cx<'_>, desc: NodeId, name: &str) -> bool {
         NodeKind::Kwoptarg { name: n, .. } => matches_sym(n),
         _ => false,
     }
+}
+
+/// `true` when the pattern subtree contains an `Unknown` node — meaning a
+/// pattern construct is not yet lowered (e.g. `MatchAs`/pin), so a match-var
+/// binding may be invisible.
+fn pattern_has_unknown(cx: &Cx<'_>, pattern: NodeId) -> bool {
+    if matches!(cx.kind(pattern), NodeKind::Unknown) {
+        return true;
+    }
+    cx.descendants(pattern)
+        .iter()
+        .any(|&d| matches!(cx.kind(d), NodeKind::Unknown))
+}
+
+/// `true` when the pattern subtree contains a `MatchVar` whose name is `name`.
+/// Mirrors RuboCop's `add_match_var_scopes` descendant collection.
+fn pattern_binds_name(cx: &Cx<'_>, pattern: NodeId, name: &str) -> bool {
+    let is_match_var = |id: NodeId| {
+        if let NodeKind::MatchVar(s) = *cx.kind(id) {
+            cx.symbol_str(s) == name
+        } else {
+            false
+        }
+    };
+    is_match_var(pattern) || cx.descendants(pattern).iter().any(|&d| is_match_var(d))
 }
 
 #[cfg(test)]
@@ -701,5 +733,42 @@ mod tests {
         // `self.x ||= 42` into a visible `OrAsgn`+`Send` flips this
         // test alongside the cop logic.
         test::<RedundantSelf>().expect_no_offenses("self.x ||= 42\n");
+    }
+
+    // ----- pattern-match scope precision (jw5t) ----------------------------
+
+    #[test]
+    fn array_pattern_match_var_shadows_self_send() {
+        // `in [a, b]` binds `a` and `b` as locals — `self.a` inside the body
+        // is not redundant and must NOT be flagged.
+        test::<RedundantSelf>().expect_no_offenses(indoc! {"
+            case foo
+            in [a, b]
+              self.a
+            end
+        "});
+    }
+
+    #[test]
+    fn hash_pattern_shorthand_shadows_self_send() {
+        // `in {a:}` binds `a` — `self.a` is not redundant.
+        test::<RedundantSelf>().expect_no_offenses(indoc! {"
+            case foo
+            in {a:}
+              self.a
+            end
+        "});
+    }
+
+    #[test]
+    fn unbound_name_in_pattern_is_still_flagged() {
+        // `in [a]` binds `a` but not `b`, so `self.b` is genuinely redundant.
+        test::<RedundantSelf>().expect_offense(indoc! {"
+            case foo
+            in [a]
+              self.b
+              ^^^^ Redundant `self` detected.
+            end
+        "});
     }
 }

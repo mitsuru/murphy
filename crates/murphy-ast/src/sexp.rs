@@ -602,6 +602,18 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         NodeKind::MatchVar(s) => {
             let _ = write!(out, "(match_var :{})", interner.resolve(s.0));
         }
+        NodeKind::FindPattern(_) => {
+            out.push_str("(find_pattern");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
+        NodeKind::MatchAlt { left, right } => {
+            out.push_str("(match_alt\n");
+            write_node(ast, left, d, out);
+            out.push('\n');
+            write_node(ast, right, d, out);
+            out.push(')');
+        }
         NodeKind::Itblock { send, body } => {
             out.push_str("(itblock\n");
             write_node(ast, send, d, out);

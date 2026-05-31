@@ -284,9 +284,16 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
             push_opt(out, body);
         }
 
-        NodeKind::ArrayPattern(l) | NodeKind::HashPattern(l) => push_list(out, lists, l),
+        NodeKind::ArrayPattern(l) | NodeKind::HashPattern(l) | NodeKind::FindPattern(l) => {
+            push_list(out, lists, l)
+        }
 
         NodeKind::MatchVar(_) => {}
+
+        NodeKind::MatchAlt { left, right } => {
+            out.push(left);
+            out.push(right);
+        }
 
         NodeKind::Itblock { send, body } => {
             out.push(send);
@@ -669,7 +676,14 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
             slot_opt(out, body);
         }
 
-        NodeKind::ArrayPattern(l) | NodeKind::HashPattern(l) => slot_list(out, lists, l),
+        NodeKind::ArrayPattern(l) | NodeKind::HashPattern(l) | NodeKind::FindPattern(l) => {
+            slot_list(out, lists, l)
+        }
+
+        NodeKind::MatchAlt { left, right } => {
+            slot_node(out, left);
+            slot_node(out, right);
+        }
 
         // `(itblock call :it body)` — `:it` marker is a phantom slot.
         NodeKind::Itblock { send, body } => {
