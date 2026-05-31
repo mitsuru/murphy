@@ -40,29 +40,21 @@
 //! - `class << self` — singleton-class operator (`Sclass`).
 //! - `a ? b : c` — ternary `?` and `:` (`If` with ternary form).
 //!
-//! ## Out of scope (remaining v1 limitations)
+//! ## Out of scope (remaining limitations)
 //!
 //! - Index / call op-assign: `x[i] += 1` (`IndexOperatorWriteNode`) and
 //!   `x.y += 1` (`CallOperatorWriteNode`). `murphy-translate` lowers both
-//!   to `NodeKind::Unknown` in v1 so there is nothing for us to dispatch on.
-//! - Setter-method assignment `x.y = 2` (a `Send` with a trailing-`=`
-//!   method name) — not in the binary-operator method list and not a plain
-//!   `Lvasgn`, so this shape is skipped.
+//!   to `NodeKind::Unknown` so there is nothing to dispatch on (murphy-9vwq).
+//! - Setter-method assignment `x.y = 2` — a `Send` with a trailing-`=`
+//!   method name; not in the binary-operator dispatch list and not a plain
+//!   `Lvasgn`.
 //! - Optional-parameter defaults `def f(x=0)` — handled by
-//!   `Style/SpaceAroundEqualsInParameterDefault` in RuboCop, so Murphy
-//!   deliberately leaves `Optarg` / `Kwoptarg` to a separate cop.
-//! - Pattern-matching `in`/`=>` / `|` — Murphy has no `MatchPattern` hook
-//!   yet (see issue: AST mismatch for the cop's `on_match_pattern` /
-//!   `on_match_alt` / `on_match_as` handlers).
-//! - `**` (exponent) and `/` followed by a rational literal — RuboCop's
-//!   defaults keep these flush; v1 does not honor
-//!   `EnforcedStyleForExponentOperator` / `EnforcedStyleForRationalLiterals`
-//!   so `**` is not dispatched and `/` is treated like any other binary op.
-//! - `AllowForAlignment` — declared as a config key (default `true`,
-//!   matching RuboCop) so the `murphy.toml` surface is frozen, but the
-//!   v1 dispatch ignores the flag and flags vertical alignment as excess
-//!   space. Tracked separately for runtime wiring.
-//! - Trailing comment alignment after the operator (`foo +  # comment`).
+//!   `Style/SpaceAroundEqualsInParameterDefault` in RuboCop; Murphy
+//!   deliberately delegates `Optarg` / `Kwoptarg` to a separate cop.
+//! - Pattern-matching `in` / `=>` / `|` — Murphy has no `MatchPattern`
+//!   node yet.
+//! - Trailing comment after the operator (`foo +  # comment`) — the extra
+//!   space before `#` is silently accepted.
 //!
 //! Users who hit a false positive can disable per project via
 //! `[cops.rules."Layout/SpaceAroundOperators"] enabled = false`.
