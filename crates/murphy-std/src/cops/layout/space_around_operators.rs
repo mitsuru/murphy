@@ -975,12 +975,19 @@ mod tests {
     }
 
     #[test]
-    fn masgn_does_not_flag_inner_assignment_in_complex_target() {
-        // `a[i], b = rhs` has an index target before `b`; the `=` inside
-        // any complex subscript must not be mistaken for the masgn separator.
-        // Using the last Mlhs child's range end bounds the search correctly.
-        test::<SpaceAroundOperators>().expect_no_offenses("a[i], b = 1
-");
+    fn masgn_catches_separator_even_with_complex_lhs_target() {
+        // `a[i = 1]` is an index-assignment target containing an inner `=`.
+        // With node.start as the gap start, the inner `=` in `i = 1` (properly
+        // spaced) would be found first — no offense — silently missing the real
+        // masgn `=` that lacks spacing.  The lhs_end boundary (end of the last
+        // Mlhs child) bounds the search to after `b` and correctly flags the
+        // actual masgn separator.
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                a[i = 1], b=2
+                           ^ Surrounding space missing for operator `=`.
+            "#})
+            .expect_no_offenses("a[i = 1], b = 2\n");
     }
 
     #[test]
