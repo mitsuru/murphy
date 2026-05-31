@@ -11,7 +11,8 @@ const LSP_ERROR_INVALID_PARAMS: i32 = -32602;
 
 pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
     let config =
-        MurphyConfig::load(Path::new(".")).map_err(|e| super::AppError::setup(e.to_string()))?;
+        MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
+            .map_err(|e| super::AppError::setup(e.to_string()))?;
 
     let registry =
         CopRegistry::discover_with_config(Path::new("."), &config, super::builtin_pack())

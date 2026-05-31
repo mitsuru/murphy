@@ -894,7 +894,9 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     if debug {
         eprintln!("murphy: debug: config load start elapsed_ms=0");
     }
-    let config = MurphyConfig::load(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))?;
+    let config =
+        MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
+            .map_err(|e| AppError::setup(e.to_string()))?;
     if debug {
         eprintln!(
             "murphy: debug: config load done elapsed_ms={}",
@@ -905,16 +907,12 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
             run_started.elapsed().as_millis()
         );
     }
-    // Warn (once per run) if the user opted back into a cop that's in
-    // the disabled registry — arena migration is still in progress, so
-    // the enable is ineffective and surprising. We do not error: the
-    // intent of `[cops.rules."Name"] enabled = true` becomes effective
-    // automatically when the cop is migrated, and we don't want a
-    // future-prepping config to break today's lint (§12c contract).
-    cops::warn_user_enabled_disabled(&config);
-
     let registry = CopRegistry::discover_with_config(Path::new("."), &config, builtin_pack())
         .map_err(|e| AppError::setup(e.to_string()))?;
+    // Warn (once per run) if the user opted back into a cop that's disabled
+    // by default (via bundled defaults or arena migration). The enable is
+    // honoured but the cop does not run until its implementation ships.
+    cops::warn_user_enabled_disabled(&config, &registry);
     if debug {
         eprintln!(
             "murphy: debug: cop registry load done elapsed_ms={}, packs={:?}",
@@ -962,7 +960,8 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
         } else {
             // For non-cwd roots, load the root-local .murphy.yml.
             let local_config =
-                MurphyConfig::load(root).map_err(|e| AppError::setup(e.to_string()))?;
+                MurphyConfig::load_with_defaults(root, murphy_std::BUNDLED_DEFAULTS_YAML)
+                    .map_err(|e| AppError::setup(e.to_string()))?;
             discover_with_config(root, &local_config).map_err(|e| AppError::setup(e.to_string()))?
         };
         for p in discovered {

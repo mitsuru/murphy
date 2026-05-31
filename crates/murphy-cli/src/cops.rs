@@ -41,6 +41,7 @@ struct Listing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Enabled,
+    DisabledDefault,
     DisabledArenaMigration,
     DisabledUserConfig,
 }
@@ -49,6 +50,7 @@ impl std::fmt::Display for Status {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Status::Enabled => f.write_str("enabled"),
+            Status::DisabledDefault => f.write_str("disabled: default"),
             Status::DisabledArenaMigration => f.write_str("disabled: arena migration"),
             Status::DisabledUserConfig => f.write_str("disabled: user config"),
         }
@@ -63,7 +65,9 @@ pub enum Format {
 }
 
 pub fn list_with_format(format: Format) -> Result<u8, AppError> {
-    let config = MurphyConfig::load(Path::new(".")).map_err(|e| AppError::setup(e.to_string()))?;
+    let config =
+        MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
+            .map_err(|e| AppError::setup(e.to_string()))?;
 
     // Build the same registry the lint flow uses (builtin pack +
     // configured `.so` cop packs), then enumerate via
@@ -81,10 +85,13 @@ pub fn list_with_format(format: Format) -> Result<u8, AppError> {
     for (cop, pack_name) in registry.all_cops_with_packs() {
         let name = String::from_utf8_lossy(unsafe { cop.name.as_bytes() }).into_owned();
         let namespace = namespace_of(&name).to_owned();
-        let status = if config.cop_enabled(&name) {
+        let cop_default = murphy_plugin_api::tristate_from_wire(cop.default_enabled);
+        let status = if config.cop_enabled_with_cop_default(&name, cop_default) {
             Status::Enabled
-        } else {
+        } else if config.cops.rules.get(name.as_str()).and_then(|r| r.enabled) == Some(false) {
             Status::DisabledUserConfig
+        } else {
+            Status::DisabledDefault
         };
         listings.push(Listing {
             name,
@@ -215,12 +222,31 @@ fn write_json<W: Write>(out: &mut W, listings: &[Listing]) -> std::io::Result<()
 /// once per lint run (after config load, before any file is parsed) so
 /// the diagnostic surfaces even on a zero-file run. Skipping the cop
 /// itself happens for free — it has no `PluginCopV1` to dispatch.
-pub fn warn_user_enabled_disabled(config: &MurphyConfig) {
+pub fn warn_user_enabled_disabled(config: &MurphyConfig, registry: &murphy_core::CopRegistry) {
+    // Warn only for stubs from dynamic packs (e.g. murphy-rails) where the cop's
+    // default_enabled tristate says false — meaning it has no real implementation yet.
+    // Fully-implemented cops that are disabled by default in default.yml (e.g.
+    // Style/CollectionMethods) will work fine if the user enables them, so no warning.
+    for (cop, pack_name) in registry.all_cops_with_packs() {
+        let cop_default = murphy_plugin_api::tristate_from_wire(cop.default_enabled);
+        if cop_default == Some(false)
+            && let Ok(name) = std::str::from_utf8(unsafe { cop.name.as_bytes() })
+            && config.is_explicitly_enabled(name)
+        {
+            eprintln!(
+                "warning: cop `{name}` is a stub in the '{pack_name}' pack \
+                 with a no-op check; `Enabled: true` in .murphy.yml is \
+                 honoured and the cop is dispatched, but no offenses will \
+                 be reported until the implementation ships"
+            );
+        }
+    }
+    // Also warn for arena-migration disabled cops (DISABLED_COPS list).
     for name in murphy_std::DISABLED_COPS {
         if config.is_explicitly_enabled(name) {
             eprintln!(
                 "warning: cop `{name}` is in the disabled registry \
-                 (arena migration in progress, murphy-9cr.23 / murphy-au8); \
+                 (arena migration in progress); \
                  `Enabled: true` in .murphy.yml is honoured but the cop will not run"
             );
         }

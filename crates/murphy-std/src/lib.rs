@@ -28,6 +28,11 @@
 
 pub mod cops;
 
+/// RuboCop's built-in default configuration, embedded at compile time.
+/// Passed to `MurphyConfig::load_with_defaults` so defaults are data-driven
+/// rather than hardcoded in `is_cop_disabled_by_default`.
+pub const BUNDLED_DEFAULTS_YAML: &str = include_str!("../config/default.yml");
+
 use crate::cops::layout::dot_position::DotPosition;
 use crate::cops::layout::empty_lines::EmptyLines;
 use crate::cops::layout::space_around_operators::SpaceAroundOperators;

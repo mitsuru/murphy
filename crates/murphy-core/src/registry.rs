@@ -222,7 +222,10 @@ impl CopRegistry {
                 let cop = unsafe { cop.as_ref() };
                 let name_bytes = unsafe { cop.name.as_bytes() };
                 let name = String::from_utf8_lossy(name_bytes);
-                config.cop_enabled(&name)
+                // Layer 3 fallback: PluginCopV1.default_enabled from the ABI
+                // (set by #[cop(default_enabled = false)] on dynamic pack stubs).
+                let cop_default = murphy_plugin_api::tristate_from_wire(cop.default_enabled);
+                config.cop_enabled_with_cop_default(&name, cop_default)
                     && cop_supports_target_ruby_version(cop, config.target_ruby_version)
             })
             .copied()

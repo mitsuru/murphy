@@ -11,6 +11,9 @@ pub struct MurphyConfig {
     pub files: FilesConfig,
     pub cops: CopsConfig,
     pub plugins: Vec<PluginConfig>,
+    /// Defaults parsed from the pack's bundled `default.yml` (e.g. rubocop's).
+    /// Populated by `with_defaults`; empty when loaded via `from_yaml_str` / `load`.
+    pub base_defaults: DefaultCopsData,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +58,125 @@ pub struct CopRule {
     pub options: BTreeMap<String, serde_json::Value>,
 }
 
+/// Metadata keys from RuboCop's default.yml that are NOT cop options.
+/// These are stripped when building the options map so cops don't receive them.
+const METADATA_KEYS: &[&str] = &[
+    "Description",
+    "VersionAdded",
+    "VersionChanged",
+    "VersionRemoved",
+    "StyleGuide",
+    "References",
+    "Safe",
+    "SafeAutoCorrect",
+];
+
+/// Per-cop defaults extracted from a bundled `default.yml`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DefaultCopRule {
+    pub enabled: Option<bool>,
+    pub severity: Option<Severity>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub options: BTreeMap<String, serde_json::Value>,
+}
+
+/// The full set of defaults parsed from a bundled `default.yml`
+/// (e.g. `rubocop/config/default.yml` in murphy-std).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DefaultCopsData {
+    /// `AllCops.Include` patterns from the YAML.
+    pub allcops_include: Vec<String>,
+    /// `AllCops.Exclude` patterns from the YAML.
+    pub allcops_exclude: Vec<String>,
+    /// Per-cop defaults keyed by cop name.
+    pub cop_rules: BTreeMap<String, DefaultCopRule>,
+}
+
+impl DefaultCopsData {
+    /// Parse a RuboCop-format default.yml string into structured defaults.
+    ///
+    /// Unrecognised top-level keys are silently ignored.
+    /// Parse failures are silently skipped.
+    pub fn from_yaml(text: &str) -> Self {
+        use yaml_rust2::{Yaml, YamlLoader};
+
+        let docs = match YamlLoader::load_from_str(text) {
+            Ok(d) => d,
+            Err(_) => return Self::default(),
+        };
+        let doc = match docs.into_iter().next() {
+            Some(Yaml::Hash(h)) => h,
+            _ => return Self::default(),
+        };
+
+        let mut result = Self::default();
+
+        for (key, value) in doc {
+            let Yaml::String(section) = key else { continue };
+
+            if section == "AllCops" {
+                if let Yaml::Hash(all_cops) = value {
+                    if let Some(inc) = all_cops.get(&Yaml::String("Include".to_string())) {
+                        result.allcops_include = yaml_string_list(inc);
+                    }
+                    if let Some(exc) = all_cops.get(&Yaml::String("Exclude".to_string())) {
+                        result.allcops_exclude = yaml_string_list(exc);
+                    }
+                }
+                continue;
+            }
+
+            // Treat as a cop section (e.g. "Style/Foo").
+            if let Yaml::Hash(cop_map) = value {
+                let rule = parse_default_cop_rule(cop_map);
+                result.cop_rules.insert(section, rule);
+            }
+        }
+
+        result
+    }
+}
+
+fn parse_default_cop_rule(map: yaml_rust2::yaml::Hash) -> DefaultCopRule {
+    use yaml_rust2::Yaml;
+    let mut rule = DefaultCopRule::default();
+    for (key, value) in map {
+        let Yaml::String(k) = key else { continue };
+        match k.as_str() {
+            "Enabled" => {
+                if let Yaml::Boolean(b) = value {
+                    rule.enabled = Some(b);
+                }
+            }
+            "Severity" => {
+                if let Yaml::String(s) = value {
+                    rule.severity = match s.as_str() {
+                        "warning" => Some(Severity::Warning),
+                        "error" => Some(Severity::Error),
+                        _ => None,
+                    };
+                }
+            }
+            "Include" => {
+                rule.include = yaml_string_list(&value);
+            }
+            "Exclude" => {
+                rule.exclude = yaml_string_list(&value);
+            }
+            other if METADATA_KEYS.contains(&other) => {
+                // Skip documentation/metadata keys.
+            }
+            other => {
+                if let Some(json_val) = yaml_to_json(value) {
+                    rule.options.insert(other.to_string(), json_val);
+                }
+            }
+        }
+    }
+    rule
+}
+
 fn default_include() -> Vec<String> {
     vec!["**/*.rb".to_string()]
 }
@@ -80,6 +202,7 @@ impl Default for MurphyConfig {
                 rules: BTreeMap::new(),
             },
             plugins: Vec::new(),
+            base_defaults: DefaultCopsData::default(),
         }
     }
 }
@@ -108,13 +231,21 @@ impl MurphyConfig {
     /// Top-level keys other than `AllCops` and `plugins` are treated as cop
     /// names (open-keyed, compatible with `.rubocop.yml`).
     pub fn from_yaml_str(text: &str) -> Result<Self, ConfigError> {
+        let (cfg, _, _) = Self::from_yaml_str_raw(text)?;
+        Ok(cfg)
+    }
+
+    /// Internal: parse user YAML and return `(config, saw_include, saw_exclude)`.
+    /// `saw_include`/`saw_exclude` tell `with_defaults` whether to apply bundled
+    /// AllCops defaults.
+    fn from_yaml_str_raw(text: &str) -> Result<(Self, bool, bool), ConfigError> {
         use yaml_rust2::{Yaml, YamlLoader};
 
         let docs =
             YamlLoader::load_from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
 
         let doc = match docs.into_iter().next() {
-            None => return Ok(Self::default()),
+            None => return Ok((Self::default(), false, false)),
             Some(d) => d,
         };
 
@@ -122,7 +253,7 @@ impl MurphyConfig {
         // all produce Yaml::Null; treat them as defaults (RuboCop-compatible).
         let top = match doc {
             Yaml::Hash(h) => h,
-            Yaml::Null => return Ok(Self::default()),
+            Yaml::Null => return Ok((Self::default(), false, false)),
             _ => {
                 return Err(ConfigError::BadYaml(
                     "top-level document must be a mapping".to_string(),
@@ -137,6 +268,7 @@ impl MurphyConfig {
         let mut rules: BTreeMap<String, CopRule> = BTreeMap::new();
         let mut plugins: Vec<PluginConfig> = Vec::new();
         let mut saw_include = false;
+        let mut saw_exclude = false;
 
         for (key, value) in top {
             let Yaml::String(section) = key else {
@@ -152,6 +284,7 @@ impl MurphyConfig {
                         }
                         if let Some(exc) = all_cops.get(&Yaml::String("Exclude".to_string())) {
                             exclude = yaml_string_list(exc);
+                            saw_exclude = true;
                         }
                         if let Some(Yaml::String(p)) =
                             all_cops.get(&Yaml::String("CopsPath".to_string()))
@@ -190,15 +323,39 @@ impl MurphyConfig {
             validate_glob_patterns(&rule.exclude)?;
         }
 
-        Ok(MurphyConfig {
-            target_ruby_version,
-            files: FilesConfig { include, exclude },
-            cops: CopsConfig {
-                path: cops_path,
-                rules,
+        Ok((
+            MurphyConfig {
+                target_ruby_version,
+                files: FilesConfig { include, exclude },
+                cops: CopsConfig {
+                    path: cops_path,
+                    rules,
+                },
+                plugins,
+                base_defaults: DefaultCopsData::default(),
             },
-            plugins,
-        })
+            saw_include,
+            saw_exclude,
+        ))
+    }
+
+    /// Parse user YAML and merge bundled `defaults_yaml` as a base layer.
+    /// User settings always win; defaults fill in missing values.
+    ///
+    /// The host (murphy-cli) calls this with `murphy_std::BUNDLED_DEFAULTS_YAML`
+    /// so cop defaults are data-driven rather than hardcoded.
+    pub fn with_defaults(user_yaml: &str, defaults_yaml: &str) -> Result<Self, ConfigError> {
+        let (mut cfg, saw_include, saw_exclude) = Self::from_yaml_str_raw(user_yaml)?;
+        let defaults = DefaultCopsData::from_yaml(defaults_yaml);
+
+        if !saw_include && !defaults.allcops_include.is_empty() {
+            cfg.files.include = defaults.allcops_include.clone();
+        }
+        if !saw_exclude && !defaults.allcops_exclude.is_empty() {
+            cfg.files.exclude = defaults.allcops_exclude.clone();
+        }
+        cfg.base_defaults = defaults;
+        Ok(cfg)
     }
 
     pub fn load(root: &Path) -> Result<Self, ConfigError> {
@@ -213,12 +370,51 @@ impl MurphyConfig {
         }
     }
 
+    /// Like [`Self::load`] but merges bundled `defaults_yaml` as a base layer.
+    /// The host (murphy-cli) calls this with `murphy_std::BUNDLED_DEFAULTS_YAML`.
+    pub fn load_with_defaults(root: &Path, defaults_yaml: &str) -> Result<Self, ConfigError> {
+        let config_path = root.join(".murphy.yml");
+        let user_yaml = match std::fs::read_to_string(&config_path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(ConfigError::Io(format!(
+                    "cannot read {}: {e}",
+                    config_path.display()
+                )));
+            }
+        };
+        Self::with_defaults(&user_yaml, defaults_yaml)
+    }
+
     pub fn cop_enabled(&self, name: &str) -> bool {
-        self.cops
-            .rules
+        self.cop_enabled_with_cop_default(name, None)
+    }
+
+    /// Like `cop_enabled` but also accepts the cop's ABI `default_enabled`
+    /// tristate as a third fallback layer (from `PluginCopV1.default_enabled`).
+    ///
+    /// Layer order (first `Some` wins):
+    ///   1. User `.murphy.yml` explicit `Enabled:`
+    ///   2. Bundled `base_defaults` from pack's default.yml
+    ///   3. `cop_default` from `PluginCopV1.default_enabled` (dynamic pack ABI)
+    ///   4. `true` (enabled by default)
+    pub fn cop_enabled_with_cop_default(&self, name: &str, cop_default: Option<bool>) -> bool {
+        if let Some(e) = self.cops.rules.get(name).and_then(|r| r.enabled) {
+            return e;
+        }
+        if let Some(e) = self
+            .base_defaults
+            .cop_rules
             .get(name)
-            .and_then(|rule| rule.enabled)
-            .unwrap_or(!is_cop_disabled_by_default(name))
+            .and_then(|r| r.enabled)
+        {
+            return e;
+        }
+        if let Some(e) = cop_default {
+            return e;
+        }
+        true
     }
 
     /// True when the user wrote `Enabled: true` for a cop in `.murphy.yml`.
@@ -227,16 +423,47 @@ impl MurphyConfig {
     }
 
     pub fn severity_override(&self, name: &str) -> Option<Severity> {
-        self.cops.rules.get(name).and_then(|rule| rule.severity)
+        self.cops
+            .rules
+            .get(name)
+            .and_then(|r| r.severity)
+            .or_else(|| {
+                self.base_defaults
+                    .cop_rules
+                    .get(name)
+                    .and_then(|r| r.severity)
+            })
     }
 
     pub fn cop_applies_to_file(&self, name: &str, file: &Path) -> bool {
-        let Some(rule) = self.cops.rules.get(name) else {
-            return true;
-        };
         let file = file.strip_prefix(".").unwrap_or(file);
-        (rule.include.is_empty() || globset_matches(&rule.include, file))
-            && (rule.exclude.is_empty() || !globset_matches(&rule.exclude, file))
+
+        let rule = self.cops.rules.get(name);
+        let default_rule = self.base_defaults.cop_rules.get(name);
+
+        // Resolve Include and Exclude independently: user setting wins per-field;
+        // fall back to base_defaults for each field individually. This prevents
+        // a user-level Exclude from accidentally disabling a default Include scope.
+        let include = rule
+            .map(|r| &r.include)
+            .filter(|inc| !inc.is_empty())
+            .or_else(|| default_rule.map(|r| &r.include));
+
+        let exclude = rule
+            .map(|r| &r.exclude)
+            .filter(|exc| !exc.is_empty())
+            .or_else(|| default_rule.map(|r| &r.exclude));
+
+        let matches_include = match include {
+            Some(inc) if !inc.is_empty() => globset_matches(inc, file),
+            _ => true,
+        };
+        let matches_exclude = match exclude {
+            Some(exc) if !exc.is_empty() => globset_matches(exc, file),
+            _ => false,
+        };
+
+        matches_include && !matches_exclude
     }
 
     pub fn has_cop_path_scopes(&self) -> bool {
@@ -247,10 +474,20 @@ impl MurphyConfig {
     }
 
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
-        let Some(rule) = self.cops.rules.get(name) else {
+        let default_opts = self.base_defaults.cop_rules.get(name).map(|r| &r.options);
+        let user_opts = self.cops.rules.get(name).map(|r| &r.options);
+
+        // Fast path: skip cloning and serializing when both are empty (common case).
+        if default_opts.is_none_or(|o| o.is_empty()) && user_opts.is_none_or(|o| o.is_empty()) {
             return b"{}".to_vec();
-        };
-        serde_json::to_vec(&rule.options).unwrap_or_else(|_| b"{}".to_vec())
+        }
+
+        // Start from base defaults, then overlay user options (user wins per key).
+        let mut merged = default_opts.cloned().unwrap_or_default();
+        if let Some(opts) = user_opts {
+            merged.extend(opts.clone());
+        }
+        serde_json::to_vec(&merged).unwrap_or_else(|_| b"{}".to_vec())
     }
 
     pub fn cop_options_map_json(&self, names: &[String]) -> Vec<u8> {
@@ -466,144 +703,6 @@ fn yaml_string_list(yaml: &yaml_rust2::Yaml) -> Vec<String> {
         Yaml::String(s) => vec![s.clone()],
         _ => Vec::new(),
     }
-}
-
-fn is_cop_disabled_by_default(name: &str) -> bool {
-    matches!(
-        name,
-        "Rails/ActionControllerFlashBeforeRender"
-            | "Rails/ActionControllerTestCase"
-            | "Rails/ActionFilter"
-            | "Rails/ActionOrder"
-            | "Rails/ActiveRecordAliases"
-            | "Rails/ActiveRecordCallbacksOrder"
-            | "Rails/ActiveRecordOverride"
-            | "Rails/ActiveSupportAliases"
-            | "Rails/ActiveSupportOnLoad"
-            | "Rails/AddColumnIndex"
-            | "Rails/AfterCommitOverride"
-            | "Rails/ApplicationController"
-            | "Rails/ApplicationJob"
-            | "Rails/ApplicationMailer"
-            | "Rails/ApplicationRecord"
-            | "Rails/ArelStar"
-            | "Rails/AttributeDefaultBlockValue"
-            | "Rails/BelongsTo"
-            | "Rails/Blank"
-            | "Rails/BulkChangeTable"
-            | "Rails/CompactBlank"
-            | "Rails/ContentTag"
-            | "Rails/CreateTableWithTimestamps"
-            | "Rails/DangerousColumnNames"
-            | "Rails/Date"
-            | "Rails/DefaultScope"
-            | "Rails/Delegate"
-            | "Rails/DelegateAllowBlank"
-            | "Rails/DeprecatedActiveModelErrorsMethods"
-            | "Rails/DotSeparatedKeys"
-            | "Rails/DuplicateAssociation"
-            | "Rails/DuplicateScope"
-            | "Rails/DurationArithmetic"
-            | "Rails/DynamicFindBy"
-            | "Rails/EagerEvaluationLogMessage"
-            | "Rails/EnumHash"
-            | "Rails/EnumSyntax"
-            | "Rails/EnumUniqueness"
-            | "Rails/Env"
-            | "Rails/EnvLocal"
-            | "Rails/EnvironmentComparison"
-            | "Rails/EnvironmentVariableAccess"
-            | "Rails/Exit"
-            | "Rails/ExpandedDateRange"
-            | "Rails/FilePath"
-            | "Rails/FindBy"
-            | "Rails/FindById"
-            | "Rails/FindByOrAssignmentMemoization"
-            | "Rails/FindEach"
-            | "Rails/FreezeTime"
-            | "Rails/HasAndBelongsToMany"
-            | "Rails/HasManyOrHasOneDependent"
-            | "Rails/HelperInstanceVariable"
-            | "Rails/HttpPositionalArguments"
-            | "Rails/HttpStatus"
-            | "Rails/HttpStatusNameConsistency"
-            | "Rails/I18nLazyLookup"
-            | "Rails/I18nLocaleTexts"
-            | "Rails/IgnoredColumnsAssignment"
-            | "Rails/IgnoredSkipActionFilterOption"
-            | "Rails/IndexBy"
-            | "Rails/IndexWith"
-            | "Rails/Inquiry"
-            | "Rails/InverseOf"
-            | "Rails/LexicallyScopedActionFilter"
-            | "Rails/LinkToBlank"
-            | "Rails/MailerName"
-            | "Rails/MatchRoute"
-            | "Rails/MigrationClassName"
-            | "Rails/MultipleRoutePaths"
-            | "Rails/NotNullColumn"
-            | "Rails/OrderArguments"
-            | "Rails/OrderById"
-            | "Rails/OutputSafety"
-            | "Rails/Pluck"
-            | "Rails/PluckId"
-            | "Rails/PluckInWhere"
-            | "Rails/PluralizationGrammar"
-            | "Rails/Presence"
-            | "Rails/Present"
-            | "Rails/RakeEnvironment"
-            | "Rails/ReadWriteAttribute"
-            | "Rails/RedirectBackOrTo"
-            | "Rails/RedundantActiveRecordAllMethod"
-            | "Rails/RedundantAllowNil"
-            | "Rails/RedundantForeignKey"
-            | "Rails/RedundantPresenceValidationOnBelongsTo"
-            | "Rails/RedundantReceiverInWithOptions"
-            | "Rails/RedundantTravelBack"
-            | "Rails/ReflectionClassName"
-            | "Rails/RefuteMethods"
-            | "Rails/RelativeDateConstant"
-            | "Rails/RenderInline"
-            | "Rails/RenderPlainText"
-            | "Rails/RequireDependency"
-            | "Rails/ResponseParsedBody"
-            | "Rails/ReversibleMigration"
-            | "Rails/ReversibleMigrationMethodDefinition"
-            | "Rails/RootJoinChain"
-            | "Rails/RootPathnameMethods"
-            | "Rails/RootPublicPath"
-            | "Rails/SafeNavigation"
-            | "Rails/SafeNavigationWithBlank"
-            | "Rails/SaveBang"
-            | "Rails/SchemaComment"
-            | "Rails/ScopeArgs"
-            | "Rails/SelectMap"
-            | "Rails/ShortI18n"
-            | "Rails/SkipsModelValidations"
-            | "Rails/SquishedSQLHeredocs"
-            | "Rails/StripHeredoc"
-            | "Rails/StrongParametersExpect"
-            | "Rails/TableNameAssignment"
-            | "Rails/ThreeStateBooleanColumn"
-            | "Rails/TimeZone"
-            | "Rails/TimeZoneAssignment"
-            | "Rails/ToFormattedS"
-            | "Rails/ToSWithArgument"
-            | "Rails/TopLevelHashWithIndifferentAccess"
-            | "Rails/TransactionExitStatement"
-            | "Rails/UniqueValidationWithoutIndex"
-            | "Rails/UnknownEnv"
-            | "Rails/UnusedIgnoredColumns"
-            | "Rails/UnusedRenderContent"
-            | "Rails/Validation"
-            | "Rails/WhereEquals"
-            | "Rails/WhereExists"
-            | "Rails/WhereMissing"
-            | "Rails/WhereNot"
-            | "Rails/WhereNotWithMultipleConditions"
-            | "Rails/WhereRange"
-            | "Style/FrozenStringLiteralComment"
-    )
 }
 
 /// Migrate a `.rubocop.yml` document to `.murphy.yml` format.
@@ -895,7 +994,9 @@ Style/StringLiterals:
     }
 
     #[test]
-    fn cop_enabled_is_false_for_rails_cops_disabled_by_default() {
+    fn cop_enabled_with_cop_default_disables_rails_stubs() {
+        // Rails cop stubs have PluginCopV1.default_enabled = Some(false).
+        // cop_enabled_with_cop_default honours this as the 3rd fallback layer.
         let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
         const SAMPLE: [&str; 5] = [
             "Rails/ActionControllerFlashBeforeRender",
@@ -906,18 +1007,20 @@ Style/StringLiterals:
         ];
         for name in SAMPLE {
             assert!(
-                !cfg.cop_enabled(name),
-                "{name} should be disabled by default"
+                !cfg.cop_enabled_with_cop_default(name, Some(false)),
+                "{name} should be disabled when cop_default is Some(false)"
             );
         }
+        // Without a cop_default hint, config layer defaults to enabled.
         assert!(cfg.cop_enabled("Unknown/Foo"));
     }
 
     #[test]
-    fn cop_enabled_can_override_default_for_rails_cop() {
+    fn cop_enabled_user_override_beats_cop_default() {
         let cfg = MurphyConfig::from_yaml_str("Rails/ActionFilter:\n  Enabled: true\n")
             .expect("config parses");
-        assert!(cfg.cop_enabled("Rails/ActionFilter"));
+        // User explicit Enabled: true wins even if cop_default says false.
+        assert!(cfg.cop_enabled_with_cop_default("Rails/ActionFilter", Some(false)));
     }
 
     #[test]
@@ -1095,5 +1198,62 @@ Style/StringLiterals:
             out.contains("# unsupported plugin entry: <empty or non-string key>"),
             "empty mapping:\n{out}"
         );
+    }
+
+    #[test]
+    fn default_cops_data_parses_enabled_false() {
+        let yaml = "Style/Foo:\n  Enabled: false\n  EnforcedStyle: single_quotes\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        let rule = data.cop_rules.get("Style/Foo").expect("rule exists");
+        assert_eq!(rule.enabled, Some(false));
+        assert_eq!(
+            rule.options.get("EnforcedStyle"),
+            Some(&serde_json::Value::String("single_quotes".to_string()))
+        );
+    }
+
+    #[test]
+    fn default_cops_data_parses_allcops_include_exclude() {
+        let yaml = "AllCops:\n  Include:\n    - '**/*.rb'\n    - '**/Gemfile'\n  Exclude:\n    - 'vendor/**'\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        assert!(data.allcops_include.contains(&"**/*.rb".to_string()));
+        assert!(data.allcops_include.contains(&"**/Gemfile".to_string()));
+        assert_eq!(data.allcops_exclude, vec!["vendor/**"]);
+    }
+
+    #[test]
+    fn default_cops_data_strips_metadata_keys() {
+        let yaml = "Style/Foo:\n  Description: 'Some cop'\n  Enabled: true\n  VersionAdded: '1.0'\n  EnforcedStyle: compact\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        let rule = data.cop_rules.get("Style/Foo").expect("rule");
+        assert!(
+            !rule.options.contains_key("Description"),
+            "Description must not be in options"
+        );
+        assert!(
+            !rule.options.contains_key("VersionAdded"),
+            "VersionAdded must not be in options"
+        );
+        assert!(
+            rule.options.contains_key("EnforcedStyle"),
+            "EnforcedStyle must be in options"
+        );
+    }
+
+    #[test]
+    fn default_cops_data_parses_per_cop_include_exclude() {
+        let yaml = "Bundler/Foo:\n  Enabled: true\n  Include:\n    - '**/Gemfile'\n  Exclude:\n    - 'vendor/**'\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        let rule = data.cop_rules.get("Bundler/Foo").expect("rule");
+        assert_eq!(rule.include, vec!["**/Gemfile"]);
+        assert_eq!(rule.exclude, vec!["vendor/**"]);
+    }
+
+    #[test]
+    fn default_cops_data_parses_severity() {
+        let yaml = "Bundler/Foo:\n  Enabled: true\n  Severity: warning\n";
+        let data = DefaultCopsData::from_yaml(yaml);
+        let rule = data.cop_rules.get("Bundler/Foo").expect("rule");
+        assert_eq!(rule.severity, Some(crate::Severity::Warning));
     }
 }

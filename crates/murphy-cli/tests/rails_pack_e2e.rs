@@ -133,7 +133,7 @@ fn lint_on_rails_fixture_exits_clean_with_pack_loaded() {
     let rb = dir.path().join("app.rb");
     fs::write(
         &rb,
-        "class UsersController < ApplicationController\n  \
+        "# frozen_string_literal: true\nclass UsersController < ApplicationController\n  \
          before_action :authenticate\n  \
          def index\n    render :index\n  end\nend\n",
     )
@@ -171,7 +171,7 @@ fn rails_rule_section_does_not_error_lint_setup() {
     // `Murphy/NoReceiverPuts` flags bare `puts`) so the exit code only
     // reflects the Rails pack's behaviour. An empty class body is
     // inert against the current standard pack.
-    fs::write(&rb, "class Foo\nend\n").expect("write rb");
+    fs::write(&rb, "# frozen_string_literal: true\nclass Foo\nend\n").expect("write rb");
 
     let yml = format!(
         "plugins:\n  - name: murphy-rails\n    path: {:?}\nRails/HttpStatus:\n  Enabled: true\n",
