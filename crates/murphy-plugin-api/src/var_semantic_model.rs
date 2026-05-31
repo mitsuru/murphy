@@ -86,7 +86,6 @@ fn is_branch_barrier(ast: &Ast, node: NodeId) -> bool {
             | NodeKind::Case { .. }
             | NodeKind::When { .. }
             | NodeKind::CaseMatch { .. }
-            | NodeKind::InPattern { .. }
             | NodeKind::While { .. }
             | NodeKind::Until { .. }
     )
@@ -428,6 +427,9 @@ impl VarSemanticModel {
                     // Only a full assignment (with value) registers an Assignment.
                     // A value-less Lvasgn is a target placeholder inside
                     // OpAsgn/OrAsgn/AndAsgn/Masgn; it is handled by those arms.
+                    // If traversal reaches one directly, it is an exposed
+                    // binding target such as regexp named captures lowered from
+                    // MatchWriteNode.
                     if let Some(val_id) = value.get() {
                         if !Self::is_underscore_prefix(name, ast) {
                             let end = ast.range(node).end;
@@ -444,8 +446,35 @@ impl VarSemanticModel {
                             node: val_id,
                             scope,
                         });
+                    } else if !Self::is_underscore_prefix(name, ast) {
+                        let end = ast
+                            .parent(node)
+                            .get()
+                            .map(|parent| ast.range(parent).end)
+                            .unwrap_or_else(|| ast.range(node).end);
+                        let scope_info = scopes.get_mut(&scope).expect("scope must exist");
+                        let var = Self::find_or_declare_local(scope_info, name, node);
+                        var.assignments.push(Assignment {
+                            node_id: node,
+                            end,
+                            is_referenced: false,
+                        });
                     }
                     // Value-less targets have no children to recurse into.
+                }
+
+                // ── Pattern matching binding: `in [x]` / `in {x: y}` ───────
+                NodeKind::MatchVar(name) => {
+                    if !Self::is_underscore_prefix(name, ast) {
+                        let end = ast.range(node).end;
+                        let scope_info = scopes.get_mut(&scope).expect("scope must exist");
+                        let var = Self::find_or_declare_local(scope_info, name, node);
+                        var.assignments.push(Assignment {
+                            node_id: node,
+                            end,
+                            is_referenced: false,
+                        });
+                    }
                 }
 
                 // ── Compound assignment: `x op= expr` ───────────────────────

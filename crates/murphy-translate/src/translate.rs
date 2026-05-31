@@ -641,6 +641,20 @@ impl Translator {
             }
             return send;
         }
+        if let Some(mw) = node.as_match_write_node() {
+            // Regexp named captures through `=~` are implicit local writes.
+            // Reuse existing nodes: first the match call, then value-less
+            // Lvasgn targets whose ranges point at the capture names.
+            let call = mw.call();
+            let mut ids = vec![self.translate_call(&call, Self::range(&call.location()))];
+            ids.extend(
+                mw.targets()
+                    .iter()
+                    .map(|target| self.translate_target(&target)),
+            );
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Begin(list), range);
+        }
         if let Some(s) = node.as_splat_node() {
             // 注: prism `SplatNode` の内容アクセサは `expression()`（appendix の
             // `value()` ではない — bindings.rs で確認済み）。
@@ -3329,6 +3343,44 @@ mod tests {
         assert!(
             sexp.contains("(hash_pattern"),
             "hash_pattern present: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_case_in_hash_pattern_explicit_capture_value() {
+        let ast = translate("case x\nin {name: name}\n  name\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(pair\n        (sym :name)\n        (match_var :name))"),
+            "explicit hash-pattern capture must be a match_var: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_case_in_hash_pattern_shorthand_capture() {
+        let ast = translate("case x\nin {name:}\n  name\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(pair\n        (sym :name)\n        (match_var :name))"),
+            "hash-pattern shorthand capture must be a match_var: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_regexp_named_capture_match_write() {
+        let ast = translate("/(?<name>foo)/ =~ value\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.starts_with("(begin\n"),
+            "match-write root must be exposed: {sexp}"
+        );
+        assert!(
+            sexp.contains("(send :=~"),
+            "match call must be present: {sexp}"
+        );
+        assert!(
+            sexp.contains("(lvasgn name\n    nil)"),
+            "implicit named capture target must be present: {sexp}"
         );
     }
 
