@@ -34,6 +34,10 @@ unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
     }
 }
 
+/// # Safety
+///
+/// This function is intentionally unavailable — it always panics.
+/// It exists only as a sentinel vtable entry and must never be called.
 pub unsafe extern "C" fn unavailable_alloc_node_slice(
     _: *mut std::ffi::c_void,
     _: *const NodeId,
