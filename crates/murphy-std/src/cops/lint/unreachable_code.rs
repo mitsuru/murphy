@@ -155,10 +155,6 @@ fn is_flow_terminator(
     match cx.kind(node) {
         NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Next(_) => true,
 
-        NodeKind::And { rhs, .. } | NodeKind::Or { rhs, .. } => {
-            cx.is_guard_clause(node) && is_flow_terminator(*rhs, cx, redefined, in_instance_eval)
-        }
-
         // Forward-compat: translator currently emits Unknown for redo (and
         // parse-errors on retry), but these arms are correct when they arrive.
         NodeKind::Retry | NodeKind::Redo => true,
@@ -177,6 +173,9 @@ fn is_flow_terminator(
                 // Suppress if inside an instance_eval block (unknown self).
                 if in_instance_eval {
                     return false;
+                }
+                if matches!(method_str, "raise" | "fail") {
+                    return cx.is_guard_clause(node);
                 }
                 return true;
             }
@@ -412,12 +411,11 @@ mod tests {
     }
 
     #[test]
-    fn flags_dead_code_after_operator_keyword_guard_clause() {
-        test::<UnreachableCode>().expect_offense(indoc! {r#"
+    fn does_not_flag_after_operator_keyword_guard_clause() {
+        test::<UnreachableCode>().expect_no_offenses(indoc! {r#"
             def foo
               ok or return
               bar
-              ^^^ Unreachable code detected.
             end
         "#});
     }
