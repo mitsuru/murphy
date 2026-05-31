@@ -5,7 +5,8 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/DotPosition
 //! upstream_version_checked: 1.86.2
-//! status: complete
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   All RuboCop spec cases covered including implicit-call nodes with
 //!   no method name (l.\n(1) / l\n.(1)).
