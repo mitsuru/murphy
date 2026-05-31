@@ -128,7 +128,7 @@ fn heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
             SourceTokenKind::HeredocEnd => {
                 if let Some(body_start) = starts.pop() {
                     // end = start of terminator line (handles squiggly indent)
-                    let line_start = line_start_before(source, tok.range.start);
+                    let line_start = terminator_line_start(source, tok.range.start);
                     ranges.push((body_start, line_start));
                 }
             }

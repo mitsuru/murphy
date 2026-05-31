@@ -87,17 +87,19 @@ When multiple issues share one PR, list all IDs: "fix(murphy-std): ..."
 ## After draft PR — handle Gemini Code Assist review
 \`\`\`bash
 PR_NUM=$(gh pr view --json number -q '.number')
+REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
+OWNER=\${REPO%%/*}; REPO_NAME=\${REPO##*/}
 for i in $(seq 1 30); do
   COUNT=$(gh api graphql -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){reviewThreads(first:20){nodes{isResolved comments(first:1){nodes{author{login}}}}}}}}' \\
-    -f o=mitsuru -f r=murphy -F p=$PR_NUM \\
+    -f o=\$OWNER -f r=\$REPO_NAME -F p=\$PR_NUM \\
     --jq '[.data.repository.pullRequest.reviewThreads.nodes[]|select(.comments.nodes[0].author.login=="gemini-code-assist")|select(.isResolved==false)]|length' 2>/dev/null || echo 0)
-  [ "$COUNT" -gt 0 ] && echo "Gemini: $COUNT threads" && break
-  echo "Waiting Gemini attempt $i/30..."; sleep 30
+  [ "\$COUNT" -gt 0 ] && echo "Gemini: \$COUNT threads" && break
+  echo "Waiting Gemini attempt \$i/30..."; sleep 30
 done
 \`\`\`
 Fetch thread details, triage (Fix/Dismiss), implement/reply in Japanese, resolve each thread:
 \`\`\`bash
-gh api "repos/mitsuru/murphy/pulls/comments/<COMMENT_ID>/replies" -f body="<日本語で返信>"
+gh api "repos/\$REPO/pulls/comments/<COMMENT_ID>/replies" -f body="<日本語で返信>"
 gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id="<THREAD_NODE_ID>"
 \`\`\`
 
