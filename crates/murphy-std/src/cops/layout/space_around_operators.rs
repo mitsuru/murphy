@@ -7,11 +7,12 @@
 //! upstream_version_checked: 1.86.2
 //! status: partial
 //! gap_issues:
-//!   - murphy-lfn4
+//!   - murphy-9vwq
+//!   - murphy-70ej
+//!   - murphy-9jge
 //! notes: >
-//!   Known gaps: index/call op-assign (Unknown nodes), setter-method `=`
-//!   (x.y=2), pattern-match operators, AllowForAlignment runtime wiring,
-//!   and EnforcedStyle* options.
+//!   Remaining gaps: index/call op-assign lowering (murphy-9vwq),
+//!   setter-method = (murphy-70ej), pattern-match operators (murphy-9jge).
 //! ```
 //!
 //! surrounding whitespace or have more than one space on either side,
