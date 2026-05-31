@@ -1494,10 +1494,7 @@ impl<'a> Cx<'a> {
 
         match *self.kind(node) {
             NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Next(_) => true,
-            NodeKind::Send {
-                receiver, method, ..
-            } => receiver == OptNodeId::NONE && matches!(self.symbol_str(method), "raise" | "fail"),
-            _ => false,
+            _ => self.is_command(node, "raise") || self.is_command(node, "fail"),
         }
     }
 
