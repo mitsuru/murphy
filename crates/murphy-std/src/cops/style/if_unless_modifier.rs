@@ -116,6 +116,14 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    // Skip when the node contains comments. Moving comments when converting
+    // to modifier form requires non-trivial repositioning logic that is not
+    // yet implemented in v1. Skipping is safer than silently dropping comments
+    // during autocorrect.
+    if !cx.comments_for_node(node).is_empty() {
+        return;
+    }
+
     // Build the modifier-form candidate to check length.
     let NodeKind::If { cond, .. } = *cx.kind(node) else {
         return;
@@ -271,5 +279,27 @@ mod tests {
         let long_cond = "b".repeat(60);
         let src = format!("if {long_cond}\n  {long_body}\nend\n");
         test::<IfUnlessModifier>().expect_no_offenses(&src);
+    }
+
+    #[test]
+    fn accepts_if_with_comment_in_body() {
+        // Comments inside the if block must not be dropped during autocorrect.
+        // v1 conservatively skips any if/unless that contains a comment.
+        test::<IfUnlessModifier>().expect_no_offenses(indoc! {"
+            if condition
+              # required side-effect explanation
+              do_something
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_unless_with_comment() {
+        test::<IfUnlessModifier>().expect_no_offenses(indoc! {"
+            unless condition
+              # comment
+              do_something
+            end
+        "});
     }
 }
