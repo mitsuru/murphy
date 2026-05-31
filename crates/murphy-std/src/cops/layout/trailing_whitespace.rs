@@ -10,12 +10,14 @@
 //!   - murphy-wapy
 //! notes: >
 //!   AllowInHeredoc option and message punctuation implemented.
-//!   Heredoc autocorrect gap: RuboCop wraps trailing whitespace inside
-//!   dynamic heredoc bodies with `#{'  '}` interpolation rather than
-//!   removing it (to preserve string value). Murphy currently removes the
-//!   whitespace in both static and dynamic heredocs. The interpolation-wrap
-//!   form requires Cx-level heredoc-type detection (static vs dynamic) that
-//!   is not yet surfaced via the plugin API -- escalated for API extension.
+//!   Heredoc autocorrect gap: when AllowInHeredoc is false, RuboCop
+//!   wraps trailing whitespace inside dynamic heredoc bodies with
+//!   `#{'  '}` interpolation (preserving string value) and silently
+//!   skips autocorrect for static (single-quoted) heredocs. Murphy
+//!   emits the offense but suppresses emit_edit for heredoc content
+//!   lines to avoid corrupting string values -- the interpolation-wrap
+//!   form is deferred pending a static-vs-dynamic heredoc predicate in
+//!   the plugin API.
 //! ```
 //!
 //! the last non-whitespace character on a line and the line's terminator.
@@ -41,6 +43,10 @@
 //! - **AllowInHeredoc: true**: trailing whitespace inside heredoc bodies
 //!   is not flagged. Heredoc bodies are detected via `HeredocStart` /
 //!   `HeredocEnd` token pairs from `cx.sorted_tokens()`.
+//! - **Heredoc autocorrect safety**: even when AllowInHeredoc is false,
+//!   Murphy only emits the offense for heredoc body lines -- it does
+//!   NOT emit an autocorrect edit, because removing trailing whitespace
+//!   from inside a heredoc body changes the string's runtime value.
 
 use murphy_plugin_api::{CopOptions, Cx, Range, SourceTokenKind, cop};
 
@@ -75,24 +81,23 @@ impl TrailingWhitespace {
         // index space (ADR 0001: offense ranges are byte offsets).
         let bytes = src.as_bytes();
 
-        // Build heredoc body byte ranges from sorted_tokens when needed.
+        // Always collect heredoc body byte ranges so we can suppress
+        // autocorrect edits inside heredoc bodies (which would corrupt
+        // the string's runtime value). When AllowInHeredoc is true, we
+        // also use these ranges to suppress offenses entirely.
+        //
         // Each HeredocStart / HeredocEnd pair brackets the body:
         //   body_start = heredoc_start.end + 1 (skip the newline after the opener)
         //   body_end   = heredoc_end.start
-        let heredoc_body_ranges: Vec<(u32, u32)> = if opts.allow_in_heredoc {
-            collect_heredoc_body_ranges(cx)
-        } else {
-            Vec::new()
-        };
+        let heredoc_body_ranges = collect_heredoc_body_ranges(cx);
 
         let mut line_start = 0usize;
         let mut i = 0usize;
         while i < bytes.len() {
             if bytes[i] == b'\n' {
-                let in_heredoc = opts.allow_in_heredoc
-                    && byte_in_heredoc_body(line_start as u32, &heredoc_body_ranges);
-                if !in_heredoc {
-                    emit_if_trailing(cx, bytes, line_start, i);
+                let in_heredoc = byte_in_heredoc_body(line_start as u32, &heredoc_body_ranges);
+                if !opts.allow_in_heredoc || !in_heredoc {
+                    emit_if_trailing(cx, bytes, line_start, i, in_heredoc);
                 }
                 line_start = i + 1;
             }
@@ -103,10 +108,9 @@ impl TrailingWhitespace {
         // final line with no whitespace at all just means "no final
         // newline" which is a different cop's concern.)
         if line_start < bytes.len() {
-            let in_heredoc = opts.allow_in_heredoc
-                && byte_in_heredoc_body(line_start as u32, &heredoc_body_ranges);
-            if !in_heredoc {
-                emit_if_trailing(cx, bytes, line_start, bytes.len());
+            let in_heredoc = byte_in_heredoc_body(line_start as u32, &heredoc_body_ranges);
+            if !opts.allow_in_heredoc || !in_heredoc {
+                emit_if_trailing(cx, bytes, line_start, bytes.len(), in_heredoc);
             }
         }
     }
@@ -153,8 +157,19 @@ fn byte_in_heredoc_body(byte_offset: u32, ranges: &[(u32, u32)]) -> bool {
 }
 
 /// Inspect bytes `[line_start, line_end)` (exclusive of the `\n` itself)
-/// and emit an offense + edit if there is trailing whitespace.
-fn emit_if_trailing(cx: &Cx<'_>, bytes: &[u8], line_start: usize, line_end: usize) {
+/// and emit an offense if there is trailing whitespace.
+///
+/// When `in_heredoc` is true the offense is emitted but the autocorrect
+/// edit is suppressed: removing trailing whitespace from inside a heredoc
+/// body changes the string's runtime value, which is incorrect. The
+/// full RuboCop behaviour (wrap in `#{'…'}` interpolation) is deferred.
+fn emit_if_trailing(
+    cx: &Cx<'_>,
+    bytes: &[u8],
+    line_start: usize,
+    line_end: usize,
+    in_heredoc: bool,
+) {
     let mut trim = line_end;
     while trim > line_start && is_trailing_ws(bytes[trim - 1]) {
         trim -= 1;
@@ -167,7 +182,11 @@ fn emit_if_trailing(cx: &Cx<'_>, bytes: &[u8], line_start: usize, line_end: usiz
         end: line_end as u32,
     };
     cx.emit_offense(range, "Trailing whitespace detected.", None);
-    cx.emit_edit(range, "");
+    // Inside a heredoc body, suppress the autocorrect edit to avoid
+    // silently changing the string's runtime value.
+    if !in_heredoc {
+        cx.emit_edit(range, "");
+    }
 }
 
 /// Bytes that count as trailing whitespace for this cop. `\r` is in the
@@ -226,20 +245,22 @@ mod tests {
         // With default options (AllowInHeredoc: false), trailing whitespace
         // inside a heredoc body is still flagged.
         // "x = <<~RUBY\n  hello   \nRUBY\n"
-        // Line 2: "  hello   " -- trailing WS starts at byte (12 + 2 + 5) = 19
+        // Line 2: "  hello   " -- trailing WS starts at byte (12 + 7) = 19
         // (12 bytes for "x = <<~RUBY\n", then "  hello" = 7 bytes, then 3 spaces)
-        // Range: start=19, end=22; on line 2, col 7: "  hello" is 7 chars, annotation has 7 spaces + 3 carets
+        // Range: start=19, end=22; on line 2, col 7: annotation has 7 spaces + 3 carets
         test::<TrailingWhitespace>().expect_offense(
             "x = <<~RUBY\n  hello   \n       ^^^ Trailing whitespace detected.\nRUBY\n",
         );
     }
 
     #[test]
-    fn corrects_trailing_space_inside_heredoc_by_default() {
-        test::<TrailingWhitespace>().expect_correction(
-            "x = <<~RUBY\n  hello   \n       ^^^ Trailing whitespace detected.\nRUBY\n",
-            "x = <<~RUBY\n  hello\nRUBY\n",
-        );
+    fn heredoc_body_offense_has_no_autocorrect() {
+        // Trailing whitespace inside a heredoc body must NOT be auto-removed --
+        // doing so would silently change the string's runtime value.
+        // Verify the offense fires (expect_offense) but no edit is emitted
+        // (expect_no_corrections on the same clean source).
+        let src = "x = <<~RUBY\n  hello   \nRUBY\n";
+        test::<TrailingWhitespace>().expect_no_corrections(src);
     }
 
     // ----- AllowInHeredoc: true ------------------------------------
