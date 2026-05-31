@@ -273,18 +273,20 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // meaning-changing autocorrect. The `case` subject is deliberately *not*
     // covered — it runs before any binding, so `case self.foo` is still
     // flagged.
+    // Walk every enclosing InPattern (handles nested `case/in`). For each:
+    // - Unknown child → conservative skip (binding may be invisible)
+    // - binds the name → skip
+    // - otherwise → continue to outer InPatterns
+    // Fall through only when no enclosing InPattern binds `method_name`.
     for ancestor in cx.ancestors(node) {
         if let NodeKind::InPattern { pattern, .. } = *cx.kind(ancestor) {
             if pattern_has_unknown(cx, pattern) {
-                // A potentially invisible binding — skip conservatively.
                 return;
             }
             if pattern_binds_name(cx, pattern, method_name) {
                 return;
             }
-            // Not bound by this in-clause — allow the offense check to
-            // continue (outer scopes / enclosing-scope logic applies).
-            break;
+            // This in-clause doesn't bind the name; check outer ones.
         }
     }
 
@@ -756,6 +758,33 @@ mod tests {
             case foo
             in {a:}
               self.a
+            end
+        "});
+    }
+
+    #[test]
+    fn nested_case_in_outer_binding_is_respected() {
+        // Nested `case/in`: the outer pattern binds `a`, the inner binds `b`.
+        // `self.a` inside the inner body must NOT be flagged — the loop must
+        // walk past the inner InPattern and check the outer one.
+        // (The old `break`-based implementation regressed this.)
+        test::<RedundantSelf>().expect_no_offenses(indoc! {"
+            case x
+            in [a]
+              case y
+              in [b]
+                self.a
+              end
+            end
+        "});
+        // The inner binding `b` is visible from the inner body too.
+        test::<RedundantSelf>().expect_no_offenses(indoc! {"
+            case x
+            in [a]
+              case y
+              in [b]
+                self.b
+              end
             end
         "});
     }

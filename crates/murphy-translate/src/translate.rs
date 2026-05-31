@@ -3363,6 +3363,9 @@ mod tests {
     #[test]
     fn translates_find_pattern() {
         // `[*, a, *]` — FindPatternNode: pre rests + requireds + post rest.
+        // The `*` anchors (left/right SplatNodes) go through translate_node —
+        // v1 has no MatchRest NodeKind, so they become `(splat (unknown))`
+        // per the documented MatchRest deferral.
         let ast = translate("case x\nin [*, a, *]\n  a\nend\n", "t.rb");
         let sexp = murphy_ast::ast_to_sexp(&ast);
         assert!(
@@ -3372,6 +3375,12 @@ mod tests {
         assert!(
             sexp.contains("(match_var :a)"),
             "inner match_var expected: {sexp}"
+        );
+        // Pin the v1 anchor shape: SplatNode translates to `(splat (unknown))`
+        // since the inner `*` has no lowering target yet.
+        assert!(
+            sexp.contains("(splat"),
+            "splat anchors expected in find_pattern: {sexp}"
         );
     }
 
