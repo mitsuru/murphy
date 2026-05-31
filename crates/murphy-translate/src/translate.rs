@@ -1163,12 +1163,24 @@ impl Translator {
             // wrapped in `IfGuard`/`UnlessGuard` so cops can tell them apart.
             let raw_pattern = in_node.pattern();
             let (pattern_node, guard) = if let Some(iff) = raw_pattern.as_if_node() {
-                let guard_range = Self::node_range(&raw_pattern);
+                // Range covers `if <predicate>` only, not the pattern that
+                // prism wraps inside IfNode.statements.
+                let guard_range = iff
+                    .if_keyword_loc()
+                    .map(|kw| murphy_ast::Range {
+                        start: kw.start_offset() as u32,
+                        end: iff.predicate().location().end_offset() as u32,
+                    })
+                    .unwrap_or_else(|| Self::node_range(&iff.predicate()));
                 let cond = self.translate_node(&iff.predicate());
                 let guard_node = self.builder.push(NodeKind::IfGuard(cond), guard_range);
                 (iff.statements(), Some(guard_node))
             } else if let Some(unl) = raw_pattern.as_unless_node() {
-                let guard_range = Self::node_range(&raw_pattern);
+                let kw = unl.keyword_loc();
+                let guard_range = murphy_ast::Range {
+                    start: kw.start_offset() as u32,
+                    end: unl.predicate().location().end_offset() as u32,
+                };
                 let cond = self.translate_node(&unl.predicate());
                 let guard_node = self.builder.push(NodeKind::UnlessGuard(cond), guard_range);
                 (unl.statements(), Some(guard_node))
@@ -3730,21 +3742,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unsupported_pattern_kinds_fall_to_unknown() {
-        // MatchAs(`=>`) / Pin(`^x`) have no prism binding in v1, so they
-        // remain Unknown. The surrounding case_match/in_pattern still translate.
-        // MatchRest (`*rest`) is now lowered to match_rest (murphy-j1j2 PM-B).
-        for src in [
-            "case x\nin Integer => n\n  n\nend\n", // match-as / capture (no prism binding)
-            "case x\nin ^foo\n  a\nend\n",         // pin (no prism binding)
-        ] {
-            let ast = translate(src, "t.rb");
-            let sexp = murphy_ast::ast_to_sexp(&ast);
-            assert!(sexp.starts_with("(case_match\n"), "{src}: {sexp}");
-            assert!(sexp.contains("(in_pattern"), "{src}: {sexp}");
-        }
-    }
+    // Note: match_as (`Integer => n`) and pin (`^foo`) were previously unknown
+    // and listed here. They are now properly lowered in PM-D and PM-E respectively.
+    // See translates_capture_pattern_match_as and translates_pin_operator.
 
     #[test]
     fn translates_match_rest_named() {

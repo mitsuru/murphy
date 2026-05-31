@@ -706,26 +706,17 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         }
 
         NodeKind::Pin(inner) => {
-            out.push_str(
-                "(pin
-",
-            );
+            out.push_str("(pin\n");
             write_node(ast, inner, d, out);
             out.push(')');
         }
         NodeKind::IfGuard(inner) => {
-            out.push_str(
-                "(if_guard
-",
-            );
+            out.push_str("(if_guard\n");
             write_node(ast, inner, d, out);
             out.push(')');
         }
         NodeKind::UnlessGuard(inner) => {
-            out.push_str(
-                "(unless_guard
-",
-            );
+            out.push_str("(unless_guard\n");
             write_node(ast, inner, d, out);
             out.push(')');
         }
