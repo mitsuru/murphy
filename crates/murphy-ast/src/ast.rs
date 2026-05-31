@@ -295,6 +295,14 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
             out.push(right);
         }
 
+        NodeKind::MatchRest(inner) => {
+            push_opt(out, inner);
+        }
+
+        NodeKind::MatchNilPattern => {}
+
+        NodeKind::ArrayPatternWithTail(l) => push_list(out, lists, l),
+
         NodeKind::Itblock { send, body } => {
             out.push(send);
             push_opt(out, body);
@@ -420,7 +428,8 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
         | NodeKind::MatchVar(_)
         | NodeKind::BackRef(_)
         | NodeKind::NthRef(_)
-        | NodeKind::Shadowarg(_) => slot_phantom(out),
+        | NodeKind::Shadowarg(_)
+        | NodeKind::MatchNilPattern => slot_phantom(out),
 
         // `(const scope :name)` — scope slot then name phantom.
         NodeKind::Const { scope, .. } => {
@@ -684,6 +693,12 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
             slot_node(out, left);
             slot_node(out, right);
         }
+
+        NodeKind::MatchRest(inner) => {
+            slot_opt(out, inner);
+        }
+
+        NodeKind::ArrayPatternWithTail(l) => slot_list(out, lists, l),
 
         // `(itblock call :it body)` — `:it` marker is a phantom slot.
         NodeKind::Itblock { send, body } => {
