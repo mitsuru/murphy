@@ -24,3 +24,9 @@ case opts
 in {host:, **nil}
   host
 end
+
+# hash_pattern with match_rest (**rest)
+case opts
+in {host:, **rest}
+  rest
+end
