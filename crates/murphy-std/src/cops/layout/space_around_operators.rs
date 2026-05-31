@@ -415,11 +415,8 @@ impl SpaceAroundOperators {
 
     #[on_node(kind = "pair")]
     fn check_pair(&self, node: NodeId, cx: &Cx<'_>) {
-        if !cx.is_hash_rocket(node) {
-            return;
-        }
         let op_range = cx.pair_operator_loc(node);
-        if op_range != Range::ZERO {
+        if op_range != Range::ZERO && cx.raw_source(op_range) == "=>" {
             let afa = cx
                 .options_or_default::<SpaceAroundOperatorsOptions>()
                 .allow_for_alignment;
@@ -508,16 +505,14 @@ impl SpaceAroundOperators {
 
     #[on_node(kind = "if")]
     fn check_if(&self, node: NodeId, cx: &Cx<'_>) {
-        if !cx.is_ternary(node) {
+        let q_range = cx.ternary_question_loc(node);
+        if q_range == Range::ZERO {
             return;
         }
         let afa = cx
             .options_or_default::<SpaceAroundOperatorsOptions>()
             .allow_for_alignment;
-        let q_range = cx.ternary_question_loc(node);
-        if q_range != Range::ZERO {
-            check_operator(cx, q_range, afa);
-        }
+        check_operator(cx, q_range, afa);
         let c_range = cx.ternary_colon_loc(node);
         if c_range != Range::ZERO {
             check_operator(cx, c_range, afa);
