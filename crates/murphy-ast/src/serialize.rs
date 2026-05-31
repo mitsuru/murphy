@@ -657,6 +657,17 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u8(out, 105);
             write_node_list(l, out);
         }
+        // murphy-j1j2 PM-C one-liner pattern matching
+        NodeKind::MatchPatternP { value, pattern } => {
+            put_u8(out, 106);
+            put_u32(out, value.0);
+            put_u32(out, pattern.0);
+        }
+        NodeKind::MatchPattern { value, pattern } => {
+            put_u8(out, 107);
+            put_u32(out, value.0);
+            put_u32(out, pattern.0);
+        }
     }
 }
 
@@ -921,6 +932,15 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         103 => NodeKind::MatchRest(OptNodeId(get_u32(cur)?)),
         104 => NodeKind::MatchNilPattern,
         105 => NodeKind::ArrayPatternWithTail(read_node_list(cur)?),
+        // murphy-j1j2 PM-C one-liner pattern matching
+        106 => NodeKind::MatchPatternP {
+            value: NodeId(get_u32(cur)?),
+            pattern: NodeId(get_u32(cur)?),
+        },
+        107 => NodeKind::MatchPattern {
+            value: NodeId(get_u32(cur)?),
+            pattern: NodeId(get_u32(cur)?),
+        },
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -1443,6 +1463,12 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
             NodeKind::MatchRest(inner) => check_opt_node(inner)?,
             NodeKind::MatchNilPattern => {}
             NodeKind::ArrayPatternWithTail(l) => check_list(l)?,
+            // murphy-j1j2 PM-C one-liner pattern matching
+            NodeKind::MatchPatternP { value, pattern }
+            | NodeKind::MatchPattern { value, pattern } => {
+                check_node(value.0)?;
+                check_node(pattern.0)?;
+            }
         }
     }
     for id in &ast.node_lists {
