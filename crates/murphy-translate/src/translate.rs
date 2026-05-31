@@ -419,8 +419,7 @@ impl Translator {
         // --- op-assign (`+=` / `||=` / `&&=`) ---
         // lvar/ivar/cvar/gvar/const の 5 ファミリ × operator/or/and の 3 種を
         // 翻訳する。`target` は値なし write ノード（`*asgn` の `value` が `None`）。
-        // call/index/constant-path ターゲット系は arm を持たず `Unknown` に落ちる
-        // （設計どおり）。
+        // constant-path ターゲット系は arm を持たず `Unknown` に落ちる（設計どおり）。
         if let Some(w) = node.as_local_variable_operator_write_node() {
             let name = self.sym(&w.name());
             let target = self.builder.push(
@@ -628,6 +627,94 @@ impl Translator {
             return self
                 .builder
                 .push(NodeKind::AndAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_call_operator_write_node() {
+            let method = self.sym(&w.read_name());
+            let receiver = w.receiver();
+            let selector_range = Self::opt_loc_range(w.message_loc());
+            let target_range = receiver
+                .as_ref()
+                .zip(w.message_loc())
+                .map(|(recv, message)| Range {
+                    start: Self::node_range(recv).start,
+                    end: Self::range(&message).end,
+                })
+                .unwrap_or(selector_range);
+            let args = self.builder.push_list(&[]);
+            let target = match (receiver, w.is_safe_navigation()) {
+                (Some(r), true) => {
+                    let recv = self.translate_node(&r);
+                    self.builder.push_named(
+                        NodeKind::Csend {
+                            receiver: recv,
+                            method,
+                            args,
+                        },
+                        target_range,
+                        selector_range,
+                    )
+                }
+                (recv_opt, _) => {
+                    let receiver = recv_opt
+                        .map(|r| OptNodeId::some(self.translate_node(&r)))
+                        .unwrap_or(OptNodeId::NONE);
+                    self.builder.push_named(
+                        NodeKind::Send {
+                            receiver,
+                            method,
+                            args,
+                        },
+                        target_range,
+                        selector_range,
+                    )
+                }
+            };
+            if let Some(operator) = w.call_operator_loc() {
+                self.builder
+                    .add_call_operator_loc(target, Self::range(&operator));
+            }
+            let op = self.sym(&w.binary_operator());
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::OpAsgn { target, op, value }, range);
+        }
+        if let Some(w) = node.as_index_operator_write_node() {
+            let Some(receiver_node) = w.receiver() else {
+                return self.builder.push(NodeKind::Unknown, range);
+            };
+            let receiver_range = Self::node_range(&receiver_node);
+            let receiver = self.translate_node(&receiver_node);
+            let mut arg_ids = self.translate_arg_list(w.arguments());
+            if let Some(ba) = w.block() {
+                let expr = ba
+                    .expression()
+                    .map(|e| OptNodeId::some(self.translate_node(&e)))
+                    .unwrap_or(OptNodeId::NONE);
+                let bp = self
+                    .builder
+                    .push(NodeKind::BlockPass(expr), Self::range(&ba.location()));
+                arg_ids.push(bp);
+            }
+            let args = self.builder.push_list(&arg_ids);
+            let target_range = Range {
+                start: receiver_range.start,
+                end: Self::range(&w.closing_loc()).end,
+            };
+            let target = self
+                .builder
+                .push(NodeKind::Index { receiver, args }, target_range);
+            if let Some(operator) = w.call_operator_loc() {
+                self.builder
+                    .add_call_operator_loc(target, Self::range(&operator));
+            }
+            self.builder
+                .add_call_closing_loc(target, Self::range(&w.closing_loc()));
+            let op = self.sym(&w.binary_operator());
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::OpAsgn { target, op, value }, range);
         }
 
         // --- calls / splat ---
@@ -2870,17 +2957,40 @@ mod tests {
     }
 
     #[test]
-    fn call_target_op_assign_is_unknown_not_panic() {
-        // `a.b += 1`（CallOperatorWriteNode）は v1 では Unknown 許容（panic しない）。
+    fn translates_call_target_op_assign() {
+        // `a.b += 1`（CallOperatorWriteNode）は getter send を target にした OpAsgn。
         let ast = translate("a.b += 1", "t.rb");
-        assert!(matches!(ast.kind(ast.root()), NodeKind::Unknown));
+        match ast.kind(ast.root()) {
+            NodeKind::OpAsgn { target, op, .. } => {
+                assert_eq!(ast.interner().resolve(op.0), "+");
+                match ast.kind(*target) {
+                    NodeKind::Send {
+                        receiver, method, ..
+                    } => {
+                        assert!(
+                            receiver.get().is_some(),
+                            "call op-assign target has receiver"
+                        );
+                        assert_eq!(ast.interner().resolve(method.0), "b");
+                    }
+                    other => panic!("expected Send target, got {other:?}"),
+                }
+            }
+            other => panic!("expected OpAsgn, got {other:?}"),
+        }
     }
 
     #[test]
-    fn index_target_op_assign_is_unknown_not_panic() {
-        // `a[0] += 1`（IndexOperatorWriteNode）も Unknown 許容。
+    fn translates_index_target_op_assign() {
+        // `a[0] += 1`（IndexOperatorWriteNode）は index read を target にした OpAsgn。
         let ast = translate("a[0] += 1", "t.rb");
-        assert!(matches!(ast.kind(ast.root()), NodeKind::Unknown));
+        match ast.kind(ast.root()) {
+            NodeKind::OpAsgn { target, op, .. } => {
+                assert_eq!(ast.interner().resolve(op.0), "+");
+                assert!(matches!(ast.kind(*target), NodeKind::Index { .. }));
+            }
+            other => panic!("expected OpAsgn, got {other:?}"),
+        }
     }
 
     #[test]
