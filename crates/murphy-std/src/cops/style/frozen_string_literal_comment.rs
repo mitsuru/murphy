@@ -56,7 +56,7 @@ pub struct FrozenStringLiteralComment;
     name = "Style/FrozenStringLiteralComment",
     description = "Require the `# frozen_string_literal: true` magic comment at the top of every file.",
     default_severity = "warning",
-    default_enabled = true
+    default_enabled = false
 )]
 impl FrozenStringLiteralComment {
     #[on_new_investigation]
