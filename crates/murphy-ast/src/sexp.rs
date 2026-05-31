@@ -674,6 +674,22 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
         NodeKind::Kwnilarg => out.push_str("(kwnilarg)"),
         NodeKind::Blocknilarg => out.push_str("(blocknilarg)"),
 
+        // murphy-j1j2 PM-C one-liner pattern matching
+        NodeKind::MatchPatternP { value, pattern } => {
+            out.push_str("(match_pattern_p\n");
+            write_node(ast, value, d, out);
+            out.push('\n');
+            write_node(ast, pattern, d, out);
+            out.push(')');
+        }
+        NodeKind::MatchPattern { value, pattern } => {
+            out.push_str("(match_pattern\n");
+            write_node(ast, value, d, out);
+            out.push('\n');
+            write_node(ast, pattern, d, out);
+            out.push(')');
+        }
+
         NodeKind::Unknown => out.push_str("(unknown)"),
     }
 }

@@ -630,6 +630,22 @@ pub enum NodeKind {
     Kwnilarg,
     /// `&nil` (block suppression、`BlocksArgumentSuppressionNode`)。marker。
     Blocknilarg,
+
+    // ── murphy-j1j2 PM-C one-liner pattern matching (tags 106, 107) ──────
+    /// `expr in pat` — boolean one-liner pattern match (Ruby 3.0+).
+    /// prism: `MatchPredicateNode`. parser-gem: `match_pattern_p`.
+    /// `value` は左辺 (matchable expression)、`pattern` は右辺パターン。
+    MatchPatternP {
+        value: NodeId,
+        pattern: NodeId,
+    },
+    /// `expr => pat` — assignment-form one-liner pattern match (Ruby 3.0+).
+    /// prism: `MatchRequiredNode`. parser-gem: `match_pattern`.
+    /// `value` は左辺 (matchable expression)、`pattern` は右辺パターン。
+    MatchPattern {
+        value: NodeId,
+        pattern: NodeId,
+    },
 }
 
 /// A source comment, stored outside the node tree.
@@ -799,6 +815,9 @@ impl NodeKind {
             NodeKind::MatchRest(_) => 103,
             NodeKind::MatchNilPattern => 104,
             NodeKind::ArrayPatternWithTail(_) => 105,
+            // murphy-j1j2 PM-C one-liner pattern matching
+            NodeKind::MatchPatternP { .. } => 106,
+            NodeKind::MatchPattern { .. } => 107,
         };
         crate::NodeKindTag(t)
     }
