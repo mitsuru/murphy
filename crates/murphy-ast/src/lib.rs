@@ -22,8 +22,9 @@ pub use kinds::{
     tags_for_type_name,
 };
 pub use node::{
-    AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, NodeId, NodeKind, NodeList,
-    NodeLoc, OptNodeId, Range, SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, MagicComment, MagicCommentKind,
+    NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range, SourceBuffer, SourceToken,
+    SourceTokenKind, StringId, Symbol,
 };
 pub use serialize::{FORMAT_VERSION, HEADER_LEN, MAGIC, SerError, content_hash};
 pub use sexp::ast_to_sexp;

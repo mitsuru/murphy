@@ -633,6 +633,30 @@ pub enum CommentKind {
     Block,
 }
 
+/// A structured file-level magic comment, stored outside the node tree.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MagicComment {
+    /// Full source range for the shebang or comment line, excluding newline.
+    pub range: Range,
+    /// Source range for the magic-comment key, or [`Range::ZERO`] for shebang.
+    pub key_range: Range,
+    /// Source range for the magic-comment value, or [`Range::ZERO`] for shebang.
+    pub value_range: Range,
+    pub kind: MagicCommentKind,
+    /// `1` for true `frozen_string_literal`, `0` otherwise.
+    pub value_bool: u8,
+}
+
+/// The structured magic comments Murphy exposes to cops.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MagicCommentKind {
+    Shebang,
+    FrozenStringLiteral,
+    Encoding,
+}
+
 /// The owned source text and path for one file. All [`Range`] values index
 /// into `text` as byte offsets.
 #[derive(Debug, Clone, PartialEq, Eq)]

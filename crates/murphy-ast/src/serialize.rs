@@ -12,8 +12,9 @@
 use crate::ast::Ast;
 use crate::interner::Interner;
 use crate::node::{
-    AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, NodeId, NodeKind, NodeList,
-    NodeLoc, OptNodeId, Range, SourceBuffer, SourceToken, SourceTokenKind, StringId, Symbol,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, MagicComment, MagicCommentKind,
+    NodeId, NodeKind, NodeList, NodeLoc, OptNodeId, Range, SourceBuffer, SourceToken,
+    SourceTokenKind, StringId, Symbol,
 };
 use sha2::{Digest, Sha256};
 
@@ -41,7 +42,9 @@ pub const MAGIC: &[u8; 8] = b"MURPHYAS";
 /// Version 7: adds the `call_operator_locs` sparse table after the existing
 /// `call_closing_locs` table. Header validation still rejects older format
 /// versions before reading the body.
-pub const FORMAT_VERSION: u32 = 7;
+///
+/// Version 8: adds the `magic_comments` side table after `call_operator_locs`.
+pub const FORMAT_VERSION: u32 = 8;
 
 /// Total header size in bytes. The body immediately follows. Downstream
 /// (cache, mmap) code can rely on this offset being fixed.
@@ -933,6 +936,41 @@ fn read_call_operator_loc(cur: &mut &[u8]) -> Result<CallOperatorLoc, SerError> 
     })
 }
 
+const MAGIC_COMMENT_SERIALIZED_LEN: usize = 26;
+
+fn write_magic_comment(comment: MagicComment, out: &mut Vec<u8>) {
+    write_range(comment.range, out);
+    write_range(comment.key_range, out);
+    write_range(comment.value_range, out);
+    let kind = match comment.kind {
+        MagicCommentKind::Shebang => 0,
+        MagicCommentKind::FrozenStringLiteral => 1,
+        MagicCommentKind::Encoding => 2,
+    };
+    put_u8(out, kind);
+    put_u8(out, comment.value_bool);
+}
+
+fn read_magic_comment(cur: &mut &[u8]) -> Result<MagicComment, SerError> {
+    let range = read_range(cur)?;
+    let key_range = read_range(cur)?;
+    let value_range = read_range(cur)?;
+    let kind = match get_u8(cur)? {
+        0 => MagicCommentKind::Shebang,
+        1 => MagicCommentKind::FrozenStringLiteral,
+        2 => MagicCommentKind::Encoding,
+        _ => return Err(SerError::BadDiscriminant),
+    };
+    let value_bool = get_u8(cur)?;
+    Ok(MagicComment {
+        range,
+        key_range,
+        value_range,
+        kind,
+        value_bool,
+    })
+}
+
 fn write_node_list(l: NodeList, out: &mut Vec<u8>) {
     put_u32(out, l.start);
     put_u32(out, l.len);
@@ -1459,6 +1497,12 @@ impl Ast {
             write_call_operator_loc(*entry, &mut out);
         }
 
+        // 12. magic comments side table.
+        put_u64(&mut out, self.magic_comments.len() as u64);
+        for comment in &self.magic_comments {
+            write_magic_comment(*comment, &mut out);
+        }
+
         Ok(out)
     }
 
@@ -1562,11 +1606,26 @@ impl Ast {
             call_operator_locs.push(read_call_operator_loc(&mut cur)?);
         }
 
+        // 12. magic comments side table. Version 8 buffers must include this
+        // table, even when empty, so truncation is reported as EOF.
+        let count = usize::try_from(get_u64(&mut cur)?).map_err(|_| SerError::UnexpectedEof)?;
+        if count
+            .checked_mul(MAGIC_COMMENT_SERIALIZED_LEN)
+            .is_none_or(|needed| needed > cur.len())
+        {
+            return Err(SerError::UnexpectedEof);
+        }
+        let mut magic_comments = Vec::with_capacity(count);
+        for _ in 0..count {
+            magic_comments.push(read_magic_comment(&mut cur)?);
+        }
+
         let ast = Ast {
             nodes,
             node_lists,
             interner: Interner { blob, offsets },
             comments,
+            magic_comments,
             source_tokens,
             call_closing_locs,
             call_operator_locs,
@@ -1580,10 +1639,12 @@ impl Ast {
 
 #[cfg(test)]
 mod tests {
+    use super::MAGIC_COMMENT_SERIALIZED_LEN;
     use crate::SerError;
     use crate::builder::AstBuilder;
     use crate::node::{
-        CommentKind, NodeKind, NodeList, OptNodeId, Range, SourceToken, SourceTokenKind,
+        CommentKind, MagicComment, MagicCommentKind, NodeKind, NodeList, OptNodeId, Range,
+        SourceToken, SourceTokenKind,
     };
 
     fn r(a: u32, b: u32) -> Range {
@@ -2221,6 +2282,28 @@ mod tests {
 
         let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
         assert_eq!(restored.sorted_tokens(), ast.sorted_tokens());
+    }
+
+    #[test]
+    fn round_trip_magic_comments() {
+        let mut b = AstBuilder::new("# frozen_string_literal: true\nnil\n", "t.rb");
+        let root = b.push(NodeKind::Nil, r(30, 33));
+        b.add_magic_comment(MagicComment {
+            range: r(0, 29),
+            key_range: r(2, 23),
+            value_range: r(25, 29),
+            kind: MagicCommentKind::FrozenStringLiteral,
+            value_bool: 1,
+        });
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
+        assert_eq!(restored.magic_comments(), ast.magic_comments());
+    }
+
+    #[test]
+    fn magic_comment_serialized_len_matches_encoded_fields() {
+        assert_eq!(MAGIC_COMMENT_SERIALIZED_LEN, 26);
     }
 
     #[test]

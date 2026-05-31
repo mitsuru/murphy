@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crate::ast::{Ast, collect_children};
 use crate::interner::InternBuilder;
 use crate::node::{
-    AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, NodeId, NodeKind, NodeList,
-    NodeLoc, OptNodeId, Range, SourceBuffer, SourceToken, StringId, Symbol,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, MagicComment, NodeId, NodeKind,
+    NodeList, NodeLoc, OptNodeId, Range, SourceBuffer, SourceToken, StringId, Symbol,
 };
 
 /// Builds an [`Ast`]. Push nodes and lists; `finish` computes parent links
@@ -16,6 +16,7 @@ pub struct AstBuilder {
     node_lists: Vec<NodeId>,
     interner: InternBuilder,
     comments: Vec<Comment>,
+    magic_comments: Vec<MagicComment>,
     source_tokens: Vec<SourceToken>,
     call_closing_locs: Vec<CallClosingLoc>,
     call_operator_locs: Vec<CallOperatorLoc>,
@@ -30,6 +31,7 @@ impl AstBuilder {
             node_lists: Vec::new(),
             interner: InternBuilder::default(),
             comments: Vec::new(),
+            magic_comments: Vec::new(),
             source_tokens: Vec::new(),
             call_closing_locs: Vec::new(),
             call_operator_locs: Vec::new(),
@@ -103,6 +105,11 @@ impl AstBuilder {
         self.comments.push(Comment { range, kind });
     }
 
+    /// Record a structured magic comment.
+    pub fn add_magic_comment(&mut self, comment: MagicComment) {
+        self.magic_comments.push(comment);
+    }
+
     /// Record a source token.
     pub fn add_source_token(&mut self, token: SourceToken) {
         self.source_tokens.push(token);
@@ -150,11 +157,13 @@ impl AstBuilder {
             .sort_unstable_by_key(|entry| entry.node.0);
         self.call_operator_locs
             .sort_unstable_by_key(|entry| entry.node.0);
+        self.magic_comments.sort_by_key(|entry| entry.range.start);
         Ast {
             nodes: self.nodes,
             node_lists: self.node_lists,
             interner: self.interner.finish(),
             comments: self.comments,
+            magic_comments: self.magic_comments,
             source_tokens: self.source_tokens,
             call_closing_locs: self.call_closing_locs,
             call_operator_locs: self.call_operator_locs,
@@ -167,7 +176,7 @@ impl AstBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{NodeKind, OptNodeId, Range};
+    use crate::node::{MagicComment, MagicCommentKind, NodeKind, OptNodeId, Range};
 
     fn r() -> Range {
         Range { start: 0, end: 1 }
@@ -206,5 +215,50 @@ mod tests {
         let ast = b.finish(root);
         assert_eq!(ast.source(), "source");
         assert_eq!(ast.path().to_str(), Some("f.rb"));
+    }
+
+    #[test]
+    fn finish_preserves_magic_comments_in_source_order() {
+        let mut b = AstBuilder::new(
+            "#!/usr/bin/env ruby\n# frozen_string_literal: true\n# encoding: utf-8\nnil\n",
+            "test.rb",
+        );
+        b.add_magic_comment(MagicComment {
+            range: Range { start: 0, end: 19 },
+            key_range: Range::ZERO,
+            value_range: Range::ZERO,
+            kind: MagicCommentKind::Shebang,
+            value_bool: 0,
+        });
+        b.add_magic_comment(MagicComment {
+            range: Range { start: 20, end: 49 },
+            key_range: Range { start: 22, end: 43 },
+            value_range: Range { start: 45, end: 49 },
+            kind: MagicCommentKind::FrozenStringLiteral,
+            value_bool: 1,
+        });
+        b.add_magic_comment(MagicComment {
+            range: Range { start: 50, end: 66 },
+            key_range: Range { start: 52, end: 60 },
+            value_range: Range { start: 62, end: 66 },
+            kind: MagicCommentKind::Encoding,
+            value_bool: 0,
+        });
+        let root = b.push(NodeKind::Nil, Range { start: 67, end: 70 });
+
+        let ast = b.finish(root);
+
+        assert_eq!(
+            ast.magic_comments()
+                .iter()
+                .map(|comment| comment.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                MagicCommentKind::Shebang,
+                MagicCommentKind::FrozenStringLiteral,
+                MagicCommentKind::Encoding,
+            ]
+        );
+        assert_eq!(ast.raw_parts().magic_comments, ast.magic_comments());
     }
 }

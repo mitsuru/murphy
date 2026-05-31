@@ -17,16 +17,16 @@ pub use translate::translate;
 /// **`NodeKind` の variant 追加・削除・並べ替えに伴って必ず bump。**
 /// バイナリ形式そのものを変える場合は代わりに
 /// [`murphy_ast::FORMAT_VERSION`] を bump する。
-pub const LAYER_VERSION: u32 = 1;
+pub const LAYER_VERSION: u32 = 2;
 
 #[cfg(test)]
 mod lib_tests {
     use super::*;
 
     #[test]
-    fn layer_version_is_initialized_to_one() {
+    fn layer_version_is_initialized() {
         // Anchors the initial value. Bump alongside any prism→arena
         // mapping change so cache invalidation kicks in.
-        assert_eq!(LAYER_VERSION, 1);
+        assert_eq!(LAYER_VERSION, 2);
     }
 }
