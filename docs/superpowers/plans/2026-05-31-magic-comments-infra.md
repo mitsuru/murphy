@@ -90,10 +90,15 @@ Expected: PASS.
 
 - [ ] **Step 1: Format code**
 
-Run: `cargo fmt --all --check`
+Run: `cargo +nightly fmt --check`
 Expected: PASS.
 
-- [ ] **Step 2: Run focused workspace tests**
+- [ ] **Step 2: Build workspace**
 
-Run: `cargo test -p murphy-ast -p murphy-translate -p murphy-plugin-api -p murphy-core`
+Run: `cargo build`
+Expected: PASS.
+
+- [ ] **Step 3: Run workspace tests**
+
+Run: `cargo test --workspace`
 Expected: PASS.
