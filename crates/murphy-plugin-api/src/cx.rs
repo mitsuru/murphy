@@ -78,6 +78,38 @@ pub enum CommentDirectiveScope {
     File,
 }
 
+/// Which side of a range a RuboCop-style range helper should expand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RangeSide {
+    Left,
+    Right,
+    Both,
+}
+
+/// Options for [`Cx::range_with_surrounding_space`].
+///
+/// Defaults mirror RuboCop's `RangeHelp#range_with_surrounding_space`:
+/// expand both sides through spaces/tabs and newlines, but not backslash
+/// continuations or arbitrary Unicode whitespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpaceRangeOptions {
+    pub side: RangeSide,
+    pub newlines: bool,
+    pub whitespace: bool,
+    pub continuations: bool,
+}
+
+impl Default for SpaceRangeOptions {
+    fn default() -> Self {
+        Self {
+            side: RangeSide::Both,
+            newlines: true,
+            whitespace: false,
+            continuations: false,
+        }
+    }
+}
+
 fn line_range(source: &str, offset: usize) -> Range {
     let bytes = source.as_bytes();
     let start = bytes[..offset]
@@ -92,6 +124,80 @@ fn line_range(source: &str, offset: usize) -> Range {
         start: start as u32,
         end: end as u32,
     }
+}
+
+fn clamp_range(range: Range, len: usize) -> Range {
+    let start = (range.start as usize).min(len);
+    let end = (range.end as usize).min(len).max(start);
+    Range {
+        start: start as u32,
+        end: end as u32,
+    }
+}
+
+fn range_directions(side: RangeSide) -> (bool, bool) {
+    match side {
+        RangeSide::Left => (true, false),
+        RangeSide::Right => (false, true),
+        RangeSide::Both => (true, true),
+    }
+}
+
+fn move_pos(
+    src: &[u8],
+    mut pos: usize,
+    step: isize,
+    condition: bool,
+    matches: impl Fn(u8) -> bool,
+) -> usize {
+    if !condition {
+        return pos;
+    }
+    if step < 0 {
+        while pos > 0 && matches(src[pos - 1]) {
+            pos -= 1;
+        }
+    } else {
+        while pos < src.len() && matches(src[pos]) {
+            pos += 1;
+        }
+    }
+    pos
+}
+
+fn move_pos_str(src: &[u8], mut pos: usize, step: isize, condition: bool, needle: &[u8]) -> usize {
+    if !condition {
+        return pos;
+    }
+    if step < 0 {
+        while pos >= needle.len() && &src[pos - needle.len()..pos] == needle {
+            pos -= needle.len();
+        }
+    } else {
+        while pos + needle.len() <= src.len() && &src[pos..pos + needle.len()] == needle {
+            pos += needle.len();
+        }
+    }
+    pos
+}
+
+fn final_space_pos(src: &[u8], pos: usize, step: isize, options: SpaceRangeOptions) -> usize {
+    let pos = move_pos(src, pos, step, true, |b| matches!(b, b' ' | b'\t'));
+    let pos = move_pos_str(src, pos, step, options.continuations, b"\\\n");
+    let pos = move_pos(src, pos, step, options.newlines, |b| b == b'\n');
+    move_pos(src, pos, step, options.whitespace, |b| {
+        b.is_ascii_whitespace()
+    })
+}
+
+fn own_line_comment(source: &str, comment: Comment) -> bool {
+    if comment.kind != murphy_ast::CommentKind::Inline {
+        return false;
+    }
+    let line = line_range(source, comment.range.start as usize);
+    source[line.start as usize..comment.range.start as usize]
+        .bytes()
+        .all(|b| matches!(b, b' ' | b'\t'))
 }
 
 fn prefix_has_code(source: &str, end: usize) -> bool {
@@ -2286,6 +2392,95 @@ impl<'a> Cx<'a> {
         toks.get(idx).copied()
     }
 
+    /// Expand `range` to cover the whole source lines it touches.
+    ///
+    /// Mirrors RuboCop's `RangeHelp#range_by_whole_lines`: the start moves
+    /// to the first line's column 0, the end moves to the last line's end,
+    /// and `include_final_newline` includes that line's terminating `\n` if
+    /// it exists. Results are clamped to the file source range.
+    pub fn range_by_whole_lines(&self, range: Range, include_final_newline: bool) -> Range {
+        let source = self.source();
+        let bytes = source.as_bytes();
+        let range = clamp_range(range, bytes.len());
+        let start = bytes[..range.start as usize]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |pos| pos + 1);
+        let end_anchor = if range.end > range.start {
+            range.end as usize - 1
+        } else {
+            range.end as usize
+        };
+        let mut end = bytes[end_anchor..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(bytes.len(), |pos| end_anchor + pos);
+        if end < bytes.len() && bytes[end] == b'\n' && include_final_newline {
+            end += 1;
+        }
+        Range {
+            start: start as u32,
+            end: end as u32,
+        }
+    }
+
+    /// Expand `range` through surrounding whitespace in source bytes.
+    ///
+    /// The scan order intentionally follows RuboCop: spaces/tabs, optional
+    /// backslash-newline continuations, optional newlines, then optional
+    /// general ASCII whitespace.
+    pub fn range_with_surrounding_space(&self, range: Range, options: SpaceRangeOptions) -> Range {
+        let bytes = self.source().as_bytes();
+        let range = clamp_range(range, bytes.len());
+        let (go_left, go_right) = range_directions(options.side);
+        let mut start = range.start as usize;
+        let mut end = range.end as usize;
+        if go_left {
+            start = final_space_pos(bytes, start, -1, options);
+        }
+        if go_right {
+            end = final_space_pos(bytes, end, 1, options);
+        }
+        Range {
+            start: start as u32,
+            end: end as u32,
+        }
+    }
+
+    /// Union a node's source range with immediately preceding own-line
+    /// comments.
+    ///
+    /// RuboCop uses `processed_source.ast_with_comments[node]`. Murphy does
+    /// not yet have parser-compatible comment association, so this helper
+    /// takes the conservative subset layout cops commonly need: contiguous
+    /// `#` comment lines directly above the node.
+    pub fn range_with_comments(&self, id: NodeId) -> Range {
+        let source = self.source();
+        let mut result = self.range(id);
+        for &comment in self.comments().iter().rev() {
+            if comment.range.end > result.start {
+                continue;
+            }
+            if !own_line_comment(source, comment) {
+                continue;
+            }
+            let comment_line = line_range(source, comment.range.start as usize);
+            let result_line_start = line_range(source, result.start as usize).start;
+            let comment_line_end = comment_line.end;
+            if comment_line_end != result_line_start {
+                break;
+            }
+            result.start = comment_line.start;
+        }
+        result
+    }
+
+    /// Compose [`Self::range_with_comments`] and [`Self::range_by_whole_lines`]
+    /// with RuboCop's `include_final_newline: true` convention.
+    pub fn range_with_comments_and_lines(&self, id: NodeId) -> Range {
+        self.range_by_whole_lines(self.range_with_comments(id), true)
+    }
+
     /// Decode the current cop's runtime options.
     pub fn options<T: CopOptions>(&self) -> Result<T, ConfigError> {
         let bytes = unsafe { self.raw.options_json.as_bytes() };
@@ -2615,6 +2810,192 @@ mod tests {
         assert_eq!(directives[0].scope, CommentDirectiveScope::File);
         assert_eq!(directives[0].cop, None);
         assert_eq!(cx.raw_source(directives[0].affected_range), source);
+    }
+
+    fn cx_for_source(source: &str) -> (Ast, FnTable) {
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        (ast, fns)
+    }
+
+    #[test]
+    fn range_help_range_by_whole_lines_expands_to_line_bounds() {
+        let (ast, fns) = cx_for_source("alpha\n  beta\ngamma");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_by_whole_lines(Range { start: 8, end: 10 }, false);
+
+        assert_eq!(range, Range { start: 6, end: 12 });
+        assert_eq!(cx.raw_source(range), "  beta");
+    }
+
+    #[test]
+    fn range_help_range_by_whole_lines_can_include_final_newline() {
+        let (ast, fns) = cx_for_source("alpha\n  beta\ngamma");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_by_whole_lines(Range { start: 8, end: 10 }, true);
+
+        assert_eq!(range, Range { start: 6, end: 13 });
+        assert_eq!(cx.raw_source(range), "  beta\n");
+    }
+
+    #[test]
+    fn range_help_range_by_whole_lines_respects_half_open_line_boundary_end() {
+        let (ast, fns) = cx_for_source("alpha\nbeta\n");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_by_whole_lines(Range { start: 0, end: 6 }, false);
+
+        assert_eq!(range, Range { start: 0, end: 5 });
+        assert_eq!(cx.raw_source(range), "alpha");
+    }
+
+    #[test]
+    fn range_help_range_with_surrounding_space_matches_rubocop_defaults() {
+        let (ast, fns) = cx_for_source("foo  +\n  bar");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx
+            .range_with_surrounding_space(Range { start: 5, end: 6 }, SpaceRangeOptions::default());
+
+        assert_eq!(range, Range { start: 3, end: 7 });
+        assert_eq!(cx.raw_source(range), "  +\n");
+    }
+
+    #[test]
+    fn range_help_range_with_surrounding_space_honors_side_and_no_newlines() {
+        let (ast, fns) = cx_for_source("foo  +\n  bar");
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_with_surrounding_space(
+            Range { start: 5, end: 6 },
+            SpaceRangeOptions {
+                side: RangeSide::Left,
+                newlines: false,
+                continuations: false,
+                whitespace: false,
+            },
+        );
+
+        assert_eq!(range, Range { start: 3, end: 6 });
+        assert_eq!(cx.raw_source(range), "  +");
+    }
+
+    #[test]
+    fn range_help_range_with_comments_includes_adjacent_own_line_comments() {
+        let source = concat!(
+            "# doc one\n",
+            "# doc two\n",
+            "def m\n",
+            "  puts 1\n",
+            "end\n"
+        );
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_with_comments(cx.root());
+
+        assert_eq!(
+            cx.raw_source(range),
+            "# doc one\n# doc two\ndef m\n  puts 1\nend"
+        );
+    }
+
+    #[test]
+    fn range_help_range_with_comments_includes_comments_for_non_root_node() {
+        let source = concat!(
+            "class C\n",
+            "  # doc one\n",
+            "  # doc two\n",
+            "  def m\n",
+            "    puts 1\n",
+            "  end\n",
+            "end\n"
+        );
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let def = cx
+            .descendants(cx.root())
+            .into_iter()
+            .find(|&id| matches!(cx.kind(id), NodeKind::Def { .. }))
+            .expect("def node");
+
+        let range = cx.range_with_comments(def);
+
+        assert_eq!(
+            cx.raw_source(range),
+            "  # doc one\n  # doc two\n  def m\n    puts 1\n  end"
+        );
+    }
+
+    #[test]
+    fn range_help_range_with_comments_and_lines_includes_final_newline() {
+        let source = concat!(
+            "# doc one\n",
+            "# doc two\n",
+            "def m\n",
+            "  puts 1\n",
+            "end\n"
+        );
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_with_comments_and_lines(cx.root());
+
+        assert_eq!(cx.raw_source(range), source);
+    }
+
+    #[test]
+    fn range_help_range_with_comments_ignores_inline_comments() {
+        let source = "foo # inline\nbar\n";
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_with_comments(cx.root());
+
+        assert_eq!(cx.raw_source(range), "foo # inline\nbar");
+    }
+
+    #[test]
+    fn range_help_range_with_comments_stops_at_blank_line() {
+        let source = concat!("# doc\n", "\n", "def m\n", "end\n");
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let range = cx.range_with_comments(cx.root());
+
+        assert_eq!(cx.raw_source(range), "def m\nend");
+    }
+
+    #[test]
+    fn range_help_range_by_whole_lines_handles_heredoc_body_and_end_lines() {
+        let source = "value = <<~TEXT\n  body\nTEXT\n";
+        let (ast, fns) = cx_for_source(source);
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let heredoc_end = cx
+            .sorted_tokens()
+            .iter()
+            .find(|tok| tok.kind == murphy_ast::SourceTokenKind::HeredocEnd)
+            .expect("heredoc end token");
+
+        let range = cx.range_by_whole_lines(heredoc_end.range, true);
+
+        assert_eq!(cx.raw_source(range), "TEXT\n");
     }
 
     #[test]
