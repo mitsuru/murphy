@@ -587,6 +587,7 @@ fn run_cop_with_options_and_edits_json<T: NodeCop + Default>(
     options_json: &str,
 ) -> CapturedRun {
     let ast = murphy_translate::translate(source, "t.rb");
+    let var_model = crate::var_semantic_model::VarSemanticModel::build(&ast);
     let cop = T::default();
     let cop_name = RawSlice::from_str(<T as Cop>::NAME);
     let sink = RefCell::new(Sink {
@@ -606,7 +607,7 @@ fn run_cop_with_options_and_edits_json<T: NodeCop + Default>(
         ptr: options_json.as_ptr(),
         len: options_json.len(),
     };
-    let raw = cx_raw_for(&ast, &fns, cop_name, &sink, options_slice);
+    let raw = cx_raw_for(&ast, &fns, cop_name, &sink, options_slice, &var_model);
     let cx = unsafe { Cx::from_raw(&raw) };
 
     if T::KINDS.is_empty() {
@@ -702,15 +703,16 @@ fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
     corrected
 }
 
-/// Build a `CxRaw` borrowing from `ast`, `fns`, `sink`, and the caller's
-/// per-test options JSON blob. The returned value contains raw pointers;
-/// the caller keeps all four alive for the duration of the dispatch.
+/// Build a `CxRaw` borrowing from `ast`, `fns`, `sink`, `var_model`, and the
+/// caller's per-test options JSON blob. The returned value contains raw
+/// pointers; the caller keeps all five alive for the duration of the dispatch.
 fn cx_raw_for(
     ast: &Ast,
     fns: &FnTable,
     cop_name: RawSlice,
     sink: &RefCell<Sink>,
     options_json: RawSlice,
+    var_model: &crate::var_semantic_model::VarSemanticModel,
 ) -> CxRaw {
     let p = ast.raw_parts();
     CxRaw {
@@ -737,6 +739,7 @@ fn cx_raw_for(
         call_closing_locs_len: p.call_closing_locs.len(),
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
+        var_model: var_model as *const crate::var_semantic_model::VarSemanticModel,
     }
 }
 

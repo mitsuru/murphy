@@ -31,6 +31,7 @@
 use std::ffi::c_void;
 
 use murphy_ast::{Ast, NodeId, NodeKind};
+use murphy_plugin_api::var_semantic_model::VarSemanticModel;
 use murphy_plugin_api::{
     CxRaw, FnTable, NodeKindTag as PluginNodeKindTag, PluginCopV1, RawEdit, RawOffense, RawSlice,
     SEVERITY_UNSET,
@@ -164,7 +165,7 @@ impl DispatchIndex {
 
 /// Build the `CxRaw` template used for every dispatch call in one run. Only
 /// `cop_name` is restamped per cop (and `sink` is the host's, shared).
-fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink) -> CxRaw {
+fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink, var_model: &VarSemanticModel) -> CxRaw {
     let p = ast.raw_parts();
     CxRaw {
         nodes: p.nodes.as_ptr(),
@@ -190,6 +191,7 @@ fn build_cx_raw(ast: &Ast, sink: &mut OffenseSink) -> CxRaw {
         call_closing_locs_len: p.call_closing_locs.len(),
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
+        var_model: var_model as *const VarSemanticModel,
     }
 }
 
@@ -226,8 +228,9 @@ pub fn run_cops_with_options(
     sink: &mut OffenseSink,
     mut options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
+    let var_model = VarSemanticModel::build(ast);
     let index = DispatchIndex::build(ast);
-    let mut base = build_cx_raw(ast, sink);
+    let mut base = build_cx_raw(ast, sink, &var_model);
     for cop in cops {
         base.cop_name = cop.name;
         let name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("");

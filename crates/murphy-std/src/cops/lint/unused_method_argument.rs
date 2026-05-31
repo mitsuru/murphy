@@ -52,8 +52,6 @@
 //! - **Blockarg**: remove the whole `&blk` (and the preceding comma if
 //!   any), matching RuboCop's blockarg autocorrect.
 
-use std::collections::HashSet;
-
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, Symbol, cop};
 
 #[derive(Default)]
@@ -112,8 +110,6 @@ impl UnusedMethodArgument {
             return;
         }
 
-        let reads = lvar_reads(cx, body);
-
         let NodeKind::Args(list) = *cx.kind(args) else {
             return;
         };
@@ -124,9 +120,35 @@ impl UnusedMethodArgument {
                 continue;
             };
             let name_str = cx.symbol_str(name);
-            if name_str.is_empty() || name_str.starts_with('_') || reads.contains(name_str) {
+            if name_str.is_empty() || name_str.starts_with('_') {
                 continue;
             }
+
+            // Primary check: use VarSemanticModel for same-scope references.
+            // This correctly handles `x += 1` (OpAsgn implicit read) which
+            // `Lvar` scanning misses.
+            let model_used = cx
+                .var_model()
+                .and_then(|m| m.scope(node))
+                .and_then(|s| {
+                    s.variables()
+                        .iter()
+                        .find(|v| v.name == name && v.is_argument)
+                })
+                .map(|v| !v.references.is_empty())
+                .unwrap_or(false);
+
+            // Fallback: scan body descendants for Lvar reads. This catches
+            // cross-scope reads (e.g. args used only inside a nested block),
+            // which the model won't see in the def scope. Reads inside a
+            // nested scope that re-declares `name` as an argument are skipped
+            // — there the name shadows this method argument.
+            let is_used = model_used || lvar_reads_excluding_shadowed(cx, body, name);
+
+            if is_used {
+                continue;
+            }
+
             // `&blk` on a method that yields is implicitly used.
             if has_yield && matches!(param_kind, NodeKind::Blockarg(_)) {
                 continue;
@@ -177,14 +199,53 @@ fn emit_autocorrect(
     }
 }
 
-fn lvar_reads<'a>(cx: &Cx<'a>, body: NodeId) -> HashSet<&'a str> {
-    std::iter::once(body)
-        .chain(cx.descendants(body))
-        .filter_map(|id| match *cx.kind(id) {
-            NodeKind::Lvar(s) => Some(cx.symbol_str(s)),
-            _ => None,
-        })
-        .collect()
+/// Whether `body` contains an `Lvar` read of `name`, skipping reads inside
+/// nested scopes that re-declare `name` as an argument (shadowing). Those
+/// reads refer to the inner argument, not the method argument under test, so
+/// they must not mark the method argument as used. Requires the
+/// `VarSemanticModel` to detect which scopes redeclare `name`; when the model
+/// is unavailable the scan is conservative and counts every read (no shadow
+/// detection), preserving the prior "any read uses the arg" behaviour.
+fn lvar_reads_excluding_shadowed(cx: &Cx<'_>, body: NodeId, name: Symbol) -> bool {
+    let model = cx.var_model();
+    let mut stack = vec![body];
+    while let Some(id) = stack.pop() {
+        let kind = *cx.kind(id);
+        if let NodeKind::Lvar(n) = kind
+            && n == name
+        {
+            return true;
+        }
+        // At scope boundaries: if the scope redeclares `name` as an argument,
+        // skip its entire subtree (reads there refer to the inner arg). This
+        // applies even when `body` itself is the boundary (a method whose only
+        // statement is a block redeclaring `name`).
+        let is_scope_boundary = matches!(
+            kind,
+            NodeKind::Def { .. }
+                | NodeKind::Defs { .. }
+                | NodeKind::Block { .. }
+                | NodeKind::Numblock { .. }
+                | NodeKind::Itblock { .. }
+                | NodeKind::Lambda
+                | NodeKind::Class { .. }
+                | NodeKind::Module { .. }
+                | NodeKind::Sclass { .. }
+        );
+        if is_scope_boundary
+            && let Some(m) = model
+            && let Some(scope) = m.scope(id)
+            && scope
+                .variables()
+                .iter()
+                .any(|v| v.name == name && v.is_argument)
+        {
+            // This scope re-declares `name`: skip its subtree entirely.
+            continue;
+        }
+        stack.extend(cx.children(id));
+    }
+    false
 }
 
 /// Whether `body` (a method body) contains a `yield` that would
@@ -554,6 +615,46 @@ mod tests {
         test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
             def method(arg)
               fail
+            end
+        "#});
+    }
+
+    // VarSemanticModel migration: cross-scope read — arg used inside a block.
+    // The model only tracks same-scope references; the lvar-scan fallback
+    // handles this case so no false-positive offense is emitted.
+    #[test]
+    fn arg_used_only_inside_nested_block_is_not_flagged() {
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
+            def foo(x)
+              [1].each { puts x }
+            end
+        "#});
+    }
+
+    // VarSemanticModel migration: a method arg shadowed by an inner block
+    // parameter of the same name is still unused — the read inside the block
+    // refers to the inner `|x|`, not the method's `x`.
+    #[test]
+    fn arg_shadowed_by_inner_block_is_flagged() {
+        test::<UnusedMethodArgument>().expect_offense(indoc! {r#"
+            def foo(x)
+                    ^ Unused method argument
+              [1].each do |x|
+                puts x
+              end
+            end
+        "#});
+    }
+
+    // VarSemanticModel migration: compound-assign is an implicit read.
+    // `x += 1` parses as OpAsgn with no explicit Lvar node, so the old
+    // lvar-scan missed it.  The model's reference tracking catches it.
+    #[test]
+    fn arg_used_via_op_assign_is_not_flagged() {
+        test::<UnusedMethodArgument>().expect_no_offenses(indoc! {r#"
+            def foo(x)
+              x += 1
+              x
             end
         "#});
     }

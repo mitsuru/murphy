@@ -31,6 +31,7 @@ mod parse;
 pub mod plugin_loader;
 pub mod plugin_resolver;
 mod registry;
+// var_semantic_model has been moved to murphy-plugin-api
 
 pub use aggregator::{aggregate, aggregate_with_config};
 pub use autocorrect::{

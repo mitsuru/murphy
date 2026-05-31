@@ -28,6 +28,7 @@ pub mod method_predicates;
 mod node_cop;
 mod options;
 mod severity;
+pub mod var_semantic_model;
 
 /// Parser-driven cop test harness. Available only when the
 /// `test-support` feature is enabled (typically as a plugin pack's
