@@ -261,6 +261,8 @@ mod tests {
             call_operator_locs: p.call_operator_locs.as_ptr(),
             call_operator_locs_len: p.call_operator_locs.len(),
             var_model: std::ptr::null(),
+            magic_comments: p.magic_comments.as_ptr(),
+            magic_comments_len: p.magic_comments.len(),
         }
     }
 

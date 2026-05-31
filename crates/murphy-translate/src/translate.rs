@@ -1,7 +1,8 @@
 //! 再帰ポストオーダー DFS による prism→arena 変換。
 
 use murphy_ast::{
-    Ast, AstBuilder, NodeId, NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind,
+    Ast, AstBuilder, MagicComment, MagicCommentKind, NodeId, NodeKind, OptNodeId, Range,
+    SourceToken, SourceTokenKind,
 };
 use murphy_prism as prism;
 use std::path::PathBuf;
@@ -39,6 +40,7 @@ pub fn translate(source: &str, path: impl Into<PathBuf>) -> Ast {
         };
         t.builder.add_comment(range, kind);
     }
+    t.add_magic_comments(result.parse());
     t.builder.finish(root)
 }
 
@@ -47,6 +49,89 @@ struct Translator {
 }
 
 impl Translator {
+    fn add_magic_comments(&mut self, parse: &prism::ParseResult<'_>) {
+        let source = parse.source();
+        if source.starts_with(b"#!") {
+            self.builder.add_magic_comment(MagicComment {
+                range: Self::line_range(source, 0),
+                key_range: Range::ZERO,
+                value_range: Range::ZERO,
+                kind: MagicCommentKind::Shebang,
+                value_bool: 0,
+            });
+        }
+
+        for comment in parse.magic_comments() {
+            let Some(key_range) = Self::slice_range(source, comment.key()) else {
+                continue;
+            };
+            let Some(value_range) = Self::slice_range(source, comment.value()) else {
+                continue;
+            };
+            let Some(kind) = Self::magic_comment_kind(comment.key()) else {
+                continue;
+            };
+            self.builder.add_magic_comment(MagicComment {
+                range: Self::line_range(source, key_range.start as usize),
+                key_range,
+                value_range,
+                kind,
+                value_bool: u8::from(
+                    kind == MagicCommentKind::FrozenStringLiteral
+                        && comment.value().eq_ignore_ascii_case(b"true"),
+                ),
+            });
+        }
+    }
+
+    fn magic_comment_kind(key: &[u8]) -> Option<MagicCommentKind> {
+        let normalized: Vec<u8> = key
+            .iter()
+            .map(|b| match b {
+                b'-' => b'_',
+                b'A'..=b'Z' => b + 32,
+                _ => *b,
+            })
+            .collect();
+        match normalized.as_slice() {
+            b"frozen_string_literal" => Some(MagicCommentKind::FrozenStringLiteral),
+            b"encoding" => Some(MagicCommentKind::Encoding),
+            _ => None,
+        }
+    }
+
+    fn slice_range(source: &[u8], slice: &[u8]) -> Option<Range> {
+        let source_start = source.as_ptr() as usize;
+        let slice_start = slice.as_ptr() as usize;
+        let start = slice_start.checked_sub(source_start)?;
+        let end = start.checked_add(slice.len())?;
+        if end > source.len() {
+            return None;
+        }
+        Some(Range {
+            start: start as u32,
+            end: end as u32,
+        })
+    }
+
+    fn line_range(source: &[u8], offset: usize) -> Range {
+        let start = source[..offset]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |pos| pos + 1);
+        let mut end = source[offset..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(source.len(), |pos| offset + pos);
+        if end > start && source[end - 1] == b'\r' {
+            end -= 1;
+        }
+        Range {
+            start: start as u32,
+            end: end as u32,
+        }
+    }
+
     fn source_token_kind(kind: prism::pm_token_type_t) -> SourceTokenKind {
         match kind {
             prism::PM_TOKEN_PARENTHESIS_LEFT | prism::PM_TOKEN_PARENTHESIS_LEFT_PARENTHESES => {
@@ -1559,7 +1644,41 @@ impl Translator {
 #[cfg(test)]
 mod tests {
     use super::translate;
-    use murphy_ast::NodeKind;
+    use murphy_ast::{MagicCommentKind, NodeKind};
+
+    #[test]
+    fn translates_structured_magic_comments() {
+        let src = "#!/usr/bin/env ruby\n# frozen_string_literal: true\n# encoding: utf-8\nnil\n";
+        let ast = translate(src, "t.rb");
+        let comments = ast.magic_comments();
+
+        assert_eq!(comments.len(), 3);
+        assert_eq!(comments[0].kind, MagicCommentKind::Shebang);
+        assert_eq!(ast.raw_source(comments[0].range), "#!/usr/bin/env ruby");
+        assert_eq!(comments[1].kind, MagicCommentKind::FrozenStringLiteral);
+        assert_eq!(
+            ast.raw_source(comments[1].key_range),
+            "frozen_string_literal"
+        );
+        assert_eq!(ast.raw_source(comments[1].value_range), "true");
+        assert_eq!(comments[1].value_bool, 1);
+        assert_eq!(comments[2].kind, MagicCommentKind::Encoding);
+        assert_eq!(ast.raw_source(comments[2].key_range), "encoding");
+        assert_eq!(ast.raw_source(comments[2].value_range), "utf-8");
+    }
+
+    #[test]
+    fn translates_false_frozen_string_literal_magic_comment() {
+        let ast = translate("# frozen_string_literal: false\nnil\n", "t.rb");
+        let comment = ast
+            .magic_comments()
+            .iter()
+            .find(|comment| comment.kind == MagicCommentKind::FrozenStringLiteral)
+            .expect("frozen_string_literal comment");
+
+        assert_eq!(ast.raw_source(comment.value_range), "false");
+        assert_eq!(comment.value_bool, 0);
+    }
 
     #[test]
     fn empty_program_root_is_nil() {

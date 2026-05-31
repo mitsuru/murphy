@@ -68,6 +68,8 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable) -> CxRaw {
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
         var_model: std::ptr::null(),
+        magic_comments: p.magic_comments.as_ptr(),
+        magic_comments_len: p.magic_comments.len(),
     }
 }
 
@@ -112,6 +114,8 @@ fn cx_raw_for_with_options_json<'a>(
         call_operator_locs: p.call_operator_locs.as_ptr(),
         call_operator_locs_len: p.call_operator_locs.len(),
         var_model: std::ptr::null(),
+        magic_comments: p.magic_comments.as_ptr(),
+        magic_comments_len: p.magic_comments.len(),
     }
 }
 

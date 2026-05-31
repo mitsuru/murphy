@@ -6,7 +6,8 @@
 use std::ffi::c_void;
 
 use murphy_ast::{
-    AstNode, CallClosingLoc, CallOperatorLoc, Comment, NodeId, NodeKindTag, Range, SourceToken,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, MagicComment, NodeId, NodeKindTag, Range,
+    SourceToken,
 };
 
 /// The ABI's borrowed-slice primitive: a `#[repr(C)]` pointer+length pair.
@@ -183,6 +184,9 @@ pub struct CxRaw {
     pub call_operator_locs_len: usize,
     /// File-level variable scope model. Always non-null during native cop dispatch.
     pub var_model: *const crate::var_semantic_model::VarSemanticModel,
+    /// Structured file-level magic comments.
+    pub magic_comments: *const MagicComment,
+    pub magic_comments_len: usize,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -202,6 +206,10 @@ pub struct CxRaw {
 /// `*const VarSemanticModel` tail-appended at offset 200. Plugins built
 /// against v1–v3 must be rejected so they never observe a layout they
 /// were not compiled against.
+///
+/// es99.10 tail-appended `magic_comments`/`magic_comments_len` under the
+/// evolving-v1 lockstep policy. Do not bump this constant without explicit
+/// approval.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -394,7 +402,9 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, call_operator_locs_len), 192);
         // es99.5: var_model appended after call_operator_locs_len
         assert_eq!(offset_of!(CxRaw, var_model), 200);
-        assert_eq!(size_of::<CxRaw>(), 208);
+        assert_eq!(offset_of!(CxRaw, magic_comments), 208);
+        assert_eq!(offset_of!(CxRaw, magic_comments_len), 216);
+        assert_eq!(size_of::<CxRaw>(), 224);
     }
 
     #[test]

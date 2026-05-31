@@ -3,8 +3,8 @@
 use std::marker::PhantomData;
 
 use murphy_ast::{
-    AstNode, CallClosingLoc, CallOperatorLoc, Comment, NodeId, NodeKind, OptNodeId, Range,
-    SourceToken, SourceTokenKind, collect_children, slot_layout,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, MagicComment, MagicCommentKind, NodeId,
+    NodeKind, OptNodeId, Range, SourceToken, SourceTokenKind, collect_children, slot_layout,
 };
 
 use crate::abi::CxRaw;
@@ -483,6 +483,12 @@ impl<'a> Cx<'a> {
 
     fn call_operator_locs(&self) -> &'a [CallOperatorLoc] {
         unsafe { slice(self.raw.call_operator_locs, self.raw.call_operator_locs_len) }
+    }
+
+    fn find_magic_comment(&self, kind: MagicCommentKind) -> Option<&'a MagicComment> {
+        self.magic_comments()
+            .iter()
+            .find(|comment| comment.kind == kind)
     }
 
     fn call_operator_range(&self, id: NodeId) -> Range {
@@ -2326,6 +2332,26 @@ impl<'a> Cx<'a> {
         unsafe { slice(self.raw.comments, self.raw.comments_len) }
     }
 
+    /// The file's structured magic comments, in source order.
+    pub fn magic_comments(&self) -> &'a [MagicComment] {
+        unsafe { slice(self.raw.magic_comments, self.raw.magic_comments_len) }
+    }
+
+    /// The file's shebang line, if present.
+    pub fn shebang(&self) -> Option<&'a MagicComment> {
+        self.find_magic_comment(MagicCommentKind::Shebang)
+    }
+
+    /// The file's `frozen_string_literal` magic comment, if present.
+    pub fn frozen_string_literal_comment(&self) -> Option<&'a MagicComment> {
+        self.find_magic_comment(MagicCommentKind::FrozenStringLiteral)
+    }
+
+    /// The file's `encoding` magic comment, if present.
+    pub fn encoding_comment(&self) -> Option<&'a MagicComment> {
+        self.find_magic_comment(MagicCommentKind::Encoding)
+    }
+
     /// Parsed `murphy:`/`rubocop:` disable, enable, and todo directives from
     /// the file's comment table.
     pub fn comment_directives(&self) -> Vec<CommentDirective<'a>> {
@@ -2564,7 +2590,7 @@ mod tests {
     use super::*;
     use crate::CopOptions;
     use crate::abi::{CxRaw, FnTable, RawEdit, RawOffense, RawSlice};
-    use murphy_ast::{Ast, AstBuilder, NodeKind, OptNodeId, Range};
+    use murphy_ast::{Ast, AstBuilder, MagicCommentKind, NodeKind, OptNodeId, Range};
 
     /// Build `return nil` and return the owned `Ast` (kept alive by the
     /// caller) plus the root id.
@@ -2612,7 +2638,34 @@ mod tests {
             call_operator_locs: p.call_operator_locs.as_ptr(),
             call_operator_locs_len: p.call_operator_locs.len(),
             var_model: std::ptr::null(),
+            magic_comments: p.magic_comments.as_ptr(),
+            magic_comments_len: p.magic_comments.len(),
         }
+    }
+
+    #[test]
+    fn magic_comment_helpers_expose_structured_file_metadata() {
+        let src = "#!/usr/bin/env ruby\n# frozen_string_literal: true\n# encoding: utf-8\nnil\n";
+        let ast = murphy_translate::translate(src, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(cx.magic_comments().len(), 3);
+        assert_eq!(
+            cx.shebang().map(|c| c.kind),
+            Some(MagicCommentKind::Shebang)
+        );
+        let frozen = cx
+            .frozen_string_literal_comment()
+            .expect("frozen_string_literal comment");
+        assert_eq!(cx.raw_source(frozen.value_range), "true");
+        assert_eq!(frozen.value_bool, 1);
+        let encoding = cx.encoding_comment().expect("encoding comment");
+        assert_eq!(cx.raw_source(encoding.value_range), "utf-8");
     }
 
     #[derive(Default)]

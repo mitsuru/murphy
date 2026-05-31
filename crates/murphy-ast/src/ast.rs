@@ -2,8 +2,8 @@
 
 use crate::interner::Interner;
 use crate::node::{
-    AstNode, CallClosingLoc, CallOperatorLoc, Comment, NodeId, NodeKind, NodeList, NodeLoc,
-    OptNodeId, Range, SourceBuffer, SourceToken,
+    AstNode, CallClosingLoc, CallOperatorLoc, Comment, MagicComment, NodeId, NodeKind, NodeList,
+    NodeLoc, OptNodeId, Range, SourceBuffer, SourceToken,
 };
 
 #[inline]
@@ -696,6 +696,7 @@ pub struct Ast {
     pub(crate) node_lists: Vec<NodeId>,
     pub(crate) interner: Interner,
     pub(crate) comments: Vec<Comment>,
+    pub(crate) magic_comments: Vec<MagicComment>,
     pub(crate) source_tokens: Vec<SourceToken>,
     pub(crate) call_closing_locs: Vec<CallClosingLoc>,
     pub(crate) call_operator_locs: Vec<CallOperatorLoc>,
@@ -816,6 +817,11 @@ impl Ast {
         &self.comments
     }
 
+    /// The structured magic comments, in source order.
+    pub fn magic_comments(&self) -> &[MagicComment] {
+        &self.magic_comments
+    }
+
     /// The source tokens, in source order.
     pub fn sorted_tokens(&self) -> &[SourceToken] {
         &self.source_tokens
@@ -850,6 +856,7 @@ impl Ast {
             interner_blob: &self.interner.blob,
             interner_offsets: &self.interner.offsets,
             comments: &self.comments,
+            magic_comments: &self.magic_comments,
             sorted_tokens: &self.source_tokens,
             call_closing_locs: &self.call_closing_locs,
             call_operator_locs: &self.call_operator_locs,
@@ -873,6 +880,8 @@ pub struct AstRawParts<'a> {
     pub interner_offsets: &'a [Range],
     /// The source comments, in source order.
     pub comments: &'a [Comment],
+    /// The structured magic comments, in source order.
+    pub magic_comments: &'a [MagicComment],
     /// The source tokens, in source order.
     pub sorted_tokens: &'a [SourceToken],
     /// Sparse parser-provided closing parens for call nodes.
