@@ -1104,13 +1104,6 @@ impl Translator {
     }
 
     /// Translate a pattern-matching pattern node (the thing after `in`).
-    ///
-    /// v1 supports `ArrayPatternNode` / `HashPatternNode` and the bindings
-    /// inside them (`LocalVariableTargetNode` → `MatchVar`). Unsupported
-    /// pattern kinds — `FindPatternNode`, `MatchAsNode` (`=> x`),
-    /// `AlternationPatternNode` (`a | b`), splat rest (`*rest`), and pins
-    /// (`^x`) — have no dedicated `NodeKind` variant yet and fall back to
-    /// `translate_node`, which lands them on `Unknown` (documented deferred).
     fn translate_pattern(&mut self, node: &prism::Node<'_>) -> NodeId {
         let range = Self::node_range(node);
         if let Some(ap) = node.as_array_pattern_node() {
@@ -1134,8 +1127,10 @@ impl Translator {
             return self.builder.push(NodeKind::ArrayPattern(list), range);
         }
         if let Some(hp) = node.as_hash_pattern_node() {
-            // parser-gem: `(hash_pattern <pair>...)`. Lean on the existing
-            // Assoc translation for `{a:, b: x}` elements; rest is Unknown.
+            // parser-gem: `(hash_pattern <pair>...)`. Route elements through
+            // translate_pattern_element so that hash values are translated as
+            // patterns (not via translate_node which would yield Unknown for
+            // pattern-only constructs like `{a: Integer}` or `{a:}`).
             let mut ids: Vec<NodeId> = hp
                 .elements()
                 .iter()
@@ -1147,16 +1142,40 @@ impl Translator {
             let list = self.builder.push_list(&ids);
             return self.builder.push(NodeKind::HashPattern(list), range);
         }
+        if let Some(fp) = node.as_find_pattern_node() {
+            // parser-gem: `(find_pattern <left_rest> <elem>... <right_rest>)`.
+            // `left()` and `right()` are SplatNodes (the `*` anchors).
+            // `requireds()` is the inner elements list.
+            let left = self.translate_node(&fp.left().as_node());
+            let mut ids = vec![left];
+            ids.extend(
+                fp.requireds()
+                    .iter()
+                    .map(|e| self.translate_pattern_element(&e)),
+            );
+            let right = self.translate_node(&fp.right());
+            ids.push(right);
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::FindPattern(list), range);
+        }
+        if let Some(alt) = node.as_alternation_pattern_node() {
+            // parser-gem: `(match_alt <left> <right>)`.
+            let left = self.translate_pattern(&alt.left());
+            let right = self.translate_pattern(&alt.right());
+            return self.builder.push(NodeKind::MatchAlt { left, right }, range);
+        }
         // Bare top-level pattern (e.g. `in x` with no brackets is wrapped in
         // an ArrayPattern by prism, so this path is for atoms / unsupported
-        // kinds): route through the element translator.
+        // kinds like MatchAs/Pin): route through the element translator.
         self.translate_pattern_element(node)
     }
 
     /// Translate a single element inside a pattern (an array/hash pattern
     /// member). A `LocalVariableTargetNode` is a binding → `MatchVar`
-    /// (parser-gem `(match_var :name)`). Everything else (literals, nested
-    /// patterns, unsupported kinds) routes through the general translators.
+    /// (parser-gem `(match_var :name)`). An `AssocNode` inside a hash pattern
+    /// gets its value translated as a pattern so that `{a: Integer}` and `{a:}`
+    /// produce the right shapes. Everything else routes through general
+    /// translators.
     fn translate_pattern_element(&mut self, node: &prism::Node<'_>) -> NodeId {
         if let Some(t) = node.as_local_variable_target_node() {
             let name = self.sym(&t.name());
@@ -1164,10 +1183,39 @@ impl Translator {
                 .builder
                 .push(NodeKind::MatchVar(name), Self::node_range(node));
         }
-        if node.as_array_pattern_node().is_some() || node.as_hash_pattern_node().is_some() {
+        if let Some(assoc) = node.as_assoc_node() {
+            // Hash pattern element: `{a: Integer}` or shorthand `{a:}`.
+            // In prism, shorthand `{a:}` yields an AssocNode whose value is a
+            // `LocalVariableTargetNode` (the implicit binding). Detect that and
+            // emit `(match_var :a)` per parser-gem. For non-shorthand, route the
+            // value through translate_pattern so nested patterns like `Integer`
+            // are correctly rendered instead of falling to Unknown.
+            let range = Self::node_range(node);
+            let key = self.translate_node(&assoc.key());
+            let value_node = assoc.value();
+            // Shorthand `{a:}` in prism: AssocNode whose value is an
+            // `ImplicitNode` wrapping a `LocalVariableTargetNode`.
+            let inner_target = value_node
+                .as_implicit_node()
+                .and_then(|imp| imp.value().as_local_variable_target_node());
+            let value = if let Some(t) = inner_target {
+                // Shorthand `{a:}` — the binding side is a match_var.
+                let name = self.sym(&t.name());
+                self.builder
+                    .push(NodeKind::MatchVar(name), Self::node_range(&value_node))
+            } else {
+                self.translate_pattern(&value_node)
+            };
+            return self.builder.push(NodeKind::Pair { key, value }, range);
+        }
+        if node.as_array_pattern_node().is_some()
+            || node.as_hash_pattern_node().is_some()
+            || node.as_find_pattern_node().is_some()
+            || node.as_alternation_pattern_node().is_some()
+        {
             return self.translate_pattern(node);
         }
-        // Literals / nested constants / unsupported kinds.
+        // Literals / nested constants / unsupported kinds (MatchAs, Pin etc).
         self.translate_node(node)
     }
 
@@ -3297,19 +3345,90 @@ mod tests {
 
     #[test]
     fn unsupported_pattern_kinds_fall_to_unknown() {
-        // FindPattern / MatchAs / MatchAlt / MatchRest / Pin have no NodeKind
-        // variant in v1, so the in-clause pattern is Unknown (documented
-        // deferred). The surrounding case_match/in_pattern still translate.
+        // MatchAs(`=>`)/MatchRest(`*rest`)/Pin(`^x`) have no prism binding
+        // in v1, so they remain Unknown. The surrounding case_match/in_pattern
+        // still translate.
         for src in [
-            "case x\nin [*, a, *]\n  a\nend\n",    // find pattern
-            "case x\nin Integer => n\n  n\nend\n", // match-as / capture
-            "case x\nin 1 | 2\n  a\nend\n",        // alternation
-            "case x\nin ^foo\n  a\nend\n",         // pin
+            "case x\nin Integer => n\n  n\nend\n", // match-as / capture (no prism binding)
+            "case x\nin [*rest]\n  a\nend\n",      // match-rest splat (no prism binding)
+            "case x\nin ^foo\n  a\nend\n",         // pin (no prism binding)
         ] {
             let ast = translate(src, "t.rb");
             let sexp = murphy_ast::ast_to_sexp(&ast);
             assert!(sexp.starts_with("(case_match\n"), "{src}: {sexp}");
             assert!(sexp.contains("(in_pattern"), "{src}: {sexp}");
         }
+    }
+
+    #[test]
+    fn translates_find_pattern() {
+        // `[*, a, *]` — FindPatternNode: pre rests + requireds + post rest.
+        // The `*` anchors (left/right SplatNodes) go through translate_node —
+        // v1 has no MatchRest NodeKind, so they become `(splat (unknown))`
+        // per the documented MatchRest deferral.
+        let ast = translate("case x\nin [*, a, *]\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(find_pattern"),
+            "find_pattern expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(match_var :a)"),
+            "inner match_var expected: {sexp}"
+        );
+        // Pin the v1 anchor shape: SplatNode translates to `(splat (unknown))`
+        // since the inner `*` has no lowering target yet.
+        assert!(
+            sexp.contains("(splat"),
+            "splat anchors expected in find_pattern: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_alternation_pattern() {
+        // `1 | 2` — AlternationPatternNode: left/right.
+        let ast = translate("case x\nin 1 | 2\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(sexp.contains("(match_alt"), "match_alt expected: {sexp}");
+        assert!(
+            sexp.contains("(int 1)") && sexp.contains("(int 2)"),
+            "both arms expected: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_hash_pattern_with_value() {
+        // `{a: Integer}` — hash pattern where the value is a pattern, not a
+        // literal; must route through translate_pattern, not translate_node.
+        let ast = translate("case x\nin {a: Integer}\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(hash_pattern"),
+            "hash_pattern expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(const :Integer"),
+            "const value expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown in hash pattern: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_hash_pattern_shorthand() {
+        // `{a:}` — shorthand binding: the value is SymbolNode (same as key)
+        // in prism, indicating an implicit match_var capture.
+        let ast = translate("case x\nin {a:}\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(hash_pattern"),
+            "hash_pattern expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(match_var :a)"),
+            "shorthand binding must become match_var: {sexp}"
+        );
     }
 }

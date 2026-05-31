@@ -150,6 +150,9 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("shadowarg", 98),
     ("kwnilarg", 99),
     ("blocknilarg", 100),
+    // murphy-jw5t pattern-match lowering extensions
+    ("find_pattern", 101),
+    ("match_alt", 102),
 ];
 
 /// RuboCop-compatible type-name aliases for APIs that accept parser node
@@ -254,6 +257,9 @@ pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
     ("shadowarg", &[NodeKindTag(98)]),
     ("kwnilarg", &[NodeKindTag(99)]),
     ("blocknilarg", &[NodeKindTag(100)]),
+    // murphy-jw5t pattern-match lowering extensions
+    ("find_pattern", &[NodeKindTag(101)]),
+    ("match_alt", &[NodeKindTag(102)]),
     ("call", &[NodeKindTag(17), NodeKindTag(18)]),
     (
         "any_block",
@@ -550,6 +556,9 @@ mod tests {
             NodeKind::Shadowarg(s),
             NodeKind::Kwnilarg,
             NodeKind::Blocknilarg,
+            // murphy-jw5t pattern-match lowering extensions (tags 101, 102)
+            NodeKind::FindPattern(NodeList::EMPTY),
+            NodeKind::MatchAlt { left: n, right: n },
         ]
     }
 
@@ -694,6 +703,9 @@ mod tests {
             NodeKind::Shadowarg(_) => "shadowarg",
             NodeKind::Kwnilarg => "kwnilarg",
             NodeKind::Blocknilarg => "blocknilarg",
+            // murphy-jw5t pattern-match lowering extensions
+            NodeKind::FindPattern(_) => "find_pattern",
+            NodeKind::MatchAlt { .. } => "match_alt",
         })
     }
 

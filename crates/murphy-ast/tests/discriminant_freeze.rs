@@ -296,6 +296,15 @@ fn node_kind_discriminants_are_frozen() {
     );
     freeze(NodeKind::Masgn { lhs: n(), rhs: n() }, 67);
     freeze(NodeKind::Mlhs(NodeList::EMPTY), 68);
+    // murphy-jw5t pattern-match lowering
+    freeze(NodeKind::FindPattern(NodeList::EMPTY), 101);
+    freeze(
+        NodeKind::MatchAlt {
+            left: n(),
+            right: n(),
+        },
+        102,
+    );
 }
 
 /// Catch the failure mode that `node_kind_discriminants_are_frozen` would
@@ -303,14 +312,19 @@ fn node_kind_discriminants_are_frozen() {
 /// list above: the freeze list must cover **every** variant, so its length
 /// must equal the highest valid tag + 1.
 ///
-/// `NodeKind::Mlhs` is the current highest variant. Bumping it without
+/// `NodeKind::MatchAlt` is the current highest variant. Bumping it without
 /// touching this file means the new tag falls outside the test and slips
 /// in undetected.
 #[test]
 fn highest_frozen_tag_matches_last_variant() {
-    let last = NodeKind::Mlhs(NodeList::EMPTY).tag().0;
+    let last = NodeKind::MatchAlt {
+        left: n(),
+        right: n(),
+    }
+    .tag()
+    .0;
     assert_eq!(
-        last, 68,
+        last, 102,
         "appending a new NodeKind variant requires extending tests/discriminant_freeze.rs \
          (add the new variant to both `node_kind_discriminants_are_frozen` and update \
          the expected last-tag here)."

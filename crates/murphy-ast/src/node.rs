@@ -574,6 +574,14 @@ pub enum NodeKind {
     HashPattern(NodeList),
     /// `match_var` — pattern 内で名前束縛する identifier (`in [x, y]` の `x`/`y`)。
     MatchVar(Symbol),
+    /// `[*, x, *]` の find pattern (parser-gem `find_pattern`)。要素は
+    /// requireds + 先頭/末尾の SplatNode (`MatchRest`) を含む NodeList。
+    FindPattern(NodeList),
+    /// `a | b` の alternation pattern (parser-gem `match_alt`)。
+    MatchAlt {
+        left: NodeId,
+        right: NodeId,
+    },
     /// `it { ... }` block (Ruby 3.4+; parser-gem `itblock`)。`send` は block
     /// の receiver call、`body` は block 本体。`:it` marker は variant 自身。
     Itblock {
@@ -774,6 +782,9 @@ impl NodeKind {
             NodeKind::Shadowarg(_) => 98,
             NodeKind::Kwnilarg => 99,
             NodeKind::Blocknilarg => 100,
+            // murphy-jw5t pattern-match lowering extensions
+            NodeKind::FindPattern(_) => 101,
+            NodeKind::MatchAlt { .. } => 102,
         };
         crate::NodeKindTag(t)
     }
