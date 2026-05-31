@@ -689,14 +689,30 @@ mod tests {
         "#});
     }
 
+    #[test]
+    fn flags_missing_space_around_call_and_index_op_assign() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                x.y+=1
+                   ^^ Surrounding space missing for operator `+=`.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    x[i]+=1
+                        ^^ Surrounding space missing for operator `+=`.
+                "#},
+                "x[i] += 1\n",
+            );
+    }
+
     // ---------- documented v1 gaps — should not register offenses today ----------
 
     #[test]
     fn v1_gaps_are_silently_accepted() {
         // RuboCop flags each of these shapes, but v1 does not dispatch
         // on the underlying NodeKind (Lvasgn, Pair, OrAsgn, AndAsgn,
-        // Class, Sclass, If-ternary, IndexOperatorWriteNode). The chain
-        // pins the v1 contract for the full list at once.
+        // Class, Sclass, If-ternary). The chain pins the v1 contract for
+        // the full list at once.
         test::<SpaceAroundOperators>()
             .expect_no_offenses("x=0\n")
             .expect_no_offenses("{ 1=>2 }\n")
@@ -709,8 +725,7 @@ mod tests {
                 class<<self
                 end
             "#})
-            .expect_no_offenses("x == 0?1:2\n")
-            .expect_no_offenses("x[i]+=1\n");
+            .expect_no_offenses("x == 0?1:2\n");
     }
 
     // ---------- multiple offenses + idempotent autocorrect ----------
