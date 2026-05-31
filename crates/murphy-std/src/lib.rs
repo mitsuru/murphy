@@ -49,9 +49,11 @@ use crate::cops::style::frozen_string_literal_comment::FrozenStringLiteralCommen
 use crate::cops::style::hash_syntax::HashSyntax;
 use crate::cops::style::if_unless_modifier::IfUnlessModifier;
 use crate::cops::style::nil_comparison::NilComparison;
+use crate::cops::style::redundant_return::RedundantReturn;
 use crate::cops::style::redundant_self::RedundantSelf;
 use crate::cops::style::string_literals::StringLiterals;
 use crate::cops::style::symbol_array::SymbolArray;
+use crate::cops::style::word_array::WordArray;
 
 // `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
 // single Murphy-prefixed runtime dependency by design.
@@ -81,6 +83,8 @@ murphy_plugin_api::register_cops!(
     EmptyLines,
     IfUnlessModifier,
     NilComparison,
+    RedundantReturn,
+    WordArray,
 );
 
 /// Standard cops that have **not yet been migrated** to the arena AST /
