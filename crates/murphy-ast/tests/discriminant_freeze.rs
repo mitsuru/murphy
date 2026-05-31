@@ -296,6 +296,24 @@ fn node_kind_discriminants_are_frozen() {
     );
     freeze(NodeKind::Masgn { lhs: n(), rhs: n() }, 67);
     freeze(NodeKind::Mlhs(NodeList::EMPTY), 68);
+    // murphy-o57f MID-priority pattern-match extensions (tags 86–90 subset)
+    freeze(
+        NodeKind::CaseMatch {
+            subject: n(),
+            in_patterns: NodeList::EMPTY,
+            else_body: OptNodeId::NONE,
+        },
+        86,
+    );
+    freeze(
+        NodeKind::InPattern {
+            pattern: n(),
+            guard: OptNodeId::NONE,
+            body: OptNodeId::NONE,
+        },
+        87,
+    );
+    freeze(NodeKind::MatchVar(s()), 90);
     // murphy-jw5t pattern-match lowering
     freeze(NodeKind::FindPattern(NodeList::EMPTY), 101);
     freeze(
