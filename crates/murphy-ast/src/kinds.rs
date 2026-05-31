@@ -160,6 +160,9 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     // murphy-j1j2 PM-C one-liner pattern matching
     ("match_pattern_p", 106),
     ("match_pattern", 107),
+    // murphy-j1j2 PM-D advanced patterns
+    ("match_as", 108),
+    ("const_pattern", 109),
 ];
 
 /// RuboCop-compatible type-name aliases for APIs that accept parser node
@@ -573,6 +576,9 @@ mod tests {
             // murphy-j1j2 PM-C one-liner pattern matching (tags 106-107)
             NodeKind::MatchPatternP { value: n, pattern: n },
             NodeKind::MatchPattern { value: n, pattern: n },
+            // murphy-j1j2 PM-D advanced patterns (tags 108-109)
+            NodeKind::MatchAs { value: n, name: n },
+            NodeKind::ConstPattern { const_: n, pattern: n },
         ]
     }
 
@@ -727,6 +733,9 @@ mod tests {
             // murphy-j1j2 PM-C one-liner pattern matching
             NodeKind::MatchPatternP { .. } => "match_pattern_p",
             NodeKind::MatchPattern { .. } => "match_pattern",
+            // murphy-j1j2 PM-D advanced patterns
+            NodeKind::MatchAs { .. } => "match_as",
+            NodeKind::ConstPattern { .. } => "const_pattern",
         })
     }
 

@@ -1257,6 +1257,25 @@ impl Translator {
             } else {
                 NodeKind::ArrayPattern(list)
             };
+            // If the array pattern has a constant prefix (e.g. `Some(x)`),
+            // wrap in `(const_pattern <const> <array_pattern>)`.
+            // The inner pattern gets the bracketed span; the wrapper gets
+            // the full node range (includes the constant name).
+            // If the array pattern has a constant prefix (e.g. `Some(x)`),
+            // wrap in `(const_pattern <const> <array_pattern>)`.
+            // Inner pattern uses the bracketed span; wrapper uses the full range.
+            if let Some(constant) = ap.constant() {
+                let inner_range = match (ap.opening_loc(), ap.closing_loc()) {
+                    (Some(op), Some(cl)) => murphy_ast::Range {
+                        start: op.start_offset() as u32,
+                        end: cl.end_offset() as u32,
+                    },
+                    _ => range,
+                };
+                let inner_id = self.builder.push(kind, inner_range);
+                let const_id = self.translate_node(&constant);
+                return self.builder.push(NodeKind::ConstPattern { const_: const_id, pattern: inner_id }, range);
+            }
             return self.builder.push(kind, range);
         }
         if let Some(hp) = node.as_hash_pattern_node() {
@@ -1295,6 +1314,20 @@ impl Translator {
                 ids.push(rest_id);
             }
             let list = self.builder.push_list(&ids);
+            // If the hash pattern has a constant prefix (e.g. `Point(x:, y:)`),
+            // wrap in `(const_pattern <const> <hash_pattern>)`.
+            if let Some(constant) = hp.constant() {
+                let inner_range = match (hp.opening_loc(), hp.closing_loc()) {
+                    (Some(op), Some(cl)) => murphy_ast::Range {
+                        start: op.start_offset() as u32,
+                        end: cl.end_offset() as u32,
+                    },
+                    _ => range,
+                };
+                let inner_id = self.builder.push(NodeKind::HashPattern(list), inner_range);
+                let const_id = self.translate_node(&constant);
+                return self.builder.push(NodeKind::ConstPattern { const_: const_id, pattern: inner_id }, range);
+            }
             return self.builder.push(NodeKind::HashPattern(list), range);
         }
         if let Some(fp) = node.as_find_pattern_node() {
@@ -1311,6 +1344,20 @@ impl Translator {
             let right = self.translate_node(&fp.right());
             ids.push(right);
             let list = self.builder.push_list(&ids);
+            // If the find pattern has a constant prefix (e.g. `Some[*, x, *]`),
+            // wrap in `(const_pattern <const> <find_pattern>)`.
+            if let Some(constant) = fp.constant() {
+                let inner_range = match (fp.opening_loc(), fp.closing_loc()) {
+                    (Some(op), Some(cl)) => murphy_ast::Range {
+                        start: op.start_offset() as u32,
+                        end: cl.end_offset() as u32,
+                    },
+                    _ => range,
+                };
+                let inner_id = self.builder.push(NodeKind::FindPattern(list), inner_range);
+                let const_id = self.translate_node(&constant);
+                return self.builder.push(NodeKind::ConstPattern { const_: const_id, pattern: inner_id }, range);
+            }
             return self.builder.push(NodeKind::FindPattern(list), range);
         }
         if let Some(alt) = node.as_alternation_pattern_node() {
@@ -1319,9 +1366,21 @@ impl Translator {
             let right = self.translate_pattern(&alt.right());
             return self.builder.push(NodeKind::MatchAlt { left, right }, range);
         }
+        if let Some(cap) = node.as_capture_pattern_node() {
+            // parser-gem: `(match_as <value-as-pattern> (match_var :name))`.
+            // `value()` is the pattern being matched, `target()` is the
+            // LocalVariableTargetNode for the binding name.
+            let value = self.translate_pattern(&cap.value());
+            let target = cap.target();
+            let name = self.sym(&target.name());
+            let name_id = self
+                .builder
+                .push(NodeKind::MatchVar(name), Self::node_range(&target.as_node()));
+            return self.builder.push(NodeKind::MatchAs { value, name: name_id }, range);
+        }
         // Bare top-level pattern (e.g. `in x` with no brackets is wrapped in
         // an ArrayPattern by prism, so this path is for atoms / unsupported
-        // kinds like MatchAs/Pin): route through the element translator.
+        // kinds like Pin): route through the element translator.
         self.translate_pattern_element(node)
     }
 
@@ -1367,6 +1426,7 @@ impl Translator {
             || node.as_hash_pattern_node().is_some()
             || node.as_find_pattern_node().is_some()
             || node.as_alternation_pattern_node().is_some()
+            || node.as_capture_pattern_node().is_some()
         {
             return self.translate_pattern(node);
         }
@@ -3821,6 +3881,86 @@ mod tests {
         assert!(
             sexp.contains("(match_var :a)") && sexp.contains("(match_var :b)"),
             "binding vars expected: {sexp}"
+        );
+    }
+
+    // ── murphy-j1j2 PM-D: advanced patterns ──────────────────────────────────
+
+    #[test]
+    fn translates_capture_pattern_match_as() {
+        // `case x; in Integer => n; end` — CapturePatternNode → match_as.
+        let ast = translate("case x\nin Integer => n\n  n\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(sexp.contains("(match_as"), "match_as expected: {sexp}");
+        assert!(
+            sexp.contains("(const :Integer"),
+            "Integer const expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(match_var :n)"),
+            "match_var binding expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown in capture pattern: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_capture_pattern_nested_in_array() {
+        // `case x; in [Integer => n]; end` — nested capture in array pattern.
+        let ast = translate("case x\nin [Integer => n]\n  n\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(sexp.contains("(match_as"), "match_as expected in nested: {sexp}");
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown in nested capture pattern: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_const_pattern_array() {
+        // `case x; in Some(y); end` — ArrayPatternNode with constant → const_pattern.
+        let ast = translate("case x\nin Some(y)\n  y\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(const_pattern"),
+            "const_pattern expected for Some(y): {sexp}"
+        );
+        assert!(
+            sexp.contains("(const :Some"),
+            "Some const expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(array_pattern"),
+            "inner array_pattern expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(match_var :y)"),
+            "binding var expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown in const_pattern: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_const_pattern_hash() {
+        // `case x; in Point(x:, y:); end` — HashPatternNode with constant.
+        let ast = translate("case x\nin Point(x:, y:)\n  x\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(const_pattern"),
+            "const_pattern expected for Point(x:, y:): {sexp}"
+        );
+        assert!(
+            sexp.contains("(hash_pattern"),
+            "inner hash_pattern expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown in hash const_pattern: {sexp}"
         );
     }
 }
