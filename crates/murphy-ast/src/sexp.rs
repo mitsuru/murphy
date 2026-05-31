@@ -690,6 +690,21 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             out.push(')');
         }
 
+        NodeKind::MatchAs { value, name } => {
+            out.push_str("(match_as\n");
+            write_node(ast, value, d, out);
+            out.push('\n');
+            write_node(ast, name, d, out);
+            out.push(')');
+        }
+        NodeKind::ConstPattern { const_, pattern } => {
+            out.push_str("(const_pattern\n");
+            write_node(ast, const_, d, out);
+            out.push('\n');
+            write_node(ast, pattern, d, out);
+            out.push(')');
+        }
+
         NodeKind::Unknown => out.push_str("(unknown)"),
     }
 }
