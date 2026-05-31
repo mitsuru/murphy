@@ -1208,16 +1208,29 @@ impl Translator {
     fn translate_pattern(&mut self, node: &prism::Node<'_>) -> NodeId {
         let range = Self::node_range(node);
         if let Some(ap) = node.as_array_pattern_node() {
-            // parser-gem: `(array_pattern <elem>...)`. `requireds` + `posts`
-            // are the bracketed elements; `rest` (`*x`) has no NodeKind so we
-            // route it through `translate_node` (Unknown) to stay honest.
+            // parser-gem: `(array_pattern <elem>...)` or
+            // `(array_pattern_with_tail <elem>...)` (trailing comma).
+            // `requireds` + `posts` are the bracketed elements.
+            // `rest()` is either:
+            //   - SplatNode         → `(match_rest)` / `(match_rest (match_var :x))`
+            //   - ImplicitRestNode  → trailing comma — emit ArrayPatternWithTail
             let mut ids: Vec<NodeId> = ap
                 .requireds()
                 .iter()
                 .map(|e| self.translate_pattern_element(&e))
                 .collect();
+            // Detect trailing comma (ImplicitRestNode) vs named/bare splat.
+            let is_with_tail = ap
+                .rest()
+                .as_ref()
+                .map(|r| r.as_implicit_rest_node().is_some())
+                .unwrap_or(false);
             if let Some(rest) = ap.rest() {
-                ids.push(self.translate_node(&rest));
+                // Real splat: SplatNode → match_rest.
+                // ImplicitRestNode (trailing comma) adds no child.
+                if rest.as_implicit_rest_node().is_none() {
+                    ids.push(self.translate_match_rest(&rest));
+                }
             }
             ids.extend(
                 ap.posts()
@@ -1225,20 +1238,47 @@ impl Translator {
                     .map(|e| self.translate_pattern_element(&e)),
             );
             let list = self.builder.push_list(&ids);
-            return self.builder.push(NodeKind::ArrayPattern(list), range);
+            let kind = if is_with_tail {
+                NodeKind::ArrayPatternWithTail(list)
+            } else {
+                NodeKind::ArrayPattern(list)
+            };
+            return self.builder.push(kind, range);
         }
         if let Some(hp) = node.as_hash_pattern_node() {
             // parser-gem: `(hash_pattern <pair>...)`. Route elements through
             // translate_pattern_element so that hash values are translated as
             // patterns (not via translate_node which would yield Unknown for
             // pattern-only constructs like `{a: Integer}` or `{a:}`).
+            // `rest()` is either:
+            //   - AssocSplatNode          → `**val` (translate_node handles it as Kwsplat)
+            //   - NoKeywordsParameterNode → `**nil` → match_nil_pattern
             let mut ids: Vec<NodeId> = hp
                 .elements()
                 .iter()
                 .map(|e| self.translate_pattern_element(&e))
                 .collect();
             if let Some(rest) = hp.rest() {
-                ids.push(self.translate_node(&rest));
+                let rest_id = if rest.as_no_keywords_parameter_node().is_some() {
+                    self.builder
+                        .push(NodeKind::MatchNilPattern, Self::node_range(&rest))
+                } else if let Some(assoc_splat) = rest.as_assoc_splat_node() {
+                    // `**rest` in a hash pattern → match_rest with optional match_var.
+                    let inner = assoc_splat.value().and_then(|v| {
+                        v.as_local_variable_target_node().map(|t| {
+                            let name = self.sym(&t.name());
+                            self.builder
+                                .push(NodeKind::MatchVar(name), Self::node_range(&v))
+                        })
+                    });
+                    self.builder.push(
+                        NodeKind::MatchRest(murphy_ast::OptNodeId::from(inner)),
+                        Self::node_range(&rest),
+                    )
+                } else {
+                    self.translate_node(&rest)
+                };
+                ids.push(rest_id);
             }
             let list = self.builder.push_list(&ids);
             return self.builder.push(NodeKind::HashPattern(list), range);
@@ -1316,8 +1356,35 @@ impl Translator {
         {
             return self.translate_pattern(node);
         }
+        // SplatNode inside a pattern element (e.g. array pattern element that
+        // is itself a splat-style rest capture).
+        if node.as_splat_node().is_some() {
+            return self.translate_match_rest(node);
+        }
         // Literals / nested constants / unsupported kinds (MatchAs, Pin etc).
         self.translate_node(node)
+    }
+
+    /// Translate a SplatNode appearing as a pattern rest element
+    /// (`*rest` or bare `*`) → `(match_rest (match_var :name))` or
+    /// `(match_rest)`.
+    fn translate_match_rest(&mut self, node: &prism::Node<'_>) -> NodeId {
+        let range = Self::node_range(node);
+        // SplatNode.expression() is the optional named target.
+        let inner = if let Some(s) = node.as_splat_node() {
+            s.expression().and_then(|e| {
+                // Named rest: expression is a LocalVariableTargetNode → match_var.
+                e.as_local_variable_target_node().map(|t| {
+                    let name = self.sym(&t.name());
+                    self.builder
+                        .push(NodeKind::MatchVar(name), Self::node_range(&e))
+                })
+            })
+        } else {
+            None
+        };
+        let inner_id = murphy_ast::OptNodeId::from(inner);
+        self.builder.push(NodeKind::MatchRest(inner_id), range)
     }
 
     /// 多重代入左辺（lefts + rest + rights）→ `Mlhs` ノード。
@@ -3507,12 +3574,11 @@ mod tests {
 
     #[test]
     fn unsupported_pattern_kinds_fall_to_unknown() {
-        // MatchAs(`=>`)/MatchRest(`*rest`)/Pin(`^x`) have no prism binding
-        // in v1, so they remain Unknown. The surrounding case_match/in_pattern
-        // still translate.
+        // MatchAs(`=>`) / Pin(`^x`) have no prism binding in v1, so they
+        // remain Unknown. The surrounding case_match/in_pattern still translate.
+        // MatchRest (`*rest`) is now lowered to match_rest (murphy-j1j2 PM-B).
         for src in [
             "case x\nin Integer => n\n  n\nend\n", // match-as / capture (no prism binding)
-            "case x\nin [*rest]\n  a\nend\n",      // match-rest splat (no prism binding)
             "case x\nin ^foo\n  a\nend\n",         // pin (no prism binding)
         ] {
             let ast = translate(src, "t.rb");
@@ -3520,6 +3586,66 @@ mod tests {
             assert!(sexp.starts_with("(case_match\n"), "{src}: {sexp}");
             assert!(sexp.contains("(in_pattern"), "{src}: {sexp}");
         }
+    }
+
+    #[test]
+    fn translates_match_rest_named() {
+        // `[*rest]` — named match_rest inside array pattern.
+        let ast = translate("case x\nin [*rest]\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(match_rest\n"),
+            "match_rest expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(match_var :rest)"),
+            "match_var :rest expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown after match_rest lowering: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_match_rest_bare() {
+        // `[*]` — bare match_rest (no name).
+        let ast = translate("case x\nin [*]\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(match_rest)"),
+            "bare match_rest expected: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_match_nil_pattern() {
+        // `{a:, **nil}` — no-other-keys hash pattern.
+        let ast = translate("case x\nin {a:, **nil}\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(match_nil_pattern)"),
+            "match_nil_pattern expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown after match_nil_pattern lowering: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_array_pattern_with_tail() {
+        // `[a, b,]` — array pattern with trailing comma.
+        let ast = translate("case x\nin [a, b,]\n  a\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(array_pattern_with_tail"),
+            "array_pattern_with_tail expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(match_var :a)") && sexp.contains("(match_var :b)"),
+            "match_var elements expected: {sexp}"
+        );
     }
 
     #[test]
@@ -3538,8 +3664,9 @@ mod tests {
             sexp.contains("(match_var :a)"),
             "inner match_var expected: {sexp}"
         );
-        // Pin the v1 anchor shape: SplatNode translates to `(splat (unknown))`
-        // since the inner `*` has no lowering target yet.
+        // The `*` anchors in find_pattern go through translate_node (SplatNode path),
+        // yielding `(splat nil)`. They are NOT converted to match_rest because
+        // find_pattern anchor semantics differ from array_pattern rest.
         assert!(
             sexp.contains("(splat"),
             "splat anchors expected in find_pattern: {sexp}"

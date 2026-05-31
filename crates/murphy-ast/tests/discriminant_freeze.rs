@@ -323,6 +323,10 @@ fn node_kind_discriminants_are_frozen() {
         },
         102,
     );
+    // murphy-j1j2 PM-B array/hash pattern extensions
+    freeze(NodeKind::MatchRest(OptNodeId::NONE), 103);
+    freeze(NodeKind::MatchNilPattern, 104);
+    freeze(NodeKind::ArrayPatternWithTail(NodeList::EMPTY), 105);
 }
 
 /// Catch the failure mode that `node_kind_discriminants_are_frozen` would
@@ -335,14 +339,9 @@ fn node_kind_discriminants_are_frozen() {
 /// in undetected.
 #[test]
 fn highest_frozen_tag_matches_last_variant() {
-    let last = NodeKind::MatchAlt {
-        left: n(),
-        right: n(),
-    }
-    .tag()
-    .0;
+    let last = NodeKind::ArrayPatternWithTail(NodeList::EMPTY).tag().0;
     assert_eq!(
-        last, 102,
+        last, 105,
         "appending a new NodeKind variant requires extending tests/discriminant_freeze.rs \
          (add the new variant to both `node_kind_discriminants_are_frozen` and update \
          the expected last-tag here)."

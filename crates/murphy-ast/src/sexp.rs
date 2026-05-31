@@ -614,6 +614,23 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             write_node(ast, right, d, out);
             out.push(')');
         }
+        NodeKind::MatchRest(inner) => {
+            if let Some(inner_id) = inner.get() {
+                out.push_str("(match_rest\n");
+                write_node(ast, inner_id, d, out);
+                out.push(')');
+            } else {
+                out.push_str("(match_rest)");
+            }
+        }
+        NodeKind::MatchNilPattern => {
+            out.push_str("(match_nil_pattern)");
+        }
+        NodeKind::ArrayPatternWithTail(_) => {
+            out.push_str("(array_pattern_with_tail");
+            write_slice(ast, id, 0, usize::MAX, d, out);
+            out.push(')');
+        }
         NodeKind::Itblock { send, body } => {
             out.push_str("(itblock\n");
             write_node(ast, send, d, out);
