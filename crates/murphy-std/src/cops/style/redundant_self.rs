@@ -418,6 +418,10 @@ fn pattern_binds_name(cx: &Cx<'_>, pattern: NodeId, name: &str) -> bool {
 /// inside a block that has no explicit `|...|` pipe delimiters — the case
 /// where bare `it` would resolve to Ruby 3.3+'s implicit block parameter
 /// instead of calling the method. Mirrors RuboCop's `it_method_in_block?`.
+///
+/// The ancestor walk stops at the first `Def` / `Defs` boundary: a `self.it`
+/// inside a `def` nested inside a parameterless block is not covered by the
+/// outer block's implicit `it` parameter — the `def` starts a fresh scope.
 fn it_method_in_parameterless_block(node: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
     if method_name != "it" {
         return false;
@@ -431,11 +435,21 @@ fn it_method_in_parameterless_block(node: NodeId, method_name: &str, cx: &Cx<'_>
         return false;
     }
 
-    // Must be inside a Block ancestor (not a Def)
-    let Some(block_ancestor) = cx
-        .ancestors(node)
-        .find(|&a| matches!(cx.kind(a), NodeKind::Block { .. }))
-    else {
+    // Walk ancestors looking for the nearest Block. Stop immediately if we
+    // hit a Def/Defs — a `def` defines a new scope, so the outer parameterless
+    // block's implicit `it` param is not visible inside it.
+    let mut block_ancestor: Option<NodeId> = None;
+    for ancestor in cx.ancestors(node) {
+        match *cx.kind(ancestor) {
+            NodeKind::Def { .. } => return false, // new scope — outer `it` not visible
+            NodeKind::Block { .. } => {
+                block_ancestor = Some(ancestor);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(block_ancestor) = block_ancestor else {
         return false;
     };
 
@@ -841,6 +855,30 @@ mod tests {
             indoc! {"
                 0.times { |_n|
                   it
+                }
+            "},
+        );
+    }
+
+    #[test]
+    fn flags_self_it_in_def_inside_parameterless_block() {
+        // `0.times { def foo; self.it; end }` — the `def` starts a fresh
+        // scope. The outer parameterless block's implicit `it` param is NOT
+        // visible inside the `def`, so `self.it` is genuinely redundant.
+        test::<RedundantSelf>().expect_correction(
+            indoc! {"
+                0.times {
+                  def foo
+                    self.it
+                    ^^^^ Redundant `self` detected.
+                  end
+                }
+            "},
+            indoc! {"
+                0.times {
+                  def foo
+                    it
+                  end
                 }
             "},
         );
