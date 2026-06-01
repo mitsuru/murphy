@@ -42,3 +42,8 @@ fn golden_method_def() {
 fn golden_mixed() {
     check("mixed");
 }
+
+#[test]
+fn golden_case_in() {
+    check("case_in");
+}
