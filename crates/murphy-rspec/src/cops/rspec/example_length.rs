@@ -65,7 +65,7 @@
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
-use super::helpers::{example_call_range, is_example_call};
+use crate::cops::rspec_helpers::{example_call_range, is_example_call};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
