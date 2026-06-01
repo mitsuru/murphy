@@ -8,13 +8,12 @@
 //! status: partial
 //! gap_issues:
 //!   - murphy-fgcu
-//!   - murphy-ttzm
 //! notes: >
 //!   Fixed: comment lines skipped by default, blank lines skipped, CountComments
 //!   option, CountAsOne option (array/hash/method_call), message format matches
 //!   RuboCop ("Example has too many lines. [N/M]"), runtime options wired via
-//!   cx.options_or_default. Remaining gaps: heredoc folding in CountAsOne,
-//!   alias coverage.
+//!   cx.options_or_default, focused/skipped/pending alias coverage (murphy-ttzm).
+//!   Remaining gaps: heredoc folding in CountAsOne (murphy-fgcu).
 //! ```
 //!
 //! body. Mirrors RuboCop-RSpec's cop of the same name.
@@ -287,6 +286,50 @@ mod tests {
             end
         "#};
         assert_eq!(hits(src), 2);
+    }
+
+    /// murphy-ttzm: focused and skipped/pending example aliases must be
+    /// recognized by `is_example_call` and trigger length checks the same
+    /// way as `it`/`specify`/`example`.
+    #[test]
+    fn handles_focused_skipped_and_pending_aliases() {
+        // fit / xit / skip / pending — each gets a 6-line body so all
+        // four should fire (default Max = 5).
+        let src = indoc! {r#"
+            fit "focused" do
+              a = 1
+              b = 2
+              c = 3
+              d = 4
+              e = 5
+              f = 6
+            end
+            xit "skipped" do
+              a = 1
+              b = 2
+              c = 3
+              d = 4
+              e = 5
+              f = 6
+            end
+            skip "skip_form" do
+              a = 1
+              b = 2
+              c = 3
+              d = 4
+              e = 5
+              f = 6
+            end
+            pending "pending_form" do
+              a = 1
+              b = 2
+              c = 3
+              d = 4
+              e = 5
+              f = 6
+            end
+        "#};
+        assert_eq!(hits(src), 4);
     }
 
     #[test]

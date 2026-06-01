@@ -5,11 +5,10 @@
 //! upstream: rubocop-rspec
 //! upstream_cop: RSpec/MultipleExpectations
 //! upstream_version_checked: 3.7.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-ipxn
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Known follow-up remains for token-based example call offense ranges.
+//!   Token-based example_call_range (murphy-ipxn) implemented.
 //! ```
 //!
 //! calls inside one example. Mirrors RuboCop-RSpec's cop of the same
@@ -53,7 +52,7 @@
 //! Splitting an example into multiple `it` blocks is a refactor that
 //! needs human judgement about isolation and shared setup.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, SourceTokenKind, cop};
 
 use super::helpers::is_example_call;
 
@@ -236,24 +235,73 @@ fn is_bare_send_named(cx: &Cx<'_>, id: NodeId, name: &str) -> bool {
     receiver == OptNodeId::NONE && cx.symbol_str(method) == name
 }
 
+/// Compute the offense range for an example call. The range covers the
+/// call node (method name + args), trimmed to end just before the block
+/// opener token (`do` or `{`), skipping any trailing comment or newline
+/// tokens that sit between the last real arg and the opener.
+///
+/// Token-based approach (murphy-ipxn): searches backward from `body_start`
+/// to find the block opener (`do` or `{`), then finds the last real token
+/// before it (skipping `Comment`/`Newline`/`IgnoredNewline`).
+///
+/// Uses `cx.node(call).loc.name.end` as the lower search bound and
+/// `body_range.start` as the upper bound; picks the *last* `do`/`{` in
+/// that window to correctly skip any hash-literal `{` inside the args.
 fn example_call_range(cx: &Cx<'_>, call: NodeId, body: NodeId) -> Range {
-    let mut range = cx.range(call);
+    let call_range = cx.range(call);
     let body_range = cx.range(body);
-    if body_range.start <= range.start {
-        return range;
+    if body_range.start <= call_range.start {
+        return call_range;
     }
 
-    range.end = body_range.start;
-    let mut text = cx.raw_source(range).trim_end();
-    if let Some(stripped) = text.strip_suffix("do") {
-        text = stripped.trim_end();
-    } else if let Some(stripped) = text.strip_suffix('{') {
-        text = stripped.trim_end();
-    }
+    let source = cx.source().as_bytes();
+    let toks = cx.sorted_tokens();
+
+    // Lower bound: just after the method name selector (e.g. after `it`).
+    // Upper bound: start of the body node (first token of the block body).
+    // We pick the *last* `do`/`{` in this window so that a hash-literal `{`
+    // inside the args is skipped and only the block opener is selected.
+    let name_end = cx.node(call).loc.name.end;
+    // Scan backward from the token just before body_range.start, looking for
+    // the last `do` or `{` in the window [name_end, body_range.start).
+    let opener = toks
+        .iter()
+        .rev()
+        .skip_while(|t| t.range.start >= body_range.start)
+        .find(|t| {
+            t.range.start >= name_end
+                && (t.kind == SourceTokenKind::LeftBrace
+                    || (t.kind == SourceTokenKind::Other
+                        && &source[t.range.start as usize..t.range.end as usize] == b"do"))
+        });
+
+    let offense_end = match opener {
+        Some(opener_tok) => {
+            // Walk backward from the opener to find the last real token —
+            // skip Comment, Newline, IgnoredNewline tokens which may appear
+            // between the call args and `do` (e.g. trailing inline comment).
+            let last_real = toks
+                .iter()
+                .rev()
+                .skip_while(|t| t.range.start >= opener_tok.range.start)
+                .find(|t| {
+                    !matches!(
+                        t.kind,
+                        SourceTokenKind::Comment
+                            | SourceTokenKind::Newline
+                            | SourceTokenKind::IgnoredNewline
+                    )
+                });
+            last_real.map(|t| t.range.end).unwrap_or(call_range.start)
+        }
+        // No block opener found (shouldn't happen in well-formed Ruby):
+        // fall back to just the method name end so we emit something.
+        None => name_end,
+    };
 
     Range {
-        start: range.start,
-        end: range.start + text.len() as u32,
+        start: call_range.start,
+        end: offense_end,
     }
 }
 
@@ -485,6 +533,53 @@ mod tests {
                   expect(a).to eq(1)
                   expect(b).to eq(2)
                 }
+            "#});
+    }
+
+    // ------------------------------------------------------------------
+    // Token-based example_call_range tests (murphy-ipxn)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn offense_range_excludes_block_args_before_body() {
+        // `it "works" do |x|` — block parameters appear between `do` and
+        // the body. The offense range must cover only the call (`it "works"`),
+        // not `do |x|`. The heuristic strip_suffix("do") fails here because
+        // the trimmed text ends with `|x|` not `do`.
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it "works" do |x|
+                ^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
+    }
+
+    #[test]
+    fn offense_range_excludes_block_opener_with_brace_hash_arg() {
+        // When the example call has an explicit brace-hash argument,
+        // the `{` of the hash must NOT be mistaken for the block opener.
+        // The offense range should cover the whole call including the
+        // hash arg, but not the `do` block opener.
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it "works", { aggregate_failures: false } do
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
+    }
+
+    #[test]
+    fn offense_range_includes_parens_in_call() {
+        // `it("works") do` -- the parens are part of the call node's
+        // expression range and must be included in the offense range.
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it("works") do
+                ^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
             "#});
     }
 }
