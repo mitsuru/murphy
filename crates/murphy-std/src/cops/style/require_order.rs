@@ -110,10 +110,29 @@ fn str_arg<'a>(send_id: NodeId, cx: &'a Cx<'_>) -> Option<&'a str> {
 }
 
 /// Returns `true` if no blank line separates `range1` and `range2`.
+///
+/// A "blank-line separator" is a line that is empty or contains only
+/// whitespace between the two node ranges. Covers both `\n\n` (RuboCop's
+/// original pattern) and whitespace-only blank lines that editors sometimes
+/// preserve (e.g. `"\n  \n"`).
 fn in_same_section(range1: Range, range2: Range, cx: &Cx<'_>) -> bool {
     let start = range1.start.min(range2.start) as usize;
     let end = range1.end.max(range2.end) as usize;
-    !cx.source()[start..end].contains("\n\n")
+    let between = &cx.source()[start..end];
+    // Split into lines and check if any interior line (not the first, which is
+    // the tail of node1, or the last trailing empty piece) trims to empty.
+    // That indicates a blank-line section break.
+    let mut lines = between.split('\n').peekable();
+    lines.next(); // Skip the first piece (tail of the first node's line).
+    while let Some(line) = lines.next() {
+        if lines.peek().is_none() {
+            break; // Skip the trailing empty piece after the last \n.
+        }
+        if line.trim().is_empty() {
+            return false; // Found a blank separator line.
+        }
+    }
+    true
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
@@ -336,6 +355,14 @@ mod tests {
             end
             require 'c'
         "#});
+    }
+
+    #[test]
+    fn no_offense_whitespace_only_blank_line_is_section_boundary() {
+        // A line with only spaces/tabs counts as a blank-line section separator,
+        // just like an empty blank line. The two sections sort independently.
+        let src = "require 'b'\n  \nrequire 'a'\n";
+        test::<RequireOrder>().expect_no_offenses(src);
     }
 }
 murphy_plugin_api::submit_cop!(RequireOrder);
