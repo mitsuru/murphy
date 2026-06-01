@@ -20,13 +20,15 @@
 //!   Gaps vs RuboCop:
 //!     - Preferred %r delimiter (from Style/PercentLiteralDelimiters config)
 //!       is hardcoded to `{}`. RuboCop reads it from configuration.
-//!     - `percent_r_delimiters_conflict?` (balanced-delimiter check) is not
-//!       implemented; Murphy always uses `%r{}` as the target. If the regexp
-//!       body contains `{` or `}`, autocorrect may produce invalid Ruby.
+//!     - Preferred `%r` delimiter (from `Style/PercentLiteralDelimiters`) is
+//!       hardcoded to `{}`. Non-`%r{}` forms with `{}` body conflicts skip
+//!       autocorrect (bare-brace detection now implemented).
 //!     - `allowed_omit_parentheses_with_percent_r_literal?` guard for
 //!       `Style/MethodCallWithArgsParentheses` omit_parentheses style is
-//!       not implemented.
-//!     - Interpolated regexps that start with space or `=` are not guarded.
+//!       not implemented. `%r{ foo}` (leading-space) or `%r{= val}` in method
+//!       argument position may autocorrect to ambiguous slash literals.
+//!     - Interpolated regexps starting with space or `=` in argument position
+//!       are not guarded — a known v1 gap.
 //! ```
 //!
 //! ## Matched shapes
