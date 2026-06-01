@@ -20,13 +20,15 @@
 //!   Gaps vs RuboCop:
 //!     - Preferred %r delimiter (from Style/PercentLiteralDelimiters config)
 //!       is hardcoded to `{}`. RuboCop reads it from configuration.
-//!     - `percent_r_delimiters_conflict?` (balanced-delimiter check) is not
-//!       implemented; Murphy always uses `%r{}` as the target. If the regexp
-//!       body contains `{` or `}`, autocorrect may produce invalid Ruby.
+//!     - Preferred `%r` delimiter (from `Style/PercentLiteralDelimiters`) is
+//!       hardcoded to `{}`. Non-`%r{}` forms with `{}` body conflicts skip
+//!       autocorrect (bare-brace detection now implemented).
 //!     - `allowed_omit_parentheses_with_percent_r_literal?` guard for
 //!       `Style/MethodCallWithArgsParentheses` omit_parentheses style is
-//!       not implemented.
-//!     - Interpolated regexps that start with space or `=` are not guarded.
+//!       not implemented. `%r{ foo}` (leading-space) or `%r{= val}` in method
+//!       argument position may autocorrect to ambiguous slash literals.
+//!     - Interpolated regexps starting with space or `=` in argument position
+//!       are not guarded — a known v1 gap.
 //! ```
 //!
 //! ## Matched shapes
@@ -193,11 +195,90 @@ fn regexp_body_contains_slash(node: NodeId, cx: &Cx<'_>) -> bool {
     }
 }
 
+/// Returns `true` if the regexp body contains bare (unescaped) `{` or `}`
+/// in the raw source. Used to skip `%r{}` autocorrect when the body would
+/// conflict with the brace delimiters.
+///
+/// Escaped braces `\{` and `\}` in the raw source do NOT cause a conflict
+/// because they remain escaped in the `%r{...}` form as well.
+fn regexp_body_contains_braces(node: NodeId, cx: &Cx<'_>) -> bool {
+    let range = cx.range(node);
+    let src = cx.raw_source(range);
+    let bytes = src.as_bytes();
+
+    // Extract the body from the slash-delimited regexp: skip `[1..]` up to
+    // the closing `/`.
+    let (body_start, body_end) = if bytes.first() == Some(&b'/') {
+        find_slash_body_bounds(bytes)
+    } else {
+        return false; // Only called for slash literals
+    };
+
+    if body_start >= body_end {
+        return false;
+    }
+
+    // Scan the body for bare (non-escaped, non-interpolation) `{` or `}`.
+    // Interpolation sequences `#{...}` are safe in `%r{...}` — Ruby handles
+    // the brace nesting correctly. Only bare structural braces conflict.
+    let body = &bytes[body_start..body_end];
+    let mut i = 0;
+    while i < body.len() {
+        if body[i] == b'\\' {
+            i += 2; // skip escape
+            continue;
+        }
+        // Skip interpolation `#{...}` — these are safe in `%r{}`.
+        if body[i] == b'#' && i + 1 < body.len() && body[i + 1] == b'{' {
+            // Skip past the entire `#{...}` block (counting brace depth).
+            i += 2; // skip `#{`
+            let mut depth = 1usize;
+            while i < body.len() && depth > 0 {
+                match body[i] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if body[i] == b'{' || body[i] == b'}' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Find the body byte range within a slash-delimited regexp source.
+/// Returns `(start, end)` as indices into `bytes`.
+fn find_slash_body_bounds(bytes: &[u8]) -> (usize, usize) {
+    // bytes[0] == '/'
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'/' {
+            return (1, i);
+        }
+        i += 1;
+    }
+    (1, bytes.len())
+}
+
 /// Emit the autocorrect edit — swap delimiters and fix inner slash escaping.
 fn emit_autocorrect(node: NodeId, cx: &Cx<'_>, is_slash_literal: bool, src: &str) {
     let range = cx.range(node);
     if is_slash_literal {
         // `/foo/flags` → `%r{foo}flags`
+        // Skip autocorrect if body contains `{` or `}` — the braces would
+        // conflict with the `%r{}` delimiters and produce invalid Ruby.
+        if regexp_body_contains_braces(node, cx) {
+            return;
+        }
         // Opening delimiter: the `/` at start → `%r{`
         let open_range = Range { start: range.start, end: range.start + 1 };
         cx.emit_edit(open_range, "%r{");
@@ -266,30 +347,41 @@ fn find_percent_r_body_start(src: &str) -> usize {
     }
 }
 
-/// Find the offset of the closing `}` (or matching close delimiter) in a
-/// percent-r literal. This simplified version only handles `%r{...}`.
+/// Find the offset of the closing delimiter in a percent-r literal.
+/// Handles all `%r<delim>...</delim>` forms: `%r{...}`, `%r[...]`,
+/// `%r(...)`, `%r<...>`, and non-paired forms like `%r/.../ `.
 fn find_closing_brace(src: &str) -> Option<usize> {
-    if src.len() < 3 || &src[..3] != "%r{" {
+    if src.len() < 3 || !src.starts_with("%r") {
         return None;
     }
     let bytes = src.as_bytes();
-    // Scan from position 3 (after `%r{`), tracking depth for nested braces.
-    let mut depth = 1usize;
+    let open = bytes[2];
+    let close = match open {
+        b'{' => b'}',
+        b'[' => b']',
+        b'(' => b')',
+        b'<' => b'>',
+        other => other, // non-paired: same char as close
+    };
+    let paired = open != close;
+    let mut depth = if paired { 1usize } else { 0 };
     let mut i = 3;
     while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => {
-                i += 2; // skip escape
-                continue;
-            }
-            b'{' => depth += 1,
-            b'}' => {
+        if bytes[i] == b'\\' {
+            i += 2; // skip escape
+            continue;
+        }
+        if paired {
+            if bytes[i] == open {
+                depth += 1;
+            } else if bytes[i] == close {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
                 }
             }
-            _ => {}
+        } else if bytes[i] == close {
+            return Some(i);
         }
         i += 1;
     }
@@ -320,6 +412,8 @@ fn fix_inner_slashes_slash_to_percent(
 }
 
 /// Emit edits to fix `/` → `\/` inside a `%r{}`-literal being converted to `//`.
+/// Skips `#{...}` interpolation blocks — `/` inside Ruby interpolation is a
+/// division operator, not a regexp delimiter, and must not be escaped.
 fn fix_inner_slashes_percent_to_slash(
     src: &str,
     node_start: u32,
@@ -335,6 +429,21 @@ fn fix_inner_slashes_percent_to_slash(
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             i += 2; // skip existing escape
+            continue;
+        }
+        // Skip interpolation `#{...}` — `/` inside Ruby interpolation is a
+        // division operator and must not be escaped.
+        if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            i += 2; // skip `#{`
+            let mut depth = 1usize;
+            while i < bytes.len() && depth > 0 {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
             continue;
         }
         if bytes[i] == b'/' {
@@ -448,6 +557,58 @@ mod tests {
                   foo
                 }x
             "});
+    }
+
+    // ----- Non-brace %r delimiters -----
+
+    #[test]
+    fn flags_slash_literal_with_body_brace_but_no_autocorrect() {
+        // Body contains bare `}` — offense is emitted but autocorrect is skipped
+        // to avoid generating invalid `%r{foo}bar}`.
+        test::<RegexpLiteral>()
+            .with_options(&RegexpLiteralOptions { enforced_style: EnforcedStyle::PercentR, ..Default::default() })
+            .expect_offense(indoc! {r#"
+                r = /foo}bar/
+                    ^ Use `%r` around regular expression.
+            "#});
+    }
+
+    #[test]
+    fn corrects_slash_literal_with_escaped_brace() {
+        // Escaped `\{` in raw source is NOT a bare brace — autocorrect is safe.
+        // `/foo\{bar/` → `%r{foo\{bar}` (the `\{` remains escaped).
+        test::<RegexpLiteral>()
+            .with_options(&RegexpLiteralOptions { enforced_style: EnforcedStyle::PercentR, ..Default::default() })
+            .expect_correction(
+                indoc! {r#"
+                    r = /foo\{bar/
+                        ^ Use `%r` around regular expression.
+                "#},
+                "r = %r{foo\\{bar}\n",
+            );
+    }
+
+    #[test]
+    fn corrects_percent_r_bracket_to_slashes() {
+        // %r[foo] uses `[` delimiter — the fix should produce /foo/, not /foo]
+        test::<RegexpLiteral>().expect_correction(
+            indoc! {r#"
+                snake_case = %r[foo]
+                             ^^^ Use `//` around regular expression.
+            "#},
+            "snake_case = /foo/\n",
+        );
+    }
+
+    #[test]
+    fn corrects_percent_r_paren_to_slashes() {
+        test::<RegexpLiteral>().expect_correction(
+            indoc! {r#"
+                snake_case = %r(foo)
+                             ^^^ Use `//` around regular expression.
+            "#},
+            "snake_case = /foo/\n",
+        );
     }
 
     // ----- AllowInnerSlashes: true -----

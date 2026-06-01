@@ -15,9 +15,9 @@
 //!   EnforcedStyle: implicit -- flags `rescue StandardError` when it is the
 //!   sole exception class, suggesting bare `rescue`.
 //!
-//!   The modifier rescue form (`foo rescue bar`) is NOT flagged. In Murphy's
-//!   AST translator the modifier form currently produces an `Unknown` node,
-//!   so it will never match a `Resbody` subscription.
+//!   The modifier rescue form (`foo rescue bar`) is NOT flagged. The
+//!   containing `Rescue` node is detected as modifier-form by the absence
+//!   of an `end` keyword token, and the `Resbody` check is skipped.
 //!
 //!   Implicit style: only flags when there is exactly ONE exception class
 //!   and it is a bare `StandardError` constant (scope == None). Multi-class
@@ -76,6 +76,16 @@ impl RescueStandardError {
         let NodeKind::Resbody { exceptions, .. } = *cx.kind(node) else {
             return;
         };
+
+        // Skip modifier-form rescue (`foo rescue bar`).
+        // The containing Rescue node has no `end` keyword for modifier-form.
+        if let Some(parent) = cx.parent(node).get() {
+            if matches!(cx.kind(parent), NodeKind::Rescue { .. }) {
+                if cx.loc(parent).end_keyword() == Range::ZERO {
+                    return;
+                }
+            }
+        }
 
         let exception_list = cx.list(exceptions);
 
@@ -318,6 +328,23 @@ mod tests {
                   baz
                 end
             "});
+    }
+
+    // -------------------------------------------------------------------------
+    // Modifier-form rescue must not fire
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn no_offense_rescue_modifier_explicit() {
+        // `foo rescue nil` is modifier-form — RescueStandardError must not flag it.
+        test::<RescueStandardError>().expect_no_offenses("foo rescue nil\n");
+    }
+
+    #[test]
+    fn no_offense_rescue_modifier_implicit() {
+        test::<RescueStandardError>()
+            .with_options(&implicit_opts())
+            .expect_no_offenses("foo rescue nil\n");
     }
 }
 
