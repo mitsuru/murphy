@@ -91,10 +91,16 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
     let cond_end = cx.range(cond).end;
 
-    // Find the `then` keyword token between condition and else, if any.
-    // When `then` is present: header includes ` x then`, body starts after `then`.
-    // When `then` is absent: body starts at condition end (includes trailing comment).
-    let header_end = find_then_token_end(cond_end, else_tok.start, cx).unwrap_or(cond_end);
+    // Find the `then` keyword token on the header line only (from condition
+    // end to the first newline). Limiting to the header line avoids picking up
+    // `then` from nested `if y then...end` inside the body. If no `then` on
+    // the header line, body starts at cond_end.
+    let header_line_end = source[cond_end as usize..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(else_tok.start, |pos| cond_end + pos as u32);
+    let scan_to = header_line_end.min(else_tok.start);
+    let header_end = find_then_token_end(cond_end, scan_to, cx).unwrap_or(cond_end);
 
     // body_chunk: from header_end to start of `else`.
     // - No `then`: " # neg\n  a=1\n" (includes trailing comment and body)
@@ -286,6 +292,32 @@ mod tests {
               a = 1
             end
         "});
+    }
+
+    // Regression: `then` inside the body must not be treated as the header `then`.
+    #[test]
+    fn body_with_then_is_not_confused_for_header_then() {
+        test::<UnlessElse>().expect_correction(
+            indoc! {r#"
+                unless condition
+                ^^^^^^^^^^^^^^^^ Do not use `unless` with `else`. Rewrite these with the positive case first.
+                  if y then
+                    a = 1
+                  end
+                else
+                  a = 2
+                end
+            "#},
+            indoc! {"
+                if condition
+                  a = 2
+                else
+                  if y then
+                    a = 1
+                  end
+                end
+            "},
+        );
     }
 
     #[test]
