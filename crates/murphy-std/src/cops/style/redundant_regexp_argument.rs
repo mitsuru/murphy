@@ -141,11 +141,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Build the preferred string argument.
     let prefer = preferred_argument(regexp_content);
 
-    // Skip single-space regexp (awk-split special case). We check the
-    // replacement string (not raw regexp body) so that escaped-space `/\ /`
-    // is also excluded — both `/  /` and `/\ /` would produce `' '`,
-    // which has special awk-whitespace semantics for `String#split`.
-    if prefer == "' '" {
+    // Skip single-space regexp for `split` only (awk-split special case).
+    // `String#split(' ')` has special awk-whitespace semantics that differ
+    // from splitting on a literal single space. Check the replacement string
+    // (not raw regexp body) so that escaped-space `/\ /` is also excluded.
+    // Other methods like `gsub` / `sub` behave the same with `' '` vs `/ /`.
+    if prefer == "' '" && method == "split" {
         return;
     }
 
@@ -566,15 +567,27 @@ mod tests {
     }
 
     #[test]
-    fn no_offense_single_space_regexp() {
-        // Single space: special awk-split semantics.
+    fn no_offense_single_space_regexp_split() {
+        // Single space in split: special awk-split semantics.
         test::<RedundantRegexpArgument>().expect_no_offenses("'foo'.split(/ /)\n");
     }
 
     #[test]
-    fn no_offense_escaped_space_regexp() {
-        // Escaped space /\ / also produces ' ' replacement — skip it too.
+    fn no_offense_escaped_space_regexp_split() {
+        // Escaped space /\ / in split also produces ' ' replacement — skip it too.
         test::<RedundantRegexpArgument>().expect_no_offenses("'foo'.split(/\\ /)\n");
+    }
+
+    #[test]
+    fn flags_single_space_regexp_gsub() {
+        // `gsub(/ /, '_')` — single space in non-split method — must fire.
+        test::<RedundantRegexpArgument>().expect_correction(
+            indoc! {r#"
+                'foo bar'.gsub(/ /, '_')
+                               ^^^ Use string `' '` as argument instead of regexp `/ /`.
+            "#},
+            "'foo bar'.gsub(' ', '_')\n",
+        );
     }
 
     #[test]
