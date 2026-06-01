@@ -646,6 +646,24 @@ pub enum NodeKind {
         value: NodeId,
         pattern: NodeId,
     },
+
+    // ── murphy-j1j2 PM-D advanced patterns (tags 108, 109) ───────────────
+    /// `pat => name` — capture pattern inside pattern matching (Ruby 3.0+).
+    /// prism: `CapturePatternNode`. parser-gem: `match_as`.
+    /// `value` は左辺パターン、`name` は `MatchVar` (束縛対象の local var)。
+    MatchAs {
+        value: NodeId,
+        name: NodeId,
+    },
+    /// `Some(x)` — deconstruct-style pattern with a constant prefix.
+    /// prism: `ArrayPatternNode`/`HashPatternNode`/`FindPatternNode` の
+    /// `constant` フィールドが存在する場合に包む wrapper。
+    /// parser-gem: `const_pattern`. `const_` は定数ノード、`pattern` は
+    /// 内側の array/hash/find_pattern ノード。
+    ConstPattern {
+        const_: NodeId,
+        pattern: NodeId,
+    },
 }
 
 /// A source comment, stored outside the node tree.
@@ -818,6 +836,9 @@ impl NodeKind {
             // murphy-j1j2 PM-C one-liner pattern matching
             NodeKind::MatchPatternP { .. } => 106,
             NodeKind::MatchPattern { .. } => 107,
+            // murphy-j1j2 PM-D advanced patterns
+            NodeKind::MatchAs { .. } => 108,
+            NodeKind::ConstPattern { .. } => 109,
         };
         crate::NodeKindTag(t)
     }

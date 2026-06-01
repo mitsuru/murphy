@@ -344,6 +344,21 @@ fn node_kind_discriminants_are_frozen() {
         },
         107,
     );
+    // murphy-j1j2 PM-D advanced patterns
+    freeze(
+        NodeKind::MatchAs {
+            value: NodeId(0),
+            name: NodeId(0),
+        },
+        108,
+    );
+    freeze(
+        NodeKind::ConstPattern {
+            const_: NodeId(0),
+            pattern: NodeId(0),
+        },
+        109,
+    );
 }
 
 /// Catch the failure mode that `node_kind_discriminants_are_frozen` would
@@ -356,14 +371,14 @@ fn node_kind_discriminants_are_frozen() {
 /// in undetected.
 #[test]
 fn highest_frozen_tag_matches_last_variant() {
-    let last = NodeKind::MatchPattern {
-        value: NodeId(0),
+    let last = NodeKind::ConstPattern {
+        const_: NodeId(0),
         pattern: NodeId(0),
     }
     .tag()
     .0;
     assert_eq!(
-        last, 107,
+        last, 109,
         "appending a new NodeKind variant requires extending tests/discriminant_freeze.rs \
          (add the new variant to both `node_kind_discriminants_are_frozen` and update \
          the expected last-tag here)."
