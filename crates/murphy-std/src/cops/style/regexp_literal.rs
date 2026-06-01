@@ -216,12 +216,29 @@ fn regexp_body_contains_braces(node: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
 
-    // Scan the body for bare (non-escaped) `{` or `}`.
+    // Scan the body for bare (non-escaped, non-interpolation) `{` or `}`.
+    // Interpolation sequences `#{...}` are safe in `%r{...}` — Ruby handles
+    // the brace nesting correctly. Only bare structural braces conflict.
     let body = &bytes[body_start..body_end];
     let mut i = 0;
     while i < body.len() {
         if body[i] == b'\\' {
             i += 2; // skip escape
+            continue;
+        }
+        // Skip interpolation `#{...}` — these are safe in `%r{}`.
+        if body[i] == b'#' && i + 1 < body.len() && body[i + 1] == b'{' {
+            // Skip past the entire `#{...}` block (counting brace depth).
+            i += 2; // skip `#{`
+            let mut depth = 1usize;
+            while i < body.len() && depth > 0 {
+                match body[i] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
             continue;
         }
         if body[i] == b'{' || body[i] == b'}' {

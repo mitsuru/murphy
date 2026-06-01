@@ -24,8 +24,9 @@
 //!   Gaps:
 //!     - `__FILE__` / `__dir__` character literals not explicitly handled
 //!       (skipped because their raw_source won't contain `\`).
-//!     - Dsym (:"...") nodes containing Str segments — handled via the
-//!       dsym handler, which delegates to check_dstr_node.
+//!     - Dsym (:"...") nodes — NOT covered. Prism provides normalized string
+//!       values for Str segments inside dsym, so the raw escape bytes are
+//!       not visible. The dsym subscription exists but cannot detect offenses.
 //!     - Xstr (`%x{...}`) is explicitly skipped (matches RuboCop).
 //!     - Regexp nodes are explicitly skipped (matches RuboCop).
 //!     - Character literals (`?x`) are not subscribed (no `\` in raw source).
