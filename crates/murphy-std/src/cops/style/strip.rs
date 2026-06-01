@@ -22,6 +22,9 @@
 //!   case; Murphy chooses the conservative stance.
 //!   `x.lstrip&.rstrip` (inner send, outer csend) is still matched because
 //!   x.lstrip always returns a non-nil String, making the &. redundant.
+//!   Block receivers: `x.lstrip { }.rstrip` is skipped — the inner receiver
+//!   is a block node and `cx.selector` on a block node delegates through to
+//!   the inner send, but the block itself changes the semantics.
 //!   Both inner and outer calls must have no arguments.
 //! ```
 //!
@@ -35,6 +38,7 @@
 //! ## Non-matches
 //!
 //! - `x&.lstrip.rstrip` / `x&.rstrip.lstrip` — inner csend, outer send (behavior change risk)
+//! - `x.lstrip { }.rstrip` — inner call is wrapped in a block
 //! - `x.lstrip.rstrip(arg)` — outer call has arguments
 //! - `x.lstrip(arg).rstrip` — inner call has arguments
 //!
@@ -83,6 +87,13 @@ fn check(outer: NodeId, cx: &Cx<'_>) {
         return;
     };
 
+    // Skip when the inner receiver is a block node (e.g. `x.lstrip { }.rstrip`).
+    // method_name delegates through blocks, but the block changes semantics and
+    // cx.selector on a block would return Range::ZERO for the block node itself.
+    if cx.is_any_block_type(inner_id) {
+        return;
+    }
+
     let Some(inner_method) = cx.method_name(inner_id) else {
         return;
     };
@@ -113,12 +124,16 @@ fn check(outer: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // Offense range: from start of inner method name to end of outer node.
-    // Mirrors RuboCop: range_between(first_send.loc.selector.begin_pos, node.source_range.end_pos)
-    let inner_name_start = cx.node(inner_id).loc.name.start;
+    // Offense range: from start of inner selector to end of outer node.
+    // Use cx.selector(inner_id) rather than cx.node(inner_id).loc.name for
+    // safety — loc.name on a non-send node returns Range::ZERO.
+    let inner_selector = cx.selector(inner_id);
+    if inner_selector == Range::ZERO {
+        return;
+    }
     let outer_end = cx.range(outer).end;
     let offense_range = Range {
-        start: inner_name_start,
+        start: inner_selector.start,
         end: outer_end,
     };
 
