@@ -193,24 +193,61 @@ fn regexp_body_contains_slash(node: NodeId, cx: &Cx<'_>) -> bool {
     }
 }
 
-/// Returns `true` if the regexp body contains `{` or `}` (unescaped in the
-/// interned string value). Used to skip `%r{}` autocorrect when the body
-/// would conflict with the brace delimiters.
+/// Returns `true` if the regexp body contains bare (unescaped) `{` or `}`
+/// in the raw source. Used to skip `%r{}` autocorrect when the body would
+/// conflict with the brace delimiters.
+///
+/// Escaped braces `\{` and `\}` in the raw source do NOT cause a conflict
+/// because they remain escaped in the `%r{...}` form as well.
 fn regexp_body_contains_braces(node: NodeId, cx: &Cx<'_>) -> bool {
-    match *cx.kind(node) {
-        NodeKind::Regexp { parts, .. } => {
-            for &part in cx.list(parts) {
-                if let NodeKind::Str(sid) = cx.kind(part) {
-                    let s = cx.string_str(*sid);
-                    if s.contains('{') || s.contains('}') {
-                        return true;
-                    }
-                }
-            }
-            false
-        }
-        _ => false,
+    let range = cx.range(node);
+    let src = cx.raw_source(range);
+    let bytes = src.as_bytes();
+
+    // Extract the body from the slash-delimited regexp: skip `[1..]` up to
+    // the closing `/`.
+    let (body_start, body_end) = if bytes.first() == Some(&b'/') {
+        find_slash_body_bounds(bytes)
+    } else {
+        return false; // Only called for slash literals
+    };
+
+    if body_start >= body_end {
+        return false;
     }
+
+    // Scan the body for bare (non-escaped) `{` or `}`.
+    let body = &bytes[body_start..body_end];
+    let mut i = 0;
+    while i < body.len() {
+        if body[i] == b'\\' {
+            i += 2; // skip escape
+            continue;
+        }
+        if body[i] == b'{' || body[i] == b'}' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Find the body byte range within a slash-delimited regexp source.
+/// Returns `(start, end)` as indices into `bytes`.
+fn find_slash_body_bounds(bytes: &[u8]) -> (usize, usize) {
+    // bytes[0] == '/'
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'/' {
+            return (1, i);
+        }
+        i += 1;
+    }
+    (1, bytes.len())
 }
 
 /// Emit the autocorrect edit — swap delimiters and fix inner slash escaping.
@@ -490,7 +527,7 @@ mod tests {
 
     #[test]
     fn flags_slash_literal_with_body_brace_but_no_autocorrect() {
-        // Body contains `}` — offense is emitted but autocorrect is skipped
+        // Body contains bare `}` — offense is emitted but autocorrect is skipped
         // to avoid generating invalid `%r{foo}bar}`.
         test::<RegexpLiteral>()
             .with_options(&RegexpLiteralOptions { enforced_style: EnforcedStyle::PercentR, ..Default::default() })
@@ -498,6 +535,21 @@ mod tests {
                 r = /foo}bar/
                     ^ Use `%r` around regular expression.
             "#});
+    }
+
+    #[test]
+    fn corrects_slash_literal_with_escaped_brace() {
+        // Escaped `\{` in raw source is NOT a bare brace — autocorrect is safe.
+        // `/foo\{bar/` → `%r{foo\{bar}` (the `\{` remains escaped).
+        test::<RegexpLiteral>()
+            .with_options(&RegexpLiteralOptions { enforced_style: EnforcedStyle::PercentR, ..Default::default() })
+            .expect_correction(
+                indoc! {r#"
+                    r = /foo\{bar/
+                        ^ Use `%r` around regular expression.
+                "#},
+                "r = %r{foo\\{bar}\n",
+            );
     }
 
     #[test]
