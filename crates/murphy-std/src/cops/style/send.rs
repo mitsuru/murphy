@@ -30,7 +30,7 @@
 //! quuz.public_send(fred)
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop};
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -53,10 +53,7 @@ impl Send {
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if cx.symbol_str(method) == "send" {
+        if cx.method_name(node) == Some("send") {
             check(node, cx);
         }
     }
@@ -64,18 +61,12 @@ impl Send {
 
 fn check(node: NodeId, cx: &Cx<'_>) {
     // Only flag calls that have at least one argument.
-    let args = match cx.kind(node) {
-        NodeKind::Send { args, .. } => cx.list(*args),
-        NodeKind::Csend { args, .. } => cx.list(*args),
-        _ => return,
-    };
-
-    if args.is_empty() {
+    if !cx.has_call_arguments(node) {
         return;
     }
 
     // Offense is on the selector only (matching RuboCop's `node.loc.selector`).
-    let selector = cx.node(node).loc.name;
+    let selector = cx.selector(node);
     cx.emit_offense(selector, MSG, None);
     // No autocorrect -- upstream provides none.
 }

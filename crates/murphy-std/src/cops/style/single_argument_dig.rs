@@ -59,8 +59,6 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 #[derive(Default)]
 pub struct SingleArgumentDig;
 
-const MSG: &str = "Use `%<receiver>s[%<argument>s]` instead of `%<original>s`.";
-
 #[cop(
     name = "Style/SingleArgumentDig",
     description = "Avoid using single argument dig method.",
@@ -79,33 +77,29 @@ impl SingleArgumentDig {
 /// Returns true if `node` is a plain `send` to `dig` with exactly one
 /// eligible (non-blocked, non-splat, non-hash) argument and a non-nil receiver.
 fn is_single_arg_dig(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
-        return false;
-    };
-    if receiver.get().is_none() {
+    if cx.method_name(node) != Some("dig") {
         return false;
     }
-    let args_list = cx.list(args);
-    if args_list.len() != 1 {
+    if cx.call_receiver(node).get().is_none() {
+        return false;
+    }
+    let args = cx.call_arguments(node);
+    if args.len() != 1 {
         return false;
     }
     !matches!(
-        cx.kind(args_list[0]),
+        cx.kind(args[0]),
         NodeKind::BlockPass(_) | NodeKind::Splat(_) | NodeKind::Hash(_)
     )
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
-        return;
-    };
-
     // Must have a receiver (skip bare `dig(:key)` calls).
-    let Some(recv_id) = receiver.get() else {
+    let Some(recv_id) = cx.call_receiver(node).get() else {
         return;
     };
 
-    let args_list = cx.list(args);
+    let args_list = cx.call_arguments(node);
 
     // Must have exactly one argument.
     if args_list.len() != 1 {
@@ -125,10 +119,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let argument_src = cx.raw_source(cx.range(arg));
     let original_src = cx.raw_source(cx.range(node));
 
-    let message = MSG
-        .replace("%<receiver>s", receiver_src)
-        .replace("%<argument>s", argument_src)
-        .replace("%<original>s", original_src);
+    let message = format!(
+        "Use `{receiver_src}[{argument_src}]` instead of `{original_src}`."
+    );
 
     cx.emit_offense(cx.range(node), &message, None);
 
