@@ -122,6 +122,7 @@ fn trim_same_line_space_before(source: &[u8], pos: u32) -> u32 {
     i as u32
 }
 
+
 fn check(class_node: NodeId, cx: &Cx<'_>) {
     let NodeKind::Class {
         name: class_name_id,
@@ -195,16 +196,39 @@ fn check(class_node: NodeId, cx: &Cx<'_>) {
         _ => {
             let has_body = body.get().is_some();
             if !has_body {
-                // Empty body: remove everything after Struct.new(...) through
-                // end of class. Result: `Name = Struct.new(...)`
+                // Empty body. Check if the region between Struct.new and the
+                // class's `end` contains comments — if so, preserve them by
+                // wrapping in `do...end`.
                 let super_end = cx.range(super_id).end;
-                cx.emit_edit(
-                    Range {
-                        start: super_end,
-                        end: class_range.end,
-                    },
-                    "",
-                );
+                let after_struct = Range {
+                    start: super_end,
+                    end: class_range.end,
+                };
+                let has_comments = !cx.comments_in_range(after_struct).is_empty();
+
+                if has_comments {
+                    // Has comments: append ` do` to wrap in a block.
+                    // The class's `end` keyword is preserved as-is — it
+                    // naturally becomes the `end` of the new `do...end` block.
+                    let super_range = cx.range(super_id);
+                    cx.emit_edit(
+                        Range {
+                            start: super_range.end,
+                            end: super_range.end,
+                        },
+                        " do",
+                    );
+                } else {
+                    // No comments: remove everything after Struct.new(...)
+                    // through end of class. Result: `Name = Struct.new(...)`
+                    cx.emit_edit(
+                        Range {
+                            start: super_end,
+                            end: class_range.end,
+                        },
+                        "",
+                    );
+                }
             } else {
                 // Non-empty body: append ` do` after the struct.new call.
                 // If unparenthesized, wrap args in parens first.
@@ -367,6 +391,24 @@ mod tests {
         "});
     }
 
+
+    #[test]
+    fn flags_struct_with_comment_in_empty_body() {
+        // When the "empty" body has only comments, preserve them in a do...end block.
+        test::<StructInheritance>().expect_correction(
+            indoc! {"
+                class Person < Struct.new(:name)
+                               ^^^^^^^^^^^^^^^^^ Don't extend an instance initialized by `Struct.new`. Use a block to customize the struct.
+                  # important note
+                end
+            "},
+            indoc! {"
+                Person = Struct.new(:name) do
+                  # important note
+                end
+            "},
+        );
+    }
     #[test]
     fn accepts_namespaced_struct_new() {
         // MyNamespace::Struct.new is not the built-in Struct — must not flag.
