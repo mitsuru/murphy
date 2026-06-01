@@ -410,6 +410,8 @@ fn fix_inner_slashes_slash_to_percent(
 }
 
 /// Emit edits to fix `/` → `\/` inside a `%r{}`-literal being converted to `//`.
+/// Skips `#{...}` interpolation blocks — `/` inside Ruby interpolation is a
+/// division operator, not a regexp delimiter, and must not be escaped.
 fn fix_inner_slashes_percent_to_slash(
     src: &str,
     node_start: u32,
@@ -425,6 +427,21 @@ fn fix_inner_slashes_percent_to_slash(
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             i += 2; // skip existing escape
+            continue;
+        }
+        // Skip interpolation `#{...}` — `/` inside Ruby interpolation is a
+        // division operator and must not be escaped.
+        if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+            i += 2; // skip `#{`
+            let mut depth = 1usize;
+            while i < bytes.len() && depth > 0 {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
             continue;
         }
         if bytes[i] == b'/' {
