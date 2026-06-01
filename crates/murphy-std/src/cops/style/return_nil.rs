@@ -27,11 +27,16 @@
 //!
 //!   Numblock (`arr.each_with_index { _1 }`) is treated like Block: has
 //!   implicit arguments, so it is treated as args-present. Skipped when
-//!   the block call has a receiver (chained).
+//!   the block call has a receiver (chained). This is conservative: RuboCop's
+//!   `each_ancestor(:block, :any_def)` may not match `:numblock` at all and
+//!   could flag `return nil` inside numbered-parameter chained blocks. Murphy's
+//!   behavior here is a deliberate conservative choice (no false positives).
 //!
 //!   Gaps:
 //!     - `return(nil)` is not handled; the parenthesised form parses as Unknown
 //!       in Murphy's translator and no offense is emitted.
+//!     - Numblock handling may diverge from RuboCop for numbered-param blocks
+//!       (conservative, see note above).
 //! ```
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
