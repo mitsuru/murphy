@@ -2802,6 +2802,13 @@ impl<'a> Cx<'a> {
         std::str::from_utf8(src).expect("source is valid UTF-8")
     }
 
+    /// Current source file path, or an empty string if the host cannot expose
+    /// it as UTF-8.
+    pub fn file_path(&self) -> &'a str {
+        let path = unsafe { self.raw.file_path.as_bytes() };
+        std::str::from_utf8(path).expect("file_path is valid UTF-8")
+    }
+
     /// Record an offense. `cop_name` is stamped from the `CxRaw` the host
     /// built for the running cop.
     pub fn emit_offense(&self, range: Range, message: &str, severity: Option<crate::Severity>) {
@@ -2892,7 +2899,24 @@ mod tests {
             var_model: std::ptr::null(),
             node_slice_arena: std::ptr::null_mut(),
             alloc_node_slice: unavailable_alloc_node_slice,
+            file_path: RawSlice {
+                ptr: ast.path().to_str().unwrap_or("").as_ptr(),
+                len: ast.path().to_str().unwrap_or("").len(),
+            },
         }
+    }
+
+    #[test]
+    fn file_path_exposes_current_source_path() {
+        let (ast, _) = fixture();
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(cx.file_path(), "t.rb");
     }
 
     #[test]

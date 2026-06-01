@@ -190,6 +190,7 @@ fn build_cx_raw(
     node_slice_arena: &mut NodeSliceArena,
 ) -> CxRaw {
     let p = ast.raw_parts();
+    let file_path = ast.path().to_str().unwrap_or("");
     CxRaw {
         nodes: p.nodes.as_ptr(),
         nodes_len: p.nodes.len(),
@@ -217,6 +218,10 @@ fn build_cx_raw(
         var_model: var_model as *const VarSemanticModel,
         node_slice_arena: node_slice_arena as *mut NodeSliceArena as *mut c_void,
         alloc_node_slice,
+        file_path: RawSlice {
+            ptr: file_path.as_ptr(),
+            len: file_path.len(),
+        },
     }
 }
 
