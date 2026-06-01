@@ -6,7 +6,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/TrailingCommaInBlockArgs
 //! upstream_version_checked: 1.86.2
-//! status: partial
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Murphy v1 matches RuboCop's core behavior: flag trailing comma in block args

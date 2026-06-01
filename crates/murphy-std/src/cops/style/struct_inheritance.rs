@@ -6,13 +6,14 @@
 //! upstream: rubocop
 //! upstream_cop: Style/StructInheritance
 //! upstream_version_checked: 1.86.2
-//! status: partial
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Detection is complete. Autocorrect is implemented for the common cases.
 //!   The ::Struct.new and Struct.new forms are treated identically (Murphy's
 //!   translator lowers ::Struct to (const :Struct nil), same as Struct).
-//!   Unparenthesized Struct.new (e.g. Struct.new :x, :y) is supported.
+//!   Unparenthesized Struct.new (e.g. Struct.new :x, :y) is supported; empty-body
+//!   autocorrect leaves args unparenthesized (still valid Ruby).
 //! ```
 //!
 //! ## Matched shapes
@@ -406,6 +407,35 @@ mod tests {
             class Person < DelegateClass(Animal)
             end
         "});
+    }
+
+    #[test]
+    fn flags_struct_inheritance_unparenthesized_with_body() {
+        test::<StructInheritance>().expect_correction(
+            indoc! {"
+                class Person < Struct.new :first_name, :last_name
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Don't extend an instance initialized by `Struct.new`. Use a block to customize the struct.
+                  def foo; end
+                end
+            "},
+            indoc! {"
+                Person = Struct.new(:first_name, :last_name) do
+                  def foo; end
+                end
+            "},
+        );
+    }
+
+    #[test]
+    fn flags_struct_inheritance_unparenthesized_empty_body() {
+        test::<StructInheritance>().expect_correction(
+            indoc! {"
+                class Person < Struct.new :first_name, :last_name
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Don't extend an instance initialized by `Struct.new`. Use a block to customize the struct.
+                end
+            "},
+            "Person = Struct.new :first_name, :last_name\n",
+        );
     }
 }
 murphy_plugin_api::submit_cop!(StructInheritance);
