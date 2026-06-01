@@ -39,8 +39,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
-const MSG: &str = "Use `warn` instead of `%s` to allow such output to be disabled.";
-
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct StderrPuts;
@@ -93,7 +91,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
 
     let recv_src = cx.raw_source(recv_range);
-    let message = MSG.replacen("%s", &format!("{recv_src}.puts"), 1);
+    let message =
+        format!("Use `warn` instead of `{recv_src}.puts` to allow such output to be disabled.");
 
     cx.emit_offense(offense_range, &message, None);
     cx.emit_edit(offense_range, "warn");

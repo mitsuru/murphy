@@ -55,7 +55,9 @@
 //! a heredoc, contains a block descendant, or is a `Dstr` (already
 //! interpolated).
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{
+    CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop,
+};
 
 const MSG: &str = "Prefer string interpolation to string concatenation.";
 
@@ -167,8 +169,12 @@ fn is_str(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Returns true iff `node` is a line-end concatenation:
-/// both receiver and first argument are strings, the node is multiline,
-/// and the source contains `+` followed by optional whitespace and a newline.
+/// both immediate operands are strings, the node is multiline, and the `+`
+/// operator token is immediately followed by a newline (possibly with
+/// trailing spaces).
+///
+/// Uses token-based scanning so that `+` inside string literals or comments
+/// is not mistakenly matched.
 fn is_line_end_concatenation(node: NodeId, cx: &Cx<'_>) -> bool {
     let NodeKind::Send {
         receiver,
@@ -196,23 +202,34 @@ fn is_line_end_concatenation(node: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
 
-    let src = cx.raw_source(cx.range(node));
-    // Check for `+` followed by optional whitespace and a newline.
-    src.contains("+\n")
-        || src.contains("+ \n")
-        || src.contains("+  \n")
-        || contains_plus_newline(src)
-}
+    // Find the `+` operator token between lhs end and rhs start.
+    // Use token scanning to avoid false matches inside string literals.
+    let lhs_end = cx.range(lhs).end;
+    let rhs_start = cx.range(rhs).start;
+    let search_range = Range {
+        start: lhs_end,
+        end: rhs_start,
+    };
+    let src = cx.source().as_bytes();
 
-/// Check if source contains `+` followed by optional whitespace then `\n`.
-fn contains_plus_newline(src: &str) -> bool {
-    if let Some(plus_pos) = src.find('+') {
-        let after = &src[plus_pos + 1..];
-        let trimmed = after.trim_start_matches(' ').trim_start_matches('\t');
-        trimmed.starts_with('\n')
-    } else {
-        false
+    for tok in cx.tokens_in(search_range) {
+        if tok.kind == SourceTokenKind::Other {
+            let tok_src = &src[tok.range.start as usize..tok.range.end as usize];
+            if tok_src == b"+" {
+                // Found the `+` token. Check if it is followed only by optional
+                // spaces/tabs and then a newline.
+                let after_plus = tok.range.end as usize;
+                let remaining = &src[after_plus..rhs_start as usize];
+                let trimmed = remaining
+                    .iter()
+                    .skip_while(|&&b| b == b' ' || b == b'\t')
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return trimmed.first() == Some(&b'\n');
+            }
+        }
     }
+    false
 }
 
 /// Collect all leaf parts of a `+` chain in left-to-right order.
@@ -272,21 +289,19 @@ fn is_correctable(id: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Returns true iff the node has any `Block`/`Numblock`/`Itblock` descendant.
+///
+/// Uses `cx.descendants` (a flat pre-order traversal) rather than recursive
+/// `cx.children` to avoid allocating a `Vec` for every level of the subtree.
 fn has_block_descendant(id: NodeId, cx: &Cx<'_>) -> bool {
-    // We use a simple DFS through children.
-    let kind = cx.kind(id);
-    match kind {
-        NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. } => {
-            return true;
-        }
-        _ => {}
-    }
-    for child in cx.children(id) {
-        if has_block_descendant(child, cx) {
-            return true;
-        }
-    }
-    false
+    matches!(
+        cx.kind(id),
+        NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. }
+    ) || cx.descendants(id).into_iter().any(|desc| {
+        matches!(
+            cx.kind(desc),
+            NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. }
+        )
+    })
 }
 
 /// Build the interpolated string replacement from a list of leaf parts.
@@ -338,12 +353,13 @@ fn escape_for_interpolation(value: &str, src: &str) -> String {
         escape_decoded_value(value)
     } else if trimmed.starts_with('"') {
         // Double-quoted: the source already contains the properly escaped content.
-        // Extract the part between the outer `"` delimiters.
-        if trimmed.len() >= 2 {
-            trimmed[1..trimmed.len() - 1].to_string()
-        } else {
-            String::new()
-        }
+        // Use strip_prefix/strip_suffix to safely remove the outer `"` delimiters
+        // without manual byte-offset slicing (which can panic on multi-byte boundaries).
+        trimmed
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or("")
+            .to_string()
     } else {
         String::new()
     }
