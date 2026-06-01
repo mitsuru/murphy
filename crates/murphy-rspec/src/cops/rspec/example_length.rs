@@ -5,15 +5,16 @@
 //! upstream: rubocop-rspec
 //! upstream_cop: RSpec/ExampleLength
 //! upstream_version_checked: 3.7.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-fgcu
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Fixed: comment lines skipped by default, blank lines skipped, CountComments
-//!   option, CountAsOne option (array/hash/method_call), message format matches
-//!   RuboCop ("Example has too many lines. [N/M]"), runtime options wired via
-//!   cx.options_or_default, focused/skipped/pending alias coverage (murphy-ttzm).
-//!   Remaining gaps: heredoc folding in CountAsOne (murphy-fgcu).
+//!   option, CountAsOne option (array/hash/heredoc/method_call), message format
+//!   matches RuboCop ("Example has too many lines. [N/M]"), runtime options wired
+//!   via cx.options_or_default, focused/skipped/pending alias coverage (murphy-ttzm),
+//!   heredoc folding in CountAsOne (murphy-fgcu).
+//!   Note: Murphy folds Block nodes under method_call (pre-existing behavior pinned
+//!   by count_as_one_folds_block_method_call_into_one_line test); RuboCop does not.
 //! ```
 //!
 //! body. Mirrors RuboCop-RSpec's cop of the same name.
@@ -50,8 +51,9 @@
 //! - `count_comments` (default `false`) — when `true`, comment lines
 //!   are included in the count, matching RuboCop's `CountComments: true`.
 //! - `count_as_one` (default `[]`) — list of constructs to fold to 1
-//!   line: `"array"`, `"hash"`, `"method_call"`. Matching RuboCop's
-//!   `CountAsOne` option.
+//!   line: `"array"`, `"hash"`, `"heredoc"`, `"method_call"`. Matching
+//!   RuboCop's `CountAsOne` option. `"heredoc"` folds any heredoc string
+//!   (opener line + body + terminator) to 1 line.
 //!
 //! Runtime option wiring goes through `cx.options_or_default`.
 //!
@@ -61,7 +63,7 @@
 //! judgement (which assertions move, which setup belongs in
 //! `before`); the cop reports and leaves the fix to the user.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 use super::helpers::{example_call_range, is_example_call};
 
@@ -86,7 +88,7 @@ pub struct ExampleLengthOptions {
     pub count_comments: bool,
     #[option(
         default = [],
-        description = "Constructs to fold into one line: array, hash, method_call."
+        description = "Constructs to fold into one line: array, hash, heredoc, method_call."
     )]
     pub count_as_one: Vec<String>,
 }
@@ -148,10 +150,24 @@ fn apply_count_as_one(
 ) -> usize {
     let fold_array = opts.count_as_one.iter().any(|s| s == "array");
     let fold_hash = opts.count_as_one.iter().any(|s| s == "hash");
+    let fold_heredoc = opts.count_as_one.iter().any(|s| s == "heredoc");
     let fold_method_call = opts.count_as_one.iter().any(|s| s == "method_call");
+
+    // Pre-compute heredoc extents when heredoc folding is enabled.
+    // Each entry maps (heredoc_start_byte_offset → full_extent_range) where
+    // full_extent_range covers from the HeredocStart token through the end of
+    // the terminator line. This is needed because prism assigns the Dstr/Str
+    // node range only the opener token (e.g. `<<~HEREDOC`), not the body.
+    let heredoc_extents = if fold_heredoc {
+        build_heredoc_extents(cx)
+    } else {
+        Vec::new()
+    };
 
     let mut count = base as isize;
     // Track already-folded ranges so we skip nested descendants.
+    // For heredocs we use the full physical extent as the folded range,
+    // so any inner nodes (Str parts of a dstr) are not double-counted.
     let mut folded_ranges: Vec<Range> = Vec::new();
 
     let descendants = cx.descendants(body_id);
@@ -163,6 +179,35 @@ fn apply_count_as_one(
             .any(|fr| range.start >= fr.start && range.end <= fr.end)
         {
             continue;
+        }
+
+        // Check for heredoc folding first (before other foldable checks).
+        if fold_heredoc {
+            let is_heredoc_node = matches!(cx.kind(desc), NodeKind::Str(_) | NodeKind::Dstr(_))
+                && cx.raw_source(range).starts_with("<<");
+            if is_heredoc_node {
+                // Find the full extent of this heredoc from the pre-computed map.
+                if let Some(&(full_start, full_end)) = heredoc_extents
+                    .iter()
+                    .find(|&&(start, _)| start == range.start)
+                {
+                    let full_extent_src = cx.raw_source(Range {
+                        start: full_start,
+                        end: full_end,
+                    });
+                    let node_lines = count_lines(full_extent_src, opts.count_comments);
+                    if node_lines > 1 {
+                        count -= (node_lines as isize) - 1;
+                    }
+                    // Register the full extent as folded so inner Str parts
+                    // (the dstr children) are not counted again.
+                    folded_ranges.push(Range {
+                        start: full_start,
+                        end: full_end,
+                    });
+                }
+                continue;
+            }
         }
 
         let should_fold = match cx.kind(desc) {
@@ -185,6 +230,59 @@ fn apply_count_as_one(
     }
 
     count.max(0) as usize
+}
+
+/// Pre-compute heredoc extents from the token stream.
+///
+/// Returns a list of `(heredoc_start_byte, full_extent_end_byte)` pairs.
+/// `heredoc_start_byte` matches the `range.start` of the corresponding
+/// `Dstr`/`Str` AST node (prism assigns only the opener token to the node).
+/// `full_extent_end_byte` is the byte offset past the end of the terminator
+/// line (inclusive of the `\n` after `HEREDOC`), so that
+/// `cx.raw_source(full_start..full_end)` covers opener + body + terminator.
+///
+/// Multiple heredocs opened on the same source line are matched FIFO (the
+/// order in which `HeredocStart` tokens appear equals the order their
+/// `HeredocEnd` terminators appear in the source).
+fn build_heredoc_extents(cx: &Cx<'_>) -> Vec<(u32, u32)> {
+    use std::collections::VecDeque;
+    let source = cx.source().as_bytes();
+    let mut starts: VecDeque<u32> = VecDeque::new();
+    let mut result: Vec<(u32, u32)> = Vec::new();
+
+    for tok in cx.sorted_tokens() {
+        match tok.kind {
+            SourceTokenKind::HeredocStart => {
+                starts.push_back(tok.range.start);
+            }
+            SourceTokenKind::HeredocEnd => {
+                if let Some(opener_start) = starts.pop_front() {
+                    // The terminator line ends at the \n after the label,
+                    // or at EOF if there is no trailing newline.
+                    let term_end = terminator_line_end(source, tok.range.end);
+                    result.push((opener_start, term_end));
+                }
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+/// Returns the byte offset of the first byte past the end of the line
+/// that contains `pos`. If the line ends with `\n` we include that `\n`
+/// so that `source[start..end]` faithfully represents the full line(s).
+fn terminator_line_end(source: &[u8], pos: u32) -> u32 {
+    let mut i = pos as usize;
+    while i < source.len() && source[i] != b'\n' {
+        i += 1;
+    }
+    // Include the \n itself so blank-line detection works correctly.
+    if i < source.len() {
+        i as u32 + 1
+    } else {
+        i as u32
+    }
 }
 
 /// Count logical source lines spanned by `text`:
@@ -529,5 +627,139 @@ mod tests {
                   end
                 end
             "#});
+    }
+
+    // ------------------------------------------------------------------
+    // CountAsOne: heredoc folding
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn count_as_one_folds_heredoc_into_one_line() {
+        // Heredoc with 2 body lines spans 4 physical lines (opener + 2 + terminator).
+        // With CountAsOne: ["heredoc"] it folds to 1 line.
+        // a = 1 (1) + heredoc (folded->1) = 2 lines. Max=3 -> no offense.
+        let src = indoc! {r#"
+            it "works" do
+              a = 1
+              msg = <<~HEREDOC
+                line1
+                line2
+              HEREDOC
+            end
+        "#};
+        let opts = ExampleLengthOptions {
+            max: 3,
+            count_comments: false,
+            count_as_one: vec!["heredoc".to_string()],
+        };
+        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
+        assert_eq!(
+            offenses.len(),
+            0,
+            "CountAsOne:heredoc should fold the multi-line heredoc to 1 line"
+        );
+    }
+
+    #[test]
+    fn count_as_one_heredoc_rubocop_docstring_example() {
+        // Mirrors the canonical RuboCop docstring example for CountAsOne.
+        // CountAsOne: ['array', 'heredoc', 'method_call'] (not hash).
+        // Counts:
+        //   array = [...] folded -> 1
+        //   hash = {...}  NOT folded -> 3 lines
+        //   msg = <<~HEREDOC folded -> 1
+        //   foo(...) folded -> 1
+        //   blank lines -> 0
+        // Total = 1 + 3 + 1 + 1 = 6 lines. Max=5 -> one offense.
+        let src = indoc! {r#"
+            it do
+              array = [
+                1,
+                2
+              ]
+
+              hash = {
+                key: 'value'
+              }
+
+              msg = <<~HEREDOC
+                Heredoc
+                content.
+              HEREDOC
+
+              foo(
+                1,
+                2
+              )
+            end
+        "#};
+        let opts = ExampleLengthOptions {
+            max: 5,
+            count_comments: false,
+            count_as_one: vec![
+                "array".to_string(),
+                "heredoc".to_string(),
+                "method_call".to_string(),
+            ],
+        };
+        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
+        assert_eq!(
+            offenses.len(),
+            1,
+            "Expected one offense per RuboCop docstring example"
+        );
+        assert_eq!(
+            offenses[0].message, "Example has too many lines. [6/5]",
+            "Message must report 6 lines (array->1 + hash->3 + heredoc->1 + method_call->1)"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Alias coverage: focused/skipped/pending forms
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn handles_focused_and_skipped_example_aliases() {
+        // fit, xit, skip, pending are all example aliases and should be
+        // flagged just like it/specify/example.
+        let src = indoc! {r#"
+            fit "focused" do
+              a = 1
+              b = 2
+              c = 3
+              d = 4
+              e = 5
+              f = 6
+            end
+            xit "skipped" do
+              a = 1
+              b = 2
+              c = 3
+              d = 4
+              e = 5
+              f = 6
+            end
+            skip "pending1" do
+              a = 1
+              b = 2
+              c = 3
+              d = 4
+              e = 5
+              f = 6
+            end
+            pending "pending2" do
+              a = 1
+              b = 2
+              c = 3
+              d = 4
+              e = 5
+              f = 6
+            end
+        "#};
+        assert_eq!(
+            hits(src),
+            4,
+            "fit/xit/skip/pending should all be flagged like it/specify/example"
+        );
     }
 }
