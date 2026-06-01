@@ -107,15 +107,14 @@ impl OpKind {
 /// We scan tokens because some sub-expressions (e.g. `(b && c)`) parse as
 /// `Unknown` in Murphy's AST, making purely AST-based descendant walks miss
 /// operators inside parenthesized groups.
-fn collect_op_tokens_in_range(cond: NodeId, cx: &Cx<'_>) -> Vec<OpKind> {
-    let cond_range = cx.range(cond);
+fn collect_op_tokens_in_range(range_start: u32, range_end: u32, cx: &Cx<'_>) -> Vec<OpKind> {
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
-    let idx = toks.partition_point(|t| t.range.start < cond_range.start);
+    let idx = toks.partition_point(|t| t.range.start < range_start);
 
     let mut ops = Vec::new();
     for tok in &toks[idx..] {
-        if tok.range.start >= cond_range.end {
+        if tok.range.start >= range_end {
             break;
         }
         if tok.kind != SourceTokenKind::Other {
@@ -152,45 +151,48 @@ fn is_word_char(b: u8) -> bool {
 
 /// Returns `true` when the condition mixes logical operator types or
 /// mixes symbolic and keyword forms.
+///
+/// Mirrors RuboCop's `mixed_logical_operator?`: gates on the top condition
+/// being `And` or `Or` to avoid false positives on logical operators inside
+/// method call arguments (e.g. `unless foo(a && b || c)`).
 fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
-    let ops = collect_op_tokens_in_range(cond, cx);
-    if ops.is_empty() {
-        return false;
-    }
-
-    let has_and = ops.iter().any(|op| op.is_and());
-    let has_or = ops.iter().any(|op| op.is_or());
-
-    // Mixed if both `and`-type and `or`-type are present.
-    if has_and && has_or {
-        return true;
-    }
-
-    // Mixed if `and`-type operators mix symbolic and keyword.
-    if has_and {
-        let has_symbolic_and = ops.iter().any(|&op| op == OpKind::SymbolicAnd);
-        let has_keyword_and = ops.iter().any(|&op| op == OpKind::KeywordAnd);
-        if has_symbolic_and && has_keyword_and {
-            return true;
+    let cond_range = cx.range(cond);
+    match cx.kind(cond) {
+        NodeKind::Or { .. } => {
+            // or_with_and?: top is `or`; fire if any descendant is `and`-type.
+            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, cx);
+            let has_and = ops.iter().any(|op| op.is_and());
+            if has_and {
+                return true; // cross-type: or + and
+            }
+            // mixed_precedence_or?: only `or`-type but mixing symbolic/keyword.
+            let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicOr);
+            let has_kw = ops.iter().any(|&op| op == OpKind::KeywordOr);
+            has_sym && has_kw
         }
-    }
-
-    // Mixed if `or`-type operators mix symbolic and keyword.
-    if has_or {
-        let has_symbolic_or = ops.iter().any(|&op| op == OpKind::SymbolicOr);
-        let has_keyword_or = ops.iter().any(|&op| op == OpKind::KeywordOr);
-        if has_symbolic_or && has_keyword_or {
-            return true;
+        NodeKind::And { .. } => {
+            // and_with_or?: top is `and`; fire if any descendant is `or`-type.
+            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, cx);
+            let has_or = ops.iter().any(|op| op.is_or());
+            if has_or {
+                return true; // cross-type: and + or
+            }
+            // mixed_precedence_and?: only `and`-type but mixing symbolic/keyword.
+            let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicAnd);
+            let has_kw = ops.iter().any(|&op| op == OpKind::KeywordAnd);
+            has_sym && has_kw
         }
+        // Top condition is not And/Or (e.g. Send, Unknown): not flagged.
+        _ => false,
     }
-
-    false
 }
 
-/// Returns `true` when the condition contains any `and` or `or` operator.
+/// Returns `true` when the condition's top node is `And` or `Or`.
+///
+/// Mirrors RuboCop's `logical_operator?` which only matches when the condition
+/// itself is `and`/`or`, not when logical operators appear inside method args.
 fn has_any_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
-    let ops = collect_op_tokens_in_range(cond, cx);
-    !ops.is_empty()
+    matches!(cx.kind(cond), NodeKind::And { .. } | NodeKind::Or { .. })
 }
 
 #[cfg(test)]
@@ -450,6 +452,24 @@ mod tests {
             opts.enforced_style,
             EnforcedStyle::ForbidMixedLogicalOperators
         );
+    }
+
+    #[test]
+    fn forbid_any_does_not_flag_logical_inside_method_arg() {
+        // `foo(a || b)` — the condition is a method call, not a logical operator.
+        // RuboCop's `logical_operator?` pattern only matches when the condition
+        // itself (direct child of `if`) is `and`/`or`.
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_no_offenses("return unless foo(a || b)\n");
+    }
+
+    #[test]
+    fn forbid_mixed_does_not_flag_logical_inside_method_arg() {
+        // Mixed operators inside a method arg — condition is Send, not And/Or.
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless foo(a && b || c)\n");
     }
 }
 

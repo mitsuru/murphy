@@ -245,6 +245,41 @@ mod tests {
     }
 
     #[test]
+    fn flags_and_corrects_unless_with_nested_if_else() {
+        // Tests the parenthesized condition `unless(x)` (condition is Unknown in
+        // Murphy's AST) and verifies that nested if/elsif/else is preserved.
+        test::<UnlessElse>().expect_correction(
+            indoc! {r#"
+                unless(x)
+                ^^^^^^^^^ Do not use `unless` with `else`. Rewrite these with the positive case first.
+                  if(y == 0)
+                    a = 0
+                  elsif(z == 0)
+                    a = 1
+                  else
+                    a = 2
+                  end
+                else
+                  a = 3
+                end
+            "#},
+            indoc! {"
+                if(x)
+                  a = 3
+                else
+                  if(y == 0)
+                    a = 0
+                  elsif(z == 0)
+                    a = 1
+                  else
+                    a = 2
+                  end
+                end
+            "},
+        );
+    }
+
+    #[test]
     fn accepts_unless_without_else() {
         test::<UnlessElse>().expect_no_offenses(indoc! {"
             unless x
