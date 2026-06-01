@@ -18,120 +18,82 @@ mod node_pattern;
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, Ident, Path, Token, parse_macro_input, punctuated::Punctuated};
+use syn::{DeriveInput, Ident, Token, parse_macro_input};
 
-/// Register a list of cop types as a Murphy native plugin pack
-/// (ADR 0038 single-surface ABI).
+/// Declare the Murphy plugin registration entry point for a cop pack.
 ///
-/// `mode = static|dynamic` is **required** as the first argument and
-/// selects the symbol shape of the generated `murphy_plugin_register`
-/// entry. Both modes generate the *same* static `PluginCopV1` table —
-/// only the export shape differs (design §5 of
-/// `docs/plans/2026-05-22-plugin-reboot-design.md`):
+/// `mode = static|dynamic` is **required** and selects the symbol shape of
+/// the generated `murphy_plugin_register` entry (design §5):
 ///
 /// - `mode = dynamic` — emits `#[no_mangle] pub unsafe extern "C" fn
-///   murphy_plugin_register` inside an anonymous `const` block. This is
-///   the shape an external `.so` plugin pack exports; the murphy-cli
-///   loader resolves it through `dlsym`.
+///   murphy_plugin_register`. Used by external `.so` plugin packs; the
+///   murphy-cli loader resolves it through `dlsym`.
 /// - `mode = static` — emits a plain Rust `pub fn murphy_plugin_register`
-///   at the macro caller's scope, with **no `#[no_mangle]` symbol**. This
-///   is the shape used by statically-linked built-in packs (`murphy-std`,
-///   future `murphy-rails` siblings); murphy-cli calls the Rust path
-///   directly. Avoiding `#[no_mangle]` prevents a C-symbol collision when
-///   multiple static packs are linked into the same binary.
+///   at the macro caller's scope, with **no `#[no_mangle]` symbol**. Used
+///   by statically-linked built-in packs (`murphy-std`); murphy-cli calls
+///   the Rust path directly. Avoids C-symbol collision when multiple static
+///   packs are linked into the same binary.
 ///
-/// The mode is a macro argument rather than a Cargo feature because
-/// features unify across the dependency tree — a `plugin-dynamic`
-/// feature flipped on by an unrelated crate would silently force every
-/// static pack to emit a `#[no_mangle]` symbol and collide.
+/// Both modes also declare `pub static PACK_COPS: [PluginCopV1]` as a
+/// `#[linkme::distributed_slice]`. Each cop file calls
+/// `murphy_plugin_api::submit_cop!(T)` to register itself; the linker
+/// collects all submissions into `PACK_COPS` at link time. No central cop
+/// list is needed in `lib.rs` — add a cop by editing only its own file.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use murphy_ast::NodeId;
-/// use murphy_plugin_api::{Cop, Cx, NoOptions, NodeCop, NodeKindTag};
+/// // lib.rs — just the entry point declaration, no cop list:
+/// murphy_plugin_api::register_cops!(mode = dynamic);
 ///
+/// // cops/lint/no_tabs.rs — self-registration in the cop's own file:
 /// #[derive(Default)]
 /// struct NoTabs;
-///
-/// impl Cop for NoTabs {
-///     type Options = NoOptions;
-///     const NAME: &'static str = "Plugin/NoTabs";
-/// }
-///
-/// impl NodeCop for NoTabs {
-///     const KINDS: &'static [NodeKindTag] = &[];
-///     fn check(&self, node: NodeId, cx: &Cx<'_>) {}
-/// }
-///
-/// // .so plugin pack (cdylib):
-/// murphy_plugin_macros::register_cops!(mode = dynamic, NoTabs);
-///
-/// // Statically-linked built-in pack:
-/// // murphy_plugin_macros::register_cops!(mode = static, NoTabs);
+/// // ... impl Cop + NodeCop ...
+/// murphy_plugin_api::submit_cop!(NoTabs);
 /// ```
-///
-/// Every listed type must implement `murphy_plugin_api::NodeCop` (hence
-/// `Cop`) and [`Default`] — the dispatch thunk constructs a fresh,
-/// stateless cop per matched node. `KINDS` / `check` are hand-written
-/// here; `#[on_node]` / `#[murphy::cop]` (murphy-9cr.8) will generate
-/// them.
-///
-/// Each cop's `NAME` must be pairwise distinct; `register_cops!`
-/// enforces this at compile time with an inline const-eval `panic!`
-/// guarded by `murphy_plugin_api::__internal::cop_names_unique`.
 #[proc_macro]
 pub fn register_cops(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as RegisterCopsInput);
-    let cops: Vec<&Path> = input.cops.iter().collect();
-    let n = cops.len();
 
-    let cop_entries = cops.iter().map(|cop| {
-        quote! { __api::__internal::build_cop::<#cop>() }
-    });
-
-    let name_exprs = cops.iter().map(|cop| {
-        quote! { <#cop as __api::Cop>::NAME }
-    });
-
-    let uniqueness_check = quote! {
-        // Compile-time uniqueness check. The duplicate-`NAME` `panic!`
-        // is emitted inline here (not inside the helper) so the
-        // const-eval error stays a clean `error[E0080]` with no
-        // `core::panic` frame, keeping the trybuild snapshot stable
-        // across `rust-src` presence (murphy-8np).
-        const _: () = if !__api::__internal::cop_names_unique::<#n>(
-            [ #(#name_exprs),* ]
-        ) {
-            ::core::panic!(
-                "register_cops!: two registered cops share the same NAME"
-            );
-        };
+    // Shared debug-mode uniqueness check emitted into murphy_plugin_register.
+    let dup_check = quote! {
+        #[cfg(debug_assertions)]
+        {
+            let mut seen = ::std::collections::HashSet::new();
+            for cop in PACK_COPS.iter() {
+                let name = unsafe { cop.name.as_bytes() };
+                if !seen.insert(name) {
+                    panic!(
+                        "register_cops!: two cops share the same NAME: {}",
+                        ::std::str::from_utf8(name).unwrap_or("<invalid utf8>")
+                    );
+                }
+            }
+        }
     };
 
     let expanded = match input.mode {
         RegisterMode::Dynamic => quote! {
+            /// This pack's cop distributed slice. Each `submit_cop!(T)` call
+            /// contributes an entry; the linker collects them at link time.
+            #[::murphy_plugin_api::linkme::distributed_slice]
+            pub(crate) static PACK_COPS: [::murphy_plugin_api::PluginCopV1];
+
             const _: () = {
-                use ::murphy_plugin_api as __api;
-
-                #uniqueness_check
-
-                static COPS: [__api::PluginCopV1; #n] = [
-                    #(#cop_entries),*
-                ];
-
                 #[unsafe(no_mangle)]
                 pub unsafe extern "C" fn murphy_plugin_register(
-                    out: *mut __api::PluginRegistration,
+                    out: *mut ::murphy_plugin_api::PluginRegistration,
                 ) -> i32 {
                     if out.is_null() {
                         return 1;
                     }
+                    #dup_check
                     unsafe {
-                        *out = __api::PluginRegistration {
-                            abi_version: __api::MURPHY_PLUGIN_ABI_VERSION,
-                            cops_ptr: COPS.as_ptr(),
-                            cops_len: COPS.len(),
+                        *out = ::murphy_plugin_api::PluginRegistration {
+                            abi_version: ::murphy_plugin_api::MURPHY_PLUGIN_ABI_VERSION,
+                            cops_ptr: PACK_COPS.as_ptr(),
+                            cops_len: PACK_COPS.len(),
                         };
                     }
                     0
@@ -139,46 +101,35 @@ pub fn register_cops(input: TokenStream) -> TokenStream {
             };
         },
         RegisterMode::Static => quote! {
-            #[doc(hidden)]
-            pub static __MURPHY_PLUGIN_COPS_V1: [::murphy_plugin_api::PluginCopV1; #n] = {
-                use ::murphy_plugin_api as __api;
-                [ #(#cop_entries),* ]
-            };
+            /// This pack's cop distributed slice. Each `submit_cop!(T)` call
+            /// contributes an entry; the linker collects them at link time.
+            #[::murphy_plugin_api::linkme::distributed_slice]
+            pub static PACK_COPS: [::murphy_plugin_api::PluginCopV1];
 
-            const _: () = {
-                use ::murphy_plugin_api as __api;
-                #uniqueness_check
-            };
-
-            /// Fill the host-provided `PluginRegistration` with this
-            /// pack's cops. Static-mode entry point: the host (murphy-cli)
-            /// calls this directly through the Rust path — no `dlsym`,
-            /// no `#[no_mangle]` symbol that could collide with another
+            /// Fill the host-provided `PluginRegistration` with this pack's
+            /// cops. Static-mode entry point: the host (murphy-cli) calls
+            /// this directly through the Rust path — no `dlsym`, no
+            /// `#[no_mangle]` symbol that could collide with another
             /// statically-linked pack (design §5).
             ///
             /// # Safety
             ///
-            /// The signature mirrors the dynamic-mode `extern "C"` entry:
             /// `out` must be either null (treated as a usage error and
-            /// rejected with `1`) or point to a writable
-            /// `PluginRegistration` slot valid for the duration of the
-            /// call. The dynamic and static entry points share this
-            /// contract so the host can route either through a single
-            /// registration code path.
+            /// rejected with `1`) or point to a writable `PluginRegistration`
+            /// slot valid for the duration of the call.
             pub unsafe fn murphy_plugin_register(
                 out: *mut ::murphy_plugin_api::PluginRegistration,
             ) -> i32 {
                 if out.is_null() {
                     return 1;
                 }
-                // Safety: `out` is non-null per the check above; the
-                // caller upholds the pointee-writability part of the
-                // contract documented on this function.
+                #dup_check
+                // Safety: `out` is non-null per the check above.
                 unsafe {
                     *out = ::murphy_plugin_api::PluginRegistration {
                         abi_version: ::murphy_plugin_api::MURPHY_PLUGIN_ABI_VERSION,
-                        cops_ptr: __MURPHY_PLUGIN_COPS_V1.as_ptr(),
-                        cops_len: __MURPHY_PLUGIN_COPS_V1.len(),
+                        cops_ptr: PACK_COPS.as_ptr(),
+                        cops_len: PACK_COPS.len(),
                     };
                 }
                 0
@@ -431,27 +382,25 @@ enum RegisterMode {
     Static,
 }
 
-/// Parsed form of `register_cops!(mode = static|dynamic, Cop1, Cop2, …);`.
+/// Parsed form of `register_cops!(mode = static|dynamic)`.
+/// Cop list removed — each cop file calls `submit_cop!(T)` instead.
 struct RegisterCopsInput {
     mode: RegisterMode,
-    cops: Punctuated<Path, Token![,]>,
 }
 
 impl syn::parse::Parse for RegisterCopsInput {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-        // `mode = static|dynamic ,` — required as the first argument.
+        // `mode = static|dynamic` — required as the only argument.
         let mode_kw: Ident = input.parse().map_err(|_| {
             syn::Error::new(
                 input.span(),
-                "register_cops!: first argument must be `mode = static` or \
-                 `mode = dynamic` (design §5: macro argument, not Cargo feature, \
-                 to avoid feature-unification surprises)",
+                "register_cops!: first argument must be `mode = static` or `mode = dynamic`",
             )
         })?;
         if mode_kw != "mode" {
             return Err(syn::Error::new(
                 mode_kw.span(),
-                format!("register_cops!: expected first argument `mode`, found `{mode_kw}`"),
+                format!("register_cops!: expected `mode`, found `{mode_kw}`"),
             ));
         }
         let _eq: Token![=] = input.parse()?;
@@ -473,14 +422,14 @@ impl syn::parse::Parse for RegisterCopsInput {
                 ));
             }
         };
-        let _comma: Token![,] = input.parse().map_err(|_| {
-            syn::Error::new(
+        // Reject the old cop-list form with a helpful migration message.
+        if !input.is_empty() {
+            return Err(syn::Error::new(
                 input.span(),
-                "register_cops!: expected `,` after `mode = …` and at least one cop",
-            )
-        })?;
-
-        let cops = Punctuated::parse_terminated(input)?;
-        Ok(RegisterCopsInput { mode, cops })
+                "register_cops!: cop list is no longer accepted — \
+                 call submit_cop!(T) in each cop file instead",
+            ));
+        }
+        Ok(RegisterCopsInput { mode })
     }
 }
