@@ -229,9 +229,16 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TrivialAccessorsOptions) {
     // Autocorrect: only safe when names match and method is a proper `=` writer
     // (not a DSL writer whose API would change). Mirrors RuboCop's `names_match?`
     // guard in `autocorrect_instance`.
+    // For singleton methods (`def self.foo`), only autocorrect when the receiver
+    // is exactly `self` — arbitrary receivers (`def other.foo`) would require
+    // `class << other` which is a different semantic; skip those.
     let is_dsl_writer = kind == "writer" && !method_name.ends_with('=');
-    if names_match && !is_dsl_writer {
-        autocorrect(node, cx, kind, method_name, receiver.get().is_some());
+    let is_self_receiver = receiver
+        .get()
+        .is_some_and(|r| matches!(cx.kind(r), NodeKind::SelfExpr));
+    let has_non_self_receiver = receiver.get().is_some() && !is_self_receiver;
+    if names_match && !is_dsl_writer && !has_non_self_receiver {
+        autocorrect(node, cx, kind, method_name, is_self_receiver);
     }
 }
 
@@ -681,6 +688,33 @@ mod tests {
                   end
                 end
             "#});
+    }
+
+    // --- No autocorrect for non-self singleton receiver ---
+
+    #[test]
+    fn flags_non_self_singleton_receiver() {
+        // `def SomeConst.foo` inside a class is detected but NOT autocorrected —
+        // the receiver is not `self`, so `class << self` would change the target.
+        test::<TrivialAccessors>().expect_offense(indoc! {r#"
+            class Bar
+              def SomeConst.foo
+              ^^^ Use `attr_reader` to define trivial reader methods.
+                @foo
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn no_autocorrect_for_non_self_singleton_receiver() {
+        test::<TrivialAccessors>().expect_no_corrections(indoc! {r#"
+            class Bar
+              def SomeConst.foo
+                @foo
+              end
+            end
+        "#});
     }
 
     // --- CopOptions config tests ---
