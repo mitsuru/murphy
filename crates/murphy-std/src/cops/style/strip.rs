@@ -6,7 +6,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/Strip
 //! upstream_version_checked: 1.86.2
-//! status: verified
+//! status: partial
 //! gap_issues: []
 //! notes: >
 //!   Matches `lstrip.rstrip` and `rstrip.lstrip` chains in both send and csend
@@ -15,21 +15,28 @@
 //!   node.source_range.end). Autocorrect replaces the range with `strip`.
 //!   csend: methods filter is not supported for csend nodes by the macro;
 //!   the csend handler dispatches manually based on method name.
-//!   Both inner and outer calls must have no arguments; if either has arguments
-//!   the cop does not fire (lstrip/rstrip take no arguments in practice, but
-//!   guarding prevents data loss if someone passes a fictitious argument).
+//!   Mixed csend/send combinations: `x&.lstrip.rstrip` (inner csend, outer
+//!   send) is skipped entirely. When x is nil, x&.lstrip returns nil and
+//!   nil.rstrip raises NoMethodError, but autocorrecting to x&.strip would
+//!   silently return nil — a behavior change. RuboCop does not filter this
+//!   case; Murphy chooses the conservative stance.
+//!   `x.lstrip&.rstrip` (inner send, outer csend) is still matched because
+//!   x.lstrip always returns a non-nil String, making the &. redundant.
+//!   Both inner and outer calls must have no arguments.
 //! ```
 //!
 //! ## Matched shapes
 //!
 //! - `x.lstrip.rstrip` → offense
 //! - `x.rstrip.lstrip` → offense
-//! - `x&.lstrip.rstrip` / `x.lstrip&.rstrip` → offense (csend variants matched)
+//! - `x&.lstrip&.rstrip` / `x&.rstrip&.lstrip` → offense (both csend)
+//! - `x.lstrip&.rstrip` / `x.rstrip&.lstrip` → offense (inner send, outer csend)
 //!
 //! ## Non-matches
 //!
-//! - `x.lstrip.rstrip(arg)` — outer call has arguments, skipped
-//! - `x.lstrip(arg).rstrip` — inner call has arguments, skipped
+//! - `x&.lstrip.rstrip` / `x&.rstrip.lstrip` — inner csend, outer send (behavior change risk)
+//! - `x.lstrip.rstrip(arg)` — outer call has arguments
+//! - `x.lstrip(arg).rstrip` — inner call has arguments
 //!
 //! ## Autocorrect
 //!
@@ -82,6 +89,17 @@ fn check(outer: NodeId, cx: &Cx<'_>) {
 
     // The pair must be complementary: (lstrip, rstrip) or (rstrip, lstrip).
     if !is_complementary(inner_method, outer_method) {
+        return;
+    }
+
+    // Skip when inner is csend and outer is plain send: `x&.lstrip.rstrip`.
+    // In this shape, x&.lstrip short-circuits on nil (returns nil), and
+    // nil.rstrip would raise NoMethodError. Autocorrecting to x&.strip changes
+    // that from a runtime error to nil — a silent behavior change. The safe
+    // conservative stance is to not flag this combination at all.
+    let outer_is_csend = cx.is_safe_navigation(outer);
+    let inner_is_csend = cx.is_safe_navigation(inner_id);
+    if inner_is_csend && !outer_is_csend {
         return;
     }
 
@@ -183,8 +201,6 @@ mod tests {
     #[test]
     fn accepts_lstrip_rstrip_with_outer_arg() {
         // Outer call has an argument — do not fire to avoid silent argument deletion.
-        // `lstrip` and `rstrip` do not actually accept arguments, but we guard
-        // defensively.
         test::<Strip>().expect_no_offenses("x.lstrip.rstrip(1)\n");
     }
 
@@ -197,6 +213,19 @@ mod tests {
     fn accepts_lstrip_with_inner_arg_rstrip() {
         // Inner call has an argument.
         test::<Strip>().expect_no_offenses("x.lstrip(1).rstrip\n");
+    }
+
+    #[test]
+    fn accepts_csend_lstrip_send_rstrip() {
+        // x&.lstrip.rstrip — inner csend, outer send.
+        // When x is nil, x&.lstrip returns nil and nil.rstrip raises NoMethodError.
+        // Autocorrecting to x&.strip would silently change that to nil — skip.
+        test::<Strip>().expect_no_offenses("x&.lstrip.rstrip\n");
+    }
+
+    #[test]
+    fn accepts_csend_rstrip_send_lstrip() {
+        test::<Strip>().expect_no_offenses("x&.rstrip.lstrip\n");
     }
 }
 murphy_plugin_api::submit_cop!(Strip);
