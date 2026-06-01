@@ -176,9 +176,9 @@ fn check_block(node: NodeId, cx: &Cx<'_>, opts: &Options) {
         return;
     }
 
-    // If the block has more params than configured, skip entirely to avoid
-    // autocorrect dropping the extra params (which would break the code).
-    if actual_names.len() > preferred_params.len() {
+    // Skip if param count does not match configured count exactly, to avoid
+    // dropping extra params or building incomplete preferred names.
+    if actual_names.len() != preferred_params.len() {
         return;
     }
 

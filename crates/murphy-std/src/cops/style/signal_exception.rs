@@ -140,20 +140,16 @@ fn is_kernel_const(node: NodeId, cx: &Cx<'_>) -> bool {
 /// Returns `true` if `node` is inside a `Resbody` body (i.e. inside
 /// a rescue handler body). Walks ancestors until a `Resbody` is found.
 /// Stops at `Def`/`Defs`/`Block`/`Numblock` boundaries that reset rescue scope.
+///
+/// When a `Resbody` is found, `child_id` is the direct child of `Resbody` on
+/// the path from `node` to the root. If that child equals `body`, we are in
+/// the handler body; otherwise (exceptions list, var binding) we are not.
 fn is_inside_resbody(node: NodeId, cx: &Cx<'_>) -> bool {
     let mut child_id = node;
     for ancestor in cx.ancestors(node) {
         match cx.kind(ancestor) {
             NodeKind::Resbody { body, .. } => {
-                // We're inside a resbody -- confirm we are in its body subtree,
-                // not in the exception list.
-                if let Some(body_id) = body.get() {
-                    if child_id == body_id || is_same_or_descendant(child_id, body_id, cx) {
-                        return true;
-                    }
-                }
-                // We were in the exception list -- not in the handler body.
-                return false;
+                return body.get() == Some(child_id);
             }
             // Method/block boundaries reset rescue scope.
             NodeKind::Def { .. }
@@ -167,14 +163,6 @@ fn is_inside_resbody(node: NodeId, cx: &Cx<'_>) -> bool {
         child_id = ancestor;
     }
     false
-}
-
-/// Returns `true` if `child` is `root` or a descendant of `root`.
-fn is_same_or_descendant(child: NodeId, root: NodeId, cx: &Cx<'_>) -> bool {
-    if child == root {
-        return true;
-    }
-    cx.ancestors(child).any(|a| a == root)
 }
 
 #[cfg(test)]
