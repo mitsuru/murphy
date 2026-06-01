@@ -76,6 +76,17 @@ fn check_method(node: NodeId, cx: &Cx<'_>) {
 
     // Check if body end and `end` keyword are on the same line.
     let body_range = cx.range(body_id);
+
+    // When a def has rescue/ensure/else at the method level (no explicit begin),
+    // Prism creates a synthetic BeginNode whose range extends to the shared `end`
+    // keyword, so body_range.end == end_kw.end > end_kw.start. Constructing a
+    // Range { start: body_range.end, end: end_kw.start } would be inverted and
+    // panic in raw_source. Skip: the end is already at its proper terminating
+    // position and not trailing another statement on the same line.
+    if body_range.end > end_kw.start {
+        return;
+    }
+
     let between = Range {
         start: body_range.end,
         end: end_kw.start,
@@ -219,6 +230,56 @@ mod tests {
                 end
             "#},
         );
+    }
+
+    // --- No offense: def with rescue/ensure at method level (no explicit begin) ---
+    // Prism wraps these in a synthetic BeginNode whose range extends to the shared
+    // `end` keyword, so body_range.end > end_kw.start. The cop must not panic.
+
+    #[test]
+    fn no_offense_def_with_rescue_clause() {
+        test::<TrailingMethodEndStatement>().expect_no_offenses(indoc! {r#"
+            def foo
+              bar
+            rescue
+              nil
+            end
+        "#});
+    }
+
+    #[test]
+    fn no_offense_def_with_ensure_clause() {
+        test::<TrailingMethodEndStatement>().expect_no_offenses(indoc! {r#"
+            def foo
+              bar
+            ensure
+              cleanup
+            end
+        "#});
+    }
+
+    #[test]
+    fn no_offense_def_with_rescue_and_else() {
+        test::<TrailingMethodEndStatement>().expect_no_offenses(indoc! {r#"
+            def foo
+              bar
+            rescue => e
+              handle(e)
+            else
+              ok
+            end
+        "#});
+    }
+
+    #[test]
+    fn no_offense_defs_with_rescue_clause() {
+        test::<TrailingMethodEndStatement>().expect_no_offenses(indoc! {r#"
+            def self.foo
+              bar
+            rescue
+              nil
+            end
+        "#});
     }
 
     // --- defs (singleton methods) ---
