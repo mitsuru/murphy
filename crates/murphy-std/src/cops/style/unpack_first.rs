@@ -15,6 +15,9 @@
 //!   of the Ruby version in use (RuboCop enforces minimum_target_ruby_version
 //!   2.4 for `unpack1`).  Both `send` and `csend` (safe-navigation) outer
 //!   calls are handled, mirroring RuboCop's `alias on_csend on_send`.
+//!   The mixed case `recv&.unpack(fmt).first` (inner csend, outer plain send)
+//!   is excluded: autocorrecting it to `recv&.unpack1(fmt)` would change
+//!   behaviour when recv is nil (NoMethodError vs. silent nil).
 //! ```
 //!
 //! ## Matched shapes
@@ -75,12 +78,16 @@ impl UnpackFirst {
 /// - `<recv>.unpack(<fmt>)[0]`             (int 0 arg on outer)
 /// - `<recv>.unpack(<fmt>).slice(0)`       (int 0 arg on outer)
 /// - `<recv>.unpack(<fmt>).at(0)`          (int 0 arg on outer)
+///
+/// The mixed case `<recv>&.unpack(<fmt>).first` (inner Csend, outer Send) is
+/// rejected: if `recv` is nil the inner `&.unpack` returns nil, and the outer
+/// `.first` would then raise `NoMethodError`. Replacing with `&.unpack1` would
+/// silently return nil instead — a behaviour change.
 fn match_unpack_first(outer: NodeId, cx: &Cx<'_>) -> Option<(NodeId, NodeId)> {
     // Outer node must be send/csend.
-    let (outer_method, outer_args) = match cx.kind(outer) {
-        NodeKind::Send { method, args, .. } | NodeKind::Csend { method, args, .. } => {
-            (cx.symbol_str(*method), cx.list(*args))
-        }
+    let (outer_is_csend, outer_method, outer_args) = match cx.kind(outer) {
+        NodeKind::Send { method, args, .. } => (false, cx.symbol_str(*method), cx.list(*args)),
+        NodeKind::Csend { method, args, .. } => (true, cx.symbol_str(*method), cx.list(*args)),
         _ => return None,
     };
 
@@ -108,10 +115,9 @@ fn match_unpack_first(outer: NodeId, cx: &Cx<'_>) -> Option<(NodeId, NodeId)> {
     // Inner node (receiver of the outer call) must be a send/csend to `unpack`
     // with exactly one argument.
     let inner = cx.call_receiver(outer).get()?;
-    let (inner_method, inner_args) = match cx.kind(inner) {
-        NodeKind::Send { method, args, .. } | NodeKind::Csend { method, args, .. } => {
-            (cx.symbol_str(*method), cx.list(*args))
-        }
+    let (inner_is_csend, inner_method, inner_args) = match cx.kind(inner) {
+        NodeKind::Send { method, args, .. } => (false, cx.symbol_str(*method), cx.list(*args)),
+        NodeKind::Csend { method, args, .. } => (true, cx.symbol_str(*method), cx.list(*args)),
         _ => return None,
     };
 
@@ -124,6 +130,14 @@ fn match_unpack_first(outer: NodeId, cx: &Cx<'_>) -> Option<(NodeId, NodeId)> {
 
     // Inner must itself have a receiver (not a bare `unpack(...)`).
     cx.call_receiver(inner).get()?;
+
+    // Reject the unsafe mixed case: `recv&.unpack(fmt).first` — the inner
+    // safe-navigation can return nil, and the outer non-nil-safe accessor
+    // would then raise NoMethodError.  After autocorrect it would silently
+    // return nil instead, which is a behaviour change.
+    if inner_is_csend && !outer_is_csend {
+        return None;
+    }
 
     Some((inner, inner_args[0]))
 }
@@ -254,6 +268,15 @@ mod tests {
     fn accepts_unrelated_first() {
         // .first on something that is not .unpack -- no offense.
         test::<UnpackFirst>().expect_no_offenses("[1, 2, 3].first\n");
+    }
+
+    #[test]
+    fn accepts_mixed_csend_send_unpack_first() {
+        // obj&.unpack('h*').first -- inner is csend, outer is send.
+        // If obj is nil, inner returns nil and outer raises NoMethodError.
+        // Autocorrecting to obj&.unpack1('h*') would silently return nil -- a
+        // behaviour change -- so this form is not flagged.
+        test::<UnpackFirst>().expect_no_offenses("obj&.unpack('h*').first\n");
     }
 }
 murphy_plugin_api::submit_cop!(UnpackFirst);
