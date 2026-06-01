@@ -60,10 +60,13 @@ fn is_struct_send(node: NodeId, cx: &Cx<'_>) -> bool {
     if cx.symbol_str(method) != "new" {
         return false;
     }
-    matches!(
-        *cx.kind(recv_id),
-        NodeKind::Const { name, .. } if cx.symbol_str(name) == "Struct"
-    )
+    // Only match top-level `Struct` (scope == nil) or `::Struct` (which
+    // Murphy's translator lowers to the same (const :Struct nil) shape).
+    // `MyNamespace::Struct` has a non-nil scope and must be excluded.
+    match *cx.kind(recv_id) {
+        NodeKind::Const { scope, name } => scope.get().is_none() && cx.symbol_str(name) == "Struct",
+        _ => false,
+    }
 }
 
 fn is_struct_new(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -364,6 +367,14 @@ mod tests {
         "});
     }
 
+    #[test]
+    fn accepts_namespaced_struct_new() {
+        // MyNamespace::Struct.new is not the built-in Struct — must not flag.
+        test::<StructInheritance>().expect_no_offenses(indoc! {"
+            class Foo < MyNamespace::Struct.new(:x)
+            end
+        "});
+    }
     #[test]
     fn accepts_delegate_class() {
         test::<StructInheritance>().expect_no_offenses(indoc! {"

@@ -72,7 +72,11 @@ fn check(super_node: NodeId, cx: &Cx<'_>) {
     };
 
     let def_node_args = collect_def_args(def_node, cx);
-    let super_args = collect_super_args(super_args_list, cx);
+    // If collect_super_args returns None, an unrecognized arg shape was
+    // encountered — skip the check to avoid false positives.
+    let Some(super_args) = collect_super_args(super_args_list, cx) else {
+        return;
+    };
 
     let inline_block = is_super_with_inline_block(super_node, cx);
 
@@ -225,7 +229,12 @@ enum SuperArg {
 }
 
 /// Collect super args, flattening bare hashes (keyword args without braces).
-fn collect_super_args(super_args_list: murphy_plugin_api::NodeList, cx: &Cx<'_>) -> Vec<SuperArg> {
+/// Returns `None` if any argument has an unrecognized shape (indicating a
+/// non-forwarding arg that could cause a false positive).
+fn collect_super_args(
+    super_args_list: murphy_plugin_api::NodeList,
+    cx: &Cx<'_>,
+) -> Option<Vec<SuperArg>> {
     let raw = cx.list(super_args_list);
     let mut result = Vec::new();
 
@@ -237,7 +246,8 @@ fn collect_super_args(super_args_list: murphy_plugin_api::NodeList, cx: &Cx<'_>)
                     if let NodeKind::Lvar(sym) = *cx.kind(inner_id) {
                         result.push(SuperArg::Splat(Some(sym)));
                     } else {
-                        result.push(SuperArg::Splat(None)); // unexpected shape
+                        // Not a simple lvar — unrecognized forwarding shape.
+                        return None;
                     }
                 } else {
                     // Anonymous splat `*`
@@ -251,14 +261,14 @@ fn collect_super_args(super_args_list: murphy_plugin_api::NodeList, cx: &Cx<'_>)
                         NodeKind::Pair { key, value } => {
                             let key_sym = match *cx.kind(key) {
                                 NodeKind::Sym(s) => s,
-                                _ => continue,
+                                _ => return None, // non-symbol key — not forwarding
                             };
                             // Value may be Lvar (explicit forward) or Unknown
                             // (shorthand `a:` in Ruby 3.1+).
                             let val_sym = match *cx.kind(value) {
                                 NodeKind::Lvar(s) => s,
                                 NodeKind::Unknown => key_sym, // shorthand: same name
-                                _ => continue,
+                                _ => return None,             // non-lvar value — not forwarding
                             };
                             result.push(SuperArg::KeyPair {
                                 key: key_sym,
@@ -269,12 +279,14 @@ fn collect_super_args(super_args_list: murphy_plugin_api::NodeList, cx: &Cx<'_>)
                             if let Some(inner_id) = inner.get() {
                                 if let NodeKind::Lvar(sym) = *cx.kind(inner_id) {
                                     result.push(SuperArg::KwSplat(Some(sym)));
+                                } else {
+                                    return None;
                                 }
                             } else {
                                 result.push(SuperArg::KwSplat(None));
                             }
                         }
-                        _ => {}
+                        _ => return None, // unrecognized hash entry — not forwarding
                     }
                 }
             }
@@ -283,7 +295,8 @@ fn collect_super_args(super_args_list: murphy_plugin_api::NodeList, cx: &Cx<'_>)
                     if let NodeKind::Lvar(sym) = *cx.kind(inner_id) {
                         result.push(SuperArg::BlockPass(Some(sym)));
                     } else {
-                        result.push(SuperArg::BlockPass(None));
+                        // Block pass with non-lvar — not simple forwarding.
+                        return None;
                     }
                 } else {
                     // Anonymous block pass `&`
@@ -295,10 +308,11 @@ fn collect_super_args(super_args_list: murphy_plugin_api::NodeList, cx: &Cx<'_>)
             // (super(...)) or Ruby 3.1+ shorthand kwargs (a:). The Unknown
             // case for triple-dot forwarding is a single Unknown arg.
             NodeKind::Unknown => result.push(SuperArg::ForwardedArgs),
-            _ => {}
+            // Unrecognized argument shape — not a forwarding pattern.
+            _ => return None,
         }
     }
-    result
+    Some(result)
 }
 
 /// Returns true when the super node has an inline block (e.g. `super(a) { x }`).
@@ -851,6 +865,17 @@ mod tests {
               super a, b do
                 x
               end
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_super_with_extra_non_forwarded_args() {
+        // `super(a, extra_call)` — `extra_call` is not a forwarding lvar.
+        // This must NOT be flagged (it would change the behavior).
+        test::<SuperArguments>().expect_no_offenses(indoc! {"
+            def foo(a)
+              super(a, some_extra_call)
             end
         "});
     }
