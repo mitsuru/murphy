@@ -190,8 +190,10 @@ fn is_safe_assignment(cond: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Returns `true` if the parenthesized condition source has a closing `)` on
 /// its own last line — RuboCop's `only_closing_parenthesis_is_last_line?` guard.
+/// Leading/trailing whitespace is trimmed before the comparison to handle
+/// indented closing parens (e.g. `bar\n  ) ? a : b`).
 fn only_closing_paren_is_last_line(src: &str) -> bool {
-    src.lines().last() == Some(")")
+    src.lines().last().is_some_and(|line| line.trim() == ")")
 }
 
 /// Returns `true` if the condition source contains English-language operators
