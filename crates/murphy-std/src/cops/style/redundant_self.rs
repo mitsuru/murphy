@@ -6,10 +6,12 @@
 //! upstream_cop: Style/RedundantSelf
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-tpet
+//! gap_issues: []
 //! notes: >
-//!   Known gaps remain around pattern-matching scope and Ruby 3.3 self.it handling.
+//!   Pattern-matching scope (MatchAs capture, ArrayPattern, HashPattern) and
+//!   self.it in parameterless blocks (Ruby 3.3+) are now handled (murphy-tpet).
+//!   Remaining v1 limitations: `self.x ||= 42` parses to Unknown (no Send
+//!   visible), `op_asgn`/`or_asgn` self LHS. These are translator-level gaps.
 //! ```
 //!
 //! receiver is not needed for disambiguation. Mirrors RuboCop's
@@ -68,7 +70,9 @@
 //!   is deferred.
 
 use murphy_plugin_api::method_predicates::{is_camel_case_method, is_operator_method};
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
+use murphy_plugin_api::{
+    Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, SourceTokenKind, Symbol, cop,
+};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -290,6 +294,15 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         }
     }
 
+    // Ruby 3.3+ implicit `it` block param: inside a parameterless block
+    // (no `|...|` delimiters), `self.it` with no arguments cannot be
+    // simplified to bare `it` because that would reference the implicit
+    // block parameter rather than calling the method. Allow `self.it`
+    // only when the block has explicit pipe delimiters or named params.
+    if it_method_in_parameterless_block(node, method_name, cx) {
+        return;
+    }
+
     // Enclosing scope: the nearest `Def` / `Defs` / `Block` ancestor,
     // or the file root for top-level code.
     let scope = enclosing_scope(cx, node).unwrap_or_else(|| cx.root());
@@ -399,6 +412,89 @@ fn pattern_binds_name(cx: &Cx<'_>, pattern: NodeId, name: &str) -> bool {
         }
     };
     is_match_var(pattern) || cx.descendants(pattern).iter().any(|&d| is_match_var(d))
+}
+
+/// Returns `true` when `node` is a `self.it()` send (no arguments, no block)
+/// inside a block that has no explicit `|...|` pipe delimiters — the case
+/// where bare `it` would resolve to Ruby 3.3+'s implicit block parameter
+/// instead of calling the method. Mirrors RuboCop's `it_method_in_block?`.
+///
+/// The ancestor walk stops at the first `Def` / `Defs` boundary: a `self.it`
+/// inside a `def` nested inside a parameterless block is not covered by the
+/// outer block's implicit `it` parameter — the `def` starts a fresh scope.
+fn it_method_in_parameterless_block(node: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
+    if method_name != "it" {
+        return false;
+    }
+
+    // self.it must take no arguments
+    let NodeKind::Send { args, .. } = *cx.kind(node) else {
+        return false;
+    };
+    if !cx.list(args).is_empty() {
+        return false;
+    }
+
+    // Walk ancestors looking for the nearest Block. Stop immediately if we
+    // hit a Def/Defs — a `def` defines a new scope, so the outer parameterless
+    // block's implicit `it` param is not visible inside it.
+    let mut block_ancestor: Option<NodeId> = None;
+    for ancestor in cx.ancestors(node) {
+        match *cx.kind(ancestor) {
+            NodeKind::Def { .. } => return false, // new scope — outer `it` not visible
+            NodeKind::Block { .. } => {
+                block_ancestor = Some(ancestor);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(block_ancestor) = block_ancestor else {
+        return false;
+    };
+
+    let NodeKind::Block {
+        args: block_args_id,
+        body,
+        ..
+    } = *cx.kind(block_ancestor)
+    else {
+        return false;
+    };
+
+    // Block must have an empty args node (no parameters)
+    let NodeKind::Args(args_list) = *cx.kind(block_args_id) else {
+        return false;
+    };
+    if !cx.list(args_list).is_empty() {
+        return false;
+    }
+
+    // Now check for explicit pipe delimiters using the token stream.
+    // In `{ || }` the `|` tokens appear right after the `{`/`do` opener;
+    // in `{ }` there are none. We scan tokens in the range from the block
+    // start up to (but not including) the body start.
+    let block_start = cx.range(block_ancestor).start;
+    let search_end = match body.get() {
+        Some(b) => cx.range(b).start,
+        None => cx.range(block_ancestor).end,
+    };
+    !block_has_pipe_delimiters(cx, block_start, search_end)
+}
+
+/// Returns `true` when any `|` token appears in the range `[start..end)`.
+/// Used to detect explicit block parameter pipes (`{ ||` or `{ |x|`).
+fn block_has_pipe_delimiters(cx: &Cx<'_>, start: u32, end: u32) -> bool {
+    let source = cx.source().as_bytes();
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < start);
+    toks[idx..]
+        .iter()
+        .take_while(|t| t.range.start < end)
+        .any(|t| {
+            t.kind == SourceTokenKind::Other
+                && &source[t.range.start as usize..t.range.end as usize] == b"|"
+        })
 }
 
 #[cfg(test)]
@@ -688,20 +784,114 @@ mod tests {
         test::<RedundantSelf>().expect_no_offenses("self.()\n");
     }
 
+    // ----- self.it in parameterless blocks (murphy-tpet) ------------------
+
+    #[test]
+    fn accepts_self_it_in_parameterless_brace_block() {
+        // Ruby 3.3+ implicit `it` block param: `0.times { self.it }` must NOT
+        // be flagged — removing `self.` would change the meaning from the
+        // method call `it` to the implicit block parameter `it`.
+        test::<RedundantSelf>().expect_no_offenses("0.times { self.it }\n");
+    }
+
+    #[test]
+    fn accepts_self_it_in_parameterless_do_block() {
+        test::<RedundantSelf>().expect_no_offenses(indoc! {"
+            0.times do
+              self.it
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_self_it_in_def_body() {
+        // Inside a `def`, `it` is never an implicit block param.
+        test::<RedundantSelf>().expect_correction(
+            indoc! {"
+                def foo
+                  self.it
+                  ^^^^ Redundant `self` detected.
+                end
+            "},
+            indoc! {"
+                def foo
+                  it
+                end
+            "},
+        );
+    }
+
+    #[test]
+    fn flags_self_it_in_block_with_explicit_empty_pipes() {
+        // `{ || self.it }` — block with explicit empty parameters: since the
+        // explicit `||` means the block explicitly accepts no `it` param,
+        // `self.it` is redundant.
+        test::<RedundantSelf>().expect_correction(
+            indoc! {"
+                0.times { ||
+                  self.it
+                  ^^^^ Redundant `self` detected.
+                }
+            "},
+            indoc! {"
+                0.times { ||
+                  it
+                }
+            "},
+        );
+    }
+
+    #[test]
+    fn flags_self_it_in_block_with_named_param() {
+        // `{ |_n| self.it }` — block has a named param, so `it` is not
+        // the implicit block parameter.
+        test::<RedundantSelf>().expect_correction(
+            indoc! {"
+                0.times { |_n|
+                  self.it
+                  ^^^^ Redundant `self` detected.
+                }
+            "},
+            indoc! {"
+                0.times { |_n|
+                  it
+                }
+            "},
+        );
+    }
+
+    #[test]
+    fn flags_self_it_in_def_inside_parameterless_block() {
+        // `0.times { def foo; self.it; end }` — the `def` starts a fresh
+        // scope. The outer parameterless block's implicit `it` param is NOT
+        // visible inside the `def`, so `self.it` is genuinely redundant.
+        test::<RedundantSelf>().expect_correction(
+            indoc! {"
+                0.times {
+                  def foo
+                    self.it
+                    ^^^^ Redundant `self` detected.
+                  end
+                }
+            "},
+            indoc! {"
+                0.times {
+                  def foo
+                    it
+                  end
+                }
+            "},
+        );
+    }
+
     // ----- v1 known-limitation pins --------------------------------
 
     #[test]
     fn pattern_matching_in_clause_is_skipped_conservatively() {
-        // As of murphy-es99.13 the translator lowers `case .. in` into
-        // visible `CaseMatch` / `InPattern` nodes, so the `self.bar` Send
-        // now reaches dispatch. `bar` is a match-var bound by
-        // `in Integer => bar`, so `self.bar` is NOT redundant — but the
-        // `MatchAs`/capture pattern is not yet lowered (Unknown), so the
-        // binding is invisible to scope resolution. The cop therefore
-        // skips any self-send inside a `case/in` conservatively: a missed
-        // offense is safer than an autocorrect that would rewrite the
-        // method call `self.bar` into the local read `bar`. Real match-var
-        // scope handling is deferred (follow-up issue).
+        // `in Integer => bar` uses `MatchAs` (now fully lowered by the
+        // translator). The cop finds the `MatchVar(:bar)` binding inside the
+        // MatchAs pattern and correctly suppresses the offense — `self.bar`
+        // is NOT redundant because `bar` is a match-var local.
         test::<RedundantSelf>().expect_no_offenses(indoc! {"
             case foo
             in Integer => bar
