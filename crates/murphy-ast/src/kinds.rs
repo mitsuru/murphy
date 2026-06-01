@@ -286,6 +286,7 @@ pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
     ("const_pattern", &[NodeKindTag(109)]),
     ("pin", &[NodeKindTag(110)]),
     ("if_guard", &[NodeKindTag(111)]),
+    ("match_with_lvasgn", &[NodeKindTag(113)]),
     ("call", &[NodeKindTag(17), NodeKindTag(18)]),
     (
         "any_block",
@@ -819,6 +820,7 @@ mod tests {
             &[NodeKindTag(7), NodeKindTag(63), NodeKindTag(65)]
         );
         assert_eq!(tags_for_type_name("send"), &[NodeKindTag(17)]);
+        assert_eq!(tags_for_type_name("match_with_lvasgn"), &[NodeKindTag(113)]);
         assert_eq!(tags_for_type_name("sned"), &[]);
     }
 
