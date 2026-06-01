@@ -107,15 +107,30 @@ impl OpKind {
 /// We scan tokens because some sub-expressions (e.g. `(b && c)`) parse as
 /// `Unknown` in Murphy's AST, making purely AST-based descendant walks miss
 /// operators inside parenthesized groups.
-fn collect_op_tokens_in_range(range_start: u32, range_end: u32, cx: &Cx<'_>) -> Vec<OpKind> {
+fn collect_op_tokens_in_range(
+    range_start: u32,
+    range_end: u32,
+    target_depth: usize,
+    cx: &Cx<'_>,
+) -> Vec<OpKind> {
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < range_start);
 
+    let mut depth: usize = 0;
     let mut ops = Vec::new();
     for tok in &toks[idx..] {
         if tok.range.start >= range_end {
             break;
+        }
+        // Track paren depth for filtering operators inside nested calls.
+        if tok.kind == SourceTokenKind::LeftParen {
+            depth += 1;
+            continue;
+        }
+        if tok.kind == SourceTokenKind::RightParen {
+            depth = depth.saturating_sub(1);
+            continue;
         }
         if tok.kind != SourceTokenKind::Other {
             continue;
@@ -128,9 +143,7 @@ fn collect_op_tokens_in_range(range_start: u32, range_end: u32, cx: &Cx<'_>) -> 
             b"or" => OpKind::KeywordOr,
             _ => continue,
         };
-        // For `and`/`or` keywords, verify word boundary (they're not method
-        // names or identifiers — the tokenizer already ensures this since they
-        // are `Other` tokens, but double-check adjacent characters).
+        // For `and`/`or` keywords, verify word boundary.
         if matches!(text, b"and" | b"or") {
             let before_ok =
                 tok.range.start == 0 || !is_word_char(source[tok.range.start as usize - 1]);
@@ -140,7 +153,11 @@ fn collect_op_tokens_in_range(range_start: u32, range_end: u32, cx: &Cx<'_>) -> 
                 continue;
             }
         }
-        ops.push(op);
+        // Only count operators at the target depth.
+        // `usize::MAX` means "all depths" (no filtering).
+        if target_depth == usize::MAX || depth == target_depth {
+            ops.push(op);
+        }
     }
     ops
 }
@@ -160,7 +177,7 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
     match cx.kind(cond) {
         NodeKind::Or { .. } => {
             // or_with_and?: top is `or`; fire if any descendant is `and`-type.
-            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, cx);
+            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, usize::MAX, cx);
             let has_and = ops.iter().any(|op| op.is_and());
             if has_and {
                 return true; // cross-type: or + and
@@ -172,7 +189,7 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
         }
         NodeKind::And { .. } => {
             // and_with_or?: top is `and`; fire if any descendant is `or`-type.
-            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, cx);
+            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, usize::MAX, cx);
             let has_or = ops.iter().any(|op| op.is_or());
             if has_or {
                 return true; // cross-type: and + or
@@ -185,7 +202,7 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
         NodeKind::Unknown => {
             // Parenthesized condition: `(a && b || c)` is `Unknown`. Apply the
             // same mixed-detection logic via token scan within the condition range.
-            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, cx);
+            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, 1, cx);
             if ops.is_empty() {
                 return false;
             }
@@ -225,9 +242,11 @@ fn has_any_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
     match cx.kind(cond) {
         NodeKind::And { .. } | NodeKind::Or { .. } => true,
         NodeKind::Unknown => {
-            // Parenthesized condition: `(a && b)` is `Unknown`. Scan tokens.
+            // Parenthesized condition: `(a && b)` is `Unknown`. Scan at depth 1
+            // (inside the outer parens) to avoid false positives from
+            // `(foo(a || b))` where `||` is at depth 2.
             let r = cx.range(cond);
-            let ops = collect_op_tokens_in_range(r.start, r.end, cx);
+            let ops = collect_op_tokens_in_range(r.start, r.end, 1, cx);
             !ops.is_empty()
         }
         // Any other top node (Send, send call, etc.) — not flagged.
@@ -529,6 +548,23 @@ mod tests {
             return unless (a || b and c)
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
         "#});
+    }
+
+    #[test]
+    fn forbid_any_does_not_flag_parenthesized_method_call_with_logical_arg() {
+        // `(foo(a || b))` — condition is `Unknown` but the `||` is inside a
+        // nested method call at depth 2, not at depth 1. Must not be flagged.
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_no_offenses("return unless (foo(a || b))\n");
+    }
+
+    #[test]
+    fn forbid_mixed_does_not_flag_parenthesized_method_call_with_mixed_args() {
+        // `(foo(a && b || c))` — all operators inside nested call, depth 2.
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless (foo(a && b || c))\n");
     }
 
     #[test]
