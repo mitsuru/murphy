@@ -147,7 +147,7 @@ impl TrailingCommaInHashLiteral {
                 }
                 // Flag missing trailing comma when multiline (with the single-
                 // element-same-closing-brace exception).
-                if should_have_comma_consistent_style(node, last_pair, cx) {
+                if should_have_comma_consistent_style(node, last_pair, pairs.len(), cx) {
                     let after_last_pair = cx.range(last_pair).end;
                     cx.emit_offense(
                         cx.range(last_pair),
@@ -247,24 +247,34 @@ fn should_have_comma_comma_style(node: NodeId, last_pair: NodeId, cx: &Cx<'_>) -
 
 /// Returns true when `consistent_comma` style should require a trailing comma:
 /// multiline hash, excluding the single-pair same-closing-brace exception.
-fn should_have_comma_consistent_style(node: NodeId, last_pair: NodeId, cx: &Cx<'_>) -> bool {
+///
+/// The exception applies only when there is exactly one pair AND the closing
+/// `}` is on the same line as the last pair end.
+fn should_have_comma_consistent_style(
+    node: NodeId,
+    last_pair: NodeId,
+    pair_count: usize,
+    cx: &Cx<'_>,
+) -> bool {
     if !cx.is_multiline(node) {
         return false;
     }
 
     // Single-pair exception: when there is exactly one pair AND the closing
     // `}` is on the same line as the last pair end, skip.
-    let closing_brace_start = find_closing_brace_start(node, cx);
-    let last_pair_end = cx.range(last_pair).end;
-    let between = Range {
-        start: last_pair_end,
-        end: closing_brace_start,
-    };
-    let between_src = cx.raw_source(between);
-    // If there's no newline between the last pair and `}`, it's the
-    // "allowed multiline argument" exception.
-    if !between_src.contains('\n') {
-        return false;
+    if pair_count == 1 {
+        let closing_brace_start = find_closing_brace_start(node, cx);
+        let last_pair_end = cx.range(last_pair).end;
+        let between = Range {
+            start: last_pair_end,
+            end: closing_brace_start,
+        };
+        let between_src = cx.raw_source(between);
+        // If there's no newline between the last pair and `}`, it's the
+        // "allowed multiline argument" exception.
+        if !between_src.contains('\n') {
+            return false;
+        }
     }
 
     true
@@ -494,6 +504,35 @@ mod tests {
                 enforced_style_for_multiline: TrailingCommaStyle::ConsistentComma,
             })
             .expect_no_offenses("a = { foo: 1, bar: 2 }\n");
+    }
+
+    #[test]
+    fn consistent_comma_flags_multi_pair_when_last_pair_on_same_line_as_brace() {
+        // Multi-pair hash where last pair and `}` share a line — the single-pair
+        // exception must NOT apply. The hash still needs a trailing comma.
+        test::<TrailingCommaInHashLiteral>()
+            .with_options(&TrailingCommaInHashLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::ConsistentComma,
+            })
+            .expect_offense(indoc! {r#"
+                a = {
+                  foo: 1,
+                  bar: 2 }
+                  ^^^^^^ Put a comma after the last item of a multiline hash.
+            "#});
+    }
+
+    #[test]
+    fn consistent_comma_accepts_single_pair_when_closing_brace_same_line() {
+        // Single-pair exception: exactly one pair AND closing `}` on same line.
+        test::<TrailingCommaInHashLiteral>()
+            .with_options(&TrailingCommaInHashLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::ConsistentComma,
+            })
+            .expect_no_offenses(indoc! {r#"
+                a = {
+                  foo: 1 }
+            "#});
     }
 
     // --- Config JSON tests ---
