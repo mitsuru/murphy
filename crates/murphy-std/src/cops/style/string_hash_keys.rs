@@ -64,15 +64,16 @@ impl StringHashKeys {
         // Always emit the offense: string keys are always a style violation.
         cx.emit_offense(key_range, MSG, None);
 
-        // Autocorrect is best-effort: only emit an edit when we can safely
-        // derive the symbol content. parse_string_content returns None for
-        // heredocs, %q forms, and double-quoted strings with non-trivial
-        // escape sequences (\n, \t, \xNN, etc.) whose runtime value differs
-        // from the source bytes.
+        // Autocorrect is best-effort. parse_string_content returns the string
+        // body as a &str slice plus a `safe` flag. If safe is false (the body
+        // contains backslash escapes), we skip the edit to avoid producing a
+        // symbol with a different value (e.g. :a\n vs :"a" + newline).
         let raw = cx.raw_source(key_range);
-        if let Some(content) = parse_string_content(raw) {
-            let symbol_text = symbol_inspect(&content);
-            cx.emit_edit(key_range, &symbol_text);
+        if let Some((body, safe)) = parse_string_content(raw) {
+            if safe {
+                let symbol_text = symbol_inspect(body);
+                cx.emit_edit(key_range, &symbol_text);
+            }
         }
     }
 }
@@ -191,18 +192,16 @@ fn is_send_named(
     }
 }
 
-/// Extracts the logical string content from a `'...'` or `"..."` source form.
+/// Extracts the string body and an autocorrect-safety flag from `'...'` or `"..."`.
 ///
-/// Returns `None` for:
-/// - Heredocs, `%q`, char literals, etc.
-/// - Double-quoted strings that contain non-trivial escape sequences (e.g. `\n`,
-///   `\t`, `\xNN`, `\u{...}`) that cannot be losslessly represented in a
-///   Ruby symbol literal. Suppressing autocorrect for these is safer than
-///   silently producing a symbol with a different value.
+/// Returns `Some((body, safe))` where:
+/// - `body` is the slice between the surrounding quotes (UTF-8 clean).
+/// - `safe` is `true` when the body contains no backslash escapes at all;
+///   `false` suppresses the autocorrect edit to avoid emitting a symbol whose
+///   name differs from the runtime string value.
 ///
-/// Single-quoted strings only have `\\` and `\'` as escape sequences, both of
-/// which are handled correctly.
-fn parse_string_content(src: &str) -> Option<String> {
+/// Returns `None` for heredocs, `%q`, char literals, or malformed sources.
+fn parse_string_content(src: &str) -> Option<(&str, bool)> {
     let bytes = src.as_bytes();
     if bytes.len() < 2 {
         return None;
@@ -215,63 +214,13 @@ fn parse_string_content(src: &str) -> Option<String> {
     if bytes[bytes.len() - 1] != quote {
         return None;
     }
-    if quote == b'"' && has_non_trivial_escape(body) {
-        // Can't safely derive the symbol name: the body contains escape sequences
-        // whose runtime value differs from the source bytes. Suppress autocorrect.
-        return None;
-    }
-    Some(unescape_string(body, quote))
-}
-
-/// Returns `true` when the body of a double-quoted string contains a backslash
-/// escape that is not `\\` (literal backslash) or `\"` (escaped double-quote).
-///
-/// Such escapes (`\n`, `\t`, `\xNN`, `\uNNNN`, `\cX`, etc.) have a runtime
-/// value that differs from the source bytes. We cannot produce the correct symbol
-/// content without a full Ruby-aware decoder, so autocorrect is suppressed.
-fn has_non_trivial_escape(body: &str) -> bool {
-    let b = body.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'\\' && i + 1 < b.len() {
-            match b[i + 1] {
-                b'\\' | b'"' => {
-                    i += 2;
-                    continue;
-                }
-                _ => return true,
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Unescape `\\` → `\` and the matching quote escape in a string body.
-///
-/// Iterates over `char` boundaries to preserve multi-byte UTF-8 codepoints.
-/// Only `\\` (literal backslash) and `\<quote>` (escaped quote) are
-/// recognised as escape sequences; all other characters are passed through
-/// verbatim. This is correct for single-quoted strings (which only have these
-/// two escapes) and for the `has_non_trivial_escape`-cleared double-quoted
-/// bodies that reach this function.
-fn unescape_string(body: &str, quote: u8) -> String {
-    let mut result = String::with_capacity(body.len());
-    let mut chars = body.char_indices().peekable();
-    while let Some((_, ch)) = chars.next() {
-        if ch == '\\' {
-            // Look ahead one char to check the escape target.
-            if let Some(&(_, next_ch)) = chars.peek() {
-                if next_ch == '\\' || next_ch as u32 == quote as u32 {
-                    result.push(next_ch);
-                    chars.next(); // consume the escaped char
-                    continue;
-                }
-            }
-        }
-        result.push(ch);
-    }
-    result
+    // Any backslash in the body means we cannot safely use the raw source bytes
+    // as the symbol name. Single-quoted \\=literal-backslash and \'=single-quote
+    // are valid escapes but produce a name containing a backslash, which itself
+    // would need quoting differently. Double-quoted bodies may have \n, \t, etc.
+    // In both cases, suppressing the edit is the safest policy.
+    let safe = !body.contains('\\');
+    Some((body, safe))
 }
 
 /// Converts a string content to its Ruby symbol inspect representation.
@@ -464,22 +413,35 @@ mod tests {
     }
     #[test]
     #[test]
-    fn has_non_trivial_escape_detects_backslash_n() {
-        // Body of "a\n" is the bytes: a \ n
-        // has_non_trivial_escape("a\\n") should be true (\n is non-trivial)
-        assert!(has_non_trivial_escape("a\\n"));
+    fn parse_string_content_simple_returns_safe() {
+        // "foo" -> body "foo", safe=true (no backslashes)
+        let (body, safe) = parse_string_content(r#""foo""#).unwrap();
+        assert_eq!(body, "foo");
+        assert!(safe);
     }
 
     #[test]
-    fn has_non_trivial_escape_allows_backslash_backslash() {
-        // "\\\\" (body: \\\\) is two literal backslashes -- trivial
-        assert!(!has_non_trivial_escape("\\\\"));
+    #[test]
+    fn parse_string_content_with_backslash_returns_unsafe() {
+        // A double-quoted body containing a backslash should be unsafe.
+        // Feed the Ruby source as a raw string to avoid Rust escape issues.
+        let result = parse_string_content(r#""a\n""#);
+        assert!(result.is_some());
+        let (_, safe) = result.unwrap();
+        assert!(!safe, "body with backslash escape should be unsafe");
     }
 
     #[test]
-    fn has_non_trivial_escape_allows_backslash_double_quote() {
-        // "\\"" (body: \\") is an escaped double-quote -- trivial
-        assert!(!has_non_trivial_escape("\\\""));
+    fn parse_string_content_single_quoted_no_backslash_is_safe() {
+        let (body, safe) = parse_string_content("'hello'").unwrap();
+        assert_eq!(body, "hello");
+        assert!(safe);
+    }
+
+    #[test]
+    fn parse_string_content_returns_none_for_non_string() {
+        assert!(parse_string_content(": foo").is_none()); // not a quote-delimited string
+        assert!(parse_string_content("x").is_none()); // too short
     }
 }
 murphy_plugin_api::submit_cop!(StringHashKeys);
