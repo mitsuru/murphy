@@ -167,10 +167,9 @@ fn rails_rule_section_does_not_error_lint_setup() {
 
     let dir = tempdir().expect("tempdir");
     let rb = dir.path().join("app.rb");
-    // Fixture must not trip any murphy-std built-in cop (e.g.
-    // `Murphy/NoReceiverPuts` flags bare `puts`) so the exit code only
-    // reflects the Rails pack's behaviour. An empty class body is
-    // inert against the current standard pack.
+    // Fixture must not trip any murphy-std built-in cop so the exit code only
+    // reflects the Rails pack's behaviour. An empty class body is inert
+    // against the current standard pack.
     fs::write(&rb, "# frozen_string_literal: true\nclass Foo\nend\n").expect("write rb");
 
     let yml = format!(

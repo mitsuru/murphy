@@ -117,7 +117,7 @@ pub struct Autocorrect {
 pub struct Offense {
     /// Path of the file the offense was found in.
     pub file: String,
-    /// Fully-qualified cop name, e.g. `Murphy/NoReceiverPuts`.
+    /// Fully-qualified cop name, e.g. `Lint/Debugger`.
     pub cop_name: String,
     /// The offending source span (byte offsets).
     pub range: Range,
@@ -177,19 +177,19 @@ mod tests {
     fn offense_serializes_to_contract() {
         let o = Offense {
             file: "a.rb".into(),
-            cop_name: "Murphy/NoReceiverPuts".into(),
+            cop_name: "Lint/Debugger".into(),
             range: Range {
                 start_offset: 0,
-                end_offset: 4,
+                end_offset: 8,
             },
             severity: Severity::Warning,
-            message: "Use a logger instead of puts".into(),
+            message: "Remove debugger entry point `debugger`.".into(),
             autocorrect: None,
         };
         let j: serde_json::Value = serde_json::to_value(&o).unwrap();
         assert_eq!(j["range"]["start_offset"], 0);
-        assert_eq!(j["range"]["end_offset"], 4);
-        assert_eq!(j["cop_name"], "Murphy/NoReceiverPuts");
+        assert_eq!(j["range"]["end_offset"], 8);
+        assert_eq!(j["cop_name"], "Lint/Debugger");
         assert_eq!(j["severity"], "warning");
 
         let round_tripped: Offense = serde_json::from_value(j.clone()).unwrap();

@@ -11,7 +11,7 @@
 //! - A `[cops.rules."Name"] enabled = true` against a cop in the
 //!   disabled registry emits a warning on stderr and lint still exits
 //!   0 / cleanly (no error path).
-//! - The active cop (`Murphy/NoReceiverPuts`) is present and reported
+//! - The active cop (`Lint/Debugger`) is present and reported
 //!   as `enabled`.
 //! - Every entry in `murphy_std::DISABLED_COPS` appears as
 //!   `disabled: arena migration`. The list is empty after §12d
@@ -46,8 +46,8 @@ fn cops_list_default_table_includes_active_and_disabled_cops_and_exits_0() {
     );
     // Active cop is enabled and tagged with the builtin pack.
     assert!(
-        stdout.contains("Murphy/NoReceiverPuts") && stdout.contains("enabled"),
-        "Murphy/NoReceiverPuts must appear as enabled; got:\n{stdout}"
+        stdout.contains("Lint/Debugger") && stdout.contains("enabled"),
+        "Lint/Debugger must appear as enabled; got:\n{stdout}"
     );
     // Every name in `murphy_std::DISABLED_COPS` must surface as a row
     // with the arena-migration status. After §12d's third cop migrated,
@@ -104,10 +104,10 @@ fn cops_list_json_format_is_a_machine_readable_array() {
     // Active cop present with status `enabled`.
     let active = parsed
         .iter()
-        .find(|e| e["name"] == "Murphy/NoReceiverPuts")
-        .expect("Murphy/NoReceiverPuts must appear in JSON listing");
+        .find(|e| e["name"] == "Lint/Debugger")
+        .expect("Lint/Debugger must appear in JSON listing");
     assert_eq!(active["status"], "enabled");
-    assert_eq!(active["namespace"], "Murphy");
+    assert_eq!(active["namespace"], "Lint");
     assert_eq!(active["source_pack"], "builtin");
 
     // Data-driven: every name in `DISABLED_COPS` must appear in the
@@ -129,13 +129,13 @@ fn cops_list_json_format_is_a_machine_readable_array() {
 
 #[test]
 fn cops_list_reports_user_disabled_status_for_active_cop() {
-    // `enabled = false` against the *active* `Murphy/NoReceiverPuts`
+    // `enabled = false` against the *active* `Lint/Debugger`
     // surfaces as `disabled: user config`, distinct from the
     // arena-migration status applied to never-migrated cops.
     let dir = tempdir().expect("create tempdir");
     fs::write(
         dir.path().join(".murphy.yml"),
-        "Murphy/NoReceiverPuts:\n  Enabled: false\n",
+        "Lint/Debugger:\n  Enabled: false\n",
     )
     .expect("write .murphy.yml");
 
@@ -154,8 +154,8 @@ fn cops_list_reports_user_disabled_status_for_active_cop() {
 
     let entry = parsed
         .iter()
-        .find(|e| e["name"] == "Murphy/NoReceiverPuts")
-        .expect("Murphy/NoReceiverPuts must appear in JSON listing");
+        .find(|e| e["name"] == "Lint/Debugger")
+        .expect("Lint/Debugger must appear in JSON listing");
     assert_eq!(entry["status"], "disabled: user config");
 }
 

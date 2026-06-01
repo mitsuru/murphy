@@ -6,7 +6,7 @@
 //!
 //! `builtin_only_project` is the smallest fixture that exercises:
 //!
-//! - the host's only v1 built-in (`Murphy/NoReceiverPuts`),
+//! - a representative built-in cop (`Lint/Debugger`),
 //! - multibyte source (ADR 0001 byte-offset semantics — the
 //!   `multibyte.rb` row's offsets are u8 positions),
 //! - directory discovery (no path args = discover-cwd),
@@ -33,7 +33,7 @@ fn builtin_only_project_matches_committed_snapshot() {
         .arg("--format")
         .arg("json")
         .assert()
-        .code(1); // dirty.rb + multibyte.rb trigger NoReceiverPuts → exit 1.
+        .code(1); // dirty.rb + multibyte.rb trigger Lint/Debugger → exit 1.
 
     let actual: serde_json::Value =
         serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be valid JSON");
@@ -83,24 +83,21 @@ fn clean_file_alone_yields_empty_json_array_and_exit_zero() {
 }
 
 /// A subset that asserts the `range.start_offset` of the multibyte file's
-/// `puts "日本語"` offense lands on a u8 byte boundary, not a char index.
-/// Byte 162 here is the index of `p` in `puts` after a leading multibyte
-/// comment header — confirming ADR 0001 ("offsets are byte offsets, never
-/// char indices") survives the arena rewrite.
+/// `debugger` offense lands on a u8 byte boundary, not a char index.
+/// `multibyte.rb` embeds Japanese characters in a comment before the
+/// `debugger` call, so its byte index (183) differs from its char index
+/// (171) — confirming ADR 0001 ("offsets are byte offsets, never char
+/// indices") survives the arena rewrite.
 #[test]
 fn multibyte_offsets_are_byte_indices_not_char_indices() {
     let source = std::fs::read_to_string(std::path::Path::new(FIXTURE_DIR).join("multibyte.rb"))
         .expect("read multibyte fixture");
 
-    // Find the `puts` call's byte offset in the source.
-    let puts_byte_idx = source
-        .find("puts \"")
-        .expect("multibyte fixture must contain a `puts` call");
+    // Find the `debugger` call's byte offset in the source.
+    let debugger_byte_idx = source
+        .find("debugger")
+        .expect("multibyte fixture must contain a `debugger` call");
 
-    // Tolerate either offset = puts_byte_idx (a future cop with a
-    // selector-only range) or the broader Send-range start (post-reboot
-    // default). Both are byte-indexed; what we reject is a char-index
-    // value that diverges from both.
     let snapshot_text = std::fs::read_to_string(SNAPSHOT_PATH).expect("read snapshot");
     let snapshot: serde_json::Value = serde_json::from_str(&snapshot_text).unwrap();
     let multibyte_offense = snapshot
@@ -113,8 +110,8 @@ fn multibyte_offsets_are_byte_indices_not_char_indices() {
         .as_u64()
         .expect("start_offset is u64");
     assert_eq!(
-        start as usize, puts_byte_idx,
+        start as usize, debugger_byte_idx,
         "the snapshot's start_offset for the multibyte file must be the \
-         BYTE index of `puts` in the source (ADR 0001), not a char index"
+         BYTE index of `debugger` in the source (ADR 0001), not a char index"
     );
 }

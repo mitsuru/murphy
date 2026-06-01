@@ -40,7 +40,7 @@ use murphy_core::{
 /// runaway-cop timeout assertion fast.
 const TEST_DEADLINE: Duration = Duration::from_millis(200);
 
-/// Well-behaved cop: flag bare `puts` (mirrors the real NoReceiverPuts).
+/// Well-behaved cop: flag bare `puts` (test-only inline cop).
 const GOOD_PUTS_RB: &str = r#"
 class GoodPutsCop < Murphy::Cop
   def on_call_node(node)

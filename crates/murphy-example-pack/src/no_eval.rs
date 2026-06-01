@@ -46,8 +46,7 @@ pub struct NoEval;
 impl NoEval {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        // Pattern-match defends against a future kind-aliasing accident
-        // (see `Murphy/NoReceiverPuts` for the same pattern).
+        // Pattern-match defends against a future kind-aliasing accident.
         let NodeKind::Send {
             receiver, method, ..
         } = *cx.kind(node)
