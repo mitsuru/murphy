@@ -260,22 +260,37 @@ fn is_def_like_separator(
         None => return false,
     };
 
-    // Count `(` tokens (LeftParen) between the keyword and this `;`.
-    // If there are 0 or 1, this is the signature separator.
-    // 0: `def foo;` or `class Foo;`
-    // 1: `def foo(a);` or `def foo(a, b);`
-    // 2+: `def foo(a) x(1);` → body expression started before `;`
+    // Scan between the keyword and this `;`, counting:
+    // - paren_opens: number of LeftParen tokens (0 or 1 for the param list)
+    // - prior_semis: number of `;` tokens that appeared before this one
+    //
+    // If there are 0 or 1 `(` AND no prior `;`, this is the signature
+    // separator. Prior semicolons indicate the body has already started.
+    //
+    // Examples:
+    //   `def foo;` → 0 parens, 0 prior semis → allowed
+    //   `def foo(a);` → 1 paren, 0 prior semis → allowed
+    //   `def foo; bar; baz` → second `;`: 0 parens, 1 prior semi → NOT allowed
+    //   `def foo(a) x(1);` → 2 parens, 0 prior semis → NOT allowed
     let mut paren_opens = 0usize;
+    let mut prior_semis = 0usize;
     for tok in &tokens[(kw_idx + 1)..idx] {
         if line_of(bytes, tok.range.start as usize) != semi_line {
             break;
         }
-        if tok.kind == SourceTokenKind::LeftParen {
-            paren_opens += 1;
+        match tok.kind {
+            SourceTokenKind::LeftParen => paren_opens += 1,
+            SourceTokenKind::Other => {
+                let text = &bytes[tok.range.start as usize..tok.range.end as usize];
+                if text == b";" {
+                    prior_semis += 1;
+                }
+            }
+            _ => {}
         }
     }
 
-    paren_opens <= 1
+    paren_opens <= 1 && prior_semis == 0
 }
 
 #[cfg(test)]
@@ -323,6 +338,27 @@ mod tests {
                            ^ Do not use semicolons to terminate expressions.
                                  ^ Do not use semicolons to terminate expressions.
                                        ^ Do not use semicolons to terminate expressions.
+        "#});
+    }
+
+    #[test]
+    fn flags_second_semicolon_in_def_multiexpr_body() {
+        // `def foo; bar; baz end` — first `;` is the signature separator
+        // (allowed), second `;` separates `bar` from `baz` (expression
+        // separator — flagged).
+        test::<Semicolon>().expect_offense(indoc! {r#"
+            def foo; bar; baz end
+                        ^ Do not use semicolons to terminate expressions.
+        "#});
+    }
+
+    #[test]
+    fn flags_second_semicolon_when_arg_list_present() {
+        // `def foo(a); bar; baz end` — first `;` (after `(a)`) is allowed,
+        // second `;` (between `bar` and `baz`) must be flagged.
+        test::<Semicolon>().expect_offense(indoc! {r#"
+            def foo(a); bar; baz end
+                           ^ Do not use semicolons to terminate expressions.
         "#});
     }
 
