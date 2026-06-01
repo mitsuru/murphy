@@ -24,21 +24,21 @@
 //!       forces continuation; the `\` is always redundant.
 //!
 //!   Explicitly skipped (never flagged):
-//!     - `\` inside comment lines.
-//!     - `\` inside heredoc bodies.
-//!     - `\` when inside a string literal (tracked via bracket-depth limitation:
-//!       string-internal `\` would not have higher bracket depth, so those cases
-//!       with depth==0 are conservatively not flagged).
+//!     - `\` inside comment lines (detected via Comment token ranges).
+//!     - `\` inside heredoc bodies (detected via HeredocStart/HeredocEnd tokens).
+//!     - `\` inside string/dstr/xstr/regexp/dsym node ranges (detected by
+//!       walking the AST via `cx.descendants`). This correctly handles cases
+//!       like `foo("a \\\n b")` where the `\` is inside a string literal
+//!       that is itself inside parens — the `\` must not be removed.
 //!     - `\` with next-line arithmetic/logical/bitwise operators, modifier
 //!       keywords, unparenthesized method arguments: all require the reparse
 //!       oracle and are conservatively skipped.
 //!
-//!   Note: `[` and `]` bracket tracking is done via source-byte scanning
-//!   (they appear as `Other` tokens), with string-interior `[` suppressed via
-//!   the string-range exclusion below.
+//!   Note: `[` and `]` bracket tracking is done via single-byte Other token
+//!   inspection (they appear as `Other` tokens in Murphy's token stream).
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, Range, SourceToken, SourceTokenKind, cop};
+use murphy_plugin_api::{Cx, NodeKind, NoOptions, Range, SourceToken, SourceTokenKind, cop};
 
 const MSG: &str = "Redundant line continuation.";
 
@@ -71,6 +71,10 @@ fn check_source(cx: &Cx<'_>) {
     // Collect heredoc body ranges: [start, end) byte pairs.
     let heredoc_ranges = collect_heredoc_body_ranges(toks, bytes);
 
+    // Collect string/regexp/xstr literal ranges from the AST: any `\` inside
+    // these is part of a string literal and must never be flagged.
+    let string_ranges = collect_string_literal_ranges(cx);
+
     let mut i = 0usize;
     while i < bytes.len() {
         if bytes[i] == b'\\' {
@@ -95,6 +99,12 @@ fn check_source(cx: &Cx<'_>) {
                     continue;
                 }
 
+                // Skip if inside a string/regexp/xstr literal.
+                if in_any_range(backslash_pos, &string_ranges) {
+                    i += if is_backslash_crlf { 3 } else { 2 };
+                    continue;
+                }
+
                 if is_redundant_continuation(backslash_pos, bytes, toks) {
                     let offense = Range {
                         start: backslash_pos,
@@ -110,6 +120,28 @@ fn check_source(cx: &Cx<'_>) {
         }
         i += 1;
     }
+}
+
+/// Collect source ranges for all string literal, dstr, xstr, and regexp nodes.
+/// Any `\` inside these ranges is part of a literal value and must not be
+/// flagged as a redundant continuation.
+fn collect_string_literal_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
+    let root = cx.root();
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    for node_id in cx.descendants(root) {
+        match cx.kind(node_id) {
+            NodeKind::Str(_)
+            | NodeKind::Dstr(_)
+            | NodeKind::Xstr(_)
+            | NodeKind::Dsym(_)
+            | NodeKind::Regexp { .. } => {
+                let r = cx.range(node_id);
+                ranges.push((r.start, r.end));
+            }
+            _ => {}
+        }
+    }
+    ranges
 }
 
 /// Returns `true` if the `\` at `backslash_pos` is structurally redundant.
@@ -446,6 +478,24 @@ mod tests {
                   bar]
             "#},
         );
+    }
+    #[test]
+    fn no_offense_string_inside_parens() {
+        // `\` inside a string literal that happens to be inside `()` must NOT
+        // be flagged — the string value would change if the `\` were removed.
+        test::<RedundantLineContinuation>().expect_no_offenses(indoc! {r#"
+            foo("a \
+            b")
+        "#});
+    }
+
+    #[test]
+    fn no_offense_string_continuation_double_quoted() {
+        // `\` at end of a double-quoted string (multi-line string literal).
+        test::<RedundantLineContinuation>().expect_no_offenses(indoc! {r#"
+            foo = "foo \
+              bar"
+        "#});
     }
 }
 murphy_plugin_api::submit_cop!(RedundantLineContinuation);
