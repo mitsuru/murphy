@@ -11,6 +11,10 @@
 //! notes: >
 //!   Detects Block, Numblock, and Itblock nodes that are single-line and use
 //!   do...end delimiters (not braces). Brace blocks are skipped.
+//!   The opening delimiter is identified by scanning the gap between the
+//!   block node start and the body start (or node end for empty blocks) for
+//!   the first `do` keyword or `{` token. Only the opener delimiter is examined,
+//!   so hash literals and inner brace blocks in the body do not affect detection.
 //!   Autocorrect inserts a newline after the do opener (after the args or after
 //!   the do keyword for no-arg / numblock / itblock / lambda-literal blocks)
 //!   and a newline before the `end` keyword.
@@ -22,7 +26,8 @@
 //!
 //! `block`, `numblock`, and `itblock` nodes that:
 //! - Are single-line
-//! - Use `do`...`end` delimiters (no `LeftBrace` token in range)
+//! - Use `do`...`end` delimiters (first block-opener token after the node
+//!   start is `do`, not `{`)
 //!
 //! ## Autocorrect
 //!
@@ -62,12 +67,51 @@ impl SingleLineDoEndBlock {
     }
 }
 
-/// Returns true if the node uses `do`...`end` block delimiters.
-/// A brace block has a `LeftBrace` token within its range; a do/end block does not.
+/// Returns the start offset of the block body (or node end for empty-body blocks).
+/// Used as the upper bound when scanning for the opener token.
+fn body_start(node: NodeId, cx: &Cx<'_>) -> u32 {
+    match *cx.kind(node) {
+        NodeKind::Block { body, .. }
+        | NodeKind::Numblock { body, .. }
+        | NodeKind::Itblock { body, .. } => {
+            body.get().map_or(cx.range(node).end, |b| cx.range(b).start)
+        }
+        _ => cx.range(node).end,
+    }
+}
+
+/// Returns true if the block uses `do`...`end` delimiters.
+///
+/// Scans for the first `do` or `{` token in the gap between the block node
+/// start and the body start (or node end for empty-body blocks). Only the
+/// opener token itself matters — hash literals and inner brace blocks in
+/// the body are ignored because they appear after the opener.
 fn is_do_end_block(node: NodeId, cx: &Cx<'_>) -> bool {
-    let range = cx.range(node);
-    let toks = cx.tokens_in(range);
-    !toks.iter().any(|t| t.kind == SourceTokenKind::LeftBrace)
+    let from = cx.range(node).start;
+    let to = body_start(node, cx);
+
+    let toks = cx.sorted_tokens();
+    let src = cx.source().as_bytes();
+    let idx = toks.partition_point(|t| t.range.start < from);
+    for tok in &toks[idx..] {
+        if tok.range.start >= to {
+            break;
+        }
+        match tok.kind {
+            // First `{` found before the body → brace block.
+            SourceTokenKind::LeftBrace => return false,
+            // First `do` keyword found before the body → do/end block.
+            SourceTokenKind::Other
+                if &src[tok.range.start as usize..tok.range.end as usize] == b"do" =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    // No clear opener found — conservatively treat as not a do/end block
+    // to avoid false positives on malformed or unexpected input.
+    false
 }
 
 /// Find the `do` keyword token in the range `[from, to)`.
@@ -222,6 +266,25 @@ mod tests {
         test::<SingleLineDoEndBlock>().expect_offense(indoc! {"
             foo do _1 end
             ^^^^^^^^^^^^^  Prefer multiline `do`...`end` block.
+        "});
+    }
+
+    #[test]
+    fn flags_do_end_block_with_hash_body() {
+        // A do/end block whose body contains a hash literal — must still be flagged.
+        test::<SingleLineDoEndBlock>().expect_offense(indoc! {"
+            foo do { a: 1 } end
+            ^^^^^^^^^^^^^^^^^^^  Prefer multiline `do`...`end` block.
+        "});
+    }
+
+    #[test]
+    fn flags_do_end_block_with_inner_brace_block() {
+        // A do/end block whose body calls a method with a brace block —
+        // only the outer do/end block is flagged (the inner brace block is fine).
+        test::<SingleLineDoEndBlock>().expect_offense(indoc! {"
+            foo do bar { baz } end
+            ^^^^^^^^^^^^^^^^^^^^^^  Prefer multiline `do`...`end` block.
         "});
     }
 }
