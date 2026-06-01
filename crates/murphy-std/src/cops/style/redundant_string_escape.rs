@@ -72,6 +72,13 @@ impl RedundantStringEscape {
     fn check_dstr(&self, node: NodeId, cx: &Cx<'_>) {
         check_dstr_node(node, cx);
     }
+
+    #[on_node(kind = "dsym")]
+    fn check_dsym(&self, node: NodeId, cx: &Cx<'_>) {
+        // Dsym nodes (e.g. `:"foo#{bar}"`) have the same structure as Dstr.
+        // Delegate to check_dstr_node to scan literal Str segments.
+        check_dstr_node(node, cx);
+    }
 }
 
 /// Context for scanning a string's escape sequences.
