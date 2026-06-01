@@ -270,3 +270,4 @@ mod tests {
         assert!(!is_simple_identifier("foo-bar"));
     }
 }
+murphy_plugin_api::submit_cop!(SymbolArray);

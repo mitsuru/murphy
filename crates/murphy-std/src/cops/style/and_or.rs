@@ -429,3 +429,4 @@ mod tests {
         assert_eq!(opts.enforced_style, EnforcedStyle::Conditionals);
     }
 }
+murphy_plugin_api::submit_cop!(AndOr);

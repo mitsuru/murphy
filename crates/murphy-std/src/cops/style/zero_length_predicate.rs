@@ -467,3 +467,4 @@ mod tests {
         test::<ZeroLengthPredicate>().expect_no_offenses("x&.size > 0\n");
     }
 }
+murphy_plugin_api::submit_cop!(ZeroLengthPredicate);

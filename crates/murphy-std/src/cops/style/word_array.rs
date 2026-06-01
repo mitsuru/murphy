@@ -333,3 +333,4 @@ mod tests {
         assert_eq!(opts.min_size, 2);
     }
 }
+murphy_plugin_api::submit_cop!(WordArray);

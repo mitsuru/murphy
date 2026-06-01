@@ -305,3 +305,4 @@ mod tests {
             .expect_no_offenses("File.exist?(path)\n名前 = File.exist?(path)\n");
     }
 }
+murphy_plugin_api::submit_cop!(DeprecatedClassMethods);

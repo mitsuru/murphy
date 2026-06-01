@@ -439,3 +439,4 @@ mod tests {
             .expect_no_offenses("x = \"hello #{name}\"\n");
     }
 }
+murphy_plugin_api::submit_cop!(StringLiterals);
