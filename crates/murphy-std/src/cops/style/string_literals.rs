@@ -159,14 +159,14 @@ impl StringLiterals {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QuoteStyle {
+pub(crate) enum QuoteStyle {
     Single,
     Double,
 }
 
 /// Recognise `'…'` and `"…"` raw forms and split off the body. Returns
 /// `None` for any other source shape (`%q[…]`, `?x`, heredoc head, …).
-fn parse_quote_form(src: &str) -> Option<(QuoteStyle, &str)> {
+pub(crate) fn parse_quote_form(src: &str) -> Option<(QuoteStyle, &str)> {
     let bytes = src.as_bytes();
     if bytes.len() < 2 {
         return None;
@@ -184,7 +184,7 @@ fn parse_quote_form(src: &str) -> Option<(QuoteStyle, &str)> {
 /// safe to re-wrap with the *target* quote; `None` otherwise. Safety
 /// rules are intentionally tight — see the module doc comment for the
 /// invariants we are protecting.
-fn safe_swap(body: &str, target_quote: u8, source_quote: u8) -> Option<&str> {
+pub(crate) fn safe_swap(body: &str, target_quote: u8, source_quote: u8) -> Option<&str> {
     // Any backslash: escapes have different meanings between the two
     // quote styles. Don't try to be clever.
     if body.as_bytes().contains(&b'\\') {
@@ -220,7 +220,7 @@ fn safe_swap(body: &str, target_quote: u8, source_quote: u8) -> Option<&str> {
 ///
 /// Mirrors RuboCop's `double_quotes_required?` from rubocop/cop/util.rb:133:
 /// `/'|(?<!\\)(?:\\{2})*\\(?![\\"])/x`
-fn double_quotes_required(src: &str) -> bool {
+pub(crate) fn double_quotes_required(src: &str) -> bool {
     let b = src.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -255,7 +255,7 @@ fn double_quotes_required(src: &str) -> bool {
 /// `\\`, or an interpolation anchor (`#@`, `#{`, `#$`).
 ///
 /// Mirrors RuboCop's reverse guard: `/" | \\[^'\\] | \#[@{$]/x`
-fn single_quotes_required(src: &str) -> bool {
+pub(crate) fn single_quotes_required(src: &str) -> bool {
     let b = src.as_bytes();
     let mut i = 0;
     while i < b.len() {
