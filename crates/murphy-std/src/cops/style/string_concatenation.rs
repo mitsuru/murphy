@@ -125,8 +125,14 @@ fn check(node: NodeId, cx: &Cx<'_>, options: &StringConcatenationOptions) {
     let node_range = cx.range(node);
     cx.emit_offense(node_range, MSG, None);
 
-    // Autocorrect: only when all parts are correctable.
-    if parts.iter().all(|&id| is_correctable(id, cx)) {
+    // Autocorrect: only when all parts are correctable AND the first (leftmost)
+    // leaf part is a plain Str. This ensures the concatenation is definitely a
+    // String#+ call, not a Pathname#+ or other custom `+` implementation that
+    // happens to take a string argument. Without this guard, aggressive-mode
+    // detection on `Pathname.new('/') + 'test'` would emit an autocorrect that
+    // changes behavior (Pathname#+ returns a Pathname, not a String).
+    let first_is_str = parts.first().map(|&id| is_str(id, cx)) == Some(true);
+    if first_is_str && parts.iter().all(|&id| is_correctable(id, cx)) {
         let replacement = build_interpolated(parts, cx);
         cx.emit_edit(node_range, &replacement);
     }
