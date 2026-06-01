@@ -62,6 +62,7 @@ use crate::cops::style::symbol_array::SymbolArray;
 use crate::cops::style::while_until_modifier::WhileUntilModifier;
 use crate::cops::style::word_array::WordArray;
 use crate::cops::style::yaml_file_read::YAMLFileRead;
+use crate::cops::style::zero_length_predicate::ZeroLengthPredicate;
 
 // `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
 // single Murphy-prefixed runtime dependency by design.
@@ -96,6 +97,7 @@ murphy_plugin_api::register_cops!(
     WhileUntilModifier,
     WordArray,
     YAMLFileRead,
+    ZeroLengthPredicate,
 );
 
 /// Standard cops that have **not yet been migrated** to the arena AST /
