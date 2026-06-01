@@ -41,7 +41,7 @@
 //! - It has no parent (it is the root node), OR
 //! - Its parent is a `Begin` node that has no parent (the `Begin` is the root).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
 const MSG: &str = "Do not define methods at the top-level.";
 
@@ -125,20 +125,28 @@ fn first_line_range(node: NodeId, cx: &Cx<'_>) -> Range {
 ///
 /// Mirrors RuboCop's `top_level_method_definition?`:
 /// - node itself is the root (no parent), OR
-/// - node's parent is a `Begin` that is the root.
+/// - node's parent is a `Begin`/`Kwbegin` chain that ultimately reaches the root.
+///
+/// Multiple levels of `begin..end` blocks at the top level are handled by
+/// walking up through any number of `Begin`/`Kwbegin` nodes.
+/// Example: `begin; begin; def foo; end; end; end` — `foo` is still top-level.
 fn is_top_level(node: NodeId, cx: &Cx<'_>) -> bool {
-    let parent_opt = cx.parent(node);
-    match parent_opt.get() {
-        None => {
-            // No parent — this node IS the root.
-            true
-        }
-        Some(parent) => {
-            // Parent is a Begin whose own parent is absent (Begin is root).
-            if matches!(cx.kind(parent), NodeKind::Begin(..)) {
-                cx.parent(parent) == OptNodeId::NONE
-            } else {
-                false
+    let mut current = node;
+    loop {
+        let parent_opt = cx.parent(current);
+        match parent_opt.get() {
+            None => {
+                // `current` is the root — original node was top-level.
+                return true;
+            }
+            Some(parent) => {
+                if matches!(cx.kind(parent), NodeKind::Begin(..) | NodeKind::Kwbegin(..)) {
+                    // Traverse up through Begin/Kwbegin wrappers.
+                    current = parent;
+                } else {
+                    // Parent is something other than Begin/Kwbegin — not top-level.
+                    return false;
+                }
             }
         }
     }
@@ -280,6 +288,33 @@ mod tests {
         test::<TopLevelMethodDefinition>().expect_no_offenses(indoc! {"
             class Foo
               define_method(:foo) { puts 1 }
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_def_inside_top_level_begin_block() {
+        // `begin; def foo; end; end` — still top-level (begin at root).
+        test::<TopLevelMethodDefinition>().expect_offense(indoc! {"
+            begin
+              def foo
+              ^^^^^^^ Do not define methods at the top-level.
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_def_inside_nested_top_level_begin_blocks() {
+        // `begin; begin; def foo; end; end; end` — nested begins at root.
+        // Requires recursive parent traversal.
+        test::<TopLevelMethodDefinition>().expect_offense(indoc! {"
+            begin
+              begin
+                def foo
+                ^^^^^^^ Do not define methods at the top-level.
+                end
+              end
             end
         "});
     }

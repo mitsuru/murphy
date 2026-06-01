@@ -130,7 +130,7 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TernaryParenthesesOptions) {
                 let msg = MSG.replace("%<command>s", "Omit");
                 cx.emit_offense(cx.range(node), &msg, None);
                 // Autocorrect: remove parens if safe to do so.
-                if !has_below_ternary_precedence(cond_src) {
+                if !has_below_ternary_precedence(cond, cx) {
                     emit_remove_parens(cond, cx);
                 }
             }
@@ -168,7 +168,7 @@ fn is_parenthesized(cond: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
     let src = cx.raw_source(cx.range(cond)).as_bytes();
-    src.first() == Some(&b'(')
+    src.first() == Some(&b'(') && src.last() == Some(&b')')
 }
 
 /// Returns `true` if the ternary condition is a safe assignment (contains `=`).
@@ -197,26 +197,15 @@ fn only_closing_paren_is_last_line(src: &str) -> bool {
 /// Returns `true` if the condition source contains English-language operators
 /// that are below ternary precedence: `and`, `or`, `not`.
 /// These make autocorrect unsafe (removing parens changes precedence).
-fn has_below_ternary_precedence(src: &str) -> bool {
-    for word in [b"and" as &[u8], b"or", b"not"] {
-        let bytes = src.as_bytes();
-        let mut start = 0usize;
-        while start + word.len() <= bytes.len() {
-            let rest = &bytes[start..];
-            if let Some(pos) = rest.windows(word.len()).position(|w| w == word) {
-                let abs = start + pos;
-                let before_ok =
-                    abs == 0 || (!bytes[abs - 1].is_ascii_alphabetic() && bytes[abs - 1] != b'_');
-                let after_end = abs + word.len();
-                let after_ok = after_end >= bytes.len()
-                    || (!bytes[after_end].is_ascii_alphanumeric() && bytes[after_end] != b'_');
-                if before_ok && after_ok {
-                    return true;
-                }
-                start = abs + 1;
-            } else {
-                break;
-            }
+/// Returns `true` if the condition contains English-language operators that are
+/// below ternary precedence: `and`, `or`, `not`.
+/// Uses the token stream rather than raw byte scanning to avoid false positives
+/// from identical words inside string literals or comments.
+fn has_below_ternary_precedence(cond: NodeId, cx: &Cx<'_>) -> bool {
+    for tok in cx.tokens_in(cx.range(cond)) {
+        let text = cx.raw_source(tok.range);
+        if text == "and" || text == "or" || text == "not" {
+            return true;
         }
     }
     false
