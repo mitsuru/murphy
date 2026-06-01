@@ -30,9 +30,7 @@
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
 
-const MSG_ENGLISH: &str = "Prefer `{prefer}` from the stdlib 'English' module (don't forget to require it) over `{global}`.";
-const MSG_REGULAR: &str = "Prefer `{prefer}` over `{global}`.";
-const MSG_BOTH: &str = "Prefer `{prefer}` from the stdlib 'English' module (don't forget to require it) or `{regular}` over `{global}`.";
+
 
 /// Perl-style global var → list of English/preferred names.
 /// Order matters: first entry is the "primary" preferred name used in MSG_REGULAR/MSG_BOTH.
@@ -120,26 +118,33 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 fn check_use_english(node: NodeId, var_name: &str, cx: &Cx<'_>) {
     // Check if this var is a Perl-style var that has English alternatives.
     if let Some(english_names) = perl_to_english(var_name) {
-        // Split into: those needing English library vs built-in ones.
-        let (regular, english): (Vec<&str>, Vec<&str>) = english_names.iter().partition(|v| {
-            NON_ENGLISH_VARS.contains(v)
-        });
-        let msg = format_english_message(var_name, &english, &regular);
+        // Partition into: those NOT needing English library (NON_ENGLISH_VARS = built-in)
+        // vs those requiring `require 'English'`.
+        // Use fixed-size stack arrays — ENGLISH_VARS entries have at most 2 values.
+        let mut regular = [""; 4];
+        let mut english = [""; 4];
+        let mut reg_len = 0;
+        let mut eng_len = 0;
+        for &v in english_names {
+            if NON_ENGLISH_VARS.contains(&v) {
+                if reg_len < 4 {
+                    regular[reg_len] = v;
+                    reg_len += 1;
+                }
+            } else if eng_len < 4 {
+                english[eng_len] = v;
+                eng_len += 1;
+            }
+        }
+        let msg = format_english_message(var_name, &english[..eng_len], &regular[..reg_len]);
         cx.emit_offense(cx.range(node), &msg, None);
         // Autocorrect: replace with the first preferred name.
         // Note: in-string interpolation context is not handled (gap).
-        let replacement = if !english.is_empty() {
-            english[0]
-        } else {
-            regular[0]
-        };
+        let replacement = if eng_len > 0 { english[0] } else { regular[0] };
         cx.emit_edit(cx.range(node), replacement);
     }
 
-    // Check if this is an English-library name that is preferred as-is.
-    // If var_name is itself in any ENGLISH_VARS value list, it's already the right name.
-    // If it's a non-English builtin ($LOAD_PATH etc.), also correct.
-    // No offense needed for already-correct names.
+    // If var_name is already an English or builtin name, no offense needed.
 }
 
 /// `use_perl_names` style: flag English names, prefer Perl vars.
@@ -234,27 +239,25 @@ fn english_to_perl(var_name: &str) -> Option<&'static [&'static str]> {
 fn format_english_message(global: &str, english: &[&str], regular: &[&str]) -> String {
     if regular.is_empty() {
         // Only English-library names.
-        MSG_ENGLISH
-            .replace("{prefer}", &format_list(english))
-            .replace("{global}", global)
+        format!(
+            "Prefer `{}` from the stdlib 'English' module (don't forget to require it) over `{global}`.",
+            format_list(english)
+        )
     } else if english.is_empty() {
         // Only non-library (builtin) names.
-        MSG_REGULAR
-            .replace("{prefer}", &format_list(regular))
-            .replace("{global}", global)
+        format!("Prefer `{}` over `{global}`.", format_list(regular))
     } else {
         // Both kinds.
-        MSG_BOTH
-            .replace("{prefer}", &format_list(english))
-            .replace("{regular}", &format_list(regular))
-            .replace("{global}", global)
+        format!(
+            "Prefer `{}` from the stdlib 'English' module (don't forget to require it) or `{}` over `{global}`.",
+            format_list(english),
+            format_list(regular)
+        )
     }
 }
 
 fn format_regular_message(global: &str, prefer: &str) -> String {
-    MSG_REGULAR
-        .replace("{prefer}", prefer)
-        .replace("{global}", global)
+    format!("Prefer `{prefer}` over `{global}`.")
 }
 
 fn format_list(items: &[&str]) -> String {

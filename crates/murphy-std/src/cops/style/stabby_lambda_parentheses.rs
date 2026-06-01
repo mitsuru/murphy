@@ -137,7 +137,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                 // Find the ( just before first arg and ) just after last arg.
                 let open = paren_open_range(lambda_end, content_start + 1, cx);
                 // Search for ) after last arg's end.
-                let close = open.and_then(|o| paren_close_range_from(o, content_end, cx));
+                let close = paren_close_range_from(content_end, cx);
 
                 if let (Some(open), Some(close)) = (open, close) {
                     let offense_range = Range {
@@ -206,8 +206,7 @@ fn paren_open_range(from: u32, until_end: u32, cx: &Cx<'_>) -> Option<Range> {
 /// The strategy: the syntactic `)` that closes the lambda parameter list must
 /// appear at or after `args_content_end`, so we scan forward from there for the
 /// first `RightParen` token (or `Other` with text `)`).
-fn paren_close_range_from(open: Range, args_content_end: u32, cx: &Cx<'_>) -> Option<Range> {
-    let _ = open; // open is provided for context but we search from args_content_end
+fn paren_close_range_from(args_content_end: u32, cx: &Cx<'_>) -> Option<Range> {
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     // Search from args_content_end — the ) must be at or after here.
