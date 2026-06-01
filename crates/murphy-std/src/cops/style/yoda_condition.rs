@@ -159,6 +159,12 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &YodaConditionOptions) {
     let src = cx.raw_source(node_range);
     cx.emit_offense(node_range, &msg(src), None);
 
+    // `<=>` is non-commutative: swapping operands negates the result
+    // (-1 becomes 1 and vice versa), so autocorrect cannot be applied safely.
+    if method_name == "<=>" {
+        return;
+    }
+
     // Autocorrect: swap lhs/rhs and reverse relational operators.
     let lhs_src = cx.raw_source(cx.range(lhs_id)).to_owned();
     let rhs_src = cx.raw_source(cx.range(rhs_id)).to_owned();
@@ -310,6 +316,15 @@ mod tests {
             1 <=> x
             ^^^^^^^ Reverse the order of the operands `1 <=> x`.
         "});
+    }
+
+    #[test]
+    fn spaceship_has_no_autocorrect() {
+        // `<=>` is non-commutative: swapping negates the result, so no edit.
+        test::<YodaCondition>().expect_no_corrections(
+            "1 <=> x
+",
+        );
     }
 
     // ----- valid cases for default forbid style -----
