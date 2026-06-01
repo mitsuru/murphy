@@ -3679,9 +3679,19 @@ fn match_var_sym_slot_matches_consistently() {
     let cx = unsafe { Cx::from_raw(&raw) };
 
     // Hit: MatchVar(:x) with exact sym match.
-    assert_c_matches("(match_var :x)", &ast, match_var, b_match_var_x(match_var, &cx));
+    assert_c_matches(
+        "(match_var :x)",
+        &ast,
+        match_var,
+        b_match_var_x(match_var, &cx),
+    );
     // Wildcard sym slot matches any MatchVar name.
-    assert_c_matches("(match_var _)", &ast, match_var, b_match_var_any(match_var, &cx));
+    assert_c_matches(
+        "(match_var _)",
+        &ast,
+        match_var,
+        b_match_var_any(match_var, &cx),
+    );
 }
 
 #[test]

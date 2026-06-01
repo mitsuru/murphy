@@ -44,7 +44,7 @@ const SUPPORTED_TAGS: &[u8] = &[
     38, 39, // Gvasgn / Cvasgn
     47, 48, // While / Until
     86, 87, // CaseMatch / InPattern (murphy-j1j2 PM-F)
-    90,     // MatchVar (single sym slot, same shape as lvar/gvar)
+    90, // MatchVar (single sym slot, same shape as lvar/gvar)
 ];
 
 /// `true` iff `(<kind>)` Node patterns are supported for `tag`.
@@ -265,12 +265,20 @@ pub fn pattern_children<'a>(kind: &'a NodeKind, lists: &'a [NodeId]) -> Option<V
         // ── Pattern-match family (murphy-j1j2 PM-F) ─────────────────────────
         // `CaseMatch { subject, in_patterns, else_body }`: `else_body` follows
         // the `NodeList`, so it is omitted (covers_all_fields = false).
-        NodeKind::CaseMatch { subject, in_patterns, .. } => vec![
+        NodeKind::CaseMatch {
+            subject,
+            in_patterns,
+            ..
+        } => vec![
             PatChild::Node(subject),
             PatChild::List(list(in_patterns, lists)),
         ],
         // `InPattern { pattern, guard, body }`: three fixed slots.
-        NodeKind::InPattern { pattern, guard, body } => vec![
+        NodeKind::InPattern {
+            pattern,
+            guard,
+            body,
+        } => vec![
             PatChild::Node(pattern),
             PatChild::OptNode(opt(guard)),
             PatChild::OptNode(opt(body)),
