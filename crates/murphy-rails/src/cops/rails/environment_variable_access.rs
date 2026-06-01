@@ -7,22 +7,23 @@
 //! upstream_version_checked: 2.35.0
 //! status: partial
 //! gap_issues:
-//!   - murphy-j28r
+//!   - murphy-33p7
 //! notes: >
 //!   AllowReads/AllowWrites options, ::ENV handling (cbase-qualified form),
-//!   read/write-specific messages, and ENV const offense range implemented
-//!   (murphy-dls6). Remaining gap: Rails include/exclude path gating
-//!   (no file-path infrastructure yet, murphy-j28r). RuboCop default.yml
-//!   restricts this cop to app/**/*.rb, config/initializers/**/*.rb,
-//!   lib/**/*.rb (excluding lib/**/*.rake); Murphy fires in all files.
-//!   Users can disable per-directory via .murphy.yml.
+//!   read/write-specific messages matching upstream exactly, ENV const offense
+//!   range, and store-as-read classification all implemented (murphy-33p7).
+//!   Remaining gap: Rails include/exclude path gating (no file-path
+//!   infrastructure yet). RuboCop default.yml restricts this cop to
+//!   app/**/*.rb, config/initializers/**/*.rb, lib/**/*.rb (excluding
+//!   lib/**/*.rake); Murphy fires in all files. Users can disable
+//!   per-directory via .murphy.yml.
 //! ```
 //!
 //! environment variables through the top-level `ENV` constant
-//! (`ENV[key]`, `ENV.fetch(key)`, `ENV["A"] = "B"`, `ENV.store(...)`,
-//! `ENV.to_h`, …). Rails projects typically prefer a settings layer
-//! (Settings, Figaro, dotenv, Rails 6 credentials, anyway, …) so the
-//! configuration surface stays type-checked and discoverable.
+//! (`ENV[key]`, `ENV.fetch(key)`, `ENV["A"] = "B"`, `ENV.to_h`, …).
+//! Rails projects typically prefer a settings layer (Settings, Figaro,
+//! dotenv, Rails 6 credentials, anyway, …) so the configuration surface
+//! stays type-checked and discoverable.
 //!
 //! ## Matched shape (Send node)
 //!
@@ -38,8 +39,10 @@
 //! - The method position is `_` (any) — `ENV[]`, `ENV.fetch`,
 //!   `ENV.store`, `ENV.delete`, `ENV.to_h`, etc. all match. This
 //!   mirrors upstream RuboCop-rails which casts a wide net here.
-//! - **Write methods**: `:[]=` (index-assign) and `:store` are
-//!   classified as writes; all other methods are reads.
+//! - **Write methods**: `:[]=` (index-assign) is the only write method.
+//!   `ENV.store(key, value)` is classified as a read, mirroring upstream
+//!   RuboCop-rails which uses `!:[]=` to identify reads and only flags
+//!   `:[]=` (indexasgn form) as writes.
 //!
 //! Bare `ENV` (a Const read with no Send around it) is **not** a
 //! Send node and is left alone by the dispatcher.
@@ -47,14 +50,14 @@
 //! ## Options
 //!
 //! - **`AllowReads`** (default false): when true, skip ENV reads
-//!   (`ENV[key]`, `ENV.fetch`, `ENV.to_h`, etc.).
+//!   (`ENV[key]`, `ENV.fetch`, `ENV.to_h`, `ENV.store`, etc.).
 //! - **`AllowWrites`** (default false): when true, skip ENV writes
-//!   (`ENV[key] = value`, `ENV.store(key, value)`).
+//!   (`ENV[key] = value`).
 //!
 //! ## Offense messages
 //!
-//! - Read: "Avoid reading directly from `ENV`."
-//! - Write: "Avoid writing directly to `ENV`."
+//! - Read: "Do not read from `ENV` directly post initialization."
+//! - Write: "Do not write to `ENV` directly post initialization."
 //!
 //! ## Offense range
 //!
@@ -75,7 +78,7 @@
 //! layer (Rails.application.config? Settings.foo? Figaro.env.FOO?);
 //! that's outside the cop's awareness. Detect-only.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent: `(send (const nil? :ENV) _ ...)`.
 // `nil?` on the inner Const requires no scope (top-level). The method
@@ -85,14 +88,16 @@ use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher}
 def_node_matcher!(is_env_access, "(send (const nil? :ENV) _ ...)");
 
 /// Returns true if the send method is a write operation on ENV.
-/// Write methods: `:[]=` (index-assign) and `:store`.
+/// Write method: `:[]=` (index-assign) only. `store` is classified as a
+/// read, matching upstream RuboCop-rails which uses `!:[]=` for reads
+/// and only `:[]=` (indexasgn form) for writes.
 fn is_env_write(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { method, .. } = *cx.kind(node) else {
-        return false;
-    };
-    let m = cx.symbol_str(method);
-    m == "[]=" || m == "store"
+    cx.method_name(node) == Some("[]=")
 }
+
+// Upstream message text (rubocop-rails v1.86.2+).
+const READ_MSG: &str = "Do not read from `ENV` directly post initialization.";
+const WRITE_MSG: &str = "Do not write to `ENV` directly post initialization.";
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -103,13 +108,13 @@ pub struct EnvironmentVariableAccessOptions {
     #[option(
         name = "AllowReads",
         default = false,
-        description = "When true, skip ENV reads (`ENV[key]`, `ENV.fetch`, `ENV.to_h`, etc.)."
+        description = "When true, skip ENV reads (`ENV[key]`, `ENV.fetch`, `ENV.to_h`, `ENV.store`, etc.)."
     )]
     pub allow_reads: bool,
     #[option(
         name = "AllowWrites",
         default = false,
-        description = "When true, skip ENV writes (`ENV[key] = value`, `ENV.store(key, value)`)."
+        description = "When true, skip ENV writes (`ENV[key] = value`)."
     )]
     pub allow_writes: bool,
 }
@@ -140,17 +145,12 @@ impl EnvironmentVariableAccess {
 
         // Offense range: just the `ENV` constant node, not the full send.
         // The receiver is always present here (pattern is gated on it).
-        let receiver_id = match *cx.kind(node) {
-            NodeKind::Send { receiver, .. } => receiver.get().unwrap(),
-            _ => return,
+        let Some(receiver_id) = cx.call_receiver(node).get() else {
+            return;
         };
         let env_range = cx.range(receiver_id);
 
-        let msg = if write {
-            "Avoid writing directly to `ENV`."
-        } else {
-            "Avoid reading directly from `ENV`."
-        };
+        let msg = if write { WRITE_MSG } else { READ_MSG };
 
         cx.emit_offense(env_range, msg, None);
     }
@@ -181,7 +181,7 @@ mod tests {
     fn flags_env_bracket_read() {
         test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV["DATABASE_URL"]
-                ^^^ Avoid reading directly from `ENV`.
+                ^^^ Do not read from `ENV` directly post initialization.
             "#});
     }
 
@@ -189,7 +189,7 @@ mod tests {
     fn flags_env_fetch() {
         test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV.fetch("DATABASE_URL")
-                ^^^ Avoid reading directly from `ENV`.
+                ^^^ Do not read from `ENV` directly post initialization.
             "#});
     }
 
@@ -197,7 +197,7 @@ mod tests {
     fn flags_env_fetch_with_default() {
         test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV.fetch("DATABASE_URL", "sqlite::memory:")
-                ^^^ Avoid reading directly from `ENV`.
+                ^^^ Do not read from `ENV` directly post initialization.
             "#});
     }
 
@@ -205,15 +205,17 @@ mod tests {
     fn flags_env_bracket_write() {
         test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV["DATABASE_URL"] = "postgres://..."
-                ^^^ Avoid writing directly to `ENV`.
+                ^^^ Do not write to `ENV` directly post initialization.
             "#});
     }
 
     #[test]
     fn flags_env_store() {
+        // `ENV.store` is classified as a read, matching upstream RuboCop-rails
+        // which uses `!:[]=` for reads; only `:[]=` is a write.
         test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV.store("KEY", "VALUE")
-                ^^^ Avoid writing directly to `ENV`.
+                ^^^ Do not read from `ENV` directly post initialization.
             "#});
     }
 
@@ -221,7 +223,7 @@ mod tests {
     fn flags_env_to_h() {
         test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ENV.to_h
-                ^^^ Avoid reading directly from `ENV`.
+                ^^^ Do not read from `ENV` directly post initialization.
             "#});
     }
 
@@ -232,7 +234,7 @@ mod tests {
         // (5 chars including the leading `::`).
         test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
                 ::ENV["FOO"]
-                ^^^^^ Avoid reading directly from `ENV`.
+                ^^^^^ Do not read from `ENV` directly post initialization.
             "#});
     }
 
@@ -253,22 +255,20 @@ mod tests {
     }
 
     #[test]
+    fn allow_reads_skips_env_store() {
+        // `ENV.store` is a read — AllowReads suppresses it.
+        test::<EnvironmentVariableAccess>()
+            .with_options(&allow_reads())
+            .expect_no_offenses("ENV.store(\"KEY\", \"VALUE\")\n");
+    }
+
+    #[test]
     fn allow_reads_still_flags_env_write() {
         test::<EnvironmentVariableAccess>()
             .with_options(&allow_reads())
             .expect_offense(indoc! {r#"
                 ENV["DATABASE_URL"] = "postgres://..."
-                ^^^ Avoid writing directly to `ENV`.
-            "#});
-    }
-
-    #[test]
-    fn allow_reads_still_flags_env_store() {
-        test::<EnvironmentVariableAccess>()
-            .with_options(&allow_reads())
-            .expect_offense(indoc! {r#"
-                ENV.store("KEY", "VALUE")
-                ^^^ Avoid writing directly to `ENV`.
+                ^^^ Do not write to `ENV` directly post initialization.
             "#});
     }
 
@@ -282,10 +282,14 @@ mod tests {
     }
 
     #[test]
-    fn allow_writes_skips_env_store() {
+    fn allow_writes_still_flags_env_store() {
+        // `ENV.store` is a read — AllowWrites does NOT suppress it.
         test::<EnvironmentVariableAccess>()
             .with_options(&allow_writes())
-            .expect_no_offenses("ENV.store(\"KEY\", \"VALUE\")\n");
+            .expect_offense(indoc! {r#"
+                ENV.store("KEY", "VALUE")
+                ^^^ Do not read from `ENV` directly post initialization.
+            "#});
     }
 
     #[test]
@@ -294,7 +298,7 @@ mod tests {
             .with_options(&allow_writes())
             .expect_offense(indoc! {r#"
                 ENV["DATABASE_URL"]
-                ^^^ Avoid reading directly from `ENV`.
+                ^^^ Do not read from `ENV` directly post initialization.
             "#});
     }
 
@@ -302,10 +306,10 @@ mod tests {
 
     #[test]
     fn read_and_write_messages_differ() {
-        // Ensures the write message is used for writes, not the read message.
+        // Ensures the write message is used for `:[]=`, not the read message.
         test::<EnvironmentVariableAccess>().expect_offense(indoc! {r#"
-                ENV.store("K", "V")
-                ^^^ Avoid writing directly to `ENV`.
+                ENV["DATABASE_URL"] = "postgres://..."
+                ^^^ Do not write to `ENV` directly post initialization.
             "#});
     }
 
