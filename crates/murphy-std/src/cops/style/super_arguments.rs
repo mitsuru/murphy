@@ -119,26 +119,26 @@ fn check(super_node: NodeId, cx: &Cx<'_>) {
     cx.emit_edit(offense_range, "super");
 }
 
-/// Walk ancestors from `super_node` to find the nearest enclosing `Def`.
+/// Walk ancestors from `super_node` to find the nearest enclosing `Def`/`Defs`.
 /// Returns `None` if:
-/// - We encounter a `Block` node whose call is NOT the super_node itself
-///   (i.e., super is inside a block — potential define_method delegation).
-/// - No `Def` is found.
+/// - We encounter any block-type node (Block/Numblock/Itblock) whose call is
+///   NOT the super_node itself (potential define_method delegation).
+/// - No def is found.
 fn find_def_node(super_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     for ancestor in cx.ancestors(super_node) {
-        match *cx.kind(ancestor) {
-            NodeKind::Block { call, .. } => {
-                // If the block's call IS the super node, it's an inline block
-                // (e.g. `super(a, b) { x }`) — this is OK, continue walking.
-                if call == super_node {
-                    continue;
-                }
-                // Otherwise, super is inside a block body — could be
-                // define_method or similar. Stop here (no def found).
-                return None;
+        if cx.is_any_def_type(ancestor) {
+            return Some(ancestor);
+        }
+        if cx.is_any_block_type(ancestor) {
+            // If the block's call is the super node itself (inline block),
+            // continue walking — this is the `super(a) { x }` case.
+            if let Some(call) = cx.block_call(ancestor).get()
+                && call == super_node
+            {
+                continue;
             }
-            NodeKind::Def { .. } => return Some(ancestor),
-            _ => {}
+            // super inside a block body — potential define_method. Stop.
+            return None;
         }
     }
     None
@@ -163,9 +163,9 @@ enum DefArg {
     ForwardArgs,
 }
 
-/// Collect def args from the `Args` child of a `Def` node.
+/// Collect def args from the `Args` child of a `Def`/`Defs` node.
 fn collect_def_args(def_node: NodeId, cx: &Cx<'_>) -> Vec<DefArg> {
-    let NodeKind::Def { args: args_id, .. } = *cx.kind(def_node) else {
+    let Some(args_id) = cx.def_arguments(def_node).get() else {
         return vec![];
     };
     let NodeKind::Args(args_list) = *cx.kind(args_id) else {
@@ -316,13 +316,9 @@ fn collect_super_args(
 }
 
 /// Returns true when the super node has an inline block (e.g. `super(a) { x }`).
-/// In the Murphy AST this appears as `(block (super ...) (args) body)`.
+/// Uses `cx.block_node` which handles Block, Numblock, and Itblock.
 fn is_super_with_inline_block(super_node: NodeId, cx: &Cx<'_>) -> bool {
-    if let Some(parent) = cx.parent(super_node).get() {
-        matches!(*cx.kind(parent), NodeKind::Block { call, .. } if call == super_node)
-    } else {
-        false
-    }
+    cx.block_node(super_node).get().is_some()
 }
 
 /// Compare def args against super args, returning true when they're identical.

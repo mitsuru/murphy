@@ -48,31 +48,22 @@ impl StructInheritance {
 }
 
 fn is_struct_send(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send {
-        receiver, method, ..
-    } = *cx.kind(node)
-    else {
-        return false;
-    };
-    let Some(recv_id) = receiver.get() else {
-        return false;
-    };
-    if cx.symbol_str(method) != "new" {
+    // Use cx.method_name and cx.is_global_const for cleaner, API-consistent matching.
+    if cx.method_name(node) != Some("new") {
         return false;
     }
-    // Only match top-level `Struct` (scope == nil) or `::Struct` (which
-    // Murphy's translator lowers to the same (const :Struct nil) shape).
-    // `MyNamespace::Struct` has a non-nil scope and must be excluded.
-    match *cx.kind(recv_id) {
-        NodeKind::Const { scope, name } => scope.get().is_none() && cx.symbol_str(name) == "Struct",
-        _ => false,
-    }
+    let Some(recv_id) = cx.call_receiver(node).get() else {
+        return false;
+    };
+    // is_global_const accepts nil scope (Struct) and Cbase scope (::Struct).
+    cx.is_global_const(recv_id, "Struct")
 }
 
 fn is_struct_new(node: NodeId, cx: &Cx<'_>) -> bool {
-    match *cx.kind(node) {
-        NodeKind::Block { call, .. } => is_struct_send(call, cx),
-        _ => is_struct_send(node, cx),
+    if let Some(call) = cx.block_call(node).get() {
+        is_struct_send(call, cx)
+    } else {
+        is_struct_send(node, cx)
     }
 }
 
@@ -233,14 +224,8 @@ fn check(class_node: NodeId, cx: &Cx<'_>) {
                 // Non-empty body: append ` do` after the struct.new call.
                 // If unparenthesized, wrap args in parens first.
                 let super_range = cx.range(super_id);
-                let name_range = cx.loc(super_id).name;
-                let has_parens = toks
-                    .iter()
-                    .skip(toks.partition_point(|t| t.range.start < name_range.end))
-                    .take_while(|t| t.range.start < super_range.end)
-                    .any(|t| t.kind == SourceTokenKind::LeftParen);
 
-                if has_parens {
+                if cx.is_parenthesized(super_id) {
                     // Parenthesized: append ` do` after closing paren.
                     cx.emit_edit(
                         Range {
@@ -252,10 +237,7 @@ fn check(class_node: NodeId, cx: &Cx<'_>) {
                 } else {
                     // Unparenthesized: replace `<selector-end>...<expr-end>`
                     // with `(<args>) do`.
-                    let NodeKind::Send { args, .. } = *cx.kind(super_id) else {
-                        return;
-                    };
-                    let args_list = cx.list(args);
+                    let args_list = cx.call_arguments(super_id);
                     if args_list.is_empty() {
                         cx.emit_edit(
                             Range {
@@ -270,6 +252,7 @@ fn check(class_node: NodeId, cx: &Cx<'_>) {
                             .map(|&a| cx.raw_source(cx.range(a)))
                             .collect();
                         let args_joined = args_src.join(", ");
+                        let name_range = cx.loc(super_id).name;
                         cx.emit_edit(
                             Range {
                                 start: name_range.end,
