@@ -12,7 +12,10 @@
 //!   Three EnforcedStyle values are implemented:
 //!     require_no_parentheses (default): flag parenthesized conditions.
 //!     require_parentheses: flag unparenthesized conditions.
-//!     require_parentheses_when_complex: flag complex without parens or simple with parens.
+//!     require_parentheses_when_complex: flag complex without parens (only).
+//!     The "simple with parens" direction (e.g. `(bar?) ? a : b` flagged as unnecessary)
+//!     is NOT implemented — prism's ParenthesesNode translates to opaque `Unknown` so
+//!     we cannot determine whether the inner condition is simple (gap: false negatives).
 //!   AllowSafeAssignment (default: true): parenthesized conditions containing an assignment
 //!   token `=` are allowed (detected via token scan — covers common cases).
 //!   Parenthesized conditions map to `Unknown` in Murphy's AST (prism's ParenthesesNode
@@ -147,8 +150,11 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TernaryParenthesesOptions) {
                 cx.emit_offense(cx.range(node), &msg, None);
                 cx.emit_edit(cx.range(cond), &format!("({cond_src})"));
             }
-            // If is_paren: Unknown (parenthesized) — can't introspect inside,
-            // so we conservatively skip flagging. See parity notes.
+            // `require_parentheses_when_complex` gap: the "simple with parens should lose parens"
+            // direction requires knowing if the inner condition is simple. Parenthesized conditions
+            // are `Unknown` (prism ParenthesesNode not yet translated), so we cannot inspect the
+            // inner AST. All parenthesized conditions are conservatively skipped here — false
+            // negatives only (no incorrect flags). Documented in murphy-parity notes.
         }
     }
 }
