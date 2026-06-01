@@ -28,6 +28,14 @@
 //!   - Chain length > MaxChainLength (default: 2)
 //!   - RHS contains `||` (&&-or pattern)
 //!
+//!   Safety note: RuboCop marks this cop SafeAutoCorrect: false because
+//!   `foo && foo.bar` returns `false` when `foo == false`, but `foo&.bar`
+//!   would raise NoMethodError on `false`. This cop mirrors RuboCop's default
+//!   behavior of flagging truthiness guards (not just nil?). Patterns using
+//!   bool literals like `false && false.method` are not converted since
+//!   NodeKind::False_ is not a simple variable. Variables that can return
+//!   `false` will be flagged — the same as upstream.
+//!
 //!   Gaps vs RuboCop:
 //!   - `ConvertCodeThatCanStartToReturnNil` option not implemented
 //!     (`!foo.nil? && foo.bar` is not converted).
@@ -843,6 +851,23 @@ mod tests {
     #[test]
     fn no_offense_plain_method_call() {
         test::<SafeNavigation>().expect_no_offenses("foo.bar\n");
+    }
+
+    // ----- Semantic safety regression tests -----
+    // These document that bool literals are not converted (NodeKind::False_ / True_
+    // are not simple variables) — aligning with RuboCop SafeAutoCorrect: false note.
+
+    #[test]
+    fn no_offense_false_literal_and_chain() {
+        // `false && false.bar` — lhs is a bool literal (NodeKind::False_), not a
+        // variable, so simple_variable_source returns None. Not converted.
+        test::<SafeNavigation>().expect_no_offenses("false && false.bar\n");
+    }
+
+    #[test]
+    fn no_offense_true_literal_if_check() {
+        // `true.bar if true` — lhs is a bool literal. Not converted.
+        test::<SafeNavigation>().expect_no_offenses("true.bar if true\n");
     }
 }
 murphy_plugin_api::submit_cop!(SafeNavigation);

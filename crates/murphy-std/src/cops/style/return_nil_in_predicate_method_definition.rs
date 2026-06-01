@@ -18,6 +18,9 @@
 //!   Autocorrect is unsafe (RuboCop marks it `SafeAutoCorrect: false`).
 //!   `def self.foo?` singleton methods are also checked (via defs hook).
 //!   Gap: Does not recurse into case/when branches (conservative, no false positives).
+//!   Gap: For `nil` in an `if` without `else` (implicit-return position), the offense
+//!   is flagged but autocorrect is suppressed, since correcting only the then-branch
+//!   would leave the falsy-condition path still returning `nil`.
 //! ```
 //!
 //! ## Matched shapes
@@ -96,7 +99,7 @@ fn check_body(body_opt: OptNodeId, cx: &Cx<'_>) {
     let Some(body_id) = body_opt.get() else {
         return;
     };
-    check_node_for_nil_returns(body_id, cx, true);
+    check_node_for_nil_returns(body_id, cx, true, true);
 }
 
 /// Recursively check a node for nil returns.
@@ -105,7 +108,7 @@ fn check_body(body_opt: OptNodeId, cx: &Cx<'_>) {
 /// position (last expression of the method body, or the final expression in a
 /// branch that is in implicit-return position). Explicit `return nil` / bare
 /// `return` offenses are flagged regardless of position.
-fn check_node_for_nil_returns(node: NodeId, cx: &Cx<'_>, is_implicit_return_position: bool) {
+fn check_node_for_nil_returns(node: NodeId, cx: &Cx<'_>, is_implicit_return_position: bool, autocorrect_ok: bool) {
     match cx.kind(node) {
         NodeKind::Return(value_opt) => {
             // `return nil` or bare `return` — always an offense regardless of position.
@@ -132,7 +135,12 @@ fn check_node_for_nil_returns(node: NodeId, cx: &Cx<'_>, is_implicit_return_posi
             if is_implicit_return_position => {
                 let range = cx.range(node);
                 cx.emit_offense(range, MSG, None);
-                cx.emit_edit(range, "false");
+                // Only autocorrect when it's safe: we suppress autocorrect for nil
+                // in a then-branch when no else exists, since that would leave the
+                // falsy-condition path still returning nil from the if expression.
+                if autocorrect_ok {
+                    cx.emit_edit(range, "false");
+                }
             }
 
         NodeKind::Begin(list) => {
@@ -141,7 +149,7 @@ fn check_node_for_nil_returns(node: NodeId, cx: &Cx<'_>, is_implicit_return_posi
             let len = children.len();
             for (i, &child_id) in children.iter().enumerate() {
                 let last = i + 1 == len;
-                check_node_for_nil_returns(child_id, cx, last && is_implicit_return_position);
+                check_node_for_nil_returns(child_id, cx, last && is_implicit_return_position, autocorrect_ok);
             }
         }
 
@@ -149,11 +157,18 @@ fn check_node_for_nil_returns(node: NodeId, cx: &Cx<'_>, is_implicit_return_posi
             // Recurse into then/else branches.
             // Both branches can be in implicit-return position if the if/unless
             // itself is in implicit-return position.
+            //
+            // Autocorrect caveat: when in implicit-return position and no else branch
+            // exists, correcting only the then-branch nil → false would leave the
+            // falsy-condition path still returning nil. In that case we flag the
+            // offense but suppress autocorrect (pass autocorrect_ok=false).
+            let has_else = else_.get().is_some();
+            let then_autocorrect = !is_implicit_return_position || has_else;
             if let Some(then_id) = then_.get() {
-                check_node_for_nil_returns(then_id, cx, is_implicit_return_position);
+                check_node_for_nil_returns(then_id, cx, is_implicit_return_position, then_autocorrect);
             }
             if let Some(else_id) = else_.get() {
-                check_node_for_nil_returns(else_id, cx, is_implicit_return_position);
+                check_node_for_nil_returns(else_id, cx, is_implicit_return_position, true);
             }
         }
 
@@ -270,23 +285,23 @@ mod tests {
 
     #[test]
     fn flags_nil_in_if_then_branch_at_end() {
-        test::<ReturnNilInPredicateMethodDefinition>().expect_correction(
-            indoc! {"
-                def foo?
-                  if x
-                    nil
-                    ^^^ Return `false` instead of `nil` in predicate methods.
-                  end
-                end
-            "},
-            indoc! {"
-                def foo?
-                  if x
-                    false
-                  end
-                end
-            "},
-        );
+        // Offense is flagged but autocorrect is suppressed: fixing only the
+        // then-branch would leave the else/falsy path still returning nil.
+        test::<ReturnNilInPredicateMethodDefinition>().expect_offense(indoc! {"
+            def foo?
+              if x
+                nil
+                ^^^ Return `false` instead of `nil` in predicate methods.
+              end
+            end
+        "});
+        test::<ReturnNilInPredicateMethodDefinition>().expect_no_corrections(indoc! {"
+            def foo?
+              if x
+                nil
+              end
+            end
+        "});
     }
 
     #[test]
