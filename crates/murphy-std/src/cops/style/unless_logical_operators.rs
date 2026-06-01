@@ -187,12 +187,26 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
     }
 }
 
-/// Returns `true` when the condition's top node is `And` or `Or`.
+/// Returns `true` when the condition is or contains a logical operator at the
+/// top level.
 ///
-/// Mirrors RuboCop's `logical_operator?` which only matches when the condition
-/// itself is `and`/`or`, not when logical operators appear inside method args.
+/// Mirrors RuboCop's `logical_operator?` (top is `and`/`or`) and extends it to
+/// parenthesized conditions like `(a && b)` which parse as `Unknown` in
+/// Murphy's AST. We scan for logical operator tokens in the `Unknown` range
+/// to handle these cases, while still NOT flagging when the top is a `Send`
+/// (method call with a logical operator in the arguments, e.g. `foo(a || b)`).
 fn has_any_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(cx.kind(cond), NodeKind::And { .. } | NodeKind::Or { .. })
+    match cx.kind(cond) {
+        NodeKind::And { .. } | NodeKind::Or { .. } => true,
+        NodeKind::Unknown => {
+            // Parenthesized condition: `(a && b)` is `Unknown`. Scan tokens.
+            let r = cx.range(cond);
+            let ops = collect_op_tokens_in_range(r.start, r.end, cx);
+            !ops.is_empty()
+        }
+        // Any other top node (Send, send call, etc.) — not flagged.
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -470,6 +484,32 @@ mod tests {
     fn forbid_mixed_does_not_flag_logical_inside_method_arg() {
         // Mixed operators inside a method arg — condition is Send, not And/Or.
         test::<UnlessLogicalOperators>().expect_no_offenses("return unless foo(a && b || c)\n");
+    }
+
+    #[test]
+    fn forbid_any_flags_parenthesized_and() {
+        // `(a && b)` as condition parses as `Unknown` in Murphy AST;
+        // token scanning detects the `&&`.
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_offense(indoc! {r#"
+                return unless (a && b)
+                ^^^^^^^^^^^^^^^^^^^^^^ Do not use any logical operator in an `unless`.
+            "#});
+    }
+
+    #[test]
+    fn forbid_any_flags_parenthesized_or() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_offense(indoc! {r#"
+                return unless (a || b)
+                ^^^^^^^^^^^^^^^^^^^^^^ Do not use any logical operator in an `unless`.
+            "#});
     }
 }
 
