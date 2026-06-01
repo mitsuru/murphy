@@ -69,21 +69,14 @@ pub struct EmptyCaseCondition;
 impl EmptyCaseCondition {
     #[on_node(kind = "case")]
     fn check_case(&self, node: NodeId, cx: &Cx<'_>) {
-        check(node, cx);
+        let NodeKind::Case { subject, .. } = *cx.kind(node) else {
+            return;
+        };
+        if subject.get().is_some() {
+            return;
+        }
+        cx.emit_offense(cx.loc(node).keyword(), MSG, None);
     }
-}
-
-fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Case { subject, .. } = *cx.kind(node) else {
-        return;
-    };
-    // Only report when the subject is absent.
-    if subject.get().is_some() {
-        return;
-    }
-    // Offense range is the `case` keyword only, matching RuboCop's behavior.
-    let offense_range = cx.loc(node).keyword();
-    cx.emit_offense(offense_range, MSG, None);
 }
 
 #[cfg(test)]
