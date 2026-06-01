@@ -1220,11 +1220,7 @@ impl Translator {
                 .map(|e| self.translate_pattern_element(&e))
                 .collect();
             // Detect trailing comma (ImplicitRestNode) vs named/bare splat.
-            let is_with_tail = ap
-                .rest()
-                .as_ref()
-                .map(|r| r.as_implicit_rest_node().is_some())
-                .unwrap_or(false);
+            let is_with_tail = ap.rest().and_then(|r| r.as_implicit_rest_node()).is_some();
             if let Some(rest) = ap.rest() {
                 // Real splat: SplatNode → match_rest.
                 // ImplicitRestNode (trailing comma) adds no child.

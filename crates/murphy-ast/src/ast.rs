@@ -404,7 +404,8 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
         | NodeKind::ForwardArgs
         | NodeKind::ForwardedArgs
         | NodeKind::Kwnilarg
-        | NodeKind::Blocknilarg => {}
+        | NodeKind::Blocknilarg
+        | NodeKind::MatchNilPattern => {}
 
         // Leaves whose single parser-gem child is a non-node scalar
         // (literal value / name symbol). They never parent a node, but the
@@ -428,8 +429,7 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
         | NodeKind::MatchVar(_)
         | NodeKind::BackRef(_)
         | NodeKind::NthRef(_)
-        | NodeKind::Shadowarg(_)
-        | NodeKind::MatchNilPattern => slot_phantom(out),
+        | NodeKind::Shadowarg(_) => slot_phantom(out),
 
         // `(const scope :name)` — scope slot then name phantom.
         NodeKind::Const { scope, .. } => {
