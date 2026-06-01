@@ -689,6 +689,12 @@ fn write_node(ast: &Ast, id: NodeId, depth: usize, out: &mut String) {
             write_node(ast, pattern, d, out);
             out.push(')');
         }
+        NodeKind::MatchWithLvasgn { call, targets } => {
+            out.push_str("(match_with_lvasgn\n");
+            write_node(ast, call, d, out);
+            write_slice(ast, id, 1, targets.len as usize, d, out);
+            out.push(')');
+        }
 
         NodeKind::MatchAs { value, name } => {
             out.push_str("(match_as\n");

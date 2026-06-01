@@ -363,6 +363,13 @@ fn node_kind_discriminants_are_frozen() {
     freeze(NodeKind::Pin(NodeId(0)), 110);
     freeze(NodeKind::IfGuard(NodeId(0)), 111);
     freeze(NodeKind::UnlessGuard(NodeId(0)), 112);
+    freeze(
+        NodeKind::MatchWithLvasgn {
+            call: NodeId(0),
+            targets: NodeList::EMPTY,
+        },
+        113,
+    );
 }
 
 /// Catch the failure mode that `node_kind_discriminants_are_frozen` would
@@ -370,14 +377,19 @@ fn node_kind_discriminants_are_frozen() {
 /// list above: the freeze list must cover **every** variant, so its length
 /// must equal the highest valid tag + 1.
 ///
-/// `NodeKind::MatchAlt` is the current highest variant. Bumping it without
+/// `NodeKind::MatchWithLvasgn` is the current highest variant. Bumping it without
 /// touching this file means the new tag falls outside the test and slips
 /// in undetected.
 #[test]
 fn highest_frozen_tag_matches_last_variant() {
-    let last = NodeKind::UnlessGuard(NodeId(0)).tag().0;
+    let last = NodeKind::MatchWithLvasgn {
+        call: NodeId(0),
+        targets: NodeList::EMPTY,
+    }
+    .tag()
+    .0;
     assert_eq!(
-        last, 112,
+        last, 113,
         "appending a new NodeKind variant requires extending tests/discriminant_freeze.rs \
          (add the new variant to both `node_kind_discriminants_are_frozen` and update \
          the expected last-tag here)."

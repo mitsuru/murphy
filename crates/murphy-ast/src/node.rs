@@ -648,7 +648,6 @@ pub enum NodeKind {
         value: NodeId,
         pattern: NodeId,
     },
-
     // ── murphy-j1j2 PM-D advanced patterns (tags 108, 109) ───────────────
     /// `pat => name` — capture pattern inside pattern matching (Ruby 3.0+).
     /// prism: `CapturePatternNode`. parser-gem: `match_as`.
@@ -681,6 +680,13 @@ pub enum NodeKind {
     /// prism: `UnlessNode` が `InNode` の pattern slot に挿入される形で出現。
     /// parser-gem: `unless_guard`. inner は guard 条件式。
     UnlessGuard(NodeId),
+    /// `/(?<name>...)/ =~ value` — regexp named captures that implicitly bind
+    /// local variables. `call` is the `=~` send; `targets` are value-less
+    /// `Lvasgn` nodes for each named capture.
+    MatchWithLvasgn {
+        call: NodeId,
+        targets: NodeList,
+    },
 }
 
 /// A source comment, stored outside the node tree.
@@ -853,6 +859,7 @@ impl NodeKind {
             // murphy-j1j2 PM-C one-liner pattern matching
             NodeKind::MatchPatternP { .. } => 106,
             NodeKind::MatchPattern { .. } => 107,
+            NodeKind::MatchWithLvasgn { .. } => 113,
             // murphy-j1j2 PM-D advanced patterns
             NodeKind::MatchAs { .. } => 108,
             NodeKind::ConstPattern { .. } => 109,

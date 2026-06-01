@@ -428,8 +428,8 @@ impl VarSemanticModel {
                     // A value-less Lvasgn is a target placeholder inside
                     // OpAsgn/OrAsgn/AndAsgn/Masgn; it is handled by those arms.
                     // If traversal reaches one directly, it is an exposed
-                    // binding target such as regexp named captures lowered from
-                    // MatchWriteNode.
+                    // binding target such as regexp named captures under
+                    // MatchWithLvasgn.
                     if let Some(val_id) = value.get() {
                         if !Self::is_underscore_prefix(name, ast) {
                             let end = ast.range(node).end;

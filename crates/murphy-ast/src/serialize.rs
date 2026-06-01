@@ -668,6 +668,11 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, value.0);
             put_u32(out, pattern.0);
         }
+        NodeKind::MatchWithLvasgn { call, targets } => {
+            put_u8(out, 113);
+            put_u32(out, call.0);
+            write_node_list(targets, out);
+        }
         // murphy-j1j2 PM-D advanced patterns
         NodeKind::MatchAs { value, name } => {
             put_u8(out, 108);
@@ -964,6 +969,10 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
         107 => NodeKind::MatchPattern {
             value: NodeId(get_u32(cur)?),
             pattern: NodeId(get_u32(cur)?),
+        },
+        113 => NodeKind::MatchWithLvasgn {
+            call: NodeId(get_u32(cur)?),
+            targets: read_node_list(cur)?,
         },
         // murphy-j1j2 PM-D advanced patterns
         108 => NodeKind::MatchAs {
@@ -1505,6 +1514,10 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
             | NodeKind::MatchPattern { value, pattern } => {
                 check_node(value.0)?;
                 check_node(pattern.0)?;
+            }
+            NodeKind::MatchWithLvasgn { call, targets } => {
+                check_node(call.0)?;
+                check_list(targets)?;
             }
             // murphy-j1j2 PM-D advanced patterns
             NodeKind::MatchAs { value, name } => {
