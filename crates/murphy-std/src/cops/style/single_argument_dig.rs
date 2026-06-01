@@ -10,9 +10,13 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Murphy v1 does not implement the DigChain option — RuboCop's
+//!   Murphy v1 does not implement the DigChain option -- RuboCop's
 //!   `DigChainEnabled` config (disabled by default) suppresses offenses in dig
 //!   chains.  Murphy always flags single-argument dig calls regardless of chaining.
+//!   For autocorrect in dig chains (e.g. `hash.dig(:a).dig(:b)`), the edit is
+//!   deferred to the outermost single-argument dig node in the chain to avoid
+//!   overlapping whole-node edits. The fixpoint converges to the fully corrected
+//!   form (`hash[:a][:b]`) in one pass per chain depth.
 //!   `csend` (`&.dig`) calls are not flagged, matching RuboCop's safety note that
 //!   replacing `hash&.dig(:key)` with `hash[:key]` can introduce errors when the
 //!   receiver is nil.
@@ -44,6 +48,10 @@
 //! Whole-node replacement: `receiver.dig(arg)` -> `receiver[arg]`.
 //! This is a structural rewrite (receiver moves to a new syntactic position),
 //! so per `.claude/rules/autocorrect-pattern.md` whole-node interpolation is used.
+//!
+//! For dig chains (`a.dig(:x).dig(:y)`), the autocorrect edit is only emitted for
+//! the outermost dig call in the chain. Each fixpoint pass removes one level of
+//! nesting, converging to the fully corrected form.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
@@ -66,6 +74,25 @@ impl SingleArgumentDig {
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
+}
+
+/// Returns true if `node` is a plain `send` to `dig` with exactly one
+/// eligible (non-blocked, non-splat, non-hash) argument and a non-nil receiver.
+fn is_single_arg_dig(node: NodeId, cx: &Cx<'_>) -> bool {
+    let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
+        return false;
+    };
+    if receiver.get().is_none() {
+        return false;
+    }
+    let args_list = cx.list(args);
+    if args_list.len() != 1 {
+        return false;
+    }
+    !matches!(
+        cx.kind(args_list[0]),
+        NodeKind::BlockPass(_) | NodeKind::Splat(_) | NodeKind::Hash(_)
+    )
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
@@ -106,8 +133,18 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     cx.emit_offense(cx.range(node), &message, None);
 
     // Autocorrect: whole-node replacement.
-    let corrected = format!("{receiver_src}[{argument_src}]");
-    cx.emit_edit(cx.range(node), &corrected);
+    // Skip emitting an edit if the parent is also a single-argument dig -- in that
+    // case the parent's edit already covers this node's range and the two would
+    // overlap.  The parent's edit (`parent.dig(y)` -> `parent_recv[y]`) leaves this
+    // node's range intact for the next fixpoint pass, at which point its edit fires.
+    let parent_is_dig = cx
+        .parent(node)
+        .get()
+        .is_some_and(|p| is_single_arg_dig(p, cx));
+    if !parent_is_dig {
+        let corrected = format!("{receiver_src}[{argument_src}]");
+        cx.emit_edit(cx.range(node), &corrected);
+    }
 }
 
 #[cfg(test)]
@@ -151,6 +188,24 @@ mod tests {
                 ^^^^^^^^^^^^^^ Use `hash[:key]` instead of `hash.dig(:key)`.
             "#},
             "hash[:key]\n",
+        );
+    }
+
+    // ----- Dig chain: both offenses flagged; outermost emits correction first -----
+
+    #[test]
+    fn flags_dig_chain_outer_offense() {
+        // Both inner and outer dig fire offenses on the same line.
+        // The inner dig defers its autocorrect (parent is also a single-arg dig),
+        // so the first-pass correction only replaces the outer call.
+        // The inner ^^^^ annotation comes first (shorter range), outer second.
+        test::<SingleArgumentDig>().expect_correction(
+            indoc! {r#"
+                hash.dig(:a).dig(:b)
+                ^^^^^^^^^^^^ Use `hash[:a]` instead of `hash.dig(:a)`.
+                ^^^^^^^^^^^^^^^^^^^^ Use `hash.dig(:a)[:b]` instead of `hash.dig(:a).dig(:b)`.
+            "#},
+            "hash.dig(:a)[:b]\n",
         );
     }
 
