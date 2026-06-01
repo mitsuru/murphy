@@ -64,6 +64,8 @@ use crate::cops::style::while_until_do::WhileUntilDo;
 use crate::cops::style::while_until_modifier::WhileUntilModifier;
 use crate::cops::style::word_array::WordArray;
 use crate::cops::style::yaml_file_read::YAMLFileRead;
+use crate::cops::style::yoda_condition::YodaCondition;
+use crate::cops::style::yoda_expression::YodaExpression;
 use crate::cops::style::zero_length_predicate::ZeroLengthPredicate;
 
 // `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
@@ -101,6 +103,8 @@ murphy_plugin_api::register_cops!(
     YAMLFileRead,
     WhenThen,
     WhileUntilDo,
+    YodaCondition,
+    YodaExpression,
     ZeroLengthPredicate,
 );
 

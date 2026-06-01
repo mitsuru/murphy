@@ -16,4 +16,6 @@ pub mod while_until_do;
 pub mod while_until_modifier;
 pub mod word_array;
 pub mod yaml_file_read;
+pub mod yoda_condition;
+pub mod yoda_expression;
 pub mod zero_length_predicate;
