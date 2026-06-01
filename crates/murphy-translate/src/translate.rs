@@ -1259,22 +1259,25 @@ impl Translator {
             };
             // If the array pattern has a constant prefix (e.g. `Some(x)`),
             // wrap in `(const_pattern <const> <array_pattern>)`.
-            // The inner pattern gets the bracketed span; the wrapper gets
-            // the full node range (includes the constant name).
-            // If the array pattern has a constant prefix (e.g. `Some(x)`),
-            // wrap in `(const_pattern <const> <array_pattern>)`.
             // Inner pattern uses the bracketed span; wrapper uses the full range.
             if let Some(constant) = ap.constant() {
-                let inner_range = match (ap.opening_loc(), ap.closing_loc()) {
-                    (Some(op), Some(cl)) => murphy_ast::Range {
+                let inner_range = ap
+                    .opening_loc()
+                    .zip(ap.closing_loc())
+                    .map(|(op, cl)| murphy_ast::Range {
                         start: op.start_offset() as u32,
                         end: cl.end_offset() as u32,
-                    },
-                    _ => range,
-                };
+                    })
+                    .unwrap_or(range);
                 let inner_id = self.builder.push(kind, inner_range);
                 let const_id = self.translate_node(&constant);
-                return self.builder.push(NodeKind::ConstPattern { const_: const_id, pattern: inner_id }, range);
+                return self.builder.push(
+                    NodeKind::ConstPattern {
+                        const_: const_id,
+                        pattern: inner_id,
+                    },
+                    range,
+                );
             }
             return self.builder.push(kind, range);
         }
@@ -1317,16 +1320,23 @@ impl Translator {
             // If the hash pattern has a constant prefix (e.g. `Point(x:, y:)`),
             // wrap in `(const_pattern <const> <hash_pattern>)`.
             if let Some(constant) = hp.constant() {
-                let inner_range = match (hp.opening_loc(), hp.closing_loc()) {
-                    (Some(op), Some(cl)) => murphy_ast::Range {
+                let inner_range = hp
+                    .opening_loc()
+                    .zip(hp.closing_loc())
+                    .map(|(op, cl)| murphy_ast::Range {
                         start: op.start_offset() as u32,
                         end: cl.end_offset() as u32,
-                    },
-                    _ => range,
-                };
+                    })
+                    .unwrap_or(range);
                 let inner_id = self.builder.push(NodeKind::HashPattern(list), inner_range);
                 let const_id = self.translate_node(&constant);
-                return self.builder.push(NodeKind::ConstPattern { const_: const_id, pattern: inner_id }, range);
+                return self.builder.push(
+                    NodeKind::ConstPattern {
+                        const_: const_id,
+                        pattern: inner_id,
+                    },
+                    range,
+                );
             }
             return self.builder.push(NodeKind::HashPattern(list), range);
         }
@@ -1347,16 +1357,23 @@ impl Translator {
             // If the find pattern has a constant prefix (e.g. `Some[*, x, *]`),
             // wrap in `(const_pattern <const> <find_pattern>)`.
             if let Some(constant) = fp.constant() {
-                let inner_range = match (fp.opening_loc(), fp.closing_loc()) {
-                    (Some(op), Some(cl)) => murphy_ast::Range {
+                let inner_range = fp
+                    .opening_loc()
+                    .zip(fp.closing_loc())
+                    .map(|(op, cl)| murphy_ast::Range {
                         start: op.start_offset() as u32,
                         end: cl.end_offset() as u32,
-                    },
-                    _ => range,
-                };
+                    })
+                    .unwrap_or(range);
                 let inner_id = self.builder.push(NodeKind::FindPattern(list), inner_range);
                 let const_id = self.translate_node(&constant);
-                return self.builder.push(NodeKind::ConstPattern { const_: const_id, pattern: inner_id }, range);
+                return self.builder.push(
+                    NodeKind::ConstPattern {
+                        const_: const_id,
+                        pattern: inner_id,
+                    },
+                    range,
+                );
             }
             return self.builder.push(NodeKind::FindPattern(list), range);
         }
@@ -1373,10 +1390,17 @@ impl Translator {
             let value = self.translate_pattern(&cap.value());
             let target = cap.target();
             let name = self.sym(&target.name());
-            let name_id = self
-                .builder
-                .push(NodeKind::MatchVar(name), Self::node_range(&target.as_node()));
-            return self.builder.push(NodeKind::MatchAs { value, name: name_id }, range);
+            let name_id = self.builder.push(
+                NodeKind::MatchVar(name),
+                Self::node_range(&target.as_node()),
+            );
+            return self.builder.push(
+                NodeKind::MatchAs {
+                    value,
+                    name: name_id,
+                },
+                range,
+            );
         }
         // Bare top-level pattern (e.g. `in x` with no brackets is wrapped in
         // an ArrayPattern by prism, so this path is for atoms / unsupported
@@ -3904,7 +3928,10 @@ mod tests {
         // `case x; in [Integer => n]; end` — nested capture in array pattern.
         let ast = translate("case x\nin [Integer => n]\n  n\nend\n", "t.rb");
         let sexp = murphy_ast::ast_to_sexp(&ast);
-        assert!(sexp.contains("(match_as"), "match_as expected in nested: {sexp}");
+        assert!(
+            sexp.contains("(match_as"),
+            "match_as expected in nested: {sexp}"
+        );
         assert!(
             !sexp.contains("(unknown)"),
             "no Unknown in nested capture pattern: {sexp}"
@@ -3920,10 +3947,7 @@ mod tests {
             sexp.contains("(const_pattern"),
             "const_pattern expected for Some(y): {sexp}"
         );
-        assert!(
-            sexp.contains("(const :Some"),
-            "Some const expected: {sexp}"
-        );
+        assert!(sexp.contains("(const :Some"), "Some const expected: {sexp}");
         assert!(
             sexp.contains("(array_pattern"),
             "inner array_pattern expected: {sexp}"
