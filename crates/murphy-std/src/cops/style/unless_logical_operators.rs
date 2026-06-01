@@ -1,0 +1,653 @@
+//! `Style/UnlessLogicalOperators` — flags logical operators in `unless` conditions.
+//!
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/UnlessLogicalOperators
+//! upstream_version_checked: 1.86.2
+//! status: verified
+//! gap_issues: []
+//! notes: >
+//!   Two EnforcedStyle values: `forbid_mixed_logical_operators` (default) and
+//!   `forbid_logical_operators`. No autocorrect. Offense range is the whole
+//!   `unless` node. Detection uses token scanning within the condition range
+//!   to handle parenthesized sub-expressions (which parse as `Unknown` in
+//!   Murphy's AST). The `forbid_mixed_logical_operators` style fires when the
+//!   condition mixes `and`-type and `or`-type operators, or mixes symbolic
+//!   (`&&`/`||`) and keyword (`and`/`or`) forms of the same type.
+//!   Only the condition of the `unless` is examined; logical operators in the
+//!   body are not flagged.
+//! ```
+
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, SourceTokenKind, cop};
+
+const MSG_MIXED: &str = "Do not use mixed logical operators in an `unless`.";
+const MSG_ANY: &str = "Do not use any logical operator in an `unless`.";
+
+#[derive(Default)]
+pub struct UnlessLogicalOperators;
+
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EnforcedStyle {
+    #[default]
+    #[option(value = "forbid_mixed_logical_operators")]
+    ForbidMixedLogicalOperators,
+    #[option(value = "forbid_logical_operators")]
+    ForbidLogicalOperators,
+}
+
+#[derive(CopOptions)]
+pub struct UnlessLogicalOperatorsOptions {
+    #[option(
+        name = "EnforcedStyle",
+        default = "forbid_mixed_logical_operators",
+        description = "When `forbid_mixed_logical_operators`, flags `unless` conditions that mix different logical operators. When `forbid_logical_operators`, flags any use of logical operators in `unless` conditions."
+    )]
+    pub enforced_style: EnforcedStyle,
+}
+
+#[cop(
+    name = "Style/UnlessLogicalOperators",
+    description = "Do not use logical operators in `unless` conditions.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = UnlessLogicalOperatorsOptions
+)]
+impl UnlessLogicalOperators {
+    #[on_node(kind = "if")]
+    fn check_if(&self, node: NodeId, cx: &Cx<'_>) {
+        if !cx.is_unless(node) {
+            return;
+        }
+        let opts = cx.options_or_default::<UnlessLogicalOperatorsOptions>();
+        let cond = match cx.kind(node) {
+            NodeKind::If { cond, .. } => *cond,
+            _ => return,
+        };
+        match opts.enforced_style {
+            EnforcedStyle::ForbidMixedLogicalOperators => {
+                if is_mixed_logical_operator(cond, cx) {
+                    cx.emit_offense(cx.range(node), MSG_MIXED, None);
+                }
+            }
+            EnforcedStyle::ForbidLogicalOperators => {
+                if has_any_logical_operator(cond, cx) {
+                    cx.emit_offense(cx.range(node), MSG_ANY, None);
+                }
+            }
+        }
+    }
+}
+
+/// Logical operator token classification.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpKind {
+    /// `&&` — symbolic and
+    SymbolicAnd,
+    /// `and` — keyword and
+    KeywordAnd,
+    /// `||` — symbolic or
+    SymbolicOr,
+    /// `or` — keyword or
+    KeywordOr,
+}
+
+impl OpKind {
+    fn is_and(self) -> bool {
+        matches!(self, OpKind::SymbolicAnd | OpKind::KeywordAnd)
+    }
+    fn is_or(self) -> bool {
+        matches!(self, OpKind::SymbolicOr | OpKind::KeywordOr)
+    }
+}
+
+/// Collects all logical operator tokens within the condition's source range.
+///
+/// We scan tokens because some sub-expressions (e.g. `(b && c)`) parse as
+/// `Unknown` in Murphy's AST, making purely AST-based descendant walks miss
+/// operators inside parenthesized groups.
+fn collect_op_tokens_in_range(
+    range_start: u32,
+    range_end: u32,
+    target_depth: usize,
+    cx: &Cx<'_>,
+) -> Vec<OpKind> {
+    let source = cx.source().as_bytes();
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < range_start);
+
+    // Stack of booleans: true = this paren depth is a method-call paren.
+    // We push on every `(` (true if preceded by an identifier, false for grouping).
+    // Operators are excluded when any entry in the stack is `true`.
+    let mut call_stack: Vec<bool> = Vec::new();
+    let mut paren_depth: usize = 0;
+    let mut prev_was_word = false;
+    let mut ops = Vec::new();
+
+    for tok in &toks[idx..] {
+        if tok.range.start >= range_end {
+            break;
+        }
+        match tok.kind {
+            SourceTokenKind::LeftParen => {
+                let is_call = prev_was_word;
+                call_stack.push(is_call);
+                paren_depth += 1;
+                prev_was_word = false;
+                continue;
+            }
+            SourceTokenKind::RightParen => {
+                call_stack.pop();
+                paren_depth = paren_depth.saturating_sub(1);
+                prev_was_word = false;
+                continue;
+            }
+            SourceTokenKind::Other => {}
+            _ => {
+                prev_was_word = false;
+                continue;
+            }
+        }
+        let text = &source[tok.range.start as usize..tok.range.end as usize];
+        let op = match text {
+            b"&&" => OpKind::SymbolicAnd,
+            b"and" => OpKind::KeywordAnd,
+            b"||" => OpKind::SymbolicOr,
+            b"or" => OpKind::KeywordOr,
+            _ => {
+                prev_was_word = is_word_start(text);
+                continue;
+            }
+        };
+        // For `and`/`or` keywords, verify word boundary.
+        if matches!(text, b"and" | b"or") {
+            let before_ok =
+                tok.range.start == 0 || !is_word_char(source[tok.range.start as usize - 1]);
+            let after_ok = tok.range.end as usize >= source.len()
+                || !is_word_char(source[tok.range.end as usize]);
+            if !before_ok || !after_ok {
+                prev_was_word = false;
+                continue;
+            }
+        }
+        prev_was_word = false;
+        // Skip operators inside method-call argument lists.
+        if call_stack.iter().any(|&is_call| is_call) {
+            continue;
+        }
+        // For Unknown conditions (target_depth=1): require paren_depth >= target.
+        // For And/Or conditions (target_depth=usize::MAX): count all.
+        if target_depth != usize::MAX && paren_depth < target_depth {
+            continue;
+        }
+        ops.push(op);
+    }
+    ops
+}
+
+/// Returns `true` if the token text starts an identifier / method name.
+fn is_word_start(text: &[u8]) -> bool {
+    !text.is_empty() && (text[0].is_ascii_alphabetic() || text[0] == b'_')
+}
+
+fn is_word_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'?'
+}
+
+/// Returns `true` when the condition mixes logical operator types or
+/// mixes symbolic and keyword forms.
+///
+/// Mirrors RuboCop's `mixed_logical_operator?`: gates on the top condition
+/// being `And` or `Or` to avoid false positives on logical operators inside
+/// method call arguments (e.g. `unless foo(a && b || c)`).
+fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
+    let cond_range = cx.range(cond);
+    match cx.kind(cond) {
+        NodeKind::Or { .. } => {
+            // or_with_and?: top is `or`; fire if any descendant is `and`-type.
+            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, usize::MAX, cx);
+            let has_and = ops.iter().any(|op| op.is_and());
+            if has_and {
+                return true; // cross-type: or + and
+            }
+            // mixed_precedence_or?: only `or`-type but mixing symbolic/keyword.
+            let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicOr);
+            let has_kw = ops.iter().any(|&op| op == OpKind::KeywordOr);
+            has_sym && has_kw
+        }
+        NodeKind::And { .. } => {
+            // and_with_or?: top is `and`; fire if any descendant is `or`-type.
+            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, usize::MAX, cx);
+            let has_or = ops.iter().any(|op| op.is_or());
+            if has_or {
+                return true; // cross-type: and + or
+            }
+            // mixed_precedence_and?: only `and`-type but mixing symbolic/keyword.
+            let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicAnd);
+            let has_kw = ops.iter().any(|&op| op == OpKind::KeywordAnd);
+            has_sym && has_kw
+        }
+        NodeKind::Unknown => {
+            // Parenthesized condition: `(a && b || c)` is `Unknown`. Apply the
+            // same mixed-detection logic via token scan within the condition range.
+            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, 1, cx);
+            if ops.is_empty() {
+                return false;
+            }
+            let has_and = ops.iter().any(|op| op.is_and());
+            let has_or = ops.iter().any(|op| op.is_or());
+            // Cross-type mixing (and + or).
+            if has_and && has_or {
+                return true;
+            }
+            // Same-type symbolic/keyword mixing.
+            if has_and {
+                let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicAnd);
+                let has_kw = ops.iter().any(|&op| op == OpKind::KeywordAnd);
+                return has_sym && has_kw;
+            }
+            if has_or {
+                let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicOr);
+                let has_kw = ops.iter().any(|&op| op == OpKind::KeywordOr);
+                return has_sym && has_kw;
+            }
+            false
+        }
+        // Top condition is Send or any other non-logical node: not flagged.
+        _ => false,
+    }
+}
+
+/// Returns `true` when the condition is or contains a logical operator at the
+/// top level.
+///
+/// Mirrors RuboCop's `logical_operator?` (top is `and`/`or`) and extends it to
+/// parenthesized conditions like `(a && b)` which parse as `Unknown` in
+/// Murphy's AST. We scan for logical operator tokens in the `Unknown` range
+/// to handle these cases, while still NOT flagging when the top is a `Send`
+/// (method call with a logical operator in the arguments, e.g. `foo(a || b)`).
+fn has_any_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
+    match cx.kind(cond) {
+        NodeKind::And { .. } | NodeKind::Or { .. } => true,
+        NodeKind::Unknown => {
+            // Parenthesized condition: `(a && b)` is `Unknown`. Scan at depth 1
+            // (inside the outer parens) to avoid false positives from
+            // `(foo(a || b))` where `||` is at depth 2.
+            let r = cx.range(cond);
+            let ops = collect_op_tokens_in_range(r.start, r.end, 1, cx);
+            !ops.is_empty()
+        }
+        // Any other top node (Send, send call, etc.) — not flagged.
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EnforcedStyle, UnlessLogicalOperators, UnlessLogicalOperatorsOptions};
+    use murphy_plugin_api::test_support::{indoc, test};
+
+    // ---- forbid_mixed_logical_operators (default) ----
+
+    #[test]
+    fn flags_mixed_and_or() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a && b || c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_or_and() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a || b && c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_and_keyword_and() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a && b and c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_keyword_and_and() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a and b && c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_and_or_keyword() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a && b or c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_or_keyword_and() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a or b && c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_or_or_keyword() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a || b or c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_or_keyword_or() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a or b || c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_or_keyword_and_symbolic() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a || b and c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_and_keyword_or_symbolic() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a and b || c
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_parenthesized() {
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless a || (b && c) || d
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn accepts_only_symbolic_and() {
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless a && b && c\n");
+    }
+
+    #[test]
+    fn accepts_only_symbolic_or() {
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless a || b || c\n");
+    }
+
+    #[test]
+    fn accepts_only_keyword_and() {
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless a and b and c\n");
+    }
+
+    #[test]
+    fn accepts_only_keyword_or() {
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless a or b or c\n");
+    }
+
+    #[test]
+    fn accepts_if_with_mixed_operators() {
+        test::<UnlessLogicalOperators>().expect_no_offenses("return if a || b && c || d\n");
+    }
+
+    #[test]
+    fn accepts_logical_operators_outside_unless() {
+        test::<UnlessLogicalOperators>().expect_no_offenses(indoc! {"
+            def condition?
+              a or b && c || d
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_no_logical_operator() {
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless a?\n");
+    }
+
+    #[test]
+    fn accepts_operators_in_unless_body_not_condition() {
+        // Logical operators inside the body of the unless should not be flagged.
+        test::<UnlessLogicalOperators>().expect_no_offenses(indoc! {"
+            unless condition
+              includes_or_in_the_name
+
+              foo || bar
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_keyword_and_operators_in_unless_body() {
+        test::<UnlessLogicalOperators>().expect_no_offenses(indoc! {"
+            unless condition
+              includes_and_in_the_name
+
+              foo && bar
+            end
+        "});
+    }
+
+    // ---- forbid_logical_operators ----
+
+    #[test]
+    fn forbid_any_flags_single_symbolic_and() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_offense(indoc! {r#"
+                return unless a && b
+                ^^^^^^^^^^^^^^^^^^^^ Do not use any logical operator in an `unless`.
+            "#});
+    }
+
+    #[test]
+    fn forbid_any_flags_single_symbolic_or() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_offense(indoc! {r#"
+                return unless a || b
+                ^^^^^^^^^^^^^^^^^^^^ Do not use any logical operator in an `unless`.
+            "#});
+    }
+
+    #[test]
+    fn forbid_any_flags_single_keyword_and() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_offense(indoc! {r#"
+                return unless a and b
+                ^^^^^^^^^^^^^^^^^^^^^ Do not use any logical operator in an `unless`.
+            "#});
+    }
+
+    #[test]
+    fn forbid_any_flags_single_keyword_or() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_offense(indoc! {r#"
+                return unless a or b
+                ^^^^^^^^^^^^^^^^^^^^ Do not use any logical operator in an `unless`.
+            "#});
+    }
+
+    #[test]
+    fn forbid_any_flags_mixed_too() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_offense(indoc! {r#"
+                return unless a && b || c
+                ^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use any logical operator in an `unless`.
+            "#});
+    }
+
+    #[test]
+    fn forbid_any_accepts_if() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_no_offenses("return if a || b\n");
+    }
+
+    #[test]
+    fn forbid_any_accepts_outside_unless() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_no_offenses(indoc! {"
+                def condition?
+                  a || b
+                end
+            "});
+    }
+
+    #[test]
+    fn forbid_any_accepts_no_logical_operator() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_no_offenses("return unless a?\n");
+    }
+
+    #[test]
+    fn default_options_are_forbid_mixed() {
+        let opts = UnlessLogicalOperatorsOptions::default();
+        assert_eq!(
+            opts.enforced_style,
+            EnforcedStyle::ForbidMixedLogicalOperators
+        );
+    }
+
+    #[test]
+    fn forbid_any_does_not_flag_logical_inside_method_arg() {
+        // `foo(a || b)` — the condition is a method call, not a logical operator.
+        // RuboCop's `logical_operator?` pattern only matches when the condition
+        // itself (direct child of `if`) is `and`/`or`.
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_no_offenses("return unless foo(a || b)\n");
+    }
+
+    #[test]
+    fn forbid_mixed_does_not_flag_logical_inside_method_arg() {
+        // Mixed operators inside a method arg — condition is Send, not And/Or.
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless foo(a && b || c)\n");
+    }
+
+    #[test]
+    fn flags_mixed_parenthesized_and_or() {
+        // Parenthesized condition `(a && b || c)` parses as `Unknown`.
+        // Token scanning detects the mixed `&&` and `||`.
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless (a && b || c)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_parenthesized_keyword_symbolic() {
+        // Parenthesized `(a || b and c)` — mixes symbolic `||` and keyword `and`.
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless (a || b and c)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn forbid_any_does_not_flag_parenthesized_method_call_with_logical_arg() {
+        // `(foo(a || b))` — condition is `Unknown` but the `||` is inside a
+        // nested method call at depth 2, not at depth 1. Must not be flagged.
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_no_offenses("return unless (foo(a || b))\n");
+    }
+
+    #[test]
+    fn forbid_mixed_does_not_flag_parenthesized_method_call_with_mixed_args() {
+        // `(foo(a && b || c))` — all operators inside nested call, depth 2.
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless (foo(a && b || c))\n");
+    }
+
+    #[test]
+    fn flags_mixed_nested_parens_or_then_and() {
+        // `(a || (b && c))` — outer Unknown contains `||` at depth 1 and
+        // nested-group `(b && c)` with `&&` at depth 2. Mixed: should flag.
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless (a || (b && c))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_nested_parens_and_then_or() {
+        // `(a && (b || c))` — mixed: should flag.
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless (a && (b || c))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn forbid_mixed_does_not_flag_nested_call_grouping_parens() {
+        // `(foo((a || b) && c))` — the `||` is inside a grouping paren inside
+        // a method-call paren. The stack correctly marks both levels as inside
+        // a call → not flagged.
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless (foo((a || b) && c))\n");
+    }
+
+    #[test]
+    fn forbid_any_flags_parenthesized_and() {
+        // `(a && b)` as condition parses as `Unknown` in Murphy AST;
+        // token scanning detects the `&&`.
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_offense(indoc! {r#"
+                return unless (a && b)
+                ^^^^^^^^^^^^^^^^^^^^^^ Do not use any logical operator in an `unless`.
+            "#});
+    }
+
+    #[test]
+    fn forbid_any_flags_parenthesized_or() {
+        test::<UnlessLogicalOperators>()
+            .with_options(&UnlessLogicalOperatorsOptions {
+                enforced_style: EnforcedStyle::ForbidLogicalOperators,
+            })
+            .expect_offense(indoc! {r#"
+                return unless (a || b)
+                ^^^^^^^^^^^^^^^^^^^^^^ Do not use any logical operator in an `unless`.
+            "#});
+    }
+}
+
+murphy_plugin_api::submit_cop!(UnlessLogicalOperators);
