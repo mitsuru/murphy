@@ -100,9 +100,14 @@ fn check(super_node: NodeId, cx: &Cx<'_>) {
     // block. We scan tokens to find the closing `)` of the super args list.
     let node_range = cx.range(super_node);
     let offense_range = if inline_block {
-        // Find the closing `)` of the super args list by scanning tokens from
-        // the super node start.
-        super_call_range(super_node, node_range, cx).unwrap_or(node_range)
+        // Find the closing `)` of the super args list by scanning tokens.
+        // If the call is unparenthesized (super a, b { x }), we cannot safely
+        // bound the autocorrect range — skip the offense to avoid deleting the
+        // block body.
+        match super_call_range(super_node, node_range, cx) {
+            Some(r) => r,
+            None => return, // unparenthesized inline-block: cannot safely correct
+        }
     } else {
         node_range
     };
@@ -836,6 +841,19 @@ mod tests {
             "});
     }
 
+    #[test]
+    fn accepts_unparenthesized_super_with_inline_block() {
+        // Unparenthesized `super a, b { x }` — cannot safely bound the
+        // autocorrect range (the super node's expression includes the block),
+        // so we skip the offense entirely to avoid deleting the block body.
+        test::<SuperArguments>().expect_no_offenses(indoc! {"
+            def foo(a, b)
+              super a, b do
+                x
+              end
+            end
+        "});
+    }
     #[test]
     fn accepts_super_with_no_inline_block_and_no_args() {
         // `super { x }` with no args in a no-arg def — already bare super.
