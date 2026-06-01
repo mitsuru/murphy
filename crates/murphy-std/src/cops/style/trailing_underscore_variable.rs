@@ -167,23 +167,45 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TrailingUnderscoreVariableOptions) {
     let first_offense_start = cx.range(first_offense).start;
     let rhs_start = cx.range(rhs).start;
 
-    // Find the `=` operator token between the last lhs var and rhs.
-    let eq_start = find_eq_token_start(cx, first_offense_start, rhs_start).unwrap_or(rhs_start);
+    // `unused_variables_only?`: when the offense is the very first variable
+    // (i.e., ALL variables in the mlhs are unneeded underscores), the
+    // autocorrect should replace the entire `lhs = ` with just the rhs value.
+    // Example: `_, _ = foo` → `foo`.
+    // For partial cases like `a, b, _ = foo`, the offense range is from the
+    // first underscore to the `=` operator, leaving `a, b, = foo`.
+    let all_underscores = first_offense_idx == 0;
 
-    let offense_range = Range {
-        start: first_offense_start,
-        end: eq_start,
+    let (offense_range, good_code) = if all_underscores {
+        // Delete the entire LHS + `=` + leading space before rhs.
+        // offense_range = [lhs_start, rhs_start)
+        let lhs_start = cx.range(lhs).start;
+        let offense_range = Range {
+            start: lhs_start,
+            end: rhs_start,
+        };
+        let rhs_src = cx.raw_source(cx.range(rhs));
+        let good_code = rhs_src.to_string();
+        (offense_range, good_code)
+    } else {
+        // Find the `=` operator token between the last lhs var and rhs.
+        let eq_start = find_eq_token_start(cx, first_offense_start, rhs_start).unwrap_or(rhs_start);
+
+        let offense_range = Range {
+            start: first_offense_start,
+            end: eq_start,
+        };
+
+        // Build the "good code" message by deleting offense range from full source.
+        let node_range = cx.range(node);
+        let full_src = cx.raw_source(node_range);
+        let offset = (first_offense_start - node_range.start) as usize;
+        let len = (eq_start - first_offense_start) as usize;
+        let mut good_code = full_src.to_string();
+        if offset + len <= good_code.len() {
+            good_code.replace_range(offset..offset + len, "");
+        }
+        (offense_range, good_code)
     };
-
-    // Build the "good code" message by deleting offense range from full source.
-    let node_range = cx.range(node);
-    let full_src = cx.raw_source(node_range);
-    let offset = (first_offense_start - node_range.start) as usize;
-    let len = (eq_start - first_offense_start) as usize;
-    let mut good_code = full_src.to_string();
-    if offset + len <= good_code.len() {
-        good_code.replace_range(offset..offset + len, "");
-    }
 
     let msg = format!("Do not use trailing `_`s in parallel assignment. Prefer `{good_code}`.");
 
@@ -248,6 +270,28 @@ mod tests {
                    ^^^^^ Do not use trailing `_`s in parallel assignment. Prefer `a, = foo`.
             "#},
             "a, = foo\n",
+        );
+    }
+
+    // --- All underscores case: offense deletes entire LHS = ---
+
+    #[test]
+    fn flags_all_underscores() {
+        test::<TrailingUnderscoreVariable>().expect_offense(indoc! {r#"
+            _, _ = foo
+            ^^^^^^^ Do not use trailing `_`s in parallel assignment. Prefer `foo`.
+        "#});
+    }
+
+    #[test]
+    fn corrects_all_underscores() {
+        test::<TrailingUnderscoreVariable>().expect_correction(
+            indoc! {r#"
+                _, _ = foo
+                ^^^^^^^ Do not use trailing `_`s in parallel assignment. Prefer `foo`.
+            "#},
+            "foo
+",
         );
     }
 
