@@ -23,7 +23,9 @@
 //!   is treated as a scoping def-like node).
 //!
 //!   define_method/define_singleton_method calls in block position also
-//!   terminate ancestor walking without emitting an offense.
+//!   terminate ancestor walking. The offense IS still emitted — just like
+//!   inside a `def`/`defs`, a `return nil` inside a `define_method` block is
+//!   a real method return and is subject to this cop.
 //!
 //!   Numblock (`arr.each_with_index { _1 }`) is treated like Block: has
 //!   implicit arguments, so it is treated as args-present. Skipped when
@@ -137,7 +139,8 @@ fn should_skip_due_to_ancestor(node: NodeId, cx: &Cx<'_>) -> bool {
                 if cx.is_lambda(ancestor) {
                     return false;
                 }
-                // define_method / define_singleton_method: stop walking but DO flag.
+                // define_method / define_singleton_method: stop walking and emit offense
+                // (return inside define_method is a real method return, like inside def).
                 if is_define_method(*call, cx) {
                     return false;
                 }
