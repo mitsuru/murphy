@@ -45,8 +45,6 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind,
 #[derive(Default)]
 pub struct SelfAssignment;
 
-const MSG: &str = "Use self-assignment shorthand `%<method>s=`.";
-
 /// Binary operator methods that have corresponding op-assignment forms.
 const OPS: &[&str] = &[
     "+", "-", "*", "**", "/", "%", "^", "<<", ">>", "|", "&",
@@ -103,28 +101,27 @@ fn check(node: NodeId, var_kind: VarKind, cx: &Cx<'_>) {
     };
 
     match *cx.kind(value_id) {
-        NodeKind::Send {
-            receiver,
-            method,
-            args,
-        } => {
+        NodeKind::Send { .. } => {
+            let args = cx.call_arguments(value_id);
             // Must have exactly one argument (the second operand).
-            if cx.list(args).len() != 1 {
+            if args.len() != 1 {
                 return;
             }
-            let op = cx.symbol_str(method);
+            let Some(op) = cx.method_name(value_id) else {
+                return;
+            };
             if !OPS.contains(&op) {
                 return;
             }
             // Receiver of the send must be the same variable as the LHS.
-            let Some(recv_id) = receiver.get() else {
+            let Some(recv_id) = cx.call_receiver(value_id).get() else {
                 return;
             };
             if !var_matches(recv_id, lhs_name, var_kind, cx) {
                 return;
             }
-            let second_operand = cx.list(args)[0];
-            let msg = MSG.replace("%<method>s", op);
+            let second_operand = args[0];
+            let msg = format!("Use self-assignment shorthand `{op}=`.");
             cx.emit_offense(cx.range(node), &msg, None);
             emit_op_correction(node, value_id, op, second_operand, cx);
         }
@@ -132,7 +129,7 @@ fn check(node: NodeId, var_kind: VarKind, cx: &Cx<'_>) {
             if !var_matches(lhs, lhs_name, var_kind, cx) {
                 return;
             }
-            let msg = MSG.replace("%<method>s", "&&");
+            let msg = format!("Use self-assignment shorthand `&&=`.");
             cx.emit_offense(cx.range(node), &msg, None);
             emit_boolean_correction(node, value_id, "&&", rhs, cx);
         }
@@ -140,7 +137,7 @@ fn check(node: NodeId, var_kind: VarKind, cx: &Cx<'_>) {
             if !var_matches(lhs, lhs_name, var_kind, cx) {
                 return;
             }
-            let msg = MSG.replace("%<method>s", "||");
+            let msg = format!("Use self-assignment shorthand `||=`.");
             cx.emit_offense(cx.range(node), &msg, None);
             emit_boolean_correction(node, value_id, "||", rhs, cx);
         }

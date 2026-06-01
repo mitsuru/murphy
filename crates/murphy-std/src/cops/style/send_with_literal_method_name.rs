@@ -48,8 +48,6 @@ use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 #[derive(Default)]
 pub struct SendWithLiteralMethodName;
 
-const MSG: &str = "Use `%<method_name>s` method call directly instead.";
-
 /// Ruby reserved words that cannot be used as bare method calls.
 const RESERVED_WORDS: &[&str] = &[
     "BEGIN", "END", "alias", "and", "begin", "break", "case", "class", "def", "defined?",
@@ -160,7 +158,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         end: cx.range(node).end,
     };
 
-    let msg = MSG.replace("%<method_name>s", &literal_name);
+    let msg = format!("Use `{literal_name}` method call directly instead.");
     cx.emit_offense(offense_range, &msg, None);
 
     // Autocorrect
