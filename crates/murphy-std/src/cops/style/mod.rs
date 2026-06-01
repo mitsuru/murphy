@@ -11,6 +11,8 @@ pub mod redundant_return;
 pub mod redundant_self;
 pub mod string_literals;
 pub mod symbol_array;
+pub mod trailing_comma_in_hash_literal;
+pub mod trailing_method_end_statement;
 pub mod when_then;
 pub mod while_until_do;
 pub mod while_until_modifier;
