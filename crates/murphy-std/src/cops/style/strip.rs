@@ -15,6 +15,9 @@
 //!   node.source_range.end). Autocorrect replaces the range with `strip`.
 //!   csend: methods filter is not supported for csend nodes by the macro;
 //!   the csend handler dispatches manually based on method name.
+//!   Both inner and outer calls must have no arguments; if either has arguments
+//!   the cop does not fire (lstrip/rstrip take no arguments in practice, but
+//!   guarding prevents data loss if someone passes a fictitious argument).
 //! ```
 //!
 //! ## Matched shapes
@@ -22,6 +25,11 @@
 //! - `x.lstrip.rstrip` → offense
 //! - `x.rstrip.lstrip` → offense
 //! - `x&.lstrip.rstrip` / `x.lstrip&.rstrip` → offense (csend variants matched)
+//!
+//! ## Non-matches
+//!
+//! - `x.lstrip.rstrip(arg)` — outer call has arguments, skipped
+//! - `x.lstrip(arg).rstrip` — inner call has arguments, skipped
 //!
 //! ## Autocorrect
 //!
@@ -77,8 +85,13 @@ fn check(outer: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // The inner call must not have arguments.
+    // Neither call must have arguments — guarding the inner call prevents
+    // matching `x.lstrip(arg).rstrip`, and guarding the outer prevents
+    // silently deleting `arg` in `x.lstrip.rstrip(arg)`.
     if !cx.call_arguments(inner_id).is_empty() {
+        return;
+    }
+    if !cx.call_arguments(outer).is_empty() {
         return;
     }
 
@@ -165,6 +178,25 @@ mod tests {
     #[test]
     fn accepts_rstrip_rstrip() {
         test::<Strip>().expect_no_offenses("x.rstrip.rstrip\n");
+    }
+
+    #[test]
+    fn accepts_lstrip_rstrip_with_outer_arg() {
+        // Outer call has an argument — do not fire to avoid silent argument deletion.
+        // `lstrip` and `rstrip` do not actually accept arguments, but we guard
+        // defensively.
+        test::<Strip>().expect_no_offenses("x.lstrip.rstrip(1)\n");
+    }
+
+    #[test]
+    fn accepts_rstrip_lstrip_with_outer_arg() {
+        test::<Strip>().expect_no_offenses("x.rstrip.lstrip(1)\n");
+    }
+
+    #[test]
+    fn accepts_lstrip_with_inner_arg_rstrip() {
+        // Inner call has an argument.
+        test::<Strip>().expect_no_offenses("x.lstrip(1).rstrip\n");
     }
 }
 murphy_plugin_api::submit_cop!(Strip);
