@@ -77,14 +77,28 @@ impl StaticClass {
             return;
         }
 
-        // Get body elements; skip empty class.
-        let elements = class_elements(body, cx);
-        if elements.is_empty() {
+        // Skip empty class bodies.
+        if body.get().is_none() {
             return;
         }
 
-        // Check if all elements can be converted to module members.
-        if !elements.iter().all(|&el| is_convertible(el, cx)) {
+        // Skip if body is empty Begin.
+        let body_is_empty = matches!(
+            body.get().map(|id| cx.kind(id)),
+            Some(NodeKind::Begin(list)) if cx.list(*list).is_empty()
+        );
+        if body_is_empty {
+            return;
+        }
+
+        // Check if all elements can be converted to module members; at least one
+        // must be present (non-empty body).
+        let mut has_elements = false;
+        let all_convertible = all_elements(body, cx, |el| {
+            has_elements = true;
+            is_convertible(el, cx)
+        });
+        if !has_elements || !all_convertible {
             return;
         }
 
@@ -99,10 +113,7 @@ impl StaticClass {
         cx.emit_offense(offense_range, MSG, None);
 
         // Autocorrect only if no sclass elements are present (avoid invalid Ruby).
-        let has_sclass = elements
-            .iter()
-            .any(|&el| matches!(cx.kind(el), NodeKind::Sclass { .. }));
-        if has_sclass {
+        if any_element(body, cx, |el| matches!(cx.kind(el), NodeKind::Sclass { .. })) {
             return;
         }
 
@@ -121,7 +132,7 @@ impl StaticClass {
         cx.emit_edit(name_end_range, "\nmodule_function");
 
         // 3. For each `def self.method_name`: delete the `self.` prefix.
-        for &el in &elements {
+        for_each_element(body, cx, |el| {
             if let NodeKind::Def { receiver, .. } = *cx.kind(el) {
                 if let Some(recv_id) = receiver.get() {
                     if matches!(cx.kind(recv_id), NodeKind::SelfExpr) {
@@ -130,7 +141,6 @@ impl StaticClass {
                         // then delete up to the end of the dot.
                         let recv_start = cx.range(recv_id).start;
                         let recv_end = cx.range(recv_id).end;
-                        // token_after(recv_end) finds the `.` dot.
                         let method_name_start = cx
                             .token_after(recv_end)
                             .map(|dot| dot.range.end)
@@ -143,24 +153,67 @@ impl StaticClass {
                     }
                 }
             }
-        }
+        });
     }
 }
 
-/// Returns the direct body elements of a class, handling the `Begin` wrapper.
-///
-/// - Empty class body → empty vec
-/// - Single element (no `begin`) → vec of one
-/// - Multi-element body (`begin`) → its children
-fn class_elements(body: OptNodeId, cx: &Cx<'_>) -> Vec<NodeId> {
+// --------------------------------------------------------------------------
+// Element iteration helpers — avoid heap-allocating a Vec per class node.
+// --------------------------------------------------------------------------
+
+/// Iterate over the direct body elements of a class/sclass body, calling `f`
+/// for each. Handles the `Begin` wrapper transparently.
+fn for_each_element<F>(body: OptNodeId, cx: &Cx<'_>, mut f: F)
+where
+    F: FnMut(NodeId),
+{
     let Some(body_id) = body.get() else {
-        return vec![];
+        return;
     };
     match *cx.kind(body_id) {
-        NodeKind::Begin(list) => cx.list(list).to_vec(),
-        _ => vec![body_id],
+        NodeKind::Begin(list) => {
+            for &el in cx.list(list) {
+                f(el);
+            }
+        }
+        _ => f(body_id),
     }
 }
+
+/// Returns `true` if ALL elements pass the predicate (empty body → `false`).
+fn all_elements<F>(body: OptNodeId, cx: &Cx<'_>, mut pred: F) -> bool
+where
+    F: FnMut(NodeId) -> bool,
+{
+    let Some(body_id) = body.get() else {
+        return false;
+    };
+    match *cx.kind(body_id) {
+        NodeKind::Begin(list) => {
+            let slice = cx.list(list);
+            !slice.is_empty() && slice.iter().all(|&el| pred(el))
+        }
+        _ => pred(body_id),
+    }
+}
+
+/// Returns `true` if ANY element passes the predicate.
+fn any_element<F>(body: OptNodeId, cx: &Cx<'_>, mut pred: F) -> bool
+where
+    F: FnMut(NodeId) -> bool,
+{
+    let Some(body_id) = body.get() else {
+        return false;
+    };
+    match *cx.kind(body_id) {
+        NodeKind::Begin(list) => cx.list(list).iter().any(|&el| pred(el)),
+        _ => pred(body_id),
+    }
+}
+
+// --------------------------------------------------------------------------
+// Convertibility checks
+// --------------------------------------------------------------------------
 
 /// Returns true if this body element is allowed in a convertible static class.
 fn is_convertible(el: NodeId, cx: &Cx<'_>) -> bool {
@@ -187,11 +240,7 @@ fn is_convertible(el: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Returns true if all elements inside a `class << self` body are convertible.
 fn sclass_convertible(body: OptNodeId, cx: &Cx<'_>) -> bool {
-    let elements = class_elements(body, cx);
-    if elements.is_empty() {
-        return false;
-    }
-    elements.iter().all(|&el| {
+    all_elements(body, cx, |el| {
         match *cx.kind(el) {
             // Plain `def foo` in sclass context = class method.
             NodeKind::Def { receiver, .. } => receiver.get().is_none(),

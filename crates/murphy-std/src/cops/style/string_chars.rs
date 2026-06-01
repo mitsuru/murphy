@@ -38,8 +38,6 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, Range, cop};
 #[derive(Default)]
 pub struct StringChars;
 
-const MSG: &str = "Use `chars` instead of `%s`.";
-
 /// Raw source text of the three bad split arguments.
 const BAD_ARGS: &[&str] = &["//", "''", "\"\""];
 
@@ -85,7 +83,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         end: node_end,
     };
     let offense_src = cx.raw_source(offense_range);
-    let message = MSG.replace("%s", offense_src);
+    let message = format!("Use `chars` instead of `{offense_src}`.");
     cx.emit_offense(offense_range, &message, None);
 
     // Autocorrect: replace `split(//)` (or `split('')` / `split("")`) with `chars`.
