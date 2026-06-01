@@ -13,7 +13,8 @@
 //!   Detects multi-line while/until loops that contain a redundant `do`
 //!   keyword and autocorrects by removing `do` along with the leading space.
 //!   Post-condition loops (begin..end while c) are skipped since Murphy
-//!   folds them into While{post:true} nodes.
+//!   folds them into While{post:true} nodes. The `do` scan is restricted to
+//!   the gap [cond.end, body.start) to avoid matching inner block `do` tokens.
 //! ```
 //!
 //! ## Matched shapes
@@ -69,18 +70,26 @@ fn check(node: NodeId, cx: &Cx<'_>, keyword: &str) {
         return;
     }
 
-    // Extract cond from node kind.
-    let cond = match *cx.kind(node) {
-        NodeKind::While { cond, .. } => cond,
-        NodeKind::Until { cond, .. } => cond,
+    // Extract cond and body from node kind.
+    let (cond, body_opt) = match *cx.kind(node) {
+        NodeKind::While { cond, body, .. } => (cond, body),
+        NodeKind::Until { cond, body, .. } => (cond, body),
         _ => return,
     };
 
     let cond_end = cx.range(cond).end;
-    let node_end = cx.range(node).end;
+    // Restrict the `do` search to the syntactic gap [cond_end, body_start).
+    // This prevents inner block `do` tokens (e.g. `items.each do |item| …
+    // end`) from being matched when the loop-level `do` is absent.
+    let gap_end = match body_opt.get() {
+        Some(body) => cx.range(body).start,
+        // No body — an empty loop cannot have inner block `do` tokens, so
+        // scanning to node_end is safe.
+        None => cx.range(node).end,
+    };
 
-    // Find `do` token in the gap [cond_end, node_end).
-    let Some(do_range) = find_do_in_gap(cx, cond_end, node_end) else {
+    // Find `do` token in the gap [cond_end, gap_end).
+    let Some(do_range) = find_do_in_gap(cx, cond_end, gap_end) else {
         return;
     };
 
@@ -185,6 +194,18 @@ mod tests {
             begin
               do_something
             end while condition
+        "});
+    }
+
+    #[test]
+    fn accepts_while_with_inner_block_do() {
+        // The loop-level `do` is absent; the inner `each do` must not be flagged.
+        test::<WhileUntilDo>().expect_no_offenses(indoc! {"
+            while condition
+              items.each do |item|
+                puts item
+              end
+            end
         "});
     }
 }
