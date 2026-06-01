@@ -9,7 +9,11 @@
 //! gap_issues:
 //!   - murphy-pvyl
 //! notes: >
-//!   Implementation appears broadly aligned, but expanded RuboCop spec parity coverage remains open.
+//!   murphy-pvyl: parity test coverage expanded to cover all RuboCop spec cases
+//!   (no_space/space/compact) including empty parens, consecutive parens, block params,
+//!   and multiline. All cases pass. The `add_missing_space` path emits zero-length offense
+//!   ranges (insert points); these are verified via run_cop_with_options_and_edits rather
+//!   than the caret annotation format.
 //! ```
 //!
 //! parentheses. Mirrors RuboCop's same-named cop.
@@ -326,5 +330,365 @@ mod tests {
               )
             end
         "#});
+    }
+    // ── no_space style parity ────────────────────────────────────────────────
+
+    /// RuboCop parity: empty parens with space — `f( )` → `f()`.
+    #[test]
+    fn no_space_flags_space_in_empty_parens() {
+        test::<SpaceInsideParens>().expect_correction(
+            indoc! {r#"
+                f( )
+                  ^ Space inside parentheses detected.
+            "#},
+            "f()
+",
+        );
+    }
+
+    /// RuboCop parity: accepts parentheses with line break.
+    #[test]
+    fn no_space_accepts_paren_with_line_break() {
+        test::<SpaceInsideParens>().expect_no_offenses(
+            "f(
+  1)
+",
+        );
+    }
+
+    /// RuboCop parity: accepts parentheses with comment and line break.
+    #[test]
+    fn no_space_accepts_paren_with_comment_and_line_break() {
+        test::<SpaceInsideParens>().expect_no_offenses(
+            "f( # Comment
+  1)
+",
+        );
+    }
+
+    /// RuboCop parity: accepts block parameter list with parens (no_space).
+    #[test]
+    fn no_space_accepts_block_parameter_parens() {
+        test::<SpaceInsideParens>().expect_no_offenses(
+            "list.inject(Tms.new) { |sum, (label, item)|
+}
+",
+        );
+    }
+
+    // ── space style parity ────────────────────────────────────────────────────
+
+    /// RuboCop parity: space style requires spaces inside non-empty parens.
+    /// Note: `add_missing_space` emits zero-length ranges (insert points);
+    /// verified via run_cop and edits rather than the caret annotation format.
+    #[test]
+    fn space_style_flags_missing_space_before_closing_paren() {
+        use murphy_plugin_api::test_support::run_cop_with_options_and_edits;
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Space,
+        };
+        let result = run_cop_with_options_and_edits::<SpaceInsideParens>(
+            "f( 3)
+", &opts,
+        );
+        assert_eq!(
+            result.offenses.len(),
+            1,
+            "expected 1 offense, got {:?}",
+            result.offenses
+        );
+        assert_eq!(
+            result.offenses[0].message,
+            "No space inside parentheses detected."
+        );
+        assert_eq!(result.edits.len(), 1, "expected 1 edit");
+        assert_eq!(result.edits[0].replacement, " ");
+    }
+
+    /// RuboCop parity: space style — `g = (a + 3 )` missing space after `(`.
+    #[test]
+    fn space_style_flags_missing_space_after_paren() {
+        use murphy_plugin_api::test_support::run_cop_with_options_and_edits;
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Space,
+        };
+        let result = run_cop_with_options_and_edits::<SpaceInsideParens>(
+            "g = (a + 3 )
+",
+            &opts,
+        );
+        assert_eq!(
+            result.offenses.len(),
+            1,
+            "expected 1 offense, got {:?}",
+            result.offenses
+        );
+        assert_eq!(
+            result.offenses[0].message,
+            "No space inside parentheses detected."
+        );
+        assert_eq!(result.edits.len(), 1, "expected 1 edit");
+        assert_eq!(result.edits[0].replacement, " ");
+    }
+
+    /// RuboCop parity: space style flags space in empty parens.
+    #[test]
+    fn space_style_flags_space_in_empty_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Space,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_correction(
+                indoc! {r#"
+                    f( )
+                      ^ Space inside parentheses detected.
+                "#},
+                "f()
+",
+            );
+    }
+
+    /// RuboCop parity: space style accepts empty parens without spaces.
+    #[test]
+    fn space_style_accepts_empty_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Space,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f()
+",
+            );
+    }
+
+    /// RuboCop parity: space style accepts parens with spaces present.
+    #[test]
+    fn space_style_accepts_correctly_spaced_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Space,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f( 3 )
+g = ( a + 3 )
+",
+            );
+    }
+
+    /// RuboCop parity: space style accepts parens with line break.
+    #[test]
+    fn space_style_accepts_paren_with_line_break() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Space,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f(
+  1 )
+",
+            );
+    }
+
+    /// RuboCop parity: space style accepts parens with comment and line break.
+    #[test]
+    fn space_style_accepts_paren_with_comment_and_line_break() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Space,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f( # Comment
+  1 )
+",
+            );
+    }
+
+    // ── compact style parity ──────────────────────────────────────────────────
+
+    /// RuboCop parity: compact style flags missing spaces (non-consecutive parens).
+    /// Note: `add_missing_space` emits zero-length ranges; verified via run_cop.
+    #[test]
+    fn compact_style_flags_missing_space_before_closing_paren() {
+        use murphy_plugin_api::test_support::run_cop_with_options_and_edits;
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        let result = run_cop_with_options_and_edits::<SpaceInsideParens>(
+            "f( 3)
+", &opts,
+        );
+        assert_eq!(
+            result.offenses.len(),
+            1,
+            "expected 1 offense, got {:?}",
+            result.offenses
+        );
+        assert_eq!(
+            result.offenses[0].message,
+            "No space inside parentheses detected."
+        );
+        assert_eq!(result.edits.len(), 1, "expected 1 edit");
+        assert_eq!(result.edits[0].replacement, " ");
+    }
+
+    /// RuboCop parity: compact style flags space in empty parens.
+    #[test]
+    fn compact_style_flags_space_in_empty_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_correction(
+                indoc! {r#"
+                    f( )
+                      ^ Space inside parentheses detected.
+                "#},
+                "f()
+",
+            );
+    }
+
+    /// RuboCop parity: compact style accepts empty parens without spaces.
+    #[test]
+    fn compact_style_accepts_empty_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f()
+",
+            );
+    }
+
+    /// RuboCop parity: compact style accepts correctly spaced parens.
+    #[test]
+    fn compact_style_accepts_correctly_spaced_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f( 3 )
+g = ( a + 3 )
+",
+            );
+    }
+
+    /// RuboCop parity: compact style accepts two consecutive left parentheses.
+    #[test]
+    fn compact_style_accepts_consecutive_left_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f(( 3 + 5 ) * x )
+",
+            );
+    }
+
+    /// RuboCop parity: compact style accepts two consecutive right parentheses.
+    #[test]
+    fn compact_style_accepts_consecutive_right_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f( x( 3 ))
+g( f( x( 3 )), 5 )
+",
+            );
+    }
+
+    /// RuboCop parity: compact style accepts three consecutive left parentheses.
+    #[test]
+    fn compact_style_accepts_three_consecutive_left_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "g((( 3 + 5 ) * f ) ** x, 5 )
+",
+            );
+    }
+
+    /// RuboCop parity: compact style accepts three consecutive right parentheses.
+    #[test]
+    fn compact_style_accepts_three_consecutive_right_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "g( f( x( 3 )))
+w( g( f( x( 3 ))), 5 )
+",
+            );
+    }
+
+    /// RuboCop parity: compact style flags space between consecutive brackets.
+    #[test]
+    fn compact_style_flags_space_between_consecutive_parens() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_correction(
+                indoc! {r#"
+                    f( ( 3 + 5 ) * x )
+                      ^ Space inside parentheses detected.
+                    f( x( 3 ) )
+                             ^ Space inside parentheses detected.
+                "#},
+                "f(( 3 + 5 ) * x )
+f( x( 3 ))
+",
+            );
+    }
+
+    /// RuboCop parity: compact style accepts parens with line break.
+    #[test]
+    fn compact_style_accepts_paren_with_line_break() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f(
+  1 )
+",
+            );
+    }
+
+    /// RuboCop parity: compact style accepts parens with comment and line break.
+    #[test]
+    fn compact_style_accepts_paren_with_comment_and_line_break() {
+        let opts = SpaceInsideParensOptions {
+            enforced_style: SpaceInsideParensStyle::Compact,
+        };
+        test::<SpaceInsideParens>()
+            .with_options(&opts)
+            .expect_no_offenses(
+                "f( # Comment
+  1 )
+",
+            );
     }
 }

@@ -8,8 +8,13 @@
 //! status: partial
 //! gap_issues:
 //!   - murphy-ev4p
+//!   - murphy-4845
 //! notes: >
 //!   Known gaps remain around VariableForce-equivalent coverage and RuboCop parity details.
+//!   murphy-4845: scope boundary gaps in is_scope() fixed — Defs/Numblock/Itblock now included.
+//!   Regexp named captures are represented via value-less Lvasgn lowered from Prism's
+//!   MatchWriteNode; no dedicated MatchWithLvasgn node is needed for UselessAssignment parity.
+//!   The construct is tracked via the existing Lvasgn arm in VarSemanticModel.
 //! ```
 //!
 //! never read, *or* whose result is overwritten by a sibling write before
@@ -450,7 +455,10 @@ fn is_scope(cx: &Cx<'_>, node: NodeId) -> bool {
     matches!(
         *cx.kind(node),
         NodeKind::Def { .. }
+            | NodeKind::Defs { .. }
             | NodeKind::Block { .. }
+            | NodeKind::Numblock { .. }
+            | NodeKind::Itblock { .. }
             | NodeKind::Class { .. }
             | NodeKind::Module { .. }
             | NodeKind::Sclass { .. }
@@ -987,5 +995,63 @@ mod tests {
                 x += 1
                 ^ Useless assignment to variable - `x`. Use `+` instead of `+=`.
             "#});
+    }
+
+    // murphy-4845: scope boundary gaps — Defs/Numblock/Itblock/Lambda must
+    // stop candidate collection from crossing into nested scopes.
+
+    #[test]
+    fn singleton_method_bare_call_does_not_leak_as_candidate() {
+        // `environment` inside `def self.foo` must not generate a
+        // "Did you mean?" suggestion for `enviromnent` in the outer scope.
+        // Pre-fix: missing `Defs` in is_scope() would cause the candidate to leak.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            enviromnent = {}
+            ^^^^^^^^^^^ Useless assignment to variable - `enviromnent`.
+            def self.foo
+              environment
+            end
+        "#});
+    }
+
+    #[test]
+    fn numblock_bare_call_does_not_leak_as_candidate() {
+        // A bare no-arg call inside a numbered-parameter block must not leak
+        // as a "Did you mean?" candidate into the outer scope.
+        // Pre-fix: missing `Numblock` in is_scope() would cause the leak.
+        // Note: `{ environment; _1 }` creates a Numblock (not a plain Block)
+        // because `_1` is a numbered parameter.
+        let offenses = run_cop::<UselessAssignment>(indoc! {r#"
+            enviromnent = {}
+            result = [1].map { environment; _1 }
+            puts result
+        "#});
+        // Only `enviromnent` is flagged (result is read by puts).
+        assert_eq!(offenses.len(), 1, "expected 1 offense, got {offenses:?}");
+        assert!(
+            !offenses[0].message.contains("Did you mean"),
+            "numblock-internal `environment` must not leak as candidate: {}",
+            offenses[0].message
+        );
+    }
+
+    #[test]
+    fn lambda_bare_call_does_not_leak_as_candidate() {
+        // `environment` inside a lambda must not leak as a "Did you mean?"
+        // suggestion into the outer scope.
+        // Pre-fix: missing `Lambda` in is_scope() would generate
+        // "Did you mean `environment`?" for `enviromnent`.
+        let offenses = run_cop::<UselessAssignment>(indoc! {r#"
+            enviromnent = {}
+            lam = -> { environment }
+            puts lam
+        "#});
+        // Only `enviromnent` is useless (lam is read by puts).
+        assert_eq!(offenses.len(), 1, "expected 1 offense, got {offenses:?}");
+        assert!(
+            !offenses[0].message.contains("Did you mean"),
+            "lambda-internal `environment` must not leak as candidate: {}",
+            offenses[0].message
+        );
     }
 }
