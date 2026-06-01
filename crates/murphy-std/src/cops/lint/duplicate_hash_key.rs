@@ -6,8 +6,7 @@
 //! upstream_cop: Lint/DuplicateHashKey
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-m7lp
+//! gap_issues: []
 //! notes: >
 //!   Main literal-key behavior is implemented. Added Begin, And/Or, Send
 //!   (LITERAL_RECURSIVE_METHODS), and Dstr (all-literal-fragment) key shapes
@@ -15,7 +14,9 @@
 //!   expressions like (1), (false && true) remain undetected because
 //!   Murphy's translator emits Unknown for prism's ParenthesesNode (a
 //!   cross-cutting translator gap, not fixable per-cop). Inner-hash
-//!   canonicalization follow-up remains.
+//!   canonicalization uses BTreeMap last-write-wins to match Ruby's runtime
+//!   Hash equality (murphy-m7lp), which is a deliberate divergence from
+//!   RuboCop's structural AST equality.
 //! ```
 //!
 //! twice (the second binding wins, so the first is dead).
@@ -49,7 +50,7 @@
 //! Interpolated strings/regexps with non-literal fragments and other
 //! non-literal keys are skipped because their values aren't statically known.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
@@ -179,19 +180,19 @@ fn literal_key(cx: &Cx<'_>, node: NodeId) -> Option<LiteralKey> {
         }
         NodeKind::Hash(list) => {
             let pairs = cx.list(list);
-            let mut items: Vec<(LiteralKey, LiteralKey)> = Vec::with_capacity(pairs.len());
+            // Ruby's `Hash#==` uses last-write-wins: `{ a: 1, a: 2 } == { a: 2 }`.
+            // Canonicalize through a BTreeMap so duplicate keys within the inner
+            // hash collapse to their last value, and the result is sorted
+            // (order-independent) — matching Ruby's runtime Hash equality.
+            let mut map: BTreeMap<LiteralKey, LiteralKey> = BTreeMap::new();
             for &pair in pairs {
                 let NodeKind::Pair { key, value } = *cx.kind(pair) else {
                     return None;
                 };
-                items.push((literal_key(cx, key)?, literal_key(cx, value)?));
+                // Overwrite earlier entries: last write wins.
+                map.insert(literal_key(cx, key)?, literal_key(cx, value)?);
             }
-            // Ruby's `Hash#==` is order-independent, so two hashes with
-            // the same `{key => value}` set should compare equal even
-            // when literal order differs. Sort by `(key, value)` to give
-            // them the same canonical form.
-            items.sort();
-            LiteralKey::Hash(items)
+            LiteralKey::Hash(map.into_iter().collect())
         }
         NodeKind::RangeExpr {
             begin_,
@@ -562,6 +563,42 @@ mod tests {
                   "#{false or true}" => 2,
                 }
             "##});
+    }
+
+    // --- murphy-m7lp: inner-hash cross-pair canonicalization (last-write-wins) ---
+
+    #[test]
+    fn inner_hash_dedup_last_write_wins() {
+        // `{ a: 1, a: 2 }` and `{ a: 2 }` have the same Ruby runtime value
+        // (last-write-wins). Murphy canonicalizes inner hashes through BTreeMap
+        // so they compare equal as hash keys.
+        // Note: the inner `{ a: 1, a: 2 }` also generates an offense for its
+        // own duplicate `a:` key (dispatch visits nested hashes). Both offenses
+        // are annotated here.
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
+            {
+              { a: 1, a: 2 } => :x,
+                      ^^ Duplicated key in hash literal.
+              { a: 2 } => :y,
+              ^^^^^^^^ Duplicated key in hash literal.
+            }
+        "#});
+    }
+
+    #[test]
+    fn inner_hash_dedup_order_and_last_write_wins_combined() {
+        // Combining order-independence (existing) with last-write-wins (new):
+        // `{ a: 1, b: 2, a: 3 }` last-write-wins to `{ a: 3, b: 2 }` which
+        // order-independent-equals `{ b: 2, a: 3 }`.
+        // Note: inner `{ a: 1, b: 2, a: 3 }` also fires on its own `a:` dupe.
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
+            {
+              { a: 1, b: 2, a: 3 } => :x,
+                            ^^ Duplicated key in hash literal.
+              { b: 2, a: 3 } => :y,
+              ^^^^^^^^^^^^^^ Duplicated key in hash literal.
+            }
+        "#});
     }
 
     #[test]
