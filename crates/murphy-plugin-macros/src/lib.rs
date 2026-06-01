@@ -60,13 +60,15 @@ pub fn register_cops(input: TokenStream) -> TokenStream {
     // Runs once per pack load (never per-node), so the overhead is negligible.
     // Returns 2 (config/setup error) on duplicate rather than panicking so the
     // host can surface a clean error message in release builds.
+    // O(N²) nested loop avoids heap allocation; N is at most ~140 cops per pack.
     let dup_check = quote! {
         {
-            let mut seen = ::std::collections::HashSet::new();
-            for cop in PACK_COPS.iter() {
-                let name = unsafe { cop.name.as_bytes() };
-                if !seen.insert(name) {
-                    return 2; // duplicate NAME — pack author bug
+            let len = PACK_COPS.len();
+            for i in 0..len {
+                for j in (i + 1)..len {
+                    if unsafe { PACK_COPS[i].name.as_bytes() == PACK_COPS[j].name.as_bytes() } {
+                        return 2; // duplicate NAME — pack author bug
+                    }
                 }
             }
         }
