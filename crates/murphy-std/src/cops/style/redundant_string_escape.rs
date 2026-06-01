@@ -74,12 +74,6 @@ impl RedundantStringEscape {
         check_dstr_node(node, cx);
     }
 
-    #[on_node(kind = "dsym")]
-    fn check_dsym(&self, node: NodeId, cx: &Cx<'_>) {
-        // Dsym nodes (e.g. `:"foo#{bar}"`) have the same structure as Dstr.
-        // Delegate to check_dstr_node to scan literal Str segments.
-        check_dstr_node(node, cx);
-    }
 }
 
 /// Context for scanning a string's escape sequences.
@@ -139,11 +133,8 @@ fn check_dstr_node(node: NodeId, cx: &Cx<'_>) {
         return; // No redundant escapes in non-interpolating strings.
     }
 
-    // Accept both Dstr and Dsym — they both have a NodeList of children.
-    let children = match cx.kind(node) {
-        NodeKind::Dstr(children) => children,
-        NodeKind::Dsym(children) => children,
-        _ => return,
+    let NodeKind::Dstr(children) = cx.kind(node) else {
+        return;
     };
 
     for &child_id in cx.list(*children) {
@@ -307,14 +298,6 @@ fn classify_dstr(node: NodeId, cx: &Cx<'_>) -> (bool, u8, u8, bool, bool) {
     match bytes[0] {
         b'"' => (true, b'"', b'"', false, false),
         b'\'' => (false, b'\'', b'\0', false, false),
-        b':' if bytes.len() >= 2 => {
-            // Dsym: `:"..."` is interpolation-enabled, `:'...'` is disabled.
-            match bytes[1] {
-                b'"' => (true, b'"', b'"', false, false),
-                b'\'' => (false, b'\'', b'\0', false, false),
-                _ => (false, b'\0', b'\0', false, false),
-            }
-        }
         b'%' => {
             let ctx = classify_percent_literal(bytes);
             match ctx {
@@ -717,8 +700,6 @@ mod tests {
     }
 
     // --- Dsym (dynamic symbol) ---
-    // TODO: dsym segments are not yet working — Prism may not expose the raw
-    // source bytes for dsym Str segments. Tracked as a parity gap.
 
     // --- Skip regexp and xstr ---
 
