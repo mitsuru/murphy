@@ -145,7 +145,8 @@ enum SortKind {
 /// 1. Plain `send :sort` with no args → `(sort_node, Sort)`
 /// 2. Plain `send :sort_by` with exactly one block-pass arg → `(sort_by_node, SortBy)`
 /// 3. Block/Numblock/Itblock wrapping a `sort_by` call → `(sort_by_call_inside_block, SortBy)`
-/// 4. Block wrapping a bare `sort` (no args) → `(sort_call_inside_block, Sort)`
+/// Note: Block wrapping `sort` (comparison block) is intentionally excluded —
+///       `sort { |a, b| b <=> a }.first` is NOT equivalent to `min { |a, b| b <=> a }`.
 fn extract_sort_receiver(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, SortKind)> {
     match *cx.kind(receiver) {
         // Case 1 & 2: plain send
@@ -165,14 +166,14 @@ fn extract_sort_receiver(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, SortK
                 _ => None,
             }
         }
-        // Case 3 & 4: block wrapping sort/sort_by
+        // Case 3: block wrapping sort_by (sort with comparison block is NOT handled —
+        // `sort { |a, b| b <=> a }.first` is NOT equivalent to `min { |a, b| b <=> a }`)
         NodeKind::Block { call, .. } | NodeKind::Numblock { send: call, .. } => {
             let method_name = cx.method_name(call)?;
             match method_name {
                 "sort_by" if cx.call_arguments(call).is_empty() => {
                     Some((call, SortKind::SortBy))
                 }
-                "sort" if cx.call_arguments(call).is_empty() => Some((call, SortKind::Sort)),
                 _ => None,
             }
         }
