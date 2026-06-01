@@ -197,102 +197,39 @@ fn regexp_body_contains_slash(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Returns `true` if the regexp body contains bare (unescaped) `{` or `}`
 /// in the raw source. Used to skip `%r{}` autocorrect when the body would
-/// conflict with the brace delimiters.
-///
-/// Escaped braces `\{` and `\}` in the raw source do NOT cause a conflict
-/// because they remain escaped in the `%r{...}` form as well.
-fn regexp_body_contains_braces(node: NodeId, cx: &Cx<'_>) -> bool {
-    let range = cx.range(node);
-    let src = cx.raw_source(range);
-    let bytes = src.as_bytes();
-
-    // Extract the body from the slash-delimited regexp: skip `[1..]` up to
-    // the closing `/`.
-    let (body_start, body_end) = if bytes.first() == Some(&b'/') {
-        find_slash_body_bounds(bytes)
-    } else {
-        return false; // Only called for slash literals
-    };
-
-    if body_start >= body_end {
-        return false;
-    }
-
-    // Scan the body for bare (non-escaped, non-interpolation) `{` or `}`.
-    // Interpolation sequences `#{...}` are safe in `%r{...}` — Ruby handles
-    // the brace nesting correctly. Only bare structural braces conflict.
-    let body = &bytes[body_start..body_end];
-    let mut i = 0;
-    while i < body.len() {
-        if body[i] == b'\\' {
-            i += 2; // skip escape
-            continue;
-        }
-        // Skip interpolation `#{...}` — these are safe in `%r{}`.
-        if body[i] == b'#' && i + 1 < body.len() && body[i + 1] == b'{' {
-            // Skip past the entire `#{...}` block (counting brace depth).
-            i += 2; // skip `#{`
-            let mut depth = 1usize;
-            while i < body.len() && depth > 0 {
-                match body[i] {
-                    b'{' => depth += 1,
-                    b'}' => depth -= 1,
-                    _ => {}
-                }
-                i += 1;
-            }
-            continue;
-        }
-        if body[i] == b'{' || body[i] == b'}' {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Find the body byte range within a slash-delimited regexp source.
-/// Returns `(start, end)` as indices into `bytes`.
-fn find_slash_body_bounds(bytes: &[u8]) -> (usize, usize) {
-    // bytes[0] == '/'
-    let mut i = 1;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'/' {
-            return (1, i);
-        }
-        i += 1;
-    }
-    (1, bytes.len())
-}
 
 /// Emit the autocorrect edit — swap delimiters and fix inner slash escaping.
+///
+/// Skips autocorrect for percent-r forms that use non-`{}` delimiters when
+/// the close-delimiter search fails, to avoid emitting partial/broken edits.
 fn emit_autocorrect(node: NodeId, cx: &Cx<'_>, is_slash_literal: bool, src: &str) {
     let range = cx.range(node);
     if is_slash_literal {
         // `/foo/flags` → `%r{foo}flags`
-        // Skip autocorrect if body contains `{` or `}` — the braces would
-        // conflict with the `%r{}` delimiters and produce invalid Ruby.
-        if regexp_body_contains_braces(node, cx) {
+        // Closing delimiter: find the closing `/`, skipping character classes.
+        let close_offset = match find_closing_slash(src) {
+            Some(off) => off,
+            None => return,
+        };
+
+        // Skip autocorrect if the body contains unescaped `{` or `}`.
+        // Converting `/a{1}/` to `%r{a{1}}` would be broken because the
+        // inner `}` closes the percent literal early.
+        if body_contains_brace(&src[1..close_offset]) {
             return;
         }
+
+
         // Opening delimiter: the `/` at start → `%r{`
         let open_range = Range { start: range.start, end: range.start + 1 };
         cx.emit_edit(open_range, "%r{");
 
-        // Closing delimiter: find the closing `/` before the flags.
-        // The closing `/` is the last `/` before flags (flags are non-`/` chars at end).
-        if let Some(close_offset) = find_closing_slash(src) {
-            let close_start = range.start + close_offset as u32;
-            let close_range = Range { start: close_start, end: close_start + 1 };
-            cx.emit_edit(close_range, "}");
+        let close_start = range.start + close_offset as u32;
+        let close_range = Range { start: close_start, end: close_start + 1 };
+        cx.emit_edit(close_range, "}");
 
-            // Fix inner slash escaping: `\/` → `/` in the body.
-            fix_inner_slashes_slash_to_percent(src, range.start, close_offset, cx);
-        }
+        // Fix inner slash escaping: `\/` → `/` in the body.
+        fix_inner_slashes_slash_to_percent(src, range.start, close_offset, cx);
     } else {
         // `%r{foo}flags` → `/foo/flags`
         // Opening delimiter: `%r{` (3 bytes) → `/`
@@ -300,35 +237,71 @@ fn emit_autocorrect(node: NodeId, cx: &Cx<'_>, is_slash_literal: bool, src: &str
         if open_end == 0 {
             return; // Unexpected format, skip.
         }
+        // Find the closing delimiter matching the opener.
+        // If we can't find it (unsupported delimiter form), skip autocorrect
+        // entirely to avoid emitting partial broken edits.
+        let close_offset = match find_percent_r_close(src, open_end) {
+            Some(off) => off,
+            None => return, // Skip autocorrect for unrecognised %r delimiters.
+        };
+
         let open_range = Range { start: range.start, end: range.start + open_end as u32 };
         cx.emit_edit(open_range, "/");
 
-        // Closing delimiter: last `}` before flags → `/`
-        if let Some(close_offset) = find_closing_brace(src) {
-            let close_start = range.start + close_offset as u32;
-            let close_range = Range { start: close_start, end: close_start + 1 };
-            cx.emit_edit(close_range, "/");
+        let close_start = range.start + close_offset as u32;
+        let close_range = Range { start: close_start, end: close_start + 1 };
+        cx.emit_edit(close_range, "/");
 
-            // Fix inner slash escaping: `/` → `\/` in the body.
-            fix_inner_slashes_percent_to_slash(src, range.start, open_end, close_offset, cx);
-        }
+        // Fix inner slash escaping: `/` → `\/` in the body.
+        fix_inner_slashes_percent_to_slash(src, range.start, open_end, close_offset, cx);
     }
 }
 
-/// Find the offset of the closing `/` in a slash-delimited regexp source.
-/// Returns byte offset from the start of `src`.
-fn find_closing_slash(src: &str) -> Option<usize> {
-    // src = `/body/flags`
-    // Scan from position 1, skipping `\X` escape sequences.
-    let bytes = src.as_bytes();
-    let mut i = 1;
+/// Returns `true` if the body (raw source between delimiters) contains
+/// an unescaped `{` or `}` character. Used to guard slash-to-`%r{}`
+/// autocorrect: if the body contains braces, the `%r{...}` form would be
+/// broken (e.g. `/a{1}/` → `%r{a{1}}` where the inner `}` closes too early).
+fn body_contains_brace(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             i += 2; // skip escape
             continue;
         }
-        if bytes[i] == b'/' {
-            return Some(i);
+        if bytes[i] == b'{' || bytes[i] == b'}' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Find the offset of the closing `/` in a slash-delimited regexp source.
+/// Tracks `[...]` character classes to skip `/` inside them.
+/// Returns byte offset from the start of `src`.
+fn find_closing_slash(src: &str) -> Option<usize> {
+    // src = `/body/flags`
+    // Scan from position 1, skipping `\X` escape sequences and char classes.
+    let bytes = src.as_bytes();
+    let mut i = 1;
+    let mut in_class = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                i += 2; // skip escape (handles `\/`, `\[`, `\]`, etc.)
+                continue;
+            }
+            b'[' if !in_class => {
+                in_class = true;
+            }
+            b']' if in_class => {
+                in_class = false;
+            }
+            b'/' if !in_class => {
+                return Some(i);
+            }
+            _ => {}
         }
         i += 1;
     }
@@ -348,40 +321,45 @@ fn find_percent_r_body_start(src: &str) -> usize {
 }
 
 /// Find the offset of the closing delimiter in a percent-r literal.
-/// Handles all `%r<delim>...</delim>` forms: `%r{...}`, `%r[...]`,
-/// `%r(...)`, `%r<...>`, and non-paired forms like `%r/.../ `.
-fn find_closing_brace(src: &str) -> Option<usize> {
-    if src.len() < 3 || !src.starts_with("%r") {
+///
+/// Handles all `%r` delimiter types:
+/// - Paired: `{}` `[]` `()` `<>` — depth-tracked matching close delimiter.
+/// - Unpaired: any other char — first unescaped occurrence of the same char.
+///
+/// Returns the byte offset of the closing delimiter within `src`.
+/// Returns `None` if the closing delimiter cannot be found.
+fn find_percent_r_close(src: &str, open_end: usize) -> Option<usize> {
+    if src.len() < open_end {
         return None;
     }
-    let bytes = src.as_bytes();
-    let open = bytes[2];
-    let close = match open {
-        b'{' => b'}',
-        b'[' => b']',
-        b'(' => b')',
-        b'<' => b'>',
-        other => other, // non-paired: same char as close
+    let opener = src.as_bytes()[open_end - 1]; // last byte of opening delimiter
+    let (open_ch, close_ch, paired) = match opener {
+        b'{' => (b'{', b'}', true),
+        b'[' => (b'[', b']', true),
+        b'(' => (b'(', b')', true),
+        b'<' => (b'<', b'>', true),
+        ch => (ch, ch, false), // unpaired: same char as open
     };
-    let paired = open != close;
-    let mut depth = if paired { 1usize } else { 0 };
-    let mut i = 3;
+
+    let bytes = src.as_bytes();
+    let mut depth = 1usize;
+    let mut i = open_end;
     while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            i += 2; // skip escape
-            continue;
-        }
-        if paired {
-            if bytes[i] == open {
+        match bytes[i] {
+            b'\\' => {
+                i += 2; // skip escape
+                continue;
+            }
+            ch if paired && ch == open_ch => {
                 depth += 1;
-            } else if bytes[i] == close {
+            }
+            ch if ch == close_ch => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
                 }
             }
-        } else if bytes[i] == close {
-            return Some(i);
+            _ => {}
         }
         i += 1;
     }
@@ -619,5 +597,36 @@ mod tests {
             .with_options(&RegexpLiteralOptions { allow_inner_slashes: true, ..Default::default() })
             .expect_no_offenses("x =~ /home\\//\n");
     }
+
+    // ----- Non-{} percent-r delimiters (autocorrect robustness) -----
+
+    #[test]
+    fn flags_slash_with_braces_offense_but_no_autocorrect() {
+        // /a{1}/ under percent_r style: offense is emitted but autocorrect is
+        // suppressed because the body contains `{}`  which would be broken
+        // in %r{a{1}} form.
+        test::<RegexpLiteral>()
+            .with_options(&RegexpLiteralOptions { enforced_style: EnforcedStyle::PercentR, ..Default::default() })
+            .expect_offense("x =~ /a{1}/\n     ^ Use `%r` around regular expression.\n");
+    }
+
+    #[test]
+    fn flags_percent_r_bracket_delimiter_and_autocorrects() {
+        // %r[foo] is flagged and autocorrected to /foo/
+        test::<RegexpLiteral>().expect_correction(
+            "x =~ %r[foo]\n     ^^^ Use `//` around regular expression.\n",
+            "x =~ /foo/\n",
+        );
+    }
+
+    #[test]
+    fn flags_percent_r_paren_delimiter_and_autocorrects() {
+        // %r(foo) is flagged and autocorrected to /foo/
+        test::<RegexpLiteral>().expect_correction(
+            "x =~ %r(foo)\n     ^^^ Use `//` around regular expression.\n",
+            "x =~ /foo/\n",
+        );
+    }
+
 }
 murphy_plugin_api::submit_cop!(RegexpLiteral);

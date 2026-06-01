@@ -65,6 +65,18 @@ impl RescueModifier {
 mod tests {
     use super::RescueModifier;
     use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::NodeCop;
+
+    #[test]
+    fn rescue_modifier_cop_has_rescue_kind_tag() {
+        // Verify the macro-generated KINDS array contains tag 57 (Rescue).
+        // This pins the CLI dispatch contract.
+        assert!(
+            RescueModifier::KINDS.iter().any(|t| t.0 == 57),
+            "RescueModifier::KINDS must contain Rescue tag (57), got: {:?}",
+            RescueModifier::KINDS
+        );
+    }
 
     // ----- Offense cases -----
 
