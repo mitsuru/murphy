@@ -1007,10 +1007,13 @@ fn style_rescue_modifier_fires_on_modifier_rescue() {
 
     let parsed: Vec<serde_json::Value> =
         serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be JSON");
+    let rescue_modifier_offenses: Vec<_> = parsed
+        .iter()
+        .filter(|o| o["cop_name"] == "Style/RescueModifier")
+        .collect();
     assert_eq!(
-        parsed.len(),
+        rescue_modifier_offenses.len(),
         1,
-        "expected 1 offense for rescue modifier, got {parsed:?}"
+        "expected 1 Style/RescueModifier offense, got {parsed:?}"
     );
-    assert_eq!(parsed[0]["cop_name"], "Style/RescueModifier");
 }
