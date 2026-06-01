@@ -186,9 +186,10 @@ fn check_comparison_form(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // No arguments on the length call.
+    // No arguments on the length call (length_call is always Send here — Csend
+    // was excluded by check_lhs_op_rhs, so the Csend arm is unreachable).
     let length_args = match *cx.kind(length_call) {
-        NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => args,
+        NodeKind::Send { args, .. } => args,
         _ => return,
     };
     if !cx.list(length_args).is_empty() {
@@ -222,8 +223,11 @@ fn check_comparison_form(node: NodeId, cx: &Cx<'_>) {
 /// Check if `lhs OP rhs` is a matching zero/one-length pattern.
 /// Returns `Some(true)` for empty direction, `Some(false)` for non-empty.
 fn check_lhs_op_rhs(lhs: NodeId, op: &str, rhs: NodeId, cx: &Cx<'_>) -> Option<bool> {
+    // Only plain `send` nodes: safe-navigation (`&.`) semantics differ when the
+    // receiver is nil, so comparison forms are not equivalent to `empty?`.
+    // RuboCop's `on_csend` only invokes the predicate check, not comparisons.
     let lhs_method = match *cx.kind(lhs) {
-        NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => method,
+        NodeKind::Send { method, .. } => method,
         _ => return None,
     };
     if !is_length_method(cx.symbol_str(lhs_method)) {
@@ -508,5 +512,20 @@ mod tests {
     #[test]
     fn accepts_file_open_size_zero_predicate() {
         test::<ZeroLengthPredicate>().expect_no_offenses("File.open(f).size.zero?\n");
+    }
+
+    // ----- Safe-navigation (csend) comparison forms are NOT flagged -----
+    // x&.size == 0 is not equivalent to x&.empty? when x is nil:
+    // x&.size == 0 evaluates to false (nil == 0 is false), while
+    // x&.empty? returns nil. RuboCop's on_csend only handles the predicate.
+
+    #[test]
+    fn accepts_csend_size_eq_zero() {
+        test::<ZeroLengthPredicate>().expect_no_offenses("x&.size == 0\n");
+    }
+
+    #[test]
+    fn accepts_csend_size_gt_zero() {
+        test::<ZeroLengthPredicate>().expect_no_offenses("x&.size > 0\n");
     }
 }
