@@ -84,20 +84,13 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 /// Find a trailing comma token in the source range `[from, to)`.
 /// Returns `None` if no comma is found.
 fn find_trailing_comma(cx: &Cx<'_>, from: u32, to: u32) -> Option<Range> {
-    if from >= to {
-        return None;
-    }
-    let toks = cx.sorted_tokens();
-    let idx = toks.partition_point(|t| t.range.start < from);
-    for tok in &toks[idx..] {
-        if tok.range.start >= to {
-            break;
-        }
-        if tok.kind == SourceTokenKind::Comma {
-            return Some(tok.range);
-        }
-    }
-    None
+    cx.tokens_in(Range {
+        start: from,
+        end: to,
+    })
+    .iter()
+    .find(|tok| tok.kind == SourceTokenKind::Comma)
+    .map(|tok| tok.range)
 }
 
 #[cfg(test)]

@@ -73,7 +73,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // The body must start on the same line as `def`.
     let node_start = cx.range(node).start;
-    let body_start = first_part_start(body, cx);
+    let first = first_part(body, cx);
+    let body_start = cx.range(first).start;
 
     // Count newlines between node start and body start.
     // If there are any, the body is on a different line.
@@ -83,18 +84,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     // Offense range is the first part of the body.
-    let offense_range = Range {
-        start: body_start,
-        end: first_part_end(body, cx),
-    };
+    let offense_range = cx.range(first);
 
     cx.emit_offense(offense_range, MSG, None);
 
-    // Autocorrect: find the cut point — after any `)` closing args paren or
-    // after the name, then replace gap to body_start with "\n  ".
-    // Scan from name end forward for `)` or `;` before body_start.
+    // Autocorrect: scan from name end forward for `)` or `;` before body_start.
     let search_start = cx.loc(node).name.end;
-
     let cut_point = find_cut_point(cx, search_start, body_start);
 
     let separator_range = Range {
@@ -104,28 +99,17 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     cx.emit_edit(separator_range, "\n  ");
 }
 
-/// Returns the start offset of the "first part" of a body node.
-/// If the body is a `begin` (multi-statement), this is the first child's
-/// start. Otherwise it's the body's own start.
-fn first_part_start(body: NodeId, cx: &Cx<'_>) -> u32 {
+/// Returns the "first part" of a body node.
+/// If the body is a `begin` (multi-statement), this is the first child.
+/// Otherwise it's the body itself.
+fn first_part(body: NodeId, cx: &Cx<'_>) -> NodeId {
     if let NodeKind::Begin(list) = cx.kind(body) {
         let children = cx.list(*list);
         if let Some(&first_child) = children.first() {
-            return cx.range(first_child).start;
+            return first_child;
         }
     }
-    cx.range(body).start
-}
-
-/// Returns the end offset of the "first part" of a body node.
-fn first_part_end(body: NodeId, cx: &Cx<'_>) -> u32 {
-    if let NodeKind::Begin(list) = cx.kind(body) {
-        let children = cx.list(*list);
-        if let Some(&first_child) = children.first() {
-            return cx.range(first_child).end;
-        }
-    }
-    cx.range(body).end
+    body
 }
 
 /// Count newlines in source bytes between `from` and `to`.
@@ -148,18 +132,14 @@ fn count_newlines_in(src: &str, from: u32, to: u32) -> usize {
 ///   only the space after `)` is replaced).
 /// - Otherwise returns `from`.
 fn find_cut_point(cx: &Cx<'_>, from: u32, to: u32) -> u32 {
-    if from >= to {
-        return from;
-    }
-    let toks = cx.sorted_tokens();
-    let src = cx.source().as_bytes();
-    let idx = toks.partition_point(|t| t.range.start < from);
-    let mut after_paren = from; // position after `)` if present
+    let mut after_paren = from;
     let mut semi_start: Option<u32> = None;
-    for tok in &toks[idx..] {
-        if tok.range.start >= to {
-            break;
-        }
+    let src = cx.source().as_bytes();
+
+    for tok in cx.tokens_in(Range {
+        start: from,
+        end: to,
+    }) {
         match tok.kind {
             SourceTokenKind::RightParen => {
                 after_paren = tok.range.end;
@@ -168,7 +148,7 @@ fn find_cut_point(cx: &Cx<'_>, from: u32, to: u32) -> u32 {
                 let bytes = &src[tok.range.start as usize..tok.range.end as usize];
                 if bytes == b";" {
                     semi_start = Some(tok.range.start);
-                    break; // `;` ends the search
+                    break;
                 }
             }
             _ => {}
