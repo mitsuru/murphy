@@ -188,7 +188,16 @@ fn is_send_named(
 }
 
 /// Extracts the logical string content from a `'...'` or `"..."` source form.
-/// Returns `None` for heredocs, `%q`, char literals, etc.
+///
+/// Returns `None` for:
+/// - Heredocs, `%q`, char literals, etc.
+/// - Double-quoted strings that contain non-trivial escape sequences (e.g. `\n`,
+///   `\t`, `\xNN`, `\u{...}`) that cannot be losslessly represented in a
+///   Ruby symbol literal. Suppressing autocorrect for these is safer than
+///   silently producing a symbol with a different value.
+///
+/// Single-quoted strings only have `\\` and `\'` as escape sequences, both of
+/// which are handled correctly.
 fn parse_string_content(src: &str) -> Option<String> {
     let bytes = src.as_bytes();
     if bytes.len() < 2 {
@@ -202,10 +211,40 @@ fn parse_string_content(src: &str) -> Option<String> {
     if bytes[bytes.len() - 1] != quote {
         return None;
     }
+    if quote == b'"' && has_non_trivial_escape(body) {
+        // Can't safely derive the symbol name: the body contains escape sequences
+        // whose runtime value differs from the source bytes. Suppress autocorrect.
+        return None;
+    }
     Some(unescape_string(body, quote))
 }
 
-/// Minimal unescaping: handles `\\` and the matching quote; passes others through.
+/// Returns `true` when the body of a double-quoted string contains a backslash
+/// escape that is not `\\` (literal backslash) or `\"` (escaped double-quote).
+///
+/// Such escapes (`\n`, `\t`, `\xNN`, `\uNNNN`, `\cX`, etc.) have a runtime
+/// value that differs from the source bytes. We cannot produce the correct symbol
+/// content without a full Ruby-aware decoder, so autocorrect is suppressed.
+fn has_non_trivial_escape(body: &str) -> bool {
+    let b = body.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 1 < b.len() {
+            match b[i + 1] {
+                b'\\' | b'"' => {
+                    i += 2;
+                    continue;
+                }
+                _ => return true,
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Unescape `\\` → `\` and `\"` → `"` in a double-quoted body; pass
+/// single-quoted bodies through (only `\\'` → `\'` and `\\` → `\` exist).
 fn unescape_string(body: &str, quote: u8) -> String {
     let b = body.as_bytes();
     let mut result = String::with_capacity(body.len());
@@ -419,6 +458,24 @@ mod tests {
     #[test]
     fn no_offense_for_open3_popen3_with_string_hash() {
         test::<StringHashKeys>().expect_no_offenses("Open3.popen3('ls', 'HOME' => '/tmp')\n");
+    }
+    #[test]
+    fn has_non_trivial_escape_detects_backslash_n() {
+        // Body of "a\n" is the bytes: a \ n
+        // has_non_trivial_escape("a\\n") should be true (\n is non-trivial)
+        assert!(has_non_trivial_escape("a\\n"));
+    }
+
+    #[test]
+    fn has_non_trivial_escape_allows_backslash_backslash() {
+        // "\\\\" (body: \\\\) is two literal backslashes -- trivial
+        assert!(!has_non_trivial_escape("\\\\"));
+    }
+
+    #[test]
+    fn has_non_trivial_escape_allows_backslash_double_quote() {
+        // "\\"" (body: \\") is an escaped double-quote -- trivial
+        assert!(!has_non_trivial_escape("\\\""));
     }
 }
 murphy_plugin_api::submit_cop!(StringHashKeys);
