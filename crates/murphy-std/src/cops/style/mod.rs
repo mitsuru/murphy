@@ -14,3 +14,4 @@ pub mod symbol_array;
 pub mod while_until_modifier;
 pub mod word_array;
 pub mod yaml_file_read;
+pub mod zero_length_predicate;
