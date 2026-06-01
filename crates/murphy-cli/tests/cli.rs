@@ -988,3 +988,29 @@ fn cache_is_disabled_by_env_var() {
         "no cache file should be written under MURPHY_NO_CACHE"
     );
 }
+
+#[test]
+fn style_rescue_modifier_fires_on_modifier_rescue() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rescue.rb");
+    fs::write(&path, "# frozen_string_literal: true\nfoo rescue nil\n").expect("write rescue.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("--no-cache")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be JSON");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "expected 1 offense for rescue modifier, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Style/RescueModifier");
+}
