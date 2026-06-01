@@ -6,7 +6,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/YodaExpression
 //! upstream_version_checked: 1.86.2
-//! status: partial
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Disabled by default (matches RuboCop's Enabled: false).

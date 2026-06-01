@@ -6,7 +6,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/AndOr
 //! upstream_version_checked: 1.86.2
-//! status: partial
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   EnforcedStyle: conditionals (default) — flags `and`/`or` only inside

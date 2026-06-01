@@ -7,7 +7,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/TrailingMethodEndStatement
 //! upstream_version_checked: 1.86.2
-//! status: partial
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Endless methods (`def foo = expr`) are skipped (no `end` keyword).
