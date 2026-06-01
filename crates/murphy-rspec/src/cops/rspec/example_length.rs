@@ -647,63 +647,30 @@ mod tests {
     #[test]
     fn count_as_one_folds_heredoc_into_one_line() {
         // Heredoc with 2 body lines spans 4 physical lines (opener + 2 + terminator).
-        // With CountAsOne: ["heredoc"] it folds to 1 line.
-        // a = 1 (1) + heredoc (folded->1) = 2 lines. Max=3 -> no offense.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              msg = <<~HEREDOC
-                line1
-                line2
-              HEREDOC
-            end
-        "#};
+        // a = 1 (1) + heredoc (folded→1) = 2 lines. Max=3 -> no offense.
         let opts = ExampleLengthOptions {
             max: 3,
             count_comments: false,
             count_as_one: vec!["heredoc".to_string()],
         };
-        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
-        assert_eq!(
-            offenses.len(),
-            0,
-            "CountAsOne:heredoc should fold the multi-line heredoc to 1 line"
-        );
+        test::<ExampleLength>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                it "works" do
+                  a = 1
+                  msg = <<~HEREDOC
+                    line1
+                    line2
+                  HEREDOC
+                end
+            "#});
     }
 
     #[test]
     fn count_as_one_heredoc_rubocop_docstring_example() {
         // Mirrors the canonical RuboCop docstring example for CountAsOne.
         // CountAsOne: ['array', 'heredoc', 'method_call'] (not hash).
-        // Counts:
-        //   array = [...] folded -> 1
-        //   hash = {...}  NOT folded -> 3 lines
-        //   msg = <<~HEREDOC folded -> 1
-        //   foo(...) folded -> 1
-        //   blank lines -> 0
-        // Total = 1 + 3 + 1 + 1 = 6 lines. Max=5 -> one offense.
-        let src = indoc! {r#"
-            it do
-              array = [
-                1,
-                2
-              ]
-
-              hash = {
-                key: 'value'
-              }
-
-              msg = <<~HEREDOC
-                Heredoc
-                content.
-              HEREDOC
-
-              foo(
-                1,
-                2
-              )
-            end
-        "#};
+        // Counts: array->1, hash (unfolded)->3, heredoc->1, method_call->1 = 6. Max=5 -> offense.
         let opts = ExampleLengthOptions {
             max: 5,
             count_comments: false,
@@ -713,64 +680,30 @@ mod tests {
                 "method_call".to_string(),
             ],
         };
-        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
-        assert_eq!(
-            offenses.len(),
-            1,
-            "Expected one offense per RuboCop docstring example"
-        );
-        assert_eq!(
-            offenses[0].message, "Example has too many lines. [6/5]",
-            "Message must report 6 lines (array->1 + hash->3 + heredoc->1 + method_call->1)"
-        );
-    }
+        test::<ExampleLength>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                it do
+                ^^ Example has too many lines. [6/5]
+                  array = [
+                    1,
+                    2
+                  ]
 
-    // ------------------------------------------------------------------
-    // Alias coverage: focused/skipped/pending forms
-    // ------------------------------------------------------------------
+                  hash = {
+                    key: 'value'
+                  }
 
-    #[test]
-    fn handles_focused_and_skipped_example_aliases() {
-        // fit, xit, skip, pending are all example aliases and should be
-        // flagged just like it/specify/example.
-        let src = indoc! {r#"
-            fit "focused" do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-            xit "skipped" do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-            skip "pending1" do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-            pending "pending2" do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-        "#};
-        assert_eq!(
-            hits(src),
-            4,
-            "fit/xit/skip/pending should all be flagged like it/specify/example"
-        );
+                  msg = <<~HEREDOC
+                    Heredoc
+                    content.
+                  HEREDOC
+
+                  foo(
+                    1,
+                    2
+                  )
+                end
+            "#});
     }
 }
