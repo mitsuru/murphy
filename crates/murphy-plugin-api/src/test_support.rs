@@ -135,6 +135,7 @@ pub fn assert_cop_parity_metadata_for_crate(manifest_dir: impl AsRef<Path>) {
 pub fn test<T: NodeCop + Default>() -> Tester<T> {
     Tester {
         options_json: DEFAULT_OPTIONS_JSON.to_string(),
+        target_rails_version: None,
         _phantom: PhantomData,
     }
 }
@@ -148,6 +149,7 @@ pub fn test<T: NodeCop + Default>() -> Tester<T> {
 /// value.
 pub struct Tester<T: NodeCop + Default> {
     options_json: String,
+    target_rails_version: Option<crate::RubyVersion>,
     _phantom: PhantomData<fn() -> T>,
 }
 
@@ -161,19 +163,25 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Set `AllCops.TargetRailsVersion` for this cop test.
+    pub fn with_target_rails_version(mut self, major: u16, minor: u16) -> Self {
+        self.target_rails_version = Some(crate::RubyVersion::new(major, minor));
+        self
+    }
+
     /// Assert the cop emits exactly the offenses described by the caret
     /// annotations in `annotated`. See the module docs for the
     /// annotation grammar.
     #[track_caller]
     pub fn expect_offense(&self, annotated: &str) -> &Self {
-        assert_offenses_match_inner::<T>(annotated, &self.options_json);
+        assert_offenses_match_inner::<T>(annotated, &self.options_json, self.target_rails_version);
         self
     }
 
     /// Assert the cop emits no offenses against `src`.
     #[track_caller]
     pub fn expect_no_offenses(&self, src: &str) -> &Self {
-        assert_no_offenses_inner::<T>(src, &self.options_json);
+        assert_no_offenses_inner::<T>(src, &self.options_json, self.target_rails_version);
         self
     }
 
@@ -181,7 +189,12 @@ impl<T: NodeCop + Default> Tester<T> {
     /// and that applying its autocorrect edits produces `after`.
     #[track_caller]
     pub fn expect_correction(&self, annotated: &str, after: &str) -> &Self {
-        assert_correction_match_inner::<T>(annotated, after, &self.options_json);
+        assert_correction_match_inner::<T>(
+            annotated,
+            after,
+            &self.options_json,
+            self.target_rails_version,
+        );
         self
     }
 
@@ -190,18 +203,26 @@ impl<T: NodeCop + Default> Tester<T> {
     /// [`Tester::expect_offense`] when both must hold.
     #[track_caller]
     pub fn expect_no_corrections(&self, src: &str) -> &Self {
-        assert_no_corrections_inner::<T>(src, &self.options_json);
+        assert_no_corrections_inner::<T>(src, &self.options_json, self.target_rails_version);
         self
     }
 }
 
 #[track_caller]
-fn assert_no_offenses_inner<T: NodeCop + Default>(src: &str, options_json: &str) {
+fn assert_no_offenses_inner<T: NodeCop + Default>(
+    src: &str,
+    options_json: &str,
+    target_rails_version: Option<crate::RubyVersion>,
+) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!("expect_no_offenses must not contain annotations; use expect_offense instead");
     }
-    let offenses = run_cop_with_options_json::<T>(src, options_json);
+    let offenses = run_cop_with_options_json_and_target_rails_version::<T>(
+        src,
+        options_json,
+        target_rails_version,
+    );
     if !offenses.is_empty() {
         panic!(
             "expect_no_offenses found {} offense(s) for {}",
@@ -292,14 +313,22 @@ fn nth_char_byte(line: &str, n: usize) -> usize {
 }
 
 #[track_caller]
-fn assert_offenses_match_inner<T: NodeCop + Default>(annotated: &str, options_json: &str) {
+fn assert_offenses_match_inner<T: NodeCop + Default>(
+    annotated: &str,
+    options_json: &str,
+    target_rails_version: Option<crate::RubyVersion>,
+) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
         panic!(
             "expect_offense must contain at least one annotation; use expect_no_offenses instead"
         );
     }
-    let actuals = run_cop_with_options_json::<T>(&cleaned, options_json);
+    let actuals = run_cop_with_options_json_and_target_rails_version::<T>(
+        &cleaned,
+        options_json,
+        target_rails_version,
+    );
     assert_offenses_match("expect_offense", &cleaned, &expected, &actuals);
 }
 
@@ -356,6 +385,7 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
     annotated: &str,
     expected_after: &str,
     options_json: &str,
+    target_rails_version: Option<crate::RubyVersion>,
 ) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
@@ -364,7 +394,11 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
         );
     }
 
-    let captured = run_cop_with_options_and_edits_json::<T>(&cleaned, options_json);
+    let captured = run_cop_with_options_and_edits_json_and_target_rails_version::<T>(
+        &cleaned,
+        options_json,
+        target_rails_version,
+    );
     assert_offenses_match("expect_correction", &cleaned, &expected, &captured.offenses);
 
     let actual_after = apply_captured_edits(&cleaned, &captured.edits);
@@ -378,13 +412,21 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
 }
 
 #[track_caller]
-fn assert_no_corrections_inner<T: NodeCop + Default>(src: &str, options_json: &str) {
+fn assert_no_corrections_inner<T: NodeCop + Default>(
+    src: &str,
+    options_json: &str,
+    target_rails_version: Option<crate::RubyVersion>,
+) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!("expect_no_corrections must not contain annotations; use expect_correction instead");
     }
 
-    let captured = run_cop_with_options_and_edits_json::<T>(src, options_json);
+    let captured = run_cop_with_options_and_edits_json_and_target_rails_version::<T>(
+        src,
+        options_json,
+        target_rails_version,
+    );
     if !captured.edits.is_empty() {
         panic!(
             "expect_no_corrections found {} edit(s) for {}",
@@ -579,12 +621,33 @@ fn run_cop_with_options_json<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
 ) -> Vec<CapturedOffense> {
-    run_cop_with_options_and_edits_json::<T>(source, options_json).offenses
+    run_cop_with_options_json_and_target_rails_version::<T>(source, options_json, None)
+}
+
+fn run_cop_with_options_json_and_target_rails_version<T: NodeCop + Default>(
+    source: &str,
+    options_json: &str,
+    target_rails_version: Option<crate::RubyVersion>,
+) -> Vec<CapturedOffense> {
+    run_cop_with_options_and_edits_json_and_target_rails_version::<T>(
+        source,
+        options_json,
+        target_rails_version,
+    )
+    .offenses
 }
 
 fn run_cop_with_options_and_edits_json<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
+) -> CapturedRun {
+    run_cop_with_options_and_edits_json_and_target_rails_version::<T>(source, options_json, None)
+}
+
+fn run_cop_with_options_and_edits_json_and_target_rails_version<T: NodeCop + Default>(
+    source: &str,
+    options_json: &str,
+    target_rails_version: Option<crate::RubyVersion>,
 ) -> CapturedRun {
     let ast = murphy_translate::translate(source, "t.rb");
     let var_model = crate::var_semantic_model::VarSemanticModel::build(&ast);
@@ -607,7 +670,15 @@ fn run_cop_with_options_and_edits_json<T: NodeCop + Default>(
         ptr: options_json.as_ptr(),
         len: options_json.len(),
     };
-    let raw = cx_raw_for(&ast, &fns, cop_name, &sink, options_slice, &var_model);
+    let raw = cx_raw_for(
+        &ast,
+        &fns,
+        cop_name,
+        &sink,
+        options_slice,
+        &var_model,
+        target_rails_version,
+    );
     let cx = unsafe { Cx::from_raw(&raw) };
 
     if T::KINDS.is_empty() {
@@ -713,6 +784,7 @@ fn cx_raw_for(
     sink: &RefCell<Sink>,
     options_json: RawSlice,
     var_model: &crate::var_semantic_model::VarSemanticModel,
+    target_rails_version: Option<crate::RubyVersion>,
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -747,6 +819,7 @@ fn cx_raw_for(
             ptr: file_path.as_ptr(),
             len: file_path.len(),
         },
+        target_rails_version: crate::RubyVersion::to_wire(target_rails_version),
     }
 }
 

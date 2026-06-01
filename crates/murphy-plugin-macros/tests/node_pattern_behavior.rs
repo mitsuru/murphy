@@ -54,6 +54,7 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable) -> CxRaw {
         node_slice_arena: std::ptr::null_mut(),
         alloc_node_slice: murphy_plugin_api::unavailable_alloc_node_slice,
         file_path: RawSlice::from_str("t.rb"),
+        target_rails_version: 0,
     }
 }
 

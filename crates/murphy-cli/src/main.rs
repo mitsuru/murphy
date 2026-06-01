@@ -418,9 +418,13 @@ fn lint_source(
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
-            dispatch::run_cops_with_options(&ast, &scoped_cops, &mut sink, |name| {
-                config.cop_options_json(name)
-            });
+            dispatch::run_cops_with_options_and_target_rails_version(
+                &ast,
+                &scoped_cops,
+                &mut sink,
+                config.target_rails_version,
+                |name| config.cop_options_json(name),
+            );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
             offenses
@@ -553,9 +557,13 @@ fn lint_source_timed(
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
-            dispatch::run_cops_with_options(&ast, &scoped_cops, &mut sink, |name| {
-                config.cop_options_json(name)
-            });
+            dispatch::run_cops_with_options_and_target_rails_version(
+                &ast,
+                &scoped_cops,
+                &mut sink,
+                config.target_rails_version,
+                |name| config.cop_options_json(name),
+            );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
             offenses
