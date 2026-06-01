@@ -36,7 +36,7 @@
 //!   - Not ternary, has no `else` clause.
 //!   - Not in modifier form when `AllowModifier: true`.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceToken, cop};
 
 #[derive(Default)]
 pub struct SoleNestedConditional;
@@ -179,11 +179,11 @@ fn autocorrect_basic(outer: NodeId, inner: NodeId, cx: &Cx<'_>) {
 
     cx.emit_edit(gap, " && ");
 
-    if needs_parens_for_merge(outer_cond_src) {
+    if needs_parens_for_merge(*outer_cond, cx) {
         let wrapped = format!("({outer_cond_src})");
         cx.emit_edit(outer_cond_range, &wrapped);
     }
-    if needs_parens_for_merge(inner_cond_src) {
+    if needs_parens_for_merge(*inner_cond, cx) {
         let wrapped = format!("({inner_cond_src})");
         cx.emit_edit(inner_cond_range, &wrapped);
     }
@@ -195,25 +195,9 @@ fn autocorrect_basic(outer: NodeId, inner: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    let source = cx.source().as_bytes();
-    let end_start = outer_end_loc.start as usize;
-
-    // Find the start of the outer `end` line (beginning of the line).
-    let line_start = source[..end_start]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map_or(0, |p| p + 1);
-
-    // Find the end of the outer `end` line (including the trailing newline).
-    let line_end = source[outer_end_loc.end as usize..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .map_or(source.len(), |p| outer_end_loc.end as usize + p + 1);
-
-    let remove_range = Range {
-        start: line_start as u32,
-        end: line_end as u32,
-    };
+    // Use cx.range_by_whole_lines to expand the outer `end` token to its
+    // entire line (including the trailing newline), avoiding manual byte scanning.
+    let remove_range = cx.range_by_whole_lines(outer_end_loc, true);
 
     // Guard: ensure the outer end line is outside the gap range (no overlap).
     if remove_range.start >= gap.end {
@@ -221,10 +205,18 @@ fn autocorrect_basic(outer: NodeId, inner: NodeId, cx: &Cx<'_>) {
     }
 }
 
-/// Returns `true` if the condition source needs parentheses when joined with `&&`.
-/// Basic heuristic: wrap `||` / `or` conditions.
-fn needs_parens_for_merge(src: &str) -> bool {
-    src.contains(" or ") || src.contains(" || ")
+/// Returns `true` if the condition node contains a top-level `||` or `or` operator,
+/// meaning it needs to be wrapped in parentheses when joined with `&&`.
+///
+/// Uses token-based scanning via `cx.tokens_in` to avoid false positives from
+/// `||` / `or` appearing inside string literals, regexps, or comments.
+fn needs_parens_for_merge(cond: NodeId, cx: &Cx<'_>) -> bool {
+    cx.tokens_in(cx.range(cond))
+        .iter()
+        .any(|tok: &SourceToken| {
+            let text = cx.token_text(*tok);
+            text == "or" || text == "||"
+        })
 }
 
 #[cfg(test)]
