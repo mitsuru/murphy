@@ -60,16 +60,20 @@ impl StringHashKeys {
         }
 
         let key_range = cx.range(key);
-        let raw = cx.raw_source(key_range);
-        // Derive the string content from the key source.
-        let Some(content) = parse_string_content(raw) else {
-            return;
-        };
 
-        let symbol_text = symbol_inspect(&content);
-
+        // Always emit the offense: string keys are always a style violation.
         cx.emit_offense(key_range, MSG, None);
-        cx.emit_edit(key_range, &symbol_text);
+
+        // Autocorrect is best-effort: only emit an edit when we can safely
+        // derive the symbol content. parse_string_content returns None for
+        // heredocs, %q forms, and double-quoted strings with non-trivial
+        // escape sequences (\n, \t, \xNN, etc.) whose runtime value differs
+        // from the source bytes.
+        let raw = cx.raw_source(key_range);
+        if let Some(content) = parse_string_content(raw) {
+            let symbol_text = symbol_inspect(&content);
+            cx.emit_edit(key_range, &symbol_text);
+        }
     }
 }
 
@@ -243,30 +247,29 @@ fn has_non_trivial_escape(body: &str) -> bool {
     false
 }
 
-/// Unescape `\\` → `\` and `\"` → `"` in a double-quoted body; pass
-/// single-quoted bodies through (only `\\'` → `\'` and `\\` → `\` exist).
+/// Unescape `\\` → `\` and the matching quote escape in a string body.
+///
+/// Iterates over `char` boundaries to preserve multi-byte UTF-8 codepoints.
+/// Only `\\` (literal backslash) and `\<quote>` (escaped quote) are
+/// recognised as escape sequences; all other characters are passed through
+/// verbatim. This is correct for single-quoted strings (which only have these
+/// two escapes) and for the `has_non_trivial_escape`-cleared double-quoted
+/// bodies that reach this function.
 fn unescape_string(body: &str, quote: u8) -> String {
-    let b = body.as_bytes();
     let mut result = String::with_capacity(body.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'\\' && i + 1 < b.len() {
-            match b[i + 1] {
-                b'\\' => {
-                    result.push('\\');
-                    i += 2;
+    let mut chars = body.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        if ch == '\\' {
+            // Look ahead one char to check the escape target.
+            if let Some(&(_, next_ch)) = chars.peek() {
+                if next_ch == '\\' || next_ch as u32 == quote as u32 {
+                    result.push(next_ch);
+                    chars.next(); // consume the escaped char
                     continue;
                 }
-                c if c == quote => {
-                    result.push(c as char);
-                    i += 2;
-                    continue;
-                }
-                _ => {}
             }
         }
-        result.push(b[i] as char);
-        i += 1;
+        result.push(ch);
     }
     result
 }
@@ -459,6 +462,7 @@ mod tests {
     fn no_offense_for_open3_popen3_with_string_hash() {
         test::<StringHashKeys>().expect_no_offenses("Open3.popen3('ls', 'HOME' => '/tmp')\n");
     }
+    #[test]
     #[test]
     fn has_non_trivial_escape_detects_backslash_n() {
         // Body of "a\n" is the bytes: a \ n
