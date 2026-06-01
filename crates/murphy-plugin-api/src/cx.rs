@@ -2520,9 +2520,11 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// `InPatternNode#guard` — the `if`/`unless` guard expression of an `in`
-    /// clause, or `OptNodeId::NONE` (no guard, or a non-`InPattern` node).
-    /// The if/unless distinction is not preserved (see `NodeKind::InPattern`).
+    /// `InPatternNode#guard` — the guard of an `in` clause, or
+    /// `OptNodeId::NONE` (no guard, or a non-`InPattern` node).
+    /// The returned node is `NodeKind::IfGuard` for `if` guards and
+    /// `NodeKind::UnlessGuard` for `unless` guards. Use `.get()` to unwrap
+    /// and dispatch on the variant to distinguish them.
     pub fn in_pattern_guard(&self, id: NodeId) -> OptNodeId {
         match *self.kind(id) {
             NodeKind::InPattern { guard, .. } => guard,
