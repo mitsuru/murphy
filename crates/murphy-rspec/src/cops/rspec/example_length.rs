@@ -5,15 +5,16 @@
 //! upstream: rubocop-rspec
 //! upstream_cop: RSpec/ExampleLength
 //! upstream_version_checked: 3.7.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-fgcu
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Fixed: comment lines skipped by default, blank lines skipped, CountComments
-//!   option, CountAsOne option (array/hash/method_call), message format matches
-//!   RuboCop ("Example has too many lines. [N/M]"), runtime options wired via
-//!   cx.options_or_default, focused/skipped/pending alias coverage (murphy-ttzm).
-//!   Remaining gaps: heredoc folding in CountAsOne (murphy-fgcu).
+//!   option, CountAsOne option (array/hash/heredoc/method_call), message format
+//!   matches RuboCop ("Example has too many lines. [N/M]"), runtime options wired
+//!   via cx.options_or_default, focused/skipped/pending alias coverage (murphy-ttzm),
+//!   heredoc folding in CountAsOne (murphy-fgcu).
+//!   Note: Murphy folds Block nodes under method_call (pre-existing behavior pinned
+//!   by count_as_one_folds_block_method_call_into_one_line test); RuboCop does not.
 //! ```
 //!
 //! body. Mirrors RuboCop-RSpec's cop of the same name.
@@ -50,8 +51,9 @@
 //! - `count_comments` (default `false`) — when `true`, comment lines
 //!   are included in the count, matching RuboCop's `CountComments: true`.
 //! - `count_as_one` (default `[]`) — list of constructs to fold to 1
-//!   line: `"array"`, `"hash"`, `"method_call"`. Matching RuboCop's
-//!   `CountAsOne` option.
+//!   line: `"array"`, `"hash"`, `"heredoc"`, `"method_call"`. Matching
+//!   RuboCop's `CountAsOne` option. `"heredoc"` folds any heredoc string
+//!   (opener line + body + terminator) to 1 line.
 //!
 //! Runtime option wiring goes through `cx.options_or_default`.
 //!
@@ -61,7 +63,7 @@
 //! judgement (which assertions move, which setup belongs in
 //! `before`); the cop reports and leaves the fix to the user.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 use super::helpers::{example_call_range, is_example_call};
 
@@ -86,7 +88,7 @@ pub struct ExampleLengthOptions {
     pub count_comments: bool,
     #[option(
         default = [],
-        description = "Constructs to fold into one line: array, hash, method_call."
+        description = "Constructs to fold into one line: array, hash, heredoc, method_call."
     )]
     pub count_as_one: Vec<String>,
 }
@@ -148,10 +150,32 @@ fn apply_count_as_one(
 ) -> usize {
     let fold_array = opts.count_as_one.iter().any(|s| s == "array");
     let fold_hash = opts.count_as_one.iter().any(|s| s == "hash");
+    let fold_heredoc = opts.count_as_one.iter().any(|s| s == "heredoc");
     let fold_method_call = opts.count_as_one.iter().any(|s| s == "method_call");
+
+    // Pre-compute heredoc extents when heredoc folding is enabled.
+    // Each entry maps (heredoc_start_byte_offset → full_extent_range) where
+    // full_extent_range covers from the HeredocStart token through the end of
+    // the terminator line. This is needed because prism assigns the Dstr/Str
+    // node range only the opener token (e.g. `<<~HEREDOC`), not the body.
+    //
+    // We scope the token search to the enclosing block range to avoid
+    // scanning unrelated heredocs from the rest of the file.
+    let heredoc_extents = if fold_heredoc {
+        let block_range = cx
+            .parent(body_id)
+            .get()
+            .map(|p| cx.range(p))
+            .unwrap_or_else(|| cx.range(body_id));
+        build_heredoc_extents(cx, block_range)
+    } else {
+        Vec::new()
+    };
 
     let mut count = base as isize;
     // Track already-folded ranges so we skip nested descendants.
+    // For heredocs we use the full physical extent as the folded range,
+    // so any inner nodes (Str parts of a dstr) are not double-counted.
     let mut folded_ranges: Vec<Range> = Vec::new();
 
     let descendants = cx.descendants(body_id);
@@ -163,6 +187,35 @@ fn apply_count_as_one(
             .any(|fr| range.start >= fr.start && range.end <= fr.end)
         {
             continue;
+        }
+
+        // Check for heredoc folding first (before other foldable checks).
+        if fold_heredoc {
+            let is_heredoc_node = matches!(cx.kind(desc), NodeKind::Str(_) | NodeKind::Dstr(_))
+                && cx.raw_source(range).starts_with("<<");
+            if is_heredoc_node {
+                // Find the full extent of this heredoc from the pre-computed map.
+                if let Some(&(full_start, full_end)) = heredoc_extents
+                    .iter()
+                    .find(|&&(start, _)| start == range.start)
+                {
+                    let full_extent_src = cx.raw_source(Range {
+                        start: full_start,
+                        end: full_end,
+                    });
+                    let node_lines = count_lines(full_extent_src, opts.count_comments);
+                    if node_lines > 1 {
+                        count -= (node_lines as isize) - 1;
+                    }
+                    // Register the full extent as folded so inner Str parts
+                    // (the dstr children) are not counted again.
+                    folded_ranges.push(Range {
+                        start: full_start,
+                        end: full_end,
+                    });
+                }
+                continue;
+            }
         }
 
         let should_fold = match cx.kind(desc) {
@@ -185,6 +238,62 @@ fn apply_count_as_one(
     }
 
     count.max(0) as usize
+}
+
+/// Pre-compute heredoc extents from the token stream within `range`.
+///
+/// Returns a list of `(heredoc_start_byte, full_extent_end_byte)` pairs.
+/// `heredoc_start_byte` matches the `range.start` of the corresponding
+/// `Dstr`/`Str` AST node (prism assigns only the opener token to the node).
+/// `full_extent_end_byte` is the byte offset past the end of the terminator
+/// line (inclusive of the `\n` after `HEREDOC`), so that
+/// `cx.raw_source(full_start..full_end)` covers opener + body + terminator.
+///
+/// Restricting to `range` avoids scanning the entire file's token list when
+/// only heredocs within the current example block are relevant.
+///
+/// Multiple heredocs opened on the same source line are matched FIFO (the
+/// order in which `HeredocStart` tokens appear equals the order their
+/// `HeredocEnd` terminators appear in the source).
+fn build_heredoc_extents(cx: &Cx<'_>, range: Range) -> Vec<(u32, u32)> {
+    use std::collections::VecDeque;
+    let source = cx.source().as_bytes();
+    let mut starts: VecDeque<u32> = VecDeque::new();
+    let mut result: Vec<(u32, u32)> = Vec::new();
+
+    for tok in cx.tokens_in(range) {
+        match tok.kind {
+            SourceTokenKind::HeredocStart => {
+                starts.push_back(tok.range.start);
+            }
+            SourceTokenKind::HeredocEnd => {
+                if let Some(opener_start) = starts.pop_front() {
+                    // The terminator line ends at the \n after the label,
+                    // or at EOF if there is no trailing newline.
+                    let term_end = terminator_line_end(source, tok.range.end);
+                    result.push((opener_start, term_end));
+                }
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+/// Returns the byte offset of the first byte past the end of the line
+/// that contains `pos`. If the line ends with `\n` we include that `\n`
+/// so that `source[start..end]` faithfully represents the full line(s).
+fn terminator_line_end(source: &[u8], pos: u32) -> u32 {
+    let mut i = pos as usize;
+    while i < source.len() && source[i] != b'\n' {
+        i += 1;
+    }
+    // Include the \n itself so blank-line detection works correctly.
+    if i < source.len() {
+        i as u32 + 1
+    } else {
+        i as u32
+    }
 }
 
 /// Count logical source lines spanned by `text`:
@@ -527,6 +636,73 @@ mod tests {
                     bar(3)
                     bar(4)
                   end
+                end
+            "#});
+    }
+
+    // ------------------------------------------------------------------
+    // CountAsOne: heredoc folding
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn count_as_one_folds_heredoc_into_one_line() {
+        // Heredoc with 2 body lines spans 4 physical lines (opener + 2 + terminator).
+        // a = 1 (1) + heredoc (folded→1) = 2 lines. Max=3 -> no offense.
+        let opts = ExampleLengthOptions {
+            max: 3,
+            count_comments: false,
+            count_as_one: vec!["heredoc".to_string()],
+        };
+        test::<ExampleLength>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                it "works" do
+                  a = 1
+                  msg = <<~HEREDOC
+                    line1
+                    line2
+                  HEREDOC
+                end
+            "#});
+    }
+
+    #[test]
+    fn count_as_one_heredoc_rubocop_docstring_example() {
+        // Mirrors the canonical RuboCop docstring example for CountAsOne.
+        // CountAsOne: ['array', 'heredoc', 'method_call'] (not hash).
+        // Counts: array->1, hash (unfolded)->3, heredoc->1, method_call->1 = 6. Max=5 -> offense.
+        let opts = ExampleLengthOptions {
+            max: 5,
+            count_comments: false,
+            count_as_one: vec![
+                "array".to_string(),
+                "heredoc".to_string(),
+                "method_call".to_string(),
+            ],
+        };
+        test::<ExampleLength>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                it do
+                ^^ Example has too many lines. [6/5]
+                  array = [
+                    1,
+                    2
+                  ]
+
+                  hash = {
+                    key: 'value'
+                  }
+
+                  msg = <<~HEREDOC
+                    Heredoc
+                    content.
+                  HEREDOC
+
+                  foo(
+                    1,
+                    2
+                  )
                 end
             "#});
     }
