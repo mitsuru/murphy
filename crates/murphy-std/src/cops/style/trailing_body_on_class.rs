@@ -131,14 +131,22 @@ fn check_trailing(node: NodeId, body_id: NodeId, header_end: u32, cx: &Cx<'_>) {
         end: first_part_range.start,
     };
 
-    // Compute keyword column.
+    // Compute line indentation: extract only leading whitespace (spaces/tabs)
+    // from the start of the line up to the `class` keyword. Using only
+    // whitespace (not the full byte distance) avoids misindenting when the
+    // class keyword is preceded by non-whitespace (e.g. `private class`).
     let node_start = node_range.start as usize;
     let line_start = source[..node_start]
         .iter()
         .rposition(|&b| b == b'\n')
         .map_or(0, |p| p + 1);
-    let keyword_col = node_start - line_start;
-    let indent = " ".repeat(keyword_col + 2);
+    let leading_ws_len = source[line_start..node_start]
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
+    let leading_ws =
+        std::str::from_utf8(&source[line_start..line_start + leading_ws_len]).unwrap_or("");
+    let indent = format!("{leading_ws}  ");
     let replacement = format!("\n{indent}");
     cx.emit_edit(gap, &replacement);
 }
