@@ -56,18 +56,17 @@ use syn::{DeriveInput, Ident, Token, parse_macro_input};
 pub fn register_cops(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as RegisterCopsInput);
 
-    // Shared debug-mode uniqueness check emitted into murphy_plugin_register.
+    // Unconditional duplicate-NAME check emitted into murphy_plugin_register.
+    // Runs once per pack load (never per-node), so the overhead is negligible.
+    // Returns 2 (config/setup error) on duplicate rather than panicking so the
+    // host can surface a clean error message in release builds.
     let dup_check = quote! {
-        #[cfg(debug_assertions)]
         {
             let mut seen = ::std::collections::HashSet::new();
             for cop in PACK_COPS.iter() {
                 let name = unsafe { cop.name.as_bytes() };
                 if !seen.insert(name) {
-                    panic!(
-                        "register_cops!: two cops share the same NAME: {}",
-                        ::std::str::from_utf8(name).unwrap_or("<invalid utf8>")
-                    );
+                    return 2; // duplicate NAME — pack author bug
                 }
             }
         }
