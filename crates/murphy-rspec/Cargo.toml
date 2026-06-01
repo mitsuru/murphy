@@ -17,6 +17,8 @@ crate-type = ["cdylib", "rlib"]
 # only through this crate; the boundary is asserted by
 # tests/dep_boundary.rs (cargo metadata).
 murphy-plugin-api = { path = "../murphy-plugin-api" }
+# `pub mod` auto-discovery for namespace subdirectories — eliminates per-cop mod.rs edits.
+automod = "1"
 # submit_cop! / register_cops! が生成するコードで ::linkme:: が必要なため直接依存
 linkme = "0.3"
 # `#[derive(CopOptions)]`-expanded code references `::serde_json` in the
