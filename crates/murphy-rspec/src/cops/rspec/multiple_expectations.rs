@@ -255,24 +255,25 @@ fn example_call_range(cx: &Cx<'_>, call: NodeId, body: NodeId) -> Range {
     }
 
     let source = cx.source().as_bytes();
-    let toks = cx.sorted_tokens();
 
     // Lower bound: just after the method name selector (e.g. after `it`).
     // Upper bound: start of the body node (first token of the block body).
     // We pick the *last* `do`/`{` in this window so that a hash-literal `{`
     // inside the args is skipped and only the block opener is selected.
+    // `cx.tokens_in` uses binary search (O(log N)) to slice only the tokens
+    // in this range rather than scanning the entire file token list.
     let name_end = cx.node(call).loc.name.end;
-    // Scan backward from the token just before body_range.start, looking for
-    // the last `do` or `{` in the window [name_end, body_range.start).
-    let opener = toks
+    let opener = cx
+        .tokens_in(Range {
+            start: name_end,
+            end: body_range.start,
+        })
         .iter()
         .rev()
-        .skip_while(|t| t.range.start >= body_range.start)
         .find(|t| {
-            t.range.start >= name_end
-                && (t.kind == SourceTokenKind::LeftBrace
-                    || (t.kind == SourceTokenKind::Other
-                        && &source[t.range.start as usize..t.range.end as usize] == b"do"))
+            t.kind == SourceTokenKind::LeftBrace
+                || (t.kind == SourceTokenKind::Other
+                    && &source[t.range.start as usize..t.range.end as usize] == b"do")
         });
 
     let offense_end = match opener {
@@ -280,10 +281,14 @@ fn example_call_range(cx: &Cx<'_>, call: NodeId, body: NodeId) -> Range {
             // Walk backward from the opener to find the last real token —
             // skip Comment, Newline, IgnoredNewline tokens which may appear
             // between the call args and `do` (e.g. trailing inline comment).
-            let last_real = toks
+            // Again use `cx.tokens_in` for an O(log N) slice.
+            let last_real = cx
+                .tokens_in(Range {
+                    start: call_range.start,
+                    end: opener_tok.range.start,
+                })
                 .iter()
                 .rev()
-                .skip_while(|t| t.range.start >= opener_tok.range.start)
                 .find(|t| {
                     !matches!(
                         t.kind,
