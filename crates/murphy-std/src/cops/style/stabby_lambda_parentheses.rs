@@ -139,9 +139,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                 // Search for ) after last arg's end.
                 let close = open.and_then(|o| paren_close_range_from(o, content_end, cx));
 
-                #[cfg(test)]
-                eprintln!("DEBUG: open={:?}, close={:?}", open, close);
-
                 if let (Some(open), Some(close)) = (open, close) {
                     let offense_range = Range {
                         start: open.start,
@@ -201,25 +198,24 @@ fn paren_open_range(from: u32, until_end: u32, cx: &Cx<'_>) -> Option<Range> {
         .map(|t| t.range)
 }
 
-/// Returns the matching `)` range starting from `open` (the `(` range), using
-/// nesting depth tracking. Handles both `RightParen` and `Other` with text `)`.
-fn paren_close_range_from(open: Range, _args_content_end: u32, cx: &Cx<'_>) -> Option<Range> {
+/// Returns the closing `)` of the lambda argument list, starting the search at
+/// `args_content_end` (the end of the last arg's range). This avoids counting
+/// `)` characters inside string/regexp literals (which Prism may emit as
+/// `RightParen` tokens) because they always fall within the args content range.
+///
+/// The strategy: the syntactic `)` that closes the lambda parameter list must
+/// appear at or after `args_content_end`, so we scan forward from there for the
+/// first `RightParen` token (or `Other` with text `)`).
+fn paren_close_range_from(open: Range, args_content_end: u32, cx: &Cx<'_>) -> Option<Range> {
+    let _ = open; // open is provided for context but we search from args_content_end
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
-    // Start scanning AT the ( token itself (use strict-less-than so we land on `(`).
-    let start_idx = toks.partition_point(|t| t.range.start < open.start);
-    let mut d: i32 = 0;
-    for tok in &toks[start_idx..] {
-        if is_open_paren(tok.range, tok.kind, source) {
-            d += 1;
-        } else if is_close_paren(tok.range, tok.kind, source) {
-            d -= 1;
-            if d == 0 {
-                return Some(tok.range);
-            }
-        }
-    }
-    None
+    // Search from args_content_end — the ) must be at or after here.
+    let start_idx = toks.partition_point(|t| t.range.start < args_content_end);
+    toks[start_idx..]
+        .iter()
+        .find(|t| is_close_paren(t.range, t.kind, source))
+        .map(|t| t.range)
 }
 
 #[cfg(test)]
@@ -328,6 +324,33 @@ mod tests {
         test::<StabbyLambdaParentheses>()
             .with_options(&no_parens_opts())
             .expect_no_offenses("->() { a + b + c }\n");
+    }
+
+    // --- edge cases ---
+
+    #[test]
+    fn corrects_arg_with_string_default_containing_paren() {
+        // Default value contains ")": the ) inside the string is not a real close-paren token.
+        // The lambda args list still has a proper ( and ) wrapping the args.
+        test::<StabbyLambdaParentheses>()
+            .with_options(&no_parens_opts())
+            .expect_correction(
+                indoc! {r#"
+                    ->(x = ")") { x }
+                      ^^^^^^^^^ Do not wrap stabby lambda arguments with parentheses.
+                "#},
+                r#"->x = ")" { x }
+"#,
+            );
+    }
+
+    #[test]
+    fn require_parens_with_default_arg() {
+        // Default value arg without parens: offense range covers only the args.
+        test::<StabbyLambdaParentheses>().expect_offense(indoc! {r#"
+            ->x = ")" { x }
+              ^^^^^^^ Wrap stabby lambda arguments with parentheses.
+        "#});
     }
 }
 murphy_plugin_api::submit_cop!(StabbyLambdaParentheses);
