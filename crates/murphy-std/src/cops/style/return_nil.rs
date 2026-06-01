@@ -134,7 +134,7 @@ fn should_skip_due_to_ancestor(node: NodeId, cx: &Cx<'_>) -> bool {
             NodeKind::Block { call, args, .. } => {
                 // Lambda: acts as a scoping boundary (like def), stop walking but
                 // DO flag (RuboCop's scoped_node? breaks the loop, not returns nil).
-                if matches!(cx.kind(*call), NodeKind::Lambda) {
+                if cx.is_lambda(ancestor) {
                     return false;
                 }
                 // define_method / define_singleton_method: stop walking but DO flag.
@@ -150,7 +150,7 @@ fn should_skip_due_to_ancestor(node: NodeId, cx: &Cx<'_>) -> bool {
             NodeKind::Numblock { send, .. } => {
                 // Numblock always has implicit numbered params -> treat as having args.
                 // Lambda: acts as a scoping boundary, DO flag.
-                if matches!(cx.kind(*send), NodeKind::Lambda) {
+                if cx.is_lambda(ancestor) {
                     return false;
                 }
                 if is_define_method(*send, cx) {
@@ -171,21 +171,13 @@ fn should_skip_due_to_ancestor(node: NodeId, cx: &Cx<'_>) -> bool {
 /// Returns `true` if `call_id` is a Send whose method is `define_method` or
 /// `define_singleton_method`.
 fn is_define_method(call_id: NodeId, cx: &Cx<'_>) -> bool {
-    match cx.kind(call_id) {
-        NodeKind::Send { method, .. } => {
-            let name = cx.symbol_str(*method);
-            name == "define_method" || name == "define_singleton_method"
-        }
-        _ => false,
-    }
+    cx.method_name(call_id)
+        .is_some_and(|name| name == "define_method" || name == "define_singleton_method")
 }
 
 /// Returns `true` if `call_id` is a Send with a non-None receiver.
 fn block_has_receiver(call_id: NodeId, cx: &Cx<'_>) -> bool {
-    match cx.kind(call_id) {
-        NodeKind::Send { receiver, .. } => receiver.get().is_some(),
-        _ => false,
-    }
+    cx.call_receiver(call_id).get().is_some()
 }
 
 /// Returns `true` if the `Args` node at `args_id` has at least one parameter.

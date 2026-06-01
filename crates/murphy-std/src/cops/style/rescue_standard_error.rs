@@ -94,7 +94,7 @@ impl RescueStandardError {
                 // Flag `rescue StandardError` when it is the sole exception class.
                 if exception_list.len() == 1 {
                     let exc_id = exception_list[0];
-                    if is_bare_standard_error(exc_id, cx) {
+                    if cx.is_global_const(exc_id, "StandardError") {
                         // Offense range: from rescue keyword start to end of
                         // the StandardError constant (inclusive).
                         let kw_range = rescue_keyword_range(node, cx);
@@ -132,17 +132,7 @@ fn rescue_keyword_range(node: NodeId, cx: &Cx<'_>) -> Range {
     Range { start: node_start, end: node_start + 6 }
 }
 
-/// Returns `true` if `node_id` is a `Const` named `:StandardError` with no
-/// scope (bare `StandardError` or `::StandardError`, which Murphy's translator
-/// renders the same way).
-fn is_bare_standard_error(node_id: NodeId, cx: &Cx<'_>) -> bool {
-    match cx.kind(node_id) {
-        NodeKind::Const { scope, name } => {
-            scope.get().is_none() && cx.symbol_str(*name) == "StandardError"
-        }
-        _ => false,
-    }
-}
+
 
 #[cfg(test)]
 mod tests {
