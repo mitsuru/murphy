@@ -17,6 +17,8 @@ crate-type = ["cdylib", "rlib"]
 # runtime Murphy dependency — boundary asserted by
 # tests/dep_boundary.rs.
 murphy-plugin-api = { path = "../murphy-plugin-api" }
+# submit_cop! / register_cops! が生成するコードで ::linkme:: が必要なため直接依存
+linkme = "0.3"
 # `#[derive(CopOptions)]`-expanded code references `::serde_json`
 # directly in this crate, matching murphy-std/murphy-rspec. Also used
 # by tests/dep_boundary.rs to parse `cargo metadata` JSON.

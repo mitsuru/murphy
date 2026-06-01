@@ -23,6 +23,7 @@ impl WithHelpers {
     }
 }
 
-register_cops!(mode = dynamic, WithHelpers);
+register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(WithHelpers);
 
 fn main() {}

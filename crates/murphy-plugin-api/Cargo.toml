@@ -24,6 +24,10 @@ regex = "1"
 # `murphy-pattern` dependency. No runtime cycle: `murphy-pattern` itself
 # depends only on `murphy-ast`.
 murphy-pattern = { path = "../murphy-pattern" }
+# Distributed-slice registration: `submit_cop!(T)` uses `#[linkme::distributed_slice]`.
+# Re-exported as `murphy_plugin_api::linkme` so packs keep their single-dep contract
+# (design §5 / ADR 0038).
+linkme = "0.3"
 # Optional: only pulled in by the `test-support` feature so the
 # parser-driven cop harness (`test_support` module) can `translate`
 # Ruby source. Production plugins never use this path; the cdylib

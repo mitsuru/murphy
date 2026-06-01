@@ -267,3 +267,4 @@ mod tests {
             .expect_no_offenses("#!/usr/bin/env ruby\n# frozen_string_literal: true\nx = 1\n");
     }
 }
+murphy_plugin_api::submit_cop!(FrozenStringLiteralComment);

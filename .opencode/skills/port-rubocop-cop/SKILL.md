@@ -256,45 +256,29 @@ alongside `emit_offense`; see `references/autocorrect.md`.
 
 > **Gap fill:** skip — the cop is already registered.
 
-Add the cop to the pack's `register_cops!` invocation in
-`crates/<pack>/src/lib.rs`. The macro mode (`static` vs `dynamic`) is
-already set by the existing call — just add the new struct to the list,
-in source order.
+Add `murphy_plugin_api::submit_cop!(CopName);` at the **end of the new
+cop's own file**, after the closing `}` of the `#[cop] impl` block. No
+changes to `lib.rs` are needed — `submit_cop!` uses `linkme`'s
+distributed-slice mechanism to collect cop entries at link time.
 
-Static pack example (`murphy-std`):
-
-```rust
-murphy_plugin_api::register_cops!(
-    mode = static,
-    NoReceiverPuts,
-    UnreachableCode,
-    StringLiterals,
-    TrailingWhitespace,
-    SpaceInsideParens,
-    CopName,            // ← new entry; trailing comma matches house style
-);
-```
-
-Dynamic pack example (`murphy-rspec`):
+Example (same pattern for all packs — static or dynamic):
 
 ```rust
-murphy_plugin_api::register_cops!(
-    mode = dynamic,
-    DescribeClass,
-    ExampleLength,
-    MultipleExpectations,
-    CopName             // ← new entry; murphy-rspec omits the trailing comma
-);
+// crates/<pack>/src/cops/<namespace>/cop_name.rs — bottom of the file
+
+#[cop(name = "Pack/CopName", ...)]
+impl CopName {
+    #[on_node(kind = "send", methods = ["foo"])]
+    fn check_send(&self, node: NodeId, cx: &Cx<'_>) { ... }
+}
+
+murphy_plugin_api::submit_cop!(CopName);  // ← sole registration step
 ```
 
-Trailing-comma style differs between packs — `murphy-std` keeps a
-trailing comma; `murphy-rspec` does not. Match what the existing call
-in `crates/<pack>/src/lib.rs` already does rather than imposing a new
-convention.
-
-Do not add a new `pub use` or re-export — the macro takes the type
-directly, and the cop struct is reached via the use line at the top of
-`lib.rs` (`use crate::cops::<namespace>::<file>::CopName;`).
+That is the complete registration step. Do **not** edit `lib.rs`, do
+**not** add a `use crate::cops::...` import there, and do **not** add to
+any list. The cop file also does not need a `pub` export beyond what the
+`mod.rs` `pub mod` already provides.
 
 ### Phase 2.5: write tests against the test-support harness
 

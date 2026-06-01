@@ -430,3 +430,4 @@ mod tests {
             .expect_no_offenses("Post.pick(:id, :name)\n");
     }
 }
+murphy_plugin_api::submit_cop!(Pick);

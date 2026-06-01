@@ -217,3 +217,4 @@ mod tests {
         assert_eq!(offenses[0].message, "Extra blank line detected.");
     }
 }
+murphy_plugin_api::submit_cop!(EmptyLines);

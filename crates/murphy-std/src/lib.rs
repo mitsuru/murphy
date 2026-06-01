@@ -9,22 +9,13 @@
 //! and is the implementation of §5 of
 //! `docs/plans/2026-05-22-plugin-reboot-design.md`.
 //!
-//! `register_cops!(mode = static, …)` (re-exported from `murphy-plugin-api`)
-//! emits the per-pack registration entry as a plain Rust `pub fn`
-//! `murphy_plugin_register` — no `#[no_mangle]` symbol that could collide
-//! with another statically-linked pack. `murphy-cli` calls
-//! [`murphy_plugin_register`] directly at startup; the resulting
-//! `PluginRegistration` flows into the same code path as `.so`-loaded
-//! packs.
-//!
-//! ## Pack contents
-//!
-//! v1 (murphy-9cr.23 §12b) ships `Murphy/NoReceiverPuts`, migrated out of
-//! `murphy-core/src/builtin/` so murphy-core stops being the home of any
-//! standard cop. Subsequent §12d work adds at least one cop per namespace
-//! (`Lint`, `Style`, `Layout`) covering the four authorship vectors the
-//! issue calls out (call dispatch / flow analysis /
-//! literal+option+autocorrect / raw source access).
+//! `register_cops!(mode = static)` (re-exported from `murphy-plugin-api`)
+//! declares the `PACK_COPS` distributed slice and emits a plain Rust
+//! `pub fn murphy_plugin_register` entry point — no `#[no_mangle]` symbol
+//! that could collide with another statically-linked pack. Each cop file
+//! calls `submit_cop!(T)` to register itself; the linker collects all
+//! entries into `PACK_COPS` at build time. Adding a new cop requires only
+//! editing that cop's own file — no central list in `lib.rs`.
 
 pub mod cops;
 
@@ -33,112 +24,15 @@ pub mod cops;
 /// rather than hardcoded in `is_cop_disabled_by_default`.
 pub const BUNDLED_DEFAULTS_YAML: &str = include_str!("../config/default.yml");
 
-use crate::cops::layout::dot_position::DotPosition;
-use crate::cops::layout::empty_lines::EmptyLines;
-use crate::cops::layout::space_around_operators::SpaceAroundOperators;
-use crate::cops::layout::space_inside_parens::SpaceInsideParens;
-use crate::cops::layout::trailing_whitespace::TrailingWhitespace;
-use crate::cops::lint::debugger::Debugger;
-use crate::cops::lint::deprecated_class_methods::DeprecatedClassMethods;
-use crate::cops::lint::duplicate_hash_key::DuplicateHashKey;
-use crate::cops::lint::empty_when::EmptyWhen;
-use crate::cops::lint::shadowing_outer_local_variable::ShadowingOuterLocalVariable;
-use crate::cops::lint::underscore_prefixed_variable_name::UnderscorePrefixedVariableName;
-use crate::cops::lint::unreachable_code::UnreachableCode;
-use crate::cops::lint::unused_block_argument::UnusedBlockArgument;
-use crate::cops::lint::unused_method_argument::UnusedMethodArgument;
-use crate::cops::lint::useless_assignment::UselessAssignment;
-use crate::cops::murphy::no_receiver_puts::NoReceiverPuts;
-use crate::cops::style::and_or::AndOr;
-use crate::cops::style::empty_case_condition::EmptyCaseCondition;
-use crate::cops::style::frozen_string_literal_comment::FrozenStringLiteralComment;
-use crate::cops::style::hash_syntax::HashSyntax;
-use crate::cops::style::if_unless_modifier::IfUnlessModifier;
-use crate::cops::style::nil_comparison::NilComparison;
-use crate::cops::style::redundant_return::RedundantReturn;
-use crate::cops::style::redundant_self::RedundantSelf;
-use crate::cops::style::string_literals::StringLiterals;
-use crate::cops::style::symbol_array::SymbolArray;
-use crate::cops::style::when_then::WhenThen;
-use crate::cops::style::while_until_do::WhileUntilDo;
-use crate::cops::style::while_until_modifier::WhileUntilModifier;
-use crate::cops::style::word_array::WordArray;
-use crate::cops::style::yaml_file_read::YAMLFileRead;
-use crate::cops::style::yoda_condition::YodaCondition;
-use crate::cops::style::yoda_expression::YodaExpression;
-use crate::cops::style::zero_length_predicate::ZeroLengthPredicate;
+// cop の登録は各 cop ファイルの submit_cop!(T) が担う。
+// 新しい cop を追加する場合は cop ファイルに1行追加するだけ — lib.rs は不変。
+murphy_plugin_api::register_cops!(mode = static);
 
-// `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
-// single Murphy-prefixed runtime dependency by design.
-murphy_plugin_api::register_cops!(
-    mode = static,
-    NoReceiverPuts,
-    Debugger,
-    DeprecatedClassMethods,
-    DuplicateHashKey,
-    EmptyWhen,
-    ShadowingOuterLocalVariable,
-    UnreachableCode,
-    UnderscorePrefixedVariableName,
-    UnusedBlockArgument,
-    UnusedMethodArgument,
-    UselessAssignment,
-    FrozenStringLiteralComment,
-    HashSyntax,
-    RedundantSelf,
-    StringLiterals,
-    SymbolArray,
-    TrailingWhitespace,
-    SpaceInsideParens,
-    SpaceAroundOperators,
-    DotPosition,
-    AndOr,
-    EmptyCaseCondition,
-    EmptyLines,
-    IfUnlessModifier,
-    NilComparison,
-    RedundantReturn,
-    WhileUntilModifier,
-    WordArray,
-    YAMLFileRead,
-    WhenThen,
-    WhileUntilDo,
-    YodaCondition,
-    YodaExpression,
-    ZeroLengthPredicate,
-);
-
-/// Standard cops that have **not yet been migrated** to the arena AST /
-/// single-surface ABI and are therefore not dispatched. The host (`murphy-cli`)
-/// reads this list when building its `CopRegistry` so that:
-///
-/// 1. `murphy cops list` surfaces these as `disabled: arena migration`
-///    (rather than hiding their existence) — the §12c machine-readable
-///    contract documents where the migration backlog is.
-/// 2. A `[cops.rules."Name"]` section in `murphy.toml` that references a
-///    disabled cop does not error: it is treated as a tolerated
-///    no-op until the cop is migrated. If the user explicitly opts in
-///    with `enabled = true`, the host emits a warning and still skips
-///    the cop (so an upgrade does not silently break previously working
-///    configs).
-/// 3. The lint runner never attempts to dispatch them — by design they
-///    have no `PluginCopV1` entry, only a name.
-///
-/// §12d adds the first three (`Lint/UnreachableCode`,
-/// `Style/StringLiterals`, `Layout/TrailingWhitespace`) as fully
-/// migrated cops; once those land they move from this list into the
-/// `register_cops!` list above. Until then they sit here so the
-/// disabled-registry plumbing has live test data.
 /// Standard cops that have **not yet been migrated** to the arena AST.
-/// Empty after §12d migrated the last three (`Lint/UnreachableCode`,
-/// `Style/StringLiterals`, `Layout/TrailingWhitespace`). The list will
-/// repopulate in murphy-au8 §14a when `murphy-rails`'s 131 text-matching
-/// cops join the disabled registry while their arena ports are staged.
-/// The host (`murphy-cli`) still wires up the warning + skip paths,
-/// they simply have no live tenants today.
+/// Empty after §12d migrated the last three. The list will repopulate in
+/// murphy-au8 §14a when `murphy-rails`'s cops join the disabled registry.
 pub static DISABLED_COPS: &[&str] = &[];
 
 /// Friendly pack name reported by `murphy cops list` for cops registered
-/// (or held in the disabled list) by this crate. Matches the "builtin"
-/// pack-name convention `CopRegistry` already uses for static built-ins.
+/// (or held in the disabled list) by this crate.
 pub const PACK_NAME: &str = "builtin";

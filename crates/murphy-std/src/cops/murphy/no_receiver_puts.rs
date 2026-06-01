@@ -55,3 +55,4 @@ impl NoReceiverPuts {
         cx.emit_offense(cx.range(node), "Use a logger instead of puts", None);
     }
 }
+murphy_plugin_api::submit_cop!(NoReceiverPuts);

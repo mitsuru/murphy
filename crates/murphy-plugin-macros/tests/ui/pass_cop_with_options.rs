@@ -23,6 +23,7 @@ impl NodeCop for DeepNest {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(mode = dynamic, DeepNest);
+register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(DeepNest);
 
 fn main() {}

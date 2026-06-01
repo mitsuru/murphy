@@ -20,17 +20,13 @@
 //! pre-`murphy-9cr.22` rails crate; see `git show
 //! 46a1de6^:crates/murphy-rails/src/cops/rails/`).
 
-use murphy_plugin_api::{Cx, NoOptions, cop, register_cops};
+use murphy_plugin_api::{Cx, NoOptions, cop, register_cops, submit_cop};
 
-// Cops promoted out of the stub macro into real arena dispatch live
-// under `cops::<namespace>::<name>` (mirrors `murphy-rspec` /
-// `murphy-std`). The `register_cops!` list below re-exports them as
-// bare idents via `use`, keeping the registration table flat.
+// Cops in separate files register themselves via submit_cop! in their own modules.
 pub mod cops;
-use cops::rails::{
-    AssertNot, EnvironmentVariableAccess, I18nLocaleAssignment, NegateInclude, Output, Pick,
-    RequestReferer, UniqBeforePluck,
-};
+
+// cop の登録は各 cop ファイル (inline stub / cops::rails::* 両方) の submit_cop!(T) が担う。
+register_cops!(mode = dynamic);
 
 /// ## RuboCop parity
 ///
@@ -58,6 +54,7 @@ impl ActionControllerFlashBeforeRender {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ActionControllerFlashBeforeRender);
 
 /// ## RuboCop parity
 ///
@@ -85,6 +82,7 @@ impl ActionControllerTestCase {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ActionControllerTestCase);
 
 /// ## RuboCop parity
 ///
@@ -112,6 +110,7 @@ impl ActionFilter {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ActionFilter);
 
 /// ## RuboCop parity
 ///
@@ -139,6 +138,7 @@ impl ActionOrder {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ActionOrder);
 
 /// ## RuboCop parity
 ///
@@ -166,6 +166,7 @@ impl ActiveRecordAliases {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ActiveRecordAliases);
 
 /// ## RuboCop parity
 ///
@@ -193,6 +194,7 @@ impl ActiveRecordCallbacksOrder {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ActiveRecordCallbacksOrder);
 
 /// ## RuboCop parity
 ///
@@ -220,6 +222,7 @@ impl ActiveRecordOverride {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ActiveRecordOverride);
 
 /// ## RuboCop parity
 ///
@@ -247,6 +250,7 @@ impl ActiveSupportAliases {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ActiveSupportAliases);
 
 /// ## RuboCop parity
 ///
@@ -274,6 +278,7 @@ impl ActiveSupportOnLoad {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ActiveSupportOnLoad);
 
 /// ## RuboCop parity
 ///
@@ -301,6 +306,7 @@ impl AddColumnIndex {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(AddColumnIndex);
 
 /// ## RuboCop parity
 ///
@@ -328,6 +334,7 @@ impl AfterCommitOverride {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(AfterCommitOverride);
 
 /// ## RuboCop parity
 ///
@@ -355,6 +362,7 @@ impl ApplicationController {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ApplicationController);
 
 /// ## RuboCop parity
 ///
@@ -382,6 +390,7 @@ impl ApplicationJob {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ApplicationJob);
 
 /// ## RuboCop parity
 ///
@@ -409,6 +418,7 @@ impl ApplicationMailer {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ApplicationMailer);
 
 /// ## RuboCop parity
 ///
@@ -436,6 +446,7 @@ impl ApplicationRecord {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ApplicationRecord);
 
 /// ## RuboCop parity
 ///
@@ -463,6 +474,7 @@ impl ArelStar {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ArelStar);
 
 /// ## RuboCop parity
 ///
@@ -490,6 +502,7 @@ impl AttributeDefaultBlockValue {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(AttributeDefaultBlockValue);
 
 /// ## RuboCop parity
 ///
@@ -517,6 +530,7 @@ impl BelongsTo {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(BelongsTo);
 
 /// ## RuboCop parity
 ///
@@ -544,6 +558,7 @@ impl Blank {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Blank);
 
 /// ## RuboCop parity
 ///
@@ -571,6 +586,7 @@ impl BulkChangeTable {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(BulkChangeTable);
 
 /// ## RuboCop parity
 ///
@@ -598,6 +614,7 @@ impl CompactBlank {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(CompactBlank);
 
 /// ## RuboCop parity
 ///
@@ -625,6 +642,7 @@ impl ContentTag {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ContentTag);
 
 /// ## RuboCop parity
 ///
@@ -652,6 +670,7 @@ impl CreateTableWithTimestamps {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(CreateTableWithTimestamps);
 
 /// ## RuboCop parity
 ///
@@ -679,6 +698,7 @@ impl DangerousColumnNames {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(DangerousColumnNames);
 
 /// ## RuboCop parity
 ///
@@ -706,6 +726,7 @@ impl Date {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Date);
 
 /// ## RuboCop parity
 ///
@@ -733,6 +754,7 @@ impl DefaultScope {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(DefaultScope);
 
 /// ## RuboCop parity
 ///
@@ -760,6 +782,7 @@ impl Delegate {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Delegate);
 
 /// ## RuboCop parity
 ///
@@ -787,6 +810,7 @@ impl DelegateAllowBlank {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(DelegateAllowBlank);
 
 /// ## RuboCop parity
 ///
@@ -814,6 +838,7 @@ impl DeprecatedActiveModelErrorsMethods {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(DeprecatedActiveModelErrorsMethods);
 
 /// ## RuboCop parity
 ///
@@ -841,6 +866,7 @@ impl DotSeparatedKeys {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(DotSeparatedKeys);
 
 /// ## RuboCop parity
 ///
@@ -868,6 +894,7 @@ impl DuplicateAssociation {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(DuplicateAssociation);
 
 /// ## RuboCop parity
 ///
@@ -895,6 +922,7 @@ impl DuplicateScope {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(DuplicateScope);
 
 /// ## RuboCop parity
 ///
@@ -922,6 +950,7 @@ impl DurationArithmetic {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(DurationArithmetic);
 
 /// ## RuboCop parity
 ///
@@ -949,6 +978,7 @@ impl DynamicFindBy {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(DynamicFindBy);
 
 /// ## RuboCop parity
 ///
@@ -976,6 +1006,7 @@ impl EagerEvaluationLogMessage {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(EagerEvaluationLogMessage);
 
 /// ## RuboCop parity
 ///
@@ -1003,6 +1034,7 @@ impl EnumHash {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(EnumHash);
 
 /// ## RuboCop parity
 ///
@@ -1030,6 +1062,7 @@ impl EnumSyntax {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(EnumSyntax);
 
 /// ## RuboCop parity
 ///
@@ -1057,6 +1090,7 @@ impl EnumUniqueness {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(EnumUniqueness);
 
 /// ## RuboCop parity
 ///
@@ -1084,6 +1118,7 @@ impl Env {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Env);
 
 /// ## RuboCop parity
 ///
@@ -1111,6 +1146,7 @@ impl EnvLocal {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(EnvLocal);
 
 /// ## RuboCop parity
 ///
@@ -1138,6 +1174,7 @@ impl EnvironmentComparison {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(EnvironmentComparison);
 
 // `EnvironmentVariableAccess` promoted to real cop in
 // `cops::rails::environment_variable_access`.
@@ -1168,6 +1205,7 @@ impl Exit {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Exit);
 
 /// ## RuboCop parity
 ///
@@ -1195,6 +1233,7 @@ impl ExpandedDateRange {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ExpandedDateRange);
 
 /// ## RuboCop parity
 ///
@@ -1222,6 +1261,7 @@ impl FilePath {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(FilePath);
 
 /// ## RuboCop parity
 ///
@@ -1249,6 +1289,7 @@ impl FindBy {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(FindBy);
 
 /// ## RuboCop parity
 ///
@@ -1276,6 +1317,7 @@ impl FindById {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(FindById);
 
 /// ## RuboCop parity
 ///
@@ -1303,6 +1345,7 @@ impl FindByOrAssignmentMemoization {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(FindByOrAssignmentMemoization);
 
 /// ## RuboCop parity
 ///
@@ -1330,6 +1373,7 @@ impl FindEach {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(FindEach);
 
 /// ## RuboCop parity
 ///
@@ -1357,6 +1401,7 @@ impl FreezeTime {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(FreezeTime);
 
 /// ## RuboCop parity
 ///
@@ -1384,6 +1429,7 @@ impl HasAndBelongsToMany {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(HasAndBelongsToMany);
 
 /// ## RuboCop parity
 ///
@@ -1411,6 +1457,7 @@ impl HasManyOrHasOneDependent {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(HasManyOrHasOneDependent);
 
 /// ## RuboCop parity
 ///
@@ -1438,6 +1485,7 @@ impl HelperInstanceVariable {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(HelperInstanceVariable);
 
 /// ## RuboCop parity
 ///
@@ -1465,6 +1513,7 @@ impl HttpPositionalArguments {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(HttpPositionalArguments);
 
 /// ## RuboCop parity
 ///
@@ -1492,6 +1541,7 @@ impl HttpStatus {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(HttpStatus);
 
 /// ## RuboCop parity
 ///
@@ -1519,6 +1569,7 @@ impl HttpStatusNameConsistency {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(HttpStatusNameConsistency);
 
 /// ## RuboCop parity
 ///
@@ -1546,6 +1597,7 @@ impl I18nLazyLookup {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(I18nLazyLookup);
 
 // `I18nLocaleAssignment` promoted to real cop in
 // `cops::rails::i18n_locale_assignment`.
@@ -1576,6 +1628,7 @@ impl I18nLocaleTexts {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(I18nLocaleTexts);
 
 /// ## RuboCop parity
 ///
@@ -1603,6 +1656,7 @@ impl IgnoredColumnsAssignment {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(IgnoredColumnsAssignment);
 
 /// ## RuboCop parity
 ///
@@ -1630,6 +1684,7 @@ impl IgnoredSkipActionFilterOption {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(IgnoredSkipActionFilterOption);
 
 /// ## RuboCop parity
 ///
@@ -1657,6 +1712,7 @@ impl IndexBy {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(IndexBy);
 
 /// ## RuboCop parity
 ///
@@ -1684,6 +1740,7 @@ impl IndexWith {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(IndexWith);
 
 /// ## RuboCop parity
 ///
@@ -1711,6 +1768,7 @@ impl Inquiry {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Inquiry);
 
 /// ## RuboCop parity
 ///
@@ -1738,6 +1796,7 @@ impl InverseOf {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(InverseOf);
 
 /// ## RuboCop parity
 ///
@@ -1765,6 +1824,7 @@ impl LexicallyScopedActionFilter {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(LexicallyScopedActionFilter);
 
 /// ## RuboCop parity
 ///
@@ -1792,6 +1852,7 @@ impl LinkToBlank {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(LinkToBlank);
 
 /// ## RuboCop parity
 ///
@@ -1819,6 +1880,7 @@ impl MailerName {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(MailerName);
 
 /// ## RuboCop parity
 ///
@@ -1846,6 +1908,7 @@ impl MatchRoute {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(MatchRoute);
 
 /// ## RuboCop parity
 ///
@@ -1873,6 +1936,7 @@ impl MigrationClassName {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(MigrationClassName);
 
 /// ## RuboCop parity
 ///
@@ -1900,6 +1964,7 @@ impl MultipleRoutePaths {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(MultipleRoutePaths);
 
 // `NegateInclude` promoted to real cop in
 // `cops::rails::negate_include`.
@@ -1930,6 +1995,7 @@ impl NotNullColumn {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(NotNullColumn);
 
 /// ## RuboCop parity
 ///
@@ -1957,6 +2023,7 @@ impl OrderArguments {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(OrderArguments);
 
 /// ## RuboCop parity
 ///
@@ -1984,6 +2051,7 @@ impl OrderById {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(OrderById);
 
 // `Output` is now a real cop in `cops::rails::output` — `pub use`d at
 // the crate root via the `use cops::rails::Output;` above so the
@@ -2015,6 +2083,7 @@ impl OutputSafety {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(OutputSafety);
 
 // `Pick` is now a real cop in `cops::rails::pick` — `pub use`d at the
 // crate root via the `use cops::rails::{AssertNot, Output, Pick,
@@ -2047,6 +2116,7 @@ impl Pluck {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Pluck);
 
 /// ## RuboCop parity
 ///
@@ -2074,6 +2144,7 @@ impl PluckId {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(PluckId);
 
 /// ## RuboCop parity
 ///
@@ -2101,6 +2172,7 @@ impl PluckInWhere {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(PluckInWhere);
 
 /// ## RuboCop parity
 ///
@@ -2128,6 +2200,7 @@ impl PluralizationGrammar {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(PluralizationGrammar);
 
 /// ## RuboCop parity
 ///
@@ -2155,6 +2228,7 @@ impl Presence {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Presence);
 
 /// ## RuboCop parity
 ///
@@ -2182,6 +2256,7 @@ impl Present {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Present);
 
 /// ## RuboCop parity
 ///
@@ -2209,6 +2284,7 @@ impl RakeEnvironment {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RakeEnvironment);
 
 /// ## RuboCop parity
 ///
@@ -2236,6 +2312,7 @@ impl ReadWriteAttribute {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ReadWriteAttribute);
 
 /// ## RuboCop parity
 ///
@@ -2263,6 +2340,7 @@ impl RedirectBackOrTo {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RedirectBackOrTo);
 
 /// ## RuboCop parity
 ///
@@ -2290,6 +2368,7 @@ impl RedundantActiveRecordAllMethod {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RedundantActiveRecordAllMethod);
 
 /// ## RuboCop parity
 ///
@@ -2317,6 +2396,7 @@ impl RedundantAllowNil {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RedundantAllowNil);
 
 /// ## RuboCop parity
 ///
@@ -2344,6 +2424,7 @@ impl RedundantForeignKey {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RedundantForeignKey);
 
 /// ## RuboCop parity
 ///
@@ -2371,6 +2452,7 @@ impl RedundantPresenceValidationOnBelongsTo {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RedundantPresenceValidationOnBelongsTo);
 
 /// ## RuboCop parity
 ///
@@ -2398,6 +2480,7 @@ impl RedundantReceiverInWithOptions {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RedundantReceiverInWithOptions);
 
 /// ## RuboCop parity
 ///
@@ -2425,6 +2508,7 @@ impl RedundantTravelBack {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RedundantTravelBack);
 
 /// ## RuboCop parity
 ///
@@ -2452,6 +2536,7 @@ impl ReflectionClassName {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ReflectionClassName);
 
 /// ## RuboCop parity
 ///
@@ -2479,6 +2564,7 @@ impl RefuteMethods {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RefuteMethods);
 
 /// ## RuboCop parity
 ///
@@ -2506,6 +2592,7 @@ impl RelativeDateConstant {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RelativeDateConstant);
 
 /// ## RuboCop parity
 ///
@@ -2533,6 +2620,7 @@ impl RenderInline {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RenderInline);
 
 /// ## RuboCop parity
 ///
@@ -2560,6 +2648,7 @@ impl RenderPlainText {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RenderPlainText);
 
 // `RequestReferer` is now a real cop in `cops::rails::request_referer`
 // — `pub use`d at the crate root via the `use cops::rails::{Output,
@@ -2592,6 +2681,7 @@ impl RequireDependency {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RequireDependency);
 
 /// ## RuboCop parity
 ///
@@ -2619,6 +2709,7 @@ impl ResponseParsedBody {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ResponseParsedBody);
 
 /// ## RuboCop parity
 ///
@@ -2646,6 +2737,7 @@ impl ReversibleMigration {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ReversibleMigration);
 
 /// ## RuboCop parity
 ///
@@ -2673,6 +2765,7 @@ impl ReversibleMigrationMethodDefinition {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ReversibleMigrationMethodDefinition);
 
 /// ## RuboCop parity
 ///
@@ -2700,6 +2793,7 @@ impl RootJoinChain {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RootJoinChain);
 
 /// ## RuboCop parity
 ///
@@ -2727,6 +2821,7 @@ impl RootPathnameMethods {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RootPathnameMethods);
 
 /// ## RuboCop parity
 ///
@@ -2754,6 +2849,7 @@ impl RootPublicPath {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(RootPublicPath);
 
 /// ## RuboCop parity
 ///
@@ -2781,6 +2877,7 @@ impl SafeNavigation {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(SafeNavigation);
 
 /// ## RuboCop parity
 ///
@@ -2808,6 +2905,7 @@ impl SafeNavigationWithBlank {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(SafeNavigationWithBlank);
 
 /// ## RuboCop parity
 ///
@@ -2835,6 +2933,7 @@ impl SaveBang {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(SaveBang);
 
 /// ## RuboCop parity
 ///
@@ -2862,6 +2961,7 @@ impl SchemaComment {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(SchemaComment);
 
 /// ## RuboCop parity
 ///
@@ -2889,6 +2989,7 @@ impl ScopeArgs {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ScopeArgs);
 
 /// ## RuboCop parity
 ///
@@ -2916,6 +3017,7 @@ impl SelectMap {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(SelectMap);
 
 /// ## RuboCop parity
 ///
@@ -2943,6 +3045,7 @@ impl ShortI18n {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ShortI18n);
 
 /// ## RuboCop parity
 ///
@@ -2970,6 +3073,7 @@ impl SkipsModelValidations {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(SkipsModelValidations);
 
 /// ## RuboCop parity
 ///
@@ -2997,6 +3101,7 @@ impl SquishedSQLHeredocs {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(SquishedSQLHeredocs);
 
 /// ## RuboCop parity
 ///
@@ -3024,6 +3129,7 @@ impl StripHeredoc {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(StripHeredoc);
 
 /// ## RuboCop parity
 ///
@@ -3051,6 +3157,7 @@ impl StrongParametersExpect {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(StrongParametersExpect);
 
 /// ## RuboCop parity
 ///
@@ -3078,6 +3185,7 @@ impl TableNameAssignment {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(TableNameAssignment);
 
 /// ## RuboCop parity
 ///
@@ -3105,6 +3213,7 @@ impl ThreeStateBooleanColumn {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ThreeStateBooleanColumn);
 
 /// ## RuboCop parity
 ///
@@ -3132,6 +3241,7 @@ impl TimeZone {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(TimeZone);
 
 /// ## RuboCop parity
 ///
@@ -3159,6 +3269,7 @@ impl TimeZoneAssignment {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(TimeZoneAssignment);
 
 /// ## RuboCop parity
 ///
@@ -3186,6 +3297,7 @@ impl ToFormattedS {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ToFormattedS);
 
 /// ## RuboCop parity
 ///
@@ -3213,6 +3325,7 @@ impl ToSWithArgument {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(ToSWithArgument);
 
 /// ## RuboCop parity
 ///
@@ -3240,6 +3353,7 @@ impl TopLevelHashWithIndifferentAccess {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(TopLevelHashWithIndifferentAccess);
 
 /// ## RuboCop parity
 ///
@@ -3267,6 +3381,7 @@ impl TransactionExitStatement {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(TransactionExitStatement);
 
 // `UniqBeforePluck` promoted to real cop in
 // `cops::rails::uniq_before_pluck`.
@@ -3297,6 +3412,7 @@ impl UniqueValidationWithoutIndex {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(UniqueValidationWithoutIndex);
 
 /// ## RuboCop parity
 ///
@@ -3324,6 +3440,7 @@ impl UnknownEnv {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(UnknownEnv);
 
 /// ## RuboCop parity
 ///
@@ -3351,6 +3468,7 @@ impl UnusedIgnoredColumns {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(UnusedIgnoredColumns);
 
 /// ## RuboCop parity
 ///
@@ -3378,6 +3496,7 @@ impl UnusedRenderContent {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(UnusedRenderContent);
 
 /// ## RuboCop parity
 ///
@@ -3405,6 +3524,7 @@ impl Validation {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(Validation);
 
 /// ## RuboCop parity
 ///
@@ -3432,6 +3552,7 @@ impl WhereEquals {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(WhereEquals);
 
 /// ## RuboCop parity
 ///
@@ -3459,6 +3580,7 @@ impl WhereExists {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(WhereExists);
 
 /// ## RuboCop parity
 ///
@@ -3486,6 +3608,7 @@ impl WhereMissing {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(WhereMissing);
 
 /// ## RuboCop parity
 ///
@@ -3513,6 +3636,7 @@ impl WhereNot {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(WhereNot);
 
 /// ## RuboCop parity
 ///
@@ -3540,6 +3664,7 @@ impl WhereNotWithMultipleConditions {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
+submit_cop!(WhereNotWithMultipleConditions);
 
 /// ## RuboCop parity
 ///
@@ -3567,145 +3692,4 @@ impl WhereRange {
     #[on_new_investigation]
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
-
-register_cops!(
-    mode = dynamic,
-    ActionControllerFlashBeforeRender,
-    ActionControllerTestCase,
-    ActionFilter,
-    ActionOrder,
-    ActiveRecordAliases,
-    ActiveRecordCallbacksOrder,
-    ActiveRecordOverride,
-    ActiveSupportAliases,
-    ActiveSupportOnLoad,
-    AddColumnIndex,
-    AfterCommitOverride,
-    ApplicationController,
-    ApplicationJob,
-    ApplicationMailer,
-    ApplicationRecord,
-    ArelStar,
-    AssertNot,
-    AttributeDefaultBlockValue,
-    BelongsTo,
-    Blank,
-    BulkChangeTable,
-    CompactBlank,
-    ContentTag,
-    CreateTableWithTimestamps,
-    DangerousColumnNames,
-    Date,
-    DefaultScope,
-    Delegate,
-    DelegateAllowBlank,
-    DeprecatedActiveModelErrorsMethods,
-    DotSeparatedKeys,
-    DuplicateAssociation,
-    DuplicateScope,
-    DurationArithmetic,
-    DynamicFindBy,
-    EagerEvaluationLogMessage,
-    EnumHash,
-    EnumSyntax,
-    EnumUniqueness,
-    Env,
-    EnvLocal,
-    EnvironmentComparison,
-    EnvironmentVariableAccess,
-    Exit,
-    ExpandedDateRange,
-    FilePath,
-    FindBy,
-    FindById,
-    FindByOrAssignmentMemoization,
-    FindEach,
-    FreezeTime,
-    HasAndBelongsToMany,
-    HasManyOrHasOneDependent,
-    HelperInstanceVariable,
-    HttpPositionalArguments,
-    HttpStatus,
-    HttpStatusNameConsistency,
-    I18nLazyLookup,
-    I18nLocaleAssignment,
-    I18nLocaleTexts,
-    IgnoredColumnsAssignment,
-    IgnoredSkipActionFilterOption,
-    IndexBy,
-    IndexWith,
-    Inquiry,
-    InverseOf,
-    LexicallyScopedActionFilter,
-    LinkToBlank,
-    MailerName,
-    MatchRoute,
-    MigrationClassName,
-    MultipleRoutePaths,
-    NegateInclude,
-    NotNullColumn,
-    OrderArguments,
-    OrderById,
-    Output,
-    OutputSafety,
-    Pick,
-    Pluck,
-    PluckId,
-    PluckInWhere,
-    PluralizationGrammar,
-    Presence,
-    Present,
-    RakeEnvironment,
-    ReadWriteAttribute,
-    RedirectBackOrTo,
-    RedundantActiveRecordAllMethod,
-    RedundantAllowNil,
-    RedundantForeignKey,
-    RedundantPresenceValidationOnBelongsTo,
-    RedundantReceiverInWithOptions,
-    RedundantTravelBack,
-    ReflectionClassName,
-    RefuteMethods,
-    RelativeDateConstant,
-    RenderInline,
-    RenderPlainText,
-    RequestReferer,
-    RequireDependency,
-    ResponseParsedBody,
-    ReversibleMigration,
-    ReversibleMigrationMethodDefinition,
-    RootJoinChain,
-    RootPathnameMethods,
-    RootPublicPath,
-    SafeNavigation,
-    SafeNavigationWithBlank,
-    SaveBang,
-    SchemaComment,
-    ScopeArgs,
-    SelectMap,
-    ShortI18n,
-    SkipsModelValidations,
-    SquishedSQLHeredocs,
-    StripHeredoc,
-    StrongParametersExpect,
-    TableNameAssignment,
-    ThreeStateBooleanColumn,
-    TimeZone,
-    TimeZoneAssignment,
-    ToFormattedS,
-    ToSWithArgument,
-    TopLevelHashWithIndifferentAccess,
-    TransactionExitStatement,
-    UniqBeforePluck,
-    UniqueValidationWithoutIndex,
-    UnknownEnv,
-    UnusedIgnoredColumns,
-    UnusedRenderContent,
-    Validation,
-    WhereEquals,
-    WhereExists,
-    WhereMissing,
-    WhereNot,
-    WhereNotWithMultipleConditions,
-    WhereRange,
-);
+submit_cop!(WhereRange);

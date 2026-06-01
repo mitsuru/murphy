@@ -11,6 +11,7 @@ impl NoTabs {
     fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(mode = dynamic, NoTabs);
+register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(NoTabs);
 
 fn main() {}

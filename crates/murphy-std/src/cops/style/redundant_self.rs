@@ -991,3 +991,4 @@ mod tests {
         "});
     }
 }
+murphy_plugin_api::submit_cop!(RedundantSelf);

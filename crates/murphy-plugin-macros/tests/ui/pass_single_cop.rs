@@ -14,6 +14,7 @@ impl NodeCop for NoTabs {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-murphy_plugin_macros::register_cops!(mode = dynamic, NoTabs);
+murphy_plugin_macros::register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(NoTabs);
 
 fn main() {}

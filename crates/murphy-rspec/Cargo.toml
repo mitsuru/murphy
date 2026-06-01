@@ -17,6 +17,8 @@ crate-type = ["cdylib", "rlib"]
 # only through this crate; the boundary is asserted by
 # tests/dep_boundary.rs (cargo metadata).
 murphy-plugin-api = { path = "../murphy-plugin-api" }
+# submit_cop! / register_cops! が生成するコードで ::linkme:: が必要なため直接依存
+linkme = "0.3"
 # `#[derive(CopOptions)]`-expanded code references `::serde_json` in the
 # consuming crate root (standard proc-macro pattern). Permitted: third-
 # party crate, not a Murphy-internal one — the boundary gate only forbids

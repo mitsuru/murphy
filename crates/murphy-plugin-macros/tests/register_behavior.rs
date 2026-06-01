@@ -37,7 +37,14 @@ impl NodeCop for NoSpaces {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(mode = dynamic, NoTabs, NoSpaces);
+register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(NoTabs);
+murphy_plugin_api::submit_cop!(NoSpaces);
+
+// Duplicate-NAME detection is now an unconditional runtime check
+// executed inside murphy_plugin_register when it iterates PACK_COPS.
+// A compile-time check is no longer possible because submit_cop! calls
+// are distributed across files — the linker collects them, not the macro.
 
 unsafe extern "C" {
     fn murphy_plugin_register(out: *mut PluginRegistration) -> i32;

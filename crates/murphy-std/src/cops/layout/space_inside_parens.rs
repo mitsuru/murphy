@@ -692,3 +692,4 @@ f( x( 3 ))
             );
     }
 }
+murphy_plugin_api::submit_cop!(SpaceInsideParens);

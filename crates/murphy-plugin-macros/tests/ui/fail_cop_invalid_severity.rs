@@ -11,6 +11,7 @@ impl MyCheck {
     fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(mode = dynamic, MyCheck);
+register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(MyCheck);
 
 fn main() {}

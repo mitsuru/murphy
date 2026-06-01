@@ -280,3 +280,4 @@ mod tests {
         test::<RequestReferer>().expect_no_offenses("request(:get) { |r| r.referer }\n");
     }
 }
+murphy_plugin_api::submit_cop!(RequestReferer);

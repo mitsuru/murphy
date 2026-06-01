@@ -10,6 +10,9 @@ description = "Murphy standard cop pack (Murphy/Lint/Style/Layout, ADR 0018) —
 # in tests/dep_boundary.rs and is the compile-time enforcement point for
 # §5 of docs/plans/2026-05-22-plugin-reboot-design.md.
 murphy-plugin-api = { path = "../murphy-plugin-api" }
+# `submit_cop!` and `register_cops!` generate code referencing `::linkme::` — must
+# be a direct dep (linkme's proc macro generates ::linkme:: paths in the calling crate).
+linkme = "0.3"
 # `#[derive(CopOptions)]`-expanded code references `::serde_json` directly
 # in the consuming crate root (the standard proc-macro pattern). Permitted
 # because it is a third-party dependency, not a Murphy-internal crate —

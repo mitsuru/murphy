@@ -235,3 +235,4 @@ mod tests {
         test::<NilComparison>().expect_no_offenses("x != 1\n");
     }
 }
+murphy_plugin_api::submit_cop!(NilComparison);

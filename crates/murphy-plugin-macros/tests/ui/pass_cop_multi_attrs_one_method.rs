@@ -13,6 +13,7 @@ impl BranchChecker {
     fn check_branch(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(mode = dynamic, BranchChecker);
+register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(BranchChecker);
 
 fn main() {}

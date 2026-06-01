@@ -14,13 +14,8 @@
 pub mod no_eval;
 pub mod todo_format;
 
-use crate::no_eval::NoEval;
-use crate::todo_format::TodoFormat;
-
-// `register_cops!` re-exported from `murphy-plugin-api`. `mode = dynamic`
-// emits `#[no_mangle] pub unsafe extern "C" fn murphy_plugin_register`
-// for cdylib consumption by the host's plugin loader.
-murphy_plugin_api::register_cops!(mode = dynamic, NoEval, TodoFormat);
+// cop の登録は各 cop ファイルの submit_cop!(T) が担う。
+murphy_plugin_api::register_cops!(mode = dynamic);
 
 #[cfg(test)]
 mod tests {

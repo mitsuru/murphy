@@ -271,3 +271,4 @@ mod tests {
         test::<AssertNot>().expect_no_offenses("assert_not x\n");
     }
 }
+murphy_plugin_api::submit_cop!(AssertNot);

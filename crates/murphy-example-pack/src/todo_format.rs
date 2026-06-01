@@ -121,3 +121,5 @@ fn check_comment(cx: &Cx<'_>, comment: &Comment, opts: &TodoFormatOptions) {
         );
     }
 }
+
+murphy_plugin_api::submit_cop!(TodoFormat);
