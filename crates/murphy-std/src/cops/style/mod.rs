@@ -11,4 +11,6 @@ pub mod redundant_return;
 pub mod redundant_self;
 pub mod string_literals;
 pub mod symbol_array;
+pub mod while_until_modifier;
 pub mod word_array;
+pub mod yaml_file_read;

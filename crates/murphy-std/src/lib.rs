@@ -59,7 +59,9 @@ use crate::cops::style::redundant_return::RedundantReturn;
 use crate::cops::style::redundant_self::RedundantSelf;
 use crate::cops::style::string_literals::StringLiterals;
 use crate::cops::style::symbol_array::SymbolArray;
+use crate::cops::style::while_until_modifier::WhileUntilModifier;
 use crate::cops::style::word_array::WordArray;
+use crate::cops::style::yaml_file_read::YAMLFileRead;
 
 // `register_cops!` re-exported from `murphy-plugin-api` — the crate is the
 // single Murphy-prefixed runtime dependency by design.
@@ -91,7 +93,9 @@ murphy_plugin_api::register_cops!(
     IfUnlessModifier,
     NilComparison,
     RedundantReturn,
+    WhileUntilModifier,
     WordArray,
+    YAMLFileRead,
 );
 
 /// Standard cops that have **not yet been migrated** to the arena AST /
