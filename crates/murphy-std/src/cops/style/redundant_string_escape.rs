@@ -24,7 +24,7 @@
 //!   Gaps:
 //!     - `__FILE__` / `__dir__` character literals not explicitly handled
 //!       (skipped because their raw_source won't contain `\`).
-//!     - Dsym (:"...") nodes containing Str segments — handled via dstr path.
+//!     - Dsym (:"...") interpolated symbol literals are handled (on_node dsym).
 //!     - Xstr (`%x{...}`) is explicitly skipped (matches RuboCop).
 //!     - Regexp nodes are explicitly skipped (matches RuboCop).
 //!     - Character literals (`?x`) are not subscribed (no `\` in raw source).
@@ -69,6 +69,13 @@ impl RedundantStringEscape {
 
     #[on_node(kind = "dstr")]
     fn check_dstr(&self, node: NodeId, cx: &Cx<'_>) {
+        check_dstr_node(node, cx);
+    }
+
+    #[on_node(kind = "dsym")]
+    fn check_dsym(&self, node: NodeId, cx: &Cx<'_>) {
+        // Dynamic symbols like `:"foo\;#{bar}"` have the same interpolation
+        // semantics as Dstr; delegate to the same scanner.
         check_dstr_node(node, cx);
     }
 }
@@ -124,11 +131,12 @@ fn check_dstr_node(node: NodeId, cx: &Cx<'_>) {
         return; // No redundant escapes in non-interpolating strings.
     }
 
-    let NodeKind::Dstr(children) = cx.kind(node) else {
-        return;
+    let children = match cx.kind(node) {
+        NodeKind::Dstr(children) | NodeKind::Dsym(children) => *children,
+        _ => return,
     };
 
-    for &child_id in cx.list(*children) {
+    for &child_id in cx.list(children) {
         // Only look at Str segments (literal text portions).
         if !matches!(cx.kind(child_id), NodeKind::Str(_)) {
             continue;
@@ -284,6 +292,12 @@ fn classify_dstr(node: NodeId, cx: &Cx<'_>) -> (bool, u8, bool, bool) {
     match bytes[0] {
         b'"' => (true, b'"', false, false),
         b'\'' => (false, b'\'', false, false),
+        b':' => {
+            // Dsym like `:"foo\;#{bar}"` — interpolation always enabled,
+            // delimiter is the second byte (usually `"`).
+            let delim = if bytes.len() >= 2 { bytes[1] } else { b'"' };
+            (true, matching_close_delim(delim), false, false)
+        }
         b'%' => {
             let ctx = classify_percent_literal(bytes);
             match ctx {
@@ -661,6 +675,24 @@ mod tests {
     #[test]
     fn no_offense_disable_interpolation_in_dstr() {
         test::<RedundantStringEscape>().expect_no_offenses(r#""\#{x}bar""#);
+    }
+
+    // --- Dynamic symbol (Dsym) ---
+
+    #[test]
+    fn flags_escaped_semicolon_in_dsym_segment() {
+        test::<RedundantStringEscape>().expect_offense(indoc! {r#"
+            :"foo\;#{x}"
+                 ^^ Redundant escape of ; inside string literal.
+        "#});
+    }
+
+    #[test]
+    fn no_offense_escaped_closing_delimiter_in_dsym() {
+        // `\"` in `:"..."` — necessary to close the delimiter
+        test::<RedundantStringEscape>().expect_no_offenses(r##"
+            :"foo\"#{x}"
+        "##.trim_start());
     }
 
     // --- Skip regexp and xstr ---
