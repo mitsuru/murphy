@@ -293,10 +293,13 @@ fn classify_dstr(node: NodeId, cx: &Cx<'_>) -> (bool, u8, bool, bool) {
         b'"' => (true, b'"', false, false),
         b'\'' => (false, b'\'', false, false),
         b':' => {
-            // Dsym like `:"foo\;#{bar}"` — interpolation always enabled,
-            // delimiter is the second byte (usually `"`).
+            // Dsym form: `:"..."` (interpolation enabled) or `:'...'` (disabled).
             let delim = if bytes.len() >= 2 { bytes[1] } else { b'"' };
-            (true, matching_close_delim(delim), false, false)
+            if delim == b'\'' {
+                (false, b'\'', false, false) // single-quoted symbol: no escapes redundant
+            } else {
+                (true, matching_close_delim(delim), false, false)
+            }
         }
         b'%' => {
             let ctx = classify_percent_literal(bytes);
