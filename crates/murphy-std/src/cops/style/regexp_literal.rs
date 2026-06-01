@@ -193,11 +193,36 @@ fn regexp_body_contains_slash(node: NodeId, cx: &Cx<'_>) -> bool {
     }
 }
 
+/// Returns `true` if the regexp body contains `{` or `}` (unescaped in the
+/// interned string value). Used to skip `%r{}` autocorrect when the body
+/// would conflict with the brace delimiters.
+fn regexp_body_contains_braces(node: NodeId, cx: &Cx<'_>) -> bool {
+    match *cx.kind(node) {
+        NodeKind::Regexp { parts, .. } => {
+            for &part in cx.list(parts) {
+                if let NodeKind::Str(sid) = cx.kind(part) {
+                    let s = cx.string_str(*sid);
+                    if s.contains('{') || s.contains('}') {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Emit the autocorrect edit — swap delimiters and fix inner slash escaping.
 fn emit_autocorrect(node: NodeId, cx: &Cx<'_>, is_slash_literal: bool, src: &str) {
     let range = cx.range(node);
     if is_slash_literal {
         // `/foo/flags` → `%r{foo}flags`
+        // Skip autocorrect if body contains `{` or `}` — the braces would
+        // conflict with the `%r{}` delimiters and produce invalid Ruby.
+        if regexp_body_contains_braces(node, cx) {
+            return;
+        }
         // Opening delimiter: the `/` at start → `%r{`
         let open_range = Range { start: range.start, end: range.start + 1 };
         cx.emit_edit(open_range, "%r{");
@@ -462,6 +487,18 @@ mod tests {
     }
 
     // ----- Non-brace %r delimiters -----
+
+    #[test]
+    fn flags_slash_literal_with_body_brace_but_no_autocorrect() {
+        // Body contains `}` — offense is emitted but autocorrect is skipped
+        // to avoid generating invalid `%r{foo}bar}`.
+        test::<RegexpLiteral>()
+            .with_options(&RegexpLiteralOptions { enforced_style: EnforcedStyle::PercentR, ..Default::default() })
+            .expect_offense(indoc! {r#"
+                r = /foo}bar/
+                    ^ Use `%r` around regular expression.
+            "#});
+    }
 
     #[test]
     fn corrects_percent_r_bracket_to_slashes() {

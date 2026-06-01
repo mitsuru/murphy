@@ -78,7 +78,13 @@ impl RedundantStringEscape {
 enum StringContext {
     /// Interpolation is enabled; the closing delimiter char is stored.
     InterpolationEnabled {
+        /// The closing delimiter character (e.g. `"`, `)`, `}`, `]`).
         close_delim: u8,
+        /// The opening delimiter character. Equals `close_delim` for non-paired
+        /// delimiters (`"`, `/`). For paired delimiters (`%Q{...}`, `%Q(...)`)
+        /// this is the corresponding open char (`{`, `(`). Both must be allowed
+        /// as necessary escapes inside paired-delimiter strings.
+        open_delim: u8,
         /// True if this is a `%w`/`%W` word array element.
         is_percent_word: bool,
     },
@@ -117,7 +123,7 @@ fn check_dstr_node(node: NodeId, cx: &Cx<'_>) {
     }
 
     // Determine if this Dstr has interpolation enabled by examining the opener token.
-    let (interp_enabled, close_delim, is_heredoc, is_percent_word) =
+    let (interp_enabled, close_delim, open_delim, is_heredoc, is_percent_word) =
         classify_dstr(node, cx);
 
     if !interp_enabled {
@@ -163,6 +169,7 @@ fn check_dstr_node(node: NodeId, cx: &Cx<'_>) {
             end,
             StringContext::InterpolationEnabled {
                 close_delim,
+                open_delim,
                 is_percent_word,
             },
             is_heredoc,
@@ -195,6 +202,7 @@ fn classify_standalone_str(raw: &str) -> StringContext {
     match first {
         b'"' => StringContext::InterpolationEnabled {
             close_delim: b'"',
+            open_delim: b'"',
             is_percent_word: false,
         },
         b'\'' => StringContext::InterpolationDisabled,
@@ -235,8 +243,11 @@ fn classify_percent_literal(bytes: &[u8]) -> StringContext {
 
     let is_percent_word = matches!(letter, b'W');
 
+    // For percent literals, the open delimiter character.
+    let open_delim = if open_delim_pos < bytes.len() { bytes[open_delim_pos] } else { 0 };
     StringContext::InterpolationEnabled {
         close_delim,
+        open_delim,
         is_percent_word,
     }
 }
@@ -254,8 +265,8 @@ fn matching_close_delim(open: u8) -> u8 {
 
 /// Determine if a Dstr has interpolation enabled, what its close delimiter is,
 /// and whether it's a heredoc.
-/// Returns `(interp_enabled, close_delim, is_heredoc, is_percent_word)`.
-fn classify_dstr(node: NodeId, cx: &Cx<'_>) -> (bool, u8, bool, bool) {
+/// Returns `(interp_enabled, close_delim, open_delim, is_heredoc, is_percent_word)`.
+fn classify_dstr(node: NodeId, cx: &Cx<'_>) -> (bool, u8, u8, bool, bool) {
     // Check if there's a HeredocStart token at or before this Dstr's range start.
     let range = cx.range(node);
     let src = cx.source();
@@ -272,27 +283,27 @@ fn classify_dstr(node: NodeId, cx: &Cx<'_>) -> (bool, u8, bool, bool) {
         // It's a heredoc. Check if the label ends with `'` (no interpolation).
         let heredoc_src = &src_bytes[tok.range.start as usize..tok.range.end as usize];
         let disabled = heredoc_src.ends_with(b"'");
-        return (!disabled, b'\0', true, false);
+        return (!disabled, b'\0', b'\0', true, false);
     }
 
     // Not a heredoc — look at the raw source opening.
     let raw = cx.raw_source(range);
     let bytes = raw.as_bytes();
     if bytes.is_empty() {
-        return (false, b'\0', false, false);
+        return (false, b'\0', b'\0', false, false);
     }
     match bytes[0] {
-        b'"' => (true, b'"', false, false),
-        b'\'' => (false, b'\'', false, false),
+        b'"' => (true, b'"', b'"', false, false),
+        b'\'' => (false, b'\'', b'\0', false, false),
         b'%' => {
             let ctx = classify_percent_literal(bytes);
             match ctx {
-                StringContext::InterpolationEnabled { close_delim, is_percent_word } =>
-                    (true, close_delim, false, is_percent_word),
-                StringContext::InterpolationDisabled => (false, b'\0', false, false),
+                StringContext::InterpolationEnabled { close_delim, open_delim, is_percent_word } =>
+                    (true, close_delim, open_delim, false, is_percent_word),
+                StringContext::InterpolationDisabled => (false, b'\0', b'\0', false, false),
             }
         }
-        _ => (false, b'\0', false, false),
+        _ => (false, b'\0', b'\0', false, false),
     }
 }
 
@@ -306,7 +317,7 @@ fn scan_and_emit(cx: &Cx<'_>, full_range: Range, raw: &str, ctx: StringContext) 
         StringContext::InterpolationDisabled => {
             // No redundant escapes in non-interpolating strings.
         }
-        StringContext::InterpolationEnabled { close_delim, is_percent_word } => {
+        StringContext::InterpolationEnabled { close_delim, open_delim, is_percent_word } => {
             // Find the content range (skip opening delimiter).
             // For "...", skip 1 byte (the `"`).
             // For %Q(...), skip 3 bytes (`%Q(`).
@@ -319,7 +330,7 @@ fn scan_and_emit(cx: &Cx<'_>, full_range: Range, raw: &str, ctx: StringContext) 
                 src_bytes,
                 file_offset + content_start,
                 file_offset + content_end,
-                StringContext::InterpolationEnabled { close_delim, is_percent_word },
+                StringContext::InterpolationEnabled { close_delim, open_delim, is_percent_word },
                 false,
             );
         }
@@ -356,7 +367,7 @@ fn scan_bytes_and_emit(
     ctx: StringContext,
     _is_heredoc: bool,
 ) {
-    let StringContext::InterpolationEnabled { close_delim, is_percent_word } = ctx else {
+    let StringContext::InterpolationEnabled { close_delim, open_delim, is_percent_word } = ctx else {
         return;
     };
 
@@ -376,7 +387,7 @@ fn scan_bytes_and_emit(
         let next_byte = src_bytes[next_pos];
 
         // Determine if this escape is redundant.
-        if is_redundant_escape(src_bytes, i, next_byte, close_delim, is_percent_word) {
+        if is_redundant_escape(src_bytes, i, next_byte, close_delim, open_delim, is_percent_word) {
             let escape_range = Range {
                 start: i as u32,
                 end: (i + 2) as u32,
@@ -404,6 +415,7 @@ fn is_redundant_escape(
     pos: usize,
     next: u8,
     close_delim: u8,
+    open_delim: u8,
     is_percent_word: bool,
 ) -> bool {
     // Alphanumeric, backslash: never redundant (has semantic meaning).
@@ -442,6 +454,12 @@ fn is_redundant_escape(
 
     // The closing delimiter: `\"` in `"..."`, or `\)` in `%(...)`, etc.
     if next == close_delim {
+        return false;
+    }
+
+    // The opening delimiter for paired percent literals: `{` in `%Q{...}`, `(` in `%Q(...)`.
+    // Inside nested string literals, escaping the open delimiter is necessary to break nesting.
+    if open_delim != close_delim && next == open_delim {
         return false;
     }
 
@@ -661,6 +679,21 @@ mod tests {
     #[test]
     fn no_offense_disable_interpolation_in_dstr() {
         test::<RedundantStringEscape>().expect_no_offenses(r#""\#{x}bar""#);
+    }
+
+    // --- No-offense: paired percent literal open delimiter ---
+
+    #[test]
+    fn no_offense_escaped_open_delim_in_percent_q_brace() {
+        // `\{` inside `%Q{...}` is necessary to include a literal `{` that
+        // would otherwise start nesting. The fix must not autocorrect this.
+        test::<RedundantStringEscape>().expect_no_offenses(r"%Q{foo\{bar}");
+    }
+
+    #[test]
+    fn no_offense_escaped_open_delim_in_percent_paren() {
+        // `\(` inside `%Q(...)` is the paired opening delimiter — not redundant.
+        test::<RedundantStringEscape>().expect_no_offenses(r"%Q(foo\(bar)");
     }
 
     // --- Skip regexp and xstr ---
