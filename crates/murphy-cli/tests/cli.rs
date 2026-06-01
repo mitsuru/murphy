@@ -1053,7 +1053,7 @@ fn inherit_from_current_file_overrides_base() {
     )
     .expect("write .murphy.yml");
 
-    Command::cargo_bin("murphy")
+    let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
@@ -1062,6 +1062,15 @@ fn inherit_from_current_file_overrides_base() {
         .arg("--no-cache")
         .assert()
         .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "expected exactly one offense, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
 #[test]
@@ -1073,7 +1082,7 @@ fn inherit_from_cycle_exits_2() {
     fs::write(root.join(".murphy.yml"), "inherit_from: a.yml\n").expect("write .murphy.yml");
     fs::write(root.join("clean.rb"), CLEAN_SOURCE).expect("write clean.rb");
 
-    Command::cargo_bin("murphy")
+    let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
         .current_dir(root)
         .arg("lint")
@@ -1082,4 +1091,10 @@ fn inherit_from_cycle_exits_2() {
         .arg("--no-cache")
         .assert()
         .code(2);
+
+    assert!(
+        assert.get_output().stdout.is_empty(),
+        "config-error path must write nothing to stdout, got {:?}",
+        assert.get_output().stdout
+    );
 }

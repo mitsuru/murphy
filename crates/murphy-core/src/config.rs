@@ -231,7 +231,11 @@ impl ParsedYaml {
             },
             plugins: {
                 let mut all = base.plugins;
-                all.extend(self.plugins);
+                for p in self.plugins {
+                    if !all.contains(&p) {
+                        all.push(p);
+                    }
+                }
                 all
             },
             inherit_from: vec![],
