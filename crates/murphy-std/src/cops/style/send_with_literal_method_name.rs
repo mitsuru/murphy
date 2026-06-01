@@ -18,7 +18,8 @@
 //!   not be a Ruby reserved word.
 //!   Both sym and str literal first arguments are accepted.
 //!   Autocorrect: single-arg → replace selector-to-end with method name;
-//!   multi-arg → rename selector + remove first-arg range up to second arg.
+//!   multi-arg → rename selector + remove first-arg range up to second arg
+//!   (only for parenthesized single-line calls; otherwise offense-only).
 //!   Both send and csend (safe-navigation) are handled.
 //!   This cop is marked Safe: false upstream (cannot detect private method calls).
 //! ```
@@ -167,12 +168,16 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         cx.emit_edit(offense_range, &literal_name);
     } else {
         // Multiple args: rename selector + remove first arg up to second arg.
-        cx.emit_edit(selector_range, &literal_name);
-        let removal = Range {
-            start: cx.range(first_arg).start,
-            end: cx.range(args[1]).start,
-        };
-        cx.emit_edit(removal, "");
+        // Only autocorrect for simple, parenthesized, single-line calls where
+        // the removal of the first argument is unambiguous.
+        if cx.is_parenthesized(node) && cx.is_single_line(node) {
+            cx.emit_edit(selector_range, &literal_name);
+            let removal = Range {
+                start: cx.range(first_arg).start,
+                end: cx.range(args[1]).start,
+            };
+            cx.emit_edit(removal, "");
+        }
     }
 }
 
