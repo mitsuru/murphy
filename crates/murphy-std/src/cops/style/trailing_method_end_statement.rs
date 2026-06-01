@@ -101,17 +101,23 @@ fn check_method(node: NodeId, cx: &Cx<'_>) {
 }
 
 /// Returns the leading whitespace of the line containing the `def` keyword.
-fn def_keyword_indent(node: NodeId, cx: &Cx<'_>) -> String {
-    let source = cx.source().as_bytes();
+///
+/// Only the leading spaces/tabs are returned, not any other content (e.g.
+/// `private `) that may precede `def` on the same line.
+fn def_keyword_indent<'a>(node: NodeId, cx: &Cx<'a>) -> &'a str {
+    let source = cx.source();
     let def_start = cx.range(node).start as usize;
     // Find start of the def's line.
     let line_start = source[..def_start]
-        .iter()
-        .rposition(|&b| b == b'\n')
+        .bytes()
+        .rposition(|b| b == b'\n')
         .map_or(0, |p| p + 1);
-    // Collect leading spaces/tabs as the indent.
-    let indent_bytes = &source[line_start..def_start];
-    std::str::from_utf8(indent_bytes).unwrap_or("").to_string()
+    // Collect only leading spaces/tabs as the indent.
+    let indent_len = source[line_start..def_start]
+        .bytes()
+        .take_while(|&b| b == b' ' || b == b'\t')
+        .count();
+    &source[line_start..line_start + indent_len]
 }
 
 #[cfg(test)]
@@ -224,6 +230,25 @@ mod tests {
               bar end
                   ^^^ Place the end statement of a multi-line method on its own line.
         "#});
+    }
+
+    #[test]
+    fn corrects_end_preserves_only_leading_whitespace_not_modifier_prefix() {
+        // When `def` is on a line like `  private def bar`, only the two leading
+        // spaces should be used as the indent — not `  private ` (which would
+        // produce wrong output like `  private end`).
+        test::<TrailingMethodEndStatement>().expect_correction(
+            indoc! {r#"
+                private def bar
+                  baz end
+                      ^^^ Place the end statement of a multi-line method on its own line.
+            "#},
+            indoc! {r#"
+                private def bar
+                  baz
+                end
+            "#},
+        );
     }
 }
 murphy_plugin_api::submit_cop!(TrailingMethodEndStatement);

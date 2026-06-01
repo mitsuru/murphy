@@ -148,7 +148,7 @@ impl TrailingCommaInHashLiteral {
                 }
                 // Flag missing trailing comma when multiline (with the single-
                 // element-same-closing-brace exception).
-                if should_have_comma_consistent_style(node, last_pair, pairs.len(), cx) {
+                if should_have_comma_consistent_style(node, pairs, cx) {
                     let after_last_pair = cx.range(last_pair).end;
                     cx.emit_offense(
                         cx.range(last_pair),
@@ -256,19 +256,15 @@ fn should_have_comma_comma_style(
 ///
 /// The exception applies only when there is exactly one pair AND the closing
 /// `}` is on the same line as the last pair end.
-fn should_have_comma_consistent_style(
-    node: NodeId,
-    last_pair: NodeId,
-    pair_count: usize,
-    cx: &Cx<'_>,
-) -> bool {
+fn should_have_comma_consistent_style(node: NodeId, pairs: &[NodeId], cx: &Cx<'_>) -> bool {
     if !cx.is_multiline(node) {
         return false;
     }
 
     // Single-pair exception: when there is exactly one pair AND the closing
     // `}` is on the same line as the last pair end, skip.
-    if pair_count == 1 {
+    if pairs.len() == 1 {
+        let last_pair = pairs[0];
         let closing_brace_start = find_closing_brace_start(node, cx);
         let last_pair_end = cx.range(last_pair).end;
         let between = Range {
