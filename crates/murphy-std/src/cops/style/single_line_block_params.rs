@@ -19,9 +19,9 @@
 //!     - Only single-line `Block` nodes are checked (`is_single_line`).
 //!     - Receiver required -- bare `reduce { ... }` is not flagged.
 //!     - All block arguments must be plain `Arg` nodes (no splat/destruct).
-//!     - Argument prefix matching: `_a` satisfies expected `a`; `_` satisfies
-//!       any name with underscore prefix.
-//!     - Autocorrect: rewrites `|args|` and all matching body `Lvar` nodes.
+//!     - Argument prefix matching: `_a` satisfies expected `a`; bare `_` matches any.
+//!     - Autocorrect: rewrites `|args|` and all matching body `Lvar`/`Lvasgn` nodes
+//!       within the current scope (stops at nested blocks/defs).
 //!     - Methods option: configurable map of method name -> preferred param names.
 //!   Gaps:
 //!     - `on_numblock` not covered (numbered params `_1`, `_2`).
@@ -207,7 +207,8 @@ fn check_block(node: NodeId, cx: &Cx<'_>, opts: &Options) {
     // Autocorrect: replace args declaration.
     cx.emit_edit(full_args_range, &format!("|{joined}|"));
 
-    // Rename matching body lvars.
+    // Rename matching body lvars within the current scope (not crossing into
+    // nested blocks or defs, which would introduce shadowing).
     if let Some(body_id) = body.get() {
         // Build old->new map, only for names that actually change.
         let rename_map: Vec<(String, String)> = actual_names
@@ -218,27 +219,68 @@ fn check_block(node: NodeId, cx: &Cx<'_>, opts: &Options) {
             .collect();
 
         if !rename_map.is_empty() {
-            for desc in cx.descendants(body_id) {
-                if let NodeKind::Lvar(sym) = *cx.kind(desc) {
-                    let lvar_str = cx.symbol_str(sym);
-                    if let Some((_, new_name)) =
-                        rename_map.iter().find(|(old, _)| old == lvar_str)
-                    {
-                        cx.emit_edit(cx.range(desc), new_name);
-                    }
+            rename_in_scope(body_id, &rename_map, cx);
+        }
+    }
+}
+
+/// Rename local variable references (`Lvar`) and assignments (`Lvasgn`) within
+/// `node`, stopping at scope boundaries (`Block`, `Numblock`, `Def`, `Defs`).
+/// This prevents renaming names that are shadowed inside nested blocks.
+fn rename_in_scope(node: NodeId, rename_map: &[(String, String)], cx: &Cx<'_>) {
+    match cx.kind(node) {
+        NodeKind::Lvar(sym) => {
+            let name = cx.symbol_str(*sym);
+            if let Some((_, new_name)) = rename_map.iter().find(|(old, _)| old == name) {
+                cx.emit_edit(cx.range(node), new_name);
+            }
+        }
+        NodeKind::Lvasgn { name, value } => {
+            let name_str = cx.symbol_str(*name);
+            if let Some((_, new_name)) = rename_map.iter().find(|(old, _)| old == name_str) {
+                // Rename the assignment target. Use loc.name which is the name sub-range
+                // of the Lvasgn node (excludes the ` =` part).
+                let name_range = cx.node(node).loc.name;
+                if name_range != murphy_plugin_api::Range::ZERO {
+                    cx.emit_edit(name_range, new_name);
                 }
+            }
+            // Recurse into the value (right-hand side of assignment).
+            if let Some(val_id) = value.get() {
+                rename_in_scope(val_id, rename_map, cx);
+            }
+        }
+        // Scope boundaries -- do NOT recurse into these.
+        NodeKind::Block { .. }
+        | NodeKind::Numblock { .. }
+        | NodeKind::Def { .. }
+        | NodeKind::Defs { .. } => {
+            // Stop recursion; inner scopes may shadow the params.
+        }
+        // For all other nodes, recurse into children via descendants with bounded walk.
+        _ => {
+            // Walk direct children (not using cx.descendants which goes too deep).
+            for child in cx.children(node) {
+                rename_in_scope(child, rename_map, cx);
             }
         }
     }
 }
 
-/// Returns `true` if actual params already match the preferred names
-/// (ignoring leading underscores).
+/// Returns `true` if actual params already match the preferred names.
+///
+/// Rules:
+/// - Leading underscores are stripped from both actual and preferred before comparison.
+/// - A bare `_` (sole underscore) in the actual list matches any preferred name.
 fn args_match(actual: &[&str], preferred: &[String]) -> bool {
-    let actual_stripped: Vec<&str> =
-        actual.iter().map(|a| a.trim_start_matches('_')).collect();
     let expected = preferred.iter().take(actual.len());
-    actual_stripped.iter().zip(expected).all(|(a, e)| *a == e)
+    actual.iter().zip(expected).all(|(a, e)| {
+        // Bare `_` is an unconditional wildcard -- matches any preferred name.
+        if *a == "_" {
+            return true;
+        }
+        a.trim_start_matches('_') == e.trim_start_matches('_')
+    })
 }
 
 /// Find the range from the opening `|` to the closing `|` around the args.
@@ -401,6 +443,32 @@ mod tests {
         test::<SingleLineBlockParams>()
             .with_options(&default_opts())
             .expect_no_offenses("foo.reduce { |*args| args }\n");
+    }
+
+
+    #[test]
+    fn no_offense_bare_underscore() {
+        // Bare `_` is an unconditional wildcard -- should not be flagged.
+        test::<SingleLineBlockParams>()
+            .with_options(&default_opts())
+            .expect_no_offenses("foo.reduce { |_, elem| elem }
+");
+    }
+
+    #[test]
+    fn corrects_nested_block_does_not_rename_shadow() {
+        // Nested block with same param name should NOT have its lvar renamed.
+        // Only the outer block's references should be renamed.
+        test::<SingleLineBlockParams>()
+            .with_options(&default_opts())
+            .expect_correction(
+                indoc! {"
+                    foo.reduce { |c, d| xs.map { |c| c } }
+                                 ^^^^^^ Name `reduce` block params `|acc, elem|`.
+                "},
+                "foo.reduce { |acc, elem| xs.map { |c| c } }
+",
+            );
     }
 
     // -------------------------------------------------------------------------
