@@ -5,11 +5,10 @@
 //! upstream: rubocop-rspec
 //! upstream_cop: RSpec/MultipleExpectations
 //! upstream_version_checked: 3.7.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-ipxn
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Known follow-up remains for token-based example call offense ranges.
+//!   Token-based example_call_range (murphy-ipxn) implemented.
 //! ```
 //!
 //! calls inside one example. Mirrors RuboCop-RSpec's cop of the same
@@ -53,9 +52,9 @@
 //! Splitting an example into multiple `it` blocks is a refactor that
 //! needs human judgement about isolation and shared setup.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
 
-use super::helpers::is_example_call;
+use super::helpers::{example_call_range, is_example_call};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -234,27 +233,6 @@ fn is_bare_send_named(cx: &Cx<'_>, id: NodeId, name: &str) -> bool {
         return false;
     };
     receiver == OptNodeId::NONE && cx.symbol_str(method) == name
-}
-
-fn example_call_range(cx: &Cx<'_>, call: NodeId, body: NodeId) -> Range {
-    let mut range = cx.range(call);
-    let body_range = cx.range(body);
-    if body_range.start <= range.start {
-        return range;
-    }
-
-    range.end = body_range.start;
-    let mut text = cx.raw_source(range).trim_end();
-    if let Some(stripped) = text.strip_suffix("do") {
-        text = stripped.trim_end();
-    } else if let Some(stripped) = text.strip_suffix('{') {
-        text = stripped.trim_end();
-    }
-
-    Range {
-        start: range.start,
-        end: range.start + text.len() as u32,
-    }
 }
 
 #[cfg(test)]
@@ -485,6 +463,53 @@ mod tests {
                   expect(a).to eq(1)
                   expect(b).to eq(2)
                 }
+            "#});
+    }
+
+    // ------------------------------------------------------------------
+    // Token-based example_call_range tests (murphy-ipxn)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn offense_range_excludes_block_args_before_body() {
+        // `it "works" do |x|` — block parameters appear between `do` and
+        // the body. The offense range must cover only the call (`it "works"`),
+        // not `do |x|`. The heuristic strip_suffix("do") fails here because
+        // the trimmed text ends with `|x|` not `do`.
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it "works" do |x|
+                ^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
+    }
+
+    #[test]
+    fn offense_range_excludes_block_opener_with_brace_hash_arg() {
+        // When the example call has an explicit brace-hash argument,
+        // the `{` of the hash must NOT be mistaken for the block opener.
+        // The offense range should cover the whole call including the
+        // hash arg, but not the `do` block opener.
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it "works", { aggregate_failures: false } do
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
+            "#});
+    }
+
+    #[test]
+    fn offense_range_includes_parens_in_call() {
+        // `it("works") do` -- the parens are part of the call node's
+        // expression range and must be included in the offense range.
+        test::<MultipleExpectations>().expect_offense(indoc! {r#"
+                it("works") do
+                ^^^^^^^^^^^ Example has too many expectations [2/1].
+                  expect(a).to eq(1)
+                  expect(b).to eq(2)
+                end
             "#});
     }
 }

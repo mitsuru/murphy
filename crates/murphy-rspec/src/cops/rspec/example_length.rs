@@ -8,13 +8,12 @@
 //! status: partial
 //! gap_issues:
 //!   - murphy-fgcu
-//!   - murphy-ttzm
 //! notes: >
 //!   Fixed: comment lines skipped by default, blank lines skipped, CountComments
 //!   option, CountAsOne option (array/hash/method_call), message format matches
 //!   RuboCop ("Example has too many lines. [N/M]"), runtime options wired via
-//!   cx.options_or_default. Remaining gaps: heredoc folding in CountAsOne,
-//!   alias coverage.
+//!   cx.options_or_default, focused/skipped/pending alias coverage (murphy-ttzm).
+//!   Remaining gaps: heredoc folding in CountAsOne (murphy-fgcu).
 //! ```
 //!
 //! body. Mirrors RuboCop-RSpec's cop of the same name.
@@ -64,7 +63,7 @@
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
-use super::helpers::is_example_call;
+use super::helpers::{example_call_range, is_example_call};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -128,7 +127,7 @@ impl ExampleLength {
         }
 
         cx.emit_offense(
-            cx.range(node),
+            example_call_range(cx, call, body_id),
             &format!(
                 "Example has too many lines. [{line_count}/{max}]",
                 max = opts.max
@@ -212,13 +211,7 @@ fn count_lines(text: &str, count_comments: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{ExampleLength, ExampleLengthOptions, count_lines};
-    use murphy_plugin_api::test_support::{indoc, run_cop, run_cop_with_options, test};
-
-    /// `run_cop` only dispatches the one cop type so every emission is
-    /// already a `RSpec/ExampleLength` offense.
-    fn hits(source: &str) -> usize {
-        run_cop::<ExampleLength>(source).len()
-    }
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
     fn count_lines_handles_basic_shapes() {
@@ -239,18 +232,17 @@ mod tests {
 
     #[test]
     fn flags_body_exceeding_default_max() {
-        // 6-line body, default Max = 5 -- must emit exactly once.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-        "#};
-        assert_eq!(hits(src), 1);
+        test::<ExampleLength>().expect_offense(indoc! {r#"
+                it "works" do
+                ^^^^^^^^^^ Example has too many lines. [6/5]
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                end
+            "#});
     }
 
     #[test]
@@ -268,86 +260,126 @@ mod tests {
 
     #[test]
     fn handles_specify_and_example_aliases() {
-        let src = indoc! {r#"
-            specify "x" do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-            example "y" do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-        "#};
-        assert_eq!(hits(src), 2);
+        test::<ExampleLength>().expect_offense(indoc! {r#"
+                specify "x" do
+                ^^^^^^^^^^^ Example has too many lines. [6/5]
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                end
+                example "y" do
+                ^^^^^^^^^^^ Example has too many lines. [6/5]
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                end
+            "#});
+    }
+
+    /// murphy-ttzm: focused and skipped/pending example aliases must be
+    /// recognized by `is_example_call` and trigger length checks the same
+    /// way as `it`/`specify`/`example`.
+    #[test]
+    fn handles_focused_skipped_and_pending_aliases() {
+        test::<ExampleLength>().expect_offense(indoc! {r#"
+                fit "focused" do
+                ^^^^^^^^^^^^^ Example has too many lines. [6/5]
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                end
+                xit "skipped" do
+                ^^^^^^^^^^^^^ Example has too many lines. [6/5]
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                end
+                skip "skip_form" do
+                ^^^^^^^^^^^^^^^^ Example has too many lines. [6/5]
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                end
+                pending "pending_form" do
+                ^^^^^^^^^^^^^^^^^^^^^^ Example has too many lines. [6/5]
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                end
+            "#});
     }
 
     #[test]
     fn ignores_non_example_blocks() {
-        // `describe` is grouping scaffolding, not an example.
-        let src = indoc! {r#"
-            describe Widget do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-        "#};
-        assert_eq!(hits(src), 0);
+        test::<ExampleLength>().expect_no_offenses(indoc! {r#"
+                describe Widget do
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                end
+            "#});
     }
 
     #[test]
     fn ignores_explicit_receiver_it_form() {
-        // `Other.it "x" do ... end` -- non-bare receiver belongs to
-        // some other DSL.
-        let src = indoc! {r#"
-            Other.it "x" do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-        "#};
-        assert_eq!(hits(src), 0);
+        // `Other.it "x" do ... end` -- non-bare receiver belongs to some other DSL.
+        test::<ExampleLength>().expect_no_offenses(indoc! {r#"
+                Other.it "x" do
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                end
+            "#});
     }
 
     #[test]
     fn ignores_empty_body() {
         // `it "x" do end` -- body is None, never long enough to flag.
-        let src = indoc! {r#"
-            it "x" do
-            end
-        "#};
-        assert_eq!(hits(src), 0);
+        test::<ExampleLength>().expect_no_offenses(indoc! {r#"
+                it "x" do
+                end
+            "#});
     }
 
     #[test]
     fn flags_brace_form_block() {
         // RSpec accepts `it { ... }` as well as `it do ... end`; both
-        // parse to `NodeKind::Block`. Newlines inside the braces feed
-        // the line count the same way.
-        let src = indoc! {r#"
-            it "works" {
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            }
-        "#};
-        assert_eq!(hits(src), 1);
+        // parse to `NodeKind::Block`.
+        test::<ExampleLength>().expect_offense(indoc! {r#"
+                it "works" {
+                ^^^^^^^^^^ Example has too many lines. [6/5]
+                  a = 1
+                  b = 2
+                  c = 3
+                  d = 4
+                  e = 5
+                  f = 6
+                }
+            "#});
     }
 
     // ------------------------------------------------------------------
@@ -356,194 +388,146 @@ mod tests {
 
     #[test]
     fn ignores_comment_lines_by_default() {
-        // 5 code lines + 1 comment = 6 physical lines but only 5 logical
-        // lines because comment lines are skipped by default.
-        // With default Max=5 this must emit no offense.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              b = 2
-              c = 3
-              # this is a comment
-              d = 4
-              e = 5
-            end
-        "#};
-        assert_eq!(hits(src), 0);
+        // 5 code lines + 1 comment = 5 logical lines (comment skipped).
+        test::<ExampleLength>().expect_no_offenses(indoc! {r#"
+                it "works" do
+                  a = 1
+                  b = 2
+                  c = 3
+                  # this is a comment
+                  d = 4
+                  e = 5
+                end
+            "#});
     }
 
     #[test]
     fn ignores_blank_lines_by_default() {
-        // 5 code lines + 1 blank = 6 physical lines but only 5 logical
-        // lines because blank lines are skipped by default.
-        // With default Max=5 this must emit no offense.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              b = 2
-              c = 3
+        // 5 code lines + 1 blank = 5 logical lines (blank skipped).
+        test::<ExampleLength>().expect_no_offenses(indoc! {r#"
+                it "works" do
+                  a = 1
+                  b = 2
+                  c = 3
 
-              d = 4
-              e = 5
-            end
-        "#};
-        assert_eq!(hits(src), 0);
+                  d = 4
+                  e = 5
+                end
+            "#});
     }
 
     #[test]
     fn count_comments_true_includes_comment_lines() {
         // 3 code lines + 1 comment = 4 logical lines when CountComments: true.
         // Max=3 -> offense.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              b = 2
-              # comment
-              c = 3
-            end
-        "#};
         let opts = ExampleLengthOptions {
             max: 3,
             count_comments: true,
             count_as_one: vec![],
         };
-        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
-        assert_eq!(
-            offenses.len(),
-            1,
-            "CountComments:true should count comment lines"
-        );
-        // Message format must be "Example has too many lines. [4/3]"
-        assert_eq!(offenses[0].message, "Example has too many lines. [4/3]");
+        test::<ExampleLength>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                it "works" do
+                ^^^^^^^^^^ Example has too many lines. [4/3]
+                  a = 1
+                  b = 2
+                  # comment
+                  c = 3
+                end
+            "#});
     }
 
     #[test]
     fn count_comments_false_excludes_comment_lines() {
-        // Same snippet as above but CountComments: false -- 3 code lines
-        // <= Max=3 -> no offense.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              b = 2
-              # comment
-              c = 3
-            end
-        "#};
+        // 3 code lines + 1 comment = 3 logical lines (comment skipped). Max=3 -> no offense.
         let opts = ExampleLengthOptions {
             max: 3,
             count_comments: false,
             count_as_one: vec![],
         };
-        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
-        assert_eq!(offenses.len(), 0);
-    }
-
-    #[test]
-    fn message_format_uses_period_and_brackets() {
-        // RuboCop emits "Example has too many lines. [N/M]" -- verify the
-        // exact format when an offense fires.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              b = 2
-              c = 3
-              d = 4
-              e = 5
-              f = 6
-            end
-        "#};
-        let offenses = run_cop::<ExampleLength>(src);
-        assert_eq!(offenses.len(), 1);
-        assert_eq!(offenses[0].message, "Example has too many lines. [6/5]");
+        test::<ExampleLength>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                it "works" do
+                  a = 1
+                  b = 2
+                  # comment
+                  c = 3
+                end
+            "#});
     }
 
     #[test]
     fn count_as_one_folds_array_into_one_line() {
-        // Multi-line array folded to 1 line: a=1 (1) + array (folded->1) = 2 lines.
-        // Max=3 -> no offense.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              a = [
-                2,
-                3,
-                4,
-                5,
-                6,
-                7,
-                8,
-                9
-              ]
-            end
-        "#};
+        // a=1 (1) + array (folded→1) = 2 lines. Max=3 -> no offense.
         let opts = ExampleLengthOptions {
             max: 3,
             count_comments: false,
             count_as_one: vec!["array".to_string()],
         };
-        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
-        assert_eq!(
-            offenses.len(),
-            0,
-            "CountAsOne:array should fold the multi-line array to 1 line"
-        );
+        test::<ExampleLength>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                it "works" do
+                  a = 1
+                  a = [
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9
+                  ]
+                end
+            "#});
     }
 
     #[test]
     fn count_as_one_folds_hash_into_one_line() {
-        // Multi-line hash folded to 1 line: a=1 (1) + hash (folded->1) = 2 lines.
-        // Max=3 -> no offense.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              b = {
-                c: 2,
-                d: 3,
-                e: 4,
-                f: 5
-              }
-            end
-        "#};
+        // a=1 (1) + hash (folded→1) = 2 lines. Max=3 -> no offense.
         let opts = ExampleLengthOptions {
             max: 3,
             count_comments: false,
             count_as_one: vec!["hash".to_string()],
         };
-        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
-        assert_eq!(
-            offenses.len(),
-            0,
-            "CountAsOne:hash should fold the multi-line hash to 1 line"
-        );
+        test::<ExampleLength>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                it "works" do
+                  a = 1
+                  b = {
+                    c: 2,
+                    d: 3,
+                    e: 4,
+                    f: 5
+                  }
+                end
+            "#});
     }
 
     #[test]
     fn count_as_one_folds_block_method_call_into_one_line() {
-        // A method call with a block (foo do...end) is parsed as a Block node.
-        // CountAsOne:method_call should fold it the same as Send/Csend.
-        // 1 code line + multi-line block method call folded to 1 = 2 lines.
-        // Max=3 -> no offense.
-        let src = indoc! {r#"
-            it "works" do
-              a = 1
-              foo do
-                bar(1)
-                bar(2)
-                bar(3)
-                bar(4)
-              end
-            end
-        "#};
+        // a=1 (1) + block method call (folded→1) = 2 lines. Max=3 -> no offense.
         let opts = ExampleLengthOptions {
             max: 3,
             count_comments: false,
             count_as_one: vec!["method_call".to_string()],
         };
-        let offenses = run_cop_with_options::<ExampleLength>(src, &opts);
-        assert_eq!(
-            offenses.len(),
-            0,
-            "CountAsOne:method_call should fold a block method call (Block node) to 1 line"
-        );
+        test::<ExampleLength>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                it "works" do
+                  a = 1
+                  foo do
+                    bar(1)
+                    bar(2)
+                    bar(3)
+                    bar(4)
+                  end
+                end
+            "#});
     }
 }
