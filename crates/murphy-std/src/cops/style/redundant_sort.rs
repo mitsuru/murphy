@@ -142,15 +142,19 @@ enum SortKind {
 /// - which variant (`Sort` or `SortBy`)
 ///
 /// Receiver shapes handled:
-/// 1. Plain `send :sort` with no args → `(sort_node, Sort)`
-/// 2. Plain `send :sort_by` with exactly one block-pass arg → `(sort_by_node, SortBy)`
+/// 1. Plain `send :sort` with no args → `(sort_node, Sort)` (csend excluded, see below)
+/// 2. Plain `send :sort_by` with exactly one block-pass arg → `(sort_by_node, SortBy)` (csend excluded)
 /// 3. Block/Numblock/Itblock wrapping a `sort_by` call → `(sort_by_call_inside_block, SortBy)`
 /// Note: Block wrapping `sort` (comparison block) is intentionally excluded —
 ///       `sort { |a, b| b <=> a }.first` is NOT equivalent to `min { |a, b| b <=> a }`.
 fn extract_sort_receiver(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, SortKind)> {
     match *cx.kind(receiver) {
-        // Case 1 & 2: plain send
-        NodeKind::Send { method, args, .. } | NodeKind::Csend { method, args, .. } => {
+        // Case 1 & 2: plain send only (NOT csend).
+        // `obj&.sort.first` is NOT equivalent to `obj&.min`: when `obj` is nil,
+        // `obj&.sort` returns nil and `.first` raises NoMethodError, but `obj&.min`
+        // would silently return nil. That is a behaviour change, so csend receivers
+        // are excluded.
+        NodeKind::Send { method, args, .. } => {
             let method_name = cx.symbol_str(method);
             let args_list = cx.list(args);
             match method_name {
@@ -168,7 +172,13 @@ fn extract_sort_receiver(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, SortK
         }
         // Case 3: block wrapping sort_by (sort with comparison block is NOT handled —
         // `sort { |a, b| b <=> a }.first` is NOT equivalent to `min { |a, b| b <=> a }`)
+        // csend inside the block (`obj&.sort_by { ... }.first`) is also excluded for
+        // the same reason as plain csend: behaviour change when obj is nil.
         NodeKind::Block { call, .. } | NodeKind::Numblock { send: call, .. } => {
+            // Reject if the inner call is csend.
+            if matches!(cx.kind(call), NodeKind::Csend { .. }) {
+                return None;
+            }
             let method_name = cx.method_name(call)?;
             match method_name {
                 "sort_by" if cx.call_arguments(call).is_empty() => {
@@ -178,6 +188,10 @@ fn extract_sort_receiver(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, SortK
             }
         }
         NodeKind::Itblock { send, .. } => {
+            // Reject if the inner call is csend.
+            if matches!(cx.kind(send), NodeKind::Csend { .. }) {
+                return None;
+            }
             let method_name = cx.method_name(send)?;
             match method_name {
                 "sort_by" if cx.call_arguments(send).is_empty() => {
@@ -551,6 +565,31 @@ mod tests {
     #[test]
     fn accepts_min_already_used() {
         test::<RedundantSort>().expect_no_offenses("[1, 2, 3].min\n");
+    }
+
+    #[test]
+    fn accepts_sort_with_comparison_block() {
+        // sort { |a, b| b <=> a }.first is NOT equivalent to min { |a, b| b <=> a }
+        // (the comparison block reverses order, making sort produce descending results)
+        test::<RedundantSort>().expect_no_offenses("array.sort { |a, b| b <=> a }.first\n");
+    }
+
+    #[test]
+    fn accepts_sort_with_comparison_block_last() {
+        test::<RedundantSort>().expect_no_offenses("array.sort { |a, b| b <=> a }.last\n");
+    }
+
+    #[test]
+    fn accepts_csend_sort_first() {
+        // obj&.sort.first is NOT equivalent to obj&.min:
+        // when obj is nil, &.sort returns nil and .first raises NoMethodError,
+        // but &.min would silently return nil -- a behaviour change.
+        test::<RedundantSort>().expect_no_offenses("obj&.sort.first\n");
+    }
+
+    #[test]
+    fn accepts_csend_sort_by_block_first() {
+        test::<RedundantSort>().expect_no_offenses("obj&.sort_by { |x| x.foo }.first\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantSort);
