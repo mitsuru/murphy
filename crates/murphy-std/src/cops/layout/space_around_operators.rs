@@ -7,11 +7,11 @@
 //! upstream_version_checked: 1.86.2
 //! status: partial
 //! gap_issues:
-//!   - murphy-70ej
-//!   - murphy-9jge
+//!   - murphy-9vwq
 //! notes: >
-//!   Remaining gaps: setter-method = (murphy-70ej), pattern-match operators
-//!   (murphy-9jge). Index/call op-assign resolved by murphy-9vwq.
+//!   Remaining gap: index/call op-assign (x[i]+=1, x.y+=1) — murphy-translate
+//!   lowers IndexOperatorWriteNode/CallOperatorWriteNode to NodeKind::Unknown
+//!   (murphy-9vwq).
 //! ```
 //!
 //! surrounding whitespace or have more than one space on either side,
@@ -39,20 +39,22 @@
 //! - `class C < D` — class inheritance operator (`Class`).
 //! - `class << self` — singleton-class operator (`Sclass`).
 //! - `a ? b : c` — ternary `?` and `:` (`If` with ternary form).
+//! - `x.y = 2` — setter-method `=` (`Send` with trailing-`=` method name
+//!   and `cx.is_setter_method` true).
+//! - `case x in A | B` — pattern alternation `|` (`MatchAlt`).
+//! - `case x in Integer => n` — capture pattern `=>` (`MatchAs`).
+//! - `x => n` — one-liner assignment pattern `=>` (`MatchPattern`).
 //!
 //! ## Out of scope (remaining limitations)
 //!
 //! - Index / call op-assign: `x[i] += 1` (`IndexOperatorWriteNode`) and
 //!   `x.y += 1` (`CallOperatorWriteNode`). `murphy-translate` lowers both
 //!   to `NodeKind::Unknown` so there is nothing to dispatch on (murphy-9vwq).
-//! - Setter-method assignment `x.y = 2` — a `Send` with a trailing-`=`
-//!   method name; not in the binary-operator dispatch list and not a plain
-//!   `Lvasgn`.
 //! - Optional-parameter defaults `def f(x=0)` — handled by
 //!   `Style/SpaceAroundEqualsInParameterDefault` in RuboCop; Murphy
 //!   deliberately delegates `Optarg` / `Kwoptarg` to a separate cop.
-//! - Pattern-matching `in` / `=>` / `|` — Murphy has no `MatchPattern`
-//!   node yet.
+//! - `x in Integer` — one-liner boolean pattern match (`MatchPatternP`);
+//!   the `in` keyword spacing is handled by `SpaceAroundKeyword` in RuboCop.
 //! - Trailing comment after the operator (`foo +  # comment`) — the extra
 //!   space before `#` is silently accepted.
 //!
@@ -143,13 +145,11 @@ pub enum SpaceAroundOperatorsBinaryStyle {
     options = SpaceAroundOperatorsOptions,
 )]
 impl SpaceAroundOperators {
-    #[on_node(kind = "send", methods = [
-        "+", "-", "*", "**", "/", "%",
-        "==", "!=", "===", "<=>",
-        "<=", ">=", "<", ">",
-        "&", "|", "^", "<<", ">>",
-        "=~", "!~",
-    ])]
+    // Binary-operator Send nodes and setter-method Send nodes are both
+    // dispatched here. The `methods = [...]` filter would exclude setter
+    // methods (`y=`) since they are not in the operator whitelist, so
+    // we omit the filter and perform the method-name check manually.
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Send {
             receiver,
@@ -160,9 +160,31 @@ impl SpaceAroundOperators {
         else {
             return;
         };
-        // Unary `-x` / `+x` arrive with `receiver = NONE` and a `-@`/`+@`
-        // method — the method-name filter already excludes the latter, but
-        // an explicit guard keeps the intent obvious.
+
+        let opts = cx.options_or_default::<SpaceAroundOperatorsOptions>();
+
+        // --- Setter-method branch: `x.y = 2` ---
+        // RuboCop's `setter_method?` gate: `loc?(:operator)` is set when
+        // the call carries a standalone `=` operator token.
+        if cx.is_setter_method(node) {
+            let op_range = cx.assignment_operator_loc(node);
+            if op_range != Range::ZERO {
+                check_operator(cx, op_range, opts.allow_for_alignment);
+            }
+            return;
+        }
+
+        // --- Binary-operator branch ---
+        let method_str = cx.symbol_str(method);
+        // Only process recognised binary-operator method names.
+        const BINARY_OPS: &[&str] = &[
+            "+", "-", "*", "**", "/", "%", "==", "!=", "===", "<=>", "<=", ">=", "<", ">", "&",
+            "|", "^", "<<", ">>", "=~", "!~",
+        ];
+        if !BINARY_OPS.contains(&method_str) {
+            return;
+        }
+        // Unary `-x` / `+x` arrive with `receiver = NONE` — exclude.
         let Some(receiver_id) = receiver.get() else {
             return;
         };
@@ -191,8 +213,6 @@ impl SpaceAroundOperators {
                 return;
             }
         }
-        let opts = cx.options_or_default::<SpaceAroundOperatorsOptions>();
-        let method_str = cx.symbol_str(method);
         // `**` uses `EnforcedStyleForExponentOperator` (default `no_space`).
         if method_str == "**" {
             if opts.enforced_style_for_exponent_operator == SpaceAroundOperatorsBinaryStyle::NoSpace
@@ -515,6 +535,63 @@ impl SpaceAroundOperators {
         let c_range = cx.ternary_colon_loc(node);
         if c_range != Range::ZERO {
             check_operator(cx, c_range, afa);
+        }
+    }
+
+    // --- Pattern-match alternation `|` ---
+
+    #[on_node(kind = "match_alt")]
+    fn check_match_alt(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::MatchAlt { left, right } = *cx.kind(node) else {
+            return;
+        };
+        let gap = Range {
+            start: cx.range(left).end,
+            end: cx.range(right).start,
+        };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
+        if let Some(op_range) = find_op_in_gap(cx, gap, &["|"]) {
+            check_operator(cx, op_range, afa);
+        }
+    }
+
+    // --- Pattern-match capture `=>` (`Integer => n` inside `in`) ---
+
+    #[on_node(kind = "match_as")]
+    fn check_match_as(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::MatchAs { value, name } = *cx.kind(node) else {
+            return;
+        };
+        let gap = Range {
+            start: cx.range(value).end,
+            end: cx.range(name).start,
+        };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
+        if let Some(op_range) = find_op_in_gap(cx, gap, &["=>"]) {
+            check_operator(cx, op_range, afa);
+        }
+    }
+
+    // --- One-liner assignment pattern `x => n` (`MatchPattern`) ---
+
+    #[on_node(kind = "match_pattern")]
+    fn check_match_pattern(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::MatchPattern { value, pattern } = *cx.kind(node) else {
+            return;
+        };
+        let gap = Range {
+            start: cx.range(value).end,
+            end: cx.range(pattern).start,
+        };
+        let afa = cx
+            .options_or_default::<SpaceAroundOperatorsOptions>()
+            .allow_for_alignment;
+        if let Some(op_range) = find_op_in_gap(cx, gap, &["=>"]) {
+            check_operator(cx, op_range, afa);
         }
     }
 }
@@ -1558,8 +1635,149 @@ mod tests {
     #[test]
     fn v1_gaps_are_silently_accepted() {
         // Optarg defaults are handled by SpaceAroundEqualsInParameterDefault.
-        // Pattern-match operators remain out of scope (no MatchPattern node yet).
         test::<SpaceAroundOperators>().expect_no_offenses("def f(x=0); end\n");
+    }
+
+    // ---------- setter-method = (murphy-70ej) ----------
+
+    #[test]
+    fn flags_missing_space_around_setter_equals() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x.y=2
+               ^ Surrounding space missing for operator `=`.
+        "#});
+    }
+
+    #[test]
+    fn flags_and_corrects_setter_equals_missing_space() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                obj.name=value
+                        ^ Surrounding space missing for operator `=`.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    obj.name=value
+                            ^ Surrounding space missing for operator `=`.
+                "#},
+                "obj.name = value\n",
+            );
+    }
+
+    #[test]
+    fn flags_extra_space_around_setter_equals() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x.y  =  2
+                 ^ Operator `=` should be surrounded by a single space.
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_setter_equals() {
+        test::<SpaceAroundOperators>().expect_no_offenses("x.y = 2\n");
+    }
+
+    // ---------- pattern-match operators: match_alt | and match_as => (murphy-9jge) ----------
+
+    #[test]
+    fn flags_missing_space_around_match_alt_pipe() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            case x
+            in A|B
+                ^ Surrounding space missing for operator `|`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_and_corrects_match_alt_pipe() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                case x
+                in A|B
+                    ^ Surrounding space missing for operator `|`.
+                end
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    case x
+                    in A|B
+                        ^ Surrounding space missing for operator `|`.
+                    end
+                "#},
+                "case x\nin A | B\nend\n",
+            );
+    }
+
+    #[test]
+    fn flags_extra_space_around_match_alt_pipe() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            case x
+            in A  |  B
+                  ^ Operator `|` should be surrounded by a single space.
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_match_alt_pipe() {
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            case x
+            in A | B
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_missing_space_around_match_as_rocket() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            case x
+            in Integer=>n
+                      ^^ Surrounding space missing for operator `=>`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_and_corrects_match_as_rocket() {
+        test::<SpaceAroundOperators>()
+            .expect_offense(indoc! {r#"
+                case x
+                in Integer=>n
+                          ^^ Surrounding space missing for operator `=>`.
+                end
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    case x
+                    in Integer=>n
+                              ^^ Surrounding space missing for operator `=>`.
+                    end
+                "#},
+                "case x\nin Integer => n\nend\n",
+            );
+    }
+
+    #[test]
+    fn accepts_well_spaced_match_as_rocket() {
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            case x
+            in Integer => n
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_missing_space_around_one_liner_match_pattern_rocket() {
+        test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
+            x=>n
+             ^^ Surrounding space missing for operator `=>`.
+        "#});
+    }
+
+    #[test]
+    fn accepts_well_spaced_one_liner_match_pattern_rocket() {
+        test::<SpaceAroundOperators>().expect_no_offenses("x => n\n");
     }
 
     // ---------- multiple offenses + idempotent autocorrect ----------
