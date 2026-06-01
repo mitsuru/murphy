@@ -119,10 +119,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         if b == b'\\' && i + 1 < body.len() {
             let escaped = body[i + 1];
             let char_before = if i > 0 { Some(body[i - 1]) } else { None };
-            // Two-before: needed to detect whether a preceding `#` is itself
-            // escaped (i.e. part of a `\#` sequence), in which case the `#`
-            // cannot trigger interpolation and `\@`/`\$` after it are redundant.
-            let char_two_before = if i >= 2 { Some(body[i - 2]) } else { None };
 
             if !is_allowed_escape(
                 src,
@@ -130,7 +126,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                 i,
                 escaped,
                 char_before,
-                char_two_before,
                 open_delim,
                 close_delim,
                 char_class_depth > 0,
@@ -235,7 +230,6 @@ fn is_allowed_escape(
     i: usize,   // offset of `\` within `body` (i.e., src[body_start + i] == b'\\')
     escaped: u8,
     char_before: Option<u8>,
-    char_two_before: Option<u8>,
     open_delim: u8,
     close_delim: u8,
     within_char_class: bool,
@@ -257,14 +251,22 @@ fn is_allowed_escape(
 
     // 4. Interpolation-sigil guard: `\@` or `\$` right after an UNescaped
     //    `#` would trigger interpolation — keep these escapes.
-    //    If the preceding `#` is itself escaped (i.e. part of `\#`), then it
-    //    cannot start interpolation, so `\@`/`\$` after `\#` are redundant.
+    //    A `#` is only "unescaped" when the number of backslashes immediately
+    //    before it (in the raw source) is even (each pair cancels out).
+    //    Examples: `/#\@foo/` — 0 backslashes before `#` (even) → `#` unescaped, keep `\@`.
+    //              `/\#\@foo/` — 1 backslash before `#` (odd) → `#` escaped, `\@` is redundant.
+    //              `/\\#\@foo/` — 2 backslashes before `#` (even) → `#` unescaped, keep `\@`.
     if let Some(prev) = char_before {
-        if prev == b'#'
-            && INTERPOLATION_SIGILS.contains(&escaped)
-            && !matches!(char_two_before, Some(b'\\'))
-        {
-            return true;
+        if prev == b'#' && INTERPOLATION_SIGILS.contains(&escaped) {
+            let body = &src[body_start..];
+            // Count consecutive backslashes immediately before the `#` (at body[i-1]).
+            let hash_pos = i - 1; // position of `#` within body
+            let preceding_backslashes = count_preceding_backslashes(body, hash_pos);
+            if preceding_backslashes % 2 == 0 {
+                // Even number of backslashes → `#` is literal/unescaped → keep `\@`/`\$`.
+                return true;
+            }
+            // Odd backslashes → `#` is escaped → `\@`/`\$` is redundant (fall through).
         }
     }
 
@@ -327,6 +329,17 @@ fn hyphen_is_in_middle_of_char_class(src: &[u8], body_start: usize, i: usize) ->
     let is_last = i + 2 < body.len() && body[i + 2] == b']';
 
     !is_first && !is_last
+}
+
+/// Count consecutive backslashes immediately before position `pos` in `body`.
+fn count_preceding_backslashes(body: &[u8], pos: usize) -> usize {
+    let mut count = 0;
+    let mut j = pos;
+    while j > 0 && body[j - 1] == b'\\' {
+        count += 1;
+        j -= 1;
+    }
+    count
 }
 
 #[cfg(test)]
@@ -541,6 +554,14 @@ mod tests {
         // /\#\$foo/ — even with escaped `#`, `\$` is kept because `$` has
         // special regexp meaning (end-of-line anchor), so `\$` = literal `$`.
         test::<RedundantRegexpEscape>().expect_no_offenses("/\\#\\$foo/\n");
+    }
+
+    #[test]
+    fn accepts_sigil_escape_after_double_backslash_hash() {
+        // /\\#\@foo/ — two backslashes before `#` (even parity) means
+        // `#` is NOT escaped — it will trigger `#@foo` interpolation,
+        // so `\@` must be kept.
+        test::<RedundantRegexpEscape>().expect_no_offenses("/\\\\#\\@foo/\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantRegexpEscape);
