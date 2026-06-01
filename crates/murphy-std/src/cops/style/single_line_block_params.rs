@@ -19,7 +19,8 @@
 //!     - Only single-line `Block` nodes are checked (`is_single_line`).
 //!     - Receiver required -- bare `reduce { ... }` is not flagged.
 //!     - All block arguments must be plain `Arg` nodes (no splat/destruct).
-//!     - Argument prefix matching: `_a` satisfies expected `a`; bare `_` matches any.
+//!     - Argument prefix matching: `_a` satisfies expected `a`; bare `_` does not
+//!       match named expected (strips to empty string).
 //!     - Autocorrect: rewrites `|args|` and all matching body `Lvar`/`Lvasgn` nodes
 //!       within the current scope (stops at nested blocks/defs).
 //!     - Methods option: configurable map of method name -> preferred param names.
@@ -310,20 +311,17 @@ fn collect_block_param_names<'a>(args_id: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
         .collect()
 }
 
-/// Returns `true` if actual params already match the preferred names.
+/// Returns `true` if actual params already match the preferred names
+/// (ignoring leading underscores).
 ///
-/// Rules:
-/// - Leading underscores are stripped from both actual and preferred before comparison.
-/// - A bare `_` (sole underscore) in the actual list matches any preferred name.
+/// Strips leading underscores from both actual and expected before comparing.
+/// For example: `_acc` matches `acc`, and `acc` matches `acc`.
+/// A bare `_` strips to `""`, which only matches if the preferred is also `""`.
 fn args_match(actual: &[&str], preferred: &[String]) -> bool {
+    let actual_stripped: Vec<&str> =
+        actual.iter().map(|a| a.trim_start_matches('_')).collect();
     let expected = preferred.iter().take(actual.len());
-    actual.iter().zip(expected).all(|(a, e)| {
-        // Bare `_` is an unconditional wildcard -- matches any preferred name.
-        if *a == "_" {
-            return true;
-        }
-        a.trim_start_matches('_') == e.trim_start_matches('_')
-    })
+    actual_stripped.iter().zip(expected).all(|(a, e)| *a == e.trim_start_matches('_'))
 }
 
 /// Find the range from the opening `|` to the closing `|` around the args.
@@ -488,15 +486,6 @@ mod tests {
             .expect_no_offenses("foo.reduce { |*args| args }\n");
     }
 
-
-    #[test]
-    fn no_offense_bare_underscore() {
-        // Bare `_` is an unconditional wildcard -- should not be flagged.
-        test::<SingleLineBlockParams>()
-            .with_options(&default_opts())
-            .expect_no_offenses("foo.reduce { |_, elem| elem }
-");
-    }
 
     #[test]
     fn corrects_nested_block_does_not_rename_shadow() {
