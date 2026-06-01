@@ -12,9 +12,9 @@
 //! notes: >
 //!   Known gaps remain around VariableForce-equivalent coverage and RuboCop parity details.
 //!   murphy-4845: scope boundary gaps in is_scope() fixed — Defs/Numblock/Itblock now included.
-//!   Regexp named captures are represented via value-less Lvasgn lowered from Prism's
-//!   MatchWriteNode; no dedicated MatchWithLvasgn node is needed for UselessAssignment parity.
-//!   The construct is tracked via the existing Lvasgn arm in VarSemanticModel.
+//!   Regexp named captures are represented as MatchWithLvasgn containing value-less
+//!   Lvasgn targets lowered from Prism's MatchWriteNode. The construct is tracked
+//!   via the existing Lvasgn arm in VarSemanticModel.
 //! ```
 //!
 //! never read, *or* whose result is overwritten by a sibling write before
@@ -174,7 +174,7 @@ fn make_write(cx: &Cx<'_>, var: &Variable, asgn: &Assignment) -> Write {
             // range, no autocorrect) or a multiple-assignment target.
             // `for a, b in xs` wraps each target in an `Mlhs` whose parent is
             // the `For`, so the immediate parent alone is not enough. Regexp
-            // named captures are lowered under a `Begin` wrapper.
+            // named captures are lowered under `MatchWithLvasgn`.
             let is_exception = {
                 let mut current = asgn.node_id;
                 let mut found = false;
@@ -184,7 +184,9 @@ fn make_write(cx: &Cx<'_>, var: &Variable, asgn: &Assignment) -> Write {
                         break;
                     };
                     match *cx.kind(parent) {
-                        NodeKind::Resbody { .. } | NodeKind::For { .. } | NodeKind::Begin(_) => {
+                        NodeKind::Resbody { .. }
+                        | NodeKind::For { .. }
+                        | NodeKind::MatchWithLvasgn { .. } => {
                             found = true;
                             break;
                         }

@@ -308,6 +308,11 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
             out.push(pattern);
         }
 
+        NodeKind::MatchWithLvasgn { call, targets } => {
+            out.push(call);
+            push_list(out, lists, targets);
+        }
+
         NodeKind::MatchAs { value, name } => {
             out.push(value);
             out.push(name);
@@ -723,6 +728,11 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
         NodeKind::MatchPatternP { value, pattern } | NodeKind::MatchPattern { value, pattern } => {
             slot_node(out, value);
             slot_node(out, pattern);
+        }
+
+        NodeKind::MatchWithLvasgn { call, targets } => {
+            slot_node(out, call);
+            slot_list(out, lists, targets);
         }
 
         NodeKind::MatchAs { value, name } => {

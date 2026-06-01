@@ -167,6 +167,7 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("pin", 110),
     ("if_guard", 111),
     ("unless_guard", 112),
+    ("match_with_lvasgn", 113),
 ];
 
 /// RuboCop-compatible type-name aliases for APIs that accept parser node
@@ -285,6 +286,7 @@ pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
     ("const_pattern", &[NodeKindTag(109)]),
     ("pin", &[NodeKindTag(110)]),
     ("if_guard", &[NodeKindTag(111)]),
+    ("match_with_lvasgn", &[NodeKindTag(113)]),
     ("call", &[NodeKindTag(17), NodeKindTag(18)]),
     (
         "any_block",
@@ -607,6 +609,10 @@ mod tests {
             NodeKind::Pin(n),
             NodeKind::IfGuard(n),
             NodeKind::UnlessGuard(n),
+            NodeKind::MatchWithLvasgn {
+                call: n,
+                targets: NodeList::EMPTY,
+            },
         ]
     }
 
@@ -761,6 +767,7 @@ mod tests {
             // murphy-j1j2 PM-C one-liner pattern matching
             NodeKind::MatchPatternP { .. } => "match_pattern_p",
             NodeKind::MatchPattern { .. } => "match_pattern",
+            NodeKind::MatchWithLvasgn { .. } => "match_with_lvasgn",
             // murphy-j1j2 PM-D advanced patterns
             NodeKind::MatchAs { .. } => "match_as",
             NodeKind::ConstPattern { .. } => "const_pattern",
@@ -813,6 +820,7 @@ mod tests {
             &[NodeKindTag(7), NodeKindTag(63), NodeKindTag(65)]
         );
         assert_eq!(tags_for_type_name("send"), &[NodeKindTag(17)]);
+        assert_eq!(tags_for_type_name("match_with_lvasgn"), &[NodeKindTag(113)]);
         assert_eq!(tags_for_type_name("sned"), &[]);
     }
 
