@@ -24,7 +24,8 @@
 //!   Gaps:
 //!     - `__FILE__` / `__dir__` character literals not explicitly handled
 //!       (skipped because their raw_source won't contain `\`).
-//!     - Dsym (:"...") nodes containing Str segments — handled via dstr path.
+//!     - Dsym (:"...") nodes containing Str segments — handled via the
+//!       dsym handler, which delegates to check_dstr_node.
 //!     - Xstr (`%x{...}`) is explicitly skipped (matches RuboCop).
 //!     - Regexp nodes are explicitly skipped (matches RuboCop).
 //!     - Character literals (`?x`) are not subscribed (no `\` in raw source).
@@ -130,8 +131,11 @@ fn check_dstr_node(node: NodeId, cx: &Cx<'_>) {
         return; // No redundant escapes in non-interpolating strings.
     }
 
-    let NodeKind::Dstr(children) = cx.kind(node) else {
-        return;
+    // Accept both Dstr and Dsym — they both have a NodeList of children.
+    let children = match cx.kind(node) {
+        NodeKind::Dstr(children) => children,
+        NodeKind::Dsym(children) => children,
+        _ => return,
     };
 
     for &child_id in cx.list(*children) {
@@ -295,6 +299,14 @@ fn classify_dstr(node: NodeId, cx: &Cx<'_>) -> (bool, u8, u8, bool, bool) {
     match bytes[0] {
         b'"' => (true, b'"', b'"', false, false),
         b'\'' => (false, b'\'', b'\0', false, false),
+        b':' if bytes.len() >= 2 => {
+            // Dsym: `:"..."` is interpolation-enabled, `:'...'` is disabled.
+            match bytes[1] {
+                b'"' => (true, b'"', b'"', false, false),
+                b'\'' => (false, b'\'', b'\0', false, false),
+                _ => (false, b'\0', b'\0', false, false),
+            }
+        }
         b'%' => {
             let ctx = classify_percent_literal(bytes);
             match ctx {
@@ -695,6 +707,10 @@ mod tests {
         // `\(` inside `%Q(...)` is the paired opening delimiter — not redundant.
         test::<RedundantStringEscape>().expect_no_offenses(r"%Q(foo\(bar)");
     }
+
+    // --- Dsym (dynamic symbol) ---
+    // TODO: dsym segments are not yet working — Prism may not expose the raw
+    // source bytes for dsym Str segments. Tracked as a parity gap.
 
     // --- Skip regexp and xstr ---
 
