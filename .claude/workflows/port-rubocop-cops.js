@@ -9,7 +9,10 @@
  *     → processes the specified issues only
  *
  *   Workflow({ name: "port-rubocop-cops", args: { n: 6 } })
- *     → auto-fetches top N ready cop issues
+ *     → auto-fetches top N ready cop issues (object form)
+ *
+ *   Workflow({ name: "port-rubocop-cops", args: 6 })
+ *     → same as above (bare number also accepted)
  */
 
 export const meta = {
@@ -117,7 +120,9 @@ let issueIds
 if (Array.isArray(args) && args.length > 0) {
   issueIds = args
 } else {
-  const n = (args && typeof args === 'object' && args.n) ? args.n : 10
+  const n = typeof args === 'number' ? args
+          : (args && typeof args === 'object' && args.n) ? args.n
+          : 10
   const fetched = await agent(
     `Run: bd ready --label=cop -n ${n}
      Return the issue IDs as a JSON array of strings (e.g. ["murphy-ipxn", "murphy-ttzm"]).
