@@ -120,9 +120,10 @@ let issueIds
 if (Array.isArray(args) && args.length > 0) {
   issueIds = args
 } else {
-  const n = typeof args === 'number' ? args
-          : (args && typeof args === 'object' && args.n) ? args.n
-          : 10
+  const rawN = typeof args === 'number'
+    ? args
+    : (args && typeof args === 'object' ? args.n : undefined)
+  const n = Number.isInteger(rawN) && rawN > 0 ? rawN : 10
   const fetched = await agent(
     `Run: bd ready --label=cop -n ${n}
      Return the issue IDs as a JSON array of strings (e.g. ["murphy-ipxn", "murphy-ttzm"]).
