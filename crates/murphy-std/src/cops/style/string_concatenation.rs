@@ -102,12 +102,8 @@ fn check(node: NodeId, cx: &Cx<'_>, options: &StringConcatenationOptions) {
         return;
     }
 
-    // Verify this node is itself a string concatenation.
-    if !is_string_concatenation(node, cx) {
-        return;
-    }
-
     // Skip line-end concatenation (handled by Style/LineEndConcatenation).
+    // Only applies when both immediate operands are strings and the node is multiline.
     if is_line_end_concatenation(node, cx) {
         return;
     }
@@ -115,11 +111,25 @@ fn check(node: NodeId, cx: &Cx<'_>, options: &StringConcatenationOptions) {
     // Collect all parts in the chain (left-to-right).
     let parts = collect_parts(node, cx);
 
-    // Conservative mode: only flag if the first part is a plain Str.
-    if options.mode == StringConcatenationMode::Conservative {
-        if parts.first().map(|&id| is_str(id, cx)) != Some(true) {
-            return;
-        }
+    // Check whether the chain qualifies as a string concatenation.
+    // Aggressive mode (default): any part in the chain must be a plain Str.
+    // Conservative mode: the first (leftmost) part must be a plain Str.
+    //
+    // NOTE: We check the *flattened parts* here, not just the immediate
+    // operands of the topmost node. This correctly handles chains like:
+    //   `'Hello ' + user.name + user.email`
+    // where the topmost `+` has `('Hello ' + user.name)` as lhs (a Send, not
+    // a Str), but the chain's first leaf is a Str.
+    let first_is_str = parts.first().map(|&id| is_str(id, cx)) == Some(true);
+    let any_is_str = parts.iter().any(|&id| is_str(id, cx));
+
+    let qualifies = match options.mode {
+        StringConcatenationMode::Aggressive => any_is_str,
+        StringConcatenationMode::Conservative => first_is_str,
+    };
+
+    if !qualifies {
+        return;
     }
 
     let node_range = cx.range(node);
@@ -149,32 +159,6 @@ fn is_parent_a_plus_send(node: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     };
     is_plus_send_node(parent, cx)
-}
-
-/// Returns true iff `node` matches `(send str_type? :+ _)` or
-/// `(send _ :+ str_type?)` — i.e. either side of `+` is a plain Str.
-///
-/// Note: RuboCop's `str_type?` matches only `:str` (not `:dstr`).
-fn is_string_concatenation(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send {
-        receiver,
-        method: _,
-        args,
-    } = *cx.kind(node)
-    else {
-        return false;
-    };
-
-    let arg_list = cx.list(args);
-    if arg_list.len() != 1 {
-        return false;
-    }
-    let rhs = arg_list[0];
-
-    let lhs_is_str = receiver.get().map(|id| is_str(id, cx)).unwrap_or(false);
-    let rhs_is_str = is_str(rhs, cx);
-
-    lhs_is_str || rhs_is_str
 }
 
 /// Returns true iff `node` is a plain `Str` literal (not `Dstr`).
@@ -443,6 +427,19 @@ mod tests {
             user.name + ' <' + user.email + '>'
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer string interpolation to string concatenation.
         "#});
+    }
+
+    #[test]
+    fn flags_chain_where_str_is_in_inner_position() {
+        // 'Hello ' + user.name + user.email: the topmost `+` has
+        // `('Hello ' + user.name)` as lhs — a Send, not a Str.
+        // But the flattened chain contains a Str leaf, so it qualifies.
+        use murphy_plugin_api::test_support::run_cop;
+        let offenses = run_cop::<StringConcatenation>(
+            "'Hello ' + user.name + user.email
+",
+        );
+        assert_eq!(offenses.len(), 1, "expected 1 offense, got: {:?}", offenses);
     }
 
     #[test]
