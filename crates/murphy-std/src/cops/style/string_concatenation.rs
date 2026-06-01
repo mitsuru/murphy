@@ -368,34 +368,37 @@ fn escape_for_interpolation(value: &str, src: &str) -> String {
 /// Escape a decoded (unescaped) string value for safe embedding inside a
 /// double-quoted `"..."` string.  Escapes `\`, `"`, and the interpolation
 /// triggers `#{`, `#@`, `#$`.
+///
+/// Iterates over Unicode scalar values (via `char_indices`) so that multi-byte
+/// UTF-8 characters (e.g. Japanese) are preserved intact — byte-by-byte
+/// iteration and `b as char` would corrupt them.
 fn escape_decoded_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
-    let bytes = value.as_bytes();
+    let chars: Vec<char> = value.chars().collect();
     let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match b {
-            b'\\' => {
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
                 out.push_str("\\\\");
                 i += 1;
             }
-            b'"' => {
+            '"' => {
                 out.push_str("\\\"");
                 i += 1;
             }
-            b'#' if i + 1 < bytes.len() && matches!(bytes[i + 1], b'{' | b'@' | b'$') => {
+            '#' if i + 1 < chars.len() && matches!(chars[i + 1], '{' | '@' | '$') => {
                 out.push_str("\\#");
                 i += 1;
             }
             _ => {
-                out.push(b as char);
+                out.push(c);
                 i += 1;
             }
         }
     }
     out
 }
-
 #[cfg(test)]
 mod tests {
     use super::{StringConcatenation, StringConcatenationMode, StringConcatenationOptions};
@@ -558,6 +561,19 @@ mod tests {
             "#},
             r#""\#{foo} bar"
 "#,
+        );
+    }
+
+    #[test]
+    fn autocorrects_single_quoted_multibyte_string() {
+        // Multi-byte UTF-8 characters must be preserved intact in the output.
+        // byte-by-byte iteration (b as char) would corrupt multi-byte sequences.
+        test::<StringConcatenation>().expect_correction(
+            indoc! {"
+                'こんにちは' + ' World'
+                ^^^^^^^^^^^^^^^^^^^^^^^ Prefer string interpolation to string concatenation.
+            "},
+            "\"こんにちは World\"\n",
         );
     }
 }
