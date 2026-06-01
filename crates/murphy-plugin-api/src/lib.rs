@@ -75,3 +75,34 @@ pub use regex;
 // `def_node_matcher!`-generated code can reach `::murphy_plugin_api::Param` etc.
 // without the caller crate having to declare a `murphy-pattern` dependency.
 pub use murphy_pattern::{IntoParam, LitView, Param, match_lit_against_param};
+
+// Distributed-slice runtime, re-exported so packs don't add a direct `linkme`
+// dependency (single-surface design §5 / ADR 0038).
+#[doc(hidden)]
+pub use linkme;
+
+/// Register a cop with the current pack's distributed cop list.
+///
+/// Call once per cop type, at module scope in the cop's own file,
+/// after the cop type definition:
+///
+/// ```rust,ignore
+/// // cops/lint/debugger.rs
+/// #[cop(...)]
+/// impl Debugger { ... }
+///
+/// murphy_plugin_api::submit_cop!(Debugger);
+/// ```
+///
+/// Requires [`register_cops!`]`(mode = ...)` to have been called at the
+/// crate root to declare `PACK_COPS`. Each invocation occupies the name
+/// `REGISTRATION` in its enclosing module scope — calling `submit_cop!`
+/// twice in the same file is a compile-time error (intentional safety guard).
+#[macro_export]
+macro_rules! submit_cop {
+    ($cop:ty) => {
+        #[$crate::linkme::distributed_slice(crate::PACK_COPS)]
+        static REGISTRATION: $crate::PluginCopV1 =
+            $crate::__internal::build_cop::<$cop>();
+    };
+}
