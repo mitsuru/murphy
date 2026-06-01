@@ -90,8 +90,9 @@ impl TrailingCommaInHashLiteral {
         }
 
         // Braceless hash (bare method argument) — skip.
-        // A braceless hash has no RightBrace token in its range.
-        if !has_right_brace(node, cx) {
+        // A braced hash starts with a `{` token at the hash node's own start
+        // position. Braceless hashes start at the first pair, not at `{`.
+        if !is_braced_hash(node, cx) {
             return;
         }
 
@@ -123,7 +124,7 @@ impl TrailingCommaInHashLiteral {
                 }
                 // Flag missing trailing comma only when every pair and the
                 // closing brace are each on their own lines.
-                if should_have_comma_comma_style(node, last_pair, cx) {
+                if should_have_comma_comma_style(node, pairs, last_pair, cx) {
                     let after_last_pair = cx.range(last_pair).end;
                     cx.emit_offense(
                         cx.range(last_pair),
@@ -167,13 +168,16 @@ impl TrailingCommaInHashLiteral {
     }
 }
 
-/// Returns true if the hash node has a `RightBrace` token (i.e., is a braced
-/// hash literal, not a braceless method argument hash).
-fn has_right_brace(node: NodeId, cx: &Cx<'_>) -> bool {
-    let hash_range = cx.range(node);
-    cx.tokens_in(hash_range)
-        .iter()
-        .any(|t| t.kind == SourceTokenKind::RightBrace)
+/// Returns true if the hash node is a braced hash literal (starts with `{`).
+///
+/// A braceless hash (bare method argument) has its range starting at the first
+/// pair, not at `{`. A braced hash literal has a `LeftBrace` token exactly at
+/// the hash node's start offset.
+fn is_braced_hash(node: NodeId, cx: &Cx<'_>) -> bool {
+    let hash_start = cx.range(node).start;
+    cx.token_after(hash_start)
+        .map(|tok| tok.range.start == hash_start && tok.kind == SourceTokenKind::LeftBrace)
+        .unwrap_or(false)
 }
 
 /// Returns the range of the trailing comma token if one exists between the
@@ -206,7 +210,12 @@ fn find_trailing_comma(node: NodeId, last_pair: NodeId, cx: &Cx<'_>) -> Option<R
 
 /// Returns true when `comma` style should require a trailing comma:
 /// every pair is on its own line AND the closing `}` is on its own line.
-fn should_have_comma_comma_style(node: NodeId, last_pair: NodeId, cx: &Cx<'_>) -> bool {
+fn should_have_comma_comma_style(
+    node: NodeId,
+    pairs: &[NodeId],
+    last_pair: NodeId,
+    cx: &Cx<'_>,
+) -> bool {
     if !cx.is_multiline(node) {
         return false;
     }
@@ -214,24 +223,22 @@ fn should_have_comma_comma_style(node: NodeId, last_pair: NodeId, cx: &Cx<'_>) -
     let source = cx.source().as_bytes();
 
     // Find closing `}` position.
-    let hash_range = cx.range(node);
     let closing_brace_start = find_closing_brace_start(node, cx);
 
-    // The closing `}` must be on its own line: only whitespace between the
-    // last newline and the `}`.
+    // The closing `}` must be on its own line.
     if !is_at_line_start(closing_brace_start, source) {
         return false;
     }
 
-    // The last pair must be on its own line (not on the same line as another
-    // pair or the opening `{`).
-    let last_pair_range = cx.range(last_pair);
-    // Check that there's a newline before the last pair starts.
-    if !is_at_line_start(last_pair_range.start, source) {
-        return false;
+    // Every pair must be on its own line.
+    for &pair in pairs {
+        if !is_at_line_start(cx.range(pair).start, source) {
+            return false;
+        }
     }
 
-    // Check that the last pair ends before the closing brace line.
+    // The last pair must end before the closing brace line.
+    let last_pair_range = cx.range(last_pair);
     let between = Range {
         start: last_pair_range.end,
         end: closing_brace_start,
@@ -241,7 +248,6 @@ fn should_have_comma_comma_style(node: NodeId, last_pair: NodeId, cx: &Cx<'_>) -
         return false;
     }
 
-    let _ = hash_range;
     true
 }
 
@@ -532,6 +538,40 @@ mod tests {
             .expect_no_offenses(indoc! {r#"
                 a = {
                   foo: 1 }
+            "#});
+    }
+
+    #[test]
+    fn no_comma_skips_braceless_hash_argument() {
+        // Braceless hash argument: the outer Hash has no `{` at its start.
+        test::<TrailingCommaInHashLiteral>().expect_no_offenses(
+            "foo(a: 1, b: 2,)
+",
+        );
+    }
+
+    #[test]
+    fn no_comma_flags_only_braced_hash_not_braceless_containing_braced() {
+        // Braceless hash containing a braced hash value — the outer hash must
+        // not be flagged; only the inner braced hash with trailing comma is.
+        test::<TrailingCommaInHashLiteral>().expect_offense(indoc! {r#"
+                foo(a: { b: 1, },)
+                             ^ Avoid trailing comma after the last item of a hash.
+            "#});
+    }
+
+    #[test]
+    fn comma_style_accepts_when_first_pair_not_on_own_line() {
+        // `comma` style: first pair is on the same line as `{` → no trailing
+        // comma required, even if last pair and `}` are on separate lines.
+        test::<TrailingCommaInHashLiteral>()
+            .with_options(&TrailingCommaInHashLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::Comma,
+            })
+            .expect_no_offenses(indoc! {r#"
+                a = { foo: 1,
+                  bar: 2
+                }
             "#});
     }
 
