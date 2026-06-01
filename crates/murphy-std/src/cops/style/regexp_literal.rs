@@ -266,30 +266,41 @@ fn find_percent_r_body_start(src: &str) -> usize {
     }
 }
 
-/// Find the offset of the closing `}` (or matching close delimiter) in a
-/// percent-r literal. This simplified version only handles `%r{...}`.
+/// Find the offset of the closing delimiter in a percent-r literal.
+/// Handles all `%r<delim>...</delim>` forms: `%r{...}`, `%r[...]`,
+/// `%r(...)`, `%r<...>`, and non-paired forms like `%r/.../ `.
 fn find_closing_brace(src: &str) -> Option<usize> {
-    if src.len() < 3 || &src[..3] != "%r{" {
+    if src.len() < 3 || !src.starts_with("%r") {
         return None;
     }
     let bytes = src.as_bytes();
-    // Scan from position 3 (after `%r{`), tracking depth for nested braces.
-    let mut depth = 1usize;
+    let open = bytes[2];
+    let close = match open {
+        b'{' => b'}',
+        b'[' => b']',
+        b'(' => b')',
+        b'<' => b'>',
+        other => other, // non-paired: same char as close
+    };
+    let paired = open != close;
+    let mut depth = if paired { 1usize } else { 0 };
     let mut i = 3;
     while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => {
-                i += 2; // skip escape
-                continue;
-            }
-            b'{' => depth += 1,
-            b'}' => {
+        if bytes[i] == b'\\' {
+            i += 2; // skip escape
+            continue;
+        }
+        if paired {
+            if bytes[i] == open {
+                depth += 1;
+            } else if bytes[i] == close {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
                 }
             }
-            _ => {}
+        } else if bytes[i] == close {
+            return Some(i);
         }
         i += 1;
     }
@@ -448,6 +459,31 @@ mod tests {
                   foo
                 }x
             "});
+    }
+
+    // ----- Non-brace %r delimiters -----
+
+    #[test]
+    fn corrects_percent_r_bracket_to_slashes() {
+        // %r[foo] uses `[` delimiter — the fix should produce /foo/, not /foo]
+        test::<RegexpLiteral>().expect_correction(
+            indoc! {r#"
+                snake_case = %r[foo]
+                             ^^^ Use `//` around regular expression.
+            "#},
+            "snake_case = /foo/\n",
+        );
+    }
+
+    #[test]
+    fn corrects_percent_r_paren_to_slashes() {
+        test::<RegexpLiteral>().expect_correction(
+            indoc! {r#"
+                snake_case = %r(foo)
+                             ^^^ Use `//` around regular expression.
+            "#},
+            "snake_case = /foo/\n",
+        );
     }
 
     // ----- AllowInnerSlashes: true -----
