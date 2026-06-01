@@ -86,3 +86,5 @@ fn receiver_is_eval_target(cx: &Cx<'_>, receiver: OptNodeId) -> bool {
         _ => false,
     }
 }
+
+murphy_plugin_api::submit_cop!(NoEval);

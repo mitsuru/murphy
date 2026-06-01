@@ -168,3 +168,4 @@ mod tests {
         test::<I18nLocaleAssignment>().expect_no_offenses("i18n.locale = \"ja\"\n");
     }
 }
+murphy_plugin_api::submit_cop!(I18nLocaleAssignment);

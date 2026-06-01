@@ -341,3 +341,4 @@ mod tests {
         test::<EnvironmentVariableAccess>().expect_no_offenses("puts ENV\n");
     }
 }
+murphy_plugin_api::submit_cop!(EnvironmentVariableAccess);

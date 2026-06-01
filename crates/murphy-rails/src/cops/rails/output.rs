@@ -420,3 +420,4 @@ mod tests {
         test::<Output>().expect_no_offenses("io = $stdout\nio.write(\"x\")\n");
     }
 }
+murphy_plugin_api::submit_cop!(Output);

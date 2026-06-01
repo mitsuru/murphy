@@ -311,3 +311,4 @@ mod tests {
         test::<NegateInclude>().expect_no_offenses("arr.exclude?(x)\n");
     }
 }
+murphy_plugin_api::submit_cop!(NegateInclude);

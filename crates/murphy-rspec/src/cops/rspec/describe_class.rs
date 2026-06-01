@@ -863,3 +863,5 @@ mod tests {
         assert_eq!(decoded.ignored_metadata, opts.ignored_metadata);
     }
 }
+
+murphy_plugin_api::submit_cop!(DescribeClass);
