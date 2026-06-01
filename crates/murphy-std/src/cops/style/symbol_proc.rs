@@ -408,23 +408,22 @@ fn autocorrect_with_args(node: NodeId, call: NodeId, method_name: &str, cx: &Cx<
     let args = cx.call_arguments(call);
     let last_arg = *args.last().expect("has args");
     let last_arg_range = cx.range(last_arg);
-
-    // Insert `, &:method` after the last argument.
-    cx.emit_edit(
-        Range {
-            start: last_arg_range.end,
-            end: last_arg_range.end,
-        },
-        &format!(", &:{}", method_name),
-    );
-
-    // Remove the block: from after the call's closing `)` to end of block node.
-    let call_loc = cx.loc(call);
-    let call_end_paren = call_loc.end();
     let node_range = cx.range(node);
 
+    let call_loc = cx.loc(call);
+    let call_end_paren = call_loc.end();
+
     if call_end_paren != Range::ZERO {
-        // `foo(a, b) { ... }` → keep `foo(a, b, &:m)`, so just remove ` { ... }`.
+        // Parenthesised call `foo(a, b) { ... }`:
+        // 1. Insert `, &:method` after the last argument (before `)`)
+        // 2. Remove the block: from `)` to end of block node.
+        cx.emit_edit(
+            Range {
+                start: last_arg_range.end,
+                end: last_arg_range.end,
+            },
+            &format!(", &:{}", method_name),
+        );
         cx.emit_edit(
             Range {
                 start: call_end_paren.end,
@@ -433,14 +432,16 @@ fn autocorrect_with_args(node: NodeId, call: NodeId, method_name: &str, cx: &Cx<
             "",
         );
     } else {
-        // No parens command style: search from selector end.
-        let selector_end = cx.selector(call).end;
+        // Command-style call `foo a, b { ... }` (no parens):
+        // Replace `last_arg_end..block_end` with `, &:method`, stripping
+        // the block and appending the block-pass argument inline.
+        // e.g. `method one, 2 { |x| x.test }` → `method one, 2, &:test`
         cx.emit_edit(
             Range {
-                start: selector_end,
+                start: last_arg_range.end,
                 end: node_range.end,
             },
-            "",
+            &format!(", &:{}", method_name),
         );
     }
 }
@@ -636,6 +637,22 @@ mod tests {
                       ^^^^^^^^^^^^ Pass `&:method` as an argument to `lambda` instead of a block.
             "#},
             "lambda(&:method)\n",
+        );
+    }
+
+    // --- Command-style call with arguments (do-end block, inline) ---
+    // Regression: command-style (no-parens) call must not corrupt when removing block.
+
+    #[test]
+    fn corrects_command_style_with_args_do_end() {
+        // "method one, 2 do |x|; x.test; end" - offense is `do |x|; x.test; end`
+        // (14 chars from `do` to end, positions 14..33 = 19 chars)
+        test::<SymbolProc>().expect_correction(
+            "method one, 2 do |x|; x.test; end
+              ^^^^^^^^^^^^^^^^^^^ Pass `&:test` as an argument to `method` instead of a block.
+",
+            "method one, 2, &:test
+",
         );
     }
 
