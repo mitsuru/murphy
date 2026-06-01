@@ -574,24 +574,6 @@ pub enum NodeKind {
     HashPattern(NodeList),
     /// `match_var` — pattern 内で名前束縛する identifier (`in [x, y]` の `x`/`y`)。
     MatchVar(Symbol),
-    /// `[*, x, *]` の find pattern (parser-gem `find_pattern`)。要素は
-    /// requireds + 先頭/末尾の SplatNode (`MatchRest`) を含む NodeList。
-    FindPattern(NodeList),
-    /// `a | b` の alternation pattern (parser-gem `match_alt`)。
-    MatchAlt {
-        left: NodeId,
-        right: NodeId,
-    },
-    // ── murphy-j1j2 PM-B pattern-match array/hash extensions ────────────
-    /// `*rest` または bare `*` in array pattern (parser-gem `match_rest`)。
-    /// inner は `Some(MatchVar)` (named) or `None` (bare `*`).
-    MatchRest(OptNodeId),
-    /// `**nil` in hash pattern — no-other-keys constraint
-    /// (parser-gem `match_nil_pattern`)。marker。
-    MatchNilPattern,
-    /// `[a, b,]` — array pattern with trailing comma
-    /// (parser-gem `array_pattern_with_tail`)。children はコンマ前の要素。
-    ArrayPatternWithTail(NodeList),
     /// `it { ... }` block (Ruby 3.4+; parser-gem `itblock`)。`send` は block
     /// の receiver call、`body` は block 本体。`:it` marker は variant 自身。
     Itblock {
@@ -630,6 +612,26 @@ pub enum NodeKind {
     Kwnilarg,
     /// `&nil` (block suppression、`BlocksArgumentSuppressionNode`)。marker。
     Blocknilarg,
+
+    // ── murphy-jw5t pattern-match lowering extensions (tags 101, 102) ────
+    /// `[*, x, *]` の find pattern (parser-gem `find_pattern`)。要素は
+    /// requireds + 先頭/末尾の SplatNode (`MatchRest`) を含む NodeList。
+    FindPattern(NodeList),
+    /// `a | b` の alternation pattern (parser-gem `match_alt`)。
+    MatchAlt {
+        left: NodeId,
+        right: NodeId,
+    },
+    // ── murphy-j1j2 PM-B pattern-match array/hash extensions (tags 103-105) ─
+    /// `*rest` または bare `*` in array pattern (parser-gem `match_rest`)。
+    /// inner は `Some(MatchVar)` (named) or `None` (bare `*`).
+    MatchRest(OptNodeId),
+    /// `**nil` in hash pattern — no-other-keys constraint
+    /// (parser-gem `match_nil_pattern`)。marker。
+    MatchNilPattern,
+    /// `[a, b,]` — array pattern with trailing comma
+    /// (parser-gem `array_pattern_with_tail`)。children はコンマ前の要素。
+    ArrayPatternWithTail(NodeList),
 
     // ── murphy-j1j2 PM-C one-liner pattern matching (tags 106, 107) ──────
     /// `expr in pat` — boolean one-liner pattern match (Ruby 3.0+).
