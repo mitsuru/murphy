@@ -9,7 +9,7 @@ fn formats_json_offenses_for_machine_consumers() {
         .expect("format json");
 
     let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid json");
-    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
 #[test]
@@ -21,7 +21,7 @@ fn formats_human_output_with_progress_and_details() {
 
     assert!(output.contains("Inspecting 1 file"));
     assert!(output.contains("C"));
-    assert!(output.contains("Murphy/NoReceiverPuts"));
+    assert!(output.contains("Lint/Debugger"));
 }
 
 #[test]
@@ -37,18 +37,18 @@ fn formats_progress_without_offense_details() {
 
     assert!(output.contains("Inspecting 1 file"));
     assert!(output.contains("1 offense detected"));
-    assert!(!output.contains("Murphy/NoReceiverPuts"));
+    assert!(!output.contains("Lint/Debugger"));
 }
 
 fn sample_offense() -> Offense {
     Offense::new(
         "dirty.rb",
-        "Murphy/NoReceiverPuts",
+        "Lint/Debugger",
         Range {
             start_offset: 0,
-            end_offset: 4,
+            end_offset: 8,
         },
         Severity::Warning,
-        "Use a logger instead of puts",
+        "Remove debugger entry point `debugger`.",
     )
 }

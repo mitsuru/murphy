@@ -49,7 +49,7 @@ fn migrated_output_roundtrips_to_lint_behavior() {
     let root = dir.path();
     fs::write(
         root.join(".rubocop.yml"),
-        r#"Murphy/NoReceiverPuts:
+        r#"Lint/Debugger:
   Enabled: false
 "#,
     )
@@ -66,7 +66,7 @@ fn migrated_output_roundtrips_to_lint_behavior() {
         .expect("write migrated .murphy.yml");
     fs::write(
         root.join("dirty.rb"),
-        "# frozen_string_literal: true\n\nputs 'hi'\n",
+        "# frozen_string_literal: true\n\ndebugger\n",
     )
     .expect("write dirty.rb");
 

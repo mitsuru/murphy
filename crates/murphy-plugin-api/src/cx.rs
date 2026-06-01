@@ -3170,11 +3170,11 @@ mod tests {
     #[test]
     fn comment_directives_expose_same_line_and_block_ranges() {
         let source = concat!(
-            "puts 'x' # murphy:disable Murphy/NoReceiverPuts\n",
+            "debugger # murphy:disable Lint/Debugger\n",
             "# murphy:disable Layout/LineLength, Style/StringLiterals\n",
-            "puts \"y\"\n",
+            "debugger\n",
             "# murphy:enable Layout/LineLength\n",
-            "puts \"z\"\n",
+            "debugger\n",
             "# murphy:enable Style/StringLiterals\n",
         );
         let ast = murphy_translate::translate(source, "t.rb");
@@ -3190,23 +3190,23 @@ mod tests {
         assert_eq!(directives.len(), 5);
         assert_eq!(directives[0].kind, CommentDirectiveKind::Disable);
         assert_eq!(directives[0].scope, CommentDirectiveScope::SameLine);
-        assert_eq!(directives[0].cop, Some("Murphy/NoReceiverPuts"));
+        assert_eq!(directives[0].cop, Some("Lint/Debugger"));
         assert_eq!(
             cx.raw_source(directives[0].affected_range),
-            "puts 'x' # murphy:disable Murphy/NoReceiverPuts\n"
+            "debugger # murphy:disable Lint/Debugger\n"
         );
 
         assert_eq!(directives[1].kind, CommentDirectiveKind::Disable);
         assert_eq!(directives[1].scope, CommentDirectiveScope::Block);
         assert_eq!(directives[1].cop, Some("Layout/LineLength"));
-        assert_eq!(cx.raw_source(directives[1].affected_range), "puts \"y\"\n");
+        assert_eq!(cx.raw_source(directives[1].affected_range), "debugger\n");
 
         assert_eq!(directives[2].kind, CommentDirectiveKind::Disable);
         assert_eq!(directives[2].scope, CommentDirectiveScope::Block);
         assert_eq!(directives[2].cop, Some("Style/StringLiterals"));
         assert_eq!(
             cx.raw_source(directives[2].affected_range),
-            "puts \"y\"\n# murphy:enable Layout/LineLength\nputs \"z\"\n"
+            "debugger\n# murphy:enable Layout/LineLength\ndebugger\n"
         );
 
         assert_eq!(directives[3].kind, CommentDirectiveKind::Enable);

@@ -6,7 +6,7 @@
 //! Pinned contract (design §5 + plan Task 7):
 //! - `murphy lint <clean.rb>`  → stdout is an empty JSON array, exit `0`.
 //! - `murphy lint <dirty.rb>`  → stdout is a 1-element JSON array whose
-//!   `cop_name == "Murphy/NoReceiverPuts"`, exit `1`.
+//!   `cop_name == "Lint/Debugger"`, exit `1`.
 //! - `murphy lint <missing>`   → exit `2` (file/setup error).
 //! - `murphy lint <broken.rb>` → stdout is a 1-element JSON array whose
 //!   `cop_name == "Murphy/Syntax"` (cops skipped), exit `1` (design §6).
@@ -22,8 +22,7 @@ use tempfile::tempdir;
 
 const CLEAN_SOURCE: &str = "# frozen_string_literal: true\n\nx = 1\nlogger.info x\n";
 const CLEAN_SOURCE_2: &str = "# frozen_string_literal: true\n\ny = 2\nlogger.info y\n";
-const DIRTY_PUTS_SOURCE: &str = "# frozen_string_literal: true\n\nputs 'hi'\n";
-const DIRTY_PUTS_X_SOURCE: &str = "# frozen_string_literal: true\n\nputs 'x'\n";
+const DIRTY_DEBUGGER_SOURCE: &str = "# frozen_string_literal: true\n\ndebugger\n";
 
 /// `lint` a clean file → exit 0, stdout is an empty JSON array.
 #[test]
@@ -50,12 +49,12 @@ fn lint_clean_file_exits_0_with_empty_json_array() {
     );
 }
 
-/// `lint` a file containing `puts` → exit 1, one NoReceiverPuts offense.
+/// `lint` a file containing `debugger` → exit 1, one Debugger offense.
 #[test]
 fn lint_dirty_file_exits_1_with_one_offense() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("dirty.rb");
-    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+    fs::write(&path, DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -75,8 +74,8 @@ fn lint_dirty_file_exits_1_with_one_offense() {
         "expected exactly one offense, got {parsed:?}"
     );
     assert_eq!(
-        parsed[0]["cop_name"], "Murphy/NoReceiverPuts",
-        "offense must be from the NoReceiverPuts cop"
+        parsed[0]["cop_name"], "Lint/Debugger",
+        "offense must be from the Lint/Debugger cop"
     );
 }
 
@@ -84,7 +83,7 @@ fn lint_dirty_file_exits_1_with_one_offense() {
 fn lint_format_progress_omits_offense_details() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("dirty.rb");
-    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+    fs::write(&path, DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -105,7 +104,7 @@ fn lint_format_progress_omits_offense_details() {
         "progress output should include summary, got: {stdout:?}"
     );
     assert!(
-        !stdout.contains("Murphy/NoReceiverPuts"),
+        !stdout.contains("Lint/Debugger"),
         "progress output should omit offense details, got: {stdout:?}"
     );
 }
@@ -114,7 +113,7 @@ fn lint_format_progress_omits_offense_details() {
 fn lint_default_output_is_human_readable() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("dirty.rb");
-    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+    fs::write(&path, DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -133,7 +132,7 @@ fn lint_default_output_is_human_readable() {
         "default output should include progress markers, got: {stdout:?}"
     );
     assert!(
-        stdout.contains("Murphy/NoReceiverPuts"),
+        stdout.contains("Lint/Debugger"),
         "default output should include offense details, got: {stdout:?}"
     );
 }
@@ -146,7 +145,7 @@ fn lint_default_output_is_human_readable() {
 fn lint_format_json_preserves_machine_readable_stdout() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("dirty.rb");
-    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+    fs::write(&path, DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -160,7 +159,7 @@ fn lint_format_json_preserves_machine_readable_stdout() {
     let parsed: Vec<serde_json::Value> = serde_json::from_slice(&assert.get_output().stdout)
         .expect("--format json stdout must be a JSON array");
     assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
 #[test]
@@ -169,7 +168,7 @@ fn lint_file_with_disable_comment_suppresses_offenses() {
     let path = dir.path().join("with_disable.rb");
     fs::write(
         &path,
-        "# frozen_string_literal: true\n\n# murphy:disable Murphy/NoReceiverPuts\nputs 'x'\n",
+        "# frozen_string_literal: true\n\n# murphy:disable Lint/Debugger\ndebugger\n",
     )
     .expect("write with_disable.rb");
 
@@ -193,7 +192,7 @@ fn lint_file_with_disable_comment_suppresses_offenses() {
 fn lint_debug_emits_progress_to_stderr_without_touching_stdout_json() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("dirty.rb");
-    fs::write(&path, DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+    fs::write(&path, DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -226,7 +225,7 @@ fn lint_file_with_disable_then_enable_comment_only_reattaches() {
     let path = dir.path().join("with_enable.rb");
     fs::write(
         &path,
-        "# frozen_string_literal: true\n# murphy:disable Murphy/NoReceiverPuts\nputs 'suppressed'\n# murphy:enable\nputs 'reported'\n",
+        "# frozen_string_literal: true\n# murphy:disable Lint/Debugger\ndebugger\n# murphy:enable\ndebugger\n",
     )
     .expect("write with_enable.rb");
 
@@ -246,7 +245,7 @@ fn lint_file_with_disable_then_enable_comment_only_reattaches() {
         1,
         "enable must re-enable the cop for following lines, got {parsed:?}"
     );
-    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
 #[test]
@@ -255,7 +254,7 @@ fn lint_file_with_todo_comment_skips_current_line_only() {
     let path = dir.path().join("with_todo.rb");
     fs::write(
         &path,
-        "# frozen_string_literal: true\nputs 'suppressed' # murphy:todo Murphy/NoReceiverPuts\nputs 'reported'\n",
+        "# frozen_string_literal: true\ndebugger # murphy:todo Lint/Debugger\ndebugger\n",
     )
     .expect("write with_todo.rb");
 
@@ -275,7 +274,7 @@ fn lint_file_with_todo_comment_skips_current_line_only() {
         1,
         "todo must suppress only that line, got {parsed:?}"
     );
-    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
 #[test]
@@ -284,7 +283,7 @@ fn lint_file_with_todo_without_cop_suppresses_all_offenses_on_line() {
     let path = dir.path().join("with_todo_all.rb");
     fs::write(
         &path,
-        "# frozen_string_literal: true\nputs 'first' # murphy:todo\nputs 'second'\n",
+        "# frozen_string_literal: true\ndebugger # murphy:todo\ndebugger\n",
     )
     .expect("write with_todo_all.rb");
 
@@ -304,7 +303,7 @@ fn lint_file_with_todo_without_cop_suppresses_all_offenses_on_line() {
         1,
         "todo without cop should only suppress current-line offenses, got {parsed:?}"
     );
-    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
 #[test]
@@ -365,14 +364,13 @@ fn lint_missing_file_exits_2() {
 fn lint_syntax_error_file_exits_1_with_one_syntax_offense() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("broken.rb");
-    // Genuinely unparseable Ruby that ALSO textually contains a receiver-less
-    // `puts` (a line `NoReceiverPuts` WOULD flag if cops ran). Verified with
-    // the built binary: prism's `parse` returns Err on this source (the
-    // trailing `def (` is a hard parse error), so it remains a parse failure,
-    // not a parsed file with a NoReceiverPuts offense. This pins design §6's
-    // skip-cops contract: a parse failure yields ONLY the synthetic syntax
-    // offense and the cop pass is genuinely skipped.
-    fs::write(&path, "puts \"x\"\ndef (\n").expect("write broken.rb");
+    // Genuinely unparseable Ruby that ALSO textually contains a `debugger`
+    // call (`Lint/Debugger` WOULD flag if cops ran). Verified with the built
+    // binary: prism's `parse` returns Err on this source (the trailing `def (`
+    // is a hard parse error), so it remains a parse failure. This pins
+    // design §6's skip-cops contract: a parse failure yields ONLY the
+    // synthetic syntax offense and the cop pass is genuinely skipped.
+    fs::write(&path, "debugger\ndef (\n").expect("write broken.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -396,14 +394,12 @@ fn lint_syntax_error_file_exits_1_with_one_syntax_offense() {
         "the single offense must be the synthetic syntax-error offense"
     );
     // Skip-cops invariant (design §6): even though the source textually
-    // contains a receiver-less `puts`, NO cop offense is emitted because the
-    // cop pass is skipped on a parse failure (there is no AST).
+    // contains `debugger`, NO cop offense is emitted because the cop pass is
+    // skipped on a parse failure (there is no AST).
     assert!(
-        !parsed
-            .iter()
-            .any(|o| o["cop_name"] == "Murphy/NoReceiverPuts"),
-        "cops must be skipped on a parse failure — no NoReceiverPuts offense \
-         despite the receiver-less puts in source, got {parsed:?}"
+        !parsed.iter().any(|o| o["cop_name"] == "Lint/Debugger"),
+        "cops must be skipped on a parse failure — no Lint/Debugger offense \
+         despite `debugger` in source, got {parsed:?}"
     );
     assert_eq!(
         parsed[0]["severity"], "error",
@@ -510,7 +506,7 @@ fn lint_clean_only_stdout_is_exactly_empty_array() {
 fn lint_offense_run_stderr_is_empty() {
     let dir = tempdir().expect("create tempdir");
     let path = dir.path().join("dirty.rb");
-    fs::write(&path, DIRTY_PUTS_X_SOURCE).expect("write dirty.rb");
+    fs::write(&path, DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -530,8 +526,8 @@ fn lint_offense_run_stderr_is_empty() {
         "expected exactly one offense, got {parsed:?}"
     );
     assert_eq!(
-        parsed[0]["cop_name"], "Murphy/NoReceiverPuts",
-        "offense must be from the NoReceiverPuts cop"
+        parsed[0]["cop_name"], "Lint/Debugger",
+        "offense must be from the Lint/Debugger cop"
     );
     assert!(
         output.stderr.is_empty(),
@@ -634,19 +630,19 @@ fn lint_fix_and_fix_all_are_mutually_exclusive() {
 
 /// `murphy lint <dir>` discovers `.rb` files under the dir (default
 /// `**/*.rb`), honoring a `.murphy.yml` `Exclude`. The clean+dirty tree →
-/// exit 1 with exactly the dirty file's NoReceiverPuts offense; the excluded
+/// exit 1 with exactly the dirty file's Lint/Debugger offense; the excluded
 /// file is NOT discovered.
 #[test]
 fn lint_directory_discovers_and_applies_murphy_yml_exclude() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
     fs::write(root.join("clean.rb"), CLEAN_SOURCE).expect("write clean.rb");
-    fs::write(root.join("dirty.rb"), DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+    fs::write(root.join("dirty.rb"), DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
     fs::create_dir_all(root.join("vendor")).expect("mkdir vendor");
-    // A receiver-less puts that WOULD be flagged — proves exclude prunes it.
+    // A `debugger` call that WOULD be flagged — proves exclude prunes it.
     fs::write(
         root.join("vendor").join("dep.rb"),
-        "# frozen_string_literal: true\n\nputs 'v'\n",
+        "# frozen_string_literal: true\n\ndebugger\n",
     )
     .expect("write dep.rb");
     fs::write(
@@ -673,7 +669,7 @@ fn lint_directory_discovers_and_applies_murphy_yml_exclude() {
         1,
         "only dirty.rb is discovered+dirty (clean.rb clean, vendor excluded), got {parsed:?}"
     );
-    assert_eq!(parsed[0]["cop_name"], "Murphy/NoReceiverPuts");
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
     assert!(
         !parsed
             .iter()
@@ -739,10 +735,10 @@ fn lint_directory_with_malformed_murphy_yml_exits_2() {
 fn cops_config_can_disable_native_cop() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
-    fs::write(root.join("dirty.rb"), DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+    fs::write(root.join("dirty.rb"), DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
     fs::write(
         root.join(".murphy.yml"),
-        "Murphy/NoReceiverPuts:\n  Enabled: false\n",
+        "Lint/Debugger:\n  Enabled: false\n",
     )
     .expect("write .murphy.yml");
 
@@ -762,10 +758,10 @@ fn cops_config_can_disable_native_cop() {
 fn cops_config_can_override_native_cop_severity() {
     let dir = tempdir().expect("create tempdir");
     let root = dir.path();
-    fs::write(root.join("dirty.rb"), DIRTY_PUTS_SOURCE).expect("write dirty.rb");
+    fs::write(root.join("dirty.rb"), DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
     fs::write(
         root.join(".murphy.yml"),
-        "Murphy/NoReceiverPuts:\n  Severity: error\n",
+        "Lint/Debugger:\n  Severity: error\n",
     )
     .expect("write .murphy.yml");
 
@@ -823,7 +819,7 @@ fn explicit_cop_file_path_is_still_linted_as_a_target() {
     fs::create_dir(root.join("cops")).expect("mkdir cops");
     fs::write(
         root.join("cops").join("target.rb"),
-        "class TargetCop < Murphy::Cop\n  def helper\n    puts \"x\"\n  end\nend\n",
+        "class TargetCop < Murphy::Cop\n  def helper\n    debugger\n  end\nend\n",
     )
     .expect("write target");
 
@@ -857,8 +853,8 @@ fn lint_two_identical_content_files_emits_offense_per_path() {
     let dir = tempdir().expect("create tempdir");
     let dup_a = dir.path().join("dup_a.rb");
     let dup_b = dir.path().join("dup_b.rb");
-    fs::write(&dup_a, DIRTY_PUTS_X_SOURCE).expect("write dup_a.rb");
-    fs::write(&dup_b, DIRTY_PUTS_X_SOURCE).expect("write dup_b.rb");
+    fs::write(&dup_a, DIRTY_DEBUGGER_SOURCE).expect("write dup_a.rb");
+    fs::write(&dup_b, DIRTY_DEBUGGER_SOURCE).expect("write dup_b.rb");
 
     let assert = Command::cargo_bin("murphy")
         .expect("murphy binary builds")
@@ -891,7 +887,7 @@ fn lint_two_identical_content_files_emits_offense_per_path() {
     // source bytes are identical (single shared parse, per-path `file` rewrite).
     assert_ne!(a["file"], b["file"]);
     assert_eq!(a["cop_name"], b["cop_name"]);
-    assert_eq!(a["cop_name"], "Murphy/NoReceiverPuts");
+    assert_eq!(a["cop_name"], "Lint/Debugger");
     assert_eq!(a["range"], b["range"]);
     assert_eq!(a["severity"], b["severity"]);
     assert_eq!(a["message"], b["message"]);
