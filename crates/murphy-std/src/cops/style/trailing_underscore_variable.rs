@@ -188,7 +188,11 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TrailingUnderscoreVariableOptions) {
         (offense_range, good_code)
     } else {
         // Find the `=` operator token between the last lhs var and rhs.
-        let eq_start = find_eq_token_start(cx, first_offense_start, rhs_start).unwrap_or(rhs_start);
+        // Return early rather than defaulting to rhs_start — that fallback would
+        // make the offense range include the rhs value itself.
+        let Some(eq_start) = find_eq_token_start(cx, first_offense_start, rhs_start) else {
+            return;
+        };
 
         let offense_range = Range {
             start: first_offense_start,
@@ -216,13 +220,12 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TrailingUnderscoreVariableOptions) {
 /// Find the start offset of the `=` assignment operator between `search_start`
 /// and `rhs_start` by scanning tokens.
 fn find_eq_token_start(cx: &Cx<'_>, search_start: u32, rhs_start: u32) -> Option<u32> {
-    let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < search_start);
     toks[idx..]
         .iter()
         .take_while(|t| t.range.start < rhs_start)
-        .find(|t| &source[t.range.start as usize..t.range.end as usize] == b"=")
+        .find(|&&t| cx.token_text(t) == "=")
         .map(|t| t.range.start)
 }
 

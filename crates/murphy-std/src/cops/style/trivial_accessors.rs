@@ -277,7 +277,9 @@ fn trivial_reader_names_match(
     let ivar_name = cx.symbol_str(ivar_sym);
     // Strip trailing `?` or `=` before comparing (mirrors RuboCop's names_match?).
     let method_base = method_name.trim_end_matches(|c| c == '?' || c == '=');
-    let names_match = &ivar_name[1..] == method_base;
+    let names_match = ivar_name
+        .strip_prefix('@')
+        .is_some_and(|n| n == method_base);
     if opts.exact_name_match && !names_match {
         return None;
     }
@@ -330,7 +332,9 @@ fn trivial_writer_names_match(
 
     let ivar_name = cx.symbol_str(ivar_sym);
     let method_base = method_name.trim_end_matches('=');
-    let names_match = &ivar_name[1..] == method_base;
+    let names_match = ivar_name
+        .strip_prefix('@')
+        .is_some_and(|n| n == method_base);
 
     // ExactNameMatch: ivar name must match method name (sans trailing `=`).
     if opts.exact_name_match && !names_match {
@@ -354,18 +358,24 @@ fn autocorrect(node: NodeId, cx: &Cx<'_>, kind: &str, method_name: &str, is_sing
     }
 }
 
-/// Compute the column-based indent string for a node (number of leading spaces
-/// on the node's line).
+/// Compute the indent string for a node by extracting the actual leading
+/// whitespace (spaces and tabs) from the node's line in the source buffer.
+/// This preserves tabs and is safe with multi-byte characters.
 fn compute_indent(cx: &Cx<'_>, node_start: u32) -> String {
     let src = cx.source().as_bytes();
     let start = node_start as usize;
-    // Walk backward to the previous newline (or start of file).
+    // Find start of the current line.
     let line_start = src[..start]
         .iter()
         .rposition(|&b| b == b'\n')
         .map_or(0, |p| p + 1);
-    let col = start - line_start;
-    " ".repeat(col)
+    // Extract the actual leading whitespace up to the node start.
+    let leading = &src[line_start..start];
+    leading
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .map(|&b| b as char)
+        .collect()
 }
 
 #[cfg(test)]
