@@ -337,41 +337,23 @@ fn build_interpolated(parts: Vec<NodeId>, cx: &Cx<'_>) -> String {
 /// by Ruby's single-quote rules). We need to escape `\`, `"`, `#{`, `#@`, `#$`
 /// for safe embedding in double quotes.
 ///
-/// For double-quoted or other strings, the source already has double-quote escape
-/// sequences, so we extract the content between the outer quotes.
+/// For double-quoted strings, the source already has double-quote escape
+/// sequences; extract the inner content between the outer `"` delimiters.
+///
+/// For other string literals (`%q()`, `%Q()`, etc.), fall back to using the
+/// decoded value with the same full escaping as single-quoted strings — `\`, `"`,
+/// and interpolation triggers (`#{`, `#@`, `#$`) must all be escaped. Without
+/// escaping `#{`, content like `%q(#{foo})` (which Ruby keeps as the literal
+/// text `#{foo}`) would become an active interpolation in the output.
 fn escape_for_interpolation(value: &str, src: &str) -> String {
     let trimmed = src.trim();
-    if trimmed.starts_with('\'') {
-        // Single-quoted string: escape backslash, double-quote, and interpolation
-        // sequences `#{`, `#@`, `#$`.
-        let mut out = String::with_capacity(value.len());
-        let bytes = value.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            match b {
-                b'\\' => {
-                    out.push_str("\\\\");
-                    i += 1;
-                }
-                b'"' => {
-                    out.push_str("\\\"");
-                    i += 1;
-                }
-                b'#' if i + 1 < bytes.len() && matches!(bytes[i + 1], b'{' | b'@' | b'$') => {
-                    out.push_str("\\#");
-                    i += 1;
-                }
-                _ => {
-                    out.push(b as char);
-                    i += 1;
-                }
-            }
-        }
-        out
+    if trimmed.starts_with('\'') || (!trimmed.starts_with('"') && !trimmed.is_empty()) {
+        // Single-quoted or other non-double-quoted literals: the `value` field is
+        // the decoded (unescaped) content.  Escape everything that is unsafe inside
+        // a double-quoted string.
+        escape_decoded_value(value)
     } else if trimmed.starts_with('"') {
-        // Double-quoted: extract inner content (between outer quotes).
-        // The value field has the decoded value; we need the escaped representation.
+        // Double-quoted: the source already contains the properly escaped content.
         // Extract the part between the outer `"` delimiters.
         if trimmed.len() >= 2 {
             trimmed[1..trimmed.len() - 1].to_string()
@@ -379,10 +361,39 @@ fn escape_for_interpolation(value: &str, src: &str) -> String {
             String::new()
         }
     } else {
-        // Other string literals (e.g. `%q()`, `%Q()`): fall back to using the
-        // decoded value with basic double-quote escaping.
-        value.replace('\\', "\\\\").replace('"', "\\\"")
+        String::new()
     }
+}
+
+/// Escape a decoded (unescaped) string value for safe embedding inside a
+/// double-quoted `"..."` string.  Escapes `\`, `"`, and the interpolation
+/// triggers `#{`, `#@`, `#$`.
+fn escape_decoded_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\\' => {
+                out.push_str("\\\\");
+                i += 1;
+            }
+            b'"' => {
+                out.push_str("\\\"");
+                i += 1;
+            }
+            b'#' if i + 1 < bytes.len() && matches!(bytes[i + 1], b'{' | b'@' | b'$') => {
+                out.push_str("\\#");
+                i += 1;
+            }
+            _ => {
+                out.push(b as char);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -520,6 +531,34 @@ mod tests {
             Pathname.new('/') + 'test'
             ^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer string interpolation to string concatenation.
         "#});
+    }
+
+    #[test]
+    fn no_autocorrect_for_non_str_receiver_in_aggressive_mode() {
+        // Pathname.new('/') + 'test' fires offense but NOT autocorrect: the
+        // receiver is not a Str so we cannot guarantee String#+ semantics.
+        test::<StringConcatenation>().expect_no_corrections(
+            "Pathname.new('/') + 'test'
+",
+        );
+    }
+
+    #[test]
+    fn autocorrects_single_quoted_string_with_interpolation_chars() {
+        // %q() strings don't interpolate in Ruby, so #{foo} in them is literal.
+        // After correction, the `#` must be escaped to prevent interpolation.
+        // NOTE: %q() is not a `Str` literal starting with `'` or `"`, so it
+        // falls into the fallback branch of escape_for_interpolation.
+        // We test that a plain single-quoted string containing a literal `#{`
+        // is safely embedded.
+        test::<StringConcatenation>().expect_correction(
+            indoc! {r#"
+                '#{foo}' + ' bar'
+                ^^^^^^^^^^^^^^^^^ Prefer string interpolation to string concatenation.
+            "#},
+            r#""\#{foo} bar"
+"#,
+        );
     }
 }
 murphy_plugin_api::submit_cop!(StringConcatenation);
