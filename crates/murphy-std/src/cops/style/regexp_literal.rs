@@ -270,6 +270,9 @@ fn find_slash_body_bounds(bytes: &[u8]) -> (usize, usize) {
 }
 
 /// Emit the autocorrect edit — swap delimiters and fix inner slash escaping.
+///
+/// Skips autocorrect for percent-r forms that use non-`{}` delimiters when
+/// the close-delimiter search fails, to avoid emitting partial/broken edits.
 fn emit_autocorrect(node: NodeId, cx: &Cx<'_>, is_slash_literal: bool, src: &str) {
     let range = cx.range(node);
     if is_slash_literal {
@@ -283,8 +286,7 @@ fn emit_autocorrect(node: NodeId, cx: &Cx<'_>, is_slash_literal: bool, src: &str
         let open_range = Range { start: range.start, end: range.start + 1 };
         cx.emit_edit(open_range, "%r{");
 
-        // Closing delimiter: find the closing `/` before the flags.
-        // The closing `/` is the last `/` before flags (flags are non-`/` chars at end).
+        // Closing delimiter: find the closing `/`, skipping character classes.
         if let Some(close_offset) = find_closing_slash(src) {
             let close_start = range.start + close_offset as u32;
             let close_range = Range { start: close_start, end: close_start + 1 };
@@ -300,35 +302,51 @@ fn emit_autocorrect(node: NodeId, cx: &Cx<'_>, is_slash_literal: bool, src: &str
         if open_end == 0 {
             return; // Unexpected format, skip.
         }
+        // Find the closing delimiter matching the opener.
+        // If we can't find it (unsupported delimiter form), skip autocorrect
+        // entirely to avoid emitting partial broken edits.
+        let close_offset = match find_percent_r_close(src, open_end) {
+            Some(off) => off,
+            None => return, // Skip autocorrect for unrecognised %r delimiters.
+        };
+
         let open_range = Range { start: range.start, end: range.start + open_end as u32 };
         cx.emit_edit(open_range, "/");
 
-        // Closing delimiter: last `}` before flags → `/`
-        if let Some(close_offset) = find_closing_brace(src) {
-            let close_start = range.start + close_offset as u32;
-            let close_range = Range { start: close_start, end: close_start + 1 };
-            cx.emit_edit(close_range, "/");
+        let close_start = range.start + close_offset as u32;
+        let close_range = Range { start: close_start, end: close_start + 1 };
+        cx.emit_edit(close_range, "/");
 
-            // Fix inner slash escaping: `/` → `\/` in the body.
-            fix_inner_slashes_percent_to_slash(src, range.start, open_end, close_offset, cx);
-        }
+        // Fix inner slash escaping: `/` → `\/` in the body.
+        fix_inner_slashes_percent_to_slash(src, range.start, open_end, close_offset, cx);
     }
 }
 
 /// Find the offset of the closing `/` in a slash-delimited regexp source.
+/// Tracks `[...]` character classes to skip `/` inside them.
 /// Returns byte offset from the start of `src`.
 fn find_closing_slash(src: &str) -> Option<usize> {
     // src = `/body/flags`
-    // Scan from position 1, skipping `\X` escape sequences.
+    // Scan from position 1, skipping `\X` escape sequences and char classes.
     let bytes = src.as_bytes();
     let mut i = 1;
+    let mut in_class = false;
     while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            i += 2; // skip escape
-            continue;
-        }
-        if bytes[i] == b'/' {
-            return Some(i);
+        match bytes[i] {
+            b'\\' => {
+                i += 2; // skip escape (handles `\/`, `\[`, `\]`, etc.)
+                continue;
+            }
+            b'[' if !in_class => {
+                in_class = true;
+            }
+            b']' if in_class => {
+                in_class = false;
+            }
+            b'/' if !in_class => {
+                return Some(i);
+            }
+            _ => {}
         }
         i += 1;
     }
@@ -348,40 +366,45 @@ fn find_percent_r_body_start(src: &str) -> usize {
 }
 
 /// Find the offset of the closing delimiter in a percent-r literal.
-/// Handles all `%r<delim>...</delim>` forms: `%r{...}`, `%r[...]`,
-/// `%r(...)`, `%r<...>`, and non-paired forms like `%r/.../ `.
-fn find_closing_brace(src: &str) -> Option<usize> {
-    if src.len() < 3 || !src.starts_with("%r") {
+///
+/// Handles all `%r` delimiter types:
+/// - Paired: `{}` `[]` `()` `<>` — depth-tracked matching close delimiter.
+/// - Unpaired: any other char — first unescaped occurrence of the same char.
+///
+/// Returns the byte offset of the closing delimiter within `src`.
+/// Returns `None` if the closing delimiter cannot be found.
+fn find_percent_r_close(src: &str, open_end: usize) -> Option<usize> {
+    if src.len() < open_end {
         return None;
     }
-    let bytes = src.as_bytes();
-    let open = bytes[2];
-    let close = match open {
-        b'{' => b'}',
-        b'[' => b']',
-        b'(' => b')',
-        b'<' => b'>',
-        other => other, // non-paired: same char as close
+    let opener = src.as_bytes()[open_end - 1]; // last byte of opening delimiter
+    let (open_ch, close_ch, paired) = match opener {
+        b'{' => (b'{', b'}', true),
+        b'[' => (b'[', b']', true),
+        b'(' => (b'(', b')', true),
+        b'<' => (b'<', b'>', true),
+        ch => (ch, ch, false), // unpaired: same char as open
     };
-    let paired = open != close;
-    let mut depth = if paired { 1usize } else { 0 };
-    let mut i = 3;
+
+    let bytes = src.as_bytes();
+    let mut depth = 1usize;
+    let mut i = open_end;
     while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            i += 2; // skip escape
-            continue;
-        }
-        if paired {
-            if bytes[i] == open {
+        match bytes[i] {
+            b'\\' => {
+                i += 2; // skip escape
+                continue;
+            }
+            ch if paired && ch == open_ch => {
                 depth += 1;
-            } else if bytes[i] == close {
+            }
+            ch if ch == close_ch => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
                 }
             }
-        } else if bytes[i] == close {
-            return Some(i);
+            _ => {}
         }
         i += 1;
     }
@@ -619,5 +642,26 @@ mod tests {
             .with_options(&RegexpLiteralOptions { allow_inner_slashes: true, ..Default::default() })
             .expect_no_offenses("x =~ /home\\//\n");
     }
+
+    // ----- Non-{} percent-r delimiters (autocorrect robustness) -----
+
+    #[test]
+    fn flags_percent_r_bracket_delimiter_and_autocorrects() {
+        // %r[foo] is flagged and autocorrected to /foo/
+        test::<RegexpLiteral>().expect_correction(
+            "x =~ %r[foo]\n     ^^^ Use `//` around regular expression.\n",
+            "x =~ /foo/\n",
+        );
+    }
+
+    #[test]
+    fn flags_percent_r_paren_delimiter_and_autocorrects() {
+        // %r(foo) is flagged and autocorrected to /foo/
+        test::<RegexpLiteral>().expect_correction(
+            "x =~ %r(foo)\n     ^^^ Use `//` around regular expression.\n",
+            "x =~ /foo/\n",
+        );
+    }
+
 }
 murphy_plugin_api::submit_cop!(RegexpLiteral);
