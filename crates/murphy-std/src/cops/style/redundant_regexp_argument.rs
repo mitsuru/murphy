@@ -132,19 +132,22 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let regexp_range = cx.range(first_arg);
     let regexp_src = cx.raw_source(regexp_range);
 
-    // Skip single-space regexp: `/  /` (awk-split special case).
-    let regexp_content = regexp_body_content(regexp_src);
-    if regexp_content == " " {
-        return;
-    }
-
     // Check if the regexp source is deterministic.
+    let regexp_content = regexp_body_content(regexp_src);
     if !is_deterministic(regexp_src) {
         return;
     }
 
     // Build the preferred string argument.
     let prefer = preferred_argument(regexp_content);
+
+    // Skip single-space regexp (awk-split special case). We check the
+    // replacement string (not raw regexp body) so that escaped-space `/\ /`
+    // is also excluded — both `/  /` and `/\ /` would produce `' '`,
+    // which has special awk-whitespace semantics for `String#split`.
+    if prefer == "' '" {
+        return;
+    }
 
     let msg = MSG
         .replace("%<prefer>s", &prefer)
@@ -566,6 +569,12 @@ mod tests {
     fn no_offense_single_space_regexp() {
         // Single space: special awk-split semantics.
         test::<RedundantRegexpArgument>().expect_no_offenses("'foo'.split(/ /)\n");
+    }
+
+    #[test]
+    fn no_offense_escaped_space_regexp() {
+        // Escaped space /\ / also produces ' ' replacement — skip it too.
+        test::<RedundantRegexpArgument>().expect_no_offenses("'foo'.split(/\\ /)\n");
     }
 
     #[test]
