@@ -173,8 +173,10 @@ fn find_else_token(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
     None
 }
 
-/// Looks for a `then` keyword token between `from` and `to` (both exclusive).
-/// Returns the end of the `then` token if found, `None` otherwise.
+/// Looks for a header separator token (`then` or `;`) between `from` and `to`
+/// (both exclusive). Returns the end of the first such token if found.
+///
+/// Handles both `unless x then` and `unless x; body; else ...` forms.
 fn find_then_token_end(from: u32, to: u32, cx: &Cx<'_>) -> Option<u32> {
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
@@ -187,7 +189,7 @@ fn find_then_token_end(from: u32, to: u32, cx: &Cx<'_>) -> Option<u32> {
             continue;
         }
         let text = &source[tok.range.start as usize..tok.range.end as usize];
-        if text == b"then" {
+        if text == b"then" || text == b";" {
             return Some(tok.range.end);
         }
     }
@@ -292,6 +294,19 @@ mod tests {
               a = 1
             end
         "});
+    }
+
+    // Semicolon separator: `unless x; body; else ...`
+    #[test]
+    fn flags_and_corrects_semicolon_form() {
+        test::<UnlessElse>().expect_correction(
+            indoc! {r#"
+                unless x; a; else b; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^ Do not use `unless` with `else`. Rewrite these with the positive case first.
+            "#},
+            "if x; b; else a; end
+",
+        );
     }
 
     // Regression: `then` inside the body must not be treated as the header `then`.
