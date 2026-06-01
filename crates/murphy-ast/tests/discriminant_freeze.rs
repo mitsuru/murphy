@@ -329,6 +329,21 @@ fn node_kind_discriminants_are_frozen() {
     freeze(NodeKind::MatchRest(OptNodeId::NONE), 103);
     freeze(NodeKind::MatchNilPattern, 104);
     freeze(NodeKind::ArrayPatternWithTail(NodeList::EMPTY), 105);
+    // murphy-j1j2 PM-C one-liner forms
+    freeze(
+        NodeKind::MatchPatternP {
+            value: NodeId(0),
+            pattern: NodeId(0),
+        },
+        106,
+    );
+    freeze(
+        NodeKind::MatchPattern {
+            value: NodeId(0),
+            pattern: NodeId(0),
+        },
+        107,
+    );
 }
 
 /// Catch the failure mode that `node_kind_discriminants_are_frozen` would
@@ -344,7 +359,9 @@ fn highest_frozen_tag_matches_last_variant() {
     let last = NodeKind::MatchPattern {
         value: NodeId(0),
         pattern: NodeId(0),
-    }.tag().0;
+    }
+    .tag()
+    .0;
     assert_eq!(
         last, 107,
         "appending a new NodeKind variant requires extending tests/discriminant_freeze.rs \

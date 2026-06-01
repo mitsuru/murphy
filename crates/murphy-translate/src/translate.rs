@@ -1205,13 +1205,17 @@ impl Translator {
             // `expr in pat` — `MatchPredicateNode` → `match_pattern_p`
             let value = self.translate_node(&mp.value());
             let pattern = self.translate_pattern(&mp.pattern());
-            return self.builder.push(NodeKind::MatchPatternP { value, pattern }, range);
+            return self
+                .builder
+                .push(NodeKind::MatchPatternP { value, pattern }, range);
         }
         if let Some(mr) = node.as_match_required_node() {
             // `expr => pat` — `MatchRequiredNode` → `match_pattern`
             let value = self.translate_node(&mr.value());
             let pattern = self.translate_pattern(&mr.pattern());
-            return self.builder.push(NodeKind::MatchPattern { value, pattern }, range);
+            return self
+                .builder
+                .push(NodeKind::MatchPattern { value, pattern }, range);
         }
 
         // Task 17 以降、ここに各ノード種の arm を足していく。
@@ -3731,7 +3735,6 @@ mod tests {
         );
     }
 
-
     // ── murphy-j1j2 PM-C: one-liner pattern matching ─────────────────────────
 
     #[test]
@@ -3744,10 +3747,7 @@ mod tests {
             sexp.contains("(match_pattern_p"),
             "match_pattern_p expected: {sexp}"
         );
-        assert!(
-            sexp.contains("(lvar x)"),
-            "value lvar expected: {sexp}"
-        );
+        assert!(sexp.contains("(lvar x)"), "value lvar expected: {sexp}");
         assert!(
             sexp.contains("(const :Integer"),
             "pattern const expected: {sexp}"
@@ -3768,10 +3768,7 @@ mod tests {
             sexp.contains("(match_pattern"),
             "match_pattern expected: {sexp}"
         );
-        assert!(
-            sexp.contains("(lvar x)"),
-            "value lvar expected: {sexp}"
-        );
+        assert!(sexp.contains("(lvar x)"), "value lvar expected: {sexp}");
         assert!(
             sexp.contains("(const :Integer"),
             "pattern const expected: {sexp}"
