@@ -123,6 +123,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let body_src = cx.raw_source(cx.range(body));
 
     // Compute the indentation of the node on its starting line.
+    // Use char counts (not byte counts) so multi-byte characters are handled
+    // correctly — a line with Unicode content would otherwise appear longer
+    // than its visible width.
     let node_range = cx.range(node);
     let source = cx.source();
     let source_bytes = source.as_bytes();
@@ -131,10 +134,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         .iter()
         .rposition(|&b| b == b'\n')
         .map_or(0, |p| p + 1);
-    let indent_col = start - line_start;
+    let indent_str = &source[line_start..start];
+    let indent_col = indent_str.chars().count();
 
     // Candidate: "<indent><body_src> <keyword> <cond_src>"
-    let candidate_len = indent_col + body_src.len() + 1 + keyword.len() + 1 + cond_src.len();
+    let candidate_len =
+        indent_col + body_src.chars().count() + 1 + keyword.len() + 1 + cond_src.chars().count();
     if candidate_len > MAX_LINE_LENGTH {
         return;
     }
