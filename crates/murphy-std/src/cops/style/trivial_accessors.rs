@@ -249,8 +249,11 @@ fn in_module_ancestor(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Trivial reader: no args, body is a single `Ivar` node.
 /// Returns `Some(names_match)` if this is a trivial reader, where `names_match`
-/// indicates whether ivar name == method name (safe to autocorrect).
+/// indicates whether ivar name == method base name (safe to autocorrect).
 /// Returns `None` if not a trivial reader.
+///
+/// Name matching strips trailing `?` and `=` suffixes before comparing, matching
+/// RuboCop's `names_match?` (`method_name.to_s.sub(/[=?]$/, '')`).
 fn trivial_reader_names_match(
     method_name: &str,
     args: &[NodeId],
@@ -265,8 +268,9 @@ fn trivial_reader_names_match(
         return None;
     };
     let ivar_name = cx.symbol_str(ivar_sym);
-    // ivar_name starts with `@`, method_name doesn't.
-    let names_match = &ivar_name[1..] == method_name;
+    // Strip trailing `?` or `=` before comparing (mirrors RuboCop's names_match?).
+    let method_base = method_name.trim_end_matches(|c| c == '?' || c == '=');
+    let names_match = &ivar_name[1..] == method_base;
     if opts.exact_name_match && !names_match {
         return None;
     }
@@ -561,9 +565,28 @@ mod tests {
     // --- AllowPredicates: false ---
 
     #[test]
+    fn flags_predicate_when_allow_predicates_false_default_exact_match() {
+        // With allow_predicates=false and ExactNameMatch=true (default),
+        // `def foo?; @foo; end` fires because `foo?` strips to `foo` == `@foo[1..]`.
+        test::<TrivialAccessors>()
+            .with_options(&TrivialAccessorsOptions {
+                allow_predicates: false,
+                ..Default::default()
+            })
+            .expect_offense(indoc! {r#"
+                class Foo
+                  def foo?
+                  ^^^ Use `attr_reader` to define trivial reader methods.
+                    @foo
+                  end
+                end
+            "#});
+    }
+
+    #[test]
     fn flags_predicate_when_allow_predicates_false() {
         // With allow_predicates=false and exact_name_match=false, a predicate
-        // method that returns an ivar fires.
+        // method that returns a non-matching ivar also fires.
         test::<TrivialAccessors>()
             .with_options(&TrivialAccessorsOptions {
                 allow_predicates: false,
@@ -574,7 +597,7 @@ mod tests {
                 class Foo
                   def foo?
                   ^^^ Use `attr_reader` to define trivial reader methods.
-                    @foo
+                    @bar
                   end
                 end
             "#});
