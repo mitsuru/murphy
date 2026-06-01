@@ -59,6 +59,8 @@ use crate::cops::style::redundant_return::RedundantReturn;
 use crate::cops::style::redundant_self::RedundantSelf;
 use crate::cops::style::string_literals::StringLiterals;
 use crate::cops::style::symbol_array::SymbolArray;
+use crate::cops::style::when_then::WhenThen;
+use crate::cops::style::while_until_do::WhileUntilDo;
 use crate::cops::style::while_until_modifier::WhileUntilModifier;
 use crate::cops::style::word_array::WordArray;
 use crate::cops::style::yaml_file_read::YAMLFileRead;
@@ -97,6 +99,8 @@ murphy_plugin_api::register_cops!(
     WhileUntilModifier,
     WordArray,
     YAMLFileRead,
+    WhenThen,
+    WhileUntilDo,
     ZeroLengthPredicate,
 );
 
