@@ -166,8 +166,8 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &YodaConditionOptions) {
     }
 
     // Autocorrect: swap lhs/rhs and reverse relational operators.
-    let lhs_src = cx.raw_source(cx.range(lhs_id)).to_owned();
-    let rhs_src = cx.raw_source(cx.range(rhs_id)).to_owned();
+    let lhs_src = cx.raw_source(cx.range(lhs_id));
+    let rhs_src = cx.raw_source(cx.range(rhs_id));
     let flipped_op = reverse_operator(method_name);
     let replacement = format!("{rhs_src} {flipped_op} {lhs_src}");
     cx.emit_edit(node_range, &replacement);
@@ -180,6 +180,8 @@ fn is_constant_portion(id: NodeId, cx: &Cx<'_>) -> bool {
         cx.kind(id),
         NodeKind::Int(_)
             | NodeKind::Float(_)
+            | NodeKind::Rational(_)
+            | NodeKind::Complex(_)
             | NodeKind::Str(_)
             | NodeKind::Sym(_)
             | NodeKind::True_

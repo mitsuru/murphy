@@ -49,8 +49,6 @@ pub struct YodaExpressionOptions {
     pub supported_operators: Vec<String>,
 }
 
-const MSG_TEMPLATE: &str = "Non-literal operand (`{}`) should be first.";
-
 #[cop(
     name = "Style/YodaExpression",
     description = "Forbid the use of yoda expressions.",
@@ -61,7 +59,7 @@ const MSG_TEMPLATE: &str = "Non-literal operand (`{}`) should be first.";
 impl YodaExpression {
     #[on_new_investigation]
     fn investigate(&self, cx: &Cx<'_>, opts: &YodaExpressionOptions) {
-        let mut offended: HashSet<u32> = HashSet::new();
+        let mut offended: HashSet<NodeId> = HashSet::new();
         // Walk all descendants in source order (pre-order) to mirror
         // RuboCop's on_send dispatch order.
         for node in std::iter::once(cx.root()).chain(cx.descendants(cx.root())) {
@@ -74,7 +72,7 @@ fn check_node(
     node: NodeId,
     cx: &Cx<'_>,
     opts: &YodaExpressionOptions,
-    offended: &mut HashSet<u32>,
+    offended: &mut HashSet<NodeId>,
 ) {
     let NodeKind::Send {
         receiver,
@@ -118,16 +116,15 @@ fn check_node(
 
     let node_range = cx.range(node);
     let rhs_src = cx.raw_source(cx.range(rhs_id));
-    let msg = MSG_TEMPLATE.replacen("{}", rhs_src, 1);
+    let msg = format!("Non-literal operand (`{rhs_src}`) should be first.");
     cx.emit_offense(node_range, &msg, None);
 
     // Autocorrect: swap lhs and rhs.
-    let lhs_src = cx.raw_source(cx.range(lhs_id)).to_owned();
-    let rhs_src_owned = rhs_src.to_owned();
-    let replacement = format!("{rhs_src_owned} {method_name} {lhs_src}");
+    let lhs_src = cx.raw_source(cx.range(lhs_id));
+    let replacement = format!("{rhs_src} {method_name} {lhs_src}");
     cx.emit_edit(node_range, &replacement);
 
-    offended.insert(node.0);
+    offended.insert(node);
 }
 
 /// `constant_portion?` for YodaExpression: only numerics (Int, Float, Rational,
@@ -145,9 +142,9 @@ fn is_yoda_expression_constant(id: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Returns true if any ancestor Send node of `node` is in `offended`.
-fn offended_ancestor(node: NodeId, cx: &Cx<'_>, offended: &HashSet<u32>) -> bool {
+fn offended_ancestor(node: NodeId, cx: &Cx<'_>, offended: &HashSet<NodeId>) -> bool {
     for ancestor in cx.ancestors(node) {
-        if matches!(cx.kind(ancestor), NodeKind::Send { .. }) && offended.contains(&ancestor.0) {
+        if matches!(cx.kind(ancestor), NodeKind::Send { .. }) && offended.contains(&ancestor) {
             return true;
         }
     }
