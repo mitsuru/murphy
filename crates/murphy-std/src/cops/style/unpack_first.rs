@@ -40,8 +40,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
-const MSG: &str = "Use `unpack1(%s)` instead of `%s`.";
-
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct UnpackFirst;
@@ -100,7 +98,7 @@ fn match_unpack_first(outer: NodeId, cx: &Cx<'_>) -> Option<(NodeId, NodeId)> {
                 return None;
             }
             match cx.kind(outer_args[0]) {
-                NodeKind::Int(n) if *n == 0 => {}
+                NodeKind::Int(0) => {}
                 _ => return None,
             }
         }
@@ -145,9 +143,7 @@ fn check(outer: NodeId, cx: &Cx<'_>) {
 
     let fmt_src = cx.raw_source(cx.range(fmt_node));
     let current_src = cx.raw_source(offense_range);
-    let message = MSG
-        .replacen("%s", fmt_src, 1)
-        .replacen("%s", current_src, 1);
+    let message = format!("Use `unpack1({fmt_src})` instead of `{current_src}`.");
     cx.emit_offense(offense_range, &message, None);
 
     // Autocorrect (surgical two-edit form):
