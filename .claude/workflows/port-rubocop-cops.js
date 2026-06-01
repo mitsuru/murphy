@@ -115,44 +115,73 @@ bd close <id> --reason="implemented: <summary>"
 
 phase('Discover')
 
-// Resolve the issue list: explicit args > auto-fetch
-let issueIds
-if (Array.isArray(args) && args.length > 0) {
-  issueIds = args
-} else {
-  const rawN = typeof args === 'number'
-    ? args
-    : (args && typeof args === 'object' ? args.n : undefined)
-  const n = Number.isInteger(rawN) && rawN > 0 ? rawN : 10
-  const fetched = await agent(
-    `Run: bd ready --label=cop -n ${n}
-     Return the issue IDs as a JSON array of strings (e.g. ["murphy-ipxn", "murphy-ttzm"]).
-     Include only the IDs, nothing else.`,
-    { label: 'fetch-ready', schema: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' } } }, required: ['ids'] } }
-  )
-  issueIds = fetched ? fetched.ids : []
+// Resolve n from args. Default is 30 (not 10) so bare invocation still fetches plenty.
+const rawN = typeof args === 'number' ? args
+  : typeof args === 'string' ? parseInt(args, 10)
+  : (args && typeof args === 'object' ? parseInt(args.n, 10) : 0)
+const n = rawN > 0 ? rawN : 30
+log(`[debug] args=${JSON.stringify(args)} rawN=${rawN} n=${n}`)
+
+// Fetch in batches of 10 — one agent per slice so each only returns ~10 IDs (reliable).
+// Slice i covers lines (i*10+1)..(i+1)*10 via tail -n +START | head -10.
+const BATCH_SIZE = 10
+const numBatches = Math.ceil(n / BATCH_SIZE)
+const SLICE_SCHEMA = {
+  type: 'object',
+  properties: { ids: { type: 'array', items: { type: 'string' } } },
+  required: ['ids'],
 }
+const batchResults = await parallel(
+  Array.from({ length: numBatches }, (_, i) => {
+    const take = (i + 1) * BATCH_SIZE
+    const skip = i * BATCH_SIZE
+    return () => agent(
+      `Run this bash command exactly and return the output lines as the "ids" array:
+       bd ready --label=cop -n ${take} | awk '/^[○◐]/ {print $2}' | tail -n +${skip + 1} | head -${BATCH_SIZE}
+       Each line is a murphy-* issue ID. Expected ~${BATCH_SIZE} items (lines ${skip + 1}–${take}).`,
+      { label: `fetch-${i}`, schema: SLICE_SCHEMA }
+    )
+  })
+)
+const issueIds = [...new Set(batchResults.filter(Boolean).flatMap(b => b.ids))]
 
 log(`Processing ${issueIds.length} issues: ${issueIds.join(', ')}`)
 
-// Read each issue to determine crate and type
-const details = await parallel(
-  issueIds.map(id => () => agent(
-    `Run: bd show ${id}
-     From the output determine:
-     - id: "${id}"
+// Read issues in batches of 5 to avoid overwhelming bd's Dolt DB with 30 concurrent reads.
+const DISCOVER_BATCH = 5
+const discoverBatches = []
+for (let i = 0; i < issueIds.length; i += DISCOVER_BATCH) {
+  discoverBatches.push(issueIds.slice(i, i + DISCOVER_BATCH))
+}
+
+const MULTI_DETAIL_SCHEMA = {
+  type: 'object',
+  properties: {
+    issues: { type: 'array', items: ISSUE_DETAIL_SCHEMA },
+  },
+  required: ['issues'],
+}
+
+const batchDetails = await parallel(
+  discoverBatches.map((batch, i) => () => agent(
+    `For each issue ID below, run "bd show <id>" and return its details.
+     IDs: ${batch.join(' ')}
+
+     For each issue determine:
+     - id: the issue ID
      - title: the issue title
-     - crate: which Murphy crate owns this cop:
-         "murphy-rails"  if File: contains crates/murphy-rails OR title contains Rails/
-         "murphy-rspec"  if File: contains crates/murphy-rspec OR title contains RSpec/
-         "murphy-std"    for Lint/*/Style/*/Layout/* or crates/murphy-std
-         "unknown"       if can't determine
-     - is_new_cop: true if this is a new cop port (no existing file), false if gap fill`,
-    { label: `discover:${id}`, schema: ISSUE_DETAIL_SCHEMA }
+     - crate: "murphy-rails" if title contains Rails/ or file is in crates/murphy-rails
+              "murphy-rspec" if title contains RSpec/ or file is in crates/murphy-rspec
+              "murphy-std"   for Lint/*/Style/*/Layout/* or crates/murphy-std
+              "unknown"      if can't determine
+     - is_new_cop: true if this is a new cop port, false if gap fill
+
+     Return all ${batch.length} issues in the "issues" array.`,
+    { label: `discover-batch-${i}`, schema: MULTI_DETAIL_SCHEMA }
   ))
 )
 
-const resolved = details.filter(Boolean)
+const resolved = batchDetails.filter(Boolean).flatMap(b => b.issues)
 log(`Resolved ${resolved.length} issues`)
 
 // ─── Group by crate, max 2 per agent ─────────────────────────────────────────
