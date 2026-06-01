@@ -1,7 +1,7 @@
 //! 再帰ポストオーダー DFS による prism→arena 変換。
 
 use murphy_ast::{
-    Ast, AstBuilder, MagicComment, MagicCommentKind, NodeId, NodeKind, OptNodeId, Range,
+    Ast, AstBuilder, MagicComment, MagicCommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range,
     SourceToken, SourceTokenKind,
 };
 use murphy_prism as prism;
@@ -1225,6 +1225,32 @@ impl Translator {
             return self
                 .builder
                 .push(NodeKind::MatchPattern { value, pattern }, range);
+        }
+
+        //  — modifier-form rescue.
+        // prism: RescueModifierNode { expression, keyword_loc, rescue_expression }
+        // murphy-ast: Rescue { body: expression, resbodies: [Resbody{[],None,rescue_expression}], else_: None }
+        if let Some(rm) = node.as_rescue_modifier_node() {
+            let body = OptNodeId::some(self.translate_node(&rm.expression()));
+            let handler_body = OptNodeId::some(self.translate_node(&rm.rescue_expression()));
+            let resbody_range = Self::range(&rm.rescue_expression().location());
+            let resbody = self.builder.push(
+                NodeKind::Resbody {
+                    exceptions: NodeList::EMPTY,
+                    var: OptNodeId::NONE,
+                    body: handler_body,
+                },
+                resbody_range,
+            );
+            let resbodies = self.builder.push_list(&[resbody]);
+            return self.builder.push(
+                NodeKind::Rescue {
+                    body,
+                    resbodies,
+                    else_: OptNodeId::NONE,
+                },
+                range,
+            );
         }
 
         // Task 17 以降、ここに各ノード種の arm を足していく。
@@ -4039,5 +4065,50 @@ mod tests {
             !sexp.contains("(unknown)"),
             "no Unknown in hash const_pattern: {sexp}"
         );
+    }
+
+    #[test]
+    fn translates_rescue_modifier() {
+        // `foo rescue nil` -> Rescue { body: foo, resbodies: [Resbody{[],None,nil}], else_: None }
+        // Modifier form -- no begin/end wrapping.
+        let ast = translate("foo rescue nil", "t.rb");
+        // Locate the Rescue node (may be directly root or child of Begin).
+        let rescue = ast
+            .descendants(ast.root())
+            .chain([ast.root()])
+            .find(|&n| matches!(ast.kind(n), NodeKind::Rescue { .. }))
+            .expect("expected a Rescue node for rescue modifier");
+        match ast.kind(rescue) {
+            NodeKind::Rescue {
+                body,
+                resbodies,
+                else_,
+            } => {
+                assert!(body.get().is_some(), "modifier rescue body must be Some");
+                assert_eq!(resbodies.len, 1, "exactly one resbody");
+                assert!(else_.is_none(), "no else branch in modifier rescue");
+                // Find the single Resbody child.
+                let rb = ast
+                    .children(rescue)
+                    .find(|&c| matches!(ast.kind(c), NodeKind::Resbody { .. }))
+                    .expect("Resbody child of Rescue");
+                match ast.kind(rb) {
+                    NodeKind::Resbody {
+                        exceptions,
+                        var,
+                        body: rb_body,
+                    } => {
+                        assert_eq!(
+                            exceptions.len, 0,
+                            "modifier rescue catches all (empty exceptions)"
+                        );
+                        assert!(var.is_none(), "no rescue binding in modifier rescue");
+                        assert!(rb_body.get().is_some(), "rescue handler body Some");
+                    }
+                    other => panic!("expected Resbody, got {other:?}"),
+                }
+            }
+            other => panic!("expected Rescue, got {other:?}"),
+        }
     }
 }
