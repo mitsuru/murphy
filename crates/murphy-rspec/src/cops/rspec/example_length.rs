@@ -158,8 +158,16 @@ fn apply_count_as_one(
     // full_extent_range covers from the HeredocStart token through the end of
     // the terminator line. This is needed because prism assigns the Dstr/Str
     // node range only the opener token (e.g. `<<~HEREDOC`), not the body.
+    //
+    // We scope the token search to the enclosing block range to avoid
+    // scanning unrelated heredocs from the rest of the file.
     let heredoc_extents = if fold_heredoc {
-        build_heredoc_extents(cx)
+        let block_range = cx
+            .parent(body_id)
+            .get()
+            .map(|p| cx.range(p))
+            .unwrap_or_else(|| cx.range(body_id));
+        build_heredoc_extents(cx, block_range)
     } else {
         Vec::new()
     };
@@ -232,7 +240,7 @@ fn apply_count_as_one(
     count.max(0) as usize
 }
 
-/// Pre-compute heredoc extents from the token stream.
+/// Pre-compute heredoc extents from the token stream within `range`.
 ///
 /// Returns a list of `(heredoc_start_byte, full_extent_end_byte)` pairs.
 /// `heredoc_start_byte` matches the `range.start` of the corresponding
@@ -241,16 +249,19 @@ fn apply_count_as_one(
 /// line (inclusive of the `\n` after `HEREDOC`), so that
 /// `cx.raw_source(full_start..full_end)` covers opener + body + terminator.
 ///
+/// Restricting to `range` avoids scanning the entire file's token list when
+/// only heredocs within the current example block are relevant.
+///
 /// Multiple heredocs opened on the same source line are matched FIFO (the
 /// order in which `HeredocStart` tokens appear equals the order their
 /// `HeredocEnd` terminators appear in the source).
-fn build_heredoc_extents(cx: &Cx<'_>) -> Vec<(u32, u32)> {
+fn build_heredoc_extents(cx: &Cx<'_>, range: Range) -> Vec<(u32, u32)> {
     use std::collections::VecDeque;
     let source = cx.source().as_bytes();
     let mut starts: VecDeque<u32> = VecDeque::new();
     let mut result: Vec<(u32, u32)> = Vec::new();
 
-    for tok in cx.sorted_tokens() {
+    for tok in cx.tokens_in(range) {
         match tok.kind {
             SourceTokenKind::HeredocStart => {
                 starts.push_back(tok.range.start);
