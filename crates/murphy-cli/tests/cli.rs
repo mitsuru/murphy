@@ -1017,3 +1017,69 @@ fn style_rescue_modifier_fires_on_modifier_rescue() {
         "expected 1 Style/RescueModifier offense, got {parsed:?}"
     );
 }
+
+// --- inherit_from CLI tests ---
+
+#[test]
+fn inherit_from_disables_cop_via_base_config() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("dirty.rb"), DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
+    fs::write(root.join("base.yml"), "Lint/Debugger:\n  Enabled: false\n").expect("write base.yml");
+    fs::write(root.join(".murphy.yml"), "inherit_from: base.yml\n").expect("write .murphy.yml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("--no-cache")
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+#[test]
+fn inherit_from_current_file_overrides_base() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("dirty.rb"), DIRTY_DEBUGGER_SOURCE).expect("write dirty.rb");
+    fs::write(root.join("base.yml"), "Lint/Debugger:\n  Enabled: false\n").expect("write base.yml");
+    fs::write(
+        root.join(".murphy.yml"),
+        "inherit_from: base.yml\nLint/Debugger:\n  Enabled: true\n",
+    )
+    .expect("write .murphy.yml");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("--no-cache")
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn inherit_from_cycle_exits_2() {
+    let dir = tempdir().expect("create tempdir");
+    let root = dir.path();
+    fs::write(root.join("a.yml"), "inherit_from: b.yml\n").expect("write a.yml");
+    fs::write(root.join("b.yml"), "inherit_from: a.yml\n").expect("write b.yml");
+    fs::write(root.join(".murphy.yml"), "inherit_from: a.yml\n").expect("write .murphy.yml");
+    fs::write(root.join("clean.rb"), CLEAN_SOURCE).expect("write clean.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(root)
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("--no-cache")
+        .assert()
+        .code(2);
+}
