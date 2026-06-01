@@ -117,11 +117,10 @@ fn collect_op_tokens_in_range(
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < range_start);
 
-    // Tracks how many levels of *method-call* parens we are inside.
-    // Grouping parens like `(a || b)` do NOT increment this counter.
-    // Method-call parens like `foo(a || b)` DO increment it.
-    let mut call_depth: usize = 0;
-    // Track paren depth for target_depth comparison.
+    // Stack of booleans: true = this paren depth is a method-call paren.
+    // We push on every `(` (true if preceded by an identifier, false for grouping).
+    // Operators are excluded when any entry in the stack is `true`.
+    let mut call_stack: Vec<bool> = Vec::new();
     let mut paren_depth: usize = 0;
     let mut prev_was_word = false;
     let mut ops = Vec::new();
@@ -132,22 +131,14 @@ fn collect_op_tokens_in_range(
         }
         match tok.kind {
             SourceTokenKind::LeftParen => {
-                // If the previous token was a word (identifier/method name),
-                // this is a method-call paren — increment call depth.
-                if prev_was_word {
-                    call_depth += 1;
-                }
+                let is_call = prev_was_word;
+                call_stack.push(is_call);
                 paren_depth += 1;
                 prev_was_word = false;
                 continue;
             }
             SourceTokenKind::RightParen => {
-                if call_depth > 0 && paren_depth > 0 {
-                    // We may be closing a call paren — check if we were inside one.
-                    // Simplified: decrement call depth when closing at a depth that
-                    // had a call open. We track this conservatively.
-                    call_depth = call_depth.saturating_sub(1);
-                }
+                call_stack.pop();
                 paren_depth = paren_depth.saturating_sub(1);
                 prev_was_word = false;
                 continue;
@@ -165,8 +156,6 @@ fn collect_op_tokens_in_range(
             b"||" => OpKind::SymbolicOr,
             b"or" => OpKind::KeywordOr,
             _ => {
-                // Track if this token is a word (identifier, keyword, etc.)
-                // that could be a method name followed by `(`.
                 prev_was_word = is_word_start(text);
                 continue;
             }
@@ -184,11 +173,11 @@ fn collect_op_tokens_in_range(
         }
         prev_was_word = false;
         // Skip operators inside method-call argument lists.
-        if call_depth > 0 {
+        if call_stack.iter().any(|&is_call| is_call) {
             continue;
         }
-        // For Unknown conditions (target_depth=1): only count at depth 1+.
-        // For And/Or conditions (target_depth=usize::MAX): count all depths.
+        // For Unknown conditions (target_depth=1): require paren_depth >= target.
+        // For And/Or conditions (target_depth=usize::MAX): count all.
         if target_depth != usize::MAX && paren_depth < target_depth {
             continue;
         }
@@ -624,6 +613,14 @@ mod tests {
             return unless (a && (b || c))
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
         "#});
+    }
+
+    #[test]
+    fn forbid_mixed_does_not_flag_nested_call_grouping_parens() {
+        // `(foo((a || b) && c))` — the `||` is inside a grouping paren inside
+        // a method-call paren. The stack correctly marks both levels as inside
+        // a call → not flagged.
+        test::<UnlessLogicalOperators>().expect_no_offenses("return unless (foo((a || b) && c))\n");
     }
 
     #[test]
