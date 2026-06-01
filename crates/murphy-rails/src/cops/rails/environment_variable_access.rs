@@ -78,7 +78,7 @@
 //! layer (Rails.application.config? Settings.foo? Figaro.env.FOO?);
 //! that's outside the cop's awareness. Detect-only.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, cop, def_node_matcher};
 
 // RuboCop NodePattern equivalent: `(send (const nil? :ENV) _ ...)`.
 // `nil?` on the inner Const requires no scope (top-level). The method
@@ -92,10 +92,7 @@ def_node_matcher!(is_env_access, "(send (const nil? :ENV) _ ...)");
 /// read, matching upstream RuboCop-rails which uses `!:[]=` for reads
 /// and only `:[]=` (indexasgn form) for writes.
 fn is_env_write(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { method, .. } = *cx.kind(node) else {
-        return false;
-    };
-    cx.symbol_str(method) == "[]="
+    cx.method_name(node) == Some("[]=")
 }
 
 // Upstream message text (rubocop-rails v1.86.2+).
@@ -148,9 +145,8 @@ impl EnvironmentVariableAccess {
 
         // Offense range: just the `ENV` constant node, not the full send.
         // The receiver is always present here (pattern is gated on it).
-        let receiver_id = match *cx.kind(node) {
-            NodeKind::Send { receiver, .. } => receiver.get().unwrap(),
-            _ => return,
+        let Some(receiver_id) = cx.call_receiver(node).get() else {
+            return;
         };
         let env_range = cx.range(receiver_id);
 
