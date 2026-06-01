@@ -17,6 +17,7 @@ impl MultiKind {
     fn check_def(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(mode = dynamic, MultiKind);
+register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(MultiKind);
 
 fn main() {}

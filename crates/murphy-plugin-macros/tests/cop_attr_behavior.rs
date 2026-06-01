@@ -206,9 +206,10 @@ impl T6 {
     fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-// Emit the `murphy_plugin_register` entry point once for T6.
-// Compilation success proves `register_cops!` + `#[cop]` compose correctly.
-murphy_plugin_macros::register_cops!(mode = dynamic, T6);
+// Emit the `murphy_plugin_register` entry point and register T6.
+// Compilation success proves `register_cops!` + `#[cop]` + `submit_cop!` compose correctly.
+murphy_plugin_macros::register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(T6);
 
 // --- T7: methods filter on send (murphy-34d) --------------------------------
 

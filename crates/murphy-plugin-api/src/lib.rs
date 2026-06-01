@@ -101,8 +101,10 @@ pub use linkme;
 #[macro_export]
 macro_rules! submit_cop {
     ($cop:ty) => {
-        #[$crate::linkme::distributed_slice(crate::PACK_COPS)]
-        static REGISTRATION: $crate::PluginCopV1 =
-            $crate::__internal::build_cop::<$cop>();
+        const _: () = {
+            #[$crate::linkme::distributed_slice(crate::PACK_COPS)]
+            static REGISTRATION: $crate::PluginCopV1 =
+                $crate::__internal::build_cop::<$cop>();
+        };
     };
 }

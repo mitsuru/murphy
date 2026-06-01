@@ -1,25 +1,13 @@
-error[E0277]: the trait bound `NotACop: Cop` is not satisfied
- --> tests/ui/fail_non_cop_type.rs:7:54
-  |
-7 | murphy_plugin_macros::register_cops!(mode = dynamic, NotACop);
-  |                                                      ^^^^^^^ unsatisfied trait bound
-  |
-help: the trait `Cop` is not implemented for `NotACop`
- --> tests/ui/fail_non_cop_type.rs:5:1
-  |
-5 | struct NotACop;
-  | ^^^^^^^^^^^^^^
-
 error[E0277]: the trait bound `NotACop: NodeCop` is not satisfied
- --> tests/ui/fail_non_cop_type.rs:7:54
+ --> tests/ui/fail_non_cop_type.rs:7:32
   |
-7 | murphy_plugin_macros::register_cops!(mode = dynamic, NotACop);
-  |                                                      ^^^^^^^ unsatisfied trait bound
+7 | murphy_plugin_api::submit_cop!(NotACop);
+  |                                ^^^^^^^ unsatisfied trait bound
   |
 help: the trait `NodeCop` is not implemented for `NotACop`
- --> tests/ui/fail_non_cop_type.rs:5:1
+ --> tests/ui/fail_non_cop_type.rs:4:1
   |
-5 | struct NotACop;
+4 | struct NotACop;
   | ^^^^^^^^^^^^^^
 note: required by a bound in `murphy_plugin_api::__internal::build_cop`
  --> $WORKSPACE/crates/murphy-plugin-api/src/internal.rs
@@ -28,10 +16,10 @@ note: required by a bound in `murphy_plugin_api::__internal::build_cop`
   |                           ^^^^^^^ required by this bound in `build_cop`
 
 error[E0277]: the trait bound `NotACop: Default` is not satisfied
- --> tests/ui/fail_non_cop_type.rs:7:54
+ --> tests/ui/fail_non_cop_type.rs:7:32
   |
-7 | murphy_plugin_macros::register_cops!(mode = dynamic, NotACop);
-  |                                                      ^^^^^^^ the trait `Default` is not implemented for `NotACop`
+7 | murphy_plugin_api::submit_cop!(NotACop);
+  |                                ^^^^^^^ the trait `Default` is not implemented for `NotACop`
   |
 note: required by a bound in `murphy_plugin_api::__internal::build_cop`
  --> $WORKSPACE/crates/murphy-plugin-api/src/internal.rs
@@ -40,6 +28,6 @@ note: required by a bound in `murphy_plugin_api::__internal::build_cop`
   |                                     ^^^^^^^ required by this bound in `build_cop`
 help: consider annotating `NotACop` with `#[derive(Default)]`
   |
-5 + #[derive(Default)]
-6 | struct NotACop;
+4 + #[derive(Default)]
+5 | struct NotACop;
   |

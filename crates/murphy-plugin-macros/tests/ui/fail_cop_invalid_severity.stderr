@@ -18,22 +18,10 @@ warning: unused import: `murphy_plugin_api::Cx`
 2 | use murphy_plugin_api::Cx;
   |     ^^^^^^^^^^^^^^^^^^^^^
 
-error[E0277]: the trait bound `MyCheck: Cop` is not satisfied
-  --> tests/ui/fail_cop_invalid_severity.rs:14:32
-   |
-14 | register_cops!(mode = dynamic, MyCheck);
-   |                                ^^^^^^^ unsatisfied trait bound
-   |
-help: the trait `Cop` is not implemented for `MyCheck`
-  --> tests/ui/fail_cop_invalid_severity.rs:6:1
-   |
- 6 | struct MyCheck;
-   | ^^^^^^^^^^^^^^
-
 error[E0277]: the trait bound `MyCheck: NodeCop` is not satisfied
-  --> tests/ui/fail_cop_invalid_severity.rs:14:32
+  --> tests/ui/fail_cop_invalid_severity.rs:15:32
    |
-14 | register_cops!(mode = dynamic, MyCheck);
+15 | murphy_plugin_api::submit_cop!(MyCheck);
    |                                ^^^^^^^ unsatisfied trait bound
    |
 help: the trait `NodeCop` is not implemented for `MyCheck`

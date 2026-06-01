@@ -28,3 +28,8 @@ trybuild = "1"
 # exactly as a real plugin author would. (`murphy-ast` is a normal
 # dependency above, named at macro-expansion time.)
 murphy-plugin-api = { path = "../murphy-plugin-api" }
+# `linkme` must be a direct dep of any crate that uses `submit_cop!` or
+# `register_cops!` — linkme's proc macro generates code referencing `::linkme::`.
+# Listed here so trybuild UI-test programs (compiled against this crate's
+# dev-deps) resolve `::linkme` correctly.
+linkme = "0.3"

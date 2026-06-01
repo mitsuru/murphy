@@ -19,6 +19,7 @@ impl FullMeta {
     fn check_send(&self, _node: NodeId, _cx: &Cx<'_>) {}
 }
 
-register_cops!(mode = dynamic, FullMeta);
+register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(FullMeta);
 
 fn main() {}

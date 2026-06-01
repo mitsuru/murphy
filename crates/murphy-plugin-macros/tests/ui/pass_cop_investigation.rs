@@ -17,6 +17,7 @@ impl Comments {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 
-register_cops!(mode = dynamic, Comments);
+register_cops!(mode = dynamic);
+murphy_plugin_api::submit_cop!(Comments);
 
 fn main() {}
