@@ -11,6 +11,7 @@ description = "Murphy standard cop pack (Murphy/Lint/Style/Layout, ADR 0018) —
 # §5 of docs/plans/2026-05-22-plugin-reboot-design.md.
 murphy-plugin-api = { path = "../murphy-plugin-api" }
 # `pub mod` auto-discovery for namespace subdirectories — eliminates per-cop mod.rs edits.
+# cop 移植完了後に撤退予定: automod 削除 + 各 mod.rs を明示的な pub mod リストに戻す。
 automod = "1"
 # `submit_cop!` and `register_cops!` generate code referencing `::linkme::` — must
 # be a direct dep (linkme's proc macro generates ::linkme:: paths in the calling crate).
