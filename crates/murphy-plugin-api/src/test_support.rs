@@ -715,6 +715,7 @@ fn cx_raw_for(
     var_model: &crate::var_semantic_model::VarSemanticModel,
 ) -> CxRaw {
     let p = ast.raw_parts();
+    let file_path = ast.path().to_str().unwrap_or("");
     CxRaw {
         nodes: p.nodes.as_ptr(),
         nodes_len: p.nodes.len(),
@@ -742,6 +743,10 @@ fn cx_raw_for(
         var_model: var_model as *const crate::var_semantic_model::VarSemanticModel,
         node_slice_arena: std::ptr::null_mut(),
         alloc_node_slice: crate::unavailable_alloc_node_slice,
+        file_path: RawSlice {
+            ptr: file_path.as_ptr(),
+            len: file_path.len(),
+        },
     }
 }
 

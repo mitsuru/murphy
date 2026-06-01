@@ -193,6 +193,8 @@ pub struct CxRaw {
     pub node_slice_arena: *mut c_void,
     /// Copy `len` node ids from `ptr` into `node_slice_arena` and return the copy.
     pub alloc_node_slice: AllocNodeSliceFn,
+    /// Current source file path as UTF-8 bytes, empty when unavailable.
+    pub file_path: RawSlice,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -216,6 +218,8 @@ pub struct CxRaw {
 /// `CxRaw::node_slice_arena` and `alloc_node_slice` were tail-appended under
 /// ABI v4 lockstep for murphy-7nze. Per project policy, do not bump the
 /// numeric ABI without explicit approval.
+///
+/// `CxRaw::file_path` was tail-appended under ABI v4 lockstep for murphy-vmg5.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -410,7 +414,8 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, var_model), 200);
         assert_eq!(offset_of!(CxRaw, node_slice_arena), 208);
         assert_eq!(offset_of!(CxRaw, alloc_node_slice), 216);
-        assert_eq!(size_of::<CxRaw>(), 224);
+        assert_eq!(offset_of!(CxRaw, file_path), 224);
+        assert_eq!(size_of::<CxRaw>(), 240);
     }
 
     #[test]
@@ -448,6 +453,8 @@ mod tests {
         // Bumped from 3 → 4 in es99.5 (CxRaw gained `var_model` at offset 200).
         // Kept at 4 for murphy-7nze by explicit project policy despite
         // tail-appending CxRaw node-slice allocator fields.
+        // Kept at 4 for murphy-vmg5 by the same policy despite tail-appending
+        // CxRaw file_path.
         assert_eq!(MURPHY_PLUGIN_ABI_VERSION, 4);
     }
 

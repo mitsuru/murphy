@@ -263,6 +263,7 @@ mod tests {
             var_model: std::ptr::null(),
             node_slice_arena: std::ptr::null_mut(),
             alloc_node_slice: crate::unavailable_alloc_node_slice,
+            file_path: RawSlice::from_str("t.rb"),
         }
     }
 
