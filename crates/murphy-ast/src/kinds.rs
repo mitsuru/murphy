@@ -163,6 +163,10 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     // murphy-j1j2 PM-D advanced patterns
     ("match_as", 108),
     ("const_pattern", 109),
+    // murphy-j1j2 PM-E pin & guard
+    ("pin", 110),
+    ("if_guard", 111),
+    ("unless_guard", 112),
 ];
 
 /// RuboCop-compatible type-name aliases for APIs that accept parser node
@@ -270,12 +274,17 @@ pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
     // murphy-jw5t pattern-match lowering extensions
     ("find_pattern", &[NodeKindTag(101)]),
     ("match_alt", &[NodeKindTag(102)]),
-    // murphy-j1j2 PM-B/C pattern-matching extensions
+    // murphy-j1j2 PM-B/C/D/E pattern-matching extensions
+    // Note: unless_guard excluded — `unless` nodes normalise to `if` in Murphy.
     ("match_rest", &[NodeKindTag(103)]),
     ("match_nil_pattern", &[NodeKindTag(104)]),
     ("array_pattern_with_tail", &[NodeKindTag(105)]),
     ("match_pattern_p", &[NodeKindTag(106)]),
     ("match_pattern", &[NodeKindTag(107)]),
+    ("match_as", &[NodeKindTag(108)]),
+    ("const_pattern", &[NodeKindTag(109)]),
+    ("pin", &[NodeKindTag(110)]),
+    ("if_guard", &[NodeKindTag(111)]),
     ("call", &[NodeKindTag(17), NodeKindTag(18)]),
     (
         "any_block",
@@ -594,6 +603,10 @@ mod tests {
                 const_: n,
                 pattern: n,
             },
+            // murphy-j1j2 PM-E pin & guard (tags 110-112)
+            NodeKind::Pin(n),
+            NodeKind::IfGuard(n),
+            NodeKind::UnlessGuard(n),
         ]
     }
 
@@ -751,6 +764,10 @@ mod tests {
             // murphy-j1j2 PM-D advanced patterns
             NodeKind::MatchAs { .. } => "match_as",
             NodeKind::ConstPattern { .. } => "const_pattern",
+            // murphy-j1j2 PM-E pin & guard
+            NodeKind::Pin(_) => "pin",
+            NodeKind::IfGuard(_) => "if_guard",
+            NodeKind::UnlessGuard(_) => "unless_guard",
         })
     }
 

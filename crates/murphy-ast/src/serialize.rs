@@ -679,6 +679,19 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
             put_u32(out, const_.0);
             put_u32(out, pattern.0);
         }
+        // murphy-j1j2 PM-E pin & guard
+        NodeKind::Pin(inner) => {
+            put_u8(out, 110);
+            put_u32(out, inner.0);
+        }
+        NodeKind::IfGuard(inner) => {
+            put_u8(out, 111);
+            put_u32(out, inner.0);
+        }
+        NodeKind::UnlessGuard(inner) => {
+            put_u8(out, 112);
+            put_u32(out, inner.0);
+        }
     }
 }
 
@@ -961,6 +974,10 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             const_: NodeId(get_u32(cur)?),
             pattern: NodeId(get_u32(cur)?),
         },
+        // murphy-j1j2 PM-E pin & guard
+        110 => NodeKind::Pin(NodeId(get_u32(cur)?)),
+        111 => NodeKind::IfGuard(NodeId(get_u32(cur)?)),
+        112 => NodeKind::UnlessGuard(NodeId(get_u32(cur)?)),
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -1497,6 +1514,10 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
             NodeKind::ConstPattern { const_, pattern } => {
                 check_node(const_.0)?;
                 check_node(pattern.0)?;
+            }
+            // murphy-j1j2 PM-E pin & guard
+            NodeKind::Pin(inner) | NodeKind::IfGuard(inner) | NodeKind::UnlessGuard(inner) => {
+                check_node(inner.0)?;
             }
         }
     }
