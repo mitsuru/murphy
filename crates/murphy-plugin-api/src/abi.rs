@@ -195,6 +195,8 @@ pub struct CxRaw {
     pub alloc_node_slice: AllocNodeSliceFn,
     /// Current source file path as UTF-8 bytes, empty when unavailable.
     pub file_path: RawSlice,
+    /// Optional `AllCops.TargetRailsVersion` for per-cop Rails feature gates.
+    pub target_rails_version: u16,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -220,6 +222,7 @@ pub struct CxRaw {
 /// numeric ABI without explicit approval.
 ///
 /// `CxRaw::file_path` was tail-appended under ABI v4 lockstep for murphy-vmg5.
+/// `CxRaw::target_rails_version` was tail-appended under ABI v4 lockstep for murphy-8iym.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -415,7 +418,8 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, node_slice_arena), 208);
         assert_eq!(offset_of!(CxRaw, alloc_node_slice), 216);
         assert_eq!(offset_of!(CxRaw, file_path), 224);
-        assert_eq!(size_of::<CxRaw>(), 240);
+        assert_eq!(offset_of!(CxRaw, target_rails_version), 240);
+        assert_eq!(size_of::<CxRaw>(), 248);
     }
 
     #[test]

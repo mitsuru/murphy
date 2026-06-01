@@ -8,6 +8,7 @@ use crate::ConfigError;
 #[derive(Debug, Clone, PartialEq)]
 pub struct MurphyConfig {
     pub target_ruby_version: RubyVersion,
+    pub target_rails_version: Option<RubyVersion>,
     pub files: FilesConfig,
     pub cops: CopsConfig,
     pub plugins: Vec<PluginConfig>,
@@ -193,6 +194,7 @@ impl Default for MurphyConfig {
     fn default() -> Self {
         Self {
             target_ruby_version: default_target_ruby_version(),
+            target_rails_version: None,
             files: FilesConfig {
                 include: default_include(),
                 exclude: Vec::new(),
@@ -265,6 +267,7 @@ impl MurphyConfig {
         let mut exclude: Vec<String> = Vec::new();
         let mut cops_path = default_cops_path();
         let mut target_ruby_version = default_target_ruby_version();
+        let mut target_rails_version = None;
         let mut rules: BTreeMap<String, CopRule> = BTreeMap::new();
         let mut plugins: Vec<PluginConfig> = Vec::new();
         let mut saw_include = false;
@@ -297,6 +300,12 @@ impl MurphyConfig {
                         {
                             target_ruby_version = parsed;
                         }
+                        if let Some(v) =
+                            all_cops.get(&Yaml::String("TargetRailsVersion".to_string()))
+                            && let Some(parsed) = parse_ruby_version(v)
+                        {
+                            target_rails_version = Some(parsed);
+                        }
                     }
                 }
                 "plugins" => {
@@ -326,6 +335,7 @@ impl MurphyConfig {
         Ok((
             MurphyConfig {
                 target_ruby_version,
+                target_rails_version,
                 files: FilesConfig { include, exclude },
                 cops: CopsConfig {
                     path: cops_path,
@@ -834,6 +844,7 @@ mod tests {
         assert_eq!(cfg.files.include, vec!["**/*.rb"]);
         assert_eq!(cfg.cops.path, PathBuf::from("cops"));
         assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 1));
+        assert_eq!(cfg.target_rails_version, None);
         assert!(cfg.cops.rules.is_empty());
     }
 
@@ -846,6 +857,17 @@ mod tests {
         let cfg = MurphyConfig::from_yaml_str("AllCops:\n  TargetRubyVersion: 3.2.2\n")
             .expect("config parses");
         assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 2));
+    }
+
+    #[test]
+    fn parses_target_rails_version_from_all_cops() {
+        let cfg = MurphyConfig::from_yaml_str("AllCops:\n  TargetRailsVersion: 5.2\n")
+            .expect("config parses");
+        assert_eq!(cfg.target_rails_version, Some(RubyVersion::new(5, 2)));
+
+        let cfg = MurphyConfig::from_yaml_str("AllCops:\n  TargetRailsVersion: 7.1.3\n")
+            .expect("config parses");
+        assert_eq!(cfg.target_rails_version, Some(RubyVersion::new(7, 1)));
     }
 
     #[test]
@@ -881,6 +903,7 @@ mod tests {
         assert_eq!(cfg.files.exclude, vec!["vendor/**"]);
         assert_eq!(cfg.cops.path, PathBuf::from("custom_cops"));
         assert_eq!(cfg.target_ruby_version, RubyVersion::new(3, 1));
+        assert_eq!(cfg.target_rails_version, None);
     }
 
     #[test]

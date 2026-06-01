@@ -9,7 +9,7 @@ use murphy_ast::{
 };
 
 use crate::abi::CxRaw;
-use crate::{ConfigError, CopOptions};
+use crate::{ConfigError, CopOptions, RubyVersion};
 
 /// Borrowed, direct-read view of the arena for one dispatch call.
 ///
@@ -480,6 +480,17 @@ impl<'a> Cx<'a> {
     /// any var-semantic checks.
     pub fn var_model(&self) -> Option<&'a crate::var_semantic_model::VarSemanticModel> {
         unsafe { self.raw.var_model.as_ref() }
+    }
+
+    /// Configured `AllCops.TargetRailsVersion`, if present.
+    pub fn target_rails_version(&self) -> Option<RubyVersion> {
+        RubyVersion::from_wire(self.raw.target_rails_version)
+    }
+
+    /// True when the configured Rails target is unset or at least `major.minor`.
+    pub fn rails_version_at_least(&self, major: u16, minor: u16) -> bool {
+        self.target_rails_version()
+            .is_none_or(|target| target >= RubyVersion::new(major, minor))
     }
 
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
@@ -2904,6 +2915,7 @@ mod tests {
                 ptr: file_path.as_ptr(),
                 len: file_path.len(),
             },
+            target_rails_version: 0,
         }
     }
 
@@ -2918,6 +2930,39 @@ mod tests {
         let cx = unsafe { Cx::from_raw(&raw) };
 
         assert_eq!(cx.file_path(), "t.rb");
+    }
+
+    #[test]
+    fn target_rails_version_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.target_rails_version = crate::RubyVersion::to_wire(Some(crate::RubyVersion::new(5, 2)));
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(
+            cx.target_rails_version(),
+            Some(crate::RubyVersion::new(5, 2))
+        );
+        assert!(!cx.rails_version_at_least(6, 0));
+        assert!(cx.rails_version_at_least(5, 2));
+    }
+
+    #[test]
+    fn missing_target_rails_version_allows_version_guard() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(cx.target_rails_version(), None);
+        assert!(cx.rails_version_at_least(6, 0));
     }
 
     #[test]

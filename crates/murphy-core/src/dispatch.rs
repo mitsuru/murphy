@@ -34,7 +34,7 @@ use murphy_ast::{Ast, NodeId, NodeKind};
 use murphy_plugin_api::var_semantic_model::VarSemanticModel;
 use murphy_plugin_api::{
     CxRaw, FnTable, NodeKindTag as PluginNodeKindTag, PluginCopV1, RawEdit, RawOffense, RawSlice,
-    SEVERITY_UNSET,
+    RubyVersion, SEVERITY_UNSET,
 };
 
 /// The `NodeKindTag` for [`NodeKind::Send`] (frozen by ADR 0037).
@@ -188,6 +188,7 @@ fn build_cx_raw(
     sink: &mut OffenseSink,
     var_model: &VarSemanticModel,
     node_slice_arena: &mut NodeSliceArena,
+    target_rails_version: Option<RubyVersion>,
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -222,6 +223,7 @@ fn build_cx_raw(
             ptr: file_path.as_ptr(),
             len: file_path.len(),
         },
+        target_rails_version: RubyVersion::to_wire(target_rails_version),
     }
 }
 
@@ -256,12 +258,28 @@ pub fn run_cops_with_options(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
+    options_for: impl FnMut(&str) -> Vec<u8>,
+) {
+    run_cops_with_options_and_target_rails_version(ast, cops, sink, None, options_for);
+}
+
+pub fn run_cops_with_options_and_target_rails_version(
+    ast: &Ast,
+    cops: &[&PluginCopV1],
+    sink: &mut OffenseSink,
+    target_rails_version: Option<RubyVersion>,
     mut options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
     let var_model = VarSemanticModel::build(ast);
     let index = DispatchIndex::build(ast);
     let mut node_slice_arena = NodeSliceArena::default();
-    let mut base = build_cx_raw(ast, sink, &var_model, &mut node_slice_arena);
+    let mut base = build_cx_raw(
+        ast,
+        sink,
+        &var_model,
+        &mut node_slice_arena,
+        target_rails_version,
+    );
     for cop in cops {
         base.cop_name = cop.name;
         let name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("");
@@ -400,6 +418,51 @@ mod tests {
 
     static NIL_KINDS: &[PluginNodeKindTag] = &[PluginNodeKindTag(NIL_TAG)];
     static SEND_KINDS: &[PluginNodeKindTag] = &[PluginNodeKindTag(SEND_TAG)];
+
+    static TARGET_RAILS_VERSION_SEEN: std::sync::atomic::AtomicU16 =
+        std::sync::atomic::AtomicU16::new(0);
+    unsafe extern "C" fn target_rails_version_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let cx = unsafe { &*cx };
+        TARGET_RAILS_VERSION_SEEN.store(cx.target_rails_version, Ordering::SeqCst);
+        0
+    }
+    static TARGET_RAILS_VERSION_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/TargetRailsVersion"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: target_rails_version_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_target_rails_version_to_cx_raw() {
+        TARGET_RAILS_VERSION_SEEN.store(0, Ordering::SeqCst);
+        let ast = ast_nil_and_int();
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_target_rails_version(
+            &ast,
+            &[&TARGET_RAILS_VERSION_COP],
+            &mut sink,
+            Some(RubyVersion::new(5, 2)),
+            |_| b"{}".to_vec(),
+        );
+
+        assert_eq!(
+            TARGET_RAILS_VERSION_SEEN.load(Ordering::SeqCst),
+            RubyVersion::to_wire(Some(RubyVersion::new(5, 2)))
+        );
+    }
 
     // (1) DispatchIndex correctly buckets the arena's nodes by tag.
     #[test]

@@ -169,6 +169,10 @@ impl Pick {
 /// - `<current>`: raw source from the inner pluck node's selector start
 ///   to the outer first node's selector end (e.g. `pluck(:a)&.first`).
 fn check(node: NodeId, cx: &Cx<'_>) {
+    if !cx.rails_version_at_least(6, 0) {
+        return;
+    }
+
     if !is_any_pluck_first(node, cx) {
         return;
     }
@@ -358,17 +362,24 @@ mod tests {
     }
 
     // === version-gating regression (murphy-as0h) ===
-    //
-    // Murphy has no TargetRailsVersion infrastructure yet, so Rails/Pick
-    // fires unconditionally regardless of the project's Rails version.
-    // RuboCop's upstream requires Rails >= 6.0 via `minimum_target_rails_version 6.0`.
-    // Until Murphy gains TargetRailsVersion gating, users on Rails < 6.0
-    // should disable the cop via `Rails/Pick: {Enabled: false}` in .murphy.yml.
-    // This test documents (and pins) that current behavior. Tracked by murphy-as0h.
+
     #[test]
-    fn fires_regardless_of_target_rails_version() {
-        // Without TargetRailsVersion gating, the cop fires even in contexts
-        // that would be excluded by RuboCop's minimum_target_rails_version 6.0.
+    fn does_not_fire_below_rails_6() {
+        test::<Pick>()
+            .with_target_rails_version(5, 2)
+            .expect_no_offenses("Post.pluck(:id).first\n");
+    }
+
+    #[test]
+    fn fires_at_rails_6() {
+        test::<Pick>().with_target_rails_version(6, 0).expect_offense(indoc! {r#"
+                Post.pluck(:id).first
+                ^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:id)` over `pluck(:id).first`.
+            "#});
+    }
+
+    #[test]
+    fn fires_when_target_rails_version_is_unset() {
         test::<Pick>().expect_offense(indoc! {r#"
                 Post.pluck(:id).first
                 ^^^^^^^^^^^^^^^^^^^^^ Prefer `pick(:id)` over `pluck(:id).first`.
