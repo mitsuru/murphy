@@ -313,6 +313,8 @@ fn node_kind_discriminants_are_frozen() {
         },
         87,
     );
+    freeze(NodeKind::ArrayPattern(NodeList::EMPTY), 88);
+    freeze(NodeKind::HashPattern(NodeList::EMPTY), 89);
     freeze(NodeKind::MatchVar(s()), 90);
     // murphy-jw5t pattern-match lowering
     freeze(NodeKind::FindPattern(NodeList::EMPTY), 101);
