@@ -175,6 +175,12 @@ fn check_block(node: NodeId, cx: &Cx<'_>, opts: &Options) {
         return;
     }
 
+    // If the block has more params than configured, skip entirely to avoid
+    // autocorrect dropping the extra params (which would break the code).
+    if actual_names.len() > preferred_params.len() {
+        return;
+    }
+
     // Check if args already match.
     if args_match(&actual_names, preferred_params) {
         return;
@@ -225,8 +231,9 @@ fn check_block(node: NodeId, cx: &Cx<'_>, opts: &Options) {
 }
 
 /// Rename local variable references (`Lvar`) and assignments (`Lvasgn`) within
-/// `node`, stopping at scope boundaries (`Block`, `Numblock`, `Def`, `Defs`).
-/// This prevents renaming names that are shadowed inside nested blocks.
+/// `node`, stopping only when a nested block/def redeclares a rename target as
+/// its own parameter (shadow). Free variable references in nested blocks ARE
+/// renamed.
 fn rename_in_scope(node: NodeId, rename_map: &[(String, String)], cx: &Cx<'_>) {
     match cx.kind(node) {
         NodeKind::Lvar(sym) => {
@@ -250,21 +257,57 @@ fn rename_in_scope(node: NodeId, rename_map: &[(String, String)], cx: &Cx<'_>) {
                 rename_in_scope(val_id, rename_map, cx);
             }
         }
-        // Scope boundaries -- do NOT recurse into these.
-        NodeKind::Block { .. }
-        | NodeKind::Numblock { .. }
-        | NodeKind::Def { .. }
-        | NodeKind::Defs { .. } => {
-            // Stop recursion; inner scopes may shadow the params.
+        // Nested blocks: recurse with a filtered rename_map that excludes any
+        // name shadowed by the nested block's own parameters.
+        NodeKind::Block { args: inner_args, body: inner_body, .. } => {
+            // Build filtered rename_map: remove entries whose names are declared
+            // as params in this nested block.
+            let inner_shadowed = collect_block_param_names(*inner_args, cx);
+            let filtered: Vec<(String, String)> = rename_map
+                .iter()
+                .filter(|(old, _)| !inner_shadowed.iter().any(|&s| s == old.as_str()))
+                .cloned()
+                .collect();
+            if !filtered.is_empty() {
+                if let Some(body_id) = inner_body.get() {
+                    rename_in_scope(body_id, &filtered, cx);
+                }
+            }
         }
-        // For all other nodes, recurse into children via descendants with bounded walk.
+        // Numblock: numbered params (_1, _2) can't shadow named outer params.
+        NodeKind::Numblock { body: inner_body, .. } => {
+            if let Some(body_id) = inner_body.get() {
+                rename_in_scope(body_id, rename_map, cx);
+            }
+        }
+        // Hard scope boundaries: method/class definitions reset all locals.
+        NodeKind::Def { .. } | NodeKind::Defs { .. } => {
+            // Stop recursion entirely.
+        }
+        // For all other nodes, recurse into children.
         _ => {
-            // Walk direct children (not using cx.descendants which goes too deep).
             for child in cx.children(node) {
                 rename_in_scope(child, rename_map, cx);
             }
         }
     }
+}
+
+/// Collect plain `Arg` parameter names declared in a block's `Args` node.
+fn collect_block_param_names<'a>(args_id: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
+    let NodeKind::Args(list) = *cx.kind(args_id) else {
+        return vec![];
+    };
+    cx.list(list)
+        .iter()
+        .filter_map(|&n| {
+            if let NodeKind::Arg(sym) = *cx.kind(n) {
+                Some(cx.symbol_str(sym))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Returns `true` if actual params already match the preferred names.
@@ -468,6 +511,30 @@ mod tests {
                 "},
                 "foo.reduce { |acc, elem| xs.map { |c| c } }
 ",
+            );
+    }
+
+
+    #[test]
+    fn no_offense_more_params_than_configured() {
+        // More params than configured -- skip to avoid dropping extra params.
+        test::<SingleLineBlockParams>()
+            .with_options(&default_opts())
+            .expect_no_offenses("foo.reduce { |x, y, z| x + y + z }
+");
+    }
+
+    #[test]
+    fn corrects_free_var_in_nested_block_is_renamed() {
+        // Free variable reference to outer block param inside nested block IS renamed.
+        test::<SingleLineBlockParams>()
+            .with_options(&default_opts())
+            .expect_correction(
+                indoc! {r#"
+                    foo.reduce { |c, d| xs.each { use(c) }; c + d }
+                                 ^^^^^^ Name `reduce` block params `|acc, elem|`.
+                "#},
+                "foo.reduce { |acc, elem| xs.each { use(acc) }; acc + elem }\n",
             );
     }
 
