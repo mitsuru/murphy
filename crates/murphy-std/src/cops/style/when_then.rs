@@ -87,9 +87,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let message =
-        MSG.replacen("%<expression>s", &expression, 1)
-            .replacen("%<expression>s", &expression, 1);
+    let message = MSG.replace("%<expression>s", &expression);
 
     cx.emit_offense(semi_range, &message, None);
 

@@ -93,15 +93,29 @@ fn check(node: NodeId, cx: &Cx<'_>, keyword: &str) {
         return;
     };
 
-    let message = MSG.replacen("%<keyword>s", keyword, 1);
+    let message = MSG.replace("%<keyword>s", keyword);
     cx.emit_offense(do_range, &message, None);
 
     // Autocorrect: remove from cond_end to do_range.end (space + `do`).
-    let remove_range = Range {
+    // If comments exist in the gap [cond_end, do_range.start), skip the
+    // leading whitespace deletion and only remove the `do` token itself
+    // to preserve those comments.
+    let gap_to_do = Range {
         start: cond_end,
-        end: do_range.end,
+        end: do_range.start,
     };
-    cx.emit_edit(remove_range, "");
+    if cx.comments_in_range(gap_to_do).is_empty() {
+        // No comments in the gap — remove the leading space + `do`.
+        let remove_range = Range {
+            start: cond_end,
+            end: do_range.end,
+        };
+        cx.emit_edit(remove_range, "");
+    } else {
+        // Comments are present between the condition and `do` — remove
+        // only the `do` token to avoid dropping the comment.
+        cx.emit_edit(do_range, "");
+    }
 }
 
 /// Scan tokens in `[from, to)` for a `do` keyword (`Other` token with text
