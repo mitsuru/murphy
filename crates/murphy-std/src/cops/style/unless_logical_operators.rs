@@ -117,23 +117,46 @@ fn collect_op_tokens_in_range(
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < range_start);
 
-    let mut depth: usize = 0;
+    // Tracks how many levels of *method-call* parens we are inside.
+    // Grouping parens like `(a || b)` do NOT increment this counter.
+    // Method-call parens like `foo(a || b)` DO increment it.
+    let mut call_depth: usize = 0;
+    // Track paren depth for target_depth comparison.
+    let mut paren_depth: usize = 0;
+    let mut prev_was_word = false;
     let mut ops = Vec::new();
+
     for tok in &toks[idx..] {
         if tok.range.start >= range_end {
             break;
         }
-        // Track paren depth for filtering operators inside nested calls.
-        if tok.kind == SourceTokenKind::LeftParen {
-            depth += 1;
-            continue;
-        }
-        if tok.kind == SourceTokenKind::RightParen {
-            depth = depth.saturating_sub(1);
-            continue;
-        }
-        if tok.kind != SourceTokenKind::Other {
-            continue;
+        match tok.kind {
+            SourceTokenKind::LeftParen => {
+                // If the previous token was a word (identifier/method name),
+                // this is a method-call paren — increment call depth.
+                if prev_was_word {
+                    call_depth += 1;
+                }
+                paren_depth += 1;
+                prev_was_word = false;
+                continue;
+            }
+            SourceTokenKind::RightParen => {
+                if call_depth > 0 && paren_depth > 0 {
+                    // We may be closing a call paren — check if we were inside one.
+                    // Simplified: decrement call depth when closing at a depth that
+                    // had a call open. We track this conservatively.
+                    call_depth = call_depth.saturating_sub(1);
+                }
+                paren_depth = paren_depth.saturating_sub(1);
+                prev_was_word = false;
+                continue;
+            }
+            SourceTokenKind::Other => {}
+            _ => {
+                prev_was_word = false;
+                continue;
+            }
         }
         let text = &source[tok.range.start as usize..tok.range.end as usize];
         let op = match text {
@@ -141,7 +164,12 @@ fn collect_op_tokens_in_range(
             b"and" => OpKind::KeywordAnd,
             b"||" => OpKind::SymbolicOr,
             b"or" => OpKind::KeywordOr,
-            _ => continue,
+            _ => {
+                // Track if this token is a word (identifier, keyword, etc.)
+                // that could be a method name followed by `(`.
+                prev_was_word = is_word_start(text);
+                continue;
+            }
         };
         // For `and`/`or` keywords, verify word boundary.
         if matches!(text, b"and" | b"or") {
@@ -150,16 +178,28 @@ fn collect_op_tokens_in_range(
             let after_ok = tok.range.end as usize >= source.len()
                 || !is_word_char(source[tok.range.end as usize]);
             if !before_ok || !after_ok {
+                prev_was_word = false;
                 continue;
             }
         }
-        // Only count operators at the target depth.
-        // `usize::MAX` means "all depths" (no filtering).
-        if target_depth == usize::MAX || depth == target_depth {
-            ops.push(op);
+        prev_was_word = false;
+        // Skip operators inside method-call argument lists.
+        if call_depth > 0 {
+            continue;
         }
+        // For Unknown conditions (target_depth=1): only count at depth 1+.
+        // For And/Or conditions (target_depth=usize::MAX): count all depths.
+        if target_depth != usize::MAX && paren_depth < target_depth {
+            continue;
+        }
+        ops.push(op);
     }
     ops
+}
+
+/// Returns `true` if the token text starts an identifier / method name.
+fn is_word_start(text: &[u8]) -> bool {
+    !text.is_empty() && (text[0].is_ascii_alphabetic() || text[0] == b'_')
 }
 
 fn is_word_char(b: u8) -> bool {
@@ -565,6 +605,25 @@ mod tests {
     fn forbid_mixed_does_not_flag_parenthesized_method_call_with_mixed_args() {
         // `(foo(a && b || c))` — all operators inside nested call, depth 2.
         test::<UnlessLogicalOperators>().expect_no_offenses("return unless (foo(a && b || c))\n");
+    }
+
+    #[test]
+    fn flags_mixed_nested_parens_or_then_and() {
+        // `(a || (b && c))` — outer Unknown contains `||` at depth 1 and
+        // nested-group `(b && c)` with `&&` at depth 2. Mixed: should flag.
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless (a || (b && c))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_nested_parens_and_then_or() {
+        // `(a && (b || c))` — mixed: should flag.
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless (a && (b || c))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
     }
 
     #[test]
