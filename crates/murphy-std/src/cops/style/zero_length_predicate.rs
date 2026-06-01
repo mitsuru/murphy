@@ -43,7 +43,7 @@
 //! - Comparison form: replace whole comparison node with `recv.empty?` or
 //!   `!recv.empty?` using whole-node interpolation (structural rewrite).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -65,11 +65,10 @@ impl ZeroLengthPredicate {
     /// so we dispatch internally based on the method name.
     #[on_node(kind = "send", methods = ["zero?", "==", "!=", "<", ">"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let method = match *cx.kind(node) {
-            NodeKind::Send { method, .. } => method,
-            _ => return,
+        let Some(method) = cx.method_name(node) else {
+            return;
         };
-        match cx.symbol_str(method) {
+        match method {
             "zero?" => check_predicate_form(node, cx),
             "==" | "!=" | "<" | ">" => check_comparison_form(node, cx),
             _ => {}
@@ -81,11 +80,7 @@ impl ZeroLengthPredicate {
     /// not comparison checks.
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let method = match *cx.kind(node) {
-            NodeKind::Csend { method, .. } => method,
-            _ => return,
-        };
-        if cx.symbol_str(method) == "zero?" {
+        if cx.method_name(node) == Some("zero?") {
             check_predicate_form(node, cx);
         }
     }
@@ -97,20 +92,19 @@ impl ZeroLengthPredicate {
 
 fn check_predicate_form(outer_node: NodeId, cx: &Cx<'_>) {
     // Outer node receiver must be a `size`/`length` send with its own receiver.
-    let Some(inner_id) = recv_of(outer_node, cx) else {
+    let Some(inner_id) = cx.call_receiver(outer_node).get() else {
         return;
     };
 
-    let inner_method = match *cx.kind(inner_id) {
-        NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => method,
-        _ => return,
+    let Some(inner_method) = cx.method_name(inner_id) else {
+        return;
     };
-    if !is_length_method(cx.symbol_str(inner_method)) {
+    if !is_length_method(inner_method) {
         return;
     }
 
     // The `size`/`length` call must have a receiver.
-    let Some(length_recv_id) = recv_of(inner_id, cx) else {
+    let Some(length_recv_id) = cx.call_receiver(inner_id).get() else {
         return;
     };
 
@@ -119,18 +113,14 @@ fn check_predicate_form(outer_node: NodeId, cx: &Cx<'_>) {
     }
 
     // No args on the length call.
-    let inner_args = match *cx.kind(inner_id) {
-        NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => args,
-        _ => return,
-    };
-    if !cx.list(inner_args).is_empty() {
+    if !cx.call_arguments(inner_id).is_empty() {
         return;
     }
 
     // Offense range: from start of inner method name (e.g. `size`) to end of
     // outer node (e.g. end of `zero?`). Mirrors RuboCop's
     // `node.loc.selector.join(node.parent.source_range.end)`.
-    let inner_name_start = cx.loc(inner_id).name.start;
+    let inner_name_start = cx.node(inner_id).loc.name.start;
     let outer_end = cx.range(outer_node).end;
     let offense_range = Range {
         start: inner_name_start,
@@ -149,24 +139,17 @@ fn check_predicate_form(outer_node: NodeId, cx: &Cx<'_>) {
 // --------------------------------------------------------------------------
 
 fn check_comparison_form(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send {
-        receiver: OptNodeId(recv_idx),
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
+    let Some(lhs_id) = cx.call_receiver(node).get() else {
         return;
     };
-    if recv_idx == u32::MAX {
+    let args = cx.call_arguments(node);
+    if args.len() != 1 {
         return;
     }
-    let lhs_id = NodeId(recv_idx);
-    let arg_list = cx.list(args);
-    if arg_list.len() != 1 {
+    let rhs_id = args[0];
+    let Some(op) = cx.method_name(node) else {
         return;
-    }
-    let rhs_id = arg_list[0];
-    let op = cx.symbol_str(method);
+    };
 
     // Try `lhs OP rhs` then `rhs (flipped OP) lhs`.
     let (length_call, direction) = if let Some(d) = check_lhs_op_rhs(lhs_id, op, rhs_id, cx) {
@@ -178,7 +161,7 @@ fn check_comparison_form(node: NodeId, cx: &Cx<'_>) {
     };
 
     // The length call must have a non-absent receiver.
-    let Some(length_recv) = recv_of(length_call, cx) else {
+    let Some(length_recv) = cx.call_receiver(length_call).get() else {
         return;
     };
 
@@ -186,13 +169,8 @@ fn check_comparison_form(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // No arguments on the length call (length_call is always Send here — Csend
-    // was excluded by check_lhs_op_rhs, so the Csend arm is unreachable).
-    let length_args = match *cx.kind(length_call) {
-        NodeKind::Send { args, .. } => args,
-        _ => return,
-    };
-    if !cx.list(length_args).is_empty() {
+    // No arguments on the length call.
+    if !cx.call_arguments(length_call).is_empty() {
         return;
     }
 
@@ -222,19 +200,23 @@ fn check_comparison_form(node: NodeId, cx: &Cx<'_>) {
 
 /// Check if `lhs OP rhs` is a matching zero/one-length pattern.
 /// Returns `Some(true)` for empty direction, `Some(false)` for non-empty.
+///
+/// Only plain `send` nodes are matched: safe-navigation (`csend`) comparison
+/// forms are semantically different when the receiver is `nil` — RuboCop's
+/// `on_csend` only invokes the predicate check, not comparison checks.
 fn check_lhs_op_rhs(lhs: NodeId, op: &str, rhs: NodeId, cx: &Cx<'_>) -> Option<bool> {
-    // Only plain `send` nodes: safe-navigation (`&.`) semantics differ when the
-    // receiver is nil, so comparison forms are not equivalent to `empty?`.
-    // RuboCop's `on_csend` only invokes the predicate check, not comparisons.
-    let lhs_method = match *cx.kind(lhs) {
-        NodeKind::Send { method, .. } => method,
-        _ => return None,
-    };
-    if !is_length_method(cx.symbol_str(lhs_method)) {
+    // Exclude safe-navigation calls from comparison forms.
+    if cx.is_safe_navigation(lhs) {
+        return None;
+    }
+    let lhs_method = cx.method_name(lhs)?;
+    if !is_length_method(lhs_method) {
         return None;
     }
 
-    let int_val = int_value(rhs, cx)?;
+    let NodeKind::Int(int_val) = *cx.kind(rhs) else {
+        return None;
+    };
 
     match (op, int_val) {
         ("==", 0) => Some(true),
@@ -253,14 +235,6 @@ fn flip_op(op: &str) -> &str {
     }
 }
 
-fn int_value(node: NodeId, cx: &Cx<'_>) -> Option<i64> {
-    if let NodeKind::Int(v) = *cx.kind(node) {
-        Some(v)
-    } else {
-        None
-    }
-}
-
 fn is_length_method(name: &str) -> bool {
     name == "size" || name == "length"
 }
@@ -270,61 +244,24 @@ fn is_length_method(name: &str) -> bool {
 // --------------------------------------------------------------------------
 
 fn is_non_polymorphic(recv: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send {
-        receiver: OptNodeId(const_idx),
-        method,
-        ..
-    } = *cx.kind(recv)
-    else {
+    let Some(const_id) = cx.call_receiver(recv).get() else {
         return false;
     };
-    if const_idx == u32::MAX {
+    let Some(method_name) = cx.method_name(recv) else {
         return false;
-    }
-    let const_id = NodeId(const_idx);
-    let method_name = cx.symbol_str(method);
+    };
 
-    if method_name == "stat" && is_const(const_id, "File", cx) {
+    if method_name == "stat" && cx.is_global_const(const_id, "File") {
         return true;
     }
     if matches!(method_name, "new" | "open")
-        && (is_const(const_id, "File", cx)
-            || is_const(const_id, "Tempfile", cx)
-            || is_const(const_id, "StringIO", cx))
+        && (cx.is_global_const(const_id, "File")
+            || cx.is_global_const(const_id, "Tempfile")
+            || cx.is_global_const(const_id, "StringIO"))
     {
         return true;
     }
     false
-}
-
-fn is_const(node: NodeId, name: &str, cx: &Cx<'_>) -> bool {
-    let NodeKind::Const {
-        name: sym,
-        scope: OptNodeId(scope_idx),
-    } = *cx.kind(node)
-    else {
-        return false;
-    };
-    if cx.symbol_str(sym) != name {
-        return false;
-    }
-    // nil scope (OptNodeId with MAX = absent) — unqualified constant like `File`
-    if scope_idx == u32::MAX {
-        return true;
-    }
-    let scope_id = NodeId(scope_idx);
-    matches!(*cx.kind(scope_id), NodeKind::Nil | NodeKind::Cbase)
-}
-
-fn recv_of(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    match *cx.kind(node) {
-        NodeKind::Send {
-            receiver: OptNodeId(idx),
-            ..
-        } if idx != u32::MAX => Some(NodeId(idx)),
-        NodeKind::Csend { receiver, .. } => Some(receiver),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -516,8 +453,9 @@ mod tests {
 
     // ----- Safe-navigation (csend) comparison forms are NOT flagged -----
     // x&.size == 0 is not equivalent to x&.empty? when x is nil:
-    // x&.size == 0 evaluates to false (nil == 0 is false), while
-    // x&.empty? returns nil. RuboCop's on_csend only handles the predicate.
+    // x&.size evaluates to nil (safe-navigation short-circuits), and nil == 0
+    // is false; while x&.empty? returns nil which is falsy but not false.
+    // RuboCop's on_csend only handles the predicate form.
 
     #[test]
     fn accepts_csend_size_eq_zero() {
