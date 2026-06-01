@@ -182,7 +182,33 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
             let has_kw = ops.iter().any(|&op| op == OpKind::KeywordAnd);
             has_sym && has_kw
         }
-        // Top condition is not And/Or (e.g. Send, Unknown): not flagged.
+        NodeKind::Unknown => {
+            // Parenthesized condition: `(a && b || c)` is `Unknown`. Apply the
+            // same mixed-detection logic via token scan within the condition range.
+            let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, cx);
+            if ops.is_empty() {
+                return false;
+            }
+            let has_and = ops.iter().any(|op| op.is_and());
+            let has_or = ops.iter().any(|op| op.is_or());
+            // Cross-type mixing (and + or).
+            if has_and && has_or {
+                return true;
+            }
+            // Same-type symbolic/keyword mixing.
+            if has_and {
+                let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicAnd);
+                let has_kw = ops.iter().any(|&op| op == OpKind::KeywordAnd);
+                return has_sym && has_kw;
+            }
+            if has_or {
+                let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicOr);
+                let has_kw = ops.iter().any(|&op| op == OpKind::KeywordOr);
+                return has_sym && has_kw;
+            }
+            false
+        }
+        // Top condition is Send or any other non-logical node: not flagged.
         _ => false,
     }
 }
@@ -484,6 +510,25 @@ mod tests {
     fn forbid_mixed_does_not_flag_logical_inside_method_arg() {
         // Mixed operators inside a method arg — condition is Send, not And/Or.
         test::<UnlessLogicalOperators>().expect_no_offenses("return unless foo(a && b || c)\n");
+    }
+
+    #[test]
+    fn flags_mixed_parenthesized_and_or() {
+        // Parenthesized condition `(a && b || c)` parses as `Unknown`.
+        // Token scanning detects the mixed `&&` and `||`.
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless (a && b || c)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
+    }
+
+    #[test]
+    fn flags_mixed_parenthesized_keyword_symbolic() {
+        // Parenthesized `(a || b and c)` — mixes symbolic `||` and keyword `and`.
+        test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
+            return unless (a || b and c)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not use mixed logical operators in an `unless`.
+        "#});
     }
 
     #[test]
