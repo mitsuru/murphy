@@ -57,7 +57,7 @@ pub use mruby::sandbox::{
 #[cfg(feature = "mruby-user-cops")]
 pub use mruby::{
     AstContext, COP_DEADLINE, MrubyState, run_mruby_cop, run_mruby_cop_isolated,
-    run_mruby_cop_isolated_with_deadline,
+    run_mruby_cop_isolated_with_deadline, run_mruby_test_specs,
 };
 pub use murphy_ast::ast_to_sexp;
 pub use murphy_plugin_api::RubyVersion;

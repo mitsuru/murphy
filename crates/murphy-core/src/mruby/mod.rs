@@ -22,5 +22,6 @@ pub mod state;
 pub use sdk::{
     COP_DEADLINE, MrubyCopRunOptions, run_mruby_cop, run_mruby_cop_isolated,
     run_mruby_cop_isolated_with_deadline, run_mruby_cop_isolated_with_options,
+    run_mruby_test_specs,
 };
 pub use state::{AstContext, MrubyState};

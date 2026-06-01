@@ -55,8 +55,8 @@ use mruby3_sys::{
 };
 use murphy_pattern::CaptureValue;
 
-use crate::Range;
 use crate::mruby::AstContext;
+use crate::{Range, Severity};
 
 // `ruby_string_from_bytes` narrows a slice `len` to `mrb_int` relying on cop
 // sources being `u32`-bounded (see `Range::from_prism_location`). That bound
@@ -1302,6 +1302,97 @@ unsafe extern "C" fn native_source_slice(mrb: *mut mrb_state, _self: mrb_value) 
     }
 }
 
+/// `Murphy.__run_cop_on_source(cop_name, source) -> String`.
+/// Runs the specified cop on a clean source code snippet under an isolated
+/// AstContext and returns serialized offenses including their autocorrect blobs.
+unsafe extern "C" fn native_run_cop_on_source(mrb: *mut mrb_state, _self: mrb_value) -> mrb_value {
+    let mut cop_name_ptr: *const std::os::raw::c_char = std::ptr::null();
+    let mut source_ptr: *const std::os::raw::c_char = std::ptr::null();
+    let fmt = c"zz";
+    // SAFETY: inside native callback; mrb is valid and non-null; fmt requests two strings.
+    unsafe {
+        mrb_get_args(
+            mrb,
+            fmt.as_ptr(),
+            &mut cop_name_ptr as *mut *const std::os::raw::c_char,
+            &mut source_ptr as *mut *const std::os::raw::c_char,
+        );
+    }
+
+    let cop_name = unsafe { CStr::from_ptr(cop_name_ptr) }
+        .to_string_lossy()
+        .into_owned();
+    let source = unsafe { CStr::from_ptr(source_ptr) }
+        .to_string_lossy()
+        .into_owned();
+
+    let ctx = AstContext::new(source.as_bytes().to_vec());
+    let cop_run = crate::mruby::sdk::CopRun::new(ctx, &cop_name, "test_file.rb");
+
+    let old_ud = unsafe { (*mrb).ud };
+    unsafe {
+        (*mrb).ud = &cop_run as *const _ as *mut std::ffi::c_void;
+    }
+
+    let eval_str = format!(
+        "class_name = {:?}.gsub('/', '::'); \
+         klass = class_name.split('::').inject(Object) {{ |m, c| m.const_get(c) }}; \
+         klass.new.__run",
+        cop_name
+    );
+    let eval_str_c = CString::new(eval_str).unwrap();
+    // SAFETY: evaluating inside the mruby state.
+    unsafe { mrb_load_string(mrb, eval_str_c.as_ptr()) };
+
+    unsafe {
+        (*mrb).ud = old_ud;
+    }
+
+    unsafe {
+        if !(*mrb).exc.is_null() {
+            return eval_literal(mrb, c"nil");
+        }
+    }
+
+    let offenses = cop_run.sink.into_inner();
+    let mut blob = String::new();
+    for offense in offenses {
+        let start = offense.range.start_offset;
+        let end = offense.range.end_offset;
+        let severity = match offense.severity {
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+        };
+        let message = offense.message;
+        let autocorrect_blob = match &offense.autocorrect {
+            Some(ac) => {
+                let mut ac_blob = String::new();
+                for edit in &ac.edits {
+                    let e_start = edit.range.start_offset;
+                    let e_end = edit.range.end_offset;
+                    let replen = edit.replacement.len();
+                    ac_blob.push_str(&format!("{e_start} {e_end} {replen} "));
+                    ac_blob.push_str(&edit.replacement);
+                }
+                ac_blob
+            }
+            None => "".to_owned(),
+        };
+
+        let sev_len = severity.len();
+        let msg_len = message.len();
+        let ac_len = autocorrect_blob.len();
+
+        blob.push_str(&format!("{start} {end} {sev_len} {msg_len} {ac_len} "));
+        blob.push_str(severity);
+        blob.push_str(&message);
+        blob.push_str(&autocorrect_blob);
+    }
+
+    // SAFETY: mrb valid & non-null; byte slice is copied by mruby.
+    unsafe { ruby_string_from_bytes(mrb, blob.as_bytes()) }
+}
+
 /// Register the read-only native primitives on `mrb` as module functions of a
 /// `Murphy` class (matching the proven spike's `Murphy.node_*` surface).
 ///
@@ -1360,6 +1451,13 @@ pub(crate) unsafe fn register(mrb: *mut mrb_state) {
         def(c"compile_pattern", native_compile_pattern, 1);
         def(c"match", native_match, 2);
         def(c"ast_root", native_ast_root, 0);
+        def(c"node_count", native_node_count, 0);
+        def(c"node_name", native_node_name, 1);
+        def(c"node_receiver_nil?", native_node_receiver_nil, 1);
+        def(c"node_msg_start", native_node_msg_start, 1);
+        def(c"node_msg_end", native_node_msg_end, 1);
+        def(c"source_slice", native_source_slice, 2);
+        def(c"__run_cop_on_source", native_run_cop_on_source, 2);
     }
 }
 
