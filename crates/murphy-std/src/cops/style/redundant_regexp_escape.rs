@@ -119,6 +119,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         if b == b'\\' && i + 1 < body.len() {
             let escaped = body[i + 1];
             let char_before = if i > 0 { Some(body[i - 1]) } else { None };
+            // Two-before: needed to detect whether a preceding `#` is itself
+            // escaped (i.e. part of a `\#` sequence), in which case the `#`
+            // cannot trigger interpolation and `\@`/`\$` after it are redundant.
+            let char_two_before = if i >= 2 { Some(body[i - 2]) } else { None };
 
             if !is_allowed_escape(
                 src,
@@ -126,6 +130,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                 i,
                 escaped,
                 char_before,
+                char_two_before,
                 open_delim,
                 close_delim,
                 char_class_depth > 0,
@@ -230,6 +235,7 @@ fn is_allowed_escape(
     i: usize,   // offset of `\` within `body` (i.e., src[body_start + i] == b'\\')
     escaped: u8,
     char_before: Option<u8>,
+    char_two_before: Option<u8>,
     open_delim: u8,
     close_delim: u8,
     within_char_class: bool,
@@ -249,10 +255,15 @@ fn is_allowed_escape(
         return true;
     }
 
-    // 4. Interpolation-sigil guard: `\@` or `\$` right after a `#` would
-    //    otherwise become an interpolation trigger — keep these escapes.
+    // 4. Interpolation-sigil guard: `\@` or `\$` right after an UNescaped
+    //    `#` would trigger interpolation — keep these escapes.
+    //    If the preceding `#` is itself escaped (i.e. part of `\#`), then it
+    //    cannot start interpolation, so `\@`/`\$` after `\#` are redundant.
     if let Some(prev) = char_before {
-        if prev == b'#' && INTERPOLATION_SIGILS.contains(&escaped) {
+        if prev == b'#'
+            && INTERPOLATION_SIGILS.contains(&escaped)
+            && !matches!(char_two_before, Some(b'\\'))
+        {
             return true;
         }
     }
@@ -494,6 +505,42 @@ mod tests {
             "#},
             "/[^-0-9]/\n",
         );
+    }
+
+    // ----- Interpolation-sigil guard -----
+
+    #[test]
+    fn accepts_sigil_escape_after_unescaped_hash() {
+        // /#\@foo/ — `\@` after unescaped `#` must be kept to avoid triggering
+        // `#@foo` interpolation.
+        test::<RedundantRegexpEscape>().expect_no_offenses("/#\\@foo/
+");
+    }
+
+    #[test]
+    fn accepts_sigil_escape_dollar_after_unescaped_hash() {
+        // /#\$foo/ — similarly for `#$gvar` interpolation.
+        test::<RedundantRegexpEscape>().expect_no_offenses("/#\\$foo/
+");
+    }
+
+    #[test]
+    fn flags_sigil_escape_after_escaped_hash() {
+        // /\#\@foo/ — the `#` is itself escaped, so `\@` is redundant.
+        test::<RedundantRegexpEscape>().expect_correction(
+            indoc! {r#"
+                /\#\@foo/
+                   ^^ Redundant escape inside regexp literal
+            "#},
+            "/\\#@foo/\n",
+        );
+    }
+
+    #[test]
+    fn accepts_dollar_escape_because_it_has_regexp_meaning() {
+        // /\#\$foo/ — even with escaped `#`, `\$` is kept because `$` has
+        // special regexp meaning (end-of-line anchor), so `\$` = literal `$`.
+        test::<RedundantRegexpEscape>().expect_no_offenses("/\\#\\$foo/\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantRegexpEscape);
