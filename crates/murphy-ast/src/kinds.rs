@@ -157,6 +157,9 @@ pub const KIND_PATTERN_NAMES: &[(&str, u8)] = &[
     ("match_rest", 103),
     ("match_nil_pattern", 104),
     ("array_pattern_with_tail", 105),
+    // murphy-j1j2 PM-C one-liner pattern matching
+    ("match_pattern_p", 106),
+    ("match_pattern", 107),
 ];
 
 /// RuboCop-compatible type-name aliases for APIs that accept parser node
@@ -264,6 +267,12 @@ pub const GROUP_FOR_TYPE: &[(&str, &[NodeKindTag])] = &[
     // murphy-jw5t pattern-match lowering extensions
     ("find_pattern", &[NodeKindTag(101)]),
     ("match_alt", &[NodeKindTag(102)]),
+    // murphy-j1j2 PM-B/C pattern-matching extensions
+    ("match_rest", &[NodeKindTag(103)]),
+    ("match_nil_pattern", &[NodeKindTag(104)]),
+    ("array_pattern_with_tail", &[NodeKindTag(105)]),
+    ("match_pattern_p", &[NodeKindTag(106)]),
+    ("match_pattern", &[NodeKindTag(107)]),
     ("call", &[NodeKindTag(17), NodeKindTag(18)]),
     (
         "any_block",
@@ -567,6 +576,15 @@ mod tests {
             NodeKind::MatchRest(OptNodeId::NONE),
             NodeKind::MatchNilPattern,
             NodeKind::ArrayPatternWithTail(NodeList::EMPTY),
+            // murphy-j1j2 PM-C one-liner pattern matching (tags 106-107)
+            NodeKind::MatchPatternP {
+                value: n,
+                pattern: n,
+            },
+            NodeKind::MatchPattern {
+                value: n,
+                pattern: n,
+            },
         ]
     }
 
@@ -718,6 +736,9 @@ mod tests {
             NodeKind::MatchRest(_) => "match_rest",
             NodeKind::MatchNilPattern => "match_nil_pattern",
             NodeKind::ArrayPatternWithTail(_) => "array_pattern_with_tail",
+            // murphy-j1j2 PM-C one-liner pattern matching
+            NodeKind::MatchPatternP { .. } => "match_pattern_p",
+            NodeKind::MatchPattern { .. } => "match_pattern",
         })
     }
 

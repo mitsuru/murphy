@@ -1200,6 +1200,24 @@ impl Translator {
             );
         }
 
+        // ---- one-liner pattern matching (Ruby 3.0+) ----
+        if let Some(mp) = node.as_match_predicate_node() {
+            // `expr in pat` — `MatchPredicateNode` → `match_pattern_p`
+            let value = self.translate_node(&mp.value());
+            let pattern = self.translate_pattern(&mp.pattern());
+            return self
+                .builder
+                .push(NodeKind::MatchPatternP { value, pattern }, range);
+        }
+        if let Some(mr) = node.as_match_required_node() {
+            // `expr => pat` — `MatchRequiredNode` → `match_pattern`
+            let value = self.translate_node(&mr.value());
+            let pattern = self.translate_pattern(&mr.pattern());
+            return self
+                .builder
+                .push(NodeKind::MatchPattern { value, pattern }, range);
+        }
+
         // Task 17 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
@@ -3714,6 +3732,88 @@ mod tests {
         assert!(
             sexp.contains("(match_var :a)"),
             "shorthand binding must become match_var: {sexp}"
+        );
+    }
+
+    // ── murphy-j1j2 PM-C: one-liner pattern matching ─────────────────────────
+
+    #[test]
+    fn translates_match_pattern_p_integer() {
+        // `x in Integer` — MatchPredicateNode → match_pattern_p.
+        // value is an lvar, pattern is a const.
+        let ast = translate("x = 1\nx in Integer\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(match_pattern_p"),
+            "match_pattern_p expected: {sexp}"
+        );
+        assert!(sexp.contains("(lvar x)"), "value lvar expected: {sexp}");
+        assert!(
+            sexp.contains("(const :Integer"),
+            "pattern const expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown in match_pattern_p: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_match_pattern_integer() {
+        // `x => Integer` — MatchRequiredNode → match_pattern.
+        // value is an lvar, pattern is a const.
+        let ast = translate("x = 1\nx => Integer\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(match_pattern"),
+            "match_pattern expected: {sexp}"
+        );
+        assert!(sexp.contains("(lvar x)"), "value lvar expected: {sexp}");
+        assert!(
+            sexp.contains("(const :Integer"),
+            "pattern const expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "no Unknown in match_pattern: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_match_pattern_p_with_hash_pattern() {
+        // `{a: 1} in {a:}` — hash pattern with shorthand capture.
+        let ast = translate("{a: 1} in {a:}\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(match_pattern_p"),
+            "match_pattern_p expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(hash_pattern"),
+            "hash_pattern in match_pattern_p: {sexp}"
+        );
+        assert!(
+            sexp.contains("(match_var :a)"),
+            "shorthand binding becomes match_var: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_match_pattern_with_array_pattern() {
+        // `[1, 2] => [a, b]` — array pattern destructuring via =>.
+        let ast = translate("[1, 2] => [a, b]\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(match_pattern"),
+            "match_pattern expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(array_pattern"),
+            "array_pattern in match_pattern: {sexp}"
+        );
+        assert!(
+            sexp.contains("(match_var :a)") && sexp.contains("(match_var :b)"),
+            "binding vars expected: {sexp}"
         );
     }
 }
