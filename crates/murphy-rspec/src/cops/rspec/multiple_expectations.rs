@@ -52,9 +52,9 @@
 //! Splitting an example into multiple `it` blocks is a refactor that
 //! needs human judgement about isolation and shared setup.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
 
-use super::helpers::is_example_call;
+use super::helpers::{example_call_range, is_example_call};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -233,81 +233,6 @@ fn is_bare_send_named(cx: &Cx<'_>, id: NodeId, name: &str) -> bool {
         return false;
     };
     receiver == OptNodeId::NONE && cx.symbol_str(method) == name
-}
-
-/// Compute the offense range for an example call. The range covers the
-/// call node (method name + args), trimmed to end just before the block
-/// opener token (`do` or `{`), skipping any trailing comment or newline
-/// tokens that sit between the last real arg and the opener.
-///
-/// Token-based approach (murphy-ipxn): searches backward from `body_start`
-/// to find the block opener (`do` or `{`), then finds the last real token
-/// before it (skipping `Comment`/`Newline`/`IgnoredNewline`).
-///
-/// Uses `cx.node(call).loc.name.end` as the lower search bound and
-/// `body_range.start` as the upper bound; picks the *last* `do`/`{` in
-/// that window to correctly skip any hash-literal `{` inside the args.
-fn example_call_range(cx: &Cx<'_>, call: NodeId, body: NodeId) -> Range {
-    let call_range = cx.range(call);
-    let body_range = cx.range(body);
-    if body_range.start <= call_range.start {
-        return call_range;
-    }
-
-    let source = cx.source().as_bytes();
-
-    // Lower bound: just after the method name selector (e.g. after `it`).
-    // Upper bound: start of the body node (first token of the block body).
-    // We pick the *last* `do`/`{` in this window so that a hash-literal `{`
-    // inside the args is skipped and only the block opener is selected.
-    // `cx.tokens_in` uses binary search (O(log N)) to slice only the tokens
-    // in this range rather than scanning the entire file token list.
-    let name_end = cx.node(call).loc.name.end;
-    let opener = cx
-        .tokens_in(Range {
-            start: name_end,
-            end: body_range.start,
-        })
-        .iter()
-        .rev()
-        .find(|t| {
-            t.kind == SourceTokenKind::LeftBrace
-                || (t.kind == SourceTokenKind::Other
-                    && &source[t.range.start as usize..t.range.end as usize] == b"do")
-        });
-
-    let offense_end = match opener {
-        Some(opener_tok) => {
-            // Walk backward from the opener to find the last real token —
-            // skip Comment, Newline, IgnoredNewline tokens which may appear
-            // between the call args and `do` (e.g. trailing inline comment).
-            // Again use `cx.tokens_in` for an O(log N) slice.
-            let last_real = cx
-                .tokens_in(Range {
-                    start: call_range.start,
-                    end: opener_tok.range.start,
-                })
-                .iter()
-                .rev()
-                .find(|t| {
-                    !matches!(
-                        t.kind,
-                        SourceTokenKind::Comment
-                            | SourceTokenKind::Newline
-                            | SourceTokenKind::IgnoredNewline
-                    )
-                });
-            last_real.map(|t| t.range.end).unwrap_or(call_range.start)
-        }
-        // No block opener found (shouldn't happen in well-formed Ruby):
-        // fall back to just the method name end so we emit something.
-        None => name_end,
-    };
-
-    Range {
-        start: call_range.start,
-        end: offense_end,
-    }
 }
 
 #[cfg(test)]
