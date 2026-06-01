@@ -211,10 +211,13 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TrivialAccessorsOptions) {
         _ => return,
     };
 
-    let kind = if is_trivial_reader(method_name, arg_nodes, body_id, cx, opts) {
-        "reader"
-    } else if is_trivial_writer(method_name, arg_nodes, body_id, cx, opts) {
-        "writer"
+    // Determine kind and whether the names match (for safe autocorrect).
+    let (kind, names_match) = if let Some(nm) =
+        trivial_reader_names_match(method_name, arg_nodes, body_id, cx, opts)
+    {
+        ("reader", nm)
+    } else if let Some(nm) = trivial_writer_names_match(method_name, arg_nodes, body_id, cx, opts) {
+        ("writer", nm)
     } else {
         return;
     };
@@ -223,8 +226,13 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TrivialAccessorsOptions) {
     let keyword_range = cx.loc(node).keyword();
     cx.emit_offense(keyword_range, &msg, None);
 
-    // Autocorrect: replace the whole node.
-    autocorrect(node, cx, kind, method_name, receiver.get().is_some());
+    // Autocorrect: only safe when names match and method is a proper `=` writer
+    // (not a DSL writer whose API would change). Mirrors RuboCop's `names_match?`
+    // guard in `autocorrect_instance`.
+    let is_dsl_writer = kind == "writer" && !method_name.ends_with('=');
+    if names_match && !is_dsl_writer {
+        autocorrect(node, cx, kind, method_name, receiver.get().is_some());
+    }
 }
 
 /// Returns `true` if there's a Module ancestor before any Class/Sclass boundary.
@@ -240,51 +248,55 @@ fn in_module_ancestor(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Trivial reader: no args, body is a single `Ivar` node.
-/// ExactNameMatch: ivar name must match method name.
-fn is_trivial_reader(
+/// Returns `Some(names_match)` if this is a trivial reader, where `names_match`
+/// indicates whether ivar name == method name (safe to autocorrect).
+/// Returns `None` if not a trivial reader.
+fn trivial_reader_names_match(
     method_name: &str,
     args: &[NodeId],
     body_id: NodeId,
     cx: &Cx<'_>,
     opts: &TrivialAccessorsOptions,
-) -> bool {
+) -> Option<bool> {
     if !args.is_empty() {
-        return false;
+        return None;
     }
     let NodeKind::Ivar(ivar_sym) = *cx.kind(body_id) else {
-        return false;
+        return None;
     };
     let ivar_name = cx.symbol_str(ivar_sym);
     // ivar_name starts with `@`, method_name doesn't.
-    if opts.exact_name_match && &ivar_name[1..] != method_name {
-        return false;
+    let names_match = &ivar_name[1..] == method_name;
+    if opts.exact_name_match && !names_match {
+        return None;
     }
-    true
+    Some(names_match)
 }
 
-/// Trivial writer: name ends in `=`, exactly one arg, body is `Ivasgn` with
-/// the arg's lvar as value.
-/// DSL writers: methods with one arg that don't end in `=` are allowed when
-/// `allow_dsl_writers` is true.
-fn is_trivial_writer(
+/// Trivial writer: exactly one arg, body is `Ivasgn` with the arg's lvar as value.
+/// DSL writers (no trailing `=`) are skipped when `allow_dsl_writers` is true.
+/// Returns `Some(names_match)` if this is a trivial writer, where `names_match`
+/// indicates whether ivar name == method base name (safe to autocorrect).
+/// Returns `None` if not a trivial writer.
+fn trivial_writer_names_match(
     method_name: &str,
     args: &[NodeId],
     body_id: NodeId,
     cx: &Cx<'_>,
     opts: &TrivialAccessorsOptions,
-) -> bool {
+) -> Option<bool> {
     if args.len() != 1 {
-        return false;
+        return None;
     }
 
     // DSL writer: method with one arg that doesn't end in `=`.
     if opts.allow_dsl_writers && !method_name.ends_with('=') {
-        return false;
+        return None;
     }
 
     // The argument must be a plain `Arg`.
     let NodeKind::Arg(arg_sym) = *cx.kind(args[0]) else {
-        return false;
+        return None;
     };
 
     // Body must be `Ivasgn` assigning the arg's lvar.
@@ -293,28 +305,28 @@ fn is_trivial_writer(
         value,
     } = *cx.kind(body_id)
     else {
-        return false;
+        return None;
     };
     let Some(val_id) = value.get() else {
-        return false;
+        return None;
     };
     let NodeKind::Lvar(val_sym) = *cx.kind(val_id) else {
-        return false;
+        return None;
     };
     if val_sym != arg_sym {
-        return false;
+        return None;
     }
+
+    let ivar_name = cx.symbol_str(ivar_sym);
+    let method_base = method_name.trim_end_matches('=');
+    let names_match = &ivar_name[1..] == method_base;
 
     // ExactNameMatch: ivar name must match method name (sans trailing `=`).
-    let ivar_name = cx.symbol_str(ivar_sym);
-    if opts.exact_name_match {
-        let method_base = method_name.trim_end_matches('=');
-        if &ivar_name[1..] != method_base {
-            return false;
-        }
+    if opts.exact_name_match && !names_match {
+        return None;
     }
 
-    true
+    Some(names_match)
 }
 
 fn autocorrect(node: NodeId, cx: &Cx<'_>, kind: &str, method_name: &str, is_singleton: bool) {
@@ -600,6 +612,48 @@ mod tests {
                 class Foo
                   def on_exception(action)
                   ^^^ Use `attr_writer` to define trivial writer methods.
+                    @on_exception = action
+                  end
+                end
+            "#});
+    }
+
+    // --- No autocorrect when names don't match (ExactNameMatch: false) ---
+
+    #[test]
+    fn no_autocorrect_when_names_mismatch() {
+        // With ExactNameMatch=false, offense fires but autocorrect is NOT emitted
+        // because replacing `def name; @other_name` with `attr_reader :name` would
+        // change behavior (ivar @name vs @other_name).
+        test::<TrivialAccessors>()
+            .with_options(&TrivialAccessorsOptions {
+                exact_name_match: false,
+                ..Default::default()
+            })
+            .expect_no_corrections(indoc! {r#"
+                class Foo
+                  def name
+                    @other_name
+                  end
+                end
+            "#});
+    }
+
+    // --- No autocorrect for DSL writer (AllowDSLWriters: false) ---
+
+    #[test]
+    fn no_autocorrect_for_dsl_writer() {
+        // With AllowDSLWriters=false, offense fires but autocorrect is NOT emitted
+        // because `attr_writer :on_exception` would change the method signature from
+        // `on_exception(action)` to `on_exception=(value)`, breaking callers.
+        test::<TrivialAccessors>()
+            .with_options(&TrivialAccessorsOptions {
+                allow_dsl_writers: false,
+                ..Default::default()
+            })
+            .expect_no_corrections(indoc! {r#"
+                class Foo
+                  def on_exception(action)
                     @on_exception = action
                   end
                 end
