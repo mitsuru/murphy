@@ -3693,5 +3693,3 @@ impl WhereRange {
     fn investigate(&self, _cx: &Cx<'_>) {}
 }
 submit_cop!(WhereRange);
-
-

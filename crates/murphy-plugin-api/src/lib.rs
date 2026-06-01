@@ -103,8 +103,7 @@ macro_rules! submit_cop {
     ($cop:ty) => {
         const _: () = {
             #[$crate::linkme::distributed_slice(crate::PACK_COPS)]
-            static REGISTRATION: $crate::PluginCopV1 =
-                $crate::__internal::build_cop::<$cop>();
+            static REGISTRATION: $crate::PluginCopV1 = $crate::__internal::build_cop::<$cop>();
         };
     };
 }

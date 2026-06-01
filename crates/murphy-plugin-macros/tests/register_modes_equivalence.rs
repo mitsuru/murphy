@@ -97,7 +97,10 @@ fn register_entry_point_fills_the_plugin_registration() {
 
     let cops = unsafe { std::slice::from_raw_parts(reg.cops_ptr, reg.cops_len) };
 
-    assert_eq!(unsafe { cops[0].name.as_bytes() }, b"Plugin/StubEquivalence");
+    assert_eq!(
+        unsafe { cops[0].name.as_bytes() },
+        b"Plugin/StubEquivalence"
+    );
     assert_eq!(
         cops[0].size,
         std::mem::size_of::<murphy_plugin_api::PluginCopV1>()

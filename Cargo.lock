@@ -794,6 +794,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "linkme"
+version = "0.3.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e83272d46373fb8decca684579ac3e7c8f3d71d4cc3aa693df8759e260ae41cf"
+dependencies = [
+ "linkme-impl",
+]
+
+[[package]]
+name = "linkme-impl"
+version = "0.3.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32d59e20403c7d08fe62b4376edfe5c7fb2ef1e6b1465379686d0f21c8df444b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -903,6 +923,7 @@ dependencies = [
 name = "murphy-example-pack"
 version = "0.1.0"
 dependencies = [
+ "linkme",
  "murphy-plugin-api",
  "serde_json",
 ]
@@ -922,6 +943,7 @@ name = "murphy-plugin-api"
 version = "0.1.0"
 dependencies = [
  "indoc",
+ "linkme",
  "murphy-ast",
  "murphy-pattern",
  "murphy-plugin-macros",
@@ -934,6 +956,7 @@ dependencies = [
 name = "murphy-plugin-macros"
 version = "0.1.0"
 dependencies = [
+ "linkme",
  "murphy-ast",
  "murphy-pattern",
  "murphy-plugin-api",
@@ -957,6 +980,7 @@ dependencies = [
 name = "murphy-rails"
 version = "0.1.0"
 dependencies = [
+ "linkme",
  "murphy-plugin-api",
  "serde_json",
 ]
@@ -973,6 +997,7 @@ dependencies = [
 name = "murphy-rspec"
 version = "0.1.0"
 dependencies = [
+ "linkme",
  "murphy-plugin-api",
  "serde_json",
 ]
@@ -981,6 +1006,7 @@ dependencies = [
 name = "murphy-std"
 version = "0.1.0"
 dependencies = [
+ "linkme",
  "murphy-plugin-api",
  "serde_json",
 ]
