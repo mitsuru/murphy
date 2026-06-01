@@ -221,14 +221,6 @@ fn find_trailing_comma(toks: &[SourceToken], range: Range) -> Option<SourceToken
         .copied()
 }
 
-/// Returns the 0-based line number of the byte at `offset` in `source`.
-fn line_of_offset(source: &[u8], offset: u32) -> usize {
-    source[..offset as usize]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
-}
-
 /// Determine whether the configured style requires a trailing comma for this
 /// multiline call.
 fn should_have_comma(
@@ -265,24 +257,24 @@ fn is_multiline_with_all_on_own_lines(
     // Special case: single argument — closing delimiter must be on a different
     // line from the argument end (mirrors RuboCop's `allowed_multiline_argument?`).
     if args.len() == 1 {
-        let arg_end_line = line_of_offset(source, cx.range(last_arg).end);
-        let close_line = line_of_offset(source, close_tok.range.start);
-        return arg_end_line != close_line;
+        let gap_start = cx.range(last_arg).end as usize;
+        let gap_end = close_tok.range.start as usize;
+        return source[gap_start..gap_end].contains(&b'\n');
     }
 
     // Check all consecutive pairs of args are on different lines.
     for pair in args.windows(2) {
-        let a_end_line = line_of_offset(source, cx.range(pair[0]).end);
-        let b_start_line = line_of_offset(source, cx.range(pair[1]).start);
-        if a_end_line == b_start_line {
+        let gap_start = cx.range(pair[0]).end as usize;
+        let gap_end = cx.range(pair[1]).start as usize;
+        if !source[gap_start..gap_end].contains(&b'\n') {
             return false;
         }
     }
 
     // Check last arg and closing delimiter are on different lines.
-    let last_arg_end_line = line_of_offset(source, cx.range(last_arg).end);
-    let close_line = line_of_offset(source, close_tok.range.start);
-    last_arg_end_line != close_line
+    let gap_start = cx.range(last_arg).end as usize;
+    let gap_end = close_tok.range.start as usize;
+    source[gap_start..gap_end].contains(&b'\n')
 }
 
 /// `consistent_comma` style: any multiline call, UNLESS the method selector
@@ -293,12 +285,13 @@ fn is_multiline_consistent(node: NodeId, last_arg: NodeId, cx: &Cx<'_>) -> bool 
     }
     let source = cx.source().as_bytes();
     let selector_range = cx.selector(node);
-    let selector_line = line_of_offset(source, selector_range.start);
-    let last_arg_end_line = line_of_offset(source, cx.range(last_arg).end);
     // If the selector and the last arg end are on the same line, do not
     // require a trailing comma (mirrors RuboCop's
     // `method_name_and_arguments_on_same_line?`).
-    selector_line != last_arg_end_line
+    // We check for a newline in the span from selector start to last arg end.
+    let gap_start = selector_range.start as usize;
+    let gap_end = cx.range(last_arg).end as usize;
+    source[gap_start..gap_end].contains(&b'\n')
 }
 
 /// `diff_comma` style: last arg is immediately followed by a newline (after

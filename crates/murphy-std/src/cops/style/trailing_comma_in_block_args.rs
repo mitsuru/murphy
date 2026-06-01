@@ -88,30 +88,28 @@ fn check_block(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // Find the closing `|` by scanning tokens in the block range.
-    // The opening `|` and closing `|` are `SourceTokenKind::Other` with source `b"|"`.
+    // Find the opening and closing pipe tokens within the block.
+    // The `|` tokens are `SourceTokenKind::Other` with source `b"|"`.
     let block_range = cx.range(node);
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
 
-    // Collect all `|` tokens within the block.
     let lo = toks.partition_point(|t| t.range.start < block_range.start);
-    let pipe_tokens: Vec<_> = toks[lo..]
+    let mut pipes = toks[lo..]
         .iter()
         .take_while(|t| t.range.start < block_range.end)
         .filter(|t| {
             t.kind == SourceTokenKind::Other
                 && &source[t.range.start as usize..t.range.end as usize] == b"|"
         })
-        .collect();
+        .copied();
 
-    // Need at least an opening and closing pipe.
-    if pipe_tokens.len() < 2 {
+    let Some(open_pipe) = pipes.next() else {
         return;
-    }
-
-    let open_pipe = pipe_tokens[0];
-    let close_pipe = pipe_tokens[1];
+    };
+    let Some(close_pipe) = pipes.next() else {
+        return;
+    };
 
     // Find the last non-comment token between the pipes.
     let toks_between_start = toks.partition_point(|t| t.range.start <= open_pipe.range.end);
