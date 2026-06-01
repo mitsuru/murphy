@@ -2872,6 +2872,7 @@ mod tests {
     /// not lifetime-tracked — the caller keeps both alive).
     fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable) -> CxRaw {
         let p = ast.raw_parts();
+        let file_path = ast.path().to_str().unwrap_or("");
         CxRaw {
             nodes: p.nodes.as_ptr(),
             nodes_len: p.nodes.len(),
@@ -2900,8 +2901,8 @@ mod tests {
             node_slice_arena: std::ptr::null_mut(),
             alloc_node_slice: unavailable_alloc_node_slice,
             file_path: RawSlice {
-                ptr: ast.path().to_str().unwrap_or("").as_ptr(),
-                len: ast.path().to_str().unwrap_or("").len(),
+                ptr: file_path.as_ptr(),
+                len: file_path.len(),
             },
         }
     }
