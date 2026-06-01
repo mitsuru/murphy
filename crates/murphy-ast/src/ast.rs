@@ -295,6 +295,14 @@ pub fn collect_children(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<NodeId>
             out.push(right);
         }
 
+        NodeKind::MatchRest(inner) => {
+            push_opt(out, inner);
+        }
+
+        NodeKind::MatchNilPattern => {}
+
+        NodeKind::ArrayPatternWithTail(l) => push_list(out, lists, l),
+
         NodeKind::Itblock { send, body } => {
             out.push(send);
             push_opt(out, body);
@@ -396,7 +404,8 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
         | NodeKind::ForwardArgs
         | NodeKind::ForwardedArgs
         | NodeKind::Kwnilarg
-        | NodeKind::Blocknilarg => {}
+        | NodeKind::Blocknilarg
+        | NodeKind::MatchNilPattern => {}
 
         // Leaves whose single parser-gem child is a non-node scalar
         // (literal value / name symbol). They never parent a node, but the
@@ -684,6 +693,12 @@ pub fn slot_layout(kind: &NodeKind, lists: &[NodeId], out: &mut Vec<Option<NodeI
             slot_node(out, left);
             slot_node(out, right);
         }
+
+        NodeKind::MatchRest(inner) => {
+            slot_opt(out, inner);
+        }
+
+        NodeKind::ArrayPatternWithTail(l) => slot_list(out, lists, l),
 
         // `(itblock call :it body)` — `:it` marker is a phantom slot.
         NodeKind::Itblock { send, body } => {

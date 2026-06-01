@@ -647,6 +647,16 @@ pub(crate) fn write_node_kind(k: &NodeKind, out: &mut Vec<u8>) {
         }
         NodeKind::Kwnilarg => put_u8(out, 99),
         NodeKind::Blocknilarg => put_u8(out, 100),
+        // murphy-j1j2 PM-B
+        NodeKind::MatchRest(inner) => {
+            put_u8(out, 103);
+            put_u32(out, inner.0);
+        }
+        NodeKind::MatchNilPattern => put_u8(out, 104),
+        NodeKind::ArrayPatternWithTail(l) => {
+            put_u8(out, 105);
+            write_node_list(l, out);
+        }
     }
 }
 
@@ -907,6 +917,10 @@ fn read_node_kind(cur: &mut &[u8]) -> Result<NodeKind, SerError> {
             left: NodeId(get_u32(cur)?),
             right: NodeId(get_u32(cur)?),
         },
+        // murphy-j1j2 PM-B
+        103 => NodeKind::MatchRest(OptNodeId(get_u32(cur)?)),
+        104 => NodeKind::MatchNilPattern,
+        105 => NodeKind::ArrayPatternWithTail(read_node_list(cur)?),
         _ => return Err(SerError::BadDiscriminant),
     })
 }
@@ -1425,6 +1439,10 @@ fn validate_indices(ast: &Ast) -> Result<(), SerError> {
             // `NthRef` payload is a 1-based regex capture index, not an
             // interner id — nothing to bounds-check against the AST.
             NodeKind::NthRef(_) | NodeKind::Kwnilarg | NodeKind::Blocknilarg => {}
+            // murphy-j1j2 PM-B
+            NodeKind::MatchRest(inner) => check_opt_node(inner)?,
+            NodeKind::MatchNilPattern => {}
+            NodeKind::ArrayPatternWithTail(l) => check_list(l)?,
         }
     }
     for id in &ast.node_lists {
