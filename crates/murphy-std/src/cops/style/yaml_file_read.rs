@@ -163,8 +163,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let message = MSG.replacen("%s", &prefer, 1);
     cx.emit_offense(offense_range, &message, None);
 
-    // Autocorrect: replace from selector to end with the prefer string.
-    cx.emit_edit(offense_range, &prefer);
+    // Autocorrect: skip when the call contains inline comments — whole-range
+    // reconstruction would silently drop them (there is no faithful
+    // comment-preserving rewrite path in v1).
+    if cx.comments_for_node(node).is_empty() {
+        cx.emit_edit(offense_range, &prefer);
+    }
 }
 
 #[cfg(test)]
@@ -253,5 +257,15 @@ mod tests {
             "#},
             "::YAML.load_file(path)\n",
         );
+    }
+
+    #[test]
+    fn flags_but_no_autocorrect_with_inline_comment() {
+        // When the call contains inline comments, the offense is still flagged
+        // but autocorrect is skipped to avoid dropping the comment.
+        test::<YAMLFileRead>().expect_offense(indoc! {r#"
+            YAML.load(File.read(path)) # important note
+                 ^^^^^^^^^^^^^^^^^^^^^ Use `load_file(path)` instead.
+        "#});
     }
 }
