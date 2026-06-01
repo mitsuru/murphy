@@ -590,7 +590,10 @@ mod tests {
             },
             // murphy-j1j2 PM-D advanced patterns (tags 108-109)
             NodeKind::MatchAs { value: n, name: n },
-            NodeKind::ConstPattern { const_: n, pattern: n },
+            NodeKind::ConstPattern {
+                const_: n,
+                pattern: n,
+            },
         ]
     }
 
