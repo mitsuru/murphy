@@ -172,11 +172,17 @@ fn autocorrect_basic(outer: NodeId, inner: NodeId, cx: &Cx<'_>) {
         end: inner_cond_range.start,
     };
 
-    // If inner condition needs parens, replace inner_cond with `(inner_cond_src)`
-    // as a separate edit. Keep the gap edit simple (just ` && `).
+    // Wrap outer or inner condition in parens if either contains `||` / `or`,
+    // so that `a || b / if c` becomes `(a || b) && c` (not `a || b && c`).
+    let outer_cond_src = cx.raw_source(outer_cond_range);
     let inner_cond_src = cx.raw_source(inner_cond_range);
+
     cx.emit_edit(gap, " && ");
 
+    if needs_parens_for_merge(outer_cond_src) {
+        let wrapped = format!("({outer_cond_src})");
+        cx.emit_edit(outer_cond_range, &wrapped);
+    }
     if needs_parens_for_merge(inner_cond_src) {
         let wrapped = format!("({inner_cond_src})");
         cx.emit_edit(inner_cond_range, &wrapped);
@@ -323,6 +329,26 @@ mod tests {
     #[test]
     fn accepts_ternary_outer() {
         test::<SoleNestedConditional>().expect_no_offenses("a ? b : c\n");
+    }
+
+    #[test]
+    fn wraps_outer_or_condition_in_parens() {
+        // `if a || b / if c` → `if (a || b) && c` (not `a || b && c`)
+        test::<SoleNestedConditional>().expect_correction(
+            indoc! {"
+                if a || b
+                  if c
+                  ^^ Consider merging nested conditions into outer `if` conditions.
+                    do_something
+                  end
+                end
+            "},
+            indoc! {"
+                if (a || b) && c
+                    do_something
+                  end
+            "},
+        );
     }
 
     // --- AllowModifier option ---
