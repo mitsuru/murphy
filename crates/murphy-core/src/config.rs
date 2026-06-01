@@ -190,6 +190,107 @@ fn default_target_ruby_version() -> RubyVersion {
     RubyVersion::new(3, 1)
 }
 
+/// Internal representation of a parsed YAML config file.
+///
+/// All fields are `Option<T>` so "explicitly set" is distinguished from "not
+/// set". Used by [`parse_yaml_str`] and [`load_resolving_inherit`] to merge
+/// inherited configs before applying defaults.
+#[derive(Default)]
+struct ParsedYaml {
+    target_ruby_version: Option<RubyVersion>,
+    target_rails_version: Option<RubyVersion>,
+    include: Option<Vec<String>>,
+    exclude: Option<Vec<String>>,
+    cops_path: Option<PathBuf>,
+    rules: BTreeMap<String, CopRule>,
+    plugins: Vec<PluginConfig>,
+    /// Paths from `inherit_from:` — consumed by `load_resolving_inherit`.
+    inherit_from: Vec<String>,
+}
+
+impl ParsedYaml {
+    /// Merge `self` (higher priority) over `base` (lower priority).
+    ///
+    /// For scalar and `Option` fields, `self`'s `Some` wins; `None` falls back
+    /// to `base`. Cop rules are merged per-key (not whole-section replace).
+    /// Plugins are concatenated (base first, then self).
+    fn merge_over(self, base: ParsedYaml) -> ParsedYaml {
+        ParsedYaml {
+            target_ruby_version: self.target_ruby_version.or(base.target_ruby_version),
+            target_rails_version: self.target_rails_version.or(base.target_rails_version),
+            include: self.include.or(base.include),
+            exclude: self.exclude.or(base.exclude),
+            cops_path: self.cops_path.or(base.cops_path),
+            rules: {
+                let mut merged = base.rules;
+                for (name, top_rule) in self.rules {
+                    let base_rule = merged.remove(&name).unwrap_or_default();
+                    merged.insert(name, merge_cop_rule(top_rule, base_rule));
+                }
+                merged
+            },
+            plugins: {
+                let mut all = base.plugins;
+                for p in self.plugins {
+                    if !all.contains(&p) {
+                        all.push(p);
+                    }
+                }
+                all
+            },
+            inherit_from: vec![],
+        }
+    }
+
+    /// Convert to `MurphyConfig` by applying defaults to unset fields.
+    /// Returns `(config, saw_include, saw_exclude)` for `with_defaults` compat.
+    fn into_murphy_config(self) -> (MurphyConfig, bool, bool) {
+        let saw_include = self.include.is_some();
+        let saw_exclude = self.exclude.is_some();
+        let cfg = MurphyConfig {
+            target_ruby_version: self
+                .target_ruby_version
+                .unwrap_or_else(default_target_ruby_version),
+            target_rails_version: self.target_rails_version,
+            files: FilesConfig {
+                include: self.include.unwrap_or_else(default_include),
+                exclude: self.exclude.unwrap_or_default(),
+            },
+            cops: CopsConfig {
+                path: self.cops_path.unwrap_or_else(default_cops_path),
+                rules: self.rules,
+            },
+            plugins: self.plugins,
+            base_defaults: DefaultCopsData::default(),
+        };
+        (cfg, saw_include, saw_exclude)
+    }
+}
+
+/// Merge `top` cop rule (higher priority) over `base` (lower priority).
+/// Per-field: `top` wins when it carries an explicit value; `base` fills gaps.
+fn merge_cop_rule(top: CopRule, base: CopRule) -> CopRule {
+    CopRule {
+        enabled: top.enabled.or(base.enabled),
+        severity: top.severity.or(base.severity),
+        include: if top.include.is_empty() {
+            base.include
+        } else {
+            top.include
+        },
+        exclude: if top.exclude.is_empty() {
+            base.exclude
+        } else {
+            top.exclude
+        },
+        options: {
+            let mut opts = base.options;
+            opts.extend(top.options);
+            opts
+        },
+    }
+}
+
 impl Default for MurphyConfig {
     fn default() -> Self {
         Self {
@@ -239,114 +340,9 @@ impl MurphyConfig {
 
     /// Internal: parse user YAML and return `(config, saw_include, saw_exclude)`.
     /// `saw_include`/`saw_exclude` tell `with_defaults` whether to apply bundled
-    /// AllCops defaults.
+    /// AllCops defaults. Does NOT resolve `inherit_from` — use `load` for that.
     fn from_yaml_str_raw(text: &str) -> Result<(Self, bool, bool), ConfigError> {
-        use yaml_rust2::{Yaml, YamlLoader};
-
-        let docs =
-            YamlLoader::load_from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
-
-        let doc = match docs.into_iter().next() {
-            None => return Ok((Self::default(), false, false)),
-            Some(d) => d,
-        };
-
-        // An empty document, a comment-only document, or `---` / `~` / `null`
-        // all produce Yaml::Null; treat them as defaults (RuboCop-compatible).
-        let top = match doc {
-            Yaml::Hash(h) => h,
-            Yaml::Null => return Ok((Self::default(), false, false)),
-            _ => {
-                return Err(ConfigError::BadYaml(
-                    "top-level document must be a mapping".to_string(),
-                ));
-            }
-        };
-
-        let mut include = default_include();
-        let mut exclude: Vec<String> = Vec::new();
-        let mut cops_path = default_cops_path();
-        let mut target_ruby_version = default_target_ruby_version();
-        let mut target_rails_version = None;
-        let mut rules: BTreeMap<String, CopRule> = BTreeMap::new();
-        let mut plugins: Vec<PluginConfig> = Vec::new();
-        let mut saw_include = false;
-        let mut saw_exclude = false;
-
-        for (key, value) in top {
-            let Yaml::String(section) = key else {
-                continue;
-            };
-
-            match section.as_str() {
-                "AllCops" => {
-                    if let Yaml::Hash(all_cops) = value {
-                        if let Some(inc) = all_cops.get(&Yaml::String("Include".to_string())) {
-                            include = yaml_string_list(inc);
-                            saw_include = true;
-                        }
-                        if let Some(exc) = all_cops.get(&Yaml::String("Exclude".to_string())) {
-                            exclude = yaml_string_list(exc);
-                            saw_exclude = true;
-                        }
-                        if let Some(Yaml::String(p)) =
-                            all_cops.get(&Yaml::String("CopsPath".to_string()))
-                        {
-                            cops_path = PathBuf::from(p);
-                        }
-                        if let Some(v) =
-                            all_cops.get(&Yaml::String("TargetRubyVersion".to_string()))
-                            && let Some(parsed) = parse_ruby_version(v)
-                        {
-                            target_ruby_version = parsed;
-                        }
-                        if let Some(v) =
-                            all_cops.get(&Yaml::String("TargetRailsVersion".to_string()))
-                            && let Some(parsed) = parse_ruby_version(v)
-                        {
-                            target_rails_version = Some(parsed);
-                        }
-                    }
-                }
-                "plugins" => {
-                    plugins =
-                        parse_plugins(value).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
-                }
-                _ => {
-                    // Treat as a cop rule (open-keyed, compatible with RuboCop format).
-                    if let Yaml::Hash(cop_map) = value {
-                        rules.insert(section, parse_cop_rule(cop_map));
-                    }
-                }
-            }
-        }
-
-        if !saw_include {
-            include = default_include();
-        }
-
-        validate_glob_patterns(&include)?;
-        validate_glob_patterns(&exclude)?;
-        for rule in rules.values() {
-            validate_glob_patterns(&rule.include)?;
-            validate_glob_patterns(&rule.exclude)?;
-        }
-
-        Ok((
-            MurphyConfig {
-                target_ruby_version,
-                target_rails_version,
-                files: FilesConfig { include, exclude },
-                cops: CopsConfig {
-                    path: cops_path,
-                    rules,
-                },
-                plugins,
-                base_defaults: DefaultCopsData::default(),
-            },
-            saw_include,
-            saw_exclude,
-        ))
+        Ok(parse_yaml_str(text)?.into_murphy_config())
     }
 
     /// Parse user YAML and merge bundled `defaults_yaml` as a base layer.
@@ -370,31 +366,33 @@ impl MurphyConfig {
 
     pub fn load(root: &Path) -> Result<Self, ConfigError> {
         let config_path = root.join(".murphy.yml");
-        match std::fs::read_to_string(&config_path) {
-            Ok(text) => Self::from_yaml_str(&text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(ConfigError::Io(format!(
-                "cannot read {}: {e}",
-                config_path.display()
-            ))),
+        if !config_path.exists() {
+            return Ok(Self::default());
         }
+        let parsed = load_resolving_inherit(&config_path, &std::collections::HashSet::new())?;
+        let (cfg, _, _) = parsed.into_murphy_config();
+        Ok(cfg)
     }
 
     /// Like [`Self::load`] but merges bundled `defaults_yaml` as a base layer.
     /// The host (murphy-cli) calls this with `murphy_std::BUNDLED_DEFAULTS_YAML`.
     pub fn load_with_defaults(root: &Path, defaults_yaml: &str) -> Result<Self, ConfigError> {
         let config_path = root.join(".murphy.yml");
-        let user_yaml = match std::fs::read_to_string(&config_path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                return Err(ConfigError::Io(format!(
-                    "cannot read {}: {e}",
-                    config_path.display()
-                )));
-            }
+        let parsed = if config_path.exists() {
+            load_resolving_inherit(&config_path, &std::collections::HashSet::new())?
+        } else {
+            ParsedYaml::default()
         };
-        Self::with_defaults(&user_yaml, defaults_yaml)
+        let (mut cfg, saw_include, saw_exclude) = parsed.into_murphy_config();
+        let defaults = DefaultCopsData::from_yaml(defaults_yaml);
+        if !saw_include && !defaults.allcops_include.is_empty() {
+            cfg.files.include = defaults.allcops_include.clone();
+        }
+        if !saw_exclude && !defaults.allcops_exclude.is_empty() {
+            cfg.files.exclude = defaults.allcops_exclude.clone();
+        }
+        cfg.base_defaults = defaults;
+        Ok(cfg)
     }
 
     pub fn cop_enabled(&self, name: &str) -> bool {
@@ -509,6 +507,152 @@ impl MurphyConfig {
         }
         serde_json::to_vec(&options).unwrap_or_else(|_| b"{}".to_vec())
     }
+}
+
+/// Parse a `.murphy.yml` document string into a [`ParsedYaml`].
+///
+/// Validates glob patterns at parse time. `inherit_from` paths are stored
+/// verbatim and not resolved — only [`load_resolving_inherit`] does that.
+fn parse_yaml_str(text: &str) -> Result<ParsedYaml, ConfigError> {
+    use yaml_rust2::{Yaml, YamlLoader};
+
+    let docs = YamlLoader::load_from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+
+    let doc = match docs.into_iter().next() {
+        None => return Ok(ParsedYaml::default()),
+        Some(d) => d,
+    };
+
+    let top = match doc {
+        Yaml::Hash(h) => h,
+        Yaml::Null => return Ok(ParsedYaml::default()),
+        _ => {
+            return Err(ConfigError::BadYaml(
+                "top-level document must be a mapping".to_string(),
+            ));
+        }
+    };
+
+    let mut parsed = ParsedYaml::default();
+
+    for (key, value) in top {
+        let Yaml::String(section) = key else {
+            continue;
+        };
+
+        match section.as_str() {
+            "inherit_from" => {
+                parsed.inherit_from = match value {
+                    Yaml::String(s) => vec![s],
+                    Yaml::Array(arr) => arr
+                        .into_iter()
+                        .filter_map(|v| {
+                            if let Yaml::String(s) = v {
+                                Some(s)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    _ => vec![],
+                };
+            }
+            "AllCops" => {
+                if let Yaml::Hash(all_cops) = value {
+                    if let Some(inc) = all_cops.get(&Yaml::String("Include".to_string())) {
+                        let list = yaml_string_list(inc);
+                        validate_glob_patterns(&list)?;
+                        parsed.include = Some(list);
+                    }
+                    if let Some(exc) = all_cops.get(&Yaml::String("Exclude".to_string())) {
+                        let list = yaml_string_list(exc);
+                        validate_glob_patterns(&list)?;
+                        parsed.exclude = Some(list);
+                    }
+                    if let Some(Yaml::String(p)) =
+                        all_cops.get(&Yaml::String("CopsPath".to_string()))
+                    {
+                        parsed.cops_path = Some(PathBuf::from(p));
+                    }
+                    if let Some(v) = all_cops.get(&Yaml::String("TargetRubyVersion".to_string()))
+                        && let Some(rv) = parse_ruby_version(v)
+                    {
+                        parsed.target_ruby_version = Some(rv);
+                    }
+                    if let Some(v) = all_cops.get(&Yaml::String("TargetRailsVersion".to_string()))
+                        && let Some(rv) = parse_ruby_version(v)
+                    {
+                        parsed.target_rails_version = Some(rv);
+                    }
+                }
+            }
+            "plugins" => {
+                parsed.plugins =
+                    parse_plugins(value).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+            }
+            _ => {
+                if let Yaml::Hash(cop_map) = value {
+                    let rule = parse_cop_rule(cop_map);
+                    validate_glob_patterns(&rule.include)?;
+                    validate_glob_patterns(&rule.exclude)?;
+                    parsed.rules.insert(section, rule);
+                }
+            }
+        }
+    }
+
+    Ok(parsed)
+}
+
+/// Recursively load a config file resolving its `inherit_from` chain.
+///
+/// `seen` is the set of canonicalized paths already on the current call stack;
+/// it grows as we recurse and is cloned for each branch so siblings don't
+/// interfere with each other's cycle detection.
+///
+/// Merge priority (highest first):
+/// 1. The file at `config_path` itself.
+/// 2. Files listed in `inherit_from` (later entries win over earlier ones).
+/// 3. Recursively resolved children of each inherited file.
+fn load_resolving_inherit(
+    config_path: &Path,
+    seen: &std::collections::HashSet<PathBuf>,
+) -> Result<ParsedYaml, ConfigError> {
+    let canonical = std::fs::canonicalize(config_path)
+        .map_err(|e| ConfigError::Io(format!("cannot read {}: {e}", config_path.display())))?;
+
+    if seen.contains(&canonical) {
+        return Err(ConfigError::BadYaml(format!(
+            "inherit_from: cycle detected involving {}",
+            config_path.display()
+        )));
+    }
+
+    let text = std::fs::read_to_string(config_path)
+        .map_err(|e| ConfigError::Io(format!("cannot read {}: {e}", config_path.display())))?;
+
+    let mut parsed = parse_yaml_str(&text)?;
+    let inherit_paths = std::mem::take(&mut parsed.inherit_from);
+
+    if inherit_paths.is_empty() {
+        return Ok(parsed);
+    }
+
+    let mut new_seen = seen.clone();
+    new_seen.insert(canonical);
+
+    let base_dir = config_path.parent().unwrap_or(Path::new("."));
+    let mut inherited = ParsedYaml::default();
+
+    for rel_path in inherit_paths {
+        let child_path = base_dir.join(&rel_path);
+        let child = load_resolving_inherit(&child_path, &new_seen)?;
+        // Later files win: merge child over accumulated inherited.
+        inherited = child.merge_over(inherited);
+    }
+
+    // Current file is highest priority.
+    Ok(parsed.merge_over(inherited))
 }
 
 /// Parse a `plugins:` value (sequence or scalar string).
@@ -1278,5 +1422,188 @@ Style/StringLiterals:
         let data = DefaultCopsData::from_yaml(yaml);
         let rule = data.cop_rules.get("Bundler/Foo").expect("rule");
         assert_eq!(rule.severity, Some(crate::Severity::Warning));
+    }
+
+    // --- inherit_from tests ---
+
+    fn write_cfg(dir: &Path, name: &str, content: &str) {
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn inherit_from_single_file_inherits_cop_rule() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "Style/StringLiterals:\n  Enabled: false\n",
+        );
+        write_cfg(dir.path(), ".murphy.yml", "inherit_from: base.yml\n");
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        assert!(
+            !cfg.cop_enabled("Style/StringLiterals"),
+            "should inherit Enabled: false"
+        );
+    }
+
+    #[test]
+    fn inherit_from_current_file_overrides_inherited() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "Style/StringLiterals:\n  Enabled: false\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from: base.yml\nStyle/StringLiterals:\n  Enabled: true\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        assert!(
+            cfg.cop_enabled("Style/StringLiterals"),
+            "current file should win"
+        );
+    }
+
+    #[test]
+    fn inherit_from_multiple_files_later_wins() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "a.yml",
+            "Style/StringLiterals:\n  Enabled: false\n",
+        );
+        write_cfg(
+            dir.path(),
+            "b.yml",
+            "Style/StringLiterals:\n  Enabled: true\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from:\n  - a.yml\n  - b.yml\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        assert!(
+            cfg.cop_enabled("Style/StringLiterals"),
+            "b.yml (later) should win over a.yml"
+        );
+    }
+
+    #[test]
+    fn inherit_from_recursive() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "grandparent.yml",
+            "Style/StringLiterals:\n  Enabled: false\n",
+        );
+        write_cfg(dir.path(), "parent.yml", "inherit_from: grandparent.yml\n");
+        write_cfg(dir.path(), ".murphy.yml", "inherit_from: parent.yml\n");
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        assert!(
+            !cfg.cop_enabled("Style/StringLiterals"),
+            "grandparent value should reach .murphy.yml"
+        );
+    }
+
+    #[test]
+    fn inherit_from_cycle_detection() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(dir.path(), "a.yml", "inherit_from: b.yml\n");
+        write_cfg(dir.path(), "b.yml", "inherit_from: a.yml\n");
+        write_cfg(dir.path(), ".murphy.yml", "inherit_from: a.yml\n");
+        let err = MurphyConfig::load(dir.path()).expect_err("cycle should error");
+        assert!(
+            matches!(err, ConfigError::BadYaml(_)),
+            "cycle must be a BadYaml error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("cycle") || err.to_string().contains("inherit"),
+            "error message should mention cycle/inherit, got: {err}"
+        );
+    }
+
+    #[test]
+    fn inherit_from_missing_file_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(dir.path(), ".murphy.yml", "inherit_from: nonexistent.yml\n");
+        let err = MurphyConfig::load(dir.path()).expect_err("missing file should error");
+        assert!(
+            matches!(err, ConfigError::Io(_)),
+            "missing file must be an Io error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn inherit_from_merges_cop_options() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "Style/StringLiterals:\n  Enabled: true\n  EnforcedStyle: single_quotes\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from: base.yml\nStyle/StringLiterals:\n  MaxCount: 5\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        let json = cfg.cop_options_json("Style/StringLiterals");
+        let val: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(
+            val["EnforcedStyle"], "single_quotes",
+            "base option should be inherited"
+        );
+        assert_eq!(val["MaxCount"], 5, "current file option should be present");
+    }
+
+    #[test]
+    fn inherit_from_path_relative_to_config_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sub = dir.path().join("config");
+        std::fs::create_dir(&sub).unwrap();
+        write_cfg(
+            &sub,
+            "base.yml",
+            "Style/StringLiterals:\n  Enabled: false\n",
+        );
+        write_cfg(dir.path(), ".murphy.yml", "inherit_from: config/base.yml\n");
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        assert!(
+            !cfg.cop_enabled("Style/StringLiterals"),
+            "relative path should resolve correctly"
+        );
+    }
+
+    #[test]
+    fn inherit_from_allcops_include_inherited() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "AllCops:\n  Include:\n    - lib/**/*.rb\n",
+        );
+        write_cfg(dir.path(), ".murphy.yml", "inherit_from: base.yml\n");
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        assert_eq!(cfg.files.include, vec!["lib/**/*.rb"]);
+    }
+
+    #[test]
+    fn inherit_from_allcops_current_overrides_inherited() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "AllCops:\n  Include:\n    - lib/**/*.rb\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from: base.yml\nAllCops:\n  Include:\n    - app/**/*.rb\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        assert_eq!(cfg.files.include, vec!["app/**/*.rb"]);
     }
 }
