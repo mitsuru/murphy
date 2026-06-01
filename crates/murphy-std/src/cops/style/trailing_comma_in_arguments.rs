@@ -110,8 +110,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     // Only parenthesized calls or `[]` method calls are checked.
-    let is_bracket = cx.method_name(node) == Some("[]");
-    if !cx.is_parenthesized(node) && !is_bracket {
+    // Note: `cx.is_parenthesized` is true for both `obj[...]` (closing `]` from Prism)
+    // and `obj.[](...)` (closing `)`), so we cannot use it alone to distinguish
+    // bracket syntax from parenthesized bracket calls.
+    let is_bracket_method = cx.method_name(node) == Some("[]");
+    if !cx.is_parenthesized(node) && !is_bracket_method {
         return;
     }
 
@@ -121,14 +124,20 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let last_arg = *args.last().unwrap();
     let last_arg_end = cx.range(last_arg).end;
 
-    // Find the closing delimiter: `)` for parenthesized calls, `]` for bracket calls.
+    // Find the closing delimiter.  For `[]` method calls, the delimiter may be `]`
+    // (bracket-access syntax `obj[...]`) or `)` (explicit-dot form `obj.[](...)`)
+    // — we accept either and return the first one found.  For regular calls it is `)`.
     let source = cx.source().as_bytes();
     let node_range = cx.range(node);
     let toks = cx.sorted_tokens();
 
-    let Some(close_tok) =
-        find_closing_delimiter(toks, source, last_arg_end, node_range.end, is_bracket)
-    else {
+    let Some(close_tok) = find_closing_delimiter(
+        toks,
+        source,
+        last_arg_end,
+        node_range.end,
+        is_bracket_method,
+    ) else {
         return;
     };
 
@@ -172,25 +181,32 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 }
 
 /// Find the closing delimiter token (`)` or `]`) starting from `after` up to `end`.
+///
+/// When `is_bracket_method` is true (`[]` method call), we accept either `]` or `)` as
+/// the closing delimiter: `obj[...]` uses `]` while `obj.[](...)` uses `)`.  The first
+/// matching token in source order is returned.
 fn find_closing_delimiter(
     toks: &[SourceToken],
     source: &[u8],
     after: u32,
     end: u32,
-    is_bracket: bool,
+    is_bracket_method: bool,
 ) -> Option<SourceToken> {
     let lo = toks.partition_point(|t| t.range.start < after);
     toks[lo..]
         .iter()
         .take_while(|t| t.range.start < end)
         .find(|t| {
-            if is_bracket {
-                // `]` is SourceTokenKind::Other with source `]`
-                t.kind == SourceTokenKind::Other
-                    && &source[t.range.start as usize..t.range.end as usize] == b"]"
-            } else {
-                t.kind == SourceTokenKind::RightParen
+            if t.kind == SourceTokenKind::RightParen {
+                return true;
             }
+            if is_bracket_method
+                && t.kind == SourceTokenKind::Other
+                && &source[t.range.start as usize..t.range.end as usize] == b"]"
+            {
+                return true;
+            }
+            false
         })
         .copied()
 }
@@ -368,6 +384,18 @@ mod tests {
                            ^ Avoid comma after the last parameter of a method call.
             "},
             "object[1, 2]\n",
+        );
+    }
+
+    #[test]
+    fn no_comma_flags_explicit_dot_bracket_call_trailing_comma() {
+        // obj.[](1, 2,) — explicit dot + parens form of bracket access, trailing comma at position 11
+        test::<TrailingCommaInArguments>().expect_correction(
+            indoc! {"
+                obj.[](1, 2,)
+                           ^ Avoid comma after the last parameter of a method call.
+            "},
+            "obj.[](1, 2)\n",
         );
     }
 
