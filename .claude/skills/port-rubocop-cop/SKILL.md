@@ -360,10 +360,11 @@ impl CopName {
 murphy_plugin_api::submit_cop!(CopName);  // ← sole registration step
 ```
 
-That is the complete registration step. Do **not** edit `lib.rs`, do
-**not** add a `use crate::cops::...` import there, and do **not** add to
-any list. The cop file also does not need a `pub` export beyond what the
-`mod.rs` `pub mod` already provides.
+That is the complete registration step. Do **not** edit `lib.rs` and do
+**not** edit `mod.rs` — both are conflict-free by design. `lib.rs` uses
+`register_cops!(mode = static|dynamic)` with cops self-registering via
+`submit_cop!`; `mod.rs` uses `automod::dir!` to discover cop files
+automatically. Adding a new cop requires editing only the cop's own file.
 
 ### Phase 2.5: write tests against the test-support harness
 

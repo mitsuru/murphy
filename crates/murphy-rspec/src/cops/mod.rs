@@ -6,3 +6,5 @@
 //! namespace a cop belongs to from its file path alone.
 
 pub mod rspec;
+
+mod rspec_helpers;
