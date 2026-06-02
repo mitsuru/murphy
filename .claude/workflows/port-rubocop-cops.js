@@ -202,7 +202,7 @@ function groupByCrate(issues, maxPerGroup = 2) {
   return groups
 }
 
-const groups = groupByCrate(resolved)
+const groups = groupByCrate(resolved, 4)
 log(`${groups.length} groups: ${groups.map(g => `${g.crate}(${g.issues.map(i => i.id).join('+')})`).join(', ')}`)
 
 // ─── Phase 1: Implement all groups in parallel ───────────────────────────────
