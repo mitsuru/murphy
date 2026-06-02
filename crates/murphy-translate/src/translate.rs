@@ -1253,6 +1253,16 @@ impl Translator {
             );
         }
 
+        // --- pre/post execution hooks (BEGIN / END blocks) ---
+        if let Some(pre) = node.as_pre_execution_node() {
+            let body = self.translate_stmts_opt(pre.statements());
+            return self.builder.push(NodeKind::Preexe(body), range);
+        }
+        if let Some(post) = node.as_post_execution_node() {
+            let body = self.translate_stmts_opt(post.statements());
+            return self.builder.push(NodeKind::Postexe(body), range);
+        }
+
         // Task 17 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
