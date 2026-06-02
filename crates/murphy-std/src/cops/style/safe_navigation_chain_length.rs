@@ -18,7 +18,10 @@
 //!   No autocorrect: RuboCop does not autocorrect this cop either.
 //!   Default `Max` is 2, matching RuboCop's default.
 //!   Cop is `Enabled: pending` in RuboCop; Murphy ships it enabled by default
-//!   to preserve the spirit of the port.
+//!   because the cop enforces a common readability guideline (limiting chain
+//!   length). Users can disable via `.murphy.yml` if needed.
+//!   Max: 0 or negative values are clamped to 1 at runtime (not a config error);
+//!   RuboCop would report a configuration error for such values.
 //! ```
 //!
 //! ## Matched shapes
@@ -73,8 +76,10 @@ impl SafeNavigationChainLength {
         let max = opts.max.max(1) as usize;
 
         // Walk up the ancestor chain collecting consecutive csend ancestors.
-        // Each csend node fires this handler and walks all its csend ancestors.
-        // In practice chains are short, so the quadratic traversal is negligible.
+        // Each csend fires this handler and re-walks from itself upward, giving
+        // O(n²) work across a chain of n csends. In practice chains are short
+        // (2-4 calls), so the difference from RuboCop's single-pass collection
+        // is not a practical concern.
         let mut csend_ancestors: Vec<NodeId> = Vec::new();
         let mut current = node;
         while let Some(parent) = cx.parent(current).get() {
