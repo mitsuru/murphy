@@ -12,11 +12,11 @@
 //! notes: >
 //!   Detects modifier-form if/unless expressions (e.g. `body if cond`) where
 //!   the body is multiline. Autocorrects to normal block form
-//!   (`if cond\n  body\nend`). Gaps vs RuboCop: body indentation when the
-//!   node is at non-zero column is handled with a best-effort approach using
-//!   the raw body source. RuboCop normalizes with offset(node) /
-//!   indentation(node); Murphy v1 adds 2-space indent to each non-blank body
-//!   line relative to the node's own indentation.
+//!   (`if cond\n  body\nend`). When nested modifier-form nodes both qualify,
+//!   only the outermost emits an autocorrect edit to avoid overlapping edits
+//!   (RuboCop uses ignore_node/part_of_ignored_node? for the same purpose).
+//!   Gaps vs RuboCop: body indentation when the node is at non-zero column is
+//!   handled with a best-effort approach using the raw body source.
 //! ```
 //!
 //! ## Matched shapes
@@ -28,7 +28,10 @@
 //!
 //! Rewrites `body\nif_or_unless cond` → `if_or_unless cond\n  body\nend`,
 //! re-indenting the body lines to be inside the block. This is a structural
-//! rearrangement (whole-node replacement).
+//! rearrangement (whole-node replacement). When a node is nested inside
+//! another flagged modifier-form node, the autocorrect edit is suppressed
+//! on the inner node to avoid overlapping edits; the outer node's correction
+//! subsumes the inner.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
@@ -98,6 +101,24 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     cx.emit_offense(offense_range, &message, None);
 
     // Autocorrect: rewrite to block form.
+    // Skip when nested inside another flagged modifier-form if/unless to
+    // avoid overlapping edits. (RuboCop uses ignore_node/part_of_ignored_node?
+    // for the same purpose.) The outer node's correction subsumes the inner.
+    let has_flagged_ancestor = cx.ancestors(node).any(|anc| {
+        if !cx.is_modifier_form(anc) || cx.is_ternary(anc) {
+            return false;
+        }
+        let anc_body_opt = if cx.if_keyword(anc) == "unless" {
+            cx.if_else_branch(anc)
+        } else {
+            cx.if_then_branch(anc)
+        };
+        anc_body_opt.get().is_some_and(|b| cx.is_multiline(b))
+    });
+    if has_flagged_ancestor {
+        return;
+    }
+
     let NodeKind::If { cond, .. } = *cx.kind(node) else {
         return;
     };
@@ -183,6 +204,23 @@ mod tests {
             "},
             "if condition\n  foo\n    .bar\nend\n",
         );
+    }
+
+    #[test]
+    fn nested_modifier_ifs_both_offenses_no_overlapping_edits() {
+        // Both the outer and inner modifier-if have multiline bodies.
+        // Both offenses are reported; only the outer edit is emitted to
+        // avoid overlapping edits. `if cond1` is the innermost (body = `{...}`);
+        // `if cond2` is the outermost (body = `{...} if cond1`).
+        // The outer `if cond2` offense is at col 11; the inner `if cond1`
+        // at col 2 on the `} if cond1 if cond2` line.
+        test::<MultilineIfModifier>().expect_offense(indoc! {"
+            {
+              result: 'bad'
+            } if cond1 if cond2
+              ^^ Favor a normal `if`-statement over a modifier clause in a multiline statement.
+                       ^^ Favor a normal `if`-statement over a modifier clause in a multiline statement.
+        "});
     }
 
     // ----- Allowed cases -----
