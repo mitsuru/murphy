@@ -37,8 +37,6 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 #[derive(Default)]
 pub struct FileTouch;
 
-const MSG: &str = "Use `FileUtils.touch(%s)` instead of `File.open` in append mode with empty block.";
-
 /// Append modes that only create a file without updating timestamps.
 const APPEND_MODES: &[&str] = &["a", "a+", "ab", "a+b", "at", "a+t"];
 
@@ -104,7 +102,9 @@ fn check(block_node: NodeId, cx: &Cx<'_>) {
     }
 
     let filename_src = cx.raw_source(cx.range(filename_node));
-    let msg = MSG.replacen("%s", filename_src, 1);
+    let msg = format!(
+        "Use `FileUtils.touch({filename_src})` instead of `File.open` in append mode with empty block."
+    );
     let replacement = format!("FileUtils.touch({filename_src})");
 
     cx.emit_offense(cx.range(block_node), &msg, None);

@@ -43,8 +43,6 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 #[derive(Default)]
 pub struct FileWrite;
 
-const MSG: &str = "Use `File.%s`.";
-
 /// Modes that indicate truncating write (text and binary).
 const TRUNCATING_WRITE_MODES: &[&str] = &["w", "wt", "wb", "w+", "w+t", "w+b"];
 
@@ -143,7 +141,7 @@ fn check_chained(write_node: NodeId, cx: &Cx<'_>) {
     };
 
     let method = write_method(mode_str);
-    let msg = MSG.replacen("%s", method, 1);
+    let msg = format!("Use `File.{method}`.");
 
     let filename_src = cx.raw_source(cx.range(filename_node));
     let content_src = cx.raw_source(cx.range(content_node));
@@ -230,7 +228,7 @@ fn check_block_write(block_node: NodeId, cx: &Cx<'_>) {
     }
 
     let method = write_method(mode_str);
-    let msg = MSG.replacen("%s", method, 1);
+    let msg = format!("Use `File.{method}`.");
 
     let filename_src = cx.raw_source(cx.range(filename_node));
     let content_src = cx.raw_source(cx.range(content_node));

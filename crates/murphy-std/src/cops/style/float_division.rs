@@ -193,17 +193,17 @@ fn autocorrect(
             // Rewrite `a.to_f / b.to_f` (or mixed) as `a.fdiv(b)`.
             let lhs_src = if lhs_is_to_f {
                 to_f_receiver(lhs, cx)
-                    .map(|r| cx.raw_source(cx.range(r)).to_string())
-                    .unwrap_or_else(|| cx.raw_source(cx.range(lhs)).to_string())
+                    .map(|r| cx.raw_source(cx.range(r)))
+                    .unwrap_or_else(|| cx.raw_source(cx.range(lhs)))
             } else {
-                cx.raw_source(cx.range(lhs)).to_string()
+                cx.raw_source(cx.range(lhs))
             };
             let rhs_src = if rhs_is_to_f {
                 to_f_receiver(rhs, cx)
-                    .map(|r| cx.raw_source(cx.range(r)).to_string())
-                    .unwrap_or_else(|| cx.raw_source(cx.range(rhs)).to_string())
+                    .map(|r| cx.raw_source(cx.range(r)))
+                    .unwrap_or_else(|| cx.raw_source(cx.range(rhs)))
             } else {
-                cx.raw_source(cx.range(rhs)).to_string()
+                cx.raw_source(cx.range(rhs))
             };
             let replacement = format!("{lhs_src}.fdiv({rhs_src})");
             cx.emit_edit(cx.range(node), &replacement);

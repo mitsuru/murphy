@@ -80,8 +80,6 @@ pub struct FormatStringOptions {
     pub enforced_style: FmtMethod,
 }
 
-const MSG: &str = "Favor `%s` over `%s`.";
-
 #[cop(
     name = "Style/FormatString",
     description = "Enforce the use of Kernel#sprintf, Kernel#format or String#%.",
@@ -149,9 +147,9 @@ fn check_send_format_sprintf(node: NodeId, cx: &Cx<'_>) {
         cx.range(node)
     };
 
-    let msg = MSG
-        .replacen("%s", opts.enforced_style.as_str(), 1)
-        .replacen("%s", detected.as_str(), 1);
+    let prefer = opts.enforced_style.as_str();
+    let current = detected.as_str();
+    let msg = format!("Favor `{prefer}` over `{current}`.");
     cx.emit_offense(offense_range, &msg, None);
 
     // Autocorrect: format <-> sprintf is a trivial selector rename.
@@ -186,7 +184,7 @@ fn check_send_percent(node: NodeId, cx: &Cx<'_>) {
             _ => {
                 // Non-string receiver: only flag if rhs is array or hash.
                 if let Some(&first_arg) = args.first() {
-                    matches!(cx.kind(first_arg), NodeKind::Array(_) | NodeKind::Hash { .. })
+                    matches!(cx.kind(first_arg), NodeKind::Array(_) | NodeKind::Hash(_))
                 } else {
                     false
                 }
@@ -208,9 +206,8 @@ fn check_send_percent(node: NodeId, cx: &Cx<'_>) {
         cx.range(node)
     };
 
-    let msg = MSG
-        .replacen("%s", opts.enforced_style.as_str(), 1)
-        .replacen("%s", "String#%", 1);
+    let prefer = opts.enforced_style.as_str();
+    let msg = format!("Favor `{prefer}` over `String#%`.");
     cx.emit_offense(offense_range, &msg, None);
     // No autocorrect for percent -> format/sprintf (structural rewrite needed).
 }
