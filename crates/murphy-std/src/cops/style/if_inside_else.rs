@@ -139,11 +139,15 @@ fn has_comments_between_else_and_if(outer: NodeId, inner: NodeId, cx: &Cx<'_>) -
     !cx.comments_in_range(scan_range).is_empty()
 }
 
-/// Finds the `else` keyword token directly within the outer node
-/// (not inside any child node).
+/// Finds the `else` keyword token directly within the outer `if` node,
+/// excluding tokens inside the condition, then-branch, and else-branch
+/// child ranges. Avoids heap allocation by matching on `NodeKind::If` directly.
 fn find_else_token(outer: NodeId, cx: &Cx<'_>) -> Option<Range> {
     let node_range = cx.range(outer);
-    let children = cx.children(outer);
+    let (cond, then_, else_) = match cx.kind(outer) {
+        NodeKind::If { cond, then_, else_ } => (*cond, then_.get(), else_.get()),
+        _ => return None,
+    };
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < node_range.start);
@@ -159,11 +163,21 @@ fn find_else_token(outer: NodeId, cx: &Cx<'_>) -> Option<Range> {
         if text != b"else" {
             continue;
         }
-        // Exclude tokens inside child nodes.
-        let inside_child = children.iter().any(|&child| {
-            let r = cx.range(child);
-            tok.range.start >= r.start && tok.range.end <= r.end
-        });
+        // Exclude tokens inside the condition, then-branch, or else-branch.
+        let inside_child = {
+            let r_cond = cx.range(cond);
+            if tok.range.start >= r_cond.start && tok.range.end <= r_cond.end {
+                true
+            } else if let Some(t) = then_ {
+                let r = cx.range(t);
+                tok.range.start >= r.start && tok.range.end <= r.end
+            } else if let Some(e) = else_ {
+                let r = cx.range(e);
+                tok.range.start >= r.start && tok.range.end <= r.end
+            } else {
+                false
+            }
+        };
         if !inside_child {
             return Some(tok.range);
         }
@@ -224,7 +238,7 @@ fn autocorrect(outer: NodeId, inner: NodeId, cx: &Cx<'_>) {
     };
 
     let inner_cond_range = cx.range(*inner_cond);
-    let inner_cond_src = cx.raw_source(inner_cond_range).to_owned();
+    let inner_cond_src = cx.raw_source(inner_cond_range);
 
     // Edit 1: replace `else\n  if <cond>` with `elsif <cond>`.
     let replace_range = Range {

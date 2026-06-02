@@ -25,9 +25,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
-
-const MSG: &str = "Move `%<source>s` out of the conditional.";
-
 #[derive(Default)]
 pub struct IdenticalConditionalBranches;
 
@@ -67,8 +64,10 @@ fn check_if(node: NodeId, cx: &Cx<'_>) {
     }
 
     // Expand all branches: if_branch + any elsif bodies + else body.
-    let branches = expand_if_branches(node, cx);
-    check_branches(node, &branches, cx);
+    // Returns None if any branch is missing (empty branch → no offense).
+    if let Some(branches) = expand_if_branches(node, cx) {
+        check_branches(node, &branches, cx);
+    }
 }
 
 fn check_case(node: NodeId, cx: &Cx<'_>) {
@@ -79,13 +78,16 @@ fn check_case(node: NodeId, cx: &Cx<'_>) {
     };
 
     let when_branches = cx.case_when_branches(node);
-    let mut branches: Vec<Option<NodeId>> = when_branches
-        .iter()
-        .map(|&w| cx.when_body(w).get())
-        .collect();
-    branches.push(Some(else_branch));
+    let mut branch_ids = Vec::with_capacity(when_branches.len() + 1);
+    for &w in when_branches {
+        match cx.when_body(w).get() {
+            Some(id) => branch_ids.push(id),
+            None => return, // empty branch → no offense
+        }
+    }
+    branch_ids.push(else_branch);
 
-    check_branches(node, &branches, cx);
+    check_branches(node, &branch_ids, cx);
 }
 
 fn check_case_match(node: NodeId, cx: &Cx<'_>) {
@@ -96,63 +98,59 @@ fn check_case_match(node: NodeId, cx: &Cx<'_>) {
     };
 
     let in_branches = cx.in_pattern_branches(node);
-    let mut branches: Vec<Option<NodeId>> = in_branches
-        .iter()
-        .map(|&p| cx.in_pattern_body(p).get())
-        .collect();
-    branches.push(Some(else_branch));
+    let mut branch_ids = Vec::with_capacity(in_branches.len() + 1);
+    for &p in in_branches {
+        match cx.in_pattern_body(p).get() {
+            Some(id) => branch_ids.push(id),
+            None => return, // empty branch → no offense
+        }
+    }
+    branch_ids.push(else_branch);
 
-    check_branches(node, &branches, cx);
+    check_branches(node, &branch_ids, cx);
 }
 
-/// Expand an `if` node into its logical branches (if_branch, any elsif bodies,
-/// else body). Returns `None` for any nil/missing branch.
-fn expand_if_branches(node: NodeId, cx: &Cx<'_>) -> Vec<Option<NodeId>> {
+/// Expand an `if` node into its logical branch bodies (if_branch, any elsif
+/// bodies, else body). Returns `None` if any branch is nil (empty branch →
+/// no offense possible).
+fn expand_if_branches(node: NodeId, cx: &Cx<'_>) -> Option<Vec<NodeId>> {
     let mut result = Vec::new();
 
     // if_branch (the body run when condition is true for `if`).
-    result.push(cx.if_branch(node).get());
+    result.push(cx.if_branch(node).get()?);
 
     // Walk the else chain, collecting elsif bodies and the final else body.
     let mut current = cx.if_else_branch(node).get();
     loop {
         match current {
             None => {
-                result.push(None);
-                break;
+                return None;
             }
             Some(id) if matches!(cx.kind(id), NodeKind::If { .. }) && cx.is_elsif(id) => {
                 // This is an elsif: push its body and continue with its else.
-                result.push(cx.if_branch(id).get());
+                result.push(cx.if_branch(id).get()?);
                 current = cx.if_else_branch(id).get();
             }
             Some(id) => {
                 // This is a plain else body.
-                result.push(Some(id));
+                result.push(id);
                 break;
             }
         }
     }
 
-    result
+    Some(result)
 }
 
-/// Core check: given a list of branch body node IDs (Some(id) or None),
-/// check if tails or heads are identical across all branches.
-fn check_branches(node: NodeId, branches: &[Option<NodeId>], cx: &Cx<'_>) {
-    // If any branch is nil, skip (an empty branch means no offense is possible).
-    if branches.iter().any(|b| b.is_none()) {
-        return;
-    }
-
-    let branch_ids: Vec<NodeId> = branches.iter().map(|b| b.unwrap()).collect();
-
+/// Core check: given a slice of branch body node IDs, check if tails or heads
+/// are identical across all branches.
+fn check_branches(node: NodeId, branch_ids: &[NodeId], cx: &Cx<'_>) {
     // Check tails (last expressions).
     let tails: Vec<NodeId> = branch_ids.iter().map(|&b| tail_of(b, cx)).collect();
     if duplicated_expressions(node, &tails, cx) {
         for &expr in &tails {
-            let src = cx.raw_source(cx.range(expr)).to_owned();
-            let msg = MSG.replace("%<source>s", &src);
+            let src = cx.raw_source(cx.range(expr));
+            let msg = format!("Move `{src}` out of the conditional.");
             cx.emit_offense(cx.range(expr), &msg, None);
         }
     }
@@ -168,8 +166,8 @@ fn check_branches(node: NodeId, branches: &[Option<NodeId>], cx: &Cx<'_>) {
     let heads: Vec<NodeId> = branch_ids.iter().map(|&b| head_of(b, cx)).collect();
     if duplicated_expressions(node, &heads, cx) {
         for &expr in &heads {
-            let src = cx.raw_source(cx.range(expr)).to_owned();
-            let msg = MSG.replace("%<source>s", &src);
+            let src = cx.raw_source(cx.range(expr));
+            let msg = format!("Move `{src}` out of the conditional.");
             cx.emit_offense(cx.range(expr), &msg, None);
         }
     }
@@ -291,8 +289,16 @@ fn last_child_of_parent(node: NodeId, cx: &Cx<'_>) -> bool {
         Some(p) => p,
         None => return true,
     };
-    let children = cx.children(parent);
-    children.last().map_or(false, |&last| last == node)
+    // For Begin/Kwbegin parents, use cx.list for zero-copy traversal.
+    match cx.kind(parent) {
+        NodeKind::Begin(list) | NodeKind::Kwbegin(list) => {
+            cx.list(*list).last().map_or(false, |&last| last == node)
+        }
+        _ => {
+            let children = cx.children(parent);
+            children.last().map_or(false, |&last| last == node)
+        }
+    }
 }
 
 /// Returns true if the branch body is a single-statement (not a begin with multiple children).
