@@ -95,10 +95,20 @@ fn check_def(node: NodeId, cx: &Cx<'_>) {
             return;
         }
         // AllowedPatterns: unanchored regex match (mirrors RuboCop's
-        // `pattern.match?(name)`). Invalid patterns are silently skipped.
+        // `pattern.match?(name)`). Compiled regexes are cached per-thread
+        // to avoid recompiling on every method def node.
+        thread_local! {
+            static REGEX_CACHE: std::cell::RefCell<std::collections::HashMap<String, Option<regex::Regex>>> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
+        }
         if opts.allowed_patterns.iter().any(|pat| {
-            regex::Regex::new(pat)
-                .is_ok_and(|re| re.is_match(name))
+            REGEX_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                let re = cache
+                    .entry(pat.clone())
+                    .or_insert_with(|| regex::Regex::new(pat).ok());
+                re.as_ref().is_some_and(|re| re.is_match(name))
+            })
         }) {
             return;
         }

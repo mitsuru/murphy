@@ -58,9 +58,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
-/// Offense message. `%type%` → "if-else" or "ternary".
-const MSG: &str = "Invert the negated condition and swap the %type% branches.";
-
 #[derive(Default)]
 pub struct NegatedIfElseCondition;
 
@@ -127,6 +124,7 @@ fn is_negated_condition(node: NodeId, cx: &Cx<'_>) -> bool {
     }
     // `!=` / `!~` inequality with exactly one argument.
     matches!(cx.method_name(node), Some("!=") | Some("!~"))
+        && cx.call_receiver(node).get().is_some()
         && cx.call_arguments(node).len() == 1
 }
 
@@ -207,7 +205,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Determine type and offense range.
     let is_ternary = cx.is_ternary(node);
     let type_str = if is_ternary { "ternary" } else { "if-else" };
-    let msg = MSG.replace("%type%", type_str);
+    let msg = format!("Invert the negated condition and swap the {type_str} branches.");
 
     // Offense range:
     // - Ternary: full node range (the entire `!x ? a : b` expression).
@@ -237,7 +235,8 @@ fn first_line_range(node_range: Range, cx: &Cx<'_>) -> Range {
     let first_line_end = source[node_start..]
         .iter()
         .position(|&b| b == b'\n')
-        .map_or(node_range.end as usize, |pos| node_start + pos);
+        .map_or(node_range.end as usize, |pos| node_start + pos)
+        .min(node_range.end as usize);
     Range {
         start: node_range.start,
         end: first_line_end as u32,
@@ -287,7 +286,11 @@ fn autocorrect_ternary(node: NodeId, raw_cond: NodeId, inverted: &str, cx: &Cx<'
 /// Find the `else` keyword range within this `if` node (not inside children).
 fn find_else_token_range(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
     let node_range = cx.range(node);
-    let children = cx.children(node);
+    let children = [
+        cx.if_condition(node).get(),
+        cx.if_then_branch(node).get(),
+        cx.if_else_branch(node).get(),
+    ];
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < node_range.start);
@@ -304,7 +307,7 @@ fn find_else_token_range(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
             continue;
         }
         // Exclude tokens inside child nodes.
-        let inside = children.iter().any(|&c| {
+        let inside = children.iter().flatten().any(|&c| {
             let r = cx.range(c);
             tok.range.start >= r.start && tok.range.end <= r.end
         });
