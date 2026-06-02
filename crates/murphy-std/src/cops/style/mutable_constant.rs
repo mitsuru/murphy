@@ -182,10 +182,7 @@ fn is_safe_freeze_target(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Returns true when `node` is a `.freeze` call with no arguments on any receiver.
 fn is_freeze_call(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { method, args, .. } = cx.kind(node) else {
-        return false;
-    };
-    cx.symbol_str(*method) == "freeze" && cx.list(*args).is_empty()
+    cx.method_name(node) == Some("freeze") && cx.call_arguments(node).is_empty()
 }
 
 /// Returns true for mutable literals that should be flagged in `literals` mode.

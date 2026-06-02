@@ -85,21 +85,16 @@ impl NegatedIf {
 /// Returns `Some(receiver)` if `cond` is a single `!` Send whose receiver
 /// is not itself a `!` Send. Returns `None` otherwise.
 fn single_negative(cond: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    let NodeKind::Send { receiver, method, args } = cx.kind(cond) else {
-        return None;
-    };
-    if cx.symbol_str(*method) != "!" {
+    if cx.method_name(cond) != Some("!") {
         return None;
     }
-    if !cx.list(*args).is_empty() {
+    if !cx.call_arguments(cond).is_empty() {
         return None;
     }
-    let recv = receiver.get()?;
+    let recv = cx.call_receiver(cond).get()?;
     // Exclude double negation: receiver must not itself be a `!` Send.
-    if let NodeKind::Send { method: m, .. } = cx.kind(recv) {
-        if cx.symbol_str(*m) == "!" {
-            return None;
-        }
+    if cx.method_name(recv) == Some("!") {
+        return None;
     }
     Some(recv)
 }
