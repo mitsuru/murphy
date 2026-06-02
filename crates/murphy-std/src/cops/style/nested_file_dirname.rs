@@ -7,7 +7,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/NestedFileDirname
 //! upstream_version_checked: 1.86.2
-//! status: complete
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Detection is fully implemented. Fires on the outermost File.dirname

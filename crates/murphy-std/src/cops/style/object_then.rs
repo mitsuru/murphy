@@ -6,7 +6,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/ObjectThen
 //! upstream_version_checked: 1.86.2
-//! status: complete
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Both EnforcedStyle values (`then` and `yield_self`) are implemented.

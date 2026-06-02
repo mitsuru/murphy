@@ -8,7 +8,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/YAMLFileRead
 //! upstream_version_checked: 1.86.2
-//! status: complete
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Murphy v1 handles the core case matching YAML.load/safe_load/parse

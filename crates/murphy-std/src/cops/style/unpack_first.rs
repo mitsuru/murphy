@@ -8,7 +8,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/UnpackFirst
 //! upstream_version_checked: 1.86.2
-//! status: complete
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Gated at minimum_target_ruby_version = "2.4" (`String#unpack1` requires

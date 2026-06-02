@@ -6,7 +6,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/SlicingWithRange
 //! upstream_version_checked: 1.86.2
-//! status: complete
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Three cases are implemented:
