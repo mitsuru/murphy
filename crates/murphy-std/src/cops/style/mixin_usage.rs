@@ -21,8 +21,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
-const MSG: &str = "`%s` is used at the top level. Use inside `class` or `module`.";
-
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct MixinUsage;
@@ -42,22 +40,13 @@ impl MixinUsage {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
-        return;
-    };
-
     // Must have no receiver (bare `include M`, not `SomeClass.include M`).
-    if receiver.get().is_some() {
+    if cx.call_receiver(node).get().is_some() {
         return;
     }
 
     // Must have exactly one argument, and it must be a Const node.
-    let args_slice = cx.list(args);
+    let args_slice = cx.call_arguments(node);
     if args_slice.len() != 1 {
         return;
     }
@@ -71,8 +60,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    let method_name = cx.symbol_str(method);
-    let msg = MSG.replacen("%s", method_name, 1);
+    let Some(method_name) = cx.method_name(node) else {
+        return;
+    };
+    let msg =
+        format!("`{method_name}` is used at the top level. Use inside `class` or `module`.");
     cx.emit_offense(cx.range(node), &msg, None);
 }
 

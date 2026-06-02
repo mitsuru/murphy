@@ -101,33 +101,33 @@ fn check_body(node: NodeId, cx: &Cx<'_>) {
     match opts.enforced_style {
         EnforcedStyle::Separated => {
             for &send_id in &mixin_sends {
-                let args = mixin_send_args(send_id, cx);
+                let args = cx.call_arguments(send_id);
                 if args.len() > 1 {
                     // Offense: multi-arg mixin call, should be split.
-                    let method_name = mixin_send_method(send_id, cx);
-                    let msg = format!("Put `{}` mixins in separate statements.", method_name);
+                    let method_name = cx.method_name(send_id).unwrap_or("");
+                    let msg = format!("Put `{method_name}` mixins in separate statements.");
                     cx.emit_offense(cx.range(send_id), &msg, None);
 
                     // Autocorrect: split into separate statements (args reversed).
-                    let replacement = separate_mixins(send_id, &args, cx);
+                    let replacement = separate_mixins(send_id, args, cx);
                     cx.emit_edit(cx.range(send_id), &replacement);
                 }
             }
         }
         EnforcedStyle::Grouped => {
             // For each unique mixin method, find all sibling sends with that method.
-            let mut seen_methods: Vec<String> = Vec::new();
+            let mut seen_methods: Vec<&str> = Vec::new();
             for &send_id in &mixin_sends {
-                let method_name = mixin_send_method(send_id, cx).to_owned();
+                let method_name = cx.method_name(send_id).unwrap_or("");
                 if seen_methods.contains(&method_name) {
                     continue;
                 }
-                seen_methods.push(method_name.clone());
+                seen_methods.push(method_name);
 
                 let siblings: Vec<NodeId> = mixin_sends
                     .iter()
                     .copied()
-                    .filter(|&s| mixin_send_method(s, cx) == method_name)
+                    .filter(|&s| cx.method_name(s).unwrap_or("") == method_name)
                     .collect();
 
                 if siblings.len() <= 1 {
@@ -136,8 +136,7 @@ fn check_body(node: NodeId, cx: &Cx<'_>) {
 
                 // Flag each sibling and emit correction.
                 for &sibling in &siblings {
-                    let msg =
-                        format!("Put `{}` mixins in a single statement.", method_name);
+                    let msg = format!("Put `{method_name}` mixins in a single statement.");
                     cx.emit_offense(cx.range(sibling), &msg, None);
                 }
 
@@ -150,7 +149,8 @@ fn check_body(node: NodeId, cx: &Cx<'_>) {
 
                 let source = cx.source().as_bytes();
                 for &sibling in siblings.iter().skip(1) {
-                    let remove_range = range_to_remove_for_subsequent_mixin(source, &siblings, sibling, cx);
+                    let remove_range =
+                        range_to_remove_for_subsequent_mixin(source, &siblings, sibling, cx);
                     cx.emit_edit(remove_range, "");
                 }
             }
@@ -165,7 +165,11 @@ fn collect_mixin_sends(body_id: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
         NodeKind::Begin(list) => cx.list(*list),
         _ => {
             // Single-statement body: treat as one-element slice.
-            return if is_mixin_send(body_id, cx) { vec![body_id] } else { vec![] };
+            return if is_mixin_send(body_id, cx) {
+                vec![body_id]
+            } else {
+                vec![]
+            };
         }
     };
     stmts.iter().copied().filter(|&id| is_mixin_send(id, cx)).collect()
@@ -174,34 +178,16 @@ fn collect_mixin_sends(body_id: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
 /// Returns `true` if `node` is a nil-receiver Send with a mixin method and
 /// at least one argument.
 fn is_mixin_send(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { receiver, method, args } = *cx.kind(node) else {
-        return false;
-    };
-    if receiver.get().is_some() {
+    if cx.call_receiver(node).get().is_some() {
         return false;
     }
-    let method_name = cx.symbol_str(method);
+    let Some(method_name) = cx.method_name(node) else {
+        return false;
+    };
     if !MIXIN_METHODS.contains(&method_name) {
         return false;
     }
-    !cx.list(args).is_empty()
-}
-
-/// Returns the method name of a Send node (panics if not a Send — callers
-/// ensure the node is a mixin send).
-fn mixin_send_method<'a>(node: NodeId, cx: &Cx<'a>) -> &'a str {
-    let NodeKind::Send { method, .. } = *cx.kind(node) else {
-        unreachable!("mixin_send_method called on non-Send node");
-    };
-    cx.symbol_str(method)
-}
-
-/// Returns the args slice for a mixin Send node.
-fn mixin_send_args<'a>(node: NodeId, cx: &'a Cx<'a>) -> &'a [NodeId] {
-    let NodeKind::Send { args, .. } = *cx.kind(node) else {
-        return &[];
-    };
-    cx.list(args)
+    !cx.call_arguments(node).is_empty()
 }
 
 /// Builds the `separated` autocorrect for a multi-arg mixin send.
@@ -209,7 +195,7 @@ fn mixin_send_args<'a>(node: NodeId, cx: &'a Cx<'a>) -> &'a [NodeId] {
 /// Mirrors RuboCop's `separate_mixins`: reverses arguments and emits one
 /// statement per argument, lines 2+ prefixed with the node's column indent.
 fn separate_mixins(send_id: NodeId, args: &[NodeId], cx: &Cx<'_>) -> String {
-    let method_name = mixin_send_method(send_id, cx);
+    let method_name = cx.method_name(send_id).unwrap_or("");
     let source = cx.source().as_bytes();
 
     // Compute the column indent (bytes from last newline to node start).
@@ -237,12 +223,12 @@ fn separate_mixins(send_id: NodeId, args: &[NodeId], cx: &Cx<'_>) -> String {
 /// Mirrors RuboCop's `group_mixins`: collects args from all siblings in
 /// **reverse** order (last sibling's args first), then joins with `, `.
 fn group_mixins(siblings: &[NodeId], cx: &Cx<'_>) -> String {
-    let method_name = mixin_send_method(siblings[0], cx);
+    let method_name = cx.method_name(siblings[0]).unwrap_or("");
     // Collect all args from all siblings reversed.
     let all_args: Vec<&str> = siblings
         .iter()
         .rev()
-        .flat_map(|&s| mixin_send_args(s, cx))
+        .flat_map(|&s| cx.call_arguments(s))
         .map(|&arg_id| cx.raw_source(cx.range(arg_id)))
         .collect();
     format!("{} {}", method_name, all_args.join(", "))
@@ -453,7 +439,8 @@ mod tests {
     fn config_round_trip() {
         use murphy_plugin_api::CopOptions;
         let opts =
-            MixinGroupingOptions::from_config_json(br#"{"EnforcedStyle": "grouped"}"#).expect("valid");
+            MixinGroupingOptions::from_config_json(br#"{"EnforcedStyle": "grouped"}"#)
+                .expect("valid");
         assert_eq!(opts.enforced_style, EnforcedStyle::Grouped);
         let opts2 =
             MixinGroupingOptions::from_config_json(br#"{"EnforcedStyle": "separated"}"#)
