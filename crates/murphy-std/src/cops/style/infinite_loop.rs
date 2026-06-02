@@ -359,10 +359,11 @@ fn autocorrect_modifier(node: NodeId, cx: &Cx<'_>) {
         let line_start = line_start_of(src, node_start);
         let indentation = &src[line_start..node_start];
         let indentation = std::str::from_utf8(indentation).unwrap_or("");
-        // Re-indent body lines: add `indentation` to each line.
+        // Re-indent body lines: add `indentation + 2 spaces` to each line so the
+        // body is correctly nested inside the `loop do` block.
         let body_indented = body_source
             .lines()
-            .map(|line| format!("{indentation}{line}"))
+            .map(|line| format!("{indentation}  {line}"))
             .collect::<Vec<_>>()
             .join("\n");
         let repl = format!("loop do\n{body_indented}\n{indentation}end");
@@ -608,6 +609,20 @@ mod tests {
                                ^^^^^ Use `Kernel#loop` for infinite loops.
             "},
             "loop { something += 1 }\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_modifier_while_multi_line() {
+        // Multi-line body: `something +\n  1` is a single expression spanning
+        // two lines. The body is indented 2 spaces inside the `loop do` block.
+        test::<InfiniteLoop>().expect_correction(
+            indoc! {"
+                something +
+                  1 while true
+                    ^^^^^ Use `Kernel#loop` for infinite loops.
+            "},
+            "loop do\n  something +\n    1\nend\n",
         );
     }
 }
