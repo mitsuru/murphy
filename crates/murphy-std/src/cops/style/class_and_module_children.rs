@@ -57,7 +57,7 @@
 //! context that cannot be inferred from the AST alone (whether the outer constant
 //! is a class or a module). Users should apply corrections manually.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
 
 const NESTED_MSG: &str =
     "Use nested module/class definitions instead of compact style.";
@@ -67,10 +67,35 @@ const COMPACT_MSG: &str =
 #[derive(Default)]
 pub struct ClassAndModuleChildren;
 
+/// Enforced style for `Style/ClassAndModuleChildren`.
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClassAndModuleChildrenStyle {
+    /// Nested style: each namespace segment is a separate class/module block.
+    #[default]
+    #[option(value = "nested")]
+    Nested,
+    /// Compact style: namespace segments are joined with `::`.
+    #[option(value = "compact")]
+    Compact,
+}
+
+impl ClassAndModuleChildrenStyle {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "nested" => Some(Self::Nested),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+}
+
 /// Options for [`ClassAndModuleChildren`].
 ///
 /// Matches RuboCop's `EnforcedStyle`, `EnforcedStyleForClasses`, and
-/// `EnforcedStyleForModules` config keys.
+/// `EnforcedStyleForModules` config keys. `EnforcedStyle` is validated at
+/// config-load time; invalid values produce a `ConfigError`. The per-type
+/// overrides use `Option<String>` because `#[derive(CopOptions)]` does not
+/// support `Option<CopOptionEnum>`; unknown values fall back to `EnforcedStyle`.
 #[derive(CopOptions)]
 pub struct ClassAndModuleChildrenOptions {
     /// Overall enforced style: `"nested"` (default) or `"compact"`.
@@ -79,7 +104,7 @@ pub struct ClassAndModuleChildrenOptions {
         default = "nested",
         description = "Enforced style for namespaced class/module definitions."
     )]
-    pub enforced_style: String,
+    pub enforced_style: ClassAndModuleChildrenStyle,
     /// Per-class style override. When `None` (default), falls back to
     /// `EnforcedStyle`.
     #[option(
@@ -119,11 +144,12 @@ impl ClassAndModuleChildren {
         let effective_style = opts
             .enforced_style_for_classes
             .as_deref()
-            .unwrap_or(opts.enforced_style.as_str());
+            .and_then(ClassAndModuleChildrenStyle::from_str)
+            .unwrap_or(opts.enforced_style);
 
         // RuboCop guard: `return if node.parent_class && style != :nested`
         // Skip inheritance checks on classes with a superclass in compact mode.
-        if superclass.get().is_some() && effective_style != "nested" {
+        if superclass.get().is_some() && effective_style != ClassAndModuleChildrenStyle::Nested {
             return;
         }
 
@@ -144,14 +170,15 @@ impl ClassAndModuleChildren {
         let effective_style = opts
             .enforced_style_for_modules
             .as_deref()
-            .unwrap_or(opts.enforced_style.as_str());
+            .and_then(ClassAndModuleChildrenStyle::from_str)
+            .unwrap_or(opts.enforced_style);
 
         check_style(node, name_id, body.get(), effective_style, cx);
     }
 }
 
 /// Dispatch to the appropriate style check.
-fn check_style(node: NodeId, name_id: NodeId, body: Option<NodeId>, style: &str, cx: &Cx<'_>) {
+fn check_style(node: NodeId, name_id: NodeId, body: Option<NodeId>, style: ClassAndModuleChildrenStyle, cx: &Cx<'_>) {
     // RuboCop: `return if node.identifier.namespace&.cbase_type?`
     // Murphy's translator does not preserve cbase, so we check the source:
     // if the identifier starts with `::` it is an absolute path — skip.
@@ -160,7 +187,7 @@ fn check_style(node: NodeId, name_id: NodeId, body: Option<NodeId>, style: &str,
         return;
     }
 
-    if style == "compact" {
+    if style == ClassAndModuleChildrenStyle::Compact {
         check_compact_style(node, body, cx);
     } else {
         check_nested_style(node, name_id, cx);
@@ -230,7 +257,7 @@ fn needs_compacting(body_id: NodeId, cx: &Cx<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassAndModuleChildren, ClassAndModuleChildrenOptions};
+    use super::{ClassAndModuleChildren, ClassAndModuleChildrenOptions, ClassAndModuleChildrenStyle};
     use murphy_plugin_api::test_support::{indoc, test};
 
     // --- nested style (default) ---
@@ -333,7 +360,7 @@ mod tests {
     fn compact_flags_nested_class_with_single_child_class() {
         test::<ClassAndModuleChildren>()
             .with_options(&ClassAndModuleChildrenOptions {
-                enforced_style: "compact".to_string(),
+                enforced_style: ClassAndModuleChildrenStyle::Compact,
                 enforced_style_for_classes: None,
                 enforced_style_for_modules: None,
             })
@@ -350,7 +377,7 @@ mod tests {
     fn compact_flags_nested_module_with_single_child_module() {
         test::<ClassAndModuleChildren>()
             .with_options(&ClassAndModuleChildrenOptions {
-                enforced_style: "compact".to_string(),
+                enforced_style: ClassAndModuleChildrenStyle::Compact,
                 enforced_style_for_classes: None,
                 enforced_style_for_modules: None,
             })
@@ -367,7 +394,7 @@ mod tests {
     fn compact_accepts_already_compact_class() {
         test::<ClassAndModuleChildren>()
             .with_options(&ClassAndModuleChildrenOptions {
-                enforced_style: "compact".to_string(),
+                enforced_style: ClassAndModuleChildrenStyle::Compact,
                 enforced_style_for_classes: None,
                 enforced_style_for_modules: None,
             })
@@ -382,7 +409,7 @@ mod tests {
         // Body has a method, not a nested class/module — no offense
         test::<ClassAndModuleChildren>()
             .with_options(&ClassAndModuleChildrenOptions {
-                enforced_style: "compact".to_string(),
+                enforced_style: ClassAndModuleChildrenStyle::Compact,
                 enforced_style_for_classes: None,
                 enforced_style_for_modules: None,
             })
@@ -401,7 +428,7 @@ mod tests {
         // Only `class Outer` gets flagged (body = `class Inner` -> needs_compacting).
         test::<ClassAndModuleChildren>()
             .with_options(&ClassAndModuleChildrenOptions {
-                enforced_style: "compact".to_string(),
+                enforced_style: ClassAndModuleChildrenStyle::Compact,
                 enforced_style_for_classes: None,
                 enforced_style_for_modules: None,
             })
@@ -422,7 +449,7 @@ mod tests {
         // In compact mode, a class with a superclass is skipped entirely.
         test::<ClassAndModuleChildren>()
             .with_options(&ClassAndModuleChildrenOptions {
-                enforced_style: "compact".to_string(),
+                enforced_style: ClassAndModuleChildrenStyle::Compact,
                 enforced_style_for_classes: None,
                 enforced_style_for_modules: None,
             })
@@ -442,7 +469,7 @@ mod tests {
         // should be flagged (compact expected, nested given).
         test::<ClassAndModuleChildren>()
             .with_options(&ClassAndModuleChildrenOptions {
-                enforced_style: "nested".to_string(),
+                enforced_style: ClassAndModuleChildrenStyle::Nested,
                 enforced_style_for_classes: Some("compact".to_string()),
                 enforced_style_for_modules: None,
             })
@@ -461,7 +488,7 @@ mod tests {
         // should be flagged.
         test::<ClassAndModuleChildren>()
             .with_options(&ClassAndModuleChildrenOptions {
-                enforced_style: "nested".to_string(),
+                enforced_style: ClassAndModuleChildrenStyle::Nested,
                 enforced_style_for_classes: None,
                 enforced_style_for_modules: Some("compact".to_string()),
             })
