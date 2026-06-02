@@ -14,16 +14,21 @@
 //!   Predicate style: flags `x == 0`, `x > 0`, `x < 0`, and inverted forms
 //!   (`0 == x`, `0 < x`, `0 > x`), excluding gvar receivers.
 //!   Comparison style: flags `x.zero?`, `x.positive?`, `x.negative?`, including
-//!   the negated form `!x.zero?` → `(x != 0)`.
+//!   the negated `!x.zero?` -> `(x != 0)`. For `!x.positive?` / `!x.negative?`
+//!   the offense is flagged but no autocorrect is emitted, because `!x.positive?`
+//!   is not equivalent to `x <= 0` for NaN values. RuboCop emits `(x <= 0)`
+//!   unconditionally; Murphy conservatively omits the autocorrect for these cases.
 //!   AllowedMethods (Vec<String>): flags the node and skips when the method name
 //!   or any ancestor send/block method name is in AllowedMethods. Defaults to [].
-//!   AllowedPatterns (regex): not supported — derive only covers Vec<String>.
+//!   AllowedPatterns (regex): not supported -- derive only covers Vec<String>.
 //!   This is a v1 gap; users can work around it with AllowedMethods.
 //!   target_ruby_version guard for `>` and `<` (Ruby >= 2.3): not enforced.
 //!   Murphy v1 has no per-file Ruby version tracking; benign gap.
+//!   `!= 0` and `nonzero?` are deliberately excluded from RESTRICT_ON_SEND,
+//!   matching RuboCop: `nonzero?` is truthy/falsey (not true/false), and
+//!   `x != 0` is not in RuboCop's RESTRICT_ON_SEND either.
 //!   @safety: this cop is marked unsafe in RuboCop (no sandbox); Murphy has no
 //!   cop-level safety metadata knob in v1.
-//!   nonzero? is deliberately excluded (truthy/falsey, not true/false).
 //!   Global variables are excluded from the predicate direction (gvar receiver).
 //! ```
 //!
@@ -41,7 +46,8 @@
 //! - `x.zero?` → `x == 0`
 //! - `x.positive?` → `x > 0`
 //! - `x.negative?` → `x < 0`
-//! - `!x.zero?` → `(x != 0)` (negated comparison)
+//! - `!x.zero?` -> `(x != 0)` (negated comparison; autocorrect applied)
+//! - `!x.positive?` / `!x.negative?` -> flagged, no autocorrect (NaN-safe gap)
 //!
 //! ## Autocorrect
 //!
@@ -313,28 +319,36 @@ impl NumericPredicate {
                     let node_range = cx.range(node);
                     let node_src = cx.raw_source(node_range);
 
-                    // Check if negated: `!x.zero?` → `(x != 0)`.
-                    let (replacement, offense_range) = if is_negated(node, cx) {
-                        let parent_id = cx.parent(node).get().unwrap();
-                        let parent_range = cx.range(parent_id);
-                        let parent_src = cx.raw_source(parent_range);
-                        let not_op = match op {
-                            "==" => "!=",
-                            ">" => "<=",
-                            "<" => ">=",
-                            _ => return,
-                        };
-                        let repl = format!("({recv_src} {not_op} 0)");
-                        cx.emit_offense(parent_range, &fmt_msg(&repl, parent_src), None);
-                        cx.emit_edit(parent_range, &repl);
+                    // Check if negated: `!x.zero?` -> `(x != 0)`.
+                    // Negated autocorrect is safe only for `zero?` (== -> !=).
+                    // For `positive?`/`negative?`, negation interacts with NaN
+                    // semantics: `!x.positive?` is not equivalent to `x <= 0`
+                    // for NaN values. We flag the offense but do not autocorrect
+                    // `!x.positive?` / `!x.negative?` forms.
+                    if is_negated(node, cx) {
+                        if op == "==" {
+                            // `!x.zero?` -> `(x != 0)` - safe for all numeric types.
+                            let parent_id = cx.parent(node).get().unwrap();
+                            let parent_range = cx.range(parent_id);
+                            let parent_src = cx.raw_source(parent_range);
+                            let repl = format!("({recv_src} != 0)");
+                            cx.emit_offense(parent_range, &fmt_msg(&repl, parent_src), None);
+                            cx.emit_edit(parent_range, &repl);
+                        } else {
+                            // `!x.positive?` / `!x.negative?`: flag offense on the inner
+                            // predicate node only (no autocorrect: `!x.positive?` != `x <= 0`
+                            // for NaN values).
+                            let not_op = match op { ">" => "<=", "<" => ">=", _ => return };
+                            let msg_prefer = format!("{recv_src} {not_op} 0");
+                            cx.emit_offense(node_range, &fmt_msg(&msg_prefer, node_src), None);
+                            // No emit_edit: autocorrect omitted for NaN safety.
+                        }
                         return;
-                    } else {
-                        let repl = format!("{recv_src} {op} 0");
-                        (repl, node_range)
-                    };
+                    }
 
-                    cx.emit_offense(offense_range, &fmt_msg(&replacement, node_src), None);
-                    cx.emit_edit(offense_range, &replacement);
+                    let replacement = format!("{recv_src} {op} 0");
+                    cx.emit_offense(node_range, &fmt_msg(&replacement, node_src), None);
+                    cx.emit_edit(node_range, &replacement);
                 }
             }
         }
@@ -515,6 +529,30 @@ mod tests {
                 "},
                 "(foo != 0)\n",
             );
+    }
+
+    #[test]
+    fn flags_negated_positive_predicate_no_autocorrect() {
+        // `!foo.positive?` is flagged but no autocorrect (NaN safety).
+        test::<NumericPredicate>()
+            .with_options(&NumericPredicateOptions {
+                enforced_style: NumericPredicateStyle::Comparison,
+                allowed_methods: vec![],
+            })
+            .expect_no_corrections("!foo.positive?\n");
+    }
+
+    #[test]
+    fn flags_negated_positive_offense_only() {
+        test::<NumericPredicate>()
+            .with_options(&NumericPredicateOptions {
+                enforced_style: NumericPredicateStyle::Comparison,
+                allowed_methods: vec![],
+            })
+            .expect_offense(indoc! {"
+                !foo.positive?
+                 ^^^^^^^^^^^^^ Use `foo <= 0` instead of `foo.positive?`.
+            "});
     }
 
     #[test]
