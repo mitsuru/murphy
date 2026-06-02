@@ -98,7 +98,7 @@ impl SafeNavigationChainLength {
         }
 
         // Report at the outermost csend ancestor (matching RuboCop's .last).
-        let outermost = *csend_ancestors.last().expect("non-empty by the check above");
+        let outermost = *csend_ancestors.last().expect("csend_ancestors is non-empty because len >= max >= 1");
         let msg = format!("Avoid safe navigation chains longer than {max} calls.");
         cx.emit_offense(cx.range(outermost), &msg, None);
     }
