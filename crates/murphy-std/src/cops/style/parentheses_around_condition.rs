@@ -176,6 +176,13 @@ fn check_condition(node: NodeId, cond: NodeId, cx: &Cx<'_>) {
     // Extract the body (everything inside the outer parens).
     let body = &cond_src[1..cond_src.len() - 1];
 
+    // Semicolon-separated expressions inside parens change meaning when the
+    // parens are removed: `(foo; bar)` as a condition evaluates `bar`, but
+    // `foo; bar` would evaluate `foo` and move `bar` into the body. Skip.
+    if body.contains(';') {
+        return;
+    }
+
     let opts = cx.options_or_default::<ParenthesesAroundConditionOptions>();
 
     // AllowSafeAssignment: skip when the condition body is an assignment
