@@ -72,8 +72,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     };
 
-    // Receiver must be `ENV` constant.
-    if !is_env_const(recv_id, cx) {
+    // Receiver must be the top-level `ENV` constant (not e.g. `MyModule::ENV`).
+    if !cx.is_global_const(recv_id, "ENV") {
         return;
     }
 
@@ -105,11 +105,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         }
         _ => {}
     }
-}
-
-/// Returns `true` if `node` is the `ENV` constant.
-fn is_env_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(cx.kind(node), NodeKind::Const { name, .. } if cx.symbol_str(*name) == "ENV")
 }
 
 /// Returns `true` if `node` is the string literal `"HOME"` or `'HOME'`.

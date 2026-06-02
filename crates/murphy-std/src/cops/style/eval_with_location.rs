@@ -84,7 +84,17 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let arg_list = cx.list(args);
 
     match method_str {
-        "eval" => check_eval(node, arg_list, cx),
+        "eval" => {
+            // Only flag bare `eval` or `Kernel.eval` — not `binding.eval` etc.
+            // `Binding#eval` takes (code, __FILE__, __LINE__) without a binding arg.
+            let recv_ok = match cx.call_receiver(node).get() {
+                None => true, // bare eval(...)
+                Some(r) => cx.is_global_const(r, "Kernel"),
+            };
+            if recv_ok {
+                check_eval(node, arg_list, cx);
+            }
+        }
         "instance_eval" | "class_eval" | "module_eval" => {
             check_instance_eval(node, method_str, arg_list, cx);
         }

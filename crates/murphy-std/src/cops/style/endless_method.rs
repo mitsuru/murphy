@@ -145,7 +145,8 @@ fn autocorrect_to_multiline(node: NodeId, cx: &Cx<'_>) {
         name_str.to_string()
     };
 
-    // Build argument portion: use raw source of the args node if non-empty.
+    // Build argument portion: Prism's ArgumentsNode range does not include
+    // the surrounding parentheses, so we must wrap them explicitly.
     let args_part = {
         let NodeKind::Args(arg_list) = *cx.kind(args) else {
             return;
@@ -153,7 +154,7 @@ fn autocorrect_to_multiline(node: NodeId, cx: &Cx<'_>) {
         if cx.list(arg_list).is_empty() {
             String::new()
         } else {
-            cx.raw_source(cx.range(args)).to_string()
+            format!("({})", cx.raw_source(cx.range(args)))
         }
     };
 
