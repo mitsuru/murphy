@@ -122,8 +122,15 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // Autocorrect: replace the gap between selector end and first arg start
     // with `(`, then insert `)` after the last arg.
-    let selector_end = cx.selector(node).end;
+    let selector = cx.selector(node);
+    if selector == Range::ZERO {
+        return;
+    }
+    let selector_end = selector.end;
     let first_arg_start = cx.range(args[0]).start;
+    if selector_end >= first_arg_start {
+        return;
+    }
     let last_arg_end = cx.range(args[args.len() - 1]).end;
 
     cx.emit_edit(

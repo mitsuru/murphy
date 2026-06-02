@@ -158,13 +158,10 @@ fn is_default_argument(node: NodeId, cx: &Cx<'_>) -> bool {
 /// list is empty (Ruby 3.4 `it` semantics).
 fn is_parenthesized_it_in_empty_block(node: NodeId, cx: &Cx<'_>) -> bool {
     // Only receiverless `it`.
-    let NodeKind::Send { receiver, method, .. } = *cx.kind(node) else {
-        return false;
-    };
-    if receiver.get().is_some() {
+    if cx.call_receiver(node).get().is_some() {
         return false;
     }
-    if cx.symbol_str(method) != "it" {
+    if cx.method_name(node) != Some("it") {
         return false;
     }
 
@@ -195,11 +192,8 @@ fn is_parenthesized_it_in_empty_block(node: NodeId, cx: &Cx<'_>) -> bool {
 /// has a left-hand side whose name equals the call's method name. Prevents
 /// `foo = foo()` autocorrecting to `foo = foo` (which reads the variable).
 fn is_same_name_assignment(node: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
-    // Only applies to receiverless Send calls (Csend always has a receiver).
-    let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
-        return false;
-    };
-    if receiver.get().is_some() {
+    // Only applies to receiverless calls (Csend always has a receiver).
+    if cx.call_receiver(node).get().is_some() {
         return false;
     }
 
