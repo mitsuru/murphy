@@ -149,10 +149,10 @@ fn check(predicate_node: NodeId, cx: &Cx<'_>) {
         cx.emit_edit(cx.selector(select_call), replacement);
 
         // Edit 2: delete from the end of the receiver (the block or select call)
-        //         to the end of the predicate selector.
-        // This removes the `.any?` / `.empty?` / etc. part.
+        //         to the end of the predicate call (including any trailing empty parens).
+        // Using cx.range(predicate_node).end covers `any?()` → deletes `.any?()`, not just `.any?`.
         let delete_start = cx.range(receiver).end;
-        let delete_end = cx.selector(predicate_node).end;
+        let delete_end = cx.range(predicate_node).end;
         cx.emit_edit(
             Range {
                 start: delete_start,
@@ -414,6 +414,18 @@ mod tests {
         // select followed by map is not this cop's concern
         test::<RedundantFilterChain>()
             .expect_no_offenses("arr.select { |x| x > 1 }.map { |x| x * 2 }\n");
+    }
+
+    #[test]
+    fn corrects_select_any_with_empty_parens() {
+        // `select { }.any?()` should autocorrect to `any? { }` (not `any? { }()`)
+        test::<RedundantFilterChain>().expect_correction(
+            indoc! {"
+                arr.select { |x| x > 1 }.any?()
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^ Use `any?` instead of `select.any?`.
+            "},
+            "arr.any? { |x| x > 1 }\n",
+        );
     }
 
     #[test]

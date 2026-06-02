@@ -94,12 +94,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     cx.emit_offense(cx.range(node), MSG, None);
 
-    // Autocorrect: delete the dot + "freeze".
-    // This creates one contiguous edit covering both dot and selector.
+    // Autocorrect: delete the dot + "freeze" (including any trailing empty parens).
+    // Using cx.range(node).end covers `1.freeze()` → deletes `.freeze()`, not just `.freeze`.
     if let Some(dot) = cx.call_operator_loc(node) {
         let delete_range = Range {
             start: dot.start,
-            end: cx.selector(node).end,
+            end: cx.range(node).end,
         };
         cx.emit_edit(delete_range, "");
     }
@@ -469,6 +469,18 @@ mod tests {
     fn accepts_no_receiver_freeze() {
         // bare `freeze` with no receiver
         test::<RedundantFreeze>().expect_no_offenses("freeze\n");
+    }
+
+    #[test]
+    fn corrects_integer_freeze_with_empty_parens() {
+        // `1.freeze()` should autocorrect to `1` (not `1()`)
+        test::<RedundantFreeze>().expect_correction(
+            indoc! {"
+                CONST = 1.freeze()
+                        ^^^^^^^^^^ Do not freeze immutable objects, as freezing them has no effect.
+            "},
+            "CONST = 1\n",
+        );
     }
 
     #[test]
