@@ -217,17 +217,12 @@ fn find_signature_end(src: &[u8], start: usize, node_end: usize) -> usize {
     i
 }
 
-/// Returns the 0-based column of the `def` keyword.
+/// Returns the 0-based column of the `def` keyword (Unicode-aware).
 fn def_column(node: NodeId, cx: &Cx<'_>) -> usize {
     let node_start = cx.range(node).start as usize;
-    let src = cx.source().as_bytes();
-    let mut col = 0;
-    let mut i = node_start;
-    while i > 0 && src[i - 1] != b'\n' {
-        i -= 1;
-        col += 1;
-    }
-    col
+    let src = cx.source();
+    let line_start = src[..node_start].rfind('\n').map_or(0, |pos| pos + 1);
+    src[line_start..node_start].chars().count()
 }
 
 #[cfg(test)]

@@ -175,9 +175,6 @@ fn check_nil_else(node: NodeId, cx: &Cx<'_>) {
 
 /// Find the `else` keyword token directly belonging to `node` (not inside a child).
 fn find_else_token(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
-    // Build direct child ranges to exclude `else` inside children.
-    let child_ranges: Vec<Range> = direct_child_ranges(node, cx);
-
     let node_range = cx.range(node);
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
@@ -194,45 +191,54 @@ fn find_else_token(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
         if text != b"else" {
             continue;
         }
-        // Make sure it's not inside a child node.
-        let inside_child = child_ranges.iter().any(|r| {
-            tok.range.start >= r.start && tok.range.end <= r.end
-        });
-        if !inside_child {
+        // Make sure it's not inside a direct child node.
+        if !is_inside_child(node, tok.range, cx) {
             return Some(tok.range);
         }
     }
     None
 }
 
-/// Returns the ranges of direct child nodes of `node`.
-fn direct_child_ranges(node: NodeId, cx: &Cx<'_>) -> Vec<Range> {
-    let mut ranges = Vec::new();
+/// Returns `true` if `range` falls inside a direct child node of `node`.
+fn is_inside_child(node: NodeId, range: Range, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
         NodeKind::If { .. } => {
             if let Some(id) = cx.if_condition(node).get() {
-                ranges.push(cx.range(id));
+                let r = cx.range(id);
+                if range.start >= r.start && range.end <= r.end {
+                    return true;
+                }
             }
             if let Some(id) = cx.if_then_branch(node).get() {
-                ranges.push(cx.range(id));
+                let r = cx.range(id);
+                if range.start >= r.start && range.end <= r.end {
+                    return true;
+                }
             }
             if let Some(id) = cx.if_else_branch(node).get() {
-                ranges.push(cx.range(id));
+                let r = cx.range(id);
+                if range.start >= r.start && range.end <= r.end {
+                    return true;
+                }
             }
         }
         NodeKind::Case { subject, else_, .. } => {
             if let Some(id) = subject.get() {
-                ranges.push(cx.range(id));
+                let r = cx.range(id);
+                if range.start >= r.start && range.end <= r.end {
+                    return true;
+                }
             }
             if let Some(id) = else_.get() {
-                ranges.push(cx.range(id));
+                let r = cx.range(id);
+                if range.start >= r.start && range.end <= r.end {
+                    return true;
+                }
             }
-            // We don't need to add `when` children explicitly since they
-            // won't contain a top-level `else` keyword.
         }
         _ => {}
     }
-    ranges
+    false
 }
 
 /// Autocorrect: remove from `else` keyword start to the `end` keyword start.

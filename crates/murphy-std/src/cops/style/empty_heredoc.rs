@@ -100,25 +100,28 @@ fn autocorrect(node: NodeId, cx: &Cx<'_>) -> Option<()> {
         .iter()
         .find(|t| t.kind == SourceTokenKind::HeredocStart && t.range.start == node_start)?;
 
-    // Find the matching HeredocEnd by scanning forward from heredoc_start_tok,
-    // counting paired starts (FIFO).
-    let mut depth = 0u32;
-    let mut heredoc_end_tok = None;
-    let start_idx = toks.partition_point(|t| t.range.start < heredoc_start_tok.range.start);
-    for tok in &toks[start_idx..] {
-        match tok.kind {
-            SourceTokenKind::HeredocStart => depth += 1,
-            SourceTokenKind::HeredocEnd => {
-                if depth == 0 {
-                    break;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    heredoc_end_tok = Some(*tok);
-                    break;
-                }
+    // Find which 1-based index our HeredocStart is among all HeredocStarts in the file.
+    // Heredocs are matched FIFO: the N-th HeredocStart corresponds to the N-th HeredocEnd.
+    let mut target_index = 0u32;
+    for tok in toks {
+        if tok.kind == SourceTokenKind::HeredocStart {
+            target_index += 1;
+            if tok.range.start == node_start {
+                break;
             }
-            _ => {}
+        }
+    }
+
+    // Find the corresponding HeredocEnd with the same 1-based index.
+    let mut end_count = 0u32;
+    let mut heredoc_end_tok = None;
+    for tok in toks {
+        if tok.kind == SourceTokenKind::HeredocEnd {
+            end_count += 1;
+            if end_count == target_index {
+                heredoc_end_tok = Some(*tok);
+                break;
+            }
         }
     }
     let heredoc_end_tok = heredoc_end_tok?;
@@ -131,9 +134,7 @@ fn autocorrect(node: NodeId, cx: &Cx<'_>) -> Option<()> {
     // that ends the opener's source line, then skip past it.
     let body_start = line_end_inclusive(src, heredoc_start_tok.range.end);
 
-    // Terminator line: find start of the line containing heredoc_end_tok.
-    // Find start/end of terminator line.
-    let _ = line_start(src, heredoc_end_tok.range.start);
+    // Terminator line: find end of the line containing heredoc_end_tok.
     let term_line_end = line_end_inclusive(src, heredoc_end_tok.range.end);
 
     cx.emit_edit(
@@ -144,15 +145,6 @@ fn autocorrect(node: NodeId, cx: &Cx<'_>) -> Option<()> {
         "",
     );
     Some(())
-}
-
-/// Returns the byte offset of the start of the line containing `offset`.
-fn line_start(src: &[u8], offset: u32) -> u32 {
-    let mut i = offset as usize;
-    while i > 0 && src[i - 1] != b'\n' {
-        i -= 1;
-    }
-    i as u32
 }
 
 /// Returns the byte offset just past the `\n` at or after `offset`, or

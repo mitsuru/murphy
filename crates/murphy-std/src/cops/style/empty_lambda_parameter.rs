@@ -79,10 +79,15 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // AST cannot distinguish `-> ()` from `->` — both have empty `(args)`.
     // Scan tokens for an empty paren pair after `->` and before the block opener.
+    // We bound the search to the block opener to avoid false positives from
+    // empty parens inside the block body (e.g., `-> { () }`).
     let arrow_range = cx.range(call);
     let node_end = cx.range(node).end;
 
-    let Some(empty_parens) = find_empty_parens(arrow_range.end, node_end, cx) else {
+    // Find the block opener token (`{` or `do`) to bound the paren search.
+    let opener_end = find_block_opener_end(arrow_range.end, node_end, cx);
+
+    let Some(empty_parens) = find_empty_parens(arrow_range.end, opener_end, cx) else {
         return;
     };
 
@@ -109,6 +114,23 @@ fn scan_whitespace_before(src: &[u8], pos: u32, floor: u32) -> u32 {
         i -= 1;
     }
     i as u32
+}
+
+/// Find the start of the block opener (`{` or `do`) after `from`.
+/// Returns `until_end` if no opener is found.
+fn find_block_opener_end(from: u32, until_end: u32, cx: &Cx<'_>) -> u32 {
+    let src = cx.source().as_bytes();
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < from);
+    toks[idx..]
+        .iter()
+        .take_while(|t| t.range.start < until_end)
+        .find(|t| {
+            t.kind == SourceTokenKind::LeftBrace
+                || (t.kind == SourceTokenKind::Other
+                    && &src[t.range.start as usize..t.range.end as usize] == b"do")
+        })
+        .map_or(until_end, |t| t.range.start)
 }
 
 /// Find empty `()` between `from` and `until_end`.
