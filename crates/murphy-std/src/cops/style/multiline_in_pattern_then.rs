@@ -265,6 +265,21 @@ mod tests {
             end
         "});
     }
+
+    #[test]
+    fn accepts_then_with_multiline_pattern_per_rubocop() {
+        // RuboCop's require_then? returns true when the pattern is NOT single_line
+        // (i.e., pattern.single_line? is false). In that case  is considered
+        // required and is not flagged. This matches RuboCop's upstream behavior.
+        test::<MultilineInPatternThen>().expect_no_offenses(indoc! {"
+            case x
+            in [
+              Integer
+            ] then
+              :foo
+            end
+        "});
+    }
 }
 
 murphy_plugin_api::submit_cop!(MultilineInPatternThen);
