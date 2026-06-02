@@ -117,11 +117,20 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
 /// Find the `then` token in the given `If` node, excluding tokens that fall
 /// inside any direct child node ranges.
+///
+/// Uses a stack-allocated array of the three possible `If` children
+/// (condition, then-branch, else-branch) to avoid a heap allocation.
 fn find_then_token(node: NodeId, cx: &Cx<'_>) -> Range {
-    let children = cx.children(node);
+    // If nodes have at most 3 children (condition, then-branch, else-branch).
+    // Use a stack array to avoid allocating a Vec for cx.children().
+    let child_ids = [
+        cx.if_condition(node).get(),
+        cx.if_branch(node).get(),
+        cx.else_branch(node).get(),
+    ];
     let src = cx.source().as_bytes();
     for tok in cx.tokens_in(cx.range(node)) {
-        let outside_children = children.iter().all(|&child| {
+        let outside_children = child_ids.iter().flatten().all(|&child| {
             let r = cx.range(child);
             tok.range.start < r.start || tok.range.end > r.end
         });
