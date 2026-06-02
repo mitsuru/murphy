@@ -20,8 +20,8 @@
 //!   Cop is `Enabled: pending` in RuboCop; Murphy ships it enabled by default
 //!   because the cop enforces a common readability guideline (limiting chain
 //!   length). Users can disable via `.murphy.yml` if needed.
-//!   Max: 0 or negative values are clamped to 1 at runtime (not a config error);
-//!   RuboCop would report a configuration error for such values.
+//!   Max must be a positive integer; 0 or negative values are a configuration
+//!   error (matching RuboCop's validation behavior).
 //! ```
 //!
 //! ## Matched shapes
@@ -46,20 +46,47 @@
 //!
 //! RuboCop does not provide autocorrect for this cop; Murphy mirrors that stance.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{ConfigError, CopOptions, Cx, NodeId, NodeKind, cop};
 
 #[derive(Default)]
 pub struct SafeNavigationChainLength;
 
 /// Options for `Style/SafeNavigationChainLength`.
-#[derive(CopOptions)]
+#[derive(Debug)]
 pub struct SafeNavigationChainLengthOptions {
-    #[option(
-        name = "Max",
-        default = 2,
-        description = "Maximum allowed safe navigation chain length."
-    )]
     pub max: i64,
+}
+
+impl Default for SafeNavigationChainLengthOptions {
+    fn default() -> Self {
+        Self { max: 2 }
+    }
+}
+
+impl CopOptions for SafeNavigationChainLengthOptions {
+    fn from_config_json(bytes: &[u8]) -> Result<Self, ConfigError> {
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(ConfigError::parse)?;
+        let obj = value.as_object().ok_or_else(ConfigError::not_an_object)?;
+
+        let Some(max_value) = obj.get("Max") else {
+            return Ok(Self::default());
+        };
+
+        let max = max_value
+            .as_i64()
+            .ok_or_else(|| ConfigError::type_mismatch("Max", "integer"))?;
+
+        if max <= 0 {
+            return Err(ConfigError::type_mismatch("Max", "positive integer"));
+        }
+
+        Ok(Self { max })
+    }
+
+    fn to_config_json(&self) -> String {
+        format!("{{\"Max\": {}}}", self.max)
+    }
 }
 
 #[cop(
@@ -73,7 +100,7 @@ impl SafeNavigationChainLength {
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<SafeNavigationChainLengthOptions>();
-        let max = opts.max.max(1) as usize;
+        let max = opts.max as usize;
 
         // Walk up the ancestor chain collecting consecutive csend ancestors.
         // Each csend fires this handler and re-walks from itself upward, giving
@@ -180,18 +207,28 @@ mod tests {
             .expect_no_offenses("x&.foo&.bar&.baz\n");
     }
 
-    // Edge case: Max: 0 or negative values are clamped to 1 via opts.max.max(1).
-    // With clamped max=1, any chain of 2+ csends is flagged.
+    // Edge case: Max: 0 or negative values are a config error.
 
     #[test]
-    fn max_zero_clamped_to_one_flags_two_csend_chain() {
-        // max=0 clamped to 1: x&.foo&.bar (2 csends) has 1 ancestor >= 1 → offense.
-        test::<SafeNavigationChainLength>()
-            .with_options(&SafeNavigationChainLengthOptions { max: 0 })
-            .expect_offense(indoc! {"
-                x&.foo&.bar
-                ^^^^^^^^^^^ Avoid safe navigation chains longer than 1 calls.
-            "});
+    fn max_zero_is_a_config_error() {
+        use murphy_plugin_api::{ConfigError, CopOptions};
+        let err = SafeNavigationChainLengthOptions::from_config_json(br#"{"Max": 0}"#)
+            .expect_err("Max: 0 should be a config error");
+        assert!(
+            err.to_string().contains("positive integer"),
+            "expected 'positive integer' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn max_negative_is_a_config_error() {
+        use murphy_plugin_api::{ConfigError, CopOptions};
+        let err = SafeNavigationChainLengthOptions::from_config_json(br#"{"Max": -1}"#)
+            .expect_err("Max: -1 should be a config error");
+        assert!(
+            err.to_string().contains("positive integer"),
+            "expected 'positive integer' in error, got: {err}"
+        );
     }
 
     #[test]
