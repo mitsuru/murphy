@@ -33,6 +33,9 @@
 //!     (modifier-form control flow has the keyword after the body; the
 //!     `cond` in those shapes is `Unknown` via the same prism translation).
 //!     Block-form `while (cond) do ... end` IS checked.
+//!   - body_is_assignment heuristic: false negatives when the condition body
+//!     contains `=` inside a string or regexp literal (e.g. `if ("a=b")`).
+//!     Fixing requires AST-based assignment detection unavailable for Unknown.
 //! ```
 //!
 //! ## Detection
@@ -229,6 +232,10 @@ fn node_keyword(node: NodeId, cx: &Cx<'_>) -> &'static str {
 ///
 /// Detects `=` that is not `==`, `!=`, `<=`, `>=`, `=>`.
 /// This is a conservative heuristic for the `AllowSafeAssignment` guard.
+///
+/// Known false negative: `=` inside string/regexp literals (e.g. `"a=b"`)
+/// is treated as an assignment. AST-based detection is not available for
+/// `Unknown` nodes.
 fn body_is_assignment(body: &str) -> bool {
     let b = body.as_bytes();
     let len = b.len();

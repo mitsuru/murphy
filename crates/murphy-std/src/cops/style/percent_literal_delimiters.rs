@@ -79,7 +79,10 @@ impl CopOptions for PercentLiteralDelimitersOptions {
             .as_object()
             .ok_or_else(|| ConfigError::type_mismatch("PreferredDelimiters", "object"))?;
 
-        let mut map = BTreeMap::new();
+        // Start from defaults and overlay the user-specified entries, so that
+        // a partial PreferredDelimiters config (e.g. only setting "%q") does not
+        // lose the defaults for unspecified types.
+        let mut map = default_delimiters();
         for (key, val) in delims_obj {
             let s = val.as_str().ok_or_else(|| {
                 ConfigError::type_mismatch(
