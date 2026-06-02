@@ -62,9 +62,6 @@
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
-const MSG: &str =
-    "Use a guard clause (`%s`) instead of wrapping the code inside a conditional expression.";
-
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct GuardClause;
@@ -156,9 +153,9 @@ impl GuardClause {
         // Determine which branch is the guard clause.
         let (guard_id, kw, branch_side) =
             if let Some(g) = if_branch.get().filter(|&b| cx.is_guard_clause(b)) {
-                (g, cx.if_keyword(node).to_owned(), GuardSide::If)
+                (g, cx.if_keyword(node), GuardSide::If)
             } else if let Some(g) = else_branch.get().filter(|&b| cx.is_guard_clause(b)) {
-                (g, cx.if_inverse_keyword(node).to_owned(), GuardSide::Else)
+                (g, cx.if_inverse_keyword(node), GuardSide::Else)
             } else {
                 return;
             };
@@ -168,15 +165,15 @@ impl GuardClause {
             NodeKind::And { .. } | NodeKind::Or { .. }
         );
 
-        let guard_src = cx.raw_source(cx.range(guard_id)).to_owned();
+        let guard_src = cx.raw_source(cx.range(guard_id));
         let cond = match cx.if_condition(node).get() {
             Some(c) => c,
             None => return,
         };
         let cond_src = cx.raw_source(cx.range(cond));
-        let example = format!("{guard_src} {kw} {cond_src}");
-
-        let msg = MSG.replacen("%s", &example, 1);
+        let msg = format!(
+            "Use a guard clause (`{guard_src} {kw} {cond_src}`) instead of wrapping the code inside a conditional expression."
+        );
         let keyword_loc = cx.if_keyword_loc(node);
         if keyword_loc == Range::ZERO {
             return;
@@ -185,7 +182,7 @@ impl GuardClause {
 
         // Autocorrect: skip for and/or guards and multiline conditions.
         if !is_and_or && cx.is_single_line(cond) {
-            autocorrect_shape2(node, cond, &guard_src, &kw, branch_side, cx);
+            autocorrect_shape2(node, cond, guard_src, kw, branch_side, cx);
         }
     }
 }
@@ -251,8 +248,9 @@ fn check_ending_if(node: NodeId, cx: &Cx<'_>) {
         None => return,
     };
     let cond_src = cx.raw_source(cx.range(cond));
-    let example = format!("return {inv_kw} {cond_src}");
-    let msg = MSG.replacen("%s", &example, 1);
+    let msg = format!(
+        "Use a guard clause (`return {inv_kw} {cond_src}`) instead of wrapping the code inside a conditional expression."
+    );
 
     cx.emit_offense(keyword_loc, &msg, None);
 
