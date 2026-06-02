@@ -107,25 +107,39 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
 /// Find the byte offset past the closing `)` of the parameter list.
 ///
-/// Searches forward from the node's name end, scanning for a `RightParen`
-/// token that matches the opening `(`.
+/// Locates the `(` that opens the parameter list by searching backward from
+/// the first argument's start position. This avoids mistaking a receiver
+/// paren in `def (obj).foo(arg)` for the parameter-list paren.
 fn find_params_close_paren(node: NodeId, args_node: NodeId, cx: &Cx<'_>) -> Option<u32> {
     let toks = cx.sorted_tokens();
-    let node_start = cx.range(node).start;
-    // The args node encompasses the parameters; find the `)` just after it.
-    let args_end = cx.range(args_node).end;
+    let node_end = cx.range(node).end;
 
-    // Search for opening `(` from node start up to args end.
-    let idx = toks.partition_point(|t| t.range.start < node_start);
-    let open_paren_pos = toks[idx..]
+    // Find the first argument's start to anchor the backward search.
+    // The parameter-list `(` is the last LeftParen before first_arg_start.
+    let first_arg_start = match cx.kind(args_node) {
+        NodeKind::Args(list) => {
+            let params = cx.list(*list);
+            if params.is_empty() {
+                return None;
+            }
+            cx.range(params[0]).start
+        }
+        _ => return None,
+    };
+
+    // Search backward: find the last LeftParen strictly before first_arg_start
+    // and at or after node_start (skips receiver parens in `def (obj).foo`).
+    let node_start = cx.range(node).start;
+    let idx = toks.partition_point(|t| t.range.start < first_arg_start);
+    let open_paren_pos = toks[..idx]
         .iter()
-        .take_while(|t| t.range.start < args_end)
+        .rev()
+        .take_while(|t| t.range.start >= node_start)
         .find(|t| t.kind == SourceTokenKind::LeftParen)
         .map(|t| t.range.start)?;
 
     // Now find the matching `)` by counting nesting depth.
     let search_start = open_paren_pos + 1;
-    let node_end = cx.range(node).end;
     let idx2 = toks.partition_point(|t| t.range.start < search_start);
     let mut depth: i32 = 1;
     for tok in &toks[idx2..] {
@@ -223,6 +237,21 @@ mod tests {
             def foo(arg1, arg2)
               x = 1
               y = 2
+            end
+        "});
+    }
+
+    // Regression: for `def (obj).foo(...)`, the `(` of the receiver must be
+    // skipped. The param-list `(` comes after the method name `foo`.
+    #[test]
+    fn flags_multiline_singleton_with_parenthesized_receiver() {
+        test::<MultilineMethodSignature>().expect_offense(indoc! {"
+            def (obj).foo(
+            ^^^  Avoid multi-line method signatures.
+              arg1,
+              arg2
+            )
+              body
             end
         "});
     }
