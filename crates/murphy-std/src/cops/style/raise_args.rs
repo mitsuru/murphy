@@ -155,19 +155,28 @@ fn correction_exploded_to_compact(node: NodeId, cx: &Cx<'_>) -> Option<String> {
 
     // The exception class: if it's a `Foo.new(...)` call, use the receiver.
     // Otherwise use the exception node itself.
-    let exception_class = if let NodeKind::Send { receiver, method, .. } = *cx.kind(exception_node) {
-        if cx.symbol_str(method) == "new" {
-            if let Some(recv_id) = receiver.get() {
-                cx.raw_source(cx.range(recv_id))
+    // Guard: if exception is already `Foo.new(args...)` with non-empty constructor
+    // args, skip autocorrection — merging existing constructor args with the
+    // separate message argument requires semantic knowledge we don't have.
+    let exception_class =
+        if let NodeKind::Send { receiver, method, args: new_args } = *cx.kind(exception_node) {
+            if cx.symbol_str(method) == "new" {
+                // If the existing `.new(...)` call already has constructor args,
+                // we cannot safely merge them with `message_node` — skip correction.
+                if !cx.list(new_args).is_empty() {
+                    return None;
+                }
+                if let Some(recv_id) = receiver.get() {
+                    cx.raw_source(cx.range(recv_id))
+                } else {
+                    cx.raw_source(cx.range(exception_node))
+                }
             } else {
                 cx.raw_source(cx.range(exception_node))
             }
         } else {
             cx.raw_source(cx.range(exception_node))
-        }
-    } else {
-        cx.raw_source(cx.range(exception_node))
-    };
+        };
 
     let method_name = cx.method_name(node).unwrap_or("raise");
     let inner = format!("{}.new({})", exception_class, argument);
@@ -376,6 +385,19 @@ mod tests {
                 "},
                 "raise FooError.new(message)\n",
             );
+    }
+
+    #[test]
+    fn compact_flags_raise_new_with_args_and_message_no_correction() {
+        // `raise FooError.new(context), message` — exception is a `.new(args...)`
+        // call with non-empty constructor args; cannot safely merge with the
+        // message argument, so only an offense is emitted without autocorrect.
+        test::<RaiseArgs>()
+            .with_options(&compact_opts())
+            .expect_offense(indoc! {"
+                raise FooError.new(context), message
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Provide an exception object as an argument to `raise`.
+            "});
     }
 
     #[test]
