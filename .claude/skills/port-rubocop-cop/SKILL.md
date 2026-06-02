@@ -64,8 +64,10 @@ the same for all three — only which sub-steps apply changes:
 
 ## Workflow
 
-Each cop port goes through six phases. Do not skip them: the gap analysis
-and review loop catch the kinds of regressions that block merge later.
+Each cop port goes through six phases. Do not skip them — the gap analysis
+and review loop catch the kinds of regressions that block merge later. The
+sole exception is Phase 6: when `merge_strategy: deferred` is passed, Phase 6
+is intentionally skipped and the caller controls merge timing.
 
 1. **Phase 1 — read the RuboCop source.** Capture the exact spec the port
    must mirror.
