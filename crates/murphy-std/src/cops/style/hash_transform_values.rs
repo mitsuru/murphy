@@ -265,8 +265,8 @@ fn is_const_hash(node: NodeId, cx: &Cx<'_>) -> bool {
 fn is_hash_receiver(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
         NodeKind::Hash(_) => true,
-        NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => {
-            HASH_METHODS.contains(&cx.symbol_str(method))
+        NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+            matches!(cx.method_name(node), Some(m) if HASH_METHODS.contains(&m))
         }
         NodeKind::Block { call, .. } => {
             // Block over group_by / to_h / transform_keys / etc.

@@ -61,7 +61,7 @@
 //! `slice(<key_source>)`. The offense range covers from the selector of
 //! `select`/`reject`/`filter` through the closing brace/`end` of the block.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -85,10 +85,7 @@ impl HashSlice {
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if matches!(cx.symbol_str(method), "select" | "filter" | "reject") {
+        if matches!(cx.method_name(node), Some("select" | "filter" | "reject")) {
             check(node, cx);
         }
     }
@@ -140,16 +137,12 @@ fn check(send_node: NodeId, cx: &Cx<'_>) {
     let (comparison, negated) = strip_negation(body, cx);
 
     // The comparison must be a send node.
-    let NodeKind::Send {
-        receiver: cmp_recv_opt,
-        method: cmp_method_sym,
-        args: cmp_args_list,
-    } = *cx.kind(comparison)
-    else {
+    if !matches!(cx.kind(comparison), NodeKind::Send { .. }) {
         return;
-    };
-    let cmp_method = cx.symbol_str(cmp_method_sym);
-    let cmp_args = cx.list(cmp_args_list);
+    }
+    let cmp_method = cx.method_name(comparison).unwrap_or("");
+    let cmp_recv_opt = cx.call_receiver(comparison);
+    let cmp_args = cx.call_arguments(comparison);
 
     // Extract key expression from the comparison.
     let key_expr = match extract_key_expr(
@@ -186,14 +179,9 @@ fn check(send_node: NodeId, cx: &Cx<'_>) {
 
 /// Strip a leading `!` (send with method `!`) and return `(inner, negated)`.
 fn strip_negation(node: NodeId, cx: &Cx<'_>) -> (NodeId, bool) {
-    if let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    {
-        if cx.symbol_str(method) == "!" && cx.list(args).is_empty() {
-            if let Some(recv) = receiver.get() {
+    if matches!(cx.kind(node), NodeKind::Send { .. }) {
+        if cx.method_name(node) == Some("!") && cx.call_arguments(node).is_empty() {
+            if let Some(recv) = cx.call_receiver(node).get() {
                 return (recv, true);
             }
         }
@@ -229,7 +217,7 @@ fn is_semantically_slice(method_name: &str, cmp_method: &str, negated: bool) -> 
 /// Returns the key `NodeId` (the thing being compared against the block's first arg),
 /// or `None` if the pattern doesn't match.
 fn extract_key_expr(
-    cmp_recv_opt: murphy_plugin_api::OptNodeId,
+    cmp_recv_opt: OptNodeId,
     cmp_method: &str,
     cmp_args: &[NodeId],
     key_sym: Symbol,
