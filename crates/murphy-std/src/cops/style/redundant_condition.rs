@@ -447,6 +447,21 @@ fn autocorrect_ternary(node: NodeId, cx: &Cx<'_>) {
     cx.emit_edit(replace_range, "||");
 }
 
+/// Returns `true` when the condition contains low-precedence keyword operators
+/// (`not`, `and`, `or`) that would change meaning when embedded in `cond || else_val`
+/// without parentheses.
+///
+/// Checks raw source tokens for these keywords. Using tokens avoids false positives
+/// from identifiers like `android` that contain `and`.
+fn condition_has_low_precedence_keyword(cond: NodeId, cx: &Cx<'_>) -> bool {
+    cx.tokens_in(cx.range(cond)).iter().any(|tok| {
+        matches!(
+            cx.token_text(*tok),
+            "not" | "and" | "or"
+        )
+    })
+}
+
 /// Autocorrect block-form: `if b; b; else; c; end` → `b || c`.
 fn autocorrect_block_form(node: NodeId, cx: &Cx<'_>, opts: &RedundantConditionOptions) {
     let cond = match cx.if_condition(node).get() {
@@ -454,13 +469,15 @@ fn autocorrect_block_form(node: NodeId, cx: &Cx<'_>, opts: &RedundantConditionOp
         None => return,
     };
 
-    // Skip autocorrect when the condition contains an assignment or other
-    // operator-precedence-sensitive constructs. An `if a = b` condition
-    // rewritten as `a = b || else_val` changes semantics because `||` has
-    // lower precedence than `=` — the assignment target changes.
-    // We guard conservatively: if the condition node is any assignment kind,
-    // skip autocorrect.
-    if is_asgn_type(cx, cond) {
+    // Skip autocorrect when the condition contains an assignment or
+    // low-precedence keyword operators. Rewriting these without parentheses
+    // would change semantics:
+    //   - Assignment (`a = b`): `a = b || else` has different precedence than
+    //     intended (`a` gets `b || else` not just `b`).
+    //   - `not`: `not foo || bar` parses as `not (foo || bar)`, not
+    //     `(not foo) || bar` — opposite of the original meaning.
+    //   - `and`/`or`: similar low-precedence issues.
+    if is_asgn_type(cx, cond) || condition_has_low_precedence_keyword(cond, cx) {
         return;
     }
 
@@ -706,6 +723,22 @@ mod tests {
               b
             else
               c
+            end
+        "});
+    }
+
+    // --- No autocorrect for low-precedence keyword conditions ---
+
+    #[test]
+    fn flags_not_condition_no_autocorrect() {
+        // `not foo || bar` != `(not foo) || bar` due to `not` low precedence.
+        // Offense is detected but autocorrect is skipped.
+        test::<RedundantCondition>().expect_offense(indoc! {"
+            if not foo
+            ^^^^^^^^^^ Use double pipes `||` instead.
+              not foo
+            else
+              bar
             end
         "});
     }
