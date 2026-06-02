@@ -97,9 +97,10 @@ fn is_block_type(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Find the start offset of the closing delimiter token (`end` or `}`) for a block.
 ///
-/// RuboCop uses `receiver.loc.end.begin_pos` which is the start position of the
-/// `end` keyword (do/end blocks) or `}` (brace blocks). We locate the last token
-/// in the block's range to find this.
+/// RuboCop uses `receiver.loc.end.begin_pos` to obtain the start of the closing
+/// delimiter. Murphy's `NodeLoc` does not have an `end` field (it has `expression`
+/// and `name`), so we instead scan the token stream for the last token in the block's
+/// range — which must be `end` (do/end blocks) or `}` (brace blocks).
 ///
 /// Returns `None` if the closing delimiter token cannot be found (e.g. parse error
 /// or unexpected AST shape). The caller should skip emitting an offense in that case.
@@ -158,6 +159,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         // No closing delimiter found (unexpected AST shape); skip the offense.
         return;
     };
+    // Use loc.name.end (end of the method name token itself) to match RuboCop's
+    // `node.send_node.source_range.end_pos`. In RuboCop, `send_node.source_range`
+    // covers only the method name for a chained call (e.g. `c` in `end.c`), which
+    // aligns with `loc.name.end` in Murphy's arena AST.
     let method_name_end = cx.node(call).loc.name.end;
 
     cx.emit_offense(
