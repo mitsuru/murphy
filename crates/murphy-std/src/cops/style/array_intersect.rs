@@ -422,7 +422,7 @@ fn extract_member_lvar(body: NodeId, lvar_name: &str, cx: &Cx<'_>) -> Option<Nod
 #[cfg(test)]
 mod tests {
     use super::ArrayIntersect;
-    use murphy_plugin_api::test_support::{indoc, run_cop, test};
+    use murphy_plugin_api::test_support::{indoc, test};
 
     // -------------------------------------------------------------------------
     // Shape 1: intersection receiver — predicates
@@ -570,23 +570,23 @@ mod tests {
 
     #[test]
     fn flags_numblock_any_member() {
-        let offenses = run_cop::<ArrayIntersect>("array1.any? { array2.member?(_1) }\n");
-        assert_eq!(offenses.len(), 1);
-        assert!(
-            offenses[0].message.contains("array1.intersect?(array2)"),
-            "expected intersect? in message: {}",
-            offenses[0].message
+        test::<ArrayIntersect>().expect_correction(
+            indoc! {r#"
+                array1.any? { array2.member?(_1) }
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `array1.intersect?(array2)` instead of `array1.any? { array2.member?(_1) }`.
+            "#},
+            "array1.intersect?(array2)\n",
         );
     }
 
     #[test]
     fn flags_itblock_any_member() {
-        let offenses = run_cop::<ArrayIntersect>("array1.any? { array2.member?(it) }\n");
-        assert_eq!(offenses.len(), 1);
-        assert!(
-            offenses[0].message.contains("array1.intersect?(array2)"),
-            "expected intersect? in message: {}",
-            offenses[0].message
+        test::<ArrayIntersect>().expect_correction(
+            indoc! {r#"
+                array1.any? { array2.member?(it) }
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `array1.intersect?(array2)` instead of `array1.any? { array2.member?(it) }`.
+            "#},
+            "array1.intersect?(array2)\n",
         );
     }
 
