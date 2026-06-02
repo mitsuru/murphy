@@ -14,6 +14,10 @@
 //!   Detects `if`/`unless`-else and ternary nodes whose condition is a negated
 //!   expression (`!x`, `not x`, `x != y`, `x !~ y`).
 //!   Autocorrects by inverting the condition and swapping the if and else branches.
+//!   The source keyword (`if` or `unless`) is preserved in the correction.
+//!   `then`/`;` separators are stripped from the then-body in the swap so that
+//!   `if !x then a else b end` corrects to `if x then b else a end` (the `then`
+//!   separator is re-attached to the correct position).
 //!   No options.
 //!   Parity gaps vs RuboCop upstream:
 //!   - Nested corrected nodes: RuboCop uses a corrected-node set (identity map)
@@ -49,7 +53,8 @@
 //! For ternaries: the full node is replaced with inverted condition and swapped
 //! branch source ranges.
 //! For block-form if-else: a whole-node replacement is emitted with the condition
-//! patched and the two source regions swapped.
+//! patched and the two source regions swapped. The keyword (`if`/`unless`) is
+//! preserved. Any `then`/`;` header separator is moved with its new body.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
@@ -310,20 +315,52 @@ fn find_else_token_range(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
     None
 }
 
-/// Autocorrect a block-form `if !x ... else ... end`.
+/// Find a `then` or `;` separator token on the header line (from `from` to
+/// `to`, exclusive). Returns the end offset of that token if found, or
+/// `None` if no separator is present.
+///
+/// This is used to split the if_chunk into a header separator and the body,
+/// so that the `then`/`;` is moved with the correct branch after swapping.
+fn find_header_separator_end(from: u32, to: u32, cx: &Cx<'_>) -> Option<u32> {
+    let source = cx.source().as_bytes();
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < from);
+    for tok in &toks[idx..] {
+        if tok.range.start >= to {
+            break;
+        }
+        if tok.kind != SourceTokenKind::Other {
+            continue;
+        }
+        let text = &source[tok.range.start as usize..tok.range.end as usize];
+        if text == b"then" || text == b";" {
+            return Some(tok.range.end);
+        }
+    }
+    None
+}
+
+/// Autocorrect a block-form `if/unless !x ... else ... end`.
 ///
 /// Strategy (mirrors RuboCop's `swap_branches` for block form):
-/// - if_range: raw_cond.end to else_tok.start (condition end → else keyword)
-/// - else_range: else_tok.end to end_keyword.start (else keyword end → end)
-/// Swap these two chunks and patch the condition in place.
+/// - header_end: end of condition + any `then`/`;` separator on the header line
+/// - body_chunk: from header_end to else_tok.start (then-body content)
+/// - else_chunk: from else_tok.end to end_keyword.start (else-body content)
+/// - Rebuild: `<kw><gap><inverted><header_sep_from_else_chunk><else_body>else<header_sep_from_if_chunk><then_body>end`
+///
+/// The separator (`then`/`;` + gap to first newline) from each chunk prefix is
+/// preserved and moved with the new body it introduces.
 ///
 /// When the then-branch is empty (`if !cond; else foo; end`):
-/// RuboCop removes the else keyword entirely, leaving `if cond; foo; end`.
+/// The else-body becomes the new then-body; the `else` keyword is removed.
 fn autocorrect_block_if(node: NodeId, raw_cond: NodeId, inverted: &str, cx: &Cx<'_>) {
     let keyword_loc = cx.if_keyword_loc(node);
     if keyword_loc == Range::ZERO {
         return;
     }
+    // Preserve the source keyword (`if` or `unless`).
+    let source_kw = cx.raw_source(keyword_loc);
+
     let else_tok = match find_else_token_range(node, cx) {
         Some(r) => r,
         None => return,
@@ -333,10 +370,30 @@ fn autocorrect_block_if(node: NodeId, raw_cond: NodeId, inverted: &str, cx: &Cx<
         return;
     }
 
-    // Gap between `if` keyword and the start of the condition expression.
+    // Gap between keyword and the start of the (raw, possibly wrapped) condition.
     let kw_cond_gap = cx.raw_source(Range {
         start: keyword_loc.end,
         end: cx.range(raw_cond).start,
+    });
+
+    // Header-separator scan: look for `then`/`;` on the header line (from
+    // condition end to first `\n` before `else`). This handles both
+    // `if !x then a else b end` (same line) and `if !x\n  a\nelse` (no sep).
+    let source = cx.source().as_bytes();
+    let cond_end = cx.range(raw_cond).end;
+    // Scan only up to the first newline after the condition end (header line).
+    let header_line_end = source[cond_end as usize..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(else_tok.start, |pos| cond_end + pos as u32);
+    let scan_to = header_line_end.min(else_tok.start);
+    // header_end: end of `then`/`;` if present, else == cond_end.
+    let header_end = find_header_separator_end(cond_end, scan_to, cx).unwrap_or(cond_end);
+    // header_sep: the literal `then`/`;` + any trailing whitespace on that
+    // token — e.g. ` then` (with leading space from gap).
+    let header_sep = cx.raw_source(Range {
+        start: cond_end,
+        end: header_end,
     });
 
     // Check if the then-branch is empty.
@@ -352,25 +409,29 @@ fn autocorrect_block_if(node: NodeId, raw_cond: NodeId, inverted: &str, cx: &Cx<
             start: else_tok.end,
             end: end_range.start,
         });
-        let replacement = format!("if{kw_cond_gap}{inverted}{else_chunk}end");
+        let replacement = format!("{source_kw}{kw_cond_gap}{inverted}{header_sep}{else_chunk}end");
         cx.emit_edit(cx.range(node), &replacement);
         return;
     }
 
     // Normal: both branches have content.
-    // if_chunk: from raw_cond.end to else_tok.start (includes then body)
-    let if_chunk = cx.raw_source(Range {
-        start: cx.range(raw_cond).end,
+    // body_chunk: from header_end to else_tok.start (the then-body, without the header sep).
+    let body_chunk = cx.raw_source(Range {
+        start: header_end,
         end: else_tok.start,
     });
-    // else_chunk: from else_tok.end to end_range.start (includes else body)
+    // else_chunk: from else_tok.end to end_range.start (the else-body).
     let else_chunk = cx.raw_source(Range {
         start: else_tok.end,
         end: end_range.start,
     });
 
-    // `if<gap><inverted><else_chunk>else<if_chunk>end`
-    let replacement = format!("if{kw_cond_gap}{inverted}{else_chunk}else{if_chunk}end");
+    // `<kw><gap><inverted><header_sep><else_chunk>else<header_sep><body_chunk>end`
+    // The header separator (e.g. `\n`) introduces both the new then-body and
+    // the old then-body (now moved to else). Both get the same separator.
+    let replacement = format!(
+        "{source_kw}{kw_cond_gap}{inverted}{header_sep}{else_chunk}else{body_chunk}end"
+    );
     cx.emit_edit(cx.range(node), &replacement);
 }
 
@@ -517,6 +578,48 @@ mod tests {
                 if condition.nil?
                   foo = 42
                 end
+            "},
+        );
+    }
+
+    // ----- `unless` with negated condition -----
+
+    #[test]
+    fn flags_and_corrects_unless_bang_negation() {
+        // `unless !x; a; else b; end`
+        // AST (prism swaps unless branches): if(!x) { b } else { a }
+        // Source body: `a`, source else: `b`.
+        // Autocorrect: invert cond → `x`, swap source body/else → `unless x; b; else a; end`
+        test::<NegatedIfElseCondition>().expect_correction(
+            indoc! {"
+                unless !x
+                ^^^^^^^^^ Invert the negated condition and swap the if-else branches.
+                  do_something
+                else
+                  do_something_else
+                end
+            "},
+            indoc! {"
+                unless x
+                  do_something_else
+                else
+                  do_something
+                end
+            "},
+        );
+    }
+
+    // ----- `then` separator handling -----
+
+    #[test]
+    fn corrects_inline_if_with_then_separator() {
+        test::<NegatedIfElseCondition>().expect_correction(
+            indoc! {"
+                if !x then do_something else do_something_else end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Invert the negated condition and swap the if-else branches.
+            "},
+            indoc! {"
+                if x then do_something_else else do_something end
             "},
         );
     }
