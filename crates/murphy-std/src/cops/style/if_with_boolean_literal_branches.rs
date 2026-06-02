@@ -16,7 +16,7 @@
 //!   All primary cases implemented: if/unless (block-form and modifier-ternary)
 //!   and elsif nodes with true/false branches using comparison operators,
 //!   predicate methods (ending in `?`), and double negation (`!!`).
-//!   AllowedMethods option supported with default ["nonzero?"].
+//!   AllowedMethods option supported with default ["infinite?", "nonzero?"].
 //!   return_boolean_value? logic: or (both sides), and (rhs only).
 //!   multiple_elsif? guard: skips the innermost node in a multi-elsif chain.
 //!   Autocorrect: opposite_condition? prefixes `!`; parens added for and/or
@@ -49,7 +49,7 @@
 //! ## Unsafe autocorrect
 //!
 //! Predicate methods may not return a true boolean value. Users can suppress
-//! specific methods via `AllowedMethods` (default: `["nonzero?"]`).
+//! specific methods via `AllowedMethods` (default: `["infinite?", "nonzero?"]`).
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
@@ -505,7 +505,7 @@ mod tests {
         "});
     }
 
-    // --- AllowedMethods: nonzero? is the default ---
+    // --- AllowedMethods: infinite? and nonzero? are the defaults ---
 
     #[test]
     fn allows_nonzero_by_default() {
