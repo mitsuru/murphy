@@ -336,6 +336,17 @@ mod tests {
     }
 
     #[test]
+    fn correct_non_strict_trailing_two_digit_group_at_end() {
+        // `100_00` — NOT flagged in non-strict mode.
+        // RuboCop's non-strict regex `/_\d{1,2}_/` requires the short group to
+        // be surrounded by underscores on both sides; `_00$` (trailing) does not
+        // match, so `100_00` passes in non-strict mode.  Strict mode catches it
+        // via `/_\d{1,2}(_|$)/`.
+        assert!(is_correctly_formatted("100_00", false));
+        assert!(!is_correctly_formatted("100_00", true));
+    }
+
+    #[test]
     fn correct_strict_three_groups() {
         assert!(is_correctly_formatted("100_000", true));
     }
