@@ -151,6 +151,14 @@ fn correction_exploded_to_compact(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     let exception_node = args[0];
     let message_node = args[1];
 
+    // Guard: if the message argument is a Hash, skip autocorrection. Hash args
+    // to `raise` may be Ruby keyword arguments (e.g. `raise Ex, cause: err`)
+    // that belong to `raise` itself, not to the exception constructor. Moving
+    // them into `.new(...)` would change semantics silently.
+    if matches!(cx.kind(message_node), NodeKind::Hash(..)) {
+        return None;
+    }
+
     let argument = cx.raw_source(cx.range(message_node));
 
     // The exception class: if it's a `Foo.new(...)` call, use the receiver.
@@ -246,12 +254,16 @@ fn acceptable_exploded_args(args: &[NodeId], cx: &Cx<'_>) -> bool {
         return false;
     }
     // Single arg: allow if it's a type that may forward multiple arguments.
+    // - Hash: covers `raise Foo.new(key: val)` and `raise Foo.new(**kw)`
+    //   (in Prism, `**kw` in a call is wrapped in a bare Hash node).
+    // - Kwsplat: covers any bare `**kw` argument (defensive; Prism wraps
+    //   these in Hash, but included for future-proofing).
+    // - Splat: covers `raise Foo.new(*args)` and anonymous `*`.
+    // - ForwardedArgs: covers `raise Foo.new(...)`.
     let arg = args[0];
     matches!(
         cx.kind(arg),
-        NodeKind::Hash(..)
-            | NodeKind::Splat(_)
-            | NodeKind::ForwardedArgs
+        NodeKind::Hash(..) | NodeKind::Kwsplat(_) | NodeKind::Splat(_) | NodeKind::ForwardedArgs
     )
 }
 
@@ -413,6 +425,19 @@ mod tests {
     }
 
     #[test]
+    fn compact_flags_raise_with_cause_keyword_no_correction() {
+        // `raise Ex, cause: err` — the second arg is a hash that may contain
+        // `cause:` as a `raise` keyword argument (not a constructor arg).
+        // The offense is emitted but no autocorrect is applied.
+        test::<RaiseArgs>()
+            .with_options(&compact_opts())
+            .expect_offense(indoc! {"
+                raise Ex, cause: err
+                ^^^^^^^^^^^^^^^^^^^^ Provide an exception object as an argument to `raise`.
+            "});
+    }
+
+    #[test]
     fn compact_accepts_raise_with_1_arg() {
         test::<RaiseArgs>()
             .with_options(&compact_opts())
@@ -537,6 +562,16 @@ mod tests {
         test::<RaiseArgs>()
             .with_options(&exploded_opts())
             .expect_no_offenses("raise MyKwArgError.new(a: 1, b: 2)\n");
+    }
+
+    #[test]
+    fn exploded_accepts_raise_new_kwsplat() {
+        // `raise Foo.new(**kw)` — double-splat in a call is represented as
+        // Hash { Kwsplat } in Murphy's AST; covered by the Hash branch.
+        test::<RaiseArgs>()
+            .with_options(&exploded_opts())
+            .expect_no_offenses("raise Foo.new(**kw)
+");
     }
 
     #[test]
