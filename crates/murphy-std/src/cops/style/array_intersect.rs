@@ -681,6 +681,18 @@ mod tests {
             "array1&.intersect?(array2)\n",
         );
     }
+
+    #[test]
+    fn flags_csend_intersection_count_gt_zero() {
+        // array1&.intersection(array2).count > 0 — csend inner, regular outer comparison.
+        test::<ArrayIntersect>().expect_correction(
+            indoc! {r#"
+                array1&.intersection(array2).count > 0
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `array1&.intersect?(array2)` instead of `array1&.intersection(array2).count > 0`.
+            "#},
+            "array1&.intersect?(array2)\n",
+        );
+    }
 }
 
 murphy_plugin_api::submit_cop!(ArrayIntersect);
