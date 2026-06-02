@@ -12,10 +12,10 @@
 //!   Two EnforcedStyle values: `forbid_mixed_logical_operators` (default) and
 //!   `forbid_logical_operators`. No autocorrect. Offense range is the whole
 //!   `unless` node. Detection uses token scanning within the condition range
-//!   to handle parenthesized sub-expressions (which parse as `Unknown` in
-//!   Murphy's AST). The `forbid_mixed_logical_operators` style fires when the
-//!   condition mixes `and`-type and `or`-type operators, or mixes symbolic
-//!   (`&&`/`||`) and keyword (`and`/`or`) forms of the same type.
+//!   to handle parenthesized sub-expressions (which translate to `NodeKind::Begin`
+//!   with a `LeftParen` token in Murphy's AST). The `forbid_mixed_logical_operators`
+//!   style fires when the condition mixes `and`-type and `or`-type operators, or
+//!   mixes symbolic (`&&`/`||`) and keyword (`and`/`or`) forms of the same type.
 //!   Only the condition of the `unless` is examined; logical operators in the
 //!   body are not flagged.
 //! ```
@@ -105,9 +105,9 @@ impl OpKind {
 
 /// Collects all logical operator tokens within the condition's source range.
 ///
-/// We scan tokens because some sub-expressions (e.g. `(b && c)`) parse as
-/// `Unknown` in Murphy's AST, making purely AST-based descendant walks miss
-/// operators inside parenthesized groups.
+/// We scan tokens because some sub-expressions (e.g. `(b && c)`) translate to
+/// `NodeKind::Begin` in Murphy's AST, and purely AST-based descendant walks
+/// could miss operators inside parenthesized groups.
 fn collect_op_tokens_in_range(
     range_start: u32,
     range_end: u32,
@@ -177,7 +177,7 @@ fn collect_op_tokens_in_range(
         if call_stack.iter().any(|&is_call| is_call) {
             continue;
         }
-        // For Unknown conditions (target_depth=1): require paren_depth >= target.
+        // For parenthesized conditions (target_depth=1): require paren_depth >= target.
         // For And/Or conditions (target_depth=usize::MAX): count all.
         if target_depth != usize::MAX && paren_depth < target_depth {
             continue;
@@ -265,9 +265,9 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
 /// top level.
 ///
 /// Mirrors RuboCop's `logical_operator?` (top is `and`/`or`) and extends it to
-/// parenthesized conditions like `(a && b)` which parse as `Unknown` in
-/// Murphy's AST. We scan for logical operator tokens in the `Unknown` range
-/// to handle these cases, while still NOT flagging when the top is a `Send`
+/// parenthesized conditions like `(a && b)` which translate to `NodeKind::Begin`
+/// in Murphy's AST. We scan for logical operator tokens in the parenthesized
+/// range to handle these cases, while still NOT flagging when the top is a `Send`
 /// (method call with a logical operator in the arguments, e.g. `foo(a || b)`).
 fn has_any_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
     match cx.kind(cond) {
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn flags_mixed_parenthesized_and_or() {
-        // Parenthesized condition `(a && b || c)` parses as `Unknown`.
+        // Parenthesized condition `(a && b || c)` translates to `NodeKind::Begin`.
         // Token scanning detects the mixed `&&` and `||`.
         test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
             return unless (a && b || c)
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn forbid_any_does_not_flag_parenthesized_method_call_with_logical_arg() {
-        // `(foo(a || b))` — condition is `Unknown` but the `||` is inside a
+        // `(foo(a || b))` — condition is `NodeKind::Begin` but the `||` is inside a
         // nested method call at depth 2, not at depth 1. Must not be flagged.
         test::<UnlessLogicalOperators>()
             .with_options(&UnlessLogicalOperatorsOptions {
@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn flags_mixed_nested_parens_or_then_and() {
-        // `(a || (b && c))` — outer Unknown contains `||` at depth 1 and
+        // `(a || (b && c))` — outer `NodeKind::Begin` contains `||` at depth 1 and
         // nested-group `(b && c)` with `&&` at depth 2. Mixed: should flag.
         test::<UnlessLogicalOperators>().expect_offense(indoc! {r#"
             return unless (a || (b && c))
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn forbid_any_flags_parenthesized_and() {
-        // `(a && b)` as condition parses as `Unknown` in Murphy AST;
+        // `(a && b)` as condition translates to `NodeKind::Begin` in Murphy AST;
         // token scanning detects the `&&`.
         test::<UnlessLogicalOperators>()
             .with_options(&UnlessLogicalOperatorsOptions {

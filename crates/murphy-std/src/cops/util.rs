@@ -21,7 +21,7 @@ pub fn is_parenthesized(node: NodeId, cx: &Cx<'_>) -> bool {
     }
     let range_start = cx.range(node).start;
     cx.token_after(range_start)
-        .map_or(false, |t| t.kind == SourceTokenKind::LeftParen && t.range.start == range_start)
+        .is_some_and(|t| t.kind == SourceTokenKind::LeftParen && t.range.start == range_start)
 }
 
 /// If `node_id` is a parenthesized single-expression (`(expr)`), returns the
@@ -47,14 +47,10 @@ pub fn unwrap_parenthesized(node_id: NodeId, cx: &Cx<'_>) -> NodeId {
 /// parenthesized condition like `(!x.even?)` with its inner receiver source
 /// `x.even?`. Without this guard, `if(!x.even?)` would autocorrect to
 /// `unlessx.even?` (keyword and replacement run together).
-pub fn emit_edit_with_preceding_space(
-    cond_range: Range,
-    replacement: &str,
-    cx: &Cx<'_>,
-) {
+pub fn emit_edit_with_preceding_space(cond_range: Range, replacement: &str, cx: &Cx<'_>) {
     let source = cx.source().as_bytes();
-    let needs_space = cond_range.start > 0
-        && !source[(cond_range.start - 1) as usize].is_ascii_whitespace();
+    let needs_space =
+        cond_range.start > 0 && !source[(cond_range.start - 1) as usize].is_ascii_whitespace();
     if needs_space {
         cx.emit_edit(cond_range, &format!(" {replacement}"));
     } else {

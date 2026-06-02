@@ -147,18 +147,16 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TernaryParenthesesOptions) {
                 cx.emit_offense(cx.range(node), &msg, None);
                 cx.emit_edit(cx.range(cond), &format!("({cond_src})"));
             }
-            if is_paren {
-                // Check if inner condition is simple — if so, flag to remove parens.
-                let inner = {
-                    use crate::cops::util::unwrap_parenthesized;
-                    unwrap_parenthesized(cond, cx)
-                };
-                if !is_complex_condition(inner, cx) {
-                    let msg = MSG.replace("%<command>s", "Omit");
-                    cx.emit_offense(cx.range(node), &msg, None);
-                    if !has_below_ternary_precedence(cond, cx) {
-                        emit_remove_parens(cond, cx);
-                    }
+            // Simple single-expression parenthesized condition: remove parens.
+            if is_paren
+                && let NodeKind::Begin(list) = cx.kind(cond)
+                && let [single] = cx.list(*list)
+                && !is_complex_condition(*single, cx)
+            {
+                let msg = MSG.replace("%<command>s", "Omit");
+                cx.emit_offense(cx.range(node), &msg, None);
+                if !has_below_ternary_precedence(cond, cx) {
+                    emit_remove_parens(cond, cx);
                 }
             }
         }
@@ -240,14 +238,10 @@ fn is_complex_condition(cond: NodeId, cx: &Cx<'_>) -> bool {
         // Parenthesized condition (Begin from `(...)`): delegate to inner node
         // for single-child parens. Multi-child (e.g. `(a; b)`) is treated as
         // non-complex (don't force parens on statements).
-        NodeKind::Begin(list) => {
-            if is_parenthesized(cond, cx) {
-                match cx.list(*list) {
-                    [single] => is_complex_condition(*single, cx),
-                    _ => false,
-                }
-            } else {
-                false
+        NodeKind::Begin(list) if is_parenthesized(cond, cx) => {
+            match cx.list(*list) {
+                [single] => is_complex_condition(*single, cx),
+                _ => false,
             }
         }
 
@@ -498,6 +492,21 @@ mod tests {
                 "},
                 "foo = bar? ? a : b\n",
             );
+    }
+
+    #[test]
+    fn complex_style_no_offense_for_multi_stmt_parens() {
+        // `(a; b) ? 1 : 2` — Begin with 2 children. Must NOT be flagged for
+        // removal; autocorrecting to `a; b ? 1 : 2` would change meaning.
+        let opts = TernaryParenthesesOptions {
+            enforced_style: TernaryStyle::RequireParenthesesWhenComplex,
+            allow_safe_assignment: true,
+        };
+        test::<TernaryParentheses>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {"
+                result = (a; b) ? 1 : 2
+            "});
     }
 
     // ----- Non-ternary (should not flag) -----
