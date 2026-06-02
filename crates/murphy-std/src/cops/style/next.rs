@@ -351,7 +351,11 @@ fn has_exit_body(if_branch: OptNodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Returns `true` if the offending if node is preceded by another if node
-/// as a sibling (consecutive conditionals pattern).
+/// that is itself `next`-convertible (i.e., has no `else` branch).
+///
+/// This mirrors RuboCop's `consecutive_conditionals?`: only an immediately
+/// preceding `if`/`unless` without an `else` qualifies. An `if ... else ...`
+/// cannot be converted to `next` so it does not count as a consecutive conditional.
 fn is_consecutive_conditional(if_node: NodeId, cx: &Cx<'_>) -> bool {
     // The if node must be inside a Begin. Find its index among siblings.
     let Some(parent) = cx.ancestors(if_node).next() else {
@@ -367,7 +371,10 @@ fn is_consecutive_conditional(if_node: NodeId, cx: &Cx<'_>) -> bool {
     if idx == 0 {
         return false;
     }
-    matches!(cx.kind(siblings[idx - 1]), NodeKind::If { .. })
+    let prev = siblings[idx - 1];
+    // Must be an If node without an else branch (otherwise it cannot be
+    // next-converted and does not count as a consecutive conditional).
+    matches!(cx.kind(prev), NodeKind::If { .. }) && !cx.is_else(prev)
 }
 
 /// Compute the offense range: from start of the if node to end of its condition.
@@ -793,6 +800,32 @@ mod tests {
                 [1, 2].each do |a|
                   if a == 1
                     puts a
+                  end
+                  if a == 2
+                  ^^^^^^^^^ Use `next` to skip iteration.
+                    puts a
+                  end
+                end
+            "});
+    }
+
+    #[test]
+    fn flags_last_if_when_preceded_by_if_else_with_allow_consecutive() {
+        // An if-else cannot be next-converted, so it does NOT count as a
+        // "consecutive conditional" for AllowConsecutiveConditionals purposes.
+        // The trailing if MUST still be flagged.
+        test::<Next>()
+            .with_options(&Options {
+                allow_consecutive_conditionals: true,
+                min_body_length: 1,
+                ..Options::default()
+            })
+            .expect_offense(indoc! {"
+                [1, 2].each do |a|
+                  if a == 1
+                    puts a
+                  else
+                    puts :other
                   end
                   if a == 2
                   ^^^^^^^^^ Use `next` to skip iteration.
