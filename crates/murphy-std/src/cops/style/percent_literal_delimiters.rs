@@ -283,6 +283,21 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     cx.emit_offense(node_range, &message, None);
 
     // Autocorrect: replace opening delimiter char and closing delimiter char.
+    //
+    // Guard: if the body contains a backslash-escaped version of the current
+    // delimiter (e.g. `\]` in `%q[foo\]bar]`), changing the delimiter
+    // would leave the backslash in the output and alter the literal's value.
+    // Skip autocorrect and let the user fix manually.
+    let esc_open = [b'\\', used_open as u8];
+    let esc_close = [b'\\', used_close as u8];
+    if body
+        .as_bytes()
+        .windows(2)
+        .any(|w| w == esc_open || w == esc_close)
+    {
+        return;
+    }
+
     let open_char_range = Range {
         start: node_range.start + prefix_len as u32,
         end: node_range.start + prefix_len as u32 + 1,
@@ -423,6 +438,19 @@ mod tests {
                 x = %x(ls)
                     ^^^^^^ `%x`-literals should be delimited by `[` and `]`.
             "#});
+    }
+
+    // ── escaped delimiter guard ──────────────────────────────────────────────
+
+    #[test]
+    fn no_autocorrect_when_body_has_escaped_delimiter() {
+        // %w[foo\]bar] — body contains \] which is an escape for the ] delimiter.
+        // Changing to () would leave \] in the body changing the literal's value.
+        // Offense is still emitted but without autocorrect.
+        test::<PercentLiteralDelimiters>()
+            .with_options(&opts_with(&[("%w", "()")]))
+            .expect_no_corrections("x = %w[foo\\]bar]
+");
     }
 
     // ── CopOptions round-trip ────────────────────────────────────────────────
