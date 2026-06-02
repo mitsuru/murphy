@@ -174,12 +174,17 @@ fn has_escaped_non_backslash(src: &str) -> bool {
 }
 
 /// True if `src` contains a `#{...}` interpolation-like sequence.
+///
+/// Matches `#{` followed by a closing `}` at any distance (including `#{}` —
+/// empty interpolation). The `close > 0` condition was removed: `%q(#{})` is
+/// literal text but `%Q(#{})` is valid empty interpolation, so both forms must
+/// be treated as interpolation syntax.
 fn has_interpolation_syntax(src: &str) -> bool {
     let bytes = src.as_bytes();
     let mut i = 0;
-    while i + 2 < bytes.len() {
+    while i + 1 < bytes.len() {
         if bytes[i] == b'#' && bytes[i + 1] == b'{' {
-            if bytes[i + 2..].iter().position(|&b| b == b'}').is_some_and(|close| close > 0) {
+            if bytes[i + 2..].iter().any(|&b| b == b'}') {
                 return true;
             }
         }
@@ -265,6 +270,17 @@ mod tests {
                 enforced_style: PercentQLiteralsStyle::UpperCaseQ,
             })
             .expect_no_offenses("%q(#{foo})\n");
+    }
+
+    #[test]
+    fn no_offense_for_percent_lower_q_with_empty_interpolation_when_upper_case_q() {
+        // %q(#{}) contains #{} which is literal text; %Q(#{}) is empty interpolation.
+        test::<PercentQLiterals>()
+            .with_options(&PercentQLiteralsOptions {
+                enforced_style: PercentQLiteralsStyle::UpperCaseQ,
+            })
+            .expect_no_offenses("%q(#{})
+");
     }
 
     #[test]
