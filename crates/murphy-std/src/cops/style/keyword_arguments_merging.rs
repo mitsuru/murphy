@@ -16,6 +16,7 @@
 //!       and `**opts.merge(other_opts)` with `**opts, **other_opts`.
 //!     - Hash args with braces (`merge({foo: true})`) have the surrounding braces
 //!       stripped; hash args without braces pass through as-is.
+//!     - The outer method call may be either `Send` or `Csend` (safe navigation).
 //!   Offense range is the merge call node (excludes the `**` prefix).
 //!   Autocorrect edit range is the kwsplat node (includes the `**` prefix).
 //! ```
@@ -32,7 +33,7 @@
 //! some_method(**opts, **other_opts)
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, SourceTokenKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
 const MSG: &str = "Provide additional arguments directly rather than using `merge`.";
 
@@ -79,7 +80,7 @@ fn check(kwsplat: NodeId, cx: &Cx<'_>) {
     }
 
     // The kwsplat must be the first child of its parent hash, and that hash
-    // must itself be a direct argument of an outer Send.
+    // must itself be a direct argument of an outer Send or Csend.
     let Some(hash_id) = cx.parent(kwsplat).get() else {
         return;
     };
@@ -92,11 +93,11 @@ fn check(kwsplat: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // The hash must be a direct argument of an outer Send.
+    // The hash must be a direct argument of an outer Send or Csend.
     let Some(outer_call) = cx.parent(hash_id).get() else {
         return;
     };
-    if !matches!(cx.kind(outer_call), NodeKind::Send { .. }) {
+    if !matches!(cx.kind(outer_call), NodeKind::Send { .. } | NodeKind::Csend { .. }) {
         return;
     }
 
@@ -105,16 +106,13 @@ fn check(kwsplat: NodeId, cx: &Cx<'_>) {
 
     // Autocorrect: replace the entire kwsplat with `**receiver, <expanded args>`.
     let recv_src = cx.raw_source(cx.range(receiver));
-    let merge_args: Vec<NodeId> = merge_args.to_owned();
     let other_parts: Vec<String> = merge_args
         .iter()
         .map(|&arg| {
             let src = cx.raw_source(cx.range(arg));
             if matches!(cx.kind(arg), NodeKind::Hash(_)) {
-                // Hash arg: strip surrounding braces if present.
-                if hash_has_braces(arg, cx) {
-                    // Strip exactly one `{` at start and one `}` at end.
-                    let inner = &src[1..src.len() - 1];
+                // Hash arg: strip surrounding braces if present, using safe string methods.
+                if let Some(inner) = src.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
                     inner.trim().to_owned()
                 } else {
                     src.to_owned()
@@ -127,13 +125,6 @@ fn check(kwsplat: NodeId, cx: &Cx<'_>) {
 
     let replacement = format!("**{}, {}", recv_src, other_parts.join(", "));
     cx.emit_edit(cx.range(kwsplat), &replacement);
-}
-
-/// Returns true if the hash node has `{` and `}` tokens within its range.
-fn hash_has_braces(node: NodeId, cx: &Cx<'_>) -> bool {
-    let toks = cx.tokens_in(cx.range(node));
-    toks.iter().any(|t| t.kind == SourceTokenKind::LeftBrace)
-        && toks.iter().any(|t| t.kind == SourceTokenKind::RightBrace)
 }
 
 #[cfg(test)]
@@ -222,6 +213,15 @@ mod tests {
     #[test]
     fn corrects_idempotent() {
         test::<KeywordArgumentsMerging>().expect_no_offenses("some_method(**opts, foo: true)\n");
+    }
+
+    #[test]
+    fn flags_safe_navigation_outer_call() {
+        // The outer call can be a Csend (safe navigation).
+        test::<KeywordArgumentsMerging>().expect_offense(indoc! {"
+            obj&.foo(**opts.merge(bar: 1))
+                       ^^^^^^^^^^^^^^^^^^ Provide additional arguments directly rather than using `merge`.
+        "});
     }
 }
 murphy_plugin_api::submit_cop!(KeywordArgumentsMerging);
