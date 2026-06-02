@@ -183,7 +183,9 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &ModuleFunctionOptions) {
 
     // Collect children of the body.
     // When the body is a single statement (not a Begin), store it in a
-    // stack-local array to avoid holding a reference to a local variable.
+    // stack-local array so `children` has a uniform `&[NodeId]` type.
+    // This is safe: both the `cx.list()` path and the stack-array path live
+    // as long as `children` is in scope.
     let single_child;
     let children: &[NodeId] = if let NodeKind::Begin(list) = *cx.kind(body_id) {
         cx.list(list)

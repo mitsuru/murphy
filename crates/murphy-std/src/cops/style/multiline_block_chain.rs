@@ -156,7 +156,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // or `}.method`), matching RuboCop's
     // range_between(receiver.loc.end.begin_pos, node.send_node.source_range.end_pos).
     let Some(offense_start) = closing_delimiter_start(recv_id, cx) else {
-        // No closing delimiter found (unexpected AST shape); skip the offense.
+        // No closing delimiter found. In a well-formed AST this path should be
+        // unreachable — every block node ends with `end` or `}`. Skip the
+        // offense rather than reporting with an incorrect range.
+        debug_assert!(false, "MultilineBlockChain: no closing delimiter for block node");
         return;
     };
     // Use loc.name.end (end of the method name token itself) to match RuboCop's
