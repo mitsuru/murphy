@@ -23,8 +23,8 @@
 //!   %q (lowercase) is never touched by this cop — that is PercentQLiterals.
 //!   In percent_q mode, %q, %w, %W, %i, %I, %r, %s, %x are all excluded
 //!   because they have word characters after %.
-//!   str segments that are children of a dstr node are skipped to avoid
-//!   double-flagging.
+//!   str segments that are children of a dstr or dsym node are skipped to avoid
+//!   double-flagging or false-positives on interpolated symbol inner segments.
 //! ```
 //!
 //! ## Matched shapes
@@ -84,12 +84,14 @@ const PERCENT_Q_MSG: &str = "Use `%Q` instead of `%`.";
 impl BarePercentLiterals {
     #[on_node(kind = "str")]
     fn check_str(&self, node: NodeId, cx: &Cx<'_>) {
-        // Skip str segments that are children of a dstr — the dstr handler
-        // covers those (avoids double-flagging the same literal).
+        // Skip str segments that are children of a dstr or dsym — the dstr handler
+        // covers those (avoids double-flagging). Dsym children are skipped because
+        // symbols like `:"#{x}"` contain str segments that are not percent-literal
+        // string nodes (mirrors RedundantPercentQ's parent guard).
         if cx
             .parent(node)
             .get()
-            .is_some_and(|p| matches!(cx.kind(p), NodeKind::Dstr(_)))
+            .is_some_and(|p| matches!(cx.kind(p), NodeKind::Dstr(_) | NodeKind::Dsym(_)))
         {
             return;
         }
@@ -122,13 +124,13 @@ fn check(node: NodeId, cx: &Cx<'_>) {
             if !src.starts_with("%Q") {
                 return;
             }
-            // Offense range: 3 bytes (`%Q(`)
+            // Offense range: 3 bytes (`%Q(`).
             let opener_range = Range {
                 start: node_range.start,
                 end: node_range.start + 3,
             };
             cx.emit_offense(opener_range, BARE_PERCENT_MSG, None);
-            // Autocorrect: delete the `Q` at position start+1.
+            // Autocorrect: delete the `Q` byte at position start+1 (one-byte range).
             let q_range = Range {
                 start: node_range.start + 1,
                 end: node_range.start + 2,
@@ -147,13 +149,13 @@ fn check(node: NodeId, cx: &Cx<'_>) {
             if second == 0 || second.is_ascii_alphanumeric() || second == b'_' {
                 return;
             }
-            // Offense range: 2 bytes (`%(`)
+            // Offense range: 2 bytes (`%(`).
             let opener_range = Range {
                 start: node_range.start,
                 end: node_range.start + 2,
             };
             cx.emit_offense(opener_range, PERCENT_Q_MSG, None);
-            // Autocorrect: insert `Q` after `%` at position start+1.
+            // Autocorrect: insert `Q` after `%` at position start+1 (zero-width range).
             let insert_range = Range {
                 start: node_range.start + 1,
                 end: node_range.start + 1,
