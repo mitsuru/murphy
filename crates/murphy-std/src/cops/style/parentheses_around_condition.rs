@@ -244,8 +244,9 @@ fn body_is_assignment(body: &str) -> bool {
         if b[i] == b'=' {
             // Check preceding character — must not be `!`, `<`, `>`, `=`.
             let prev_ok = i == 0 || !matches!(b[i - 1], b'!' | b'<' | b'>' | b'=');
-            // Check following character — must not be `=` or `>`.
-            let next_ok = i + 1 >= len || !matches!(b[i + 1], b'=' | b'>');
+            // Check following character — must not be `=`, `>`, or `~`
+            // (`==` is comparison, `=>` is hash rocket, `=~` is match operator).
+            let next_ok = i + 1 >= len || !matches!(b[i + 1], b'=' | b'>' | b'~');
             if prev_ok && next_ok {
                 return true;
             }
@@ -410,6 +411,17 @@ mod tests {
                   bar
                 end
             "#});
+    }
+
+    #[test]
+    fn flags_match_operator_not_treated_as_assignment() {
+        // =~ is the match operator, not an assignment; should still be flagged.
+        test::<ParenthesesAroundCondition>().expect_offense(indoc! {r#"
+            if (name =~ /foo/)
+               ^^^^^^^^^^^^^^^ Don't use parentheses around the condition of an `if`.
+              bar
+            end
+        "#});
     }
 
     // ── AllowInMultilineConditions ────────────────────────────────────────────

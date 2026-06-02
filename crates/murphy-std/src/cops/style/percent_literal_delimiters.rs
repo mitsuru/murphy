@@ -229,6 +229,15 @@ fn array_element_sources<'a>(node: NodeId, cx: &'a Cx<'_>) -> Vec<&'a str> {
         .collect()
 }
 
+/// Returns the length of the trailing options string for a regexp node
+/// (e.g. `"imx"` has length 3). Returns 0 for all non-regexp nodes.
+fn regexp_trailing_opts_len(node: NodeId, cx: &Cx<'_>) -> usize {
+    let NodeKind::Regexp { opts, .. } = *cx.kind(node) else {
+        return 0;
+    };
+    cx.symbol_str(opts).len()
+}
+
 fn check(node: NodeId, cx: &Cx<'_>) {
     let src = cx.raw_source(cx.range(node));
     let Some(ty) = percent_type(src) else {
@@ -253,11 +262,18 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    // For regexp nodes, the source ends with optional flag characters after the
+    // closing delimiter (e.g. `%r(foo)imx`). Determine the trailing options
+    // length so that body extraction and the close-delimiter edit range use the
+    // correct position.
+    let trailing_opts_len = regexp_trailing_opts_len(node, cx);
+
     // Body is everything between the delimiters.
-    if src.len() < prefix_len + 2 {
+    let close_pos = src.len() - 1 - trailing_opts_len;
+    if close_pos <= prefix_len {
         return;
     }
-    let body = &src[prefix_len + 1..src.len() - 1];
+    let body = &src[prefix_len + 1..close_pos];
 
     // contains_preferred_delimiter? — body contains pref_open or pref_close.
     if body.contains(pref_open) || body.contains(pref_close) {
@@ -302,9 +318,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         start: node_range.start + prefix_len as u32,
         end: node_range.start + prefix_len as u32 + 1,
     };
+    // close_pos is relative to the start of src; convert to absolute range.
     let close_char_range = Range {
-        start: node_range.end - 1,
-        end: node_range.end,
+        start: node_range.start + close_pos as u32,
+        end: node_range.start + close_pos as u32 + 1,
     };
     cx.emit_edit(open_char_range, &pref_open.to_string());
     cx.emit_edit(close_char_range, &pref_close.to_string());
@@ -407,6 +424,21 @@ mod tests {
                     ^^^^^^^ `%r`-literals should be delimited by `{` and `}`.
             "#},
             "x = %r{foo}\n",
+        );
+    }
+
+    // ── %r with options ──────────────────────────────────────────────────────
+
+    #[test]
+    fn autocorrects_percent_r_with_options_correctly() {
+        // %r(foo)i — the `i` is a flag, not the closing delimiter.
+        test::<PercentLiteralDelimiters>().expect_correction(
+            indoc! {r#"
+                x = %r(foo)i
+                    ^^^^^^^^ `%r`-literals should be delimited by `{` and `}`.
+            "#},
+            "x = %r{foo}i
+",
         );
     }
 
