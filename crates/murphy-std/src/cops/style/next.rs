@@ -410,6 +410,12 @@ fn autocorrect_modifier(if_node: NodeId, cx: &Cx<'_>) {
     let if_range = cx.range(if_node);
     let indent = compute_line_indent(if_range.start, cx.source().as_bytes());
 
+    // Skip autocorrect for multi-line conditions (same safety reason as
+    // autocorrect_block: multi-line cond_src breaks the statement boundary).
+    if cond_src.contains('\n') {
+        return;
+    }
+
     let replacement = format!(
         "next {inverse_kw} {cond_src}\n{indent}{body_src}"
     );
@@ -447,6 +453,13 @@ fn autocorrect_block(if_node: NodeId, cx: &Cx<'_>) {
     let cond_src = cx.raw_source(cx.range(cond)).to_owned();
     let if_range = cx.range(if_node);
     let source = cx.source().as_bytes();
+
+    // Skip autocorrect for multi-line conditions: embedding a multi-line
+    // condition directly into `next unless <cond>` breaks the statement
+    // boundary (the second line of the condition becomes the body).
+    if cond_src.contains('\n') {
+        return;
+    }
 
     // Compute the indent of the `if` keyword line.
     let if_indent = compute_line_indent(if_range.start, source);
@@ -889,6 +902,30 @@ mod tests {
                     end
                 "},
             );
+    }
+
+
+    // ----- multi-line condition: offense reported but no autocorrect -----
+
+    #[test]
+    fn does_not_autocorrect_multiline_condition() {
+        // Autocorrect is skipped for multi-line conditions because embedding a
+        // continuation line into `next unless <cond>` would break the statement
+        // boundary. The offense IS reported (manually verifiable), but no edit
+        // is emitted.
+        test::<Next>()
+            .with_options(&Options {
+                min_body_length: 1,
+                ..Options::default()
+            })
+            .expect_no_corrections(indoc! {"
+                [1, 2].each do |a|
+                  if a == 1 &&
+                     a == 2
+                    puts a
+                  end
+                end
+            "});
     }
 
     // ----- idempotency -----
