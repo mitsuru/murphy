@@ -13,7 +13,8 @@
 //!   Detects multiline when branches that use `then` as separator and
 //!   autocorrects by removing the `then` keyword (plus surrounding spaces,
 //!   stopping at a newline). Guards: skip if then is absent, skip if
-//!   conditions span multiple lines, skip if body is on same line as when.
+//!   conditions span multiple lines (including single multi-line conditions),
+//!   skip if body is on same line as then.
 //! ```
 //!
 //! ## Matched shapes
@@ -28,7 +29,7 @@
 //!
 //! Removes the `then` token and the whitespace to its left (stopping at a newline).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind};
 
 const MSG: &str = "Do not use `then` for multiline `when` statement.";
 
@@ -74,21 +75,43 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     cx.emit_edit(edit_range, "");
 }
 
-/// Find the `then` keyword token within the `when` node's range.
-/// Returns `None` if no `then` token is present (bare multiline form).
+/// Find the `then` keyword token in the gap between the last condition and
+/// the body start. The search is deliberately bounded to avoid picking up
+/// `then` tokens inside the body (e.g. `if x then y end` or nested `when`).
+///
+/// Bound: [last_cond_end, search_end) where `search_end` is:
+/// - `body.start` if the body is present, or
+/// - the first newline byte after `last_cond_end` if no body (or node end,
+///   whichever is smaller). This covers `when bar then\nend` correctly.
+///
+/// Returns `None` if no `then` token is found in the gap.
 fn find_then_token(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
-    let node_range = cx.range(node);
     let conds = cx.when_conditions(node);
     if conds.is_empty() {
         return None;
     }
-    // Scan tokens from after the last condition to end of the when node.
     let last_cond_end = cx.range(*conds.last().unwrap()).end;
+
+    // Compute the upper search bound.
+    let NodeKind::When { body, .. } = *cx.kind(node) else {
+        return None;
+    };
+    let search_end = if let Some(body_id) = body.get() {
+        cx.range(body_id).start
+    } else {
+        // No body: scan only to the end of the current line.
+        first_newline_or_end(cx.source().as_bytes(), last_cond_end as usize)
+    };
+
+    if last_cond_end >= search_end {
+        return None;
+    }
+
     let src = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < last_cond_end);
     for tok in &toks[idx..] {
-        if tok.range.start >= node_range.end {
+        if tok.range.start >= search_end {
             break;
         }
         if tok.kind == SourceTokenKind::Other
@@ -100,23 +123,42 @@ fn find_then_token(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
     None
 }
 
-/// Returns `true` when the conditions themselves span multiple lines.
-/// (Equivalent to RuboCop's `conditions.first.first_line != conditions.last.last_line`.)
+/// Returns the byte offset of the first `\n` character at or after `from`,
+/// or the length of the source if none is found. Used to bound `then`-token
+/// search when the `when` branch has no body.
+fn first_newline_or_end(src: &[u8], from: usize) -> u32 {
+    for i in from..src.len() {
+        if src[i] == b'\n' {
+            return i as u32;
+        }
+    }
+    src.len() as u32
+}
+
+/// Returns `true` when the conditions (taken as a whole) span multiple lines.
+///
+/// Checks from `conditions.first.start` to `conditions.last.end` for a `\n`,
+/// which correctly handles:
+/// - Multiple conditions where the last is on a different line than the first.
+/// - A single condition that itself spans multiple lines (e.g. a method call
+///   with arguments across lines).
 fn conditions_span_multiple_lines(node: NodeId, cx: &Cx<'_>) -> bool {
     let conds = cx.when_conditions(node);
-    if conds.len() < 2 {
+    if conds.is_empty() {
         return false;
     }
     let first_range = cx.range(*conds.first().unwrap());
     let last_range = cx.range(*conds.last().unwrap());
     let src = cx.source();
-    // If the byte slice between first condition start and last condition end
-    // contains a newline, conditions span multiple lines.
     src[first_range.start as usize..last_range.end as usize].contains('\n')
 }
 
 /// Returns `true` when the body is on the same line as the `then` keyword.
 /// Equivalent to RuboCop's `same_line?(when_node, when_node.body)`.
+///
+/// Precondition: `then_range.end <= body_range.start` (the `then` separator
+/// always precedes the body in source order). The guard `then_range.end <=
+/// body_range.start` is checked explicitly to avoid a reversed slice panic.
 fn body_on_same_line_as_then(node: NodeId, then_range: Range, cx: &Cx<'_>) -> bool {
     let NodeKind::When { body, .. } = *cx.kind(node) else {
         return false;
@@ -126,6 +168,11 @@ fn body_on_same_line_as_then(node: NodeId, then_range: Range, cx: &Cx<'_>) -> bo
         return false;
     };
     let body_range = cx.range(body_id);
+    // Guard against the `then` token being after the body start (should not
+    // happen with a correctly bounded `find_then_token`, but be defensive).
+    if then_range.end > body_range.start {
+        return false;
+    }
     // Same line means no newline between `then` end and body start.
     let src = cx.source();
     !src[then_range.end as usize..body_range.start as usize].contains('\n')
@@ -237,6 +284,32 @@ mod tests {
                 end
             "},
             "case foo\nwhen 1\n  bar\nwhen 2\n  baz\nend\n",
+        );
+    }
+
+    #[test]
+    fn accepts_then_when_body_has_nested_then() {
+        // `then` inside body's `if`/`when` must not be mistaken for the separator.
+        // The `when bar then` here: body is `if baz then qux end`.
+        // The separator `then` is on the first line after `bar`; the `then` in
+        // `if baz then qux end` is inside the body and must be ignored.
+        test::<MultilineWhenThen>().expect_correction(
+            indoc! {"
+                case foo
+                when bar then
+                         ^^^^ Do not use `then` for multiline `when` statement.
+                  if baz then qux end
+                end
+            "},
+            "case foo\nwhen bar\n  if baz then qux end\nend\n",
+        );
+    }
+
+    #[test]
+    fn accepts_then_when_conditions_multiline() {
+        // Single condition spanning multiple lines — `then` is required; no offense.
+        test::<MultilineWhenThen>().expect_no_offenses(
+            "case foo\nwhen bar(\n  baz\n) then\n  qux\nend\n",
         );
     }
 }
