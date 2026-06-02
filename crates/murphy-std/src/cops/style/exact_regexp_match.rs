@@ -137,10 +137,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Build the preferred expression: `receiver == 'literal'` or `receiver != 'literal'`.
     let new_method = if method_str == "!~" { "!=" } else { "==" };
     let receiver_src = cx.raw_source(cx.range(recv_id));
-    // Use double quotes if the literal contains single quotes, to avoid
-    // producing syntactically invalid Ruby like `x == 'it's'`.
+    // Use single-quoted string, or double-quoted if the literal contains single
+    // quotes. When double-quoting, escape any existing double quotes and backslashes
+    // in the literal to produce valid Ruby.
     let quoted_literal = if literal.contains('\'') {
-        format!("\"{literal}\"")
+        let escaped = literal.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
     } else {
         format!("'{literal}'")
     };
