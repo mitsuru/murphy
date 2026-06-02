@@ -104,12 +104,21 @@ fn extract_rand_call(node: NodeId, cx: &Cx<'_>) -> Option<RandCall> {
     Some(RandCall { node, left, right })
 }
 
-/// Check whether an optional receiver is nil, `Random`, or `Kernel`.
+/// Check whether an optional receiver is nil, or a top-level `Random`/`Kernel` constant.
+///
+/// `My::Random` (scope is `Some`) is excluded because it may not implement the
+/// same semantics as `::Random.rand`. Only bare `Random` / `Kernel` (scope is
+/// `None`) and their `::Random` / `::Kernel` equivalents qualify.
 fn is_rand_receiver(recv: OptNodeId, cx: &Cx<'_>) -> bool {
     match recv.get() {
         None => true,
         Some(r) => match cx.kind(r) {
-            NodeKind::Const { name, .. } => {
+            NodeKind::Const { name, scope } => {
+                // Only allow bare Random/Kernel (scope == None).
+                // My::Random has scope == Some(_) and is excluded.
+                if scope.get().is_some() {
+                    return false;
+                }
                 let s = cx.symbol_str(*name);
                 s == "Random" || s == "Kernel"
             }
@@ -123,8 +132,8 @@ fn is_rand_receiver(recv: OptNodeId, cx: &Cx<'_>) -> bool {
 fn boundaries_from_arg(arg: NodeId, cx: &Cx<'_>) -> Option<(i64, i64)> {
     match *cx.kind(arg) {
         NodeKind::Int(n) => {
-            if n < 0 {
-                return None; // negative int argument: skip conservatively
+            if n <= 0 {
+                return None; // rand(0) returns float; negative ints are invalid
             }
             Some((0, n - 1))
         }
@@ -429,6 +438,18 @@ mod tests {
     fn accepts_rand_succ_with_arg() {
         // succ with args is not the Integer#succ pattern
         test::<RandomWithOffset>().expect_no_offenses("rand(6).succ(1)\n");
+    }
+
+    #[test]
+    fn accepts_rand_zero_plus_int() {
+        // rand(0) returns a float, not an integer in [0, -1]; skip it.
+        test::<RandomWithOffset>().expect_no_offenses("rand(0) + 1\n");
+    }
+
+    #[test]
+    fn accepts_namespaced_random_rand() {
+        // My::Random is not stdlib Random; do not flag it.
+        test::<RandomWithOffset>().expect_no_offenses("My::Random.rand(6) + 1\n");
     }
 }
 murphy_plugin_api::submit_cop!(RandomWithOffset);
