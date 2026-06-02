@@ -19,7 +19,7 @@ export const meta = {
   name: 'port-rubocop-cops',
   description: 'Port/gap-fill RuboCop cops: auto-group by crate, implement, draft PR, Gemini review',
   phases: [
-    { title: 'Discover', detail: 'Read issue details and group by crate (max 2 per agent)' },
+    { title: 'Discover', detail: 'Read issue details and group by crate (max 4 per agent)' },
     { title: 'Implement', detail: 'Per-group agents in worktrees: implement → PR → Gemini → resolve' },
     { title: 'Summary', detail: 'Collect results' },
   ],
@@ -184,7 +184,7 @@ const batchDetails = await parallel(
 const resolved = batchDetails.filter(Boolean).flatMap(b => b.issues)
 log(`Resolved ${resolved.length} issues`)
 
-// ─── Group by crate, max 2 per agent ─────────────────────────────────────────
+// ─── Group by crate, max 4 per agent ─────────────────────────────────────────
 
 function groupByCrate(issues, maxPerGroup = 2) {
   const byCreate = {}
