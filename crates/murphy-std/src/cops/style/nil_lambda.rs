@@ -7,7 +7,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/NilLambda
 //! upstream_version_checked: 1.86.2
-//! status: verified
+//! status: partial
 //! gap_issues: []
 //! notes: >
 //!   Disabled by default (matches RuboCop's `Enabled: pending` in default.yml).
@@ -26,8 +26,16 @@
 //!   The offense range covers the full block for single-line blocks, or just
 //!   the opening line for multiline blocks (matching Murphy's test annotation
 //!   convention).
-//!   Autocorrect removes the body (with surrounding space for single-line blocks,
-//!   whole lines for multiline blocks), leaving an empty block.
+//!   Autocorrect behavior:
+//!     - Lambdas: autocorrect always emitted (return/break/next are lambda-local).
+//!     - Procs (proc{}, Proc.new{}): autocorrect skipped for `return nil` and
+//!       `break nil` because those are non-local control flow in proc context
+//!       (`return nil` can exit the enclosing method; `break nil` can break from
+//!       the yielding iterator) — changing to an empty proc alters behavior.
+//!       Bare `nil` and `next nil` are safe to autocorrect for procs.
+//!   Divergence from RuboCop: RuboCop emits autocorrect for all patterns including
+//!   `proc { return nil }` and `proc { break nil }`. Murphy skips the edit for
+//!   safety while still reporting the offense.
 //! ```
 //!
 //! ## Matched shapes
@@ -105,6 +113,15 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let node_range = cx.range(node);
     let offense_range = first_line_range_of(node_range, cx.source().as_bytes());
     cx.emit_offense(offense_range, msg, None);
+
+    // For proc forms (not lambdas), skip autocorrect when the body is
+    // `return nil` or `break nil`: these are non-local control-flow ops that
+    // change behavior if replaced with an empty proc body.
+    // `return nil` can exit the enclosing method; `break nil` can break from
+    // the yielding iterator. Bare `nil` and `next nil` are safe.
+    if is_proc && is_unsafe_proc_body(body_id, cx) {
+        return;
+    }
 
     // Autocorrect: remove the body.
     let body_range = cx.range(body_id);
@@ -184,6 +201,17 @@ fn is_nil_return(body: NodeId, cx: &Cx<'_>) -> bool {
 /// Returns `true` if `opt` is present and its value is a `nil` literal.
 fn is_nil_value(opt: OptNodeId, cx: &Cx<'_>) -> bool {
     opt.get().is_some_and(|id| matches!(cx.kind(id), NodeKind::Nil))
+}
+
+/// Returns `true` if the body is `return nil` or `break nil` — patterns that
+/// are unsafe to autocorrect in proc context because they are non-local control
+/// flow operators. `return nil` can exit the enclosing method, `break nil` can
+/// break from the yielding iterator; replacing with an empty proc changes behavior.
+fn is_unsafe_proc_body(body: NodeId, cx: &Cx<'_>) -> bool {
+    match *cx.kind(body) {
+        NodeKind::Return(val) | NodeKind::Break(val) => is_nil_value(val, cx),
+        _ => false,
+    }
 }
 
 /// Returns the range from `range.start` to the first newline (exclusive),
@@ -301,29 +329,44 @@ mod tests {
 
     #[test]
     fn flags_proc_break_nil() {
-        test::<NilLambda>().expect_correction(
-            indoc! {"
-                proc { break nil }
-                ^^^^^^^^^^^^^^^^^^ Use an empty proc instead of always returning nil.
-            "},
-            "proc {}\n",
-        );
+        // `break nil` in a proc is non-local control flow; offense is reported
+        // but no autocorrect is emitted (would change runtime behavior).
+        test::<NilLambda>().expect_offense(indoc! {"
+            proc { break nil }
+            ^^^^^^^^^^^^^^^^^^ Use an empty proc instead of always returning nil.
+        "});
     }
 
     #[test]
     fn flags_proc_new_multiline_break_nil() {
-        test::<NilLambda>().expect_correction(
-            indoc! {"
-                Proc.new do
-                ^^^^^^^^^^^ Use an empty proc instead of always returning nil.
-                  break nil
-                end
-            "},
-            indoc! {"
-                Proc.new do
-                end
-            "},
-        );
+        // `break nil` in a proc is non-local control flow; offense is reported
+        // but no autocorrect is emitted (would change runtime behavior).
+        test::<NilLambda>().expect_offense(indoc! {"
+            Proc.new do
+            ^^^^^^^^^^^ Use an empty proc instead of always returning nil.
+              break nil
+            end
+        "});
+    }
+
+    // ----- proc return/break: offense only, no autocorrect -----
+
+    #[test]
+    fn flags_proc_return_nil_no_autocorrect() {
+        // `return nil` in a proc can exit the enclosing method (non-local return).
+        // Offense is reported but no edit is emitted.
+        test::<NilLambda>().expect_offense(indoc! {"
+            proc { return nil }
+            ^^^^^^^^^^^^^^^^^^^ Use an empty proc instead of always returning nil.
+        "});
+    }
+
+    #[test]
+    fn flags_proc_new_return_nil_no_autocorrect() {
+        test::<NilLambda>().expect_offense(indoc! {"
+            Proc.new { return nil }
+            ^^^^^^^^^^^^^^^^^^^^^^^ Use an empty proc instead of always returning nil.
+        "});
     }
 
     // ----- negative cases -----
