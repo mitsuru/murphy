@@ -85,29 +85,25 @@ fn check_args(args_opt: murphy_plugin_api::OptNodeId, cx: &Cx<'_>) {
     };
     let args = cx.list(list);
 
-    // Collect positions of kwoptarg and kwarg nodes only.
+    // Two-pass, allocation-free traversal:
+    // Pass 1: find the last kwarg position.
     // Ignore kwrestarg, blockarg, regular arg/optarg/restarg, etc.
-    let mut kwoptarg_positions: Vec<usize> = Vec::new();
-    let mut kwarg_positions: Vec<usize> = Vec::new();
+    let mut max_kwarg_pos: Option<usize> = None;
     for (i, &arg_id) in args.iter().enumerate() {
-        match cx.kind(arg_id) {
-            NodeKind::Kwoptarg { .. } => kwoptarg_positions.push(i),
-            NodeKind::Kwarg(_) => kwarg_positions.push(i),
-            _ => {}
+        if let NodeKind::Kwarg(_) = cx.kind(arg_id) {
+            max_kwarg_pos = Some(i);
         }
     }
 
-    if kwoptarg_positions.is_empty() || kwarg_positions.is_empty() {
+    let Some(max_kwarg_pos) = max_kwarg_pos else {
         return;
-    }
+    };
 
-    let max_kwarg_pos = *kwarg_positions.iter().max().unwrap();
-
-    for &kwoptarg_pos in &kwoptarg_positions {
-        if kwoptarg_pos > max_kwarg_pos {
-            break;
+    // Pass 2: flag every kwoptarg that precedes the last kwarg.
+    for (i, &arg_id) in args.iter().enumerate() {
+        if i < max_kwarg_pos && let NodeKind::Kwoptarg { .. } = cx.kind(arg_id) {
+            cx.emit_offense(cx.range(arg_id), MSG, None);
         }
-        cx.emit_offense(cx.range(args[kwoptarg_pos]), MSG, None);
     }
 }
 
