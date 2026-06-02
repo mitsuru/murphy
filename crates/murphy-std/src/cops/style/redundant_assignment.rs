@@ -151,6 +151,11 @@ fn check_begin_node(list: NodeList, cx: &Cx<'_>) {
 
 /// Returns `Some(value_node)` if `asgn` is `Lvasgn{name, value}` and `ret` is
 /// `Lvar(name)` with the same name. Returns `None` otherwise.
+///
+/// Skips the `x = x` form (RHS is the same local variable as the LHS):
+/// in Ruby, `x = x` assigns `nil` (x is not yet in scope on the RHS), so
+/// autocorrecting `x = x; x` → `x` would change behavior from `nil` to a
+/// method call.
 fn redundant_assignment_check(asgn: NodeId, ret: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     let NodeKind::Lvasgn {
         name: asgn_name,
@@ -166,6 +171,13 @@ fn redundant_assignment_check(asgn: NodeId, ret: NodeId, cx: &Cx<'_>) -> Option<
         return None;
     };
     if asgn_name != ret_name {
+        return None;
+    }
+    // Skip `x = x`: the RHS references the same variable as the LHS.
+    // This is a self-assignment that evaluates to nil in Ruby (the variable
+    // is not yet in scope on the RHS side), so autocorrecting to `x` would
+    // change semantics.
+    if matches!(cx.kind(value_id), NodeKind::Lvar(rhs_name) if *rhs_name == asgn_name) {
         return None;
     }
     Some(value_id)
@@ -404,6 +416,20 @@ mod tests {
         test::<RedundantAssignment>().expect_no_offenses(indoc! {r#"
             def func
               x = 1
+            end
+        "#});
+    }
+
+    // --- self-referential assignment guard ---
+
+    #[test]
+    fn no_offense_self_referential_assignment() {
+        // `x = x; x` would autocorrect to just `x`, but `x = x` in Ruby
+        // means x is nil (variable not yet in scope on RHS), so we skip this.
+        test::<RedundantAssignment>().expect_no_offenses(indoc! {r#"
+            def func
+              x = x
+              x
             end
         "#});
     }
