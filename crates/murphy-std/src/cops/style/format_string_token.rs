@@ -210,16 +210,16 @@ fn check_str_node(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // Separate into annotated/template vs. unannotated.
-    let (unannotated, named): (Vec<&FmtSeq>, Vec<&FmtSeq>) =
-        seqs.iter().partition(|s| s.style == FmtStyle::Unannotated);
+    // Check named vs unannotated token counts without heap allocation.
+    let has_named = seqs.iter().any(|s| s.style != FmtStyle::Unannotated);
+    let unannotated_count = seqs.iter().filter(|s| s.style == FmtStyle::Unannotated).count();
 
     // Unannotated: treated as conservative regardless of mode, unless in format context.
     // If all are unannotated, apply MaxUnannotatedPlaceholdersAllowed.
-    if named.is_empty() {
+    if !has_named {
         // All unannotated.
         let max = opts.max_unannotated_placeholders_allowed as usize;
-        if unannotated.len() <= max {
+        if unannotated_count <= max {
             return;
         }
         // All exceed the limit: check only in format context (or aggressive if > limit).
@@ -228,8 +228,6 @@ fn check_str_node(node: NodeId, cx: &Cx<'_>) {
         if !in_format_ctx {
             return;
         }
-    } else if !unannotated.is_empty() {
-        // Mixed named and unannotated — treat as all-named tokens.
     }
 
     // Process each detected sequence.
@@ -273,23 +271,18 @@ fn in_format_context(node: NodeId, cx: &Cx<'_>) -> bool {
     };
     // `format(str, ...)`, `sprintf(str, ...)`, `printf(str, ...)`
     // The string must be the first positional argument.
-    if let NodeKind::Send { method, args, .. } = *cx.kind(parent) {
+    if let NodeKind::Send { method, .. } = *cx.kind(parent) {
         let method_name = cx.symbol_str(method);
         if matches!(method_name, "format" | "sprintf" | "printf") {
             // String is the first arg.
-            if let Some(&first_arg) = cx.list(args).first()
+            if let Some(&first_arg) = cx.call_arguments(parent).first()
                 && first_arg == node {
                     return true;
                 }
         }
         // `str % args` — the str is the receiver of `%`.
-        if method_name == "%" {
-            // The receiver is the node before the method.
-            // In `Send { receiver, .. }`, receiver holds the str.
-            if let NodeKind::Send { receiver, .. } = *cx.kind(parent)
-                && receiver.get() == Some(node) {
-                    return true;
-                }
+        if method_name == "%" && cx.call_receiver(parent).get() == Some(node) {
+            return true;
         }
     }
     // Also check if the str is inside a dstr that is in format context.
@@ -573,7 +566,7 @@ fn parse_flags_width_precision_type(
         flags,
         width,
         precision,
-        String::from_utf8(vec![type_byte]).unwrap(),
+        char::from(type_byte).to_string(),
         i,
     ))
 }

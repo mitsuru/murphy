@@ -127,23 +127,31 @@ fn first_line_range(node: NodeId, cx: &Cx<'_>) -> Range {
 }
 
 /// Returns true if the block is a multiline `.each` call with no send
-/// arguments and has a receiver.
+/// arguments, has a receiver, and has at least one block argument.
+/// A block with no arguments cannot be rewritten as a valid `for` loop.
 fn suspect_enumerable(node: NodeId, cx: &Cx<'_>) -> bool {
     if cx.is_single_line(node) {
         return false;
     }
-    let call = match *cx.kind(node) {
-        NodeKind::Block { call, .. } => call,
-        NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => send,
+    let (call, block_args) = match *cx.kind(node) {
+        NodeKind::Block { call, args, .. } => (call, Some(args)),
+        NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => (send, None),
         _ => return false,
     };
-    let NodeKind::Send { receiver, method, args } = *cx.kind(call) else {
-        return false;
-    };
-    if receiver.get().is_none() {
+    // Block must have at least one argument for a valid `for` rewrite.
+    if let Some(args_node) = block_args
+        && let NodeKind::Args(l) = *cx.kind(args_node)
+        && cx.list(l).is_empty()
+    {
         return false;
     }
-    cx.symbol_str(method) == "each" && cx.list(args).is_empty()
+    let NodeKind::Send { method, .. } = *cx.kind(call) else {
+        return false;
+    };
+    if cx.call_receiver(call).get().is_none() {
+        return false;
+    }
+    cx.symbol_str(method) == "each" && cx.call_arguments(call).is_empty()
 }
 
 /// Autocorrect: `for n in col\n  body\nend` → `col.each do |n|\n  body\nend`
@@ -214,10 +222,7 @@ fn autocorrect_each_to_for(node: NodeId, cx: &Cx<'_>) {
         _ => return,
     };
 
-    let NodeKind::Send { receiver, .. } = *cx.kind(call) else {
-        return;
-    };
-    let Some(recv) = receiver.get() else {
+    let Some(recv) = cx.call_receiver(call).get() else {
         return;
     };
 
@@ -226,7 +231,7 @@ fn autocorrect_each_to_for(node: NodeId, cx: &Cx<'_>) {
 
     // Build block variable(s) from block args.
     let args_list = match *cx.kind(args_node) {
-        NodeKind::Args(l) => cx.list(l).to_vec(),
+        NodeKind::Args(l) => cx.list(l),
         _ => return,
     };
 
@@ -279,21 +284,18 @@ fn node_indent(node: NodeId, cx: &Cx<'_>) -> String {
 
 /// Re-indent body source to target_indent.
 fn indent_body(body: &str, target_indent: &str) -> String {
-    let lines: Vec<&str> = body.lines().collect();
-    if lines.is_empty() {
-        return body.to_string();
-    }
-    let orig_indent = lines
-        .iter()
+    // Find original indentation from the first non-empty line using strip_suffix
+    // to safely extract the prefix without manual byte slicing.
+    let orig_indent = body
+        .lines()
         .find(|l| !l.trim().is_empty())
-        .map(|l| {
+        .and_then(|l| {
             let trimmed = l.trim_start();
-            &l[..l.len() - trimmed.len()]
+            l.strip_suffix(trimmed)
         })
         .unwrap_or("");
 
-    lines
-        .iter()
+    body.lines()
         .map(|line| {
             if line.trim().is_empty() {
                 line.to_string()
