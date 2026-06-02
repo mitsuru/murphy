@@ -7,7 +7,8 @@
 //! upstream_cop: Style/ObjectThen
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-zgcp
 //! notes: >
 //!   Both EnforcedStyle values (`then` and `yield_self`) are implemented.
 //!   Block path: flags block/numblock/itblock where the inner send (or csend)

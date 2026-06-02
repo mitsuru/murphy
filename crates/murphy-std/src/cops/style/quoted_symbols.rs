@@ -7,7 +7,8 @@
 //! upstream_cop: Style/QuotedSymbols
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-y3h2
 //! notes: >
 //!   Checks that quoted symbols use a consistent quote style. Supports three
 //!   EnforcedStyle values:

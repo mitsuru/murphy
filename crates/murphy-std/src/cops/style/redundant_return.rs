@@ -8,7 +8,8 @@
 //! upstream_cop: Style/RedundantReturn
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-imxw
 //! notes: >
 //!   Scope: only the last statement of the method body is checked. RuboCop
 //!   also recurses into if/elsif/else and case/when branch tails; that

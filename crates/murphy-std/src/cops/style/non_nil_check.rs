@@ -7,7 +7,8 @@
 //! upstream_cop: Style/NonNilCheck
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-y3h2
 //! notes: >
 //!   Covered:
 //!     - `x != nil` → flags with `Prefer \`!(x).nil?\` over \`x != nil\`.` message,

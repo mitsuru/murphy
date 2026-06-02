@@ -7,7 +7,8 @@
 //! upstream_cop: Style/MultilineMethodSignature
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-y3h2
 //! notes: >
 //!   Detects `def`/`defs` nodes whose parameter list spans multiple lines.
 //!   The offense is highlighted at the `def` keyword.
