@@ -453,6 +453,17 @@ fn autocorrect_block_form(node: NodeId, cx: &Cx<'_>, opts: &RedundantConditionOp
         Some(c) => c,
         None => return,
     };
+
+    // Skip autocorrect when the condition contains an assignment or other
+    // operator-precedence-sensitive constructs. An `if a = b` condition
+    // rewritten as `a = b || else_val` changes semantics because `||` has
+    // lower precedence than `=` — the assignment target changes.
+    // We guard conservatively: if the condition node is any assignment kind,
+    // skip autocorrect.
+    if is_asgn_type(cx, cond) {
+        return;
+    }
+
     let else_branch = match cx.if_else_branch(node).get() {
         Some(b) => b,
         None => return,

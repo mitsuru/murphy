@@ -52,15 +52,17 @@ impl RedundantCapitalW {
 }
 
 /// Returns `true` when the `%W` element source contains a backslash escape
-/// sequence that `%w` would NOT process — i.e. any `\X` where X is not `\`
-/// itself (escaped backslash) and not a space (word separator) or NUL.
+/// sequence that `%w` would NOT process.
+///
+/// Both `%W` and `%w` process:
+///   - `\\` (escaped backslash — even backslash run)
+///   - `\ ` (backslash-space, an in-word space separator)
+///
+/// Only `%W` processes character escapes (`\n`, `\t`, `\uXXXX`, `\xXX`, etc.).
 ///
 /// Unlike `double_quotes_required?`, this deliberately ignores `'` (single
 /// quote) because `%w` handles single quotes as literal characters just like
 /// `%W` does — there is no escaping difference.
-///
-/// Mirrors the meaningful part of RuboCop's `double_quotes_required?` for the
-/// `%W` context.
 fn element_requires_percent_w(src: &str) -> bool {
     let b = src.as_bytes();
     let mut i = 0;
@@ -72,13 +74,15 @@ fn element_requires_percent_w(src: &str) -> bool {
             }
             let run = i - start;
             // An odd-length run means the last backslash is an active escape.
-            // If what follows is not another backslash, it is a meaningful escape
-            // sequence (\n, \t, \u, \x, etc.) that %w would not process.
             if run % 2 == 1 && i < b.len() {
-                // Skip if the escape is a backslash itself (already counted)
-                // or a space (which is a word separator, not an escape).
-                // Everything else (\n, \t, \uXXXX, \x..) requires %W.
-                return true;
+                let next = b[i];
+                // `\ ` is a word-separator escape handled identically by %w and %W.
+                // `\\` is already handled by the even-run path above.
+                // All other escapes (\n, \t, \r, \uXXXX, \xXX, etc.) are
+                // meaningful character escapes that %w would not process.
+                if next != b' ' {
+                    return true;
+                }
             }
             continue;
         }
@@ -215,6 +219,12 @@ mod tests {
             "#},
             "x = %w[can't stop]\n",
         );
+    }
+
+    #[test]
+    fn no_offense_percent_capital_w_with_tab_escape() {
+        // \t is a character escape only %W processes: skip.
+        test::<RedundantCapitalW>().expect_no_offenses("x = %W[foo\\tbar baz]\n");
     }
 }
 
