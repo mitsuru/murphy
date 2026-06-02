@@ -99,6 +99,7 @@ pub use linkme;
 /// `REGISTRATION` in its enclosing module scope — calling `submit_cop!`
 /// twice in the same file is a compile-time error (intentional safety guard).
 #[macro_export]
+#[allow(clippy::crate_in_macro_def)]
 macro_rules! submit_cop {
     ($cop:ty) => {
         const _: () = {
