@@ -31,8 +31,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
-use super::string_literals::double_quotes_required;
-
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct RedundantCapitalW;
@@ -53,6 +51,42 @@ impl RedundantCapitalW {
     }
 }
 
+/// Returns `true` when the `%W` element source contains a backslash escape
+/// sequence that `%w` would NOT process — i.e. any `\X` where X is not `\`
+/// itself (escaped backslash) and not a space (word separator) or NUL.
+///
+/// Unlike `double_quotes_required?`, this deliberately ignores `'` (single
+/// quote) because `%w` handles single quotes as literal characters just like
+/// `%W` does — there is no escaping difference.
+///
+/// Mirrors the meaningful part of RuboCop's `double_quotes_required?` for the
+/// `%W` context.
+fn element_requires_percent_w(src: &str) -> bool {
+    let b = src.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' {
+            let start = i;
+            while i < b.len() && b[i] == b'\\' {
+                i += 1;
+            }
+            let run = i - start;
+            // An odd-length run means the last backslash is an active escape.
+            // If what follows is not another backslash, it is a meaningful escape
+            // sequence (\n, \t, \u, \x, etc.) that %w would not process.
+            if run % 2 == 1 && i < b.len() {
+                // Skip if the escape is a backslash itself (already counted)
+                // or a space (which is a word separator, not an escape).
+                // Everything else (\n, \t, \uXXXX, \x..) requires %W.
+                return true;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn check(node: NodeId, cx: &Cx<'_>) {
     // Only interested in %W literals. Check the raw source of the node.
     let array_src = cx.raw_source(cx.range(node));
@@ -69,10 +103,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
             return;
         }
 
-        // If any child's source requires double-quote processing (e.g. \n, \t),
-        // then %W may be needed over %w.
+        // If any child's source contains a meaningful backslash escape (e.g. \n, \t),
+        // then %W is required since %w does not process escape sequences.
+        // Note: single quotes do NOT require %W; %w[can't] is perfectly valid.
         let child_src = cx.raw_source(cx.range(child));
-        if double_quotes_required(child_src) {
+        if element_requires_percent_w(child_src) {
             return;
         }
     }
@@ -128,7 +163,7 @@ mod tests {
 
     #[test]
     fn no_offense_percent_capital_w_with_newline_escape() {
-        // \n is a double-quote escape: double_quotes_required? returns true.
+        // \n is a meaningful backslash escape that %w does not process: skip.
         test::<RedundantCapitalW>().expect_no_offenses("x = %W[cat\\ndog pig]\n");
     }
 
@@ -158,6 +193,27 @@ mod tests {
                     ^^^^^^^^^^^^^^^^^^^ Do not use `%W` unless interpolation is needed. If not, use `%w`.
             "#},
             "x = %w[door wall floor]\n",
+        );
+    }
+
+    #[test]
+    fn flags_percent_capital_w_with_single_quote() {
+        // Single quotes do NOT require %W — %w[can't stop] is perfectly valid.
+        // This was a false-negative in RuboCop; Murphy correctly flags it.
+        test::<RedundantCapitalW>().expect_offense(indoc! {r#"
+            x = %W[can't stop]
+                ^^^^^^^^^^^^^^ Do not use `%W` unless interpolation is needed. If not, use `%w`.
+        "#});
+    }
+
+    #[test]
+    fn autocorrects_percent_capital_w_with_single_quote() {
+        test::<RedundantCapitalW>().expect_correction(
+            indoc! {r#"
+                x = %W[can't stop]
+                    ^^^^^^^^^^^^^^ Do not use `%W` unless interpolation is needed. If not, use `%w`.
+            "#},
+            "x = %w[can't stop]\n",
         );
     }
 }

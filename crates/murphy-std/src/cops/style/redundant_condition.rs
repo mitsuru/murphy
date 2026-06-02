@@ -415,7 +415,10 @@ fn autocorrect(node: NodeId, cx: &Cx<'_>, opts: &RedundantConditionOptions) {
         return;
     }
 
-    if cx.is_ternary(node) && !branches_have_method_with_cond(node, cx) {
+    if cx.is_ternary(node)
+        && !branches_have_method_with_cond(node, cx)
+        && !branches_have_assignment_with_cond(node, cx)
+    {
         autocorrect_ternary(node, cx);
     } else if is_redundant_condition(node, cx) {
         // modifier form or no else branch — replace with if_branch source.
@@ -693,6 +696,19 @@ mod tests {
             else
               c
             end
+        "});
+    }
+
+    // --- No autocorrect for ternary assignment branches (would corrupt code) ---
+
+    #[test]
+    fn flags_ternary_assignment_branches_no_autocorrect() {
+        // `foo ? @value = foo : @value = another` detects offense but must NOT
+        // autocorrect (doing so would produce invalid code).
+        // The offense is reported (on the `? @value = foo :` range) but no edit is emitted.
+        test::<RedundantCondition>().expect_offense(indoc! {"
+            foo ? @value = foo : @value = another
+                ^^^^^^^^^^^^^^^^ Use double pipes `||` instead.
         "});
     }
 }
