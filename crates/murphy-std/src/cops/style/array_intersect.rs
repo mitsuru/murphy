@@ -65,7 +65,7 @@
 //! The negating predicates (`empty?`, `none?`, `== 0`, `zero?`)
 //! produce `!recv.intersect?(arg)`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
 
 /// Negating predicates: result maps to `!intersect?`.
 const NEGATING_PREDICATES: &[&str] = &["empty?", "none?", "==", "zero?"];
@@ -84,64 +84,30 @@ pub struct ArrayIntersect;
     options = NoOptions,
 )]
 impl ArrayIntersect {
-    /// Check send nodes for the intersection-receiver and count-comparison shapes.
+    /// Check `send` nodes for the intersection-receiver and count-comparison shapes.
     #[on_node(kind = "send", methods = [
         "any?", "empty?", "none?",
         "positive?", "zero?", ">", "!=", "=="
     ])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send {
-            receiver,
-            method,
-            args,
-        } = *cx.kind(node)
-        else {
+        check_call(node, cx);
+    }
+
+    /// Check `csend` nodes for the safe-navigation variants, e.g.
+    /// `array1&.intersection(array2)&.any?`.
+    #[on_node(kind = "csend")]
+    fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
             return;
         };
         let method_name = cx.symbol_str(method);
-
-        // Skip if this send has a block literal attached (RuboCop does the same).
-        if cx.parent(node).get().is_some_and(|p| {
-            matches!(*cx.kind(p), NodeKind::Block { call, .. } if call == node)
-                || matches!(*cx.kind(p), NodeKind::Numblock { send, .. } if send == node)
-                || matches!(*cx.kind(p), NodeKind::Itblock { send, .. } if send == node)
-        }) {
+        if !matches!(
+            method_name,
+            "any?" | "empty?" | "none?" | "positive?" | "zero?" | ">" | "!=" | "=="
+        ) {
             return;
         }
-
-        let Some(recv_id) = receiver.get() else {
-            return;
-        };
-
-        let outer_args = cx.list(args);
-
-        // Comparison methods: `> 0`, `!= 0`, `== 0`.
-        if matches!(method_name, ">" | "!=" | "==") {
-            if let Some(replacement) = check_size_check(recv_id, method_name, outer_args, cx) {
-                emit(node, &replacement, cx);
-            }
-            return;
-        }
-
-        // Zero-arg predicates only.
-        if !outer_args.is_empty() {
-            return;
-        }
-
-        // Check if receiver is `intersection(arg)` directly.
-        if let Some(replacement) = check_intersection_predicate(recv_id, method_name, cx) {
-            emit(node, &replacement, cx);
-            return;
-        }
-
-        // Check if this is `positive?` / `zero?` on a count/size/length of intersection
-        // (`array1.intersection(array2).count.positive?` etc.).
-        // Guard for size predicates only to avoid false positives on integer-returning methods.
-        if matches!(method_name, "positive?" | "zero?") &&
-            let Some(replacement) = check_size_predicate(recv_id, method_name, cx)
-        {
-            emit(node, &replacement, cx);
-        }
+        check_call(node, cx);
     }
 
     /// Check `block` nodes for `array1.any? { |e| array2.member?(e) }`.
@@ -259,6 +225,63 @@ impl ArrayIntersect {
             let replacement = format!("{bang}{array1_src}{dot}intersect?({array2_src})");
             emit(node, &replacement, cx);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared call-check logic
+// ---------------------------------------------------------------------------
+
+/// Core check for both `send` and `csend` call nodes.
+fn check_call(node: NodeId, cx: &Cx<'_>) {
+    let (receiver, method, args) = match *cx.kind(node) {
+        NodeKind::Send { receiver, method, args } => (receiver, method, args),
+        NodeKind::Csend { receiver, method, args } => (OptNodeId::some(receiver), method, args),
+        _ => return,
+    };
+    let method_name = cx.symbol_str(method);
+
+    // Skip if this call has a block literal attached (RuboCop does the same).
+    if cx.parent(node).get().is_some_and(|p| {
+        matches!(*cx.kind(p), NodeKind::Block { call, .. } if call == node)
+            || matches!(*cx.kind(p), NodeKind::Numblock { send, .. } if send == node)
+            || matches!(*cx.kind(p), NodeKind::Itblock { send, .. } if send == node)
+    }) {
+        return;
+    }
+
+    let Some(recv_id) = receiver.get() else {
+        return;
+    };
+
+    let outer_args = cx.list(args);
+
+    // Comparison methods: `> 0`, `!= 0`, `== 0`.
+    if matches!(method_name, ">" | "!=" | "==") {
+        if let Some(replacement) = check_size_check(recv_id, method_name, outer_args, cx) {
+            emit(node, &replacement, cx);
+        }
+        return;
+    }
+
+    // Zero-arg predicates only.
+    if !outer_args.is_empty() {
+        return;
+    }
+
+    // Check if receiver is `intersection(arg)` directly.
+    if let Some(replacement) = check_intersection_predicate(recv_id, method_name, cx) {
+        emit(node, &replacement, cx);
+        return;
+    }
+
+    // Check if this is `positive?` / `zero?` on a count/size/length of intersection
+    // (`array1.intersection(array2).count.positive?` etc.).
+    // Guard for size predicates only to avoid false positives on integer-returning methods.
+    if matches!(method_name, "positive?" | "zero?") &&
+        let Some(replacement) = check_size_predicate(recv_id, method_name, cx)
+    {
+        emit(node, &replacement, cx);
     }
 }
 
@@ -629,6 +652,34 @@ mod tests {
     fn accepts_any_with_extra_block_on_intersection() {
         test::<ArrayIntersect>()
             .expect_no_offenses("array1.intersection(array2).any? { |x| x > 0 }\n");
+    }
+
+    // -------------------------------------------------------------------------
+    // csend (safe navigation) forms
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn flags_csend_intersection_with_dot_any() {
+        // array1&.intersection(array2).any? — inner csend, outer regular send.
+        test::<ArrayIntersect>().expect_correction(
+            indoc! {r#"
+                array1&.intersection(array2).any?
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `array1&.intersect?(array2)` instead of `array1&.intersection(array2).any?`.
+            "#},
+            "array1&.intersect?(array2)\n",
+        );
+    }
+
+    #[test]
+    fn flags_csend_intersection_with_csend_any() {
+        // array1&.intersection(array2)&.any? — both inner and outer csend.
+        test::<ArrayIntersect>().expect_correction(
+            indoc! {r#"
+                array1&.intersection(array2)&.any?
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `array1&.intersect?(array2)` instead of `array1&.intersection(array2)&.any?`.
+            "#},
+            "array1&.intersect?(array2)\n",
+        );
     }
 }
 
