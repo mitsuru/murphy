@@ -246,7 +246,7 @@ fn autocorrect_method_to_literal(node: NodeId, call: NodeId, cx: &Cx<'_>) {
 
     // Get the list of arg children.
     let arg_ids = match *cx.kind(args) {
-        NodeKind::Args(list) => cx.list(list).to_vec(),
+        NodeKind::Args(list) => cx.list(list),
         _ => return,
     };
 
@@ -295,7 +295,7 @@ fn autocorrect_literal_to_method(node: NodeId, call: NodeId, cx: &Cx<'_>) {
 
     // Get the list of arg children.
     let arg_ids = match *cx.kind(args) {
-        NodeKind::Args(list) => cx.list(list).to_vec(),
+        NodeKind::Args(list) => cx.list(list),
         _ => return,
     };
 

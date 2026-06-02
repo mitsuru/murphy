@@ -41,9 +41,7 @@
 //! lambda.(x, y)
 //! ```
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, NodeList, cop};
-
-const MSG: &str = "Prefer the use of `%PREFER%` over `%CURRENT%`.";
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, cop};
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -92,26 +90,16 @@ impl LambdaCall {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // Extract receiver, method, args from send or csend.
-    let (recv_id, method, args) = match *cx.kind(node) {
-        NodeKind::Send { receiver, method, args } => {
-            let Some(recv_id) = receiver.get() else { return };
-            (recv_id, method, args)
-        }
-        NodeKind::Csend { receiver, method, args } => (receiver, method, args),
-        _ => return,
-    };
-
-    if cx.symbol_str(method) != "call" {
+    // Must be a `call` method on a receiver.
+    if cx.method_name(node) != Some("call") {
         return;
     }
+    let Some(recv_id) = cx.call_receiver(node).get() else {
+        return;
+    };
 
     let opts = cx.options_or_default::<Options>();
 
-    // Distinguish implicit `f.(args)` from explicit `f.call(args)`:
-    //   - `call_operator_loc` returns None for implicit-call (Prism omits the
-    //     call operator from its side table for `.()` invocations)
-    //   - `call_operator_loc` returns Some for explicit `f.call(args)`
     // Distinguish implicit `f.(args)` from explicit `f.call(args)`:
     // For implicit `f.(args)`, Prism provides no message_loc (no selector text),
     // so the translator sets loc.name (selector) to Range::ZERO.
@@ -130,10 +118,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     let current_src = cx.raw_source(cx.range(node));
-    let preferred = build_preferred(node, recv_id, args, is_implicit, cx);
-    let msg = MSG
-        .replace("%PREFER%", &preferred)
-        .replace("%CURRENT%", current_src);
+    let arg_list = cx.call_arguments(node);
+    let preferred = build_preferred(node, recv_id, arg_list, is_implicit, cx);
+    let msg = format!("Prefer the use of `{preferred}` over `{current_src}`.");
 
     cx.emit_offense(cx.range(node), &msg, None);
 
@@ -148,19 +135,16 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 fn build_preferred(
     node: NodeId,
     recv_id: NodeId,
-    args: NodeList,
+    arg_list: &[NodeId],
     is_implicit: bool,
     cx: &Cx<'_>,
 ) -> String {
     let receiver_src = cx.raw_source(cx.range(recv_id));
 
-    // Find the dot: for both forms, we scan for the `.` between receiver end
-    // and node end using the token stream.
+    // Find the dot by scanning tokens between receiver end and node end.
     let recv_end = cx.range(recv_id).end;
     let node_end = cx.range(node).end;
     let dot = dot_between(recv_end, node_end, cx);
-
-    let arg_list = cx.list(args);
 
     if is_implicit {
         // Convert `f.(args)` => `f.call(args)` or `f.call` if no args
