@@ -72,20 +72,9 @@ impl SafeNavigationChainLength {
         let opts = cx.options_or_default::<SafeNavigationChainLengthOptions>();
         let max = opts.max.max(1) as usize;
 
-        // Walk UP the ancestor chain from this csend, collecting consecutive csend
-        // ancestors. This fires for every csend node, but only the innermost csend
-        // (whose receiver is not itself a csend) accumulates all chain ancestors.
-        //
-        // For x&.foo&.bar&.baz (3 csends, max=2):
-        //   - innermost (x&.foo): ancestors = [csend_bar, csend_baz] → size 2 >= 2 → offense
-        //   - middle (x&.foo&.bar): ancestors = [csend_baz] → size 1 < 2 → no offense
-        //   - outermost (x&.foo&.bar&.baz): ancestors = [] → size 0 < 2 → no offense
-        // Exactly one offense emitted, matching RuboCop's behavior.
-        //
-        // For x&.foo&.bar (2 csends, max=2):
-        //   - innermost (x&.foo): ancestors = [csend_bar] → size 1 < 2 → no offense
-        //   - outermost (x&.foo&.bar): ancestors = [] → size 0 < 2 → no offense
-        // No offense emitted. RuboCop's default allows chains up to Max calls.
+        // Walk up the ancestor chain collecting consecutive csend ancestors.
+        // Only the innermost csend (non-csend receiver) accumulates all ancestors,
+        // so at most one offense is emitted per chain. See module doc for examples.
         let mut csend_ancestors: Vec<NodeId> = Vec::new();
         let mut current = node;
         while let Some(parent) = cx.parent(current).get() {
@@ -97,8 +86,8 @@ impl SafeNavigationChainLength {
         }
 
         // Offense fires when the ancestor csend count equals or exceeds Max.
-        // This is equivalent to total_chain_length (= ancestors + 1) > Max,
-        // matching RuboCop: .
+        // Equivalent: total_chain_length (ancestors + 1) > Max, i.e. ancestors >= Max.
+        // Mirrors RuboCop: `return if safe_navigation_chains.size < max`.
         if csend_ancestors.len() < max {
             return;
         }
@@ -187,11 +176,11 @@ mod tests {
     }
 
     // Edge case: Max: 0 or negative values are clamped to 1 via opts.max.max(1).
-    // This means even a chain of 1 csend is flagged — any &. use is an offense.
+    // With clamped max=1, any chain of 2+ csends is flagged.
 
     #[test]
-    fn max_zero_clamped_to_one_flags_single_csend() {
-        // max=0 is stored but clamped to 1 in check_csend; a single csend is flagged.
+    fn max_zero_clamped_to_one_flags_two_csend_chain() {
+        // max=0 clamped to 1: x&.foo&.bar (2 csends) has 1 ancestor >= 1 → offense.
         test::<SafeNavigationChainLength>()
             .with_options(&SafeNavigationChainLengthOptions { max: 0 })
             .expect_offense(indoc! {"
@@ -205,8 +194,7 @@ mod tests {
         // Single csend with max=1: 0 ancestors < 1 → no offense.
         test::<SafeNavigationChainLength>()
             .with_options(&SafeNavigationChainLengthOptions { max: 1 })
-            .expect_no_offenses("x&.foo
-");
+            .expect_no_offenses("x&.foo\n");
     }
 
     #[test]
