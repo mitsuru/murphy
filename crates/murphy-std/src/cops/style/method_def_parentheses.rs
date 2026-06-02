@@ -120,7 +120,10 @@ fn has_parentheses(node: NodeId, args: NodeId, cx: &Cx<'_>) -> bool {
     let Some(name_range) = find_method_name_range(node, cx) else {
         return false;
     };
-    let children = cx.children(args);
+    let NodeKind::Args(list) = *cx.kind(args) else {
+        return false;
+    };
+    let children = cx.list(list);
 
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < name_range.end);
@@ -142,7 +145,10 @@ fn has_parentheses(node: NodeId, args: NodeId, cx: &Cx<'_>) -> bool {
 /// Returns the source range from the first to the last arg child (args
 /// themselves, without surrounding parens).
 fn args_children_range(args: NodeId, cx: &Cx<'_>) -> Option<Range> {
-    let children = cx.children(args);
+    let NodeKind::Args(list) = *cx.kind(args) else {
+        return None;
+    };
+    let children = cx.list(list);
     let first = children.first()?;
     let last = children.last()?;
     Some(Range {
@@ -164,7 +170,10 @@ fn is_endless(node: NodeId, cx: &Cx<'_>) -> bool {
 /// - anonymous `**` (Kwrestarg with empty name)
 /// - anonymous `&` (Blockarg with empty name)
 fn has_anonymous_arguments(args: NodeId, cx: &Cx<'_>) -> bool {
-    for child in cx.children(args) {
+    let NodeKind::Args(list) = *cx.kind(args) else {
+        return false;
+    };
+    for &child in cx.list(list) {
         match cx.kind(child) {
             NodeKind::ForwardArgs => return true,
             NodeKind::Restarg(sym) if cx.symbol_str(*sym).is_empty() => return true,
@@ -206,7 +215,10 @@ fn require_parentheses(style: MethodDefParenthesesStyle, args: NodeId, cx: &Cx<'
 fn find_arg_parens(node: NodeId, args: NodeId, cx: &Cx<'_>) -> Option<(Range, Range)> {
     let name_range = find_method_name_range(node, cx)?;
     let node_range = cx.range(node);
-    let children = cx.children(args);
+    let NodeKind::Args(list) = *cx.kind(args) else {
+        return None;
+    };
+    let children = cx.list(list);
 
     let toks = cx.sorted_tokens();
 
@@ -240,7 +252,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     };
 
-    let has_args = !cx.children(args).is_empty();
+    let NodeKind::Args(args_list) = *cx.kind(args) else {
+        return;
+    };
+    let has_args = !cx.list(args_list).is_empty();
     let parens_present = has_parentheses(node, args, cx);
 
     if require_parentheses(opts.enforced_style, args, cx) {

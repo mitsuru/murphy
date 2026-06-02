@@ -36,7 +36,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
-const MSG: &str = "Use `%<prefer>s` instead.";
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -62,18 +61,15 @@ fn match_comparison_condition(
     cond: NodeId,
     cx: &Cx<'_>,
 ) -> Option<(NodeId, &'static str, NodeId)> {
-    let NodeKind::Send { receiver, method, args } = *cx.kind(cond) else {
-        return None;
-    };
-    let lhs = receiver.get()?;
-    let op = match cx.symbol_str(method) {
+    let op = match cx.method_name(cond)? {
         ">" => ">",
         ">=" => ">=",
         "<" => "<",
         "<=" => "<=",
         _ => return None,
     };
-    let arg_list = cx.list(args);
+    let lhs = cx.call_receiver(cond).get()?;
+    let arg_list = cx.call_arguments(cond);
     if arg_list.len() != 1 {
         return None;
     }
@@ -140,7 +136,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let lhs_src = cx.raw_source(cx.range(lhs));
     let rhs_src = cx.raw_source(cx.range(rhs));
     let replacement = format!("[{lhs_src}, {rhs_src}].{method}");
-    let message = MSG.replace("%<prefer>s", &replacement);
+    let message = format!("Use `{replacement}` instead.");
     let node_range = cx.range(node);
 
     cx.emit_offense(node_range, &message, None);
