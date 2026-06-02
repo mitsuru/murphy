@@ -85,9 +85,10 @@ impl BarePercentLiterals {
     #[on_node(kind = "str")]
     fn check_str(&self, node: NodeId, cx: &Cx<'_>) {
         // Skip str segments that are children of a dstr or dsym — the dstr handler
-        // covers those (avoids double-flagging). Dsym children are skipped because
-        // symbols like `:"#{x}"` contain str segments that are not percent-literal
-        // string nodes (mirrors RedundantPercentQ's parent guard).
+        // covers dstr children (avoids double-flagging). Dsym children are skipped
+        // because symbols like `:"hello #{x} world"` contain str segments that are
+        // not standalone percent-literal string nodes (mirrors RedundantPercentQ's
+        // parent guard).
         if cx
             .parent(node)
             .get()
@@ -100,7 +101,9 @@ impl BarePercentLiterals {
 
     #[on_node(kind = "dstr")]
     fn check_dstr(&self, node: NodeId, cx: &Cx<'_>) {
-        // Skip dstr segments nested inside another dstr (interpolation segments).
+        // Skip dstr nodes that are children of another dstr — only check top-level
+        // dstr nodes. Nested dstr nodes occur when a percent-literal with interpolation
+        // is itself inside an outer interpolated string.
         if cx
             .parent(node)
             .get()
