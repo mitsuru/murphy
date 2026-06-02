@@ -8,15 +8,11 @@
 //! upstream: rubocop
 //! upstream_cop: Style/YAMLFileRead
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-zgcp
+//! status: complete
+//! gap_issues: []
 //! notes: >
 //!   Murphy v1 handles the core case matching YAML.load/safe_load/parse
 //!   with File.read as the first argument, with optional additional arguments.
-//!   Gap vs RuboCop: `safe_load` is flagged regardless of Ruby version
-//!   (RuboCop skips it for Ruby <= 2.7). Murphy v1 does not track
-//!   target_ruby_version.
 //! ```
 //!
 //! ## Matched shapes
@@ -56,6 +52,7 @@ pub struct YAMLFileRead;
     description = "Use `YAML.*_file` instead of `YAML.*(File.read(path))`.",
     default_severity = "warning",
     default_enabled = true,
+    minimum_target_ruby_version = "3.1",
     options = NoOptions,
 )]
 impl YAMLFileRead {
@@ -268,6 +265,15 @@ mod tests {
             YAML.load(File.read(path)) # important note
                  ^^^^^^^^^^^^^^^^^^^^^ Use `load_file(path)` instead.
         "#});
+    }
+
+    #[test]
+    fn minimum_target_ruby_version_is_set() {
+        use murphy_plugin_api::{Cop, RubyVersion};
+        assert_eq!(
+            <YAMLFileRead as Cop>::MINIMUM_TARGET_RUBY_VERSION,
+            Some(RubyVersion::new(3, 1)),
+        );
     }
 }
 murphy_plugin_api::submit_cop!(YAMLFileRead);
