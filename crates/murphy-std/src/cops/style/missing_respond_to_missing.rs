@@ -13,19 +13,22 @@
 //!   when the enclosing class/module body does not also define
 //!   `respond_to_missing?` (or `self.respond_to_missing?`).
 //!
-//!   RuboCop's `add_offense(node)` highlights the full node expression. In
-//!   Murphy, `cx.range(node)` for a `def` covers the entire definition
-//!   including body and `end`. To match RuboCop's highlight (which uses
-//!   `node.source_range` trimmed to the first source line), we limit the
-//!   offense to the first line of the `def` signature.
-//!
 //!   Ancestor walk: Murphy's AST omits the `begin` wrapper for single-method
 //!   class bodies. Instead of the RuboCop `node.parent.parent` shortcut, we
 //!   walk ancestors to find the first enclosing `class`, `module`, or `sclass`
-//!   node and scan its descendants for `respond_to_missing?`.
+//!   node and scan its direct scope for `respond_to_missing?`.
+//!
+//!   Scope boundary: `implements_respond_to_missing` does NOT recurse into
+//!   nested `class`/`module`/`sclass` nodes, so a `respond_to_missing?`
+//!   defined inside a nested class does not satisfy the outer class.
 //!
 //!   Top-level `def method_missing` (no enclosing class) — no offense,
 //!   matching RuboCop's `return unless (grand_parent = node.parent.parent)`.
+//!
+//!   Uses `cx.method_name()` for DRY method-name extraction across `Def`/`Defs`.
+//!
+//!   Offense range: first line of the `def` signature (matching RuboCop's
+//!   single-line highlight on the `add_offense(node)` call).
 //!
 //!   No autocorrect — same as upstream.
 //! ```
@@ -58,14 +61,12 @@ impl MissingRespondToMissing {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // Extract the method name.
-    let method_name = match *cx.kind(node) {
-        NodeKind::Def { name, .. } => name,
-        NodeKind::Defs { name, .. } => name,
-        _ => return,
+    // Use the centralized helper to extract the method name for both Def and Defs.
+    let Some(method_name) = cx.method_name(node) else {
+        return;
     };
 
-    if cx.symbol_str(method_name) != "method_missing" {
+    if method_name != "method_missing" {
         return;
     }
 
@@ -86,8 +87,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     };
 
-    // Check all descendant `def`/`defs` in the class scope.
-    // If any is named `respond_to_missing?`, we are satisfied.
+    // Check the scope for `respond_to_missing?`, but do not cross into nested
+    // class/module/sclass boundaries (which would cause false negatives).
     if implements_respond_to_missing(scope, cx) {
         return;
     }
@@ -97,18 +98,30 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     cx.emit_offense(offense_range, MSG, None);
 }
 
-/// Returns `true` if any descendant `def` or `defs` node in `scope` defines
-/// `respond_to_missing?`.
+/// Returns `true` if a `def`/`defs` node named `respond_to_missing?` exists
+/// within `scope`, without crossing into nested class/module/sclass boundaries.
 fn implements_respond_to_missing(scope: NodeId, cx: &Cx<'_>) -> bool {
-    for desc in cx.descendants(scope) {
-        match *cx.kind(desc) {
-            NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => {
-                if cx.symbol_str(name) == "respond_to_missing?" {
-                    return true;
-                }
-            }
-            _ => {}
+    // Manual DFS with boundary pruning: do not enter nested class/module/sclass.
+    let mut stack = cx.children(scope);
+    stack.reverse();
+    while let Some(node) = stack.pop() {
+        // Stop descending into nested class/module/sclass scopes.
+        if matches!(
+            cx.kind(node),
+            NodeKind::Class { .. } | NodeKind::Module { .. } | NodeKind::Sclass { .. }
+        ) {
+            continue;
         }
+        // Check if this is a respond_to_missing? definition.
+        if matches!(cx.kind(node), NodeKind::Def { .. } | NodeKind::Defs { .. })
+            && cx.method_name(node) == Some("respond_to_missing?")
+        {
+            return true;
+        }
+        // Continue DFS into non-boundary children.
+        let mut kids = cx.children(node);
+        kids.reverse();
+        stack.extend(kids);
     }
     false
 }
@@ -220,6 +233,25 @@ mod tests {
 
               def respond_to_missing?(m, include_private = false)
                 super
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_outer_class_when_nested_class_has_respond_to_missing() {
+        // A respond_to_missing? inside a *nested* class must not satisfy the outer one.
+        test::<MissingRespondToMissing>().expect_offense(indoc! {"
+            class Outer
+              def method_missing(m, *args)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ When using `method_missing`, define `respond_to_missing?`.
+                super
+              end
+
+              class Inner
+                def respond_to_missing?(m, include_private = false)
+                  super
+                end
               end
             end
         "});

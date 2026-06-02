@@ -30,6 +30,10 @@
 //!
 //!   Pattern matching (`case`/`in`) is not checked — same as upstream.
 //!
+//!   `has_else_keyword` uses the stable `cx.if_condition`, `cx.if_then_branch`,
+//!   `cx.if_else_branch` helpers to build a stack-allocated child array, avoiding
+//!   the heap allocation that `cx.children(node)` would incur.
+//!
 //!   No autocorrect — Murphy does not implement the `else; nil; ` / `else; `
 //!   insertion (upstream's correction requires Style/EmptyElse cross-config
 //!   awareness). This is a known gap.
@@ -40,7 +44,7 @@
 //!     skipped only when Style/UnlessElse is enabled.
 //! ```
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, SourceTokenKind, cop};
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum EnforcedStyle {
@@ -136,10 +140,23 @@ fn check_case_node(node: NodeId, cx: &Cx<'_>) {
 
 /// Returns `true` when the node has an explicit `else` keyword in its source
 /// (i.e. not just `elsif`). Scans tokens within the node range, excluding
-/// tokens that belong to child nodes.
+/// tokens that belong to direct child nodes.
+///
+/// Uses the centralized helpers `cx.if_condition`, `cx.if_then_branch`, and
+/// `cx.if_else_branch` to build a stack-allocated child-range array, avoiding
+/// the heap allocation that `cx.children(node)` would incur.
 fn has_else_keyword(node: NodeId, cx: &Cx<'_>) -> bool {
+    // Build a stack-allocated array of the (up to 3) direct child ranges.
+    // For an `if` node: condition, then-branch, else-branch.
+    let child_opt_ids: [OptNodeId; 3] = [
+        cx.if_condition(node),
+        cx.if_then_branch(node),
+        cx.if_else_branch(node),
+    ];
+    let child_ranges: [Option<Range>; 3] =
+        child_opt_ids.map(|opt| opt.get().map(|id| cx.range(id)));
+
     let node_range = cx.range(node);
-    let children = cx.children(node);
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < node_range.start);
@@ -154,9 +171,12 @@ fn has_else_keyword(node: NodeId, cx: &Cx<'_>) -> bool {
         if text != b"else" {
             continue;
         }
-        let inside_child = children.iter().any(|&child| {
-            let r = cx.range(child);
-            tok.range.start >= r.start && tok.range.end <= r.end
+        let inside_child = child_ranges.iter().any(|child_range| {
+            if let Some(r) = child_range {
+                tok.range.start >= r.start && tok.range.end <= r.end
+            } else {
+                false
+            }
         });
         if !inside_child {
             return true;
