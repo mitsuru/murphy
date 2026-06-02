@@ -148,9 +148,9 @@ fn comparison_or_nested(node: NodeId, cx: &Cx<'_>) -> bool {
 fn is_variable_like(node: NodeId, cx: &Cx<'_>) -> bool {
     match cx.kind(node) {
         NodeKind::Lvar(_) => true,
-        NodeKind::Send { receiver, args, .. } => {
+        NodeKind::Send { .. } => {
             // Bare send with no receiver and no args is "variable-like" (ambiguous name).
-            receiver.get().is_none() && cx.list(*args).is_empty()
+            cx.call_receiver(node).get().is_none() && cx.call_arguments(node).is_empty()
         }
         _ => false,
     }
@@ -160,8 +160,8 @@ fn is_variable_like(node: NodeId, cx: &Cx<'_>) -> bool {
 /// or `Send` with arguments).
 fn is_method_call(node: NodeId, cx: &Cx<'_>) -> bool {
     match cx.kind(node) {
-        NodeKind::Send { receiver, args, .. } => {
-            receiver.get().is_some() || !cx.list(*args).is_empty()
+        NodeKind::Send { .. } => {
+            cx.call_receiver(node).get().is_some() || !cx.call_arguments(node).is_empty()
         }
         NodeKind::Csend { .. } => true,
         _ => false,
@@ -177,22 +177,18 @@ fn is_method_call(node: NodeId, cx: &Cx<'_>) -> bool {
 /// - both sides variable-like → `None` (skip, like RuboCop's simple_double_comparison)
 /// - neither side variable-like → `None`
 fn simple_comparison(node: NodeId, cx: &Cx<'_>) -> Option<(NodeId, NodeId)> {
-    let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
-        return None;
-    };
-
-    // Must be the `==` method.
-    if cx.symbol_str(method) != "==" {
+    // Must be a Send node.
+    if !matches!(cx.kind(node), NodeKind::Send { .. }) {
         return None;
     }
 
-    let recv_id = receiver.get()?;
-    let arg_list = cx.list(args);
+    // Must be the `==` method.
+    if cx.method_name(node) != Some("==") {
+        return None;
+    }
+
+    let recv_id = cx.call_receiver(node).get()?;
+    let arg_list = cx.call_arguments(node);
     if arg_list.len() != 1 {
         return None;
     }
@@ -272,19 +268,20 @@ fn collect_comparisons(
 /// Returns `true` if `a` and `b` refer to the same variable-like expression.
 /// Compares by source name (both lvar and bare-send share the name as symbol).
 fn same_variable(a: NodeId, b: NodeId, cx: &Cx<'_>) -> bool {
-    let sym_of = |id: NodeId| -> Option<murphy_plugin_api::Symbol> {
-        match *cx.kind(id) {
-            NodeKind::Lvar(sym) => Some(sym),
-            NodeKind::Send {
-                receiver,
-                method,
-                args,
-            } if receiver.get().is_none() && cx.list(args).is_empty() => Some(method),
+    let name_of = |id: NodeId| -> Option<&str> {
+        match cx.kind(id) {
+            NodeKind::Lvar(sym) => Some(cx.symbol_str(*sym)),
+            NodeKind::Send { .. }
+                if cx.call_receiver(id).get().is_none()
+                    && cx.call_arguments(id).is_empty() =>
+            {
+                cx.method_name(id)
+            }
             _ => None,
         }
     };
-    match (sym_of(a), sym_of(b)) {
-        (Some(sym_a), Some(sym_b)) => sym_a == sym_b,
+    match (name_of(a), name_of(b)) {
+        (Some(name_a), Some(name_b)) => name_a == name_b,
         _ => false,
     }
 }
