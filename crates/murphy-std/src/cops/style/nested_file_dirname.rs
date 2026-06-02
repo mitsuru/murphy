@@ -61,7 +61,9 @@ impl NestedFileDirname {
     }
 }
 
-/// Returns `true` if `node` is `File.dirname(...)` (accepting `::File`).
+/// Returns `true` if `node` is `File.dirname(path)` with exactly one argument
+/// (accepting `::File`). Excludes `File.dirname(path, n)` which already uses
+/// the level form.
 fn is_file_dirname(node: NodeId, cx: &Cx<'_>) -> bool {
     let NodeKind::Send {
         receiver,
@@ -84,8 +86,10 @@ fn is_file_dirname(node: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
 
-    // Must have at least one argument.
-    !cx.list(args).is_empty()
+    // Must have exactly one argument. This excludes `File.dirname(path, 2)`
+    // which already uses the level form — treating it as a chain segment would
+    // produce semantically wrong autocorrect (under-counted depth).
+    cx.list(args).len() == 1
 }
 
 /// Walk the nested chain `File.dirname(File.dirname(...path...))` and return
@@ -245,6 +249,24 @@ mod tests {
             File.dirname(File.dirname(File.dirname(path)))
                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `dirname(path, 3)` instead.
         "#});
+    }
+
+    // --- level-argument guard (regression for the review finding) ---
+
+    #[test]
+    fn accepts_inner_dirname_with_level_arg() {
+        // File.dirname(File.dirname(path, 2)) — inner already uses level form.
+        // The inner node has 2 args so is_file_dirname returns false → not flagged.
+        test::<NestedFileDirname>().expect_no_offenses("File.dirname(File.dirname(path, 2))
+");
+    }
+
+    #[test]
+    fn accepts_outer_dirname_with_level_arg() {
+        // File.dirname(File.dirname(path), 2) — outer has 2 args.
+        // The outer node has 2 args so is_file_dirname returns false → not flagged.
+        test::<NestedFileDirname>().expect_no_offenses("File.dirname(File.dirname(path), 2)
+");
     }
 }
 
