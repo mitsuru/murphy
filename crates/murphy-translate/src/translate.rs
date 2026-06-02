@@ -1267,13 +1267,18 @@ impl Translator {
         if let Some(p) = node.as_parentheses_node() {
             // Lower (expr) to Begin, same representation as begin...end.
             // The LeftParen token at range.start distinguishes this from begin...end.
-            let ids: Vec<NodeId> = match p.body().and_then(|b| b.as_statements_node()) {
+            // body() is normally a StatementsNode; fall back to direct translation
+            // for non-StatementsNode bodies (matches translate_body pattern).
+            let ids: Vec<NodeId> = match p.body() {
                 None => vec![],
-                Some(stmts) => stmts
-                    .body()
-                    .iter()
-                    .map(|n| self.translate_node(&n))
-                    .collect(),
+                Some(body) => match body.as_statements_node() {
+                    Some(stmts) => stmts
+                        .body()
+                        .iter()
+                        .map(|n| self.translate_node(&n))
+                        .collect(),
+                    None => vec![self.translate_node(&body)],
+                },
             };
             let list = self.builder.push_list(&ids);
             return self.builder.push(NodeKind::Begin(list), range);
