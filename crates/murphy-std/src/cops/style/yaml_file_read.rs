@@ -9,7 +9,8 @@
 //! upstream_cop: Style/YAMLFileRead
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-zgcp
 //! notes: >
 //!   Murphy v1 handles the core case matching YAML.load/safe_load/parse
 //!   with File.read as the first argument, with optional additional arguments.

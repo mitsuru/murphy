@@ -7,7 +7,8 @@
 //! upstream_cop: Style/TernaryParentheses
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-imxw
 //! notes: >
 //!   Three EnforcedStyle values are implemented:
 //!     require_no_parentheses (default): flag parenthesized conditions.

@@ -8,7 +8,8 @@
 //! upstream_cop: Style/RedundantConstantBase
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-y3h2
 //! notes: >
 //!   Core detection implemented: flags `::Const` (scope=None, raw source starts
 //!   with `::`) when not nested in a `class`/`module` body. `class << self`

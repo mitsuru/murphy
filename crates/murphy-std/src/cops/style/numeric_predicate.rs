@@ -8,7 +8,8 @@
 //! upstream_cop: Style/NumericPredicate
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-zgcp
 //! notes: >
 //!   Both EnforcedStyle values (`predicate` and `comparison`) are implemented.
 //!   Predicate style: flags `x == 0`, `x > 0`, `x < 0`, and inverted forms

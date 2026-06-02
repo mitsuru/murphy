@@ -8,7 +8,8 @@
 //! upstream_cop: Style/NegatedIf
 //! upstream_version_checked: 1.69.0
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-imxw
 //! notes: >
 //!   Murphy handles `if !foo` and `if not(expr)` (modifier and block
 //!   form). Autocorrect replaces `if` with `unless` and replaces the condition

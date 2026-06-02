@@ -8,7 +8,8 @@
 //! upstream_cop: Style/IfUnlessModifier
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-y3h2
 //! notes: >
 //!   Murphy v1 handles the common case: a multi-line if/unless with no else
 //!   branch, a single-statement body, where the modifier form fits in 120 chars.

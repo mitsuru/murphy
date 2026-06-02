@@ -8,7 +8,8 @@
 //! upstream_cop: Style/NegatedWhile
 //! upstream_version_checked: 1.69.0
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-imxw
 //! notes: >
 //!   Murphy handles `while !foo`, `until !foo` (block and modifier form), and
 //!   `not(expr)` style. Autocorrect swaps the keyword and replaces the

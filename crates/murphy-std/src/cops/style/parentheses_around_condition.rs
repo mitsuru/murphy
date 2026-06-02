@@ -8,7 +8,8 @@
 //! upstream_cop: Style/ParenthesesAroundCondition
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-imxw
 //! notes: >
 //!   Dispatch is on `if`/`while`/`until` nodes (all subscribable), with
 //!   detection based on the condition child. A parenthesized condition is

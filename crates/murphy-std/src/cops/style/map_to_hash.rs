@@ -8,7 +8,8 @@
 //! upstream_cop: Style/MapToHash
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-zgcp
 //! notes: >
 //!   Marked unsafe in RuboCop (Safe: false) because the receiver may not be
 //!   an Enumerable. Murphy does not have a Safe/SafeAutoCorrect cop-level

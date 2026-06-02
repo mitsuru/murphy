@@ -7,7 +7,8 @@
 //! upstream_cop: Style/SlicingWithRange
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-zgcp
 //! notes: >
 //!   Three cases are implemented:
 //!   1. Useless range: `ary[0..-1]` or `ary[0..]` → remove `[...]` entirely.

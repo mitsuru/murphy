@@ -9,7 +9,8 @@
 //! upstream_cop: Style/UnpackFirst
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-zgcp
 //! notes: >
 //!   Murphy v1 does not track target_ruby_version; this cop fires regardless
 //!   of the Ruby version in use (RuboCop enforces minimum_target_ruby_version

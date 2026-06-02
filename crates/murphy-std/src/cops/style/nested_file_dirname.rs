@@ -8,7 +8,8 @@
 //! upstream_cop: Style/NestedFileDirname
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-zgcp
 //! notes: >
 //!   Detection is fully implemented. Fires on the outermost File.dirname
 //!   when its first argument is also File.dirname (level >= 2). Parent guard
