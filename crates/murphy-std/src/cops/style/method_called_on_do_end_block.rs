@@ -19,6 +19,10 @@
 //!   cop (which handles `a do ... end.b do ... end` chains) and makes the
 //!   rule match RuboCop's `ignore_node(node.send_node)` behaviour.
 //!
+//!   The check uses `cx.ancestors` to determine at visit time whether the
+//!   outer send is the direct call node of a block, replicating RuboCop's
+//!   `ignore_node` without a separate state-tracking pass.
+//!
 //!   The offense range spans from the start of the `end` keyword (i.e., the
 //!   beginning of `receiver.loc.end`) to the end of the outer call,
 //!   matching RuboCop's `range_between(receiver.loc.end.begin_pos, ...)`.
@@ -71,23 +75,6 @@ impl MethodCalledOnDoEndBlock {
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
-
-    // Track block/numblock/itblock nodes whose send_node should be ignored
-    // (i.e., they are the outer block-with-block case, which is allowed).
-    #[on_node(kind = "block")]
-    fn mark_block_send(&self, node: NodeId, cx: &Cx<'_>) {
-        mark_inner_send_as_ignored(node, cx);
-    }
-
-    #[on_node(kind = "numblock")]
-    fn mark_numblock_send(&self, node: NodeId, cx: &Cx<'_>) {
-        mark_inner_send_as_ignored(node, cx);
-    }
-
-    #[on_node(kind = "itblock")]
-    fn mark_itblock_send(&self, node: NodeId, cx: &Cx<'_>) {
-        mark_inner_send_as_ignored(node, cx);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -100,30 +87,6 @@ fn is_any_block(id: NodeId, cx: &Cx<'_>) -> bool {
         cx.kind(id),
         NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. }
     )
-}
-
-/// Returns the inner `send`/`csend` call of a block node.
-fn block_send_node(id: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    match *cx.kind(id) {
-        NodeKind::Block { call, .. } | NodeKind::Numblock { send: call, .. } => Some(call),
-        NodeKind::Itblock { send, .. } => Some(send),
-        _ => None,
-    }
-}
-
-/// When a block node's call itself has a block, mark the inner call's
-/// send/csend as "to be ignored" so we don't fire on it.
-///
-/// RuboCop does this in `on_block`/`on_numblock`/`on_itblock` via
-/// `ignore_node(node.send_node)`. We replicate the logic by looking at the
-/// parent block to decide inside `check`.
-///
-/// Actually, in Murphy's visitor pattern there is no `ignore_node` API.
-/// Instead we check at visit time whether the outer send is used as the
-/// send-node of any block, by walking the send node's parent.
-fn mark_inner_send_as_ignored(_node: NodeId, _cx: &Cx<'_>) {
-    // No-op: the actual check is done in `check` by looking at whether the
-    // send node has a block parent via `cx.ancestors`.
 }
 
 /// Returns true if `send_node` is the `call` (send/csend) inside a

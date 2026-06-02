@@ -47,8 +47,6 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 #[derive(Default)]
 pub struct MinMax;
 
-const MSG: &str = "Use `%<receiver>s.minmax` instead of `%<offender>s`.";
-
 #[cop(
     name = "Style/MinMax",
     description = "Use `minmax` instead of `min` and `max` in conjunction.",
@@ -81,31 +79,24 @@ impl MinMax {
 
 /// For a `Send` node, return `(receiver_id, "min" | "max")`, or `None`.
 fn send_min_or_max(id: NodeId, cx: &Cx<'_>) -> Option<(NodeId, &'static str)> {
-    match *cx.kind(id) {
-        NodeKind::Send { receiver, method, args, .. } => {
-            let recv = receiver.get()?;
-            let args_list = cx.list(args);
-            if !args_list.is_empty() {
-                return None;
-            }
-            let name = cx.symbol_str(method);
-            match name {
-                "min" => Some((recv, "min")),
-                "max" => Some((recv, "max")),
-                _ => None,
-            }
-        }
+    let recv = cx.call_receiver(id).get()?;
+    if !cx.call_arguments(id).is_empty() {
+        return None;
+    }
+    match cx.method_name(id)? {
+        "min" => Some((recv, "min")),
+        "max" => Some((recv, "max")),
         _ => None,
     }
 }
 
 /// Check a two-element array node for `[recv.min, recv.max]`.
-/// Returns `(recv1_id, elems)` if it matches, or `None`.
-fn match_min_max_array(array_node: NodeId, cx: &Cx<'_>) -> Option<(NodeId, Vec<NodeId>)> {
+/// Returns `(recv1_id, [elem0, elem1])` if it matches, or `None`.
+fn match_min_max_array(array_node: NodeId, cx: &Cx<'_>) -> Option<(NodeId, [NodeId; 2])> {
     let NodeKind::Array(elems_list) = *cx.kind(array_node) else {
         return None;
     };
-    let elems = cx.list(elems_list).to_vec();
+    let elems = cx.list(elems_list);
     if elems.len() != 2 {
         return None;
     }
@@ -124,7 +115,7 @@ fn match_min_max_array(array_node: NodeId, cx: &Cx<'_>) -> Option<(NodeId, Vec<N
         return None;
     }
 
-    Some((recv1, elems))
+    Some((recv1, [elems[0], elems[1]]))
 }
 
 /// Offense range for an array node: the full array literal.
@@ -136,9 +127,7 @@ fn check_array_node(node: NodeId, cx: &Cx<'_>) {
     let offense_range = cx.range(node);
     let receiver_src = cx.raw_source(cx.range(recv1));
     let offender_src = cx.raw_source(offense_range);
-    let msg = MSG
-        .replace("%<receiver>s", receiver_src)
-        .replace("%<offender>s", offender_src);
+    let msg = format!("Use `{receiver_src}.minmax` instead of `{offender_src}`.");
 
     cx.emit_offense(offense_range, &msg, None);
     // Autocorrect: replace entire array with `recv.minmax`
@@ -163,13 +152,11 @@ fn check_return_node(node: NodeId, cx: &Cx<'_>) {
     // (matches RuboCop's `argument_range`).
     let offense_range = Range {
         start: cx.range(elems[0]).start,
-        end: cx.range(elems[elems.len() - 1]).end,
+        end: cx.range(elems[1]).end,
     };
     let receiver_src = cx.raw_source(cx.range(recv1));
     let offender_src = cx.raw_source(offense_range);
-    let msg = MSG
-        .replace("%<receiver>s", receiver_src)
-        .replace("%<offender>s", offender_src);
+    let msg = format!("Use `{receiver_src}.minmax` instead of `{offender_src}`.");
 
     cx.emit_offense(offense_range, &msg, None);
     // Autocorrect: replace the argument span with `recv.minmax`
