@@ -220,11 +220,21 @@ for i in 1 2 3 4 5; do
 done
 
 ### 5. Cleanup
+# Capture paths before leaving the worktree
+WT=\$(git rev-parse --show-toplevel)
+MAIN_REPO=\$(git worktree list | awk 'NR==1 {print \$1}')
+
 # Remove the remote cop branch (keeps origin tidy)
 git push origin --delete "\$COP_BRANCH" || true
 
 # Close the beads issue
 bd close ${task.id} --reason="cop ported and integrated into ${acceptanceBranch}"
+
+# Remove local worktree — must cd out first (cannot remove from inside)
+cd "\$MAIN_REPO"
+git worktree remove "\$WT" || git worktree remove --force "\$WT"
+git branch -D "\$COP_BRANCH" 2>/dev/null || true
+git worktree prune
 
 Return { id: "${task.id}", success: true, cop_name: "<Pack/CopName e.g. Style/Alias>" }`,
     {
