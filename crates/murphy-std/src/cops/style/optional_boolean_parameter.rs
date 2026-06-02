@@ -8,14 +8,17 @@
 //! upstream_cop: Style/OptionalBooleanParameter
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-enty]
+//! gap_issues: []
 //! notes: >
 //!   Detects method definitions (`def`/`defs`) with optional positional
 //!   arguments whose default value is `true` or `false`.
 //!   Suggests converting `bar = false` to `bar: false` (keyword argument form).
 //!   AllowedMethods is supported (Vec<String>); defaults to
 //!   ["respond_to_missing?"] matching RuboCop's upstream default.
-//!   AllowedPatterns (regex) is not supported.
+//!   AllowedPatterns is supported (Vec<String> of regex patterns, unanchored
+//!   matching via Rust's `regex` crate). Parity gap: Rust regex does not
+//!   support Ruby regex features (look-ahead, back-references, Unicode
+//!   properties). Invalid patterns are silently skipped (no panic).
 //!   No autocorrect (RuboCop marks it unsafe; method signature changes
 //!   implicitly change behavior).
 //! ```
@@ -37,7 +40,7 @@
 //! end
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, regex};
 
 const MSG: &str =
     "Prefer keyword arguments for arguments with a boolean default value; \
@@ -56,6 +59,12 @@ pub struct Options {
         description = "Methods that are allowed to use positional boolean parameters."
     )]
     pub allowed_methods: Vec<String>,
+    #[option(
+        name = "AllowedPatterns",
+        default = [],
+        description = "Regex patterns for method names that are allowed to use positional boolean parameters."
+    )]
+    pub allowed_patterns: Vec<String>,
 }
 
 #[cop(
@@ -80,9 +89,17 @@ impl OptionalBooleanParameter {
 fn check_def(node: NodeId, cx: &Cx<'_>) {
     let opts = cx.options_or_default::<Options>();
 
-    // Check AllowedMethods.
+    // Check AllowedMethods and AllowedPatterns.
     if let Some(name) = cx.method_name(node) {
         if opts.allowed_methods.iter().any(|m| m == name) {
+            return;
+        }
+        // AllowedPatterns: unanchored regex match (mirrors RuboCop's
+        // `pattern.match?(name)`). Invalid patterns are silently skipped.
+        if opts.allowed_patterns.iter().any(|pat| {
+            regex::Regex::new(pat)
+                .is_ok_and(|re| re.is_match(name))
+        }) {
             return;
         }
     }
@@ -212,6 +229,7 @@ mod tests {
     fn accepts_method_in_allowed_list() {
         let opts = Options {
             allowed_methods: vec!["some_method".to_string()],
+            allowed_patterns: vec![],
         };
         test::<OptionalBooleanParameter>()
             .with_options(&opts)
@@ -225,6 +243,7 @@ mod tests {
     fn flags_when_not_in_allowed_list() {
         let opts = Options {
             allowed_methods: vec!["other_method".to_string()],
+            allowed_patterns: vec![],
         };
         test::<OptionalBooleanParameter>()
             .with_options(&opts)
@@ -241,12 +260,75 @@ mod tests {
         // automatically allowed unless it's in the list.
         let opts = Options {
             allowed_methods: vec![],
+            allowed_patterns: vec![],
         };
         test::<OptionalBooleanParameter>()
             .with_options(&opts)
             .expect_offense(indoc! {"
                 def respond_to_missing?(name, include_private = false)
                                               ^^^^^^^^^^^^^^^^^^^^^^^ Prefer keyword arguments for arguments with a boolean default value; use `include_private: false` instead of `include_private = false`.
+                end
+            "});
+    }
+
+    // ----- AllowedPatterns option -----
+
+    #[test]
+    fn accepts_method_matching_allowed_pattern() {
+        let opts = Options {
+            allowed_methods: vec![],
+            allowed_patterns: vec!["^respond_to".to_string()],
+        };
+        test::<OptionalBooleanParameter>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {"
+                def respond_to_missing?(name, include_private = false)
+                end
+            "});
+    }
+
+    #[test]
+    fn accepts_method_matching_unanchored_pattern() {
+        let opts = Options {
+            allowed_methods: vec![],
+            allowed_patterns: vec!["_missing".to_string()],
+        };
+        test::<OptionalBooleanParameter>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {"
+                def respond_to_missing?(name, include_private = false)
+                end
+            "});
+    }
+
+    #[test]
+    fn flags_method_not_matching_pattern() {
+        let opts = Options {
+            allowed_methods: vec![],
+            allowed_patterns: vec!["^respond_to".to_string()],
+        };
+        test::<OptionalBooleanParameter>()
+            .with_options(&opts)
+            .expect_offense(indoc! {"
+                def some_method(bar = false)
+                                ^^^^^^^^^^^ Prefer keyword arguments for arguments with a boolean default value; use `bar: false` instead of `bar = false`.
+                end
+            "});
+    }
+
+    #[test]
+    fn skips_invalid_pattern_silently() {
+        // An invalid regex pattern should not panic; the method gets no
+        // exemption but the cop still runs normally.
+        let opts = Options {
+            allowed_methods: vec![],
+            allowed_patterns: vec!["[invalid".to_string()],
+        };
+        test::<OptionalBooleanParameter>()
+            .with_options(&opts)
+            .expect_offense(indoc! {"
+                def some_method(bar = false)
+                                ^^^^^^^^^^^ Prefer keyword arguments for arguments with a boolean default value; use `bar: false` instead of `bar = false`.
                 end
             "});
     }
