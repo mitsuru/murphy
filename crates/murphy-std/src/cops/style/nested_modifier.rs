@@ -45,7 +45,7 @@
 //! something if b && a
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceToken, SourceTokenKind, cop};
 
 const MSG: &str = "Avoid using nested modifiers.";
 
@@ -204,11 +204,40 @@ fn autocorrect(inner: NodeId, outer: NodeId, cx: &Cx<'_>) {
     let body_src = cx.raw_source(cx.range(actual_body));
     let outer_range = cx.range(outer);
 
+    // Wrap conditions in parens when they contain `||`/`or` and operator is `&&`.
+    // Without parens, `something if a || b if c` would produce
+    // `something if c && a || b` which changes semantics.
+    let outer_cond_str = if operator == "&&"
+        && cond_needs_parens(outer_cond_id, cx)
+    {
+        format!("({outer_cond_src})")
+    } else {
+        outer_cond_src.to_owned()
+    };
+    let inner_cond_str = if operator == "&&"
+        && cond_needs_parens(inner_cond_id, cx)
+    {
+        format!("({inner_cond_src})")
+    } else {
+        inner_cond_src.to_owned()
+    };
+
     // Build replacement: `body if outer_cond && inner_cond`
     let replacement = format!(
-        "{body_src} {outer_kw} {outer_cond_src} {operator} {inner_cond_src}"
+        "{body_src} {outer_kw} {outer_cond_str} {operator} {inner_cond_str}"
     );
     cx.emit_edit(outer_range, &replacement);
+}
+
+/// Returns `true` if the condition needs parentheses when joined with `&&`.
+/// Scans tokens for top-level `||` or `or` operators.
+fn cond_needs_parens(cond: NodeId, cx: &Cx<'_>) -> bool {
+    cx.tokens_in(cx.range(cond))
+        .iter()
+        .any(|tok: &SourceToken| {
+            let text = cx.token_text(*tok);
+            text == "or" || text == "||"
+        })
 }
 
 #[cfg(test)]
@@ -279,6 +308,18 @@ mod tests {
                           ^^^^^^ Avoid using nested modifiers.
             "},
             "something unless b || a\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_if_if_wraps_or_condition() {
+        // `something if a || b if c` → `something if c && (a || b)` (not `c && a || b`)
+        test::<NestedModifier>().expect_correction(
+            indoc! {"
+                something if a || b if c
+                          ^^ Avoid using nested modifiers.
+            "},
+            "something if c && (a || b)\n",
         );
     }
 
