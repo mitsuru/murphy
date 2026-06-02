@@ -11,8 +11,9 @@
 //! notes: >
 //!   Detects `Block` nodes with an `Args` child that has no arguments but
 //!   whose source range spans one or more `|` pipe tokens (i.e. `do ||` or
-//!   `{ || }`). Lambda blocks (`-> { || }` / `lambda { || }`) are excluded
-//!   as RuboCop does. Autocorrect removes the empty pipes and surrounding
+//!   `{ || }`). Only stabby lambda literals (`-> { || }`) are excluded —
+//!   matching RuboCop's `lambda_literal?` guard. The `lambda { || }` method
+//!   form IS flagged (consistent with RuboCop behavior). Autocorrect removes the empty pipes and surrounding
 //!   whitespace, leaving only the block opener.
 //! ```
 //!
@@ -63,8 +64,9 @@ pub struct EmptyBlockParameter;
 impl EmptyBlockParameter {
     #[on_node(kind = "block")]
     fn check_block(&self, node: NodeId, cx: &Cx<'_>) {
-        // Exclude lambda blocks.
-        if cx.is_lambda(node) {
+        // Exclude stabby lambda literals (`-> { || }`) per RuboCop's `lambda_literal?` guard.
+        // The `lambda { || }` method-call form IS flagged.
+        if cx.is_lambda_literal(node) {
             return;
         }
 
@@ -212,8 +214,12 @@ mod tests {
     }
 
     #[test]
-    fn accepts_lambda_method_block_with_empty_pipes() {
-        test::<EmptyBlockParameter>().expect_no_offenses("lambda { || }\n");
+    fn flags_lambda_method_block_with_empty_pipes() {
+        // RuboCop guards on `lambda_literal?` (stabby `->` only); the `lambda {}` form is flagged.
+        test::<EmptyBlockParameter>().expect_offense(indoc! {"
+            lambda { || }
+                     ^^ Omit pipes for the empty block parameters.
+        "});
     }
 
     // ----- Autocorrect -----------------------------------------------

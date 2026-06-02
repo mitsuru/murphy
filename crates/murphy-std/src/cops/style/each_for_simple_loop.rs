@@ -9,9 +9,8 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Detection: flags `(int..int).each {}` and `(int...int).each {}` when:
-//!   - block has no arguments, OR
-//!   - range starts at 0
+//!   Detection: flags `(int..int).each {}` and `(int...int).each {}` when
+//!   the block has no arguments (matches RuboCop's `node.arguments.empty?` guard).
 //!   In Murphy the parenthesized range receiver is represented as
 //!   `NodeKind::Unknown` (prism's ParenthesesNode). We match the receiver by
 //!   inspecting the raw source text of the `Unknown` node to extract the integer
@@ -98,10 +97,9 @@ fn check_each_block(node: NodeId, cx: &Cx<'_>) {
     };
     let has_block_args = !cx.list(list).is_empty();
 
-    // Offending when:
-    // - block has no args (any integer range qualifies), OR
-    // - range starts at 0 (even with block args)
-    if has_block_args && min != 0 {
+    // Only flag when block has no arguments.
+    // RuboCop returns immediately if node.arguments is non-empty.
+    if has_block_args {
         return;
     }
 
@@ -212,11 +210,9 @@ mod tests {
     }
 
     #[test]
-    fn flags_zero_origin_range_with_block_args() {
-        test::<EachForSimpleLoop>().expect_offense(indoc! {"
-            (0..5).each { |n| puts n }
-            ^^^^^^^^^^^ Use `Integer#times` for a simple loop which iterates a fixed number of times.
-        "});
+    fn accepts_zero_origin_range_with_block_args() {
+        // RuboCop only flags when block has no args (node.arguments.empty?).
+        test::<EachForSimpleLoop>().expect_no_offenses("(0..5).each { |n| puts n }\n");
     }
 
     // ----- Negative cases (no offense) --------------------------------
