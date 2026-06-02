@@ -124,14 +124,14 @@ fn check_trailing_conditional(node: NodeId, cx: &Cx<'_>) {
 
     if is_empty_branch(else_body, cx) && then_body.get().is_some() {
         // `a ? 'foo' : ''` → `'foo' if a`
-        cx.emit_offense(cx.range(node), MSG_TRAILING_CONDITIONAL, None);
+        cx.emit_offense(cx.range(node), MSG_TERNARY, None);
         let outcome = then_body.get().unwrap();
         let outcome_src = cx.raw_source(cx.range(outcome));
         let cond_src = cx.raw_source(cx.range(cond));
         cx.emit_edit(cx.range(node), &format!("{} if {}", outcome_src, cond_src));
     } else if is_empty_branch(then_body, cx) && else_body.get().is_some() {
         // `a ? '' : 'foo'` → `'foo' unless a`
-        cx.emit_offense(cx.range(node), MSG_TRAILING_CONDITIONAL, None);
+        cx.emit_offense(cx.range(node), MSG_TERNARY, None);
         let outcome = else_body.get().unwrap();
         let outcome_src = cx.raw_source(cx.range(outcome));
         let cond_src = cx.raw_source(cx.range(cond));
@@ -168,7 +168,7 @@ fn check_ternary(node: NodeId, cx: &Cx<'_>) {
         if is_empty_node(outcome, cx) {
             return;
         }
-        cx.emit_offense(cx.range(node), MSG_TERNARY, None);
+        cx.emit_offense(cx.range(node), MSG_TRAILING_CONDITIONAL, None);
         let outcome_src = cx.raw_source(cx.range(outcome));
         let cond_src = cx.raw_source(cx.range(cond));
         cx.emit_edit(
@@ -183,7 +183,7 @@ fn check_ternary(node: NodeId, cx: &Cx<'_>) {
         if is_empty_node(outcome, cx) {
             return;
         }
-        cx.emit_offense(cx.range(node), MSG_TERNARY, None);
+        cx.emit_offense(cx.range(node), MSG_TRAILING_CONDITIONAL, None);
         let outcome_src = cx.raw_source(cx.range(outcome));
         let cond_src = cx.raw_source(cx.range(cond));
         cx.emit_edit(
@@ -213,7 +213,7 @@ mod tests {
     fn flags_ternary_with_empty_else_in_interpolation() {
         test::<EmptyStringInsideInterpolation>().expect_offense(indoc! {r##"
             x = "#{a ? 'foo' : ''}"
-                   ^^^^^^^^^^^^^^ Do not use trailing conditionals in string interpolation.
+                   ^^^^^^^^^^^^^^ Do not return empty strings in string interpolation.
         "##});
     }
 
@@ -221,7 +221,7 @@ mod tests {
     fn flags_ternary_with_empty_if_in_interpolation() {
         test::<EmptyStringInsideInterpolation>().expect_offense(indoc! {r##"
             x = "#{a ? '' : 'foo'}"
-                   ^^^^^^^^^^^^^^ Do not use trailing conditionals in string interpolation.
+                   ^^^^^^^^^^^^^^ Do not return empty strings in string interpolation.
         "##});
     }
 
@@ -230,7 +230,7 @@ mod tests {
         test::<EmptyStringInsideInterpolation>().expect_correction(
             indoc! {r##"
                 x = "#{a ? 'foo' : ''}"
-                       ^^^^^^^^^^^^^^ Do not use trailing conditionals in string interpolation.
+                       ^^^^^^^^^^^^^^ Do not return empty strings in string interpolation.
             "##},
             "x = \"#{'foo' if a}\"\n",
         );
@@ -241,7 +241,7 @@ mod tests {
         test::<EmptyStringInsideInterpolation>().expect_correction(
             indoc! {r##"
                 x = "#{a ? '' : 'foo'}"
-                       ^^^^^^^^^^^^^^ Do not use trailing conditionals in string interpolation.
+                       ^^^^^^^^^^^^^^ Do not return empty strings in string interpolation.
             "##},
             "x = \"#{'foo' unless a}\"\n",
         );
@@ -275,7 +275,7 @@ mod tests {
             })
             .expect_offense(indoc! {r##"
                 x = "#{'foo' if a}"
-                       ^^^^^^^^^^ Do not return empty strings in string interpolation.
+                       ^^^^^^^^^^ Do not use trailing conditionals in string interpolation.
             "##});
     }
 
@@ -288,7 +288,7 @@ mod tests {
             .expect_correction(
                 indoc! {r##"
                     x = "#{'foo' if a}"
-                           ^^^^^^^^^^ Do not return empty strings in string interpolation.
+                           ^^^^^^^^^^ Do not use trailing conditionals in string interpolation.
                 "##},
                 "x = \"#{a ? 'foo' : ''}\"\n",
             );
@@ -302,7 +302,7 @@ mod tests {
             })
             .expect_offense(indoc! {r##"
                 x = "#{'foo' unless a}"
-                       ^^^^^^^^^^^^^^ Do not return empty strings in string interpolation.
+                       ^^^^^^^^^^^^^^ Do not use trailing conditionals in string interpolation.
             "##});
     }
 
