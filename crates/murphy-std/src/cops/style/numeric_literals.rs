@@ -7,14 +7,16 @@
 //! upstream: rubocop
 //! upstream_cop: Style/NumericLiterals
 //! upstream_version_checked: 1.86.2
-//! status: verified
+//! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Non-decimal literals (0x…, 0b…, 0o…) are skipped with a TODO comment
-//!   in RuboCop's source; same behavior here.
+//!   Non-decimal literals (0x…, 0b…, 0o…, and legacy octal 0NNN) are skipped
+//!   with a TODO comment in RuboCop's source; same behavior here.
 //!   AllowedNumbers is supported (Vec<String>, compared as digit-only strings
 //!   against the raw integer part).
-//!   AllowedPatterns (regex) is not supported — derive only covers Vec<String>.
+//!   AllowedPatterns (regex) is not supported — derive only covers Vec<String>;
+//!   users relying on AllowedPatterns in .rubocop.yml will not get the same
+//!   exemption in Murphy.
 //!   Strict mode is supported: in non-strict mode, a short leading group is
 //!   allowed (e.g. `10_000`); in strict mode every group must be exactly 3.
 //!   MinDigits defaults to 5 (matching RuboCop default).
