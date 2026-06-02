@@ -102,18 +102,14 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // When AllowedAddresses is empty (default from derive), use RuboCop's
     // default of ["::"].
-    let default_allowed = ["::".to_string()];
-    let effective_allowed: &[String] = if opts.allowed_addresses.is_empty() {
-        &default_allowed
+    let is_allowed = if opts.allowed_addresses.is_empty() {
+        contents.eq_ignore_ascii_case("::")
     } else {
-        &opts.allowed_addresses
+        opts.allowed_addresses
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(contents))
     };
-
-    let contents_lower = contents.to_ascii_lowercase();
-    if effective_allowed
-        .iter()
-        .any(|a| a.to_ascii_lowercase() == contents_lower)
-    {
+    if is_allowed {
         return;
     }
 
@@ -126,8 +122,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 }
 
 fn starts_with_hex_or_colon(s: &str) -> bool {
-    let b = s.as_bytes()[0];
-    b == b':' || b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || (b'A'..=b'F').contains(&b)
+    s.as_bytes()
+        .first()
+        .map_or(false, |&b| b == b':' || b.is_ascii_hexdigit())
 }
 
 fn is_ip_address(s: &str) -> bool {

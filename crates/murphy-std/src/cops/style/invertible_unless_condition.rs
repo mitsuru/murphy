@@ -173,7 +173,7 @@ fn is_class_inheritance_check(arg: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     };
     let name_str = cx.symbol_str(*name);
-    !name_str.is_empty() && name_str != name_str.to_uppercase()
+    name_str.chars().any(|c| c.is_lowercase())
 }
 
 /// Build the preferred (inverted) condition string for the offense message.
