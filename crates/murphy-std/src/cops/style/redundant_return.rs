@@ -56,7 +56,7 @@
 //!   `value_node.range.start` (removes the `return ` prefix including space).
 //! - bare `return`: replace the whole `return` node range with `nil`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -148,9 +148,12 @@ fn check_return(node: NodeId, cx: &Cx<'_>) {
             use crate::cops::util::is_parenthesized;
             if is_parenthesized(val_id, cx) {
                 // `return(expr)`: three surgical edits to remove return, (, and ).
-                // Use token ranges for ( and ) to be explicit about what is deleted.
-                let lp = cx.token_after(value_range.start);
-                let rp = cx.token_before(value_range.end);
+                // Verify token kinds defensively even though is_parenthesized already
+                // guarantees a LeftParen at value_range.start.
+                let lp = cx.token_after(value_range.start)
+                    .filter(|t| t.kind == SourceTokenKind::LeftParen);
+                let rp = cx.token_before(value_range.end)
+                    .filter(|t| t.kind == SourceTokenKind::RightParen);
                 // Edit 1: delete "return" (return node start to begin node start).
                 cx.emit_edit(
                     Range { start: return_range.start, end: value_range.start },
