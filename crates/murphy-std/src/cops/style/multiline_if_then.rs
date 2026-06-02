@@ -82,7 +82,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let if_branch = cx.if_branch(node);
     let body_start = if_branch.get().map(|b| cx.range(b).start);
 
-    if !is_multiline_then(then_range, body_start, cx) {
+    if !is_multiline_then(then_range, body_start, cx.range(node).end, cx) {
         return;
     }
 
@@ -137,13 +137,15 @@ fn find_then_token(node: NodeId, cx: &Cx<'_>) -> Range {
 
 /// Returns true if the `then` token is followed by a newline before the body
 /// starts (multiline form). Also returns true when there is no body.
-fn is_multiline_then(then_range: Range, body_start: Option<u32>, cx: &Cx<'_>) -> bool {
+fn is_multiline_then(then_range: Range, body_start: Option<u32>, node_end: u32, cx: &Cx<'_>) -> bool {
     let search_end = match body_start {
         Some(start) if start > then_range.end => start,
         Some(_) => return false, // body starts at or before then.end — single-line
         None => {
-            // No body: check for any Newline after `then`.
-            return has_newline_in(then_range.end, u32::MAX, cx);
+            // No body: check for a Newline between `then.end` and the node
+            // end (before the `end` keyword). Bounding to node_end avoids
+            // picking up the trailing newline of `if cond then end\n`.
+            return has_newline_in(then_range.end, node_end, cx);
         }
     };
 
@@ -267,6 +269,18 @@ mod tests {
     #[test]
     fn accepts_ternary() {
         test::<MultilineIfThen>().expect_no_offenses("cond ? a : b\n");
+    }
+
+    #[test]
+    fn accepts_single_line_if_then_no_body() {
+        // `if cond then end` on a single line is not multiline — no offense.
+        test::<MultilineIfThen>().expect_no_offenses("if cond then end\n");
+    }
+
+    #[test]
+    fn accepts_single_line_unless_then_no_body() {
+        // `unless cond then end` on a single line is not multiline — no offense.
+        test::<MultilineIfThen>().expect_no_offenses("unless cond then end\n");
     }
 }
 
