@@ -335,11 +335,7 @@ fn block_args_pipes_range(block_node: NodeId, cx: &Cx<'_>) -> Option<Range> {
 // ---------------------------------------------------------------------------
 
 fn check_map_to_h(to_h_node: NodeId, cx: &Cx<'_>) {
-    let receiver = match cx.call_receiver(to_h_node).get() {
-        Some(r) => r,
-        None => return,
-    };
-    let NodeKind::Block { .. } = cx.kind(receiver) else {
+    let Some(receiver) = cx.call_receiver(to_h_node).get() else {
         return;
     };
 
@@ -390,9 +386,6 @@ fn check_hash_brackets_map(brackets_node: NodeId, cx: &Cx<'_>) {
         return;
     }
     let block_node = args[0];
-    let NodeKind::Block { .. } = cx.kind(block_node) else {
-        return;
-    };
 
     let Some(m) = match_transform_keys_block(block_node, &["map", "collect"], cx) else {
         return;
@@ -421,13 +414,6 @@ fn check_hash_brackets_map(brackets_node: NodeId, cx: &Cx<'_>) {
 // ---------------------------------------------------------------------------
 
 fn check_block_to_h(block_node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Block { call, .. } = *cx.kind(block_node) else {
-        return;
-    };
-    if cx.method_name(call) != Some("to_h") {
-        return;
-    }
-
     let Some(m) = match_transform_keys_block(block_node, &["to_h"], cx) else {
         return;
     };

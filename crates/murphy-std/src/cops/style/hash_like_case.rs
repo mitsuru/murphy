@@ -112,9 +112,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // Collect the condition and body from each when branch.
-    let mut cond_nodes: Vec<NodeId> = Vec::with_capacity(when_nodes.len());
-    let mut body_nodes: Vec<NodeId> = Vec::with_capacity(when_nodes.len());
+    // Validate each when branch on the fly; track discriminants to avoid
+    // allocating Vec collectors.
+    let mut first_cond_disc = None;
+    let mut first_body_disc = None;
 
     for &when_id in when_nodes {
         let NodeKind::When { conds, body } = *cx.kind(when_id) else {
@@ -141,30 +142,21 @@ fn check(node: NodeId, cx: &Cx<'_>) {
             return;
         }
 
-        cond_nodes.push(cond);
-        body_nodes.push(body_id);
-    }
+        // All conditions must share the same NodeKind discriminant.
+        let cond_disc = discriminant(cx.kind(cond));
+        if *first_cond_disc.get_or_insert(cond_disc) != cond_disc {
+            return;
+        }
 
-    // All conditions must share the same NodeKind discriminant.
-    if !nodes_of_same_discriminant(&cond_nodes, cx) {
-        return;
-    }
-    // All bodies must share the same NodeKind discriminant.
-    if !nodes_of_same_discriminant(&body_nodes, cx) {
-        return;
+        // All bodies must share the same NodeKind discriminant.
+        let body_disc = discriminant(cx.kind(body_id));
+        if *first_body_disc.get_or_insert(body_disc) != body_disc {
+            return;
+        }
     }
 
     // Emit offense on the `case` keyword.
     cx.emit_offense(cx.loc(node).keyword(), MSG, None);
-}
-
-/// Returns true if all nodes in the slice have the same `NodeKind` discriminant.
-fn nodes_of_same_discriminant(nodes: &[NodeId], cx: &Cx<'_>) -> bool {
-    if nodes.is_empty() {
-        return true;
-    }
-    let first_disc = discriminant(cx.kind(nodes[0]));
-    nodes[1..].iter().all(|&n| discriminant(cx.kind(n)) == first_disc)
 }
 
 // ---------------------------------------------------------------------------
