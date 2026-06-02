@@ -18,6 +18,13 @@
 //!       targets Ruby 3.0+ so no version gate is applied).
 //!     - Freezing the result of `count`/`length`/`size` method calls
 //!       (including block-wrapped forms via Block/Numblock/Itblock).
+//!       Note: this is a heuristic — user-defined `count`/`length`/`size` methods
+//!       could return mutable objects. This matches RuboCop's own approach, which
+//!       applies the same heuristic without a version guard.
+//!   Safety:
+//!     - Autocorrect is unsafe for the `count`/`length`/`size` patterns: a
+//!       user-defined method with one of those names could return a mutable object,
+//!       so deleting `.freeze` could change observable behavior.
 //!   Gaps:
 //!     - Parenthesized arithmetic/comparison patterns:
 //!       `(1 + 2).freeze`, `(a == b).freeze`, `(int op int).freeze`.
@@ -57,6 +64,7 @@ const MSG: &str = "Do not freeze immutable objects, as freezing them has no effe
     default_severity = "warning",
     default_enabled = true,
     options = NoOptions,
+    safe_autocorrect = false,
 )]
 impl RedundantFreeze {
     #[on_node(kind = "send", methods = ["freeze"])]
@@ -128,11 +136,13 @@ fn is_redundant_freeze_receiver(receiver: NodeId, cx: &Cx<'_>) -> bool {
     operation_produces_immutable(receiver, cx)
 }
 
-/// Returns true when the node is an operation guaranteed to produce
+/// Returns true when the node is an operation likely to produce
 /// an immutable (numeric or boolean) result.
 ///
 /// Patterns covered:
-///   - `recv.count/length/size(...)` — count/length/size calls (any args)
+///   - `recv.count/length/size(...)` — heuristic: these methods return Integer
+///     on all standard Ruby collections. User-defined overrides could return
+///     mutable objects, which is why the autocorrect is marked unsafe.
 ///   - Block-wrapped `count/length/size` call
 ///
 /// Note: Parenthesized arithmetic/comparison patterns (`(1+2).freeze`, etc.)
@@ -142,7 +152,8 @@ fn operation_produces_immutable(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
         NodeKind::Send { method, .. } => {
             let method_name = cx.symbol_str(method);
-            // count/length/size always return an Integer
+            // count/length/size heuristic: standard collections return Integer;
+            // user-defined overrides could differ (autocorrect is unsafe)
             matches!(method_name, "count" | "length" | "size")
         }
         // Block-wrapped count/length/size: `arr.count { ... }.freeze`
@@ -422,6 +433,19 @@ mod tests {
             "},
             "CONST = arr.count { |x| x > 1 }\n",
         );
+    }
+
+    // --- count/length/size heuristic is intentional ---
+
+    #[test]
+    fn flags_count_on_arbitrary_receiver() {
+        // This is intentional: same heuristic as RuboCop.
+        // count/length/size on user-defined objects *could* return mutable values,
+        // but we flag them to match RuboCop's behavior. Autocorrect is unsafe.
+        test::<RedundantFreeze>().expect_offense(indoc! {"
+            CONST = foo.count.freeze
+                    ^^^^^^^^^^^^^^^^ Do not freeze immutable objects, as freezing them has no effect.
+        "});
     }
 
     // --- Negative cases (no offense) ---
