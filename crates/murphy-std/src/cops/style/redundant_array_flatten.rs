@@ -16,14 +16,18 @@
 //!   to `join`. Also, if the global variable `$,` is set to a value other
 //!   than the default `nil`, false positives may occur.
 //!   The cop is disabled by default (Enabled: pending in RuboCop).
+//!   Upstream uses `alias on_csend on_send` and flags all csend variants.
+//!   Murphy restricts to plain `send` for both flatten and join to avoid
+//!   autocorrect behavior changes on nil receivers: x.flatten&.join → x&.join
+//!   would silently return nil instead of raising when x is nil.
 //!   Covered patterns:
-//!     - x.flatten.join
+//!     - x.flatten.join (both plain send)
 //!     - x.flatten(n).join (any number of flatten args)
 //!     - x.flatten.join with no arg or explicit nil arg
-//!     - csend variants: x&.flatten.join, x.flatten&.join
 //!   Not flagged:
 //!     - x.flatten.join(", ") (join with non-nil separator arg)
 //!     - flatten with no receiver (bare `flatten.join`)
+//!     - csend variants (x&.flatten.join, x.flatten&.join) — behavior change risk
 //! ```
 //!
 //! ## Matched shapes
@@ -58,16 +62,6 @@ impl RedundantArrayFlatten {
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
-
-    #[on_node(kind = "csend")]
-    fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if cx.symbol_str(method) == "join" {
-            check(node, cx);
-        }
-    }
 }
 
 fn check(join_node: NodeId, cx: &Cx<'_>) {
@@ -83,29 +77,32 @@ fn check(join_node: NodeId, cx: &Cx<'_>) {
         _ => return,
     }
 
-    // The receiver of join must be a flatten call (send or csend).
+    // The receiver of join must be a plain (non-safe-navigation) flatten call.
+    // We only handle `send` (not `csend`) for flatten to avoid autocorrect
+    // behavior changes: `x.flatten&.join` → `x&.join` changes nil semantics
+    // because `x.flatten&.join` raises when x is nil, but `x&.join` returns nil.
     let Some(flatten_node) = cx.call_receiver(join_node).get() else {
         return;
     };
-
-    // Extract flatten's receiver and method name.
-    let (flatten_recv_opt, flatten_method) = match *cx.kind(flatten_node) {
-        NodeKind::Send { receiver, method, .. } => (receiver.get(), method),
-        NodeKind::Csend { receiver, method, .. } => (Some(receiver), method),
-        _ => return,
+    let NodeKind::Send {
+        receiver: flatten_receiver,
+        method: flatten_method,
+        ..
+    } = *cx.kind(flatten_node)
+    else {
+        return;
     };
     if cx.symbol_str(flatten_method) != "flatten" {
         return;
     }
 
     // flatten must have a non-nil receiver (bare `flatten.join` is not flagged).
-    let Some(flatten_receiver_id) = flatten_recv_opt else {
+    let Some(flatten_receiver_id) = flatten_receiver.get() else {
         return;
     };
 
-    // The offense range covers `.flatten` (or `&.flatten`) including any args,
+    // The offense range covers `.flatten` (including any args),
     // i.e. from after flatten's receiver end to flatten node end.
-    // This includes the dot or `&.` operator before `flatten`.
     let flatten_receiver_end = cx.range(flatten_receiver_id).end;
     let flatten_end = cx.range(flatten_node).end;
 
@@ -116,7 +113,7 @@ fn check(join_node: NodeId, cx: &Cx<'_>) {
 
     cx.emit_offense(offense_range, MSG, None);
 
-    // Autocorrect: delete the range covering .flatten(...) / &.flatten(...)
+    // Autocorrect: delete the range covering .flatten(...)
     cx.emit_edit(offense_range, "");
 }
 
@@ -133,7 +130,7 @@ mod tests {
 
     #[test]
     fn flags_flatten_join_no_args() {
-        // offense range covers `.flatten` (dot + method name, 9 chars starting at pos 1)
+        // offense range covers `.flatten` (dot + method name, 8 chars)
         test::<RedundantArrayFlatten>().expect_offense(indoc! {"
             x.flatten.join
              ^^^^^^^^ Remove the redundant `flatten`.
@@ -153,7 +150,7 @@ mod tests {
 
     #[test]
     fn flags_flatten_with_arg_join() {
-        // offense range covers `.flatten(1)` (12 chars starting at pos 1)
+        // offense range covers `.flatten(1)` (11 chars)
         test::<RedundantArrayFlatten>().expect_offense(indoc! {"
             x.flatten(1).join
              ^^^^^^^^^^^ Remove the redundant `flatten`.
@@ -166,26 +163,6 @@ mod tests {
             indoc! {"
                 x.flatten(1).join
                  ^^^^^^^^^^^ Remove the redundant `flatten`.
-            "},
-            "x.join\n",
-        );
-    }
-
-    #[test]
-    fn flags_csend_flatten_join() {
-        // offense range covers `&.flatten` (9 chars starting at pos 1)
-        test::<RedundantArrayFlatten>().expect_offense(indoc! {"
-            x&.flatten.join
-             ^^^^^^^^^ Remove the redundant `flatten`.
-        "});
-    }
-
-    #[test]
-    fn corrects_csend_flatten_join() {
-        test::<RedundantArrayFlatten>().expect_correction(
-            indoc! {"
-                x&.flatten.join
-                 ^^^^^^^^^ Remove the redundant `flatten`.
             "},
             "x.join\n",
         );
@@ -212,6 +189,18 @@ mod tests {
     fn accepts_bare_flatten_join() {
         // bare flatten without explicit receiver is not flagged
         test::<RedundantArrayFlatten>().expect_no_offenses("flatten.join\n");
+    }
+
+    #[test]
+    fn accepts_csend_flatten_join() {
+        // x.flatten&.join is not flagged: autocorrect x&.join changes nil semantics
+        test::<RedundantArrayFlatten>().expect_no_offenses("x.flatten&.join\n");
+    }
+
+    #[test]
+    fn accepts_flatten_csend_join() {
+        // x&.flatten.join is not flagged: autocorrect x.join changes nil semantics
+        test::<RedundantArrayFlatten>().expect_no_offenses("x&.flatten.join\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantArrayFlatten);
