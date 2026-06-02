@@ -17,10 +17,12 @@
 //!     - Array(['a', 'b']) (Kernel method) → ['a', 'b']
 //!   Not flagged:
 //!     - Array.new(3, 'foo') (size + default value form)
-//!     - Array.new(3) { 'foo' } (size + block form)
+//!     - Array.new(3) { 'foo' } (size + block form, block node wraps the send)
+//!     - Array.new([...]) { ... } (send wrapped as block call)
 //!     - Array.new (no args)
 //!     - Array('foo') (Kernel conversion of non-array)
 //!     - Foo::Array.new([]) (namespaced constant)
+//!     - Array.[]('a') (explicit dot bracket form, rare but valid Ruby)
 //! ```
 //!
 //! ## Matched shapes
@@ -77,6 +79,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let arg_list = cx.list(args);
     let node_range = cx.range(node);
 
+    // If this send is the call of a block node (e.g. Array.new([]) { ... }),
+    // autocorrect would produce `[...] { ... }` which is invalid Ruby.
+    if cx.block_node(node).get().is_some() {
+        return;
+    }
+
     match method_name {
         "new" => {
             // Array.new([...]) / ::Array.new([...])
@@ -128,14 +136,20 @@ fn check(node: NodeId, cx: &Cx<'_>) {
             if !is_array_const(recv_id, cx) {
                 return;
             }
+            // Guard against `Array.[]('a')` explicit dot form: autocorrecting
+            // that would delete the `Array` prefix leaving `[](...)` which is
+            // invalid Ruby. Only handle the implicit bracket form `Array[...]`.
+            if cx.is_dot(node) {
+                return;
+            }
             // Any number of args (including zero) is valid for [].
 
             // Offense: entire send node.
             cx.emit_offense(node_range, MSG, None);
 
             // Autocorrect: delete the `Array` receiver prefix.
-            // The `[]` selector starts right after the receiver, so we delete
-            // from the node start to just before the `[` selector.
+            // The `[]` selector starts right after the receiver in bracket form,
+            // so we delete from the node start to just before the `[` selector.
             let selector_start = cx.selector(node).start;
             cx.emit_edit(
                 Range {
@@ -348,8 +362,7 @@ mod tests {
 
     #[test]
     fn accepts_array_new_no_args() {
-        // Array.new with no args is valid (creates empty array, but no block/arg)
-        // RuboCop does NOT flag this since there's no array literal argument.
+        // Array.new with no args: no array literal argument, not flagged.
         test::<RedundantArrayConstructor>().expect_no_offenses("Array.new\n");
     }
 
@@ -367,6 +380,21 @@ mod tests {
     #[test]
     fn accepts_plain_array_literal() {
         test::<RedundantArrayConstructor>().expect_no_offenses("['foo', 'bar']\n");
+    }
+
+    #[test]
+    fn accepts_array_new_with_block() {
+        // Array.new([1]) { |x| x } — send wrapped as block call: correction
+        // would produce `[1] { |x| x }` which is invalid Ruby.
+        test::<RedundantArrayConstructor>()
+            .expect_no_offenses("Array.new([1]) { |x| x }\n");
+    }
+
+    #[test]
+    fn accepts_array_bracket_explicit_dot_form() {
+        // Array.[]('a') — explicit dot form: correction would produce []('a')
+        // which is invalid Ruby.
+        test::<RedundantArrayConstructor>().expect_no_offenses("Array.[]('a')\n");
     }
 }
 murphy_plugin_api::submit_cop!(RedundantArrayConstructor);
