@@ -11,13 +11,12 @@
 //! gap_issues: []
 //! notes: >
 //!   Block form (`inject`/`reduce` with explicit 2-arg block) is fully
-//!   covered with autocorrect. Numblock form (`inject(x) { _1[_2] = _2; _1 }`)
-//!   is detected but autocorrect is not implemented due to complexity of
-//!   renaming `_1`/`_2` references throughout the body while avoiding
-//!   clobbering. Itblock form is excluded (Ruby 3.4+ only, no inject idiom).
-//!   Basic-literal argument guard matches RuboCop: `inject(0)`, `inject("")`,
+//!   covered with autocorrect. Numblock and itblock forms are not ported.
+//!   Requires exactly 1 send argument (the initial accumulator object) —
+//!   `inject` with no arg is not flagged since `each_with_object` requires an
+//!   object. Basic-literal argument guard: `inject(0)`, `inject("")`,
 //!   `inject(:sym)`, `inject(true)`, `inject(false)`, `inject(nil)` are NOT
-//!   flagged. `inject({})`, `inject([])` and no-argument forms ARE flagged.
+//!   flagged. `inject({})` and `inject([])` ARE flagged.
 //!   Accumulator-reassignment guard: if the first block param is re-assigned
 //!   (Lvasgn targeting that symbol) anywhere in the body, the offense is skipped.
 //! ```
@@ -94,8 +93,9 @@ fn check_inject_block(node: NodeId, cx: &Cx<'_>) {
     }
 
     // Must have exactly one send argument (the initial value).
+    // `each_with_object` requires an object arg, so no-arg inject cannot be converted.
     let send_args = cx.call_arguments(call);
-    if send_args.len() > 1 {
+    if send_args.len() != 1 {
         return;
     }
 
@@ -356,11 +356,9 @@ mod tests {
     }
 
     #[test]
-    fn flags_inject_without_initial_value() {
-        test::<EachWithObject>().expect_offense(indoc! {"
-            [1, 2].inject { |a, e| a + e; a }
-                   ^^^^^^ Use `each_with_object` instead of `inject`.
-        "});
+    fn accepts_inject_without_initial_value() {
+        // No arg inject cannot be converted to each_with_object (requires an object arg).
+        test::<EachWithObject>().expect_no_offenses("[1, 2].inject { |a, e| a + e; a }\n");
     }
 
     // ----- Negative cases (no offense) --------------------------------
