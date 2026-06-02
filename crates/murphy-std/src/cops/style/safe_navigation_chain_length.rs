@@ -72,7 +72,20 @@ impl SafeNavigationChainLength {
         let opts = cx.options_or_default::<SafeNavigationChainLengthOptions>();
         let max = opts.max.max(1) as usize;
 
-        // Collect consecutive csend ancestors walking up the tree.
+        // Walk UP the ancestor chain from this csend, collecting consecutive csend
+        // ancestors. This fires for every csend node, but only the innermost csend
+        // (whose receiver is not itself a csend) accumulates all chain ancestors.
+        //
+        // For x&.foo&.bar&.baz (3 csends, max=2):
+        //   - innermost (x&.foo): ancestors = [csend_bar, csend_baz] → size 2 >= 2 → offense
+        //   - middle (x&.foo&.bar): ancestors = [csend_baz] → size 1 < 2 → no offense
+        //   - outermost (x&.foo&.bar&.baz): ancestors = [] → size 0 < 2 → no offense
+        // Exactly one offense emitted, matching RuboCop's behavior.
+        //
+        // For x&.foo&.bar (2 csends, max=2):
+        //   - innermost (x&.foo): ancestors = [csend_bar] → size 1 < 2 → no offense
+        //   - outermost (x&.foo&.bar): ancestors = [] → size 0 < 2 → no offense
+        // No offense emitted. RuboCop's default allows chains up to Max calls.
         let mut csend_ancestors: Vec<NodeId> = Vec::new();
         let mut current = node;
         while let Some(parent) = cx.parent(current).get() {
@@ -83,6 +96,9 @@ impl SafeNavigationChainLength {
             current = parent;
         }
 
+        // Offense fires when the ancestor csend count equals or exceeds Max.
+        // This is equivalent to total_chain_length (= ancestors + 1) > Max,
+        // matching RuboCop: .
         if csend_ancestors.len() < max {
             return;
         }
