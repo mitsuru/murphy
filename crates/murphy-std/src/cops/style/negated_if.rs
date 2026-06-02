@@ -35,7 +35,7 @@
 //!    which handles both `!expr` (removes `!`) and `not(expr)` (removes `not(…)`).
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
-use crate::cops::util::is_parenthesized;
+use crate::cops::util::{emit_edit_with_preceding_space, is_parenthesized};
 
 const MSG: &str = "Favor `unless` over `if` for negative conditions.";
 
@@ -172,8 +172,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Using replace-whole-condition handles both `!expr` (strips `!`) and
     // `not(expr)` (strips `not(` and the closing `)`), matching RuboCop's
     // ConditionCorrector which does `replace(condition, condition.children.first.source)`.
+    // Use emit_edit_with_preceding_space to guard against `if(!expr)` → `unlessx`.
     let recv_src = cx.raw_source(cx.range(recv));
-    cx.emit_edit(cx.range(cond), recv_src);
+    emit_edit_with_preceding_space(cx.range(cond), recv_src, cx);
 }
 
 #[cfg(test)]
@@ -276,6 +277,17 @@ mod tests {
             "something if (!x.even?)\n\
              ^^^^^^^^^^^^^^^^^^^^^^^ Favor `unless` over `if` for negative conditions.\n",
             "something unless x.even?\n",
+        );
+    }
+
+    #[test]
+    fn flags_modifier_if_with_parenthesized_negation_no_space() {
+        // `return if(!valid?)` — no space between `if` and `(`.
+        // Autocorrect must insert a space: `return unless valid?`.
+        test::<NegatedIf>().expect_correction(
+            "return if(!valid?)\n\
+             ^^^^^^^^^^^^^^^^^^ Favor `unless` over `if` for negative conditions.\n",
+            "return unless valid?\n",
         );
     }
 

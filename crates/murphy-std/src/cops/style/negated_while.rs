@@ -35,7 +35,7 @@
 //!    which handles both `!expr` (removes `!`) and `not(expr)` (removes `not(…)`).
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
-use crate::cops::util::is_parenthesized;
+use crate::cops::util::{emit_edit_with_preceding_space, is_parenthesized};
 
 const MSG: &str = "Favor `%s` over `%s` for negative conditions.";
 
@@ -150,19 +150,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Using replace-whole-condition handles both `!expr` (strips `!`) and
     // `not(expr)` (strips `not(` and the closing `)`), matching RuboCop's
     // ConditionCorrector which does `replace(condition, condition.children.first.source)`.
-    // For `while(!expr)` — no space before the `(` — prepend a space so the
-    // keyword and the replacement don't run together.
-    let cond_start = cx.range(cond).start;
-    let source = cx.source().as_bytes();
-    let needs_space = cond_start > 0
-        && !source[(cond_start - 1) as usize].is_ascii_whitespace();
+    // Use emit_edit_with_preceding_space to guard against `while(!expr)` → `untilx`.
     let recv_src = cx.raw_source(cx.range(recv));
-    let replacement = if needs_space {
-        format!(" {recv_src}")
-    } else {
-        recv_src.to_owned()
-    };
-    cx.emit_edit(cx.range(cond), &replacement);
+    emit_edit_with_preceding_space(cx.range(cond), recv_src, cx);
 }
 
 /// For modifier-form while/until (`body while/until cond`), `cx.loc().keyword()`
