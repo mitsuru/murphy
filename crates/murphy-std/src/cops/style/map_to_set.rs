@@ -57,8 +57,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
-const MSG: &str = "Pass a block to `to_set` instead of calling `%method%.to_set`.";
-
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct MapToSet;
@@ -103,13 +101,13 @@ fn match_map_to_set(to_set_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
             }
         }
         // Form 2: `something.map(&:method).to_set`
-        NodeKind::Send { method, args, .. } | NodeKind::Csend { method, args, .. } => {
-            let name = cx.symbol_str(method);
+        NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+            let name = cx.method_name(receiver_id)?;
             if !matches!(name, "map" | "collect") {
                 return None;
             }
             // Must have exactly one argument that is a BlockPass wrapping a Sym.
-            let arg_list = cx.list(args);
+            let arg_list = cx.call_arguments(receiver_id);
             if arg_list.len() != 1 {
                 return None;
             }
@@ -147,7 +145,7 @@ fn check(to_set_node: NodeId, cx: &Cx<'_>) {
 
     let map_selector = cx.node(map_node).loc.name;
     let method_name = cx.method_name(map_node).unwrap_or("map");
-    let message = MSG.replace("%method%", method_name);
+    let message = format!("Pass a block to `to_set` instead of calling `{method_name}.to_set`.");
 
     cx.emit_offense(map_selector, &message, None);
 

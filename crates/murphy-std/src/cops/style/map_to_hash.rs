@@ -69,9 +69,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
-const MSG: &str =
-    "Pass a block to `to_h` instead of calling `%method%%dot%to_h`.";
-
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct MapToHash;
@@ -116,13 +113,13 @@ fn match_map_to_hash(to_h_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
             }
         }
         // Form 2: `something.map(&:foo).to_h`
-        NodeKind::Send { method, args, .. } | NodeKind::Csend { method, args, .. } => {
-            let name = cx.symbol_str(method);
+        NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+            let name = cx.method_name(receiver_id)?;
             if !matches!(name, "map" | "collect") {
                 return None;
             }
             // Must have exactly one argument that is a BlockPass wrapping a Sym.
-            let arg_list = cx.list(args);
+            let arg_list = cx.call_arguments(receiver_id);
             if arg_list.len() != 1 {
                 return None;
             }
@@ -165,9 +162,9 @@ fn check(to_h_node: NodeId, cx: &Cx<'_>) {
         .map(|r| cx.raw_source(r))
         .unwrap_or(".");
 
-    let message = MSG
-        .replace("%method%", method_name)
-        .replace("%dot%", to_h_dot_src);
+    let message = format!(
+        "Pass a block to `to_h` instead of calling `{method_name}{to_h_dot_src}to_h`."
+    );
 
     cx.emit_offense(map_selector, &message, None);
 
