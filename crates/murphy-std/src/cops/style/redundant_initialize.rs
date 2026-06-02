@@ -11,7 +11,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/RedundantInitialize
 //! upstream_version_checked: 1.86.2
-//! version_added: "0.0"
+//! version_added: "1.27"
 //! safe: false
 //! supports_autocorrect: true
 //! status: partial
@@ -53,8 +53,11 @@
 //!
 //! ## Autocorrect
 //!
-//! Removes the entire method definition line(s) via `cx.range_with_comments_and_lines`,
-//! which mirrors RuboCop's `range_by_whole_lines(node.source_range, include_final_newline: true)`.
+//! Removes the entire method definition line(s) via
+//! `cx.range_by_whole_lines(cx.range(node), true)`, which mirrors RuboCop's
+//! `range_by_whole_lines(node.source_range, include_final_newline: true)`.
+//! Leading comments outside the node range are preserved (not deleted), matching
+//! RuboCop's behavior.
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, NodeList, cop};
 
@@ -198,10 +201,14 @@ fn same_args(def_args: NodeList, super_args: NodeList, cx: &Cx<'_>) -> bool {
 }
 
 /// Emit an offense on the whole node and register an autocorrect that removes
-/// the entire method definition (including its surrounding blank lines).
+/// the entire method definition lines.
+///
+/// Uses `cx.range_by_whole_lines(cx.range(node), true)` (not
+/// `range_with_comments_and_lines`) so leading comments outside the node range
+/// are not deleted — matching RuboCop's `range_by_whole_lines(node.source_range, ...)`.
 fn emit(node: NodeId, msg: &str, cx: &Cx<'_>) {
     cx.emit_offense(cx.range(node), msg, None);
-    let removal_range = cx.range_with_comments_and_lines(node);
+    let removal_range = cx.range_by_whole_lines(cx.range(node), true);
     cx.emit_edit(removal_range, "");
 }
 
@@ -459,6 +466,28 @@ end
         assert_eq!(corrected, "class Foo
 end
 ");
+    }
+
+    #[test]
+    fn leading_comment_outside_node_is_preserved() {
+        // RuboCop deletes only `node.source_range` lines; leading comments outside
+        // the node are NOT removed. Verify our autocorrect matches this behavior.
+        use murphy_plugin_api::test_support::run_cop_with_edits;
+        let src = indoc! {"
+            class Foo
+              # keep me
+              def initialize
+                super
+              end
+            end
+        "};
+        let run = run_cop_with_edits::<RedundantInitialize>(src);
+        assert_eq!(run.offenses.len(), 1);
+        let corrected = apply_edits(src.to_owned(), &run.edits);
+        assert!(
+            corrected.contains("# keep me"),
+            "Leading comment was eaten! Got: {corrected:?}"
+        );
     }
 }
 
