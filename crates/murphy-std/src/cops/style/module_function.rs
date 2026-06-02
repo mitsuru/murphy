@@ -105,21 +105,16 @@ impl ModuleFunction {
 /// Returns true if the node is `extend self` — i.e., a Send with no receiver,
 /// method `extend`, and a single argument that is `self`.
 fn is_extend_self(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
-        return false;
-    };
-    if receiver.get().is_some() {
+    if !matches!(*cx.kind(node), NodeKind::Send { .. }) {
         return false;
     }
-    if cx.symbol_str(method) != "extend" {
+    if cx.call_receiver(node).get().is_some() {
         return false;
     }
-    let arg_ids = cx.list(args);
+    if cx.method_name(node) != Some("extend") {
+        return false;
+    }
+    let arg_ids = cx.call_arguments(node);
     if arg_ids.len() != 1 {
         return false;
     }
@@ -129,21 +124,16 @@ fn is_extend_self(node: NodeId, cx: &Cx<'_>) -> bool {
 /// Returns true if the node is a bare `module_function` — a Send with no receiver,
 /// method `module_function`, and no arguments.
 fn is_bare_module_function(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
-        return false;
-    };
-    if receiver.get().is_some() {
+    if !matches!(*cx.kind(node), NodeKind::Send { .. }) {
         return false;
     }
-    if cx.symbol_str(method) != "module_function" {
+    if cx.call_receiver(node).get().is_some() {
         return false;
     }
-    cx.list(args).is_empty()
+    if cx.method_name(node) != Some("module_function") {
+        return false;
+    }
+    cx.call_arguments(node).is_empty()
 }
 
 /// Returns true if the node is a `private` directive.
@@ -191,7 +181,7 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &ModuleFunctionOptions) {
         cx.list(list)
     } else {
         // Body is a single node (not a Begin); treat it as the only child.
-        single_child = [body_id];
+        single_child = [body_id]; // [NodeId; 1]
         &single_child
     };
 
@@ -217,6 +207,9 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &ModuleFunctionOptions) {
         }
         ModuleFunctionStyle::Forbidden => {
             // Flag both `extend self` and bare `module_function`.
+            // Note: the `private` directive carve-out does NOT apply in
+            // `forbidden` style — RuboCop flags `extend self` regardless
+            // of whether `private` is present (confirmed against RuboCop spec).
             for &child in children {
                 if is_extend_self(child, cx) || is_bare_module_function(child, cx) {
                     cx.emit_offense(cx.range(child), FORBIDDEN_MSG, None);

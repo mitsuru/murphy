@@ -87,14 +87,6 @@ fn call_of(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     }
 }
 
-/// Returns true if the node is a block-type node (block, numblock, or itblock).
-fn is_block_type(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(
-        *cx.kind(node),
-        NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. }
-    )
-}
-
 /// Find the start offset of the closing delimiter token (`end` or `}`) for a block.
 ///
 /// RuboCop uses `receiver.loc.end.begin_pos` to obtain the start of the closing
@@ -131,18 +123,13 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     };
 
-    // The call must be a Send or Csend with a receiver.
-    let receiver_id = match *cx.kind(call) {
-        NodeKind::Send { receiver, .. } => receiver.get(),
-        NodeKind::Csend { receiver, .. } => Some(receiver),
-        _ => return,
+    // The call must have a receiver.
+    let Some(recv_id) = cx.call_receiver(call).get() else {
+        return;
     };
 
     // The receiver must be a block-type node.
-    let Some(recv_id) = receiver_id else {
-        return;
-    };
-    if !is_block_type(recv_id, cx) {
+    if !cx.is_any_block_type(recv_id) {
         return;
     }
 
@@ -156,10 +143,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // or `}.method`), matching RuboCop's
     // range_between(receiver.loc.end.begin_pos, node.send_node.source_range.end_pos).
     let Some(offense_start) = closing_delimiter_start(recv_id, cx) else {
-        // No closing delimiter found. In a well-formed AST this path should be
+        // No closing delimiter found. In a well-formed AST this path is
         // unreachable — every block node ends with `end` or `}`. Skip the
-        // offense rather than reporting with an incorrect range.
-        debug_assert!(false, "MultilineBlockChain: no closing delimiter for block node");
+        // offense rather than reporting with an incorrect range. The function
+        // returns None only if the token stream is malformed (parse error or
+        // unknown AST shape), in which case a silent skip is preferable to a
+        // panicking or incorrect range report.
         return;
     };
     // Use loc.name.end (end of the method name token itself) to match RuboCop's
