@@ -8,7 +8,7 @@
 //! upstream_cop: Style/OptionalBooleanParameter
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues: [murphy-enty]
 //! notes: >
 //!   Detects method definitions (`def`/`defs`) with optional positional
 //!   arguments whose default value is `true` or `false`.
