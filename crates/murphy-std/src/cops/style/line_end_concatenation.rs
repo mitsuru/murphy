@@ -62,20 +62,11 @@ impl LineEndConcatenation {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send {
-        receiver,
-        method: _,
-        args,
-    } = *cx.kind(node)
-    else {
+    let Some(recv) = cx.call_receiver(node).get() else {
         return;
     };
 
-    let Some(recv) = receiver.get() else {
-        return;
-    };
-
-    let arg_list = cx.list(args);
+    let arg_list = cx.call_arguments(node);
     if arg_list.len() != 1 {
         return;
     }
@@ -194,19 +185,10 @@ fn rightmost_leaf(node: NodeId, cx: &Cx<'_>) -> NodeId {
         return node;
     }
 
-    let NodeKind::Send {
-        receiver: _,
-        method: _,
-        args,
-    } = *cx.kind(node)
-    else {
-        return node;
-    };
-
-    let arg_list = cx.list(args);
-    if arg_list.len() == 1 {
+    let args = cx.call_arguments(node);
+    if args.len() == 1 {
         // Recurse into the rightmost argument.
-        rightmost_leaf(arg_list[0], cx)
+        rightmost_leaf(args[0], cx)
     } else {
         node
     }

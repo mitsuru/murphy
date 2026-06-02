@@ -97,8 +97,6 @@ pub enum ValueCapitalizationOption {
     Any,
 }
 
-const MSG_STYLE: &str = "Prefer {style} case for magic comments.";
-const MSG_VALUE: &str = "Prefer {case} for magic comment values.";
 
 #[cop(
     name = "Style/MagicCommentFormat",
@@ -296,7 +294,7 @@ fn check_directive_part(
 
     if directive_offends {
         let style_label = style_label(opts);
-        let msg = MSG_STYLE.replace("{style}", &style_label);
+        let msg = format!("Prefer {style_label} case for magic comments.");
         let key_range = Range {
             start: key_range_start,
             end: key_range_end,
@@ -321,7 +319,7 @@ fn check_directive_part(
                 ValueCapitalizationOption::Uppercase => "uppercase",
                 ValueCapitalizationOption::Any => "any",
             };
-            let msg = MSG_VALUE.replace("{case}", case_label);
+            let msg = format!("Prefer {case_label} for magic comment values.");
             let val_range = Range {
                 start: value_range_start,
                 end: value_range_end,
@@ -411,54 +409,35 @@ fn is_magic_comment_keyword(key: &str) -> bool {
 
 /// Match `frozen[_-]string[_-]literal` (case-insensitive, already lowercased).
 fn matches_frozen_string_literal(lower: &str) -> bool {
-    // Must start with "frozen" then sep, then "string" then sep, then "literal".
-    if lower.len() < "frozen_string_literal".len() {
+    let Some(rest) = lower.strip_prefix("frozen") else {
         return false;
-    }
-    if !lower.starts_with("frozen") {
+    };
+    let Some(rest) = rest.strip_prefix('_').or_else(|| rest.strip_prefix('-')) else {
         return false;
-    }
-    let rest = &lower["frozen".len()..];
-    let sep1 = rest.as_bytes().first();
-    if !matches!(sep1, Some(b'_' | b'-')) {
+    };
+    let Some(rest) = rest.strip_prefix("string") else {
         return false;
-    }
-    let rest = &rest[1..];
-    if !rest.starts_with("string") {
+    };
+    let Some(rest) = rest.strip_prefix('_').or_else(|| rest.strip_prefix('-')) else {
         return false;
-    }
-    let rest = &rest["string".len()..];
-    let sep2 = rest.as_bytes().first();
-    if !matches!(sep2, Some(b'_' | b'-')) {
-        return false;
-    }
-    let rest = &rest[1..];
+    };
     rest == "literal"
 }
 
 /// Match `shareable[_-]constant[_-]value` (case-insensitive, already lowercased).
 fn matches_shareable_constant_value(lower: &str) -> bool {
-    if lower.len() < "shareable_constant_value".len() {
+    let Some(rest) = lower.strip_prefix("shareable") else {
         return false;
-    }
-    if !lower.starts_with("shareable") {
+    };
+    let Some(rest) = rest.strip_prefix('_').or_else(|| rest.strip_prefix('-')) else {
         return false;
-    }
-    let rest = &lower["shareable".len()..];
-    let sep1 = rest.as_bytes().first();
-    if !matches!(sep1, Some(b'_' | b'-')) {
+    };
+    let Some(rest) = rest.strip_prefix("constant") else {
         return false;
-    }
-    let rest = &rest[1..];
-    if !rest.starts_with("constant") {
+    };
+    let Some(rest) = rest.strip_prefix('_').or_else(|| rest.strip_prefix('-')) else {
         return false;
-    }
-    let rest = &rest["constant".len()..];
-    let sep2 = rest.as_bytes().first();
-    if !matches!(sep2, Some(b'_' | b'-')) {
-        return false;
-    }
-    let rest = &rest[1..];
+    };
     rest == "value"
 }
 
