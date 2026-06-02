@@ -19,7 +19,7 @@
 //!     - %Q -> %q: blocked when the body contains a non-backslash escape sequence
 //!       (\n, \t, etc.) — %q does not process them.
 //!     - %q -> %Q: blocked when the body contains #{...}-like interpolation syntax
-//!       combined with a single quote (converting would activate interpolation)
+//!       (converting would activate interpolation, regardless of single-quote presence)
 //!       or has a non-backslash escape (converting would activate the escape).
 //!   The guard is equivalent to RuboCop's parse-and-compare via acceptable_q? and
 //!   acceptable_capital_q? / has_escaped_non_backslash patterns.
@@ -103,8 +103,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // - %Q -> %q: %q doesn't process escape sequences like \n, \t (only \\ and \').
     //   If the body has any non-backslash escape, converting would change semantics.
     // - %q -> %Q: %Q activates interpolation (#{...}) and escape sequences.
-    //   If the body has #{...} with ' or has non-backslash escapes, converting
-    //   would change the string's value.
+    //   If the body has #{...} (regardless of single-quote presence) or has
+    //   non-backslash escapes, converting would change the string's value.
     if !safe_to_change_case(src) {
         return;
     }
@@ -136,16 +136,18 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 /// - No `\X` escape where X is not `\` (non-backslash escape).
 ///   `%q` does not process escape sequences (except `\\` and `\'`), so
 ///   `%Q(\n)` (newline) != `%q(\n)` (literal `\n`).
-/// - No `#{...}` interpolation combined with a single quote.
-///   `%q(#{foo}'s)` != `%Q(#{foo}'s)` — the former is literal, the latter interpolates.
+/// - For `%q` -> `%Q`: no `#{...}` interpolation syntax.
+///   `%q(#{foo})` is a literal string containing `#{foo}`;
+///   `%Q(#{foo})` would interpolate `foo`, changing the string's value.
 ///
 /// Note: `\\` (double backslash = escaped backslash) is safe in both forms.
 fn safe_to_change_case(src: &str) -> bool {
     if has_escaped_non_backslash(src) {
         return false;
     }
-    // %q -> %Q would activate interpolation; guard against #{...} with single quote.
-    if src.starts_with("%q") && has_interpolation_syntax(src) && src.contains('\'') {
+    // %q -> %Q would activate interpolation; block if #{...} syntax is present.
+    // Any #{...} in %q is literal text; converting to %Q would evaluate it.
+    if src.starts_with("%q") && has_interpolation_syntax(src) {
         return false;
     }
     true
@@ -253,6 +255,26 @@ mod tests {
                 enforced_style: PercentQLiteralsStyle::UpperCaseQ,
             })
             .expect_no_offenses("%q(hello\\nworld)\n");
+    }
+
+    #[test]
+    fn no_offense_for_percent_lower_q_with_interpolation_syntax_when_upper_case_q() {
+        // #{foo} in %q is literal text; converting to %Q would activate interpolation.
+        test::<PercentQLiterals>()
+            .with_options(&PercentQLiteralsOptions {
+                enforced_style: PercentQLiteralsStyle::UpperCaseQ,
+            })
+            .expect_no_offenses("%q(#{foo})\n");
+    }
+
+    #[test]
+    fn no_offense_for_percent_lower_q_with_interpolation_no_single_quote() {
+        // Even without single-quote, #{...} in %q blocks the conversion to %Q.
+        test::<PercentQLiterals>()
+            .with_options(&PercentQLiteralsOptions {
+                enforced_style: PercentQLiteralsStyle::UpperCaseQ,
+            })
+            .expect_no_offenses("%q(hello #{world} there)\n");
     }
 
     // --- Skip non-%q/%Q strings ---
