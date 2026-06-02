@@ -148,21 +148,22 @@ fn check_return(node: NodeId, cx: &Cx<'_>) {
             use crate::cops::util::is_parenthesized;
             if is_parenthesized(val_id, cx) {
                 // `return(expr)`: three surgical edits to remove return, (, and ).
+                // Use token ranges for ( and ) to be explicit about what is deleted.
+                let lp = cx.token_after(value_range.start);
+                let rp = cx.token_before(value_range.end);
                 // Edit 1: delete "return" (return node start to begin node start).
                 cx.emit_edit(
                     Range { start: return_range.start, end: value_range.start },
                     "",
                 );
                 // Edit 2: delete opening `(`.
-                cx.emit_edit(
-                    Range { start: value_range.start, end: value_range.start + 1 },
-                    "",
-                );
+                if let Some(t) = lp {
+                    cx.emit_edit(t.range, "");
+                }
                 // Edit 3: delete closing `)`.
-                cx.emit_edit(
-                    Range { start: value_range.end - 1, end: value_range.end },
-                    "",
-                );
+                if let Some(t) = rp {
+                    cx.emit_edit(t.range, "");
+                }
             } else {
                 // `return expr`: delete "return " prefix.
                 let keyword_range = Range {
