@@ -59,7 +59,7 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
-const MSG: &str = "Use `%<inverse>s` instead of inverting `%<method>s`.";
+
 
 /// Methods that cannot be called with safe-navigation (`&.`) and still be
 /// inverted safely. Matches RuboCop's `SAFE_NAVIGATION_INCOMPATIBLE_METHODS`.
@@ -144,7 +144,7 @@ impl InverseMethods {
             NodeKind::Block { call, .. } => {
                 let call_id = *call;
                 let m = cx.method_name(call_id).unwrap_or("");
-                let csend = matches!(cx.kind(call_id), NodeKind::Csend { .. });
+                let csend = cx.is_safe_navigation(call_id);
                 (m, csend, call_id)
             }
             // Unknown (e.g. parenthesized begin `!(a == b)`) — skip silently.
@@ -163,9 +163,7 @@ impl InverseMethods {
         }
 
         // Emit the offense on the full outer `!` node range.
-        let msg = MSG
-            .replace("%<inverse>s", inverse)
-            .replace("%<method>s", inner_method);
+        let msg = format!("Use `{inverse}` instead of inverting `{inner_method}`.");
         cx.emit_offense(cx.range(node), &msg, None);
 
         // Autocorrect: two surgical edits.
