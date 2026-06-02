@@ -60,8 +60,11 @@ const TASK_LIST_SCHEMA = {
 
 const SETUP_SCHEMA = {
   type: 'object',
-  properties: { branch: { type: 'string' } },
-  required: ['branch'],
+  properties: {
+    branch: { type: 'string' },
+    pr_url: { type: 'string' },
+  },
+  required: ['branch', 'pr_url'],
 }
 
 const IMPL_SCHEMA = {
@@ -114,8 +117,10 @@ if (tasks.length === 0) {
 
 phase('Setup')
 
+const filterLabel = filter.replace(/\/$/, '').replace(/^Port /, '')
+
 const setup = await agent(
-  `Create an acceptance branch for this batch of cop ports.
+  `Create an acceptance branch for this batch of cop ports, then open a draft PR immediately.
 
 Steps:
 1. eval "$(mise activate bash)"
@@ -125,17 +130,32 @@ Steps:
      DATE=$(date +%Y%m%d)
      BRANCH="cop-port-batch-\${SLUG}-\${DATE}"
 4. git checkout -b "\$BRANCH"
-5. git push -u origin "\$BRANCH"
-6. Return { branch: "<the branch name you created>" }`,
+5. Add an empty commit so GitHub allows PR creation:
+     git commit --allow-empty -m "chore: open acceptance branch for ${filterLabel} cop batch"
+6. git push -u origin "\$BRANCH"
+7. Create a draft PR:
+     gh pr create --draft \\
+       --base main \\
+       --head "\$BRANCH" \\
+       --title "feat(murphy-std): batch port ${filterLabel} cops" \\
+       --body "## Status: in progress
+
+Streaming cop ports accumulate here via \`cop-port-batch\` orchestrator.
+Filter: \`${filter}\`
+
+This PR will be updated with the full cop list and marked ready once all implementations complete and the quality gate passes."
+8. Return { branch: "\$BRANCH", pr_url: "<the https://github.com/... URL from gh pr create output>" }`,
   { label: 'setup', phase: 'Setup', schema: SETUP_SCHEMA }
 )
 
 const acceptanceBranch = setup?.branch
+const prUrl = setup?.pr_url
 if (!acceptanceBranch) {
   log('ERROR: failed to create acceptance branch — aborting.')
   return { error: 'acceptance branch setup failed' }
 }
 log(`Acceptance branch: ${acceptanceBranch}`)
+log(`Draft PR: ${prUrl}`)
 
 // ── Phase: Implement (streaming pipeline) ────────────────────────────────────
 
@@ -262,12 +282,14 @@ Return { passed: false, failure_output: "<trimmed relevant output>" } if any fai
 
 if (!gate?.passed) {
   log(`GATE FAILED: ${gate?.failure_output ?? '(no output)'}`)
-  log('PR creation skipped. Fix failures on acceptance branch, then re-run or create PR manually.')
+  log(`PR remains draft at: ${prUrl}`)
+  log('Fix failures on acceptance branch, then re-run or manually ready the PR.')
   return {
     merged: merged.length, skipped: skipped.length, errored: errored.length,
     gate: 'FAILED',
     gateOutput: gate?.failure_output,
     acceptanceBranch,
+    pr: prUrl,
     skippedTasks: skipped.map(r => ({ id: r.id, reason: r.blocker_note })),
     erroredTasks: errored.map(r => ({ id: r.id, reason: r.failure_reason })),
   }
@@ -279,27 +301,22 @@ log('Gate passed.')
 
 phase('PR')
 
-const copList     = merged.map(r => `- ${r.cop_name ?? r.id}`).join('\n')
-const skipList    = skipped.length > 0
+const copList  = merged.map(r => `- ${r.cop_name ?? r.id}`).join('\n')
+const skipList = skipped.length > 0
   ? skipped.map(r => `- ${r.id}: ${r.blocker_note ?? '(escalation)'}`).join('\n')
   : 'None'
-const filterLabel = filter.replace(/\/$/, '').replace(/^Port /, '')
 
-const pr = await agent(
-  `Create the final draft PR for the cop port batch.
+await agent(
+  `Update and ready the draft PR for the completed cop port batch.
 
+PR: ${prUrl}
 Branch: ${acceptanceBranch} → main
-Filter used: "${filter}"
-Integrated cops: ${merged.length}
-Skipped: ${skipped.length}
-Errored: ${errored.length}
 
 Steps:
-git push origin ${acceptanceBranch}
+1. git push origin ${acceptanceBranch}
 
-gh pr create --draft \\
-  --base main \\
-  --head ${acceptanceBranch} \\
+2. Update the PR title and body:
+gh pr edit "${prUrl}" \\
   --title "feat(murphy-std): batch port ${merged.length} ${filterLabel} cops" \\
   --body "## Summary
 
@@ -319,11 +336,12 @@ ${skipList}
 - [x] \`clippy\` + \`fmt\` clean on acceptance branch
 "
 
-Return the PR URL (the https://github.com/... line from the output).`,
-  { label: 'create-pr', phase: 'PR' }
+3. Mark the PR ready for review:
+gh pr ready "${prUrl}"`,
+  { label: 'finalize-pr', phase: 'PR' }
 )
 
-log(`PR created: ${pr}`)
+log(`PR finalized: ${prUrl}`)
 
 return {
   merged: merged.length,
@@ -331,7 +349,7 @@ return {
   errored: errored.length,
   gate: 'PASSED',
   acceptanceBranch,
-  pr,
+  pr: prUrl,
   skippedTasks: skipped.map(r => ({ id: r.id, reason: r.blocker_note })),
   erroredTasks: errored.map(r => ({ id: r.id, reason: r.failure_reason })),
 }
