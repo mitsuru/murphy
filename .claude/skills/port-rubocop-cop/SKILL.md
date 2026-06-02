@@ -13,7 +13,10 @@ description: >-
   guide, add and maintain the cop's source-near murphy-parity metadata block,
   analyse the gap to the RuboCop original, escalate gaps the guide cannot
   cover, iterate through roborev-refine review until passing, then open a PR
-  and merge after CI is green.
+  and merge after CI is green. Phase 6 (PR creation and merge) is optional:
+  pass `merge_strategy: deferred` in args to skip it and leave the worktree
+  branch ready for a caller-controlled merge (e.g. an acceptance-branch
+  accumulator).
 ---
 
 # Porting a RuboCop cop to Murphy
@@ -78,9 +81,10 @@ and review loop catch the kinds of regressions that block merge later.
    silent workaround.
 5. **Phase 5 — pass `roborev-refine` review.** Iterate fix → re-review
    until the daemon reports passing or hits its iteration cap.
-6. **Phase 6 — open the PR, then merge after CI passes.** Push from the
-   worktree, open a PR with summary and test plan, wait for CI green,
-   merge with the repo's merge-commit convention.
+6. **Phase 6 — open the PR, then merge after CI passes** *(optional — skip
+   when `merge_strategy: deferred` is passed).* Push from the worktree, open
+   a PR with summary and test plan, wait for CI green, merge with the repo's
+   merge-commit convention.
 
 Each phase below points to the canonical reference in the infra guide or
 the in-tree example cop that demonstrates the pattern.
@@ -605,12 +609,18 @@ review, and looping. Stay in the same worktree.
 
 Outcomes:
 
-- **Passing.** Continue to Phase 6.
+- **Passing.** Continue to Phase 6 — unless `merge_strategy: deferred` was
+  passed in args, in which case push the branch (`git push -u origin
+  <branch>`), report the branch name to the caller, and stop here.
 - **Iteration cap hit.** Treat as a Phase 4 escalation — bring the
   daemon's last unresolved findings to the user. Do not force-merge a
   cop that the reviewer has open objections on.
 
 ## Phase 6: open the PR, then merge after CI passes
+
+> **Skip this phase** when `merge_strategy: deferred` is in the invocation
+> args. Push the branch and return control to the caller instead (see Phase 5
+> outcomes above).
 
 Ship the work:
 
