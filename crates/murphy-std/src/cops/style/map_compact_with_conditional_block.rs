@@ -68,8 +68,6 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
 #[derive(Default)]
 pub struct MapCompactWithConditionalBlock;
 
-const MSG: &str = "Replace `%s` with `%s`.";
-
 #[cop(
     name = "Style/MapCompactWithConditionalBlock",
     description = "Prefer `select` or `reject` over `map { ... }.compact` or `filter_map { ... }` with a conditional block.",
@@ -88,10 +86,7 @@ impl MapCompactWithConditionalBlock {
     /// Also handle csend (e.g. `array&.map { }.compact`).
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if matches!(cx.symbol_str(method), "compact" | "filter_map") {
+        if matches!(cx.method_name(node), Some("compact" | "filter_map")) {
             check(node, cx);
         }
     }
@@ -146,9 +141,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
 
     let method = if is_select { "select" } else { "reject" };
-    let msg = MSG
-        .replacen("%s", &current_label, 1)
-        .replacen("%s", method, 1);
+    let msg = format!("Replace `{}` with `{}`.", current_label, method);
 
     cx.emit_offense(offense_range, &msg, None);
 
@@ -173,10 +166,7 @@ fn is_map_block(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Returns the inner call node from a Block.
 fn block_inner_call(block_node: NodeId, cx: &Cx<'_>) -> NodeId {
-    match *cx.kind(block_node) {
-        NodeKind::Block { call, .. } => call,
-        _ => block_node,
-    }
+    cx.block_call(block_node).get().unwrap_or(block_node)
 }
 
 /// Returns the list of argument nodes from an `Args` node.

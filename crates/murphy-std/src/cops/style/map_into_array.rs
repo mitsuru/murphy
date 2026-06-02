@@ -431,15 +431,15 @@ fn block_args_list<'a>(args: NodeId, cx: &Cx<'a>) -> &'a [NodeId] {
 /// `dest.<<(expr)`, `dest.push(expr)`, or `dest.append(expr)`.
 /// The receiver must be an lvar (dest is a local variable).
 fn extract_push_call<'a>(node: NodeId, cx: &Cx<'a>) -> Option<(&'a str, NodeId)> {
-    let (receiver_opt, method, args) = match *cx.kind(node) {
-        NodeKind::Send { receiver, method, args } => (receiver, method, args),
-        _ => return None,
-    };
-    let method_str = cx.symbol_str(method);
+    // Only Send nodes (not Csend — safe-navigation doesn't apply here).
+    if !matches!(cx.kind(node), NodeKind::Send { .. }) {
+        return None;
+    }
+    let method_str = cx.method_name(node)?;
     if !PUSH_METHODS.contains(&method_str) {
         return None;
     }
-    let receiver = receiver_opt.get()?;
+    let receiver = cx.call_receiver(node).get()?;
     // Receiver must be an lvar.
     let NodeKind::Lvar(dest_sym) = *cx.kind(receiver) else {
         return None;
@@ -448,7 +448,7 @@ fn extract_push_call<'a>(node: NodeId, cx: &Cx<'a>) -> Option<(&'a str, NodeId)>
 
     // Must have exactly one argument, and that argument must be "suitable"
     // (not a splat, forwarded-restarg, etc.).
-    let args_list = cx.list(args);
+    let args_list = cx.call_arguments(node);
     if args_list.len() != 1 {
         return None;
     }
@@ -499,9 +499,10 @@ fn is_empty_array_value(node: NodeId, cx: &Cx<'_>) -> bool {
         // `[]`
         NodeKind::Array(list) => cx.list(list).is_empty(),
         // `Array[]` or `Array.new` or `Array.new([])` or `Array([])`
-        NodeKind::Send { receiver, method, args } => {
-            let method_str = cx.symbol_str(method);
-            let args_list = cx.list(args);
+        NodeKind::Send { .. } => {
+            let method_str = cx.method_name(node).unwrap_or("");
+            let receiver = cx.call_receiver(node);
+            let args_list = cx.call_arguments(node);
             match method_str {
                 "[]" => {
                     // `Array[]` — receiver must be const Array, no args
@@ -589,9 +590,10 @@ fn dest_used_only_for_mapping(
 }
 
 /// Returns `true` if `dest_name` appears as an `lvar` anywhere within `node`
-/// (recursively, excluding scope boundaries like nested blocks).
+/// (recursively). Ruby blocks are closures and do not introduce a new scope
+/// for outer local variables, so we recurse into Block/Numblock/Itblock.
+/// Only hard scope boundaries (Def, Defs, Class, Module) are excluded.
 fn lvar_appears_in(node: NodeId, dest_name: &str, cx: &Cx<'_>) -> bool {
-    // Simple DFS, stopping at scope boundaries.
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
         match *cx.kind(n) {
@@ -600,11 +602,8 @@ fn lvar_appears_in(node: NodeId, dest_name: &str, cx: &Cx<'_>) -> bool {
                     return true;
                 }
             }
-            // Don't recurse into nested blocks/defs (scope boundaries).
-            NodeKind::Block { .. }
-            | NodeKind::Numblock { .. }
-            | NodeKind::Itblock { .. }
-            | NodeKind::Def { .. }
+            // Don't recurse into nested defs/classes (scope boundaries).
+            NodeKind::Def { .. }
             | NodeKind::Defs { .. }
             | NodeKind::Class { .. }
             | NodeKind::Module { .. } => {}
