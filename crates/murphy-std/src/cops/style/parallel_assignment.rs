@@ -360,17 +360,25 @@ fn emit_modifier_correction(
         .collect();
 
     // The modifier form: `a, b = 1, 2 if foo` (or unless/while/until).
-    // We need the keyword and condition from the parent If node.
-    let NodeKind::If { cond, then_: _, else_ } = *cx.kind(parent) else {
-        // Not an if/unless — fall back to simple replacement
-        let joined = assignments.join("\n");
-        cx.emit_edit(cx.range(node), &joined);
-        return;
+    // We need the keyword and condition from the parent node.
+    let (keyword, cond_src) = match *cx.kind(parent) {
+        NodeKind::If { cond, else_, .. } => {
+            let kw = if else_.get() == Some(node) { "unless" } else { "if" };
+            (kw, cx.raw_source(cx.range(cond)).to_owned())
+        }
+        NodeKind::While { cond, .. } => {
+            ("while", cx.raw_source(cx.range(cond)).to_owned())
+        }
+        NodeKind::Until { cond, .. } => {
+            ("until", cx.raw_source(cx.range(cond)).to_owned())
+        }
+        _ => {
+            // Unsupported guard form — fall back to simple replacement
+            let joined = assignments.join("\n");
+            cx.emit_edit(cx.range(node), &joined);
+            return;
+        }
     };
-
-    // Determine keyword: `unless` if the masgn is in else_, `if` if in then_.
-    let keyword = if else_.get() == Some(node) { "unless" } else { "if" };
-    let cond_src = cx.raw_source(cx.range(cond)).to_owned();
 
     let replacement = format!(
         "{} {}\n{}\n{}end",
@@ -449,7 +457,7 @@ fn peel_rescue(rhs: NodeId, cx: &Cx<'_>) -> (NodeId, Option<NodeId>) {
 /// Return `true` if `parent` is a modifier conditional (`if`/`unless`/`while`/`until`)
 /// and `child` is the guarded body.
 fn is_modifier_conditional(parent: NodeId, child: NodeId, cx: &Cx<'_>) -> bool {
-    // Modifier form: keyword loc is ZERO for modifier if/unless
+    // Modifier form: keyword loc is ZERO for modifier if/unless/while/until
     let kw = cx.loc(parent).keyword();
     if kw != Range::ZERO {
         return false; // block form
@@ -457,6 +465,9 @@ fn is_modifier_conditional(parent: NodeId, child: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(parent) {
         NodeKind::If { then_, else_, .. } => {
             then_.get() == Some(child) || else_.get() == Some(child)
+        }
+        NodeKind::While { body, .. } | NodeKind::Until { body, .. } => {
+            body.get() == Some(child)
         }
         _ => false,
     }
@@ -625,6 +636,54 @@ mod tests {
             foo = [1, 2, 3]
             a, b, c = foo
         "});
+    }
+
+    // --- modifier while / until ---
+
+    #[test]
+    fn flags_parallel_with_while_modifier() {
+        test::<ParallelAssignment>().expect_offense(indoc! {"
+            a, b = 1, 2 while cond
+            ^^^^^^^^^^^ Do not use parallel assignment.
+        "});
+    }
+
+    #[test]
+    fn corrects_parallel_with_while_modifier() {
+        test::<ParallelAssignment>().expect_correction(
+            indoc! {"
+                a, b = 1, 2 while cond
+                ^^^^^^^^^^^ Do not use parallel assignment.
+            "},
+            "while cond
+  a = 1
+  b = 2
+end
+",
+        );
+    }
+
+    #[test]
+    fn flags_parallel_with_if_modifier() {
+        test::<ParallelAssignment>().expect_offense(indoc! {"
+            a, b = 1, 2 if foo
+            ^^^^^^^^^^^ Do not use parallel assignment.
+        "});
+    }
+
+    #[test]
+    fn corrects_parallel_with_if_modifier() {
+        test::<ParallelAssignment>().expect_correction(
+            indoc! {"
+                a, b = 1, 2 if foo
+                ^^^^^^^^^^^ Do not use parallel assignment.
+            "},
+            "if foo
+  a = 1
+  b = 2
+end
+",
+        );
     }
 }
 murphy_plugin_api::submit_cop!(ParallelAssignment);
