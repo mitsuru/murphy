@@ -10,14 +10,14 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Murphy handles the common case: a `while`/`until` whose condition is a
-//!   single `!` method call (e.g. `while !foo`). Autocorrect replaces the
-//!   keyword with its inverse and deletes the `!` prefix.
+//!   Murphy handles `while !foo`, `until !foo` (block and modifier form), and
+//!   `not(expr)` style. Autocorrect swaps the keyword and replaces the
+//!   condition with the receiver source (mirrors RuboCop ConditionCorrector).
 //!   Parity gaps vs RuboCop:
-//!   - `while (not a_condition)` — parens around `not` parse as Unknown in
-//!     Murphy; the offense is silently skipped.
-//!   - `until (var = foo; !bar)` — a begin-sequence condition also parses as
-//!     Unknown; silently skipped.
+//!   - `while (not a_condition)` — space-`not` inside parens parses as Unknown;
+//!     offense silently skipped.
+//!   - `until (var = foo; !bar)` — begin-sequence condition parses as Unknown;
+//!     silently skipped.
 //!   - `something while(!x.even?)` — parenthesized bang parses as Unknown;
 //!     silently skipped.
 //! ```
@@ -30,9 +30,10 @@
 //!
 //! ## Autocorrect
 //!
-//! Two surgical edits:
+//! Two edits:
 //! 1. Replace the `while`/`until` keyword with its inverse.
-//! 2. Delete the `!` token (range from condition start to receiver start).
+//! 2. Replace the entire condition range with the receiver source string,
+//!    which handles both `!expr` (removes `!`) and `not(expr)` (removes `not(…)`).
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
@@ -133,14 +134,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         cx.emit_edit(kw_range, inverse_kw);
     }
 
-    // Edit 2: delete the `!` prefix (from cond start to recv start).
-    let bang_range = Range {
-        start: cx.range(cond).start,
-        end: cx.range(recv).start,
-    };
-    if bang_range.start < bang_range.end {
-        cx.emit_edit(bang_range, "");
-    }
+    // Edit 2: replace the entire condition with the receiver source.
+    // Using replace-whole-condition handles both `!expr` (strips `!`) and
+    // `not(expr)` (strips `not(` and the closing `)`), matching RuboCop's
+    // ConditionCorrector which does `replace(condition, condition.children.first.source)`.
+    let recv_src = cx.raw_source(cx.range(recv));
+    cx.emit_edit(cx.range(cond), recv_src);
 }
 
 /// For modifier-form while/until (`body while/until cond`), `cx.loc().keyword()`
@@ -242,6 +241,17 @@ mod tests {
             "something until !x.even?\n\
              ^^^^^^^^^^^^^^^^^^^^^^^^ Favor `while` over `until` for negative conditions.\n",
             "something while x.even?\n",
+        );
+    }
+
+    // ----- not(expr) form regression -----
+
+    #[test]
+    fn flags_while_not_paren_form() {
+        test::<NegatedWhile>().expect_correction(
+            "some_method while not(a_condition)\n\
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor `until` over `while` for negative conditions.\n",
+            "some_method until a_condition\n",
         );
     }
 

@@ -10,15 +10,14 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Murphy handles the common case: an `unless` (modifier or block form)
-//!   whose condition is a single `!` method call. Autocorrect replaces the
-//!   `unless` keyword with `if` and deletes the `!` prefix.
-//!   EnforcedStyle: both/prefix/postfix is supported.
+//!   Murphy handles `unless !foo` and `unless not(expr)` (modifier and block
+//!   form). Autocorrect replaces `unless` with `if` and replaces the condition
+//!   with the receiver source. EnforcedStyle: both/prefix/postfix is supported.
 //!   Parity gaps vs RuboCop:
 //!   - `something unless (!x.even?)` — parenthesized bang parses as Unknown
 //!     in Murphy; the offense is silently skipped.
-//!   - `unless not a_condition` (keyword `not`) parses the same as `!` in
-//!     Murphy's prism backend; it is flagged and corrected correctly.
+//!   - `unless (not a_condition)` — space-`not` inside parens parses as Unknown;
+//!     offense silently skipped.
 //! ```
 //!
 //! ## Matched shapes
@@ -33,9 +32,10 @@
 //!
 //! ## Autocorrect
 //!
-//! Two surgical edits:
+//! Two edits:
 //! 1. Replace the `unless` keyword with `if`.
-//! 2. Delete the `!` token (range from condition start to receiver start).
+//! 2. Replace the entire condition range with the receiver source string,
+//!    which handles both `!expr` (removes `!`) and `not(expr)` (removes `not(…)`).
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
@@ -162,14 +162,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         cx.emit_edit(kw_range, "if");
     }
 
-    // Edit 2: delete the `!` prefix (from cond start to recv start).
-    let bang_range = Range {
-        start: cx.range(cond).start,
-        end: cx.range(recv).start,
-    };
-    if bang_range.start < bang_range.end {
-        cx.emit_edit(bang_range, "");
-    }
+    // Edit 2: replace the entire condition with the receiver source.
+    // Using replace-whole-condition handles both `!expr` (strips `!`) and
+    // `not(expr)` (strips `not(` and the closing `)`), matching RuboCop's
+    // ConditionCorrector which does `replace(condition, condition.children.first.source)`.
+    let recv_src = cx.raw_source(cx.range(recv));
+    cx.emit_edit(cx.range(cond), recv_src);
 }
 
 #[cfg(test)]
@@ -249,6 +247,17 @@ mod tests {
                 unless !foo
                 end
             "});
+    }
+
+    // ----- not(expr) form regression -----
+
+    #[test]
+    fn flags_unless_not_paren_form() {
+        test::<NegatedUnless>().expect_correction(
+            "something unless not(a_condition)\n\
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor `if` over `unless` for negative conditions.\n",
+            "something if a_condition\n",
+        );
     }
 
     // ----- Negative cases -----
