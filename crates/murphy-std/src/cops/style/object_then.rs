@@ -6,9 +6,8 @@
 //! upstream: rubocop
 //! upstream_cop: Style/ObjectThen
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-zgcp
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Both EnforcedStyle values (`then` and `yield_self`) are implemented.
 //!   Block path: flags block/numblock/itblock where the inner send (or csend)
@@ -16,9 +15,6 @@
 //!   Send path: flags bare send/csend with exactly one block-pass argument.
 //!   Self.then special case: when style=then and receiver is nil (bare call),
 //!   autocorrect emits `self.then` instead of bare `then` to avoid the keyword.
-//!   minimum_target_ruby_version 2.6 guard: not enforced (Murphy v1 has no
-//!   per-file Ruby version tracking). This is a benign gap: users on Ruby < 2.6
-//!   would see false-positive offenses.
 //! ```
 //!
 //! ## Matched shapes
@@ -152,6 +148,7 @@ fn check_method_node(send: NodeId, cx: &Cx<'_>, style: ObjectThenStyle) {
     description = "Enforce consistent use of `Object#then` or `Object#yield_self`.",
     default_severity = "warning",
     default_enabled = true,
+    minimum_target_ruby_version = "2.6",
     options = ObjectThenOptions,
 )]
 impl ObjectThen {
@@ -337,6 +334,15 @@ mod tests {
                      ^^^^^^^^^^ Prefer `then` over `yield_self`.
             "},
             "obj&.then(&method(:foo))\n",
+        );
+    }
+
+    #[test]
+    fn minimum_target_ruby_version_is_set() {
+        use murphy_plugin_api::{Cop, RubyVersion};
+        assert_eq!(
+            <ObjectThen as Cop>::MINIMUM_TARGET_RUBY_VERSION,
+            Some(RubyVersion::new(2, 6)),
         );
     }
 

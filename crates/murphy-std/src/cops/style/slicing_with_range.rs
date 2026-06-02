@@ -6,9 +6,8 @@
 //! upstream: rubocop
 //! upstream_cop: Style/SlicingWithRange
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-zgcp
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Three cases are implemented:
 //!   1. Useless range: `ary[0..-1]` or `ary[0..]` → remove `[...]` entirely.
@@ -16,8 +15,8 @@
 //!   3. Beginless range: `ary[nil..n]` (explicit nil begin) → remove the nil,
 //!      producing `ary[..n]`.
 //!   Already-optimal forms (`ary[n..]`, `ary[..n]`) are not flagged.
-//!   Murphy has no `target_ruby_version` machinery at the cop level, so the
-//!   beginless-range case (RuboCop requires >= 2.7) fires unconditionally.
+//!   Gated at minimum_target_ruby_version = "2.7" (beginless-range syntax
+//!   requires Ruby >= 2.7).
 //!   This cop is marked Safe: false upstream because `x..-1` and `x..` are only
 //!   equivalent for Array/String; Murphy emits the autocorrect regardless, matching
 //!   the upstream behaviour under the default settings.
@@ -43,6 +42,7 @@ pub struct SlicingWithRange;
     description = "Checks array slicing is done with redundant, endless, and beginless ranges when suitable.",
     default_severity = "warning",
     default_enabled = true,
+    minimum_target_ruby_version = "2.7",
     options = NoOptions,
 )]
 impl SlicingWithRange {
@@ -265,6 +265,15 @@ mod tests {
     #[test]
     fn accepts_two_arg_slice() {
         test::<SlicingWithRange>().expect_no_offenses("ary[0, 2]\n");
+    }
+
+    #[test]
+    fn minimum_target_ruby_version_is_set() {
+        use murphy_plugin_api::{Cop, RubyVersion};
+        assert_eq!(
+            <SlicingWithRange as Cop>::MINIMUM_TARGET_RUBY_VERSION,
+            Some(RubyVersion::new(2, 7)),
+        );
     }
 }
 

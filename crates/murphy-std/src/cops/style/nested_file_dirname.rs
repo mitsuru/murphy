@@ -7,16 +7,12 @@
 //! upstream: rubocop
 //! upstream_cop: Style/NestedFileDirname
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-zgcp
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Detection is fully implemented. Fires on the outermost File.dirname
 //!   when its first argument is also File.dirname (level >= 2). Parent guard
 //!   prevents double-reporting on inner nodes in triple+ chains.
-//!
-//!   Gap vs RuboCop: RuboCop requires target_ruby_version >= 3.1. Murphy v1
-//!   does not track target_ruby_version and fires unconditionally.
 //!
 //!   Autocorrect is implemented for the common case (no inline comments).
 //!   Skipped when the call contains inline comments to avoid dropping them.
@@ -53,6 +49,7 @@ pub struct NestedFileDirname;
     description = "Use `File.dirname(path, n)` instead of nested `File.dirname` calls.",
     default_severity = "warning",
     default_enabled = true,
+    minimum_target_ruby_version = "3.1",
     options = NoOptions,
 )]
 impl NestedFileDirname {
@@ -268,6 +265,15 @@ mod tests {
         // The outer node has 2 args so is_file_dirname returns false → not flagged.
         test::<NestedFileDirname>().expect_no_offenses("File.dirname(File.dirname(path), 2)
 ");
+    }
+
+    #[test]
+    fn minimum_target_ruby_version_is_set() {
+        use murphy_plugin_api::{Cop, RubyVersion};
+        assert_eq!(
+            <NestedFileDirname as Cop>::MINIMUM_TARGET_RUBY_VERSION,
+            Some(RubyVersion::new(3, 1)),
+        );
     }
 }
 

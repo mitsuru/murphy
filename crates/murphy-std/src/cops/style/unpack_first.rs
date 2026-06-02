@@ -8,13 +8,11 @@
 //! upstream: rubocop
 //! upstream_cop: Style/UnpackFirst
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-zgcp
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Murphy v1 does not track target_ruby_version; this cop fires regardless
-//!   of the Ruby version in use (RuboCop enforces minimum_target_ruby_version
-//!   2.4 for `unpack1`).  Both `send` and `csend` (safe-navigation) outer
+//!   Gated at minimum_target_ruby_version = "2.4" (`String#unpack1` requires
+//!   Ruby >= 2.4).  Both `send` and `csend` (safe-navigation) outer
 //!   calls are handled, mirroring RuboCop's `alias on_csend on_send`.
 //!   The mixed case `recv&.unpack(fmt).first` (inner csend, outer plain send)
 //!   is excluded: autocorrecting it to `recv&.unpack1(fmt)` would change
@@ -53,6 +51,7 @@ pub struct UnpackFirst;
     description = "Use `unpack1` instead of `unpack` followed by `.first` or `[0]`.",
     default_severity = "warning",
     default_enabled = true,
+    minimum_target_ruby_version = "2.4",
     options = NoOptions,
 )]
 impl UnpackFirst {
@@ -278,6 +277,15 @@ mod tests {
         // Autocorrecting to obj&.unpack1('h*') would silently return nil -- a
         // behaviour change -- so this form is not flagged.
         test::<UnpackFirst>().expect_no_offenses("obj&.unpack('h*').first\n");
+    }
+
+    #[test]
+    fn minimum_target_ruby_version_is_set() {
+        use murphy_plugin_api::{Cop, RubyVersion};
+        assert_eq!(
+            <UnpackFirst as Cop>::MINIMUM_TARGET_RUBY_VERSION,
+            Some(RubyVersion::new(2, 4)),
+        );
     }
 }
 murphy_plugin_api::submit_cop!(UnpackFirst);

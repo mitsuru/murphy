@@ -7,16 +7,12 @@
 //! upstream: rubocop
 //! upstream_cop: Style/MapToHash
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-zgcp
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Marked unsafe in RuboCop (Safe: false) because the receiver may not be
 //!   an Enumerable. Murphy does not have a Safe/SafeAutoCorrect cop-level
 //!   attribute yet; the unsafe nature is documented here only.
-//!
-//!   Requires Ruby >= 2.6 (upstream minimum_target_ruby_version 2.6). Murphy
-//!   does not gate on TargetRubyVersion yet; this is documented here only.
 //!
 //!   Handled patterns (mirrors RuboCop's node matcher):
 //!     1. Block form:      `something.map { |v| [v, v * 2] }.to_h`
@@ -79,6 +75,7 @@ pub struct MapToHash;
     description = "Prefer `to_h` with a block over `map.to_h` or `collect.to_h`.",
     default_severity = "warning",
     default_enabled = false,
+    minimum_target_ruby_version = "2.6",
     options = NoOptions,
 )]
 impl MapToHash {
@@ -315,6 +312,15 @@ mod tests {
                           ^^^ Pass a block to `to_h` instead of calling `map&.to_h`.
             "#},
             "something&.to_h { |v| [v, v] }\n",
+        );
+    }
+
+    #[test]
+    fn minimum_target_ruby_version_is_set() {
+        use murphy_plugin_api::{Cop, RubyVersion};
+        assert_eq!(
+            <MapToHash as Cop>::MINIMUM_TARGET_RUBY_VERSION,
+            Some(RubyVersion::new(2, 6)),
         );
     }
 }
