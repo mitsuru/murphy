@@ -73,8 +73,8 @@ impl SafeNavigationChainLength {
         let max = opts.max.max(1) as usize;
 
         // Walk up the ancestor chain collecting consecutive csend ancestors.
-        // Only the innermost csend (non-csend receiver) accumulates all ancestors,
-        // so at most one offense is emitted per chain. See module doc for examples.
+        // Each csend fires this handler, but only the innermost csend (whose receiver
+        // is not a csend) accumulates all ancestors and may emit an offense.
         let mut csend_ancestors: Vec<NodeId> = Vec::new();
         let mut current = node;
         while let Some(parent) = cx.parent(current).get() {
