@@ -84,7 +84,7 @@ impl AsciiComments {
             let allowed: Vec<char> = opts
                 .allowed_chars
                 .iter()
-                .filter_map(|s| s.chars().next())
+                .flat_map(|s| s.chars())
                 .collect();
 
             // Check whether ALL non-ASCII chars in the comment are allowed.

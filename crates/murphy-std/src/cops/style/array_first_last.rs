@@ -72,7 +72,7 @@ impl ArrayFirstLast {
 
 /// Returns `true` if `node` is a plain `Send` call to `[]` or `[]=`.
 fn is_brace_method(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(cx.kind(node), NodeKind::Send { .. })
+    matches!(cx.kind(node), NodeKind::Send { .. } | NodeKind::Csend { .. })
         && matches!(cx.method_name(node), Some("[]") | Some("[]="))
 }
 
@@ -82,7 +82,7 @@ fn is_brace_method(node: NodeId, cx: &Cx<'_>) -> bool {
 fn innermost_braces_node(node: NodeId, cx: &Cx<'_>) -> NodeId {
     let mut current = node;
     while let Some(recv) = cx.call_receiver(current).get() {
-        if matches!(cx.kind(recv), NodeKind::Send { .. })
+        if matches!(cx.kind(recv), NodeKind::Send { .. } | NodeKind::Csend { .. })
             && cx.method_name(recv) == Some("[]")
         {
             current = recv;

@@ -71,10 +71,6 @@ pub struct ClassAndModuleChildren;
 ///
 /// Matches RuboCop's `EnforcedStyle`, `EnforcedStyleForClasses`, and
 /// `EnforcedStyleForModules` config keys.
-///
-/// **v1 limitation:** option values are read from the struct's `Default`
-/// (i.e. `EnforcedStyle = "nested"` always fires); live `.murphy.yml`
-/// overrides are pending murphy-9cr.9.
 #[derive(CopOptions)]
 pub struct ClassAndModuleChildrenOptions {
     /// Overall enforced style: `"nested"` (default) or `"compact"`.

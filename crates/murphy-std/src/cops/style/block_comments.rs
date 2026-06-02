@@ -98,7 +98,7 @@ fn emit_correction(cx: &Cx<'_>, range: Range) {
     // The full text covered by the block comment range.
     let text = &src[start..end];
 
-    // Determine whether the range ends with a newline.
+    // Determine whether the range ends with a newline (LF or CRLF).
     let trailing_newline = text.ends_with(b"\n");
 
     let text_str = match std::str::from_utf8(text) {
@@ -108,7 +108,8 @@ fn emit_correction(cx: &Cx<'_>, range: Range) {
 
     // Split the whole block into lines. For `=begin\nfoo\nbar\n=end\n`,
     // splitting by `\n` gives: ["=begin", "foo", "bar", "=end", ""].
-    let lines: Vec<&str> = text_str.split('\n').collect();
+    // Strip any trailing `\r` from each line to handle CRLF files.
+    let lines: Vec<&str> = text_str.split('\n').map(|l| l.trim_end_matches('\r')).collect();
 
     // Validate: must start with `=begin`.
     if lines.is_empty() || lines[0] != "=begin" {

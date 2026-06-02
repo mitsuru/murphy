@@ -59,7 +59,7 @@ pub struct IfWithBooleanLiteralBranches;
 #[derive(CopOptions)]
 pub struct IfWithBooleanLiteralBranchesOptions {
     #[option(
-        default = ["nonzero?"],
+        default = ["infinite?", "nonzero?"],
         description = "Method names that are always allowed (not flagged)."
     )]
     pub allowed_methods: Vec<String>,

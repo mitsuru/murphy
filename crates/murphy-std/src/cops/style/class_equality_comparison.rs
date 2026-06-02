@@ -308,9 +308,49 @@ fn resolve_class_name(
             }
         }
     } else {
-        // Shape A: `recv.class == <something>` -- use the raw source of the arg.
-        // RuboCop uses `class_node.source` for all non-name-method shapes.
-        Some(cx.raw_source(cx.range(class_node)).to_string())
+        // Shape A: `recv.class == <something>`.
+        // Only autocorrect when the arg identifies a concrete class; return
+        // None for literals that cannot be a class name (Int, Array, etc.).
+        match cx.kind(class_node) {
+            NodeKind::Const { .. } => Some(cx.raw_source(cx.range(class_node)).to_string()),
+            NodeKind::Str(sid) => {
+                let value = cx.string_str(*sid);
+                let needs_cbase = cx.ancestors(comparison_node).any(|a| {
+                    matches!(cx.kind(a), NodeKind::Class { .. } | NodeKind::Module { .. })
+                });
+                if needs_cbase {
+                    Some(format!("::{value}"))
+                } else {
+                    Some(value.to_string())
+                }
+            }
+            NodeKind::Send {
+                receiver: arg_recv,
+                method: arg_method,
+                ..
+            } => {
+                let method_name = cx.symbol_str(*arg_method);
+                if CLASS_NAME_METHODS.contains(&method_name) {
+                    let recv_id = arg_recv.get()?;
+                    Some(cx.raw_source(cx.range(recv_id)).to_string())
+                } else {
+                    None
+                }
+            }
+            NodeKind::Csend {
+                receiver: arg_recv,
+                method: arg_method,
+                ..
+            } => {
+                let method_name = cx.symbol_str(*arg_method);
+                if CLASS_NAME_METHODS.contains(&method_name) {
+                    Some(cx.raw_source(cx.range(*arg_recv)).to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 }
 

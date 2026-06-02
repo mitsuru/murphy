@@ -304,7 +304,22 @@ fn except_key_source(key: NodeId, cx: &Cx<'_>) -> String {
             }
             elems
                 .iter()
-                .map(|&e| cx.raw_source(cx.range(e)).to_owned())
+                .map(|&e| match cx.kind(e) {
+                    // `%i[a b]` elements have raw_source `a` (no colon);
+                    // use the interned symbol value to always emit `:a`.
+                    NodeKind::Sym(sid) => format!(":{}", cx.symbol_str(*sid)),
+                    // `%w[a b]` elements have raw_source `a` (no quotes);
+                    // wrap in double quotes using the interned string value.
+                    NodeKind::Str(sid) => {
+                        let raw = cx.raw_source(cx.range(e));
+                        if raw.starts_with('"') || raw.starts_with('\'') {
+                            raw.to_owned()
+                        } else {
+                            format!("\"{}\"", cx.string_str(*sid))
+                        }
+                    }
+                    _ => cx.raw_source(cx.range(e)).to_owned(),
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         }
