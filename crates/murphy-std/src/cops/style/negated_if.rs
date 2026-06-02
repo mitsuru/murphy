@@ -35,7 +35,7 @@
 //!    which handles both `!expr` (removes `!`) and `not(expr)` (removes `not(…)`).
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
-use crate::cops::util::{emit_edit_with_preceding_space, is_parenthesized};
+use crate::cops::util::{emit_edit_with_preceding_space, unwrap_parenthesized};
 
 const MSG: &str = "Favor `unless` over `if` for negative conditions.";
 
@@ -128,16 +128,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // Unwrap a parenthesized condition: `(!x.even?)` is now Begin([Send{!}]).
     // Try the inner node for the negation check; keep `cond` for range/autocorrect.
-    let effective_cond = if is_parenthesized(cond, cx) {
-        if let NodeKind::Begin(list) = cx.kind(cond) {
-            let children = cx.list(*list);
-            if children.len() == 1 { children[0] } else { cond }
-        } else {
-            cond
-        }
-    } else {
-        cond
-    };
+    let effective_cond = unwrap_parenthesized(cond, cx);
 
     // Condition must be a single `!` negation.
     let Some(recv) = single_negative(effective_cond, cx) else {
