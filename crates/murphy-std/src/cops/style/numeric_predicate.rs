@@ -8,8 +8,7 @@
 //! upstream_cop: Style/NumericPredicate
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-zgcp
+//! gap_issues: []
 //! notes: >
 //!   Both EnforcedStyle values (`predicate` and `comparison`) are implemented.
 //!   Predicate style: flags `x == 0`, `x > 0`, `x < 0`, and inverted forms
@@ -23,8 +22,6 @@
 //!   or any ancestor send/block method name is in AllowedMethods. Defaults to [].
 //!   AllowedPatterns (regex): not supported -- derive only covers Vec<String>.
 //!   This is a v1 gap; users can work around it with AllowedMethods.
-//!   target_ruby_version guard for `>` and `<` (Ruby >= 2.3): not enforced.
-//!   Murphy v1 has no per-file Ruby version tracking; benign gap.
 //!   `!= 0` and `nonzero?` are deliberately excluded from RESTRICT_ON_SEND,
 //!   matching RuboCop: `nonzero?` is truthy/falsey (not true/false), and
 //!   `x != 0` is not in RuboCop's RESTRICT_ON_SEND either.
@@ -283,6 +280,7 @@ fn match_predicate(node: NodeId, cx: &Cx<'_>) -> Option<(NodeId, &'static str)> 
     description = "Prefer predicate methods or comparison operators for numeric checks.",
     default_severity = "warning",
     default_enabled = true,
+    minimum_target_ruby_version = "2.3",
     options = NumericPredicateOptions,
 )]
 impl NumericPredicate {
@@ -360,6 +358,15 @@ impl NumericPredicate {
 mod tests {
     use super::{NumericPredicate, NumericPredicateOptions, NumericPredicateStyle};
     use murphy_plugin_api::test_support::{indoc, test};
+
+    #[test]
+    fn minimum_target_ruby_version_is_set() {
+        use murphy_plugin_api::{Cop, RubyVersion};
+        assert_eq!(
+            <NumericPredicate as Cop>::MINIMUM_TARGET_RUBY_VERSION,
+            Some(RubyVersion::new(2, 3)),
+        );
+    }
 
     // ----- EnforcedStyle: predicate (default) -----
 
