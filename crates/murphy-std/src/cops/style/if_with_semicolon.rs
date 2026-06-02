@@ -56,16 +56,15 @@
 
 use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
-const MSG_IF_ELSE: &str =
-    "Do not use `%<keyword>s %<expr>s;` - use `if/else` instead.";
-const MSG_NEWLINE: &str =
-    "Do not use `%<keyword>s %<expr>s;` - use a newline instead.";
-const MSG_TERNARY: &str =
-    "Do not use `%<keyword>s %<expr>s;` - use a ternary operator instead.";
-
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct IfWithSemicolon;
+
+enum MessageTemplate {
+    Newline,
+    IfElse,
+    Ternary,
+}
 
 #[cop(
     name = "Style/IfWithSemicolon",
@@ -102,10 +101,17 @@ impl IfWithSemicolon {
         let keyword = if cx.is_unless(node) { "unless" } else { "if" };
         let expr = cx.raw_source(cx.range(cond_id));
 
-        let msg_template = message_template(node, cx);
-        let message = msg_template
-            .replace("%<keyword>s", keyword)
-            .replace("%<expr>s", expr);
+        let message = match message_template(node, cx) {
+            MessageTemplate::Newline => {
+                format!("Do not use `{keyword} {expr};` - use a newline instead.")
+            }
+            MessageTemplate::IfElse => {
+                format!("Do not use `{keyword} {expr};` - use `if/else` instead.")
+            }
+            MessageTemplate::Ternary => {
+                format!("Do not use `{keyword} {expr};` - use a ternary operator instead.")
+            }
+        };
 
         cx.emit_offense(cx.range(node), &message, None);
 
@@ -139,22 +145,23 @@ fn find_semicolon_after(cond_end: u32, cx: &Cx<'_>) -> Option<Range> {
 // Message selection
 // ---------------------------------------------------------------------------
 
-fn message_template(node: NodeId, cx: &Cx<'_>) -> &'static str {
+fn message_template(node: NodeId, cx: &Cx<'_>) -> MessageTemplate {
     if require_newline(node, cx) {
-        MSG_NEWLINE
+        MessageTemplate::Newline
     } else if else_is_if_or_begin(node, cx) || branches_have_masgn_or_block(node, cx) {
-        MSG_IF_ELSE
+        MessageTemplate::IfElse
     } else {
-        MSG_TERNARY
+        MessageTemplate::Ternary
     }
 }
 
 /// `require_newline?` from RuboCop: any compacted branch is a `Begin` node,
 /// or any branch is a `return` with arguments.
 fn require_newline(node: NodeId, cx: &Cx<'_>) -> bool {
-    branches(node, cx).iter().any(|&b| {
-        matches!(cx.kind(b), NodeKind::Begin(_)) || is_return_with_argument(b, cx)
-    })
+    branches(node, cx)
+        .into_iter()
+        .flatten()
+        .any(|b| matches!(cx.kind(b), NodeKind::Begin(_)) || is_return_with_argument(b, cx))
 }
 
 /// Returns `true` if the else-branch is an `If` or `Begin` node.
@@ -168,7 +175,7 @@ fn else_is_if_or_begin(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Returns `true` if any branch uses `Masgn` or a block (`Block`/`Numblock`).
 fn branches_have_masgn_or_block(node: NodeId, cx: &Cx<'_>) -> bool {
-    branches(node, cx).iter().any(|&b| {
+    branches(node, cx).into_iter().flatten().any(|b| {
         matches!(
             cx.kind(b),
             NodeKind::Masgn { .. } | NodeKind::Block { .. } | NodeKind::Numblock { .. }
@@ -185,16 +192,10 @@ fn is_return_with_argument(node: NodeId, cx: &Cx<'_>) -> bool {
     }
 }
 
-/// Collects the non-nil branches of the `if` node.
-fn branches(node: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
-    let mut out = Vec::new();
-    if let Some(b) = cx.if_then_branch(node).get() {
-        out.push(b);
-    }
-    if let Some(b) = cx.if_else_branch(node).get() {
-        out.push(b);
-    }
-    out
+/// Returns both branches of the `if` node as a fixed-size array.
+/// Each element is `Some(branch_id)` or `None` if the branch is absent.
+fn branches(node: NodeId, cx: &Cx<'_>) -> [Option<NodeId>; 2] {
+    [cx.if_then_branch(node).get(), cx.if_else_branch(node).get()]
 }
 
 // ---------------------------------------------------------------------------
@@ -222,13 +223,13 @@ fn emit_ternary_correction(node: NodeId, cond_id: NodeId, cx: &Cx<'_>) {
     let then_src = cx
         .if_then_branch(node)
         .get()
-        .map(|t| cx.raw_source(cx.range(t)).to_owned())
-        .unwrap_or_else(|| "nil".to_owned());
+        .map(|t| cx.raw_source(cx.range(t)))
+        .unwrap_or("nil");
     let else_src = cx
         .if_else_branch(node)
         .get()
-        .map(|e| cx.raw_source(cx.range(e)).to_owned())
-        .unwrap_or_else(|| "nil".to_owned());
+        .map(|e| cx.raw_source(cx.range(e)))
+        .unwrap_or("nil");
 
     // Murphy's AST stores `unless c; a else b` as `if c: then_=b, else_=a`
     // (branches are already swapped by the parser). Using `then_src : else_src`

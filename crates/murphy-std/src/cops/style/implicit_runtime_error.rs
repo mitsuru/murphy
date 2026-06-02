@@ -33,9 +33,6 @@
 
 use murphy_plugin_api::{Cx, NodeId, NodeKind, cop};
 
-const MSG: &str =
-    "Use `%<method>s` with an explicit exception class and message, rather than just a message.";
-
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct ImplicitRuntimeError;
@@ -75,7 +72,9 @@ impl ImplicitRuntimeError {
             return;
         }
 
-        let message = MSG.replace("%<method>s", method_str);
+        let message = format!(
+            "Use `{method_str}` with an explicit exception class and message, rather than just a message."
+        );
         cx.emit_offense(cx.range(node), &message, None);
     }
 }
