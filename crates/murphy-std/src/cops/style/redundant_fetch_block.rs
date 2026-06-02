@@ -143,6 +143,18 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     let key_src = cx.raw_source(cx.range(call_args[0]));
 
+    // If the key argument is a bare hash literal (e.g. `foo: :bar` without
+    // braces), wrapping it in `{}` is required to keep the autocorrect valid.
+    // Without braces, `fetch(foo: :bar, value)` is invalid Ruby syntax.
+    // Check: key node is a Hash AND source does not start with `{`.
+    let key_src_for_autocorrect = if matches!(cx.kind(call_args[0]), NodeKind::Hash(_))
+        && !key_src.starts_with('{')
+    {
+        format!("{{{key_src}}}")
+    } else {
+        key_src.to_string()
+    };
+
     // Offense range: from fetch selector start to end of block node.
     // Mirrors RuboCop's fetch_range(send, node).
     let fetch_sel_start = cx.selector(call).start;
@@ -151,7 +163,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         end: cx.range(node).end,
     };
 
-    let good = format!("fetch({key_src}, {default_value_src})");
+    let good = format!("fetch({key_src_for_autocorrect}, {default_value_src})");
     let bad = if body_node.is_none() {
         format!("fetch({key_src}) {{}}")
     } else {
@@ -418,6 +430,41 @@ mod tests {
     #[test]
     fn accepts_fetch_with_no_args() {
         test::<RedundantFetchBlock>().expect_no_offenses("hash.fetch { 5 }\n");
+    }
+
+    // ----- Bare hash key: autocorrect must wrap in {} -----
+
+    #[test]
+    fn flags_bare_hash_key() {
+        // Bare hash key `foo: :bar` (no braces) — offense is flagged.
+        test::<RedundantFetchBlock>().expect_offense(indoc! {r#"
+            hash.fetch(foo: :bar) { 1 }
+                 ^^^^^^^^^^^^^^^^^^^^^^^ Use `fetch({foo: :bar}, 1)` instead of `fetch(foo: :bar) { 1 }`.
+        "#});
+    }
+
+    #[test]
+    fn corrects_bare_hash_key_wraps_in_braces() {
+        // Bare hash key must be wrapped in `{}` so autocorrect produces valid Ruby.
+        test::<RedundantFetchBlock>().expect_correction(
+            indoc! {r#"
+                hash.fetch(foo: :bar) { 1 }
+                     ^^^^^^^^^^^^^^^^^^^^^^^ Use `fetch({foo: :bar}, 1)` instead of `fetch(foo: :bar) { 1 }`.
+            "#},
+            "hash.fetch({foo: :bar}, 1)\n",
+        );
+    }
+
+    #[test]
+    fn corrects_braced_hash_key_no_double_wrap() {
+        // Hash key with explicit braces `{foo: :bar}` should NOT be double-wrapped.
+        test::<RedundantFetchBlock>().expect_correction(
+            indoc! {r#"
+                hash.fetch({foo: :bar}) { 1 }
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^ Use `fetch({foo: :bar}, 1)` instead of `fetch({foo: :bar}) { 1 }`.
+            "#},
+            "hash.fetch({foo: :bar}, 1)\n",
+        );
     }
 }
 
