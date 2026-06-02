@@ -170,6 +170,29 @@ mod tests {
             .expect_no_offenses("x&.foo&.bar&.baz\n");
     }
 
+    // Edge case: Max: 0 or negative values are clamped to 1 via opts.max.max(1).
+    // This means even a chain of 1 csend is flagged — any &. use is an offense.
+
+    #[test]
+    fn max_zero_clamped_to_one_flags_single_csend() {
+        // max=0 is stored but clamped to 1 in check_csend; a single csend is flagged.
+        test::<SafeNavigationChainLength>()
+            .with_options(&SafeNavigationChainLengthOptions { max: 0 })
+            .expect_offense(indoc! {"
+                x&.foo&.bar
+                ^^^^^^^^^^^ Avoid safe navigation chains longer than 1 calls.
+            "});
+    }
+
+    #[test]
+    fn no_offense_single_csend_with_max_one() {
+        // Single csend with max=1: 0 ancestors < 1 → no offense.
+        test::<SafeNavigationChainLength>()
+            .with_options(&SafeNavigationChainLengthOptions { max: 1 })
+            .expect_no_offenses("x&.foo
+");
+    }
+
     #[test]
     fn default_options_max_is_two() {
         let opts = SafeNavigationChainLengthOptions::default();
