@@ -12,9 +12,8 @@
 //!   Three EnforcedStyle values are implemented:
 //!     require_no_parentheses (default): flag parenthesized conditions.
 //!     require_parentheses: flag unparenthesized conditions.
-//!     require_parentheses_when_complex: flag complex without parens (only).
-//!     The "simple with parens should lose parens" direction in
-//!     require_parentheses_when_complex is not implemented (false negatives only).
+//!     require_parentheses_when_complex: flag complex without parens AND
+//!     flag simple parenthesized conditions (remove-parens direction fully implemented).
 //!   AllowSafeAssignment (default: true): parenthesized conditions containing an assignment
 //!   token `=` are allowed (detected via token scan — covers common cases).
 //!   Parenthesized conditions are `NodeKind::Begin` with `LeftParen` at `range.start`
@@ -148,11 +147,20 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TernaryParenthesesOptions) {
                 cx.emit_offense(cx.range(node), &msg, None);
                 cx.emit_edit(cx.range(cond), &format!("({cond_src})"));
             }
-            // `require_parentheses_when_complex` gap: the "simple with parens should lose parens"
-            // direction requires knowing if the inner condition is simple. When a parenthesized
-            // condition has a single-child Begin, we could inspect the inner node — but RuboCop
-            // has complex precedence-awareness here. All parenthesized conditions are
-            // conservatively skipped — false negatives only (no incorrect flags).
+            if is_paren {
+                // Check if inner condition is simple — if so, flag to remove parens.
+                let inner = {
+                    use crate::cops::util::unwrap_parenthesized;
+                    unwrap_parenthesized(cond, cx)
+                };
+                if !is_complex_condition(inner, cx) {
+                    let msg = MSG.replace("%<command>s", "Omit");
+                    cx.emit_offense(cx.range(node), &msg, None);
+                    if !has_below_ternary_precedence(cond, cx) {
+                        emit_remove_parens(cond, cx);
+                    }
+                }
+            }
         }
     }
 }
@@ -228,6 +236,20 @@ fn is_complex_condition(cond: NodeId, cx: &Cx<'_>) -> bool {
 
         // Logical / negation — always complex.
         NodeKind::And { .. } | NodeKind::Or { .. } | NodeKind::Not(_) => true,
+
+        // Parenthesized condition (Begin from `(...)`): delegate to inner node
+        // for single-child parens. Multi-child (e.g. `(a; b)`) is treated as
+        // non-complex (don't force parens on statements).
+        NodeKind::Begin(list) => {
+            if is_parenthesized(cond, cx) {
+                match cx.list(*list) {
+                    [single] => is_complex_condition(*single, cx),
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
 
         // Unknown or other opaque nodes — treated as non-complex.
         // RequireParenthesesWhenComplex: if we can't see inside, skip
@@ -449,8 +471,8 @@ mod tests {
     }
 
     #[test]
-    fn complex_when_accepts_parenthesized_unknown() {
-        // `(bar && baz) ? a : b` — Unknown (parenthesized, opaque) — not flagged.
+    fn complex_when_accepts_parenthesized_complex() {
+        // `(bar && baz) ? a : b` — inner is complex (And) — not flagged for removal.
         let opts = TernaryParenthesesOptions {
             enforced_style: TernaryStyle::RequireParenthesesWhenComplex,
             allow_safe_assignment: true,
@@ -458,6 +480,24 @@ mod tests {
         test::<TernaryParentheses>()
             .with_options(&opts)
             .expect_no_offenses("foo = (bar && baz) ? a : b\n");
+    }
+
+    #[test]
+    fn complex_style_flags_simple_parenthesized() {
+        // `(bar?) ? a : b` — inner is simple (Send) — flagged to remove parens.
+        let opts = TernaryParenthesesOptions {
+            enforced_style: TernaryStyle::RequireParenthesesWhenComplex,
+            allow_safe_assignment: true,
+        };
+        test::<TernaryParentheses>()
+            .with_options(&opts)
+            .expect_correction(
+                indoc! {"
+                    foo = (bar?) ? a : b
+                          ^^^^^^^^^^^^^^ Omit parentheses for ternary conditions.
+                "},
+                "foo = bar? ? a : b\n",
+            );
     }
 
     // ----- Non-ternary (should not flag) -----

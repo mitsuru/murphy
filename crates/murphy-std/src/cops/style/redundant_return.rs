@@ -20,8 +20,8 @@
 //!   (return a, b → Return(Array)) are always skipped.
 //!   return [a, b] is indistinguishable from return a, b at the AST level;
 //!   both are skipped.
-//!   return(value): offense is emitted and autocorrect now deletes the
-//!   `return` prefix, leaving `(value)` which is valid Ruby (murphy-imxw).
+//!   return(value): offense is emitted and autocorrect applies three surgical
+//!   edits to delete `return`, `(`, and `)`, leaving just `value`.
 //!   Autocorrect: `return value` → delete `return ` prefix (from return node
 //!   start to value node start). Bare `return` → replace with `nil`.
 //!   def/defs (singleton method definitions): both handled via separate hooks.
@@ -145,14 +145,32 @@ fn check_return(node: NodeId, cx: &Cx<'_>) {
             let value_range = cx.range(val_id);
             cx.emit_offense(return_range, "Redundant `return` detected.", None);
 
-            // Delete from return-node start to value start (removes "return " or "return").
-            // For `return(value)`: value is now NodeKind::Begin (is_parenthesized),
-            // and deleting the prefix leaves `(value)` which is valid Ruby.
-            let keyword_range = Range {
-                start: return_range.start,
-                end: value_range.start,
-            };
-            cx.emit_edit(keyword_range, "");
+            use crate::cops::util::is_parenthesized;
+            if is_parenthesized(val_id, cx) {
+                // `return(expr)`: three surgical edits to remove return, (, and ).
+                // Edit 1: delete "return" (return node start to begin node start).
+                cx.emit_edit(
+                    Range { start: return_range.start, end: value_range.start },
+                    "",
+                );
+                // Edit 2: delete opening `(`.
+                cx.emit_edit(
+                    Range { start: value_range.start, end: value_range.start + 1 },
+                    "",
+                );
+                // Edit 3: delete closing `)`.
+                cx.emit_edit(
+                    Range { start: value_range.end - 1, end: value_range.end },
+                    "",
+                );
+            } else {
+                // `return expr`: delete "return " prefix.
+                let keyword_range = Range {
+                    start: return_range.start,
+                    end: value_range.start,
+                };
+                cx.emit_edit(keyword_range, "");
+            }
         }
     }
 }
@@ -356,9 +374,10 @@ mod tests {
     // --- Parenthesised return form ---
 
     #[test]
-    fn flags_and_corrects_return_parens() {
-        // `return(value)` now lowers to Return(Begin([Int(42)])) via murphy-imxw.
-        // Autocorrect deletes the `return` prefix, leaving `(42)` which is valid Ruby.
+    fn flags_and_autocorrects_return_with_parens() {
+        // `return(value)` lowers to Return(Begin([Int(42)])) via is_parenthesized.
+        // Autocorrect applies three surgical edits: delete "return", "(", and ")"
+        // leaving just `42`.
         test::<RedundantReturn>().expect_correction(
             indoc! {r#"
                 def foo
@@ -368,7 +387,7 @@ mod tests {
             "#},
             indoc! {r#"
                 def foo
-                  (42)
+                  42
                 end
             "#},
         );

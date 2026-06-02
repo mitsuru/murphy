@@ -17,21 +17,18 @@
 //!
 //!   Implemented guards:
 //!   - Ternary: skipped (not a block-form if).
-//!   - AllowSafeAssignment (default: true): skipped when the condition body
-//!     contains a bare assignment (`=` not preceded/followed by another `=`,
-//!     `!`, `<`, `>`). Raw-source-based heuristic; may miss complex cases.
+//!   - AllowSafeAssignment (default: true): skipped when the condition is an
+//!     assignment node (AST-based, covers all assignment variants).
 //!   - AllowInMultilineConditions (default: false): skipped for multiline
 //!     conditions when the option is set to true.
+//!   - Multiple statements inside parens: detected via AST child count.
 //!
 //!   Gaps vs RuboCop:
 //!   - modifier_op? guard (condition is itself a modifier conditional or
 //!     rescue expression) is NOT implemented due to AST opacity.
-//!   - Semicolon-separated expressions inside parens are NOT detected.
 //!   - Modifier-form `while (cond)` / `x until (cond)` are not checked
 //!     (modifier-form control flow has the keyword after the body).
 //!     Block-form `while (cond) do ... end` IS checked.
-//!   - body_is_assignment heuristic: false negatives when the condition body
-//!     contains `=` inside a string or regexp literal (e.g. `if ("a=b")`).
 //! ```
 //!
 //! ## Detection
@@ -47,7 +44,7 @@
 //! Remove the outer `(` and `)` from the condition.
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
-use crate::cops::util::is_parenthesized;
+use crate::cops::util::{is_parenthesized, unwrap_parenthesized};
 
 #[derive(Clone, Debug)]
 pub struct ParenthesesAroundConditionOptions {
@@ -158,36 +155,37 @@ impl ParenthesesAroundCondition {
 }
 
 fn check_condition(node: NodeId, cond: NodeId, cx: &Cx<'_>) {
-    // A parenthesized condition is represented as Begin with a LeftParen token
-    // at range.start (distinguishes `(...)` from `begin...end`).
     if !is_parenthesized(cond, cx) {
         return;
     }
 
-    let cond_src = cx.raw_source(cx.range(cond));
-
-    // Extract the body (everything inside the outer parens).
-    let body = &cond_src[1..cond_src.len() - 1];
-
-    // Semicolon-separated expressions inside parens change meaning when the
-    // parens are removed: `(foo; bar)` as a condition evaluates `bar`, but
-    // `foo; bar` would evaluate `foo` and move `bar` into the body. Skip.
-    if body.contains(';') {
+    // Multiple statements inside parens change meaning when removed:
+    // `(foo; bar)` evaluates `bar`, but `foo; bar` would evaluate `foo`.
+    // Detect via the AST child count of the Begin node.
+    let NodeKind::Begin(list) = cx.kind(cond) else {
+        return;
+    };
+    if cx.list(*list).len() > 1 {
         return;
     }
 
     let opts = cx.options_or_default::<ParenthesesAroundConditionOptions>();
 
-    // AllowSafeAssignment: skip when the condition body is an assignment
-    // (e.g. `(x = y)`). Detected via a heuristic: the body contains `=`
-    // that is not `==`, `!=`, `<=`, `>=`, `=>`.
-    if opts.allow_safe_assignment && body_is_assignment(body) {
-        return;
+    // AllowSafeAssignment: skip when the condition is an assignment node
+    // (e.g. `(x = y)`). Detected via AST node kind.
+    if opts.allow_safe_assignment {
+        let inner = unwrap_parenthesized(cond, cx);
+        if is_assignment_node(inner, cx) {
+            return;
+        }
     }
 
     // AllowInMultilineConditions: skip if body spans multiple lines.
-    if opts.allow_in_multiline_conditions && cond_src.contains('\n') {
-        return;
+    if opts.allow_in_multiline_conditions {
+        let src = cx.raw_source(cx.range(cond));
+        if src.contains('\n') {
+            return;
+        }
     }
 
     // Build the message. RuboCop uses `article = kw == 'while' ? 'a' : 'an'`.
@@ -228,32 +226,20 @@ fn node_keyword(node: NodeId, cx: &Cx<'_>) -> &'static str {
     }
 }
 
-/// Returns `true` if the body looks like an assignment (not a comparison).
-///
-/// Detects `=` that is not `==`, `!=`, `<=`, `>=`, `=>`.
-/// This is a conservative heuristic for the `AllowSafeAssignment` guard.
-///
-/// Known false negative: `=` inside string/regexp literals (e.g. `"a=b"`)
-/// is treated as an assignment. AST-based detection is not available for
-/// `Unknown` nodes.
-fn body_is_assignment(body: &str) -> bool {
-    let b = body.as_bytes();
-    let len = b.len();
-    let mut i = 0;
-    while i < len {
-        if b[i] == b'=' {
-            // Check preceding character — must not be `!`, `<`, `>`, `=`.
-            let prev_ok = i == 0 || !matches!(b[i - 1], b'!' | b'<' | b'>' | b'=');
-            // Check following character — must not be `=`, `>`, or `~`
-            // (`==` is comparison, `=>` is hash rocket, `=~` is match operator).
-            let next_ok = i + 1 >= len || !matches!(b[i + 1], b'=' | b'>' | b'~');
-            if prev_ok && next_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
+/// Returns `true` if `node_id` is an assignment node (any assignment variant).
+fn is_assignment_node(node_id: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(
+        cx.kind(node_id),
+        NodeKind::Lvasgn { .. }
+            | NodeKind::Ivasgn { .. }
+            | NodeKind::Cvasgn { .. }
+            | NodeKind::Gvasgn { .. }
+            | NodeKind::Casgn { .. }
+            | NodeKind::OpAsgn { .. }
+            | NodeKind::OrAsgn { .. }
+            | NodeKind::AndAsgn { .. }
+            | NodeKind::Masgn { .. }
+    )
 }
 
 #[cfg(test)]

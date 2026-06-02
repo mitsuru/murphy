@@ -24,6 +24,21 @@ pub fn is_parenthesized(node: NodeId, cx: &Cx<'_>) -> bool {
         .map_or(false, |t| t.kind == SourceTokenKind::LeftParen && t.range.start == range_start)
 }
 
+/// If `node_id` is a parenthesized single-expression (`(expr)`), returns the
+/// inner expression. Otherwise returns `node_id` unchanged.
+pub fn unwrap_parenthesized(node_id: NodeId, cx: &Cx<'_>) -> NodeId {
+    if !is_parenthesized(node_id, cx) {
+        return node_id;
+    }
+    let NodeKind::Begin(list) = cx.kind(node_id) else {
+        return node_id;
+    };
+    match cx.list(*list) {
+        [single] => *single,
+        _ => node_id,
+    }
+}
+
 /// Emit an edit that replaces `cond_range` with `replacement`, prepending a
 /// space if the character immediately before `cond_range.start` is not
 /// whitespace.
