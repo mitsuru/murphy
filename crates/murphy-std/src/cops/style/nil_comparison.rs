@@ -1,4 +1,4 @@
-//! `Style/NilComparison` — flags `x == nil` and `x != nil`, preferring `.nil?`.
+//! `Style/NilComparison` — flags `x == nil`, preferring `.nil?`.
 //!
 //! ## RuboCop parity
 //!
@@ -9,29 +9,26 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Murphy v1 enforces the predicate style only (x == nil → x.nil?, x != nil → !x.nil?).
+//!   Murphy v1 enforces the predicate style only (x == nil → x.nil?).
 //!   RuboCop's `EnforcedStyle = comparison` direction (nil? → == nil) is not supported.
 //!   `===` is not handled (RuboCop's RESTRICT_ON_SEND includes :=== in addition to :== and :nil?).
-//!   `!=` is a Murphy addition not present in RuboCop's default predicate-style enforcement.
+//!   `!=` is NOT handled here — it is owned by Style/NonNilCheck (matching RuboCop's cop split).
 //! ```
 //!
 //! ## Matched shapes
 //!
-//! `Send` nodes with method `==` or `!=` with exactly one argument that is a
+//! `Send` nodes with method `==` with exactly one argument that is a
 //! `nil` literal, and whose receiver is non-absent. Examples:
 //!
 //! - `x == nil` → offense, suggest `.nil?`
-//! - `x != nil` → offense, suggest `!x.nil?`
 //! - `nil == x` → no offense (receiver is nil, argument is `x`)
 //!
 //! ## Autocorrect
 //!
 //! - `recv == nil` → `(recv).nil?`: whole-node replacement wrapping the receiver
 //!   in parentheses for safety with compound receivers (e.g. `a + b == nil` → `(a + b).nil?`).
-//! - `recv != nil` → `!(recv).nil?`: whole-node replacement adding a `!` prefix with the
-//!   receiver wrapped in parentheses for safety.
-//!   Both use whole-node interpolation as per `.claude/rules/autocorrect-pattern.md`
-//!   (structural rewrites, not simple surgical deletes).
+//!   Uses whole-node interpolation as per `.claude/rules/autocorrect-pattern.md`
+//!   (structural rewrite, not a simple surgical delete).
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
@@ -49,7 +46,7 @@ pub struct NilComparison;
     options = NoOptions,
 )]
 impl NilComparison {
-    #[on_node(kind = "send", methods = ["==", "!="])]
+    #[on_node(kind = "send", methods = ["=="])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
@@ -58,8 +55,8 @@ impl NilComparison {
 fn check(node: NodeId, cx: &Cx<'_>) {
     let NodeKind::Send {
         receiver,
-        method,
         args,
+        ..
     } = *cx.kind(node)
     else {
         return;
@@ -81,41 +78,17 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    let method_name = cx.symbol_str(method);
+    // recv == nil → (recv).nil?
+    // Whole-node replacement wrapping the receiver in parentheses to
+    // preserve semantics for compound receivers:
+    //   `a + b == nil` → `(a + b).nil?` rather than `a + b.nil?`
+    // For simple receivers like `x`, `(x).nil?` is valid Ruby.
     let node_range = cx.range(node);
     let recv_range = cx.range(recv_id);
-
-    match method_name {
-        "==" => {
-            // recv == nil → (recv).nil?
-            // Whole-node replacement wrapping the receiver in parentheses to
-            // preserve semantics for compound receivers:
-            //   `a + b == nil` → `(a + b).nil?` rather than `a + b.nil?`
-            // For simple receivers like `x`, `(x).nil?` is valid Ruby.
-            let recv_src = cx.raw_source(recv_range);
-            let replacement = format!("({recv_src}).nil?");
-            cx.emit_offense(node_range, MSG, None);
-            cx.emit_edit(node_range, &replacement);
-        }
-        "!=" => {
-            // recv != nil → !recv.nil?
-            // Structural rewrite: insert `!` prefix and change operator.
-            //
-            // The receiver source is wrapped in parentheses unconditionally so
-            // that complex expressions (e.g., operator calls like `a + b != nil`,
-            // logical expressions, or other compound forms) produce valid Ruby
-            // with preserved semantics: `!(a + b).nil?` rather than the
-            // ambiguous/wrong `!a + b.nil?`.
-            //
-            // For simple receivers like `x` or `x.foo`, `!(x).nil?` is valid Ruby
-            // and semantically identical to `!x.nil?`.
-            let recv_src = cx.raw_source(recv_range);
-            let replacement = format!("!({recv_src}).nil?");
-            cx.emit_offense(node_range, MSG, None);
-            cx.emit_edit(node_range, &replacement);
-        }
-        _ => {}
-    }
+    let recv_src = cx.raw_source(recv_range);
+    let replacement = format!("({recv_src}).nil?");
+    cx.emit_offense(node_range, MSG, None);
+    cx.emit_edit(node_range, &replacement);
 }
 
 #[cfg(test)]
@@ -164,31 +137,7 @@ mod tests {
         );
     }
 
-    // ----- `!=` cases -----
-
-    #[test]
-    fn flags_neq_nil() {
-        test::<NilComparison>().expect_correction(
-            indoc! {"
-                x != nil
-                ^^^^^^^^ Prefer the use of the `nil?` predicate.
-            "},
-            "!(x).nil?\n",
-        );
-    }
-
-    #[test]
-    fn flags_neq_nil_with_complex_receiver() {
-        test::<NilComparison>().expect_correction(
-            indoc! {"
-                foo.bar != nil
-                ^^^^^^^^^^^^^^ Prefer the use of the `nil?` predicate.
-            "},
-            "!(foo.bar).nil?\n",
-        );
-    }
-
-    // ----- `==` and `!=` with complex receivers — parens wrap for safety -----
+    // ----- `==` with complex receivers — parens wrap for safety -----
 
     #[test]
     fn flags_eq_nil_with_operator_receiver() {
@@ -197,17 +146,6 @@ mod tests {
         // With parens: `(a + b).nil?` is correct.
         test::<NilComparison>().expect_offense(indoc! {"
             a + b == nil
-            ^^^^^^^^^^^^ Prefer the use of the `nil?` predicate.
-        "});
-    }
-
-    #[test]
-    fn flags_neq_nil_with_operator_receiver() {
-        // Receiver is an operator call — wrapping in parens preserves semantics.
-        // Without parens: "!a + b.nil?" has wrong precedence.
-        // With parens: "!(a + b).nil?" is correct.
-        test::<NilComparison>().expect_offense(indoc! {"
-            a + b != nil
             ^^^^^^^^^^^^ Prefer the use of the `nil?` predicate.
         "});
     }
@@ -232,7 +170,8 @@ mod tests {
 
     #[test]
     fn accepts_neq_non_nil() {
-        test::<NilComparison>().expect_no_offenses("x != 1\n");
+        // `!=` is handled by Style/NonNilCheck, not here.
+        test::<NilComparison>().expect_no_offenses("x != nil\n");
     }
 }
 murphy_plugin_api::submit_cop!(NilComparison);
