@@ -10,8 +10,11 @@
 //! gap_issues: []
 //! notes: >
 //!   Covered:
-//!     - `x != nil` → flags with `Prefer \`!x.nil?\` over \`x != nil\`.` message,
-//!       autocorrects to `!x.nil?`. (Default `IncludeSemanticChanges: false` path.)
+//!     - `x != nil` → flags with `Prefer \`!(x).nil?\` over \`x != nil\`.` message,
+//!       autocorrects to `!(x).nil?`. (Default `IncludeSemanticChanges: false` path.)
+//!       The receiver is wrapped in parentheses unconditionally to preserve semantics
+//!       for compound receivers (e.g. `a + b != nil` → `!(a + b).nil?`). This is
+//!       safer than RuboCop's unparenthesized form and produces correct Ruby.
 //!     - Predicate method exemption: the final expression of a predicate method body
 //!       (`def foo?`) is NOT flagged (matches RuboCop's `on_def`/`ignore_node` logic).
 //!   Gap (IncludeSemanticChanges: true paths — not implemented):
@@ -35,7 +38,8 @@
 //!
 //! ## Autocorrect
 //!
-//! `recv != nil` → `!recv.nil?` (no parentheses, matching RuboCop's output).
+//! `recv != nil` → `!(recv).nil?` (receiver wrapped in parens for safe precedence
+//! with compound expressions like `a + b != nil` → `!(a + b).nil?`).
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
 
@@ -103,7 +107,10 @@ fn check_neq_nil(node: NodeId, cx: &Cx<'_>) {
 
     let recv_src = cx.raw_source(cx.range(recv_id));
     let node_src = cx.raw_source(cx.range(node));
-    let prefer = format!("!{recv_src}.nil?");
+    // Wrap receiver in parentheses unconditionally for safe precedence with
+    // compound receivers (e.g. `a + b != nil` → `!(a + b).nil?` rather than
+    // `!a + b.nil?` which parses as `(!a) + (b.nil?)`).
+    let prefer = format!("!({recv_src}).nil?");
     let msg = MSG_FOR_REPLACEMENT
         .replace("%<prefer>s", &prefer)
         .replace("%<current>s", node_src);
@@ -175,9 +182,9 @@ mod tests {
             .expect_correction(
                 indoc! {"
                     x != nil
-                    ^^^^^^^^ Prefer `!x.nil?` over `x != nil`.
+                    ^^^^^^^^ Prefer `!(x).nil?` over `x != nil`.
                 "},
-                "!x.nil?\n",
+                "!(x).nil?\n",
             );
     }
 
@@ -188,9 +195,24 @@ mod tests {
             .expect_correction(
                 indoc! {"
                     foo.bar != nil
-                    ^^^^^^^^^^^^^^ Prefer `!foo.bar.nil?` over `foo.bar != nil`.
+                    ^^^^^^^^^^^^^^ Prefer `!(foo.bar).nil?` over `foo.bar != nil`.
                 "},
-                "!foo.bar.nil?\n",
+                "!(foo.bar).nil?\n",
+            );
+    }
+
+    #[test]
+    fn flags_neq_nil_with_operator_receiver() {
+        // Complex receiver (operator call) — parens preserve precedence.
+        // `!a + b.nil?` → wrong; `!(a + b).nil?` → correct.
+        test::<NonNilCheck>()
+            .with_options(&default_opts())
+            .expect_correction(
+                indoc! {"
+                    a + b != nil
+                    ^^^^^^^^^^^^ Prefer `!(a + b).nil?` over `a + b != nil`.
+                "},
+                "!(a + b).nil?\n",
             );
     }
 
@@ -201,12 +223,12 @@ mod tests {
             .expect_correction(
                 indoc! {"
                     if x != nil
-                       ^^^^^^^^ Prefer `!x.nil?` over `x != nil`.
+                       ^^^^^^^^ Prefer `!(x).nil?` over `x != nil`.
                       y
                     end
                 "},
                 indoc! {"
-                    if !x.nil?
+                    if !(x).nil?
                       y
                     end
                 "},
@@ -248,7 +270,7 @@ mod tests {
             .expect_offense(indoc! {"
                 def foo
                   x != nil
-                  ^^^^^^^^ Prefer `!x.nil?` over `x != nil`.
+                  ^^^^^^^^ Prefer `!(x).nil?` over `x != nil`.
                 end
             "});
     }
@@ -261,7 +283,7 @@ mod tests {
             .expect_offense(indoc! {"
                 def foo?
                   y = x != nil
-                      ^^^^^^^^ Prefer `!x.nil?` over `x != nil`.
+                      ^^^^^^^^ Prefer `!(x).nil?` over `x != nil`.
                   y
                 end
             "});
