@@ -95,7 +95,10 @@ impl RedundantBegin {
                 // The begin is the direct body of the method.
                 // It is redundant regardless of rescue/ensure (RuboCop removes the
                 // begin/end, keeping the rescue/ensure on the method itself).
-                emit_offense(node, cx);
+                // Empty begin blocks are never flagged.
+                if !is_empty_begin(node, cx) {
+                    emit_offense(node, cx);
+                }
             }
 
             // --- while/until: flag when no rescue/ensure ---
@@ -109,7 +112,7 @@ impl RedundantBegin {
                 }
             }
 
-            // --- do-end block (non-lambda): flag always ---
+            // --- do-end block (non-lambda): flag unless empty ---
             NodeKind::Block { call, .. } => {
                 // Skip brace blocks.
                 if is_brace_block(parent, cx) {
@@ -119,7 +122,10 @@ impl RedundantBegin {
                 if is_lambda_call(*call, cx) {
                     return;
                 }
-                emit_offense(node, cx);
+                // Empty begin blocks are never flagged.
+                if !is_empty_begin(node, cx) {
+                    emit_offense(node, cx);
+                }
             }
 
             // --- if/unless/case branches: flag when no rescue/ensure ---
@@ -475,11 +481,31 @@ mod tests {
     // --- empty begin: not flagged ---
 
     #[test]
-    fn no_offense_empty_begin() {
-        // Empty begin/end is a valid do-nothing idiom.
-        // We conservatively skip it.
-        // Note: this test checks the standalone case.
-        // An empty begin block is allowed.
+    fn no_offense_empty_begin_in_def() {
+        test::<RedundantBegin>().expect_no_offenses(indoc! {r#"
+            def func
+              begin
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn no_offense_empty_begin_in_do_end_block() {
+        test::<RedundantBegin>().expect_no_offenses(indoc! {r#"
+            do_something do
+              begin
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn no_offense_empty_standalone_begin() {
+        test::<RedundantBegin>().expect_no_offenses(indoc! {r#"
+            begin
+            end
+        "#});
     }
 }
 murphy_plugin_api::submit_cop!(RedundantBegin);
