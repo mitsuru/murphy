@@ -16,12 +16,14 @@
 //!   Detection has two directions:
 //!     Direction A (inner each): node is :each, parent is a call with
 //!       receiver==node, parent method in {each, each_with_index,
-//!       each_with_object, reverse_each}. Offense covers inner selector +
+//!       each_with_object, reverse_each}. Offense message is always MSG
+//!       ("Remove redundant `each`."). Offense covers inner selector +
 //!       parent dot ("each.").
-//!     Direction B (outer call): node is :each/:each_with_index/:each_with_object,
-//!       its receiver is a call (not inside a block) whose method starts with
-//!       "each_" or is "reverse_each", with no block-pass last arg.
-//!       Offense covers the outer method's selector.
+//!     Direction B (outer call):
+//!       - :each node: receiver is :reverse_each (only). Offense = dot + selector.
+//!       - :each_with_index/:each_with_object: receiver starts with "each_" or
+//!         is "reverse_each". Offense = outer method selector. Message is
+//!         MSG_WITH_INDEX/MSG_WITH_OBJECT accordingly.
 //!
 //!   Both send and csend are handled (matching RuboCop's alias on_csend on_send).
 //!   Block-pass guard: skip if last argument of receiver is a BlockPass.
@@ -36,10 +38,12 @@
 //! array.each.each_with_object({}) { }  # => array.each.with_object({}) { }
 //! array.each.reverse_each { |v| v }    # => array.reverse_each { |v| v }
 //!
-//! # bad (direction B — outer each is redundant)
-//! array.reverse_each.each { |v| v }          # => array.reverse_each { |v| v }
-//! array.each_with_index.each { |v| v }       # => array.each_with_index { |v| v }
-//! array.each_with_object(x).each { |v| v }   # => array.each_with_object(x) { |v| v }
+//! # bad (direction B — outer each is redundant, only when receiver is reverse_each)
+//! array.reverse_each.each { |v| v }   # => array.reverse_each { |v| v }
+//!
+//! # bad (direction B — each_with_index/object when receiver starts with each_ or is reverse_each)
+//! array.each_with_index.each_with_index { |v, i| v }   # => array.each_with_index.with_index { }
+//! array.reverse_each.each_with_object({}) { |v, o| v } # => array.reverse_each.with_object({}) { }
 //!
 //! # good
 //! array.each { |v| v }
@@ -183,7 +187,7 @@ fn check_each(node: NodeId, cx: &Cx<'_>) {
         None => return,
     };
 
-    if recv_method == "reverse_each" || recv_method.starts_with("each_") {
+    if recv_method == "reverse_each" {
         // Direction B: outer each is redundant
         emit_direction_b_each(node, cx);
     }
@@ -251,11 +255,7 @@ fn emit_direction_a(each_node: NodeId, parent: NodeId, cx: &Cx<'_>) {
         inner_selector
     };
 
-    let msg = match parent_method {
-        "each_with_index" => MSG_WITH_INDEX,
-        "each_with_object" => MSG_WITH_OBJECT,
-        _ => MSG,
-    };
+    let msg = MSG;
 
     cx.emit_offense(offense_range, msg, None);
 
@@ -333,7 +333,7 @@ mod tests {
     fn flags_each_each_with_index() {
         test::<RedundantEach>().expect_offense(indoc! {"
             array.each.each_with_index { |v, i| v }
-                  ^^^^^ Use `with_index` to remove redundant `each`.
+                  ^^^^^ Remove redundant `each`.
         "});
     }
 
@@ -342,7 +342,7 @@ mod tests {
         test::<RedundantEach>().expect_correction(
             indoc! {"
                 array.each.each_with_index { |v, i| v }
-                      ^^^^^ Use `with_index` to remove redundant `each`.
+                      ^^^^^ Remove redundant `each`.
             "},
             "array.each.with_index { |v, i| v }\n",
         );
@@ -352,7 +352,7 @@ mod tests {
     fn flags_each_each_with_object() {
         test::<RedundantEach>().expect_offense(indoc! {"
             array.each.each_with_object({}) { |v, o| v }
-                  ^^^^^ Use `with_object` to remove redundant `each`.
+                  ^^^^^ Remove redundant `each`.
         "});
     }
 
@@ -361,7 +361,7 @@ mod tests {
         test::<RedundantEach>().expect_correction(
             indoc! {"
                 array.each.each_with_object({}) { |v, o| v }
-                      ^^^^^ Use `with_object` to remove redundant `each`.
+                      ^^^^^ Remove redundant `each`.
             "},
             "array.each.with_object({}) { |v, o| v }\n",
         );
@@ -428,44 +428,20 @@ mod tests {
         );
     }
 
-    // ---- Direction B: each_with_index.each / each_with_object(x).each ----
+    // ---- Non-triggering patterns: each_with_index.each / each_with_object.each ----
+    // RuboCop only triggers on :each receiver for reverse_each, not for each_*
+    // (the `each_` prefix rule only applies when the outer node is each_with_index/object)
 
     #[test]
-    fn flags_each_with_index_each() {
-        test::<RedundantEach>().expect_offense(indoc! {"
-            array.each_with_index.each { |v| v }
-                                 ^^^^^ Remove redundant `each`.
-        "});
+    fn no_offense_each_with_index_each() {
+        // array.each_with_index.each is NOT flagged: direction B for :each only
+        // triggers when receiver is :reverse_each
+        test::<RedundantEach>().expect_no_offenses("array.each_with_index.each { |v| v }\n");
     }
 
     #[test]
-    fn corrects_each_with_index_each() {
-        test::<RedundantEach>().expect_correction(
-            indoc! {"
-                array.each_with_index.each { |v| v }
-                                     ^^^^^ Remove redundant `each`.
-            "},
-            "array.each_with_index { |v| v }\n",
-        );
-    }
-
-    #[test]
-    fn flags_each_with_object_each() {
-        test::<RedundantEach>().expect_offense(indoc! {"
-            array.each_with_object(x).each { |v| v }
-                                     ^^^^^ Remove redundant `each`.
-        "});
-    }
-
-    #[test]
-    fn corrects_each_with_object_each() {
-        test::<RedundantEach>().expect_correction(
-            indoc! {"
-                array.each_with_object(x).each { |v| v }
-                                         ^^^^^ Remove redundant `each`.
-            "},
-            "array.each_with_object(x) { |v| v }\n",
-        );
+    fn no_offense_each_with_object_each() {
+        test::<RedundantEach>().expect_no_offenses("array.each_with_object(x).each { |v| v }\n");
     }
 
     // ---- Negative cases ----
