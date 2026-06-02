@@ -97,11 +97,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Check if this is an endless method (no `end` keyword).
     let is_endless = cx.loc(node).end_keyword() == Range::ZERO;
 
-    // Skip if this is an assignment method (e.g. `def foo=`).
-    if cx.is_assignment_method(node) {
-        return;
-    }
-
     let opts = cx.options_or_default::<EndlessMethodOptions>();
 
     match opts.enforced_style {

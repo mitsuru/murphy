@@ -147,6 +147,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 /// Returns `true` if `s` contains any regexp metacharacters or quantifiers
 /// that would make the pattern non-literal (i.e. not a plain string match).
 ///
+/// The input `s` is the parser's interned string content where escape sequences
+/// such as `\s` are preserved as two-byte sequences `\` + `s`, not processed
+/// characters. A literal backslash in the source (e.g. `\\`) also arrives as `\`
+/// here, so we conservatively reject any `\` occurrence.
+///
 /// Quantifiers: `+`, `*`, `?`, `{`
 /// Metacharacters: `(`, `)`, `[`, `]`, `|`, `.`, `^`, `$`, `\`
 fn contains_regexp_metachar(s: &str) -> bool {
