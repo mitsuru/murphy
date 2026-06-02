@@ -77,10 +77,6 @@ pub struct HashEachMethodsOptions {
     pub allowed_receivers: Vec<String>,
 }
 
-const MSG: &str = "Use `%<prefer>s` instead of `%<current>s`.";
-const MSG_UNUSED: &str =
-    "Use `%<prefer>s` instead of `%<current>s` and remove the unused `%<unused_code>s` block argument.";
-
 #[cop(
     name = "Style/HashEachMethods",
     description = "Use Hash#each_key and Hash#each_value.",
@@ -89,8 +85,8 @@ const MSG_UNUSED: &str =
     options = HashEachMethodsOptions,
 )]
 impl HashEachMethods {
-    // Pattern 1 & 2: triggered when we see a Block (or block-pass send) with
-    // a `keys.each` or `values.each` call chain.
+    // Pattern 1 & 2: triggered when we see a Block with a `keys.each` or
+    // `values.each` call chain.
     #[on_node(kind = "block")]
     fn check_block(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Block { call, .. } = *cx.kind(node) else {
@@ -100,10 +96,7 @@ impl HashEachMethods {
         if cx.method_name(call) != Some("each") {
             return;
         }
-        let NodeKind::Send { receiver, .. } = *cx.kind(call) else {
-            return;
-        };
-        let Some(kv_recv_id) = receiver.get() else {
+        let Some(kv_recv_id) = cx.call_receiver(call).get() else {
             return;
         };
         if let Some(kv_method) = keys_or_values_method(kv_recv_id, cx) {
@@ -123,18 +116,15 @@ impl HashEachMethods {
                 return;
             }
         }
-        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
-            return;
-        };
         // Must have exactly one block-pass arg.
-        let arg_list = cx.list(args);
+        let arg_list = cx.call_arguments(node);
         if arg_list.len() != 1 {
             return;
         }
         if !matches!(cx.kind(arg_list[0]), NodeKind::BlockPass(_)) {
             return;
         }
-        let Some(kv_recv_id) = receiver.get() else {
+        let Some(kv_recv_id) = cx.call_receiver(node).get() else {
             return;
         };
         if let Some(kv_method) = keys_or_values_method(kv_recv_id, cx) {
@@ -162,13 +152,15 @@ fn check_kv_each(
     cx: &Cx<'_>,
 ) {
     // Guard: root receiver must exist and be valid.
-    let Some(parent_receiver) = find_receiver_of(kv_recv, cx) else {
+    let Some(parent_receiver) = cx.call_receiver(kv_recv).get() else {
         return;
     };
 
-    if !is_handleable(block_node, kv_recv, cx) {
+    if !is_handleable(kv_recv, cx) {
         return;
     }
+
+    let _ = block_node;
 
     if is_allowed_receiver(parent_receiver, cx) {
         return;
@@ -184,9 +176,7 @@ fn check_kv_each(
 
     let prefer = if kv_method == "keys" { "each_key" } else { "each_value" };
     let current = cx.raw_source(offense_range);
-    let message = MSG
-        .replace("%<prefer>s", prefer)
-        .replace("%<current>s", current);
+    let message = format!("Use `{prefer}` instead of `{current}`.");
 
     cx.emit_offense(offense_range, &message, None);
     cx.emit_edit(offense_range, prefer);
@@ -200,12 +190,11 @@ fn check_kv_each_with_block_pass(
     cx: &Cx<'_>,
 ) {
     // Guard: find the receiver of the kv call (e.g., `hash`).
-    let Some(parent_receiver) = find_receiver_of(kv_recv, cx) else {
+    let Some(parent_receiver) = cx.call_receiver(kv_recv).get() else {
         return;
     };
 
-    // Guard: array converter method preceding.
-    if has_array_converter_preceding(kv_recv, cx) {
+    if !is_handleable(kv_recv, cx) {
         return;
     }
 
@@ -223,9 +212,7 @@ fn check_kv_each_with_block_pass(
 
     let prefer = if kv_method == "keys" { "each_key" } else { "each_value" };
     let current = cx.raw_source(offense_range);
-    let message = MSG
-        .replace("%<prefer>s", prefer)
-        .replace("%<current>s", current);
+    let message = format!("Use `{prefer}` instead of `{current}`.");
 
     cx.emit_offense(offense_range, &message, None);
     cx.emit_edit(offense_range, prefer);
@@ -275,14 +262,11 @@ fn check_each_arguments(block_node: NodeId, each_call: NodeId, cx: &Cx<'_>) {
     }
 
     // Guard: root receiver must exist.
-    let NodeKind::Send { receiver, .. } = *cx.kind(each_call) else {
-        return;
-    };
-    let Some(recv_id) = receiver.get() else {
+    let Some(recv_id) = cx.call_receiver(each_call).get() else {
         return;
     };
 
-    if !is_handleable(block_node, each_call, cx) {
+    if !is_handleable(each_call, cx) {
         return;
     }
 
@@ -317,10 +301,9 @@ fn check_each_arguments(block_node: NodeId, each_call: NodeId, cx: &Cx<'_>) {
     }
 
     let current = cx.method_name(each_call).unwrap_or("each");
-    let message = MSG_UNUSED
-        .replace("%<prefer>s", prefer)
-        .replace("%<current>s", current)
-        .replace("%<unused_code>s", unused_name);
+    let message = format!(
+        "Use `{prefer}` instead of `{current}` and remove the unused `{unused_name}` block argument."
+    );
 
     cx.emit_offense(cx.range(block_node), &message, None);
     // Edit 1: rename `each` selector.
@@ -345,15 +328,14 @@ fn is_lvar_used(body: NodeId, name: &str, cx: &Cx<'_>) -> bool {
     })
 }
 
-/// Guards for both kv_each and each_arguments patterns.
-fn is_handleable(block_or_send: NodeId, kv_or_each_recv: NodeId, cx: &Cx<'_>) -> bool {
-    let _ = block_or_send;
+/// Guards shared by kv_each and each_arguments patterns.
+fn is_handleable(kv_or_each_recv: NodeId, cx: &Cx<'_>) -> bool {
     // Guard: array converter method as preceding.
     if has_array_converter_preceding(kv_or_each_recv, cx) {
         return false;
     }
     // Guard: root receiver must exist.
-    let Some(recv_id) = call_receiver(kv_or_each_recv, cx) else {
+    let Some(recv_id) = cx.call_receiver(kv_or_each_recv).get() else {
         return false;
     };
     let root = root_receiver(recv_id, cx);
@@ -367,7 +349,7 @@ fn is_handleable(block_or_send: NodeId, kv_or_each_recv: NodeId, cx: &Cx<'_>) ->
 /// Returns true when the immediate receiver of `node` is a call to an
 /// array converter method.
 fn has_array_converter_preceding(node: NodeId, cx: &Cx<'_>) -> bool {
-    let Some(recv_id) = call_receiver(node, cx) else {
+    let Some(recv_id) = cx.call_receiver(node).get() else {
         return false;
     };
     match cx.method_name(recv_id) {
@@ -376,27 +358,11 @@ fn has_array_converter_preceding(node: NodeId, cx: &Cx<'_>) -> bool {
     }
 }
 
-/// Returns the receiver of `node` if it is a Send/Csend.
-fn call_receiver(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    match *cx.kind(node) {
-        NodeKind::Send { receiver, .. } => receiver.get(),
-        NodeKind::Csend { receiver, .. } => Some(receiver),
-        _ => None,
-    }
-}
-
-/// Returns the direct receiver of a send/csend node (for AllowedReceivers check).
-/// This is `target.receiver.receiver` in RuboCop's terminology — the receiver of the
-/// `keys`/`values` call.
-fn find_receiver_of(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    call_receiver(node, cx)
-}
-
 /// Walk to the root (deepest) receiver in a send chain.
 fn root_receiver(node: NodeId, cx: &Cx<'_>) -> NodeId {
     let mut current = node;
     loop {
-        match call_receiver(current, cx) {
+        match cx.call_receiver(current).get() {
             Some(recv) => current = recv,
             None => return current,
         }

@@ -86,19 +86,15 @@ impl HashConversion {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
-        return;
-    };
-
     // Receiver must be `Hash` constant with nil or cbase scope.
-    let Some(recv_id) = receiver.get() else {
+    let Some(recv_id) = cx.call_receiver(node).get() else {
         return;
     };
     if !is_hash_const(recv_id, cx) {
         return;
     }
 
-    let arg_list = cx.list(args);
+    let arg_list = cx.call_arguments(node);
     let opts = cx.options_or_default::<HashConversionOptions>();
 
     if arg_list.len() == 1 {
@@ -111,38 +107,30 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 fn single_argument(node: NodeId, arg: NodeId, cx: &Cx<'_>, opts: &HashConversionOptions) {
     let node_range = cx.range(node);
 
-    match *cx.kind(arg) {
+    if matches!(cx.kind(arg), NodeKind::Hash { .. }) {
         // Hash literal argument: Hash[foo: 1] → {foo: 1}
-        NodeKind::Hash { .. } => {
-            let arg_src = cx.raw_source(cx.range(arg)).to_owned();
-            cx.emit_offense(node_range, MSG_LITERAL_HASH_ARG, None);
-            cx.emit_edit(node_range, &format!("{{{arg_src}}}"));
-        }
+        let arg_src = cx.raw_source(cx.range(arg)).to_owned();
+        cx.emit_offense(node_range, MSG_LITERAL_HASH_ARG, None);
+        cx.emit_edit(node_range, &format!("{{{arg_src}}}"));
+    } else if matches!(cx.kind(arg), NodeKind::Splat(_)) {
         // Splat argument: Hash[*ary]
-        NodeKind::Splat(_) => {
-            if !opts.allow_splat_argument {
-                // No autocorrect for splat — replacement is complex.
-                cx.emit_offense(node_range, MSG_SPLAT, None);
-            }
+        if !opts.allow_splat_argument {
+            // No autocorrect for splat — replacement is complex.
+            cx.emit_offense(node_range, MSG_SPLAT, None);
         }
+    } else if cx.method_name(arg) == Some("zip") && cx.call_arguments(arg).is_empty() {
         // zip method with no arguments: Hash[a.zip] → a.zip([]).to_h
-        NodeKind::Send { method, args: zip_args, .. }
-            if cx.symbol_str(method) == "zip" && cx.list(zip_args).is_empty() =>
-        {
-            register_offense_for_zip(node, arg, cx);
-        }
+        register_offense_for_zip(node, arg, cx);
+    } else {
         // Generic single arg: Hash[ary] → ary.to_h
-        _ => {
-            let arg_range = cx.range(arg);
-            let arg_src = cx.raw_source(arg_range).to_owned();
-            let replacement = if requires_parens(arg, cx) {
-                format!("({arg_src}).to_h")
-            } else {
-                format!("{arg_src}.to_h")
-            };
-            cx.emit_offense(node_range, MSG_TO_H, None);
-            cx.emit_edit(node_range, &replacement);
-        }
+        let arg_src = cx.raw_source(cx.range(arg)).to_owned();
+        let replacement = if requires_parens(arg, cx) {
+            format!("({arg_src}).to_h")
+        } else {
+            format!("{arg_src}.to_h")
+        };
+        cx.emit_offense(node_range, MSG_TO_H, None);
+        cx.emit_edit(node_range, &replacement);
     }
 }
 
@@ -165,12 +153,11 @@ fn register_offense_for_zip(outer: NodeId, zip_node: NodeId, cx: &Cx<'_>) {
         .any(|t| t.kind == SourceTokenKind::LeftParen);
 
     // Whole-node replacement — the structural rewrite shuffles AST significantly.
-    let zip_src = cx.raw_source(cx.range(zip_node)).to_owned();
+    let mut zip_src = cx.raw_source(cx.range(zip_node)).to_owned();
     if has_parens {
-        // `a.zip()` → `a.zip([]).to_h` — insert `[]` before the closing `)`.
-        // Simplest: replace whole node.
-        let prefix = &zip_src[..zip_src.len()-1];
-        let replacement = format!("{prefix}[]).to_h");
+        // `a.zip()` → `a.zip([]).to_h` — remove the trailing `)`, append `([]).to_h`.
+        zip_src.pop(); // removes the closing `)`
+        let replacement = format!("{zip_src}[]).to_h");
         cx.emit_edit(node_range, &replacement);
     } else {
         // `a.zip` → `a.zip([]).to_h`
@@ -185,16 +172,16 @@ fn register_offense_for_zip(outer: NodeId, zip_node: NodeId, cx: &Cx<'_>) {
 /// - call node with unparenthesized arguments (but NOT the `[]` method)
 /// - operator keyword nodes (and, or, not)
 fn requires_parens(node: NodeId, cx: &Cx<'_>) -> bool {
-    match *cx.kind(node) {
-        NodeKind::Send { method, args, .. } => {
-            let name = cx.symbol_str(method);
-            if name == "[]" {
-                return false;
-            }
-            !cx.list(args).is_empty() && !cx.is_parenthesized(node)
+    if matches!(cx.kind(node), NodeKind::Send { .. }) {
+        if cx.method_name(node) == Some("[]") {
+            return false;
         }
-        NodeKind::And { .. } | NodeKind::Or { .. } | NodeKind::Not { .. } => true,
-        _ => false,
+        !cx.call_arguments(node).is_empty() && !cx.is_parenthesized(node)
+    } else {
+        matches!(
+            cx.kind(node),
+            NodeKind::And { .. } | NodeKind::Or { .. } | NodeKind::Not { .. }
+        )
     }
 }
 
