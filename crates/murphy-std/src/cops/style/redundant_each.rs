@@ -183,7 +183,7 @@ fn check_each(node: NodeId, cx: &Cx<'_>) {
         None => return,
     };
 
-    if recv_method == "reverse_each" {
+    if recv_method == "reverse_each" || recv_method.starts_with("each_") {
         // Direction B: outer each is redundant
         emit_direction_b_each(node, cx);
     }
@@ -425,6 +425,46 @@ mod tests {
                                       ^^^^^^^^^^^^^^^ Use `with_index` to remove redundant `each`.
             "},
             "array.each_with_index.with_index { |v, i| v }\n",
+        );
+    }
+
+    // ---- Direction B: each_with_index.each / each_with_object(x).each ----
+
+    #[test]
+    fn flags_each_with_index_each() {
+        test::<RedundantEach>().expect_offense(indoc! {"
+            array.each_with_index.each { |v| v }
+                                 ^^^^^ Remove redundant `each`.
+        "});
+    }
+
+    #[test]
+    fn corrects_each_with_index_each() {
+        test::<RedundantEach>().expect_correction(
+            indoc! {"
+                array.each_with_index.each { |v| v }
+                                     ^^^^^ Remove redundant `each`.
+            "},
+            "array.each_with_index { |v| v }\n",
+        );
+    }
+
+    #[test]
+    fn flags_each_with_object_each() {
+        test::<RedundantEach>().expect_offense(indoc! {"
+            array.each_with_object(x).each { |v| v }
+                                     ^^^^^ Remove redundant `each`.
+        "});
+    }
+
+    #[test]
+    fn corrects_each_with_object_each() {
+        test::<RedundantEach>().expect_correction(
+            indoc! {"
+                array.each_with_object(x).each { |v| v }
+                                         ^^^^^ Remove redundant `each`.
+            "},
+            "array.each_with_object(x) { |v| v }\n",
         );
     }
 
