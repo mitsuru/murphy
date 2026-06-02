@@ -142,28 +142,42 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 ///
 /// Safe shapes:
 /// - Literals: Array `[...]`, Hash `{...}`, Str, Dstr, Xstr, Regexp
-/// - Method calls: `Send`/`Csend` (`.freeze` binds to the return value)
+/// - Method calls with parentheses: `foo()`, `Foo.new(x)` (`.freeze` binds clearly)
+/// - No-argument method calls: `foo`, `Foo.new` (no precedence hazard)
 /// - Block calls: `Block`/`Numblock`/`Itblock`
 /// - Constants: `Const`
 ///
 /// Unsafe shapes (would need parentheses):
+/// - Command-style calls with arguments and no parens: `foo 1, 2`
+///   → `.freeze` binds to last arg, not the return value
 /// - Ternary/If, And/Or, Assignment forms, Begin, etc.
 fn is_safe_freeze_target(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(
-        cx.kind(node),
+    match cx.kind(node) {
+        // Literals: brackets/braces/quotes ensure `.freeze` binds to whole literal.
         NodeKind::Array(_)
-            | NodeKind::Hash(_)
-            | NodeKind::Str(_)
-            | NodeKind::Dstr(_)
-            | NodeKind::Xstr(_)
-            | NodeKind::Regexp { .. }
-            | NodeKind::Send { .. }
-            | NodeKind::Csend { .. }
-            | NodeKind::Block { .. }
-            | NodeKind::Numblock { .. }
-            | NodeKind::Itblock { .. }
-            | NodeKind::Const { .. }
-    )
+        | NodeKind::Hash(_)
+        | NodeKind::Str(_)
+        | NodeKind::Dstr(_)
+        | NodeKind::Xstr(_)
+        | NodeKind::Regexp { .. } => true,
+
+        // Send/Csend: safe if there are no arguments OR if the call uses parentheses.
+        // Command-style calls without parens (`foo 1, 2`) are NOT safe — `.freeze`
+        // would bind to the last argument rather than the return value.
+        NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+            cx.call_arguments(node).is_empty() || cx.is_parenthesized(node)
+        }
+
+        // Block-form calls: `foo { ... }` or `foo do ... end` — `.freeze` binds to
+        // the block's return value unambiguously.
+        NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. } => true,
+
+        // Constants: `Foo`, `::Bar` — no arguments, no precedence hazard.
+        NodeKind::Const { .. } => true,
+
+        // Everything else (ternary, compound expressions, etc.) is unsafe.
+        _ => false,
+    }
 }
 
 /// Returns true when `node` is a `.freeze` call with no arguments on any receiver.
@@ -429,6 +443,19 @@ mod tests {
         test::<MutableConstant>()
             .with_options(&MutableConstantOptions { enforced_style: EnforcedStyle::Strict })
             .expect_no_offenses("CONST = /foo/\n");
+    }
+
+    // ----- Command-style calls (strict mode, no autocorrect) -----
+
+    #[test]
+    fn strict_mode_flags_command_call_without_autocorrect() {
+        // `foo 1, 2` — command form without parens; offense reported but not autocorrected.
+        test::<MutableConstant>()
+            .with_options(&MutableConstantOptions { enforced_style: EnforcedStyle::Strict })
+            .expect_offense(indoc! {"
+                CONST = foo 1, 2
+                        ^^^^^^^^ Freeze mutable objects assigned to constants.
+            "});
     }
 
     // ----- Empty array -----
