@@ -93,7 +93,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     };
 
-    if values.len() < opts.comparisons_threshold as usize {
+    let threshold = opts.comparisons_threshold.max(1) as usize;
+    if values.len() < threshold {
         return;
     }
 
@@ -398,6 +399,21 @@ mod tests {
             "#},
             "a = 1\nfoo if [1, 2].include?(a)\n",
         );
+    }
+
+    #[test]
+    fn negative_threshold_treated_as_one() {
+        // A negative ComparisonsThreshold must not disable the cop — it is
+        // normalized to 1, so any chain of 1+ comparisons is flagged.
+        test::<MultipleComparison>()
+            .with_options(&MultipleComparisonOptions {
+                allow_method_comparison: true,
+                comparisons_threshold: -1,
+            })
+            .expect_offense(indoc! {r#"
+                foo if a == 'a' || a == 'b'
+                       ^^^^^^^^^^^^^^^^^^^^ Avoid comparing a variable with multiple items in a conditional, use `Array#include?` instead.
+            "#});
     }
 }
 
