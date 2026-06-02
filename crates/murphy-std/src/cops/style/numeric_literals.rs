@@ -109,7 +109,12 @@ impl NumericLiterals {
         };
         if after_sign.len() >= 2 && after_sign[0] == b'0' {
             let second = after_sign[1];
-            if matches!(second, b'x' | b'X' | b'b' | b'B' | b'o' | b'O') {
+            // 0x/0X (hex), 0b/0B (binary), 0o/0O (new-style octal),
+            // or legacy octal (0 followed by a digit or underscore, e.g. `01234567`).
+            if matches!(second, b'x' | b'X' | b'b' | b'B' | b'o' | b'O')
+                || second.is_ascii_digit()
+                || second == b'_'
+            {
                 return;
             }
         }
@@ -389,6 +394,17 @@ mod tests {
     #[test]
     fn accepts_octal_literal() {
         test::<NumericLiterals>().expect_no_offenses("x = 0o77777\n");
+    }
+
+    #[test]
+    fn accepts_legacy_octal_literal() {
+        // `01234567` is a legacy Ruby octal literal — non-decimal, skip.
+        test::<NumericLiterals>().expect_no_offenses("x = 01234567\n");
+    }
+
+    #[test]
+    fn accepts_negative_legacy_octal_literal() {
+        test::<NumericLiterals>().expect_no_offenses("x = -01234567\n");
     }
 
     #[test]
