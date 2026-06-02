@@ -162,6 +162,7 @@ fn check_condition(node: NodeId, cond: NodeId, cx: &Cx<'_>) {
     // Multiple statements inside parens change meaning when removed:
     // `(foo; bar)` evaluates `bar`, but `foo; bar` would evaluate `foo`.
     // Detect via the AST child count of the Begin node.
+    // INVARIANT: is_parenthesized guarantees NodeKind::Begin — else branch unreachable.
     let NodeKind::Begin(list) = cx.kind(cond) else {
         return;
     };

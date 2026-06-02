@@ -260,8 +260,12 @@ fn extract_key_expr(
                 return None;
             }
             let cmp_recv = cmp_recv_opt.get()?;
-            // The receiver must not be a range, unknown, or parenthesized expression
-            // (range_include? guard). `(1..5)` is now NodeKind::Begin with LeftParen.
+            // The receiver must not be a range, opaque, or parenthesized expression
+            // (range_include? guard).
+            // - `NodeKind::Unknown` covers unimplemented prism nodes (not ParenthesesNode,
+            //   which now lowers to Begin, but other opaque shapes still fall through).
+            // - `NodeKind::RangeExpr` covers literal range receivers like `1..5`.
+            // - `is_parenthesized` covers `(1..5)` which is now Begin + LeftParen.
             if matches!(cx.kind(cmp_recv), NodeKind::Unknown | NodeKind::RangeExpr { .. })
                 || is_parenthesized(cmp_recv, cx)
             {

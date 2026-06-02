@@ -44,7 +44,7 @@
 use murphy_plugin_api::{
     CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop,
 };
-use crate::cops::util::is_parenthesized as util_is_parenthesized;
+use crate::cops::util::is_parenthesized;
 
 const MSG: &str = "%<command>s parentheses for ternary conditions.";
 const MSG_COMPLEX: &str =
@@ -161,13 +161,6 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TernaryParenthesesOptions) {
             }
         }
     }
-}
-
-/// Returns `true` if `cond` is a parenthesized expression.
-/// Delegates to the shared `cops::util::is_parenthesized`, which checks for
-/// `NodeKind::Begin` with a `LeftParen` token at `range.start`.
-fn is_parenthesized(cond: NodeId, cx: &Cx<'_>) -> bool {
-    util_is_parenthesized(cond, cx)
 }
 
 /// Returns `true` if the ternary condition is a safe assignment (contains `=`).
