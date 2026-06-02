@@ -121,15 +121,49 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // producing invalid Ruby. A proper fix requires wrapping to `[...].freeze`.
     let is_unbracketed_array = is_unbracketed_array(value, cx);
 
+    // For complex expressions (ternaries, compound operations, etc.), appending
+    // `.freeze` may bind at wrong precedence. Only autocorrect when safe.
+    let safe_to_autocorrect = !is_unbracketed_array && is_safe_freeze_target(value, cx);
+
     cx.emit_offense(cx.range(value), MSG, None);
 
-    if !is_unbracketed_array {
+    if safe_to_autocorrect {
         // Autocorrect: insert `.freeze` at end of value range.
         cx.emit_edit(
             Range { start: cx.range(value).end, end: cx.range(value).end },
             ".freeze",
         );
     }
+}
+
+/// Returns true when appending `.freeze` at the end of this node's source range
+/// is safe — i.e., `.freeze` will bind to the whole expression rather than to
+/// just the last sub-expression.
+///
+/// Safe shapes:
+/// - Literals: Array `[...]`, Hash `{...}`, Str, Dstr, Xstr, Regexp
+/// - Method calls: `Send`/`Csend` (`.freeze` binds to the return value)
+/// - Block calls: `Block`/`Numblock`/`Itblock`
+/// - Constants: `Const`
+///
+/// Unsafe shapes (would need parentheses):
+/// - Ternary/If, And/Or, Assignment forms, Begin, etc.
+fn is_safe_freeze_target(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(
+        cx.kind(node),
+        NodeKind::Array(_)
+            | NodeKind::Hash(_)
+            | NodeKind::Str(_)
+            | NodeKind::Dstr(_)
+            | NodeKind::Xstr(_)
+            | NodeKind::Regexp { .. }
+            | NodeKind::Send { .. }
+            | NodeKind::Csend { .. }
+            | NodeKind::Block { .. }
+            | NodeKind::Numblock { .. }
+            | NodeKind::Itblock { .. }
+            | NodeKind::Const { .. }
+    )
 }
 
 /// Returns true when `node` is a `.freeze` call with no arguments on any receiver.
