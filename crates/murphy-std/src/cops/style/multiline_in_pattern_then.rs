@@ -99,16 +99,19 @@ fn require_then(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Returns `true` if node `a` starts on the same line as node `b`.
+///
+/// Checks whether the byte slice between the two start offsets contains a
+/// newline — more efficient than counting from the start of the file.
 fn same_line_as_node(a: NodeId, b: NodeId, cx: &Cx<'_>) -> bool {
     let source = cx.source().as_bytes();
     let a_start = cx.range(a).start as usize;
     let b_start = cx.range(b).start as usize;
-    line_number(source, a_start) == line_number(source, b_start)
-}
-
-/// Returns the 0-based line number for `offset` in `source`.
-fn line_number(source: &[u8], offset: usize) -> usize {
-    source[..offset].iter().filter(|&&b| b == b'\n').count()
+    let (min, max) = if a_start < b_start {
+        (a_start, b_start)
+    } else {
+        (b_start, a_start)
+    };
+    !source[min..max].contains(&b'\n')
 }
 
 /// Finds the `then` keyword token inside the `in_pattern` node range, in the

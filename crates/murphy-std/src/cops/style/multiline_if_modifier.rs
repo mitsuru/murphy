@@ -35,9 +35,6 @@
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
-const MSG: &str =
-    "Favor a normal `%s`-statement over a modifier clause in a multiline statement.";
-
 #[derive(Default)]
 pub struct MultilineIfModifier;
 
@@ -97,7 +94,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         node_range
     };
 
-    let message = MSG.replacen("%s", keyword, 1);
+    let message = format!(
+        "Favor a normal `{keyword}`-statement over a modifier clause in a multiline statement."
+    );
     cx.emit_offense(offense_range, &message, None);
 
     // Autocorrect: rewrite to block form.
@@ -138,12 +137,20 @@ fn to_normal_if(keyword: &str, cond: NodeId, body: NodeId, node: NodeId, cx: &Cx
     let source_bytes = source.as_bytes();
 
     // Compute the leading whitespace of the node on its starting line.
+    // Extract only the leading whitespace (spaces/tabs) from the line, not
+    // any preceding non-whitespace tokens that may appear before the node on
+    // the same line (e.g. `foo; {body} if cond` — the prefix `foo; ` must
+    // not become part of the block indentation).
     let start = node_range.start as usize;
     let line_start = source_bytes[..start]
         .iter()
         .rposition(|&b| b == b'\n')
         .map_or(0, |p| p + 1);
-    let node_indent = &source[line_start..start];
+    let line_str = &source[line_start..start];
+    let node_indent = line_str
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map_or(line_str, |(idx, _)| &line_str[..idx]);
     let body_indent = format!("{node_indent}  ");
 
     // Re-indent the body: each non-blank line gets `body_indent` prepended.
