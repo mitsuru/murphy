@@ -146,25 +146,30 @@ fn is_bare_module_function(node: NodeId, cx: &Cx<'_>) -> bool {
     cx.list(args).is_empty()
 }
 
+/// Returns true if the node is a `private` directive.
+fn is_private_directive(node: NodeId, cx: &Cx<'_>) -> bool {
+    if let NodeKind::Send {
+        receiver, method, ..
+    } = *cx.kind(node)
+    {
+        receiver.get().is_none() && cx.symbol_str(method) == "private"
+    } else {
+        false
+    }
+}
+
 /// Returns true if any child of the module body is a `private` directive
 /// (a Send with no receiver, method `private`, with or without arguments).
+///
+/// Handles both multi-statement bodies (wrapped in `Begin`) and single-statement
+/// bodies (a bare node without a `Begin` wrapper).
 fn has_private_directive(body_id: NodeId, cx: &Cx<'_>) -> bool {
-    let children: &[NodeId] = if let NodeKind::Begin(list) = *cx.kind(body_id) {
-        cx.list(list)
+    if let NodeKind::Begin(list) = *cx.kind(body_id) {
+        cx.list(list).iter().any(|&child| is_private_directive(child, cx))
     } else {
-        return false;
-    };
-
-    children.iter().any(|&child| {
-        if let NodeKind::Send {
-            receiver, method, ..
-        } = *cx.kind(child)
-        {
-            receiver.get().is_none() && cx.symbol_str(method) == "private"
-        } else {
-            false
-        }
-    })
+        // Single-statement body — the body_id itself could be the private directive.
+        is_private_directive(body_id, cx)
+    }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>, opts: &ModuleFunctionOptions) {
@@ -266,6 +271,18 @@ mod tests {
               extend self
               private :secret
               def secret; end
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_extend_self_with_single_statement_private() {
+        // Single-statement module body (no Begin wrapper) where the body IS
+        // just `private` — has_private_directive must handle this edge case.
+        // This module has only `private` as body; no extend self to flag.
+        test::<ModuleFunction>().expect_no_offenses(indoc! {"
+            module Foo
+              private
             end
         "});
     }

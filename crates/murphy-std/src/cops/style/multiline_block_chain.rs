@@ -100,7 +100,10 @@ fn is_block_type(node: NodeId, cx: &Cx<'_>) -> bool {
 /// RuboCop uses `receiver.loc.end.begin_pos` which is the start position of the
 /// `end` keyword (do/end blocks) or `}` (brace blocks). We locate the last token
 /// in the block's range to find this.
-fn closing_delimiter_start(node: NodeId, cx: &Cx<'_>) -> u32 {
+///
+/// Returns `None` if the closing delimiter token cannot be found (e.g. parse error
+/// or unexpected AST shape). The caller should skip emitting an offense in that case.
+fn closing_delimiter_start(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
     let node_end = cx.range(node).end;
     let toks = cx.sorted_tokens();
     let src = cx.source().as_bytes();
@@ -113,12 +116,12 @@ fn closing_delimiter_start(node: NodeId, cx: &Cx<'_>) -> u32 {
                 && &src[tok.range.start as usize..tok.range.end as usize] == b"end";
             let is_rbrace = tok.kind == SourceTokenKind::RightBrace;
             if is_end || is_rbrace {
-                return tok.range.start;
+                return Some(tok.range.start);
             }
         }
     }
-    // Fallback: use the node's end position.
-    node_end
+    // No closing delimiter found — malformed or unexpected AST shape.
+    None
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
@@ -151,7 +154,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // method name (loc.name.end). This highlights `end.method` (or `end&.method`
     // or `}.method`), matching RuboCop's
     // range_between(receiver.loc.end.begin_pos, node.send_node.source_range.end_pos).
-    let offense_start = closing_delimiter_start(recv_id, cx);
+    let Some(offense_start) = closing_delimiter_start(recv_id, cx) else {
+        // No closing delimiter found (unexpected AST shape); skip the offense.
+        return;
+    };
     let method_name_end = cx.node(call).loc.name.end;
 
     cx.emit_offense(
