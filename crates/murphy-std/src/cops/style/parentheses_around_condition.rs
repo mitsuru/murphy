@@ -8,15 +8,12 @@
 //! upstream_cop: Style/ParenthesesAroundCondition
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-imxw
+//! gap_issues: []
 //! notes: >
 //!   Dispatch is on `if`/`while`/`until` nodes (all subscribable), with
 //!   detection based on the condition child. A parenthesized condition is
-//!   represented as `NodeKind::Unknown` (prism's `ParenthesesNode` is not
-//!   mapped to a subscribable AST kind). Detection uses raw source: if the
-//!   condition's raw source starts with `(` and ends with `)`, it is a
-//!   parenthesized condition.
+//!   represented as `NodeKind::Begin` with a `LeftParen` token at `range.start`
+//!   (distinguished from `begin...end` via `cops::util::is_parenthesized`).
 //!
 //!   Implemented guards:
 //!   - Ternary: skipped (not a block-form if).
@@ -31,12 +28,10 @@
 //!     rescue expression) is NOT implemented due to AST opacity.
 //!   - Semicolon-separated expressions inside parens are NOT detected.
 //!   - Modifier-form `while (cond)` / `x until (cond)` are not checked
-//!     (modifier-form control flow has the keyword after the body; the
-//!     `cond` in those shapes is `Unknown` via the same prism translation).
+//!     (modifier-form control flow has the keyword after the body).
 //!     Block-form `while (cond) do ... end` IS checked.
 //!   - body_is_assignment heuristic: false negatives when the condition body
 //!     contains `=` inside a string or regexp literal (e.g. `if ("a=b")`).
-//!     Fixing requires AST-based assignment detection unavailable for Unknown.
 //! ```
 //!
 //! ## Detection
@@ -44,14 +39,15 @@
 //! Subscribes to `if` (for both `if` and `unless`) and `while`/`until`.
 //! For modifier-form nodes, the cop returns early (no offense).
 //! For block-form nodes, it inspects the condition child: if it is
-//! `NodeKind::Unknown` AND the raw source starts with `(` and ends with `)`,
-//! it is a parenthesized condition.
+//! `NodeKind::Begin` with a `LeftParen` token at `range.start`, it is a
+//! parenthesized condition.
 //!
 //! ## Autocorrect
 //!
 //! Remove the outer `(` and `)` from the condition.
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use crate::cops::util::is_parenthesized;
 
 #[derive(Clone, Debug)]
 pub struct ParenthesesAroundConditionOptions {
@@ -162,17 +158,13 @@ impl ParenthesesAroundCondition {
 }
 
 fn check_condition(node: NodeId, cond: NodeId, cx: &Cx<'_>) {
-    // A parenthesized condition is represented as Unknown.
-    if !matches!(cx.kind(cond), NodeKind::Unknown) {
+    // A parenthesized condition is represented as Begin with a LeftParen token
+    // at range.start (distinguishes `(...)` from `begin...end`).
+    if !is_parenthesized(cond, cx) {
         return;
     }
 
     let cond_src = cx.raw_source(cx.range(cond));
-
-    // Verify the condition's source actually starts/ends with parens.
-    if !cond_src.starts_with('(') || !cond_src.ends_with(')') {
-        return;
-    }
 
     // Extract the body (everything inside the outer parens).
     let body = &cond_src[1..cond_src.len() - 1];
@@ -286,6 +278,17 @@ mod tests {
     fn no_offense_if_without_parens() {
         test::<ParenthesesAroundCondition>().expect_no_offenses(indoc! {"
             if x > 10
+              y
+            end
+        "});
+    }
+
+    #[test]
+    fn no_offense_begin_end_condition() {
+        // `begin...end` produces NodeKind::Begin but NOT is_parenthesized — must not flag.
+        // This guards the token-based discriminator: `begin` keyword at range.start, not `(`.
+        test::<ParenthesesAroundCondition>().expect_no_offenses(indoc! {"
+            if begin x end
               y
             end
         "});

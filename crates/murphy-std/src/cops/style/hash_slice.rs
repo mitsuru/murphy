@@ -62,6 +62,7 @@
 //! `select`/`reject`/`filter` through the closing brace/`end` of the block.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
+use crate::cops::util::is_parenthesized;
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -259,9 +260,11 @@ fn extract_key_expr(
                 return None;
             }
             let cmp_recv = cmp_recv_opt.get()?;
-            // The receiver must not be a range or unknown (range_include? guard).
-            // In Murphy, ranges in parentheses appear as Unknown — skip them.
-            if matches!(cx.kind(cmp_recv), NodeKind::Unknown | NodeKind::RangeExpr { .. }) {
+            // The receiver must not be a range, unknown, or parenthesized expression
+            // (range_include? guard). `(1..5)` is now NodeKind::Begin with LeftParen.
+            if matches!(cx.kind(cmp_recv), NodeKind::Unknown | NodeKind::RangeExpr { .. })
+                || is_parenthesized(cmp_recv, cx)
+            {
                 return None;
             }
             // The receiver must not be the value lvar (using_value_variable? guard).

@@ -7,27 +7,22 @@
 //! upstream_cop: Style/TernaryParentheses
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-imxw
+//! gap_issues: []
 //! notes: >
 //!   Three EnforcedStyle values are implemented:
 //!     require_no_parentheses (default): flag parenthesized conditions.
 //!     require_parentheses: flag unparenthesized conditions.
 //!     require_parentheses_when_complex: flag complex without parens (only).
-//!     The "simple with parens" direction (e.g. `(bar?) ? a : b` flagged as unnecessary)
-//!     is NOT implemented — prism's ParenthesesNode translates to opaque `Unknown` so
-//!     we cannot determine whether the inner condition is simple (gap: false negatives).
+//!     The "simple with parens should lose parens" direction in
+//!     require_parentheses_when_complex is not implemented (false negatives only).
 //!   AllowSafeAssignment (default: true): parenthesized conditions containing an assignment
 //!   token `=` are allowed (detected via token scan — covers common cases).
-//!   Parenthesized conditions map to `Unknown` in Murphy's AST (prism's ParenthesesNode
-//!   is not yet translated). Detection: `Unknown` node whose source starts with `(`.
+//!   Parenthesized conditions are `NodeKind::Begin` with `LeftParen` at `range.start`
+//!   (detected via `cops::util::is_parenthesized`).
 //!   Complexity classification:
 //!     Non-complex: Lvar/Ivar/Cvar/Gvar/Const/Defined/Yield/Send/Csend that are NOT
 //!     operator methods (or are the `[]` operator, which is non-complex per RuboCop).
 //!     Complex: And/Or/Not, operator Send nodes.
-//!   When condition is Unknown (parenthesized), complexity cannot be determined —
-//!   `require_parentheses_when_complex` never flags Unknown conditions as "too many parens"
-//!   (gap: false negatives for simple parenthesized conditions).
 //!   Autocorrect safety:
 //!     For removing parens, skipped if source contains English `and`/`or`/`not` operators
 //!     (below ternary precedence), detected via raw source scan.
@@ -50,6 +45,7 @@
 use murphy_plugin_api::{
     CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop,
 };
+use crate::cops::util::is_parenthesized as util_is_parenthesized;
 
 const MSG: &str = "%<command>s parentheses for ternary conditions.";
 const MSG_COMPLEX: &str =
@@ -153,24 +149,19 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TernaryParenthesesOptions) {
                 cx.emit_edit(cx.range(cond), &format!("({cond_src})"));
             }
             // `require_parentheses_when_complex` gap: the "simple with parens should lose parens"
-            // direction requires knowing if the inner condition is simple. Parenthesized conditions
-            // are `Unknown` (prism ParenthesesNode not yet translated), so we cannot inspect the
-            // inner AST. All parenthesized conditions are conservatively skipped here — false
-            // negatives only (no incorrect flags). Documented in murphy-parity notes.
+            // direction requires knowing if the inner condition is simple. When a parenthesized
+            // condition has a single-child Begin, we could inspect the inner node — but RuboCop
+            // has complex precedence-awareness here. All parenthesized conditions are
+            // conservatively skipped — false negatives only (no incorrect flags).
         }
     }
 }
 
 /// Returns `true` if `cond` is a parenthesized expression.
-/// In Murphy's AST, prism's `ParenthesesNode` translates to `Unknown`.
-/// We additionally confirm the source starts with `(` to avoid false positives
-/// from other `Unknown` translations.
+/// Delegates to the shared `cops::util::is_parenthesized`, which checks for
+/// `NodeKind::Begin` with a `LeftParen` token at `range.start`.
 fn is_parenthesized(cond: NodeId, cx: &Cx<'_>) -> bool {
-    if !matches!(cx.kind(cond), NodeKind::Unknown) {
-        return false;
-    }
-    let src = cx.raw_source(cx.range(cond)).as_bytes();
-    src.first() == Some(&b'(') && src.last() == Some(&b')')
+    util_is_parenthesized(cond, cx)
 }
 
 /// Returns `true` if the ternary condition is a safe assignment (contains `=`).
@@ -238,9 +229,9 @@ fn is_complex_condition(cond: NodeId, cx: &Cx<'_>) -> bool {
         // Logical / negation — always complex.
         NodeKind::And { .. } | NodeKind::Or { .. } | NodeKind::Not(_) => true,
 
-        // Unknown (parenthesized) — treated as non-complex. Used in
-        // RequireParenthesesWhenComplex for the "add parens" check:
-        // if we can't see inside, skip (don't add unnecessary parens).
+        // Unknown or other opaque nodes — treated as non-complex.
+        // RequireParenthesesWhenComplex: if we can't see inside, skip
+        // (don't add unnecessary parens).
         NodeKind::Unknown => false,
 
         // Everything else — not operator-like, treat as non-complex.

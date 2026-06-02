@@ -8,17 +8,13 @@
 //! upstream_cop: Style/NegatedUnless
 //! upstream_version_checked: 1.69.0
 //! status: partial
-//! gap_issues:
-//!   - murphy-imxw
+//! gap_issues: []
 //! notes: >
-//!   Murphy handles `unless !foo` and `unless not(expr)` (modifier and block
-//!   form). Autocorrect replaces `unless` with `if` and replaces the condition
-//!   with the receiver source. EnforcedStyle: both/prefix/postfix is supported.
-//!   Parity gaps vs RuboCop:
-//!   - `something unless (!x.even?)` — parenthesized bang parses as Unknown
-//!     in Murphy; the offense is silently skipped.
-//!   - `unless (not a_condition)` — space-`not` inside parens parses as Unknown;
-//!     offense silently skipped.
+//!   Murphy handles `unless !foo`, `unless not(expr)`, and `unless (!expr)`
+//!   (modifier and block form). Autocorrect replaces `unless` with `if` and
+//!   replaces the condition with the receiver source. EnforcedStyle:
+//!   both/prefix/postfix is supported. Parenthesized conditions
+//!   (`(!x.even?)`) are now detected via NodeKind::Begin (murphy-imxw).
 //! ```
 //!
 //! ## Matched shapes
@@ -39,6 +35,7 @@
 //!    which handles both `!expr` (removes `!`) and `not(expr)` (removes `not(…)`).
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use crate::cops::util::is_parenthesized;
 
 const MSG: &str = "Favor `if` over `unless` for negative conditions.";
 
@@ -133,8 +130,21 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
     let cond = *cond;
 
+    // Unwrap a parenthesized condition: `(!x.even?)` is now Begin([Send{!}]).
+    // Try the inner node for the negation check; keep `cond` for range/autocorrect.
+    let effective_cond = if is_parenthesized(cond, cx) {
+        if let NodeKind::Begin(list) = cx.kind(cond) {
+            let children = cx.list(*list);
+            if children.len() == 1 { children[0] } else { cond }
+        } else {
+            cond
+        }
+    } else {
+        cond
+    };
+
     // Condition must be a single `!` negation.
-    let Some(recv) = single_negative(cond, cx) else {
+    let Some(recv) = single_negative(effective_cond, cx) else {
         return;
     };
 
@@ -257,6 +267,19 @@ mod tests {
             "something unless not(a_condition)\n\
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor `if` over `unless` for negative conditions.\n",
             "something if a_condition\n",
+        );
+    }
+
+    // ----- parenthesized bang condition (murphy-imxw) -----
+
+    #[test]
+    fn flags_modifier_unless_with_parenthesized_negation() {
+        // `something unless (!x.even?)` — condition is `(!x.even?)` which was
+        // Unknown before murphy-imxw; now Begin([Send{!}]).
+        test::<NegatedUnless>().expect_correction(
+            "something unless (!x.even?)\n\
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor `if` over `unless` for negative conditions.\n",
+            "something if x.even?\n",
         );
     }
 

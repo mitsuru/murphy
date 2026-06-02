@@ -11,9 +11,9 @@
 //!   Main literal-key behavior is implemented. Added Begin, And/Or, Send
 //!   (LITERAL_RECURSIVE_METHODS), and Dstr (all-literal-fragment) key shapes
 //!   to match RuboCop's recursive_basic_literal? coverage. Grouping-paren
-//!   expressions like (1), (false && true) remain undetected because
-//!   Murphy's translator emits Unknown for prism's ParenthesesNode (a
-//!   cross-cutting translator gap, not fixable per-cop). Inner-hash
+//!   expressions like `(1)` or `(false && true)` are now detected because
+//!   prism's ParenthesesNode lowers to NodeKind::Begin (murphy-imxw). The
+//!   Begin arm of recursive_literal? covers these automatically. Inner-hash
 //!   canonicalization uses BTreeMap last-write-wins to match Ruby's runtime
 //!   Hash equality (murphy-m7lp), which is a deliberate divergence from
 //!   RuboCop's structural AST equality.
@@ -33,19 +33,14 @@
 //!   non-interpolated `Regexp`. A compound literal counts only when
 //!   every element is itself a basic-literal-or-const.
 //! - **`Begin`** — single-child begin (interpolation wrapper), e.g.
-//!   `"#{2}"` contains a `Begin(Int(2))` fragment.
+//!   `"#{2}"` contains a `Begin(Int(2))` fragment. Also covers parenthesized
+//!   literals like `(1)` now that ParenthesesNode lowers to Begin.
 //! - **`And`/`Or`** — boolean expressions where all children are
 //!   basic-literals, e.g. `false && true`, `"#{false or true}"`.
 //! - **`Send`** (LITERAL_RECURSIVE_METHODS) — calls like `!true` or
 //!   `false <=> true` where receiver and all args are basic-literals.
 //! - **`Dstr`** — interpolated strings where every fragment is a
 //!   basic-literal, e.g. `"#{2}"`.
-//!
-//! **Limitation (translator gap):** grouping parentheses like `(1)` or
-//! `(false && true)` as hash keys are **not** detected — prism's
-//! `ParenthesesNode` is translated to `Unknown` in Murphy's AST. This
-//! mirrors a cross-cutting translator gap that would need a framework
-//! change to fix. Interpolated forms like `"#{false && true}"` work.
 //!
 //! Interpolated strings/regexps with non-literal fragments and other
 //! non-literal keys are skipped because their values aren't statically known.
@@ -602,14 +597,14 @@ mod tests {
     }
 
     #[test]
-    fn grouping_paren_key_not_detected_translator_gap() {
-        // Grouping parentheses `(1)` translate to `Unknown` in Murphy's AST
-        // (prism's `ParenthesesNode` is not yet translated). The cop does NOT
-        // flag these — this is a known limitation pending a translator fix.
-        test::<DuplicateHashKey>().expect_no_offenses(indoc! {r#"
+    fn grouping_paren_key_detected_after_translator_fix() {
+        // Grouping parentheses `(1)` now lower to NodeKind::Begin (murphy-imxw),
+        // so the cop correctly detects duplicate parenthesized literal keys.
+        test::<DuplicateHashKey>().expect_offense(indoc! {r#"
                 {
                   (1) => 1,
                   (1) => 4,
+                  ^^^ Duplicated key in hash literal.
                 }
             "#});
     }

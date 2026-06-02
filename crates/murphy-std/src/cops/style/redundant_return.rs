@@ -8,8 +8,7 @@
 //! upstream_cop: Style/RedundantReturn
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-imxw
+//! gap_issues: []
 //! notes: >
 //!   Scope: only the last statement of the method body is checked. RuboCop
 //!   also recurses into if/elsif/else and case/when branch tails; that
@@ -21,9 +20,8 @@
 //!   (return a, b → Return(Array)) are always skipped.
 //!   return [a, b] is indistinguishable from return a, b at the AST level;
 //!   both are skipped.
-//!   return(value): offense is emitted but no autocorrect (parens form parses
-//!   as Unknown in Murphy's translator; deleting the prefix would leave a
-//!   dangling `)` — user must hand-fix).
+//!   return(value): offense is emitted and autocorrect now deletes the
+//!   `return` prefix, leaving `(value)` which is valid Ruby (murphy-imxw).
 //!   Autocorrect: `return value` → delete `return ` prefix (from return node
 //!   start to value node start). Bare `return` → replace with `nil`.
 //!   def/defs (singleton method definitions): both handled via separate hooks.
@@ -147,15 +145,9 @@ fn check_return(node: NodeId, cx: &Cx<'_>) {
             let value_range = cx.range(val_id);
             cx.emit_offense(return_range, "Redundant `return` detected.", None);
 
-            // Skip autocorrect for Unknown values: `return(expr)` parses the
-            // parenthesised form as Unknown; deleting the prefix blindly would
-            // leave the `)` behind. Emit the offense only so the user can
-            // hand-fix without risking a corrupt autocorrect.
-            if matches!(cx.kind(val_id), NodeKind::Unknown) {
-                return;
-            }
-
-            // Delete from return-node start to value start (removes "return ").
+            // Delete from return-node start to value start (removes "return " or "return").
+            // For `return(value)`: value is now NodeKind::Begin (is_parenthesized),
+            // and deleting the prefix leaves `(value)` which is valid Ruby.
             let keyword_range = Range {
                 start: return_range.start,
                 end: value_range.start,
@@ -364,17 +356,22 @@ mod tests {
     // --- Parenthesised return form ---
 
     #[test]
-    fn flags_offense_but_no_autocorrect_for_return_parens() {
-        // `return(value)` parses as Return(Unknown) in Murphy's translator.
-        // The cop flags it (it IS redundant) but must NOT attempt to delete
-        // the prefix, because the parenthesised form would leave a dangling `)`.
-        // The user must hand-fix.
-        test::<RedundantReturn>().expect_offense(indoc! {r#"
-            def foo
-              return(42)
-              ^^^^^^^^^^ Redundant `return` detected.
-            end
-        "#});
+    fn flags_and_corrects_return_parens() {
+        // `return(value)` now lowers to Return(Begin([Int(42)])) via murphy-imxw.
+        // Autocorrect deletes the `return` prefix, leaving `(42)` which is valid Ruby.
+        test::<RedundantReturn>().expect_correction(
+            indoc! {r#"
+                def foo
+                  return(42)
+                  ^^^^^^^^^^ Redundant `return` detected.
+                end
+            "#},
+            indoc! {r#"
+                def foo
+                  (42)
+                end
+            "#},
+        );
     }
 }
 murphy_plugin_api::submit_cop!(RedundantReturn);

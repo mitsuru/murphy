@@ -21,6 +21,7 @@
 //! ```
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, SourceTokenKind, cop};
+use crate::cops::util::is_parenthesized;
 
 const MSG_MIXED: &str = "Do not use mixed logical operators in an `unless`.";
 const MSG_ANY: &str = "Do not use any logical operator in an `unless`.";
@@ -228,9 +229,10 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
             let has_kw = ops.contains(&OpKind::KeywordAnd);
             has_sym && has_kw
         }
-        NodeKind::Unknown => {
-            // Parenthesized condition: `(a && b || c)` is `Unknown`. Apply the
-            // same mixed-detection logic via token scan within the condition range.
+        NodeKind::Unknown => false,
+        // Parenthesized condition `(a && b || c)`: Begin with LeftParen at range.start.
+        // Apply the same mixed-detection logic via token scan within the condition range.
+        _ if is_parenthesized(cond, cx) => {
             let ops = collect_op_tokens_in_range(cond_range.start, cond_range.end, 1, cx);
             if ops.is_empty() {
                 return false;
@@ -270,10 +272,10 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
 fn has_any_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
     match cx.kind(cond) {
         NodeKind::And { .. } | NodeKind::Or { .. } => true,
-        NodeKind::Unknown => {
-            // Parenthesized condition: `(a && b)` is `Unknown`. Scan at depth 1
-            // (inside the outer parens) to avoid false positives from
-            // `(foo(a || b))` where `||` is at depth 2.
+        // Parenthesized condition `(a && b)`: Begin with LeftParen at range.start.
+        // Scan at depth 1 (inside the outer parens) to avoid false positives from
+        // `(foo(a || b))` where `||` is at depth 2.
+        _ if is_parenthesized(cond, cx) => {
             let r = cx.range(cond);
             let ops = collect_op_tokens_in_range(r.start, r.end, 1, cx);
             !ops.is_empty()
