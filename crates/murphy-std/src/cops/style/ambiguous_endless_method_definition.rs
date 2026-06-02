@@ -15,10 +15,11 @@
 //! gap_issues: []
 //! notes: >
 //!   RuboCop marks this cop `Enabled: pending`; Murphy maps that to
-//!   `default_enabled = false`. Only `on_def` is dispatched — `defs`
-//!   (singleton methods) is intentionally excluded, matching RuboCop's
-//!   `on_def`-only dispatch. Autocorrect converts the endless def to a
-//!   multiline def, leaving the surrounding operator/modifier intact.
+//!   `default_enabled = false`. Singleton defs (`def self.foo = ...`) are
+//!   skipped: RuboCop's `on_def` does not fire on singleton defs (parser
+//!   emits `:defs`), and Murphy guards via `def_receiver`. Autocorrect
+//!   converts the endless def to a multiline def, leaving the surrounding
+//!   operator/modifier intact.
 //! ```
 //!
 //! ## Matched shapes
@@ -92,6 +93,14 @@ fn is_endless(node: NodeId, cx: &Cx<'_>) -> bool {
 /// operator/modifier and emits an offense + autocorrect if so.
 fn check(def_node: NodeId, cx: &Cx<'_>) {
     if !is_endless(def_node, cx) {
+        return;
+    }
+
+    // Skip singleton defs (`def self.foo = ...`). RuboCop's `on_def` does
+    // not fire on singleton defs (parser emits `:defs`), so this cop only
+    // applies to instance methods. Murphy models singleton defs as
+    // `NodeKind::Def { receiver: Some(...) }`, so we guard here.
+    if cx.def_receiver(def_node).get().is_some() {
         return;
     }
 
@@ -194,12 +203,16 @@ fn build_multiline_def(def_node: NodeId, cx: &Cx<'_>) -> Option<String> {
     Some(format!("{header}\n  {body_src}\nend"))
 }
 
-/// Finds the first `=` token (bare assignment operator, not `==`, `=>`, etc.)
-/// in the token stream in the range `[from, to)`.
+/// Finds the **last** `=` token (bare assignment operator, not `==`, `=>`, etc.)
+/// in the token stream in the range `[from, to)`. Using the last `=` rather
+/// than the first correctly handles methods with optional-argument defaults:
+/// `def foo(x = 1) = x` — the first `=` is the default separator; the last
+/// `=` is the endless-method separator.
 fn find_equals_token(cx: &Cx<'_>, from: u32, to: u32) -> Option<Range> {
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < from);
+    let mut last: Option<Range> = None;
     for tok in &toks[idx..] {
         if tok.range.start >= to {
             break;
@@ -207,10 +220,10 @@ fn find_equals_token(cx: &Cx<'_>, from: u32, to: u32) -> Option<Range> {
         if tok.kind == SourceTokenKind::Other
             && &source[tok.range.start as usize..tok.range.end as usize] == b"="
         {
-            return Some(tok.range);
+            last = Some(tok.range);
         }
     }
-    None
+    last
 }
 
 #[cfg(test)]
@@ -371,6 +384,30 @@ mod tests {
               true
             end if bar
         "});
+    }
+
+    #[test]
+    fn accepts_singleton_def_modifier_if() {
+        // Singleton defs (def self.foo = ...) are skipped — RuboCop's on_def
+        // does not fire on parser's :defs nodes.
+        test::<AmbiguousEndlessMethodDefinition>()
+            .expect_no_offenses("def self.foo = true if bar
+");
+    }
+
+    #[test]
+    fn flags_optarg_default_if() {
+        // Optional argument with default — the `=` separator must be the LAST
+        // `=` in the range, not the first (which belongs to the default).
+        test::<AmbiguousEndlessMethodDefinition>().expect_correction(
+            "def foo(x = 1) = x if bar
+^^^^^^^^^^^^^^^^^^^^^^^^^^ Avoid using `if` statements with endless methods.
+",
+            "def foo(x = 1)
+  x
+end if bar
+",
+        );
     }
 }
 
