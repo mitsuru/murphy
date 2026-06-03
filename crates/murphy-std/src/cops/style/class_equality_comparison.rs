@@ -14,8 +14,10 @@
 //! gap_issues: []
 //! notes: >
 //!   AllowedMethods (default: ["==", "equal?", "eql?"]) and AllowedPatterns
-//!   (default: []) are both implemented. AllowedPatterns uses simple substring
-//!   match (RuboCop uses Regexp), which is a known v1 limitation.
+//!   (default: []) are both implemented. AllowedPatterns now uses real regex
+//!   matching (RE2 / Rust `regex`, via `cx.matches_any_pattern`). Lookahead/
+//!   backreferences are unsupported and such patterns are diagnosed (stderr)
+//!   and skipped.
 //!   Autocorrect is emitted but marked unsafe -- the constant named in the
 //!   replacement may not exist at the call site (e.g. var.class.name == 'Foo'
 //!   to var.instance_of?(Foo) requires Foo to be in scope). Murphy has no
@@ -55,7 +57,7 @@
 //!
 //! When the node is inside a `def` or `defs` method definition whose name
 //! appears in `AllowedMethods`, or matches any pattern in `AllowedPatterns`
-//! (substring), the offense is suppressed.
+//! (unanchored regex, via `cx.matches_any_pattern`), the offense is suppressed.
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
@@ -81,7 +83,7 @@ pub struct ClassEqualityComparisonOptions {
     #[option(
         name = "AllowedPatterns",
         default = [],
-        description = "Patterns (substring match) for method names to exempt."
+        description = "Patterns (unanchored regex) for method names to exempt."
     )]
     pub allowed_patterns: Vec<String>,
 }
@@ -222,11 +224,7 @@ fn is_allowed_context(node: NodeId, cx: &Cx<'_>) -> bool {
                 if opts.allowed_methods.iter().any(|m| m == method_name) {
                     return true;
                 }
-                if opts
-                    .allowed_patterns
-                    .iter()
-                    .any(|p| method_name.contains(p.as_str()))
-                {
+                if cx.matches_any_pattern(method_name, &opts.allowed_patterns) {
                     return true;
                 }
                 // Only the first (nearest) def/defs is checked.
@@ -638,6 +636,23 @@ mod tests {
                 def equal?(other)
                   self.class == other.class &&
                     name == other.name
+                end
+            "#});
+    }
+
+    #[test]
+    fn allowed_patterns_uses_regex_anchors() {
+        use super::ClassEqualityComparisonOptions;
+        // `\Aequal` anchors to the start of the method name and matches `equal?`.
+        // The old substring scan can never match — the name contains no `\A`.
+        test::<ClassEqualityComparison>()
+            .with_options(&ClassEqualityComparisonOptions {
+                allowed_methods: vec![],
+                allowed_patterns: vec![r"\Aequal".to_string()],
+            })
+            .expect_no_offenses(indoc! {r#"
+                def equal?(other)
+                  self.class == other.class
                 end
             "#});
     }
