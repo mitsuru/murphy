@@ -2884,20 +2884,36 @@ static REPORTED_INVALID: LazyLock<Mutex<HashSet<String>>> =
 pub(crate) fn allowed_pattern_match(name: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|pat| {
         PATTERN_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            let compiled =
-                cache
-                    .entry(pat.clone())
-                    .or_insert_with(|| match regex::Regex::new(pat) {
-                        Ok(re) => Some(re),
-                        Err(err) => {
-                            report_invalid_pattern(pat, &err);
-                            None
-                        }
-                    });
-            compiled.as_ref().is_some_and(|re| re.is_match(name))
+            // Fast path: cache hit, no clone. The `borrow()` ends when this
+            // `if let` block returns, so it never overlaps the miss-path
+            // `borrow_mut()` below.
+            if let Some(compiled) = cache.borrow().get(pat) {
+                return compiled.as_ref().is_some_and(|re| re.is_match(name));
+            }
+            // Miss: compile once, clone the key only now.
+            let compiled = match regex::Regex::new(pat) {
+                Ok(re) => Some(re),
+                Err(err) => {
+                    report_invalid_pattern(pat, &err);
+                    None
+                }
+            };
+            let matched = compiled.as_ref().is_some_and(|re| re.is_match(name));
+            cache.borrow_mut().insert(pat.clone(), compiled);
+            matched
         })
     })
+}
+
+/// Returns `true` the first time `pattern` is seen (and records it), `false`
+/// afterwards — so the caller emits the diagnostic exactly once per pattern.
+/// Split out from `report_invalid_pattern` so the dedup decision is unit-
+/// testable without capturing stderr.
+fn should_report_invalid(pattern: &str) -> bool {
+    REPORTED_INVALID
+        .lock()
+        .expect("REPORTED_INVALID poisoned")
+        .insert(pattern.to_string())
 }
 
 /// Emit a one-time stderr diagnostic for a pattern that failed to compile.
@@ -2905,11 +2921,7 @@ pub(crate) fn allowed_pattern_match(name: &str, patterns: &[String]) -> bool {
 /// contract. Confined to one function so a future structured `cx.warn()`
 /// channel only needs to change here.
 fn report_invalid_pattern(pattern: &str, err: &regex::Error) {
-    if REPORTED_INVALID
-        .lock()
-        .expect("REPORTED_INVALID poisoned")
-        .insert(pattern.to_string())
-    {
+    if should_report_invalid(pattern) {
         eprintln!("murphy: AllowedPatterns: invalid regex `{pattern}`: {err}; pattern ignored");
     }
 }
@@ -3945,6 +3957,18 @@ mod tests {
     #[test]
     fn matches_any_pattern_empty_list_is_false() {
         assert!(!super::allowed_pattern_match("anything", &[]));
+    }
+
+    #[test]
+    fn report_invalid_pattern_dedup_reports_once() {
+        // Use a unique pattern string so this test is independent of others
+        // that may touch the process-global REPORTED_INVALID set.
+        let pat = "((unique-dedup-probe-task1";
+        assert!(super::should_report_invalid(pat), "first sighting reports");
+        assert!(
+            !super::should_report_invalid(pat),
+            "second sighting is deduped"
+        );
     }
 
     use std::cell::RefCell;
