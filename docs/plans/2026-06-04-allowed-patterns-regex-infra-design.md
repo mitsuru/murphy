@@ -21,9 +21,17 @@ regex match.
 
 Cops currently faking it with substring:
 
-- `crates/murphy-std/src/cops/style/class_equality_comparison.rs`
-- `crates/murphy-std/src/cops/style/format_string_token.rs`
-- `crates/murphy-std/src/cops/style/optional_boolean_parameter.rs`
+- `crates/murphy-std/src/cops/style/class_equality_comparison.rs:228`
+- `crates/murphy-std/src/cops/style/format_string_token.rs:321`
+
+**Already does real regex** (discovered during planning):
+`crates/murphy-std/src/cops/style/optional_boolean_parameter.rs:97-114` already
+compiles `regex::Regex::new(pat)` behind an inline `thread_local!` cache and
+matches unanchored — its existing tests pin `^respond_to` (anchor) and
+`[invalid` (invalid → silently skipped). For this cop the work is a **DRY
+refactor**: replace the inline cache with the shared helper. It is the de-facto
+reference implementation, and its `thread_local!` cache is the precedent this
+design generalizes.
 
 `Style/SymbolProc` wants `AllowedPatterns` too but has not implemented even the
 substring stand-in; it becomes a consumer of this infrastructure (out of scope
@@ -35,8 +43,9 @@ here — see §6).
 |---|---|---|
 | Regex engine | **RE2 (Rust `regex`)** | Already a dependency; linear-time, no C dep, fits the "fast native Rust" thesis. Lookahead/backreferences are unsupported and rare for method-name matching. |
 | API shape | **`cx` helper + cache** | Keeps options as `Vec<String>`; cops swap one line. No derive/option-cache changes (minimal churn). |
+| Cache | **`thread_local!` per-thread** | Matches existing precedent in `optional_boolean_parameter`; lock-free hot path. A separate global `Mutex<HashSet>` dedups the invalid-pattern diagnostic across threads. |
 | Invalid pattern | **Diagnostic + skip** | RE2-incompatible patterns emit a one-time stderr warning and are treated as non-matching; processing continues. |
-| Scope | **Helper + migrate the 3 cops** | Proves the infrastructure and removes the known limitation. `SymbolProc` is a follow-up. |
+| Scope | **Helper + migrate 2 substring cops + refactor 1** | `class_equality_comparison` and `format_string_token` switch from substring to regex; `optional_boolean_parameter` swaps its inline cache for the shared helper. `SymbolProc` is a follow-up. |
 
 ## 3. API surface
 
@@ -72,23 +81,29 @@ only metacharacter patterns change meaning (that is the fix).
 
 ## 4. Cache and concurrency
 
-Process-global runtime cache in `murphy-plugin-api`:
+Cops run under rayon across all cores
+(`crates/murphy-core/src/mruby/proxy.rs`). The cache is **per-thread**, matching
+the precedent already in `optional_boolean_parameter`:
 
 ```rust
-static PATTERN_CACHE: LazyLock<RwLock<HashMap<String, Result<Arc<Regex>, ()>>>>
-    = LazyLock::new(|| RwLock::new(HashMap::new()));
+thread_local! {
+    static PATTERN_CACHE: RefCell<HashMap<String, Option<Regex>>> =
+        RefCell::new(HashMap::new());
+}
+// Dedups the invalid-pattern diagnostic across threads (cold path only).
+static REPORTED_INVALID: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 ```
 
-- Key: the pattern string. Value: the compile result. `Ok(Arc<Regex>)` on
-  success; `Err(())` on failure — **failures are cached too**, so a bad pattern
-  is neither recompiled nor re-diagnosed (the cache doubles as diagnostic
-  dedup).
-- Cops run under rayon across all cores
-  (`crates/murphy-core/src/mruby/proxy.rs`). `RwLock` gives a fast read path;
-  only a cache miss takes the write lock to compile and insert. Compilation is
-  rare and short, so write contention is negligible.
+- Key: the pattern string. Value: `Some(Regex)` on success, `None` on compile
+  failure — failures are cached per-thread so a bad pattern is compiled at most
+  once per thread.
+- **Lock-free hot path**: matching only touches the `thread_local` cache. The
+  global `Mutex` is taken only on the rare compile-failure path, to ensure the
+  diagnostic is emitted once across the whole process.
 - The cache is bounded by the finite set of config-derived patterns, so no
-  eviction is needed.
+  eviction is needed. Per-thread duplication is negligible (a handful of short
+  patterns × core count).
 
 Contrast with `def_node_matcher!`, which emits a `static LazyLock<Regex>` per
 **compile-time-known** literal pattern (`node_pattern.rs:3286`). `AllowedPatterns`
@@ -98,9 +113,10 @@ the string-keyed dynamic cache.
 Match procedure in `matches_any_pattern`:
 
 1. Iterate `patterns`.
-2. Look each up in the cache (miss → compile + store).
-3. `Ok(re)` → `re.is_match(name)`; `true` returns early.
-4. `Err(())` → skip (already diagnosed).
+2. Look each up in the thread-local cache (miss → compile + store
+   `Some`/`None`; on failure also report via the global dedup set).
+3. `Some(re)` → `re.is_match(name)`; `true` returns early.
+4. `None` → skip (already diagnosed).
 5. No match across all → `false`.
 
 ## 5. Error handling
@@ -132,11 +148,19 @@ left as a documented future option on the issue.
 
 ## 6. Migration and testing
 
-**Migrate the 3 cops**: swap the substring scan for `cx.matches_any_pattern`.
-Update each `murphy-parity` metadata block: "substring match, known v1
-limitation" → "full regex (RE2 subset); lookahead/backreferences unsupported,
-diagnosed and skipped". Where `AllowedPatterns` was the sole reason for
-`status: partial`, revisit the wording (keep `partial` if other gaps remain).
+**Migrate the 2 substring cops** (`class_equality_comparison`,
+`format_string_token`): swap `.iter().any(|p| name.contains(p))` for
+`cx.matches_any_pattern(name, &opts.allowed_patterns)`. Update each
+`murphy-parity` metadata block: "substring match, known v1 limitation" → "full
+regex (RE2 subset); lookahead/backreferences unsupported, diagnosed and
+skipped". Where `AllowedPatterns` was the sole reason for `status: partial`,
+revisit the wording (keep `partial` if other gaps remain).
+
+**Refactor `optional_boolean_parameter`**: replace the inline `thread_local!`
+regex cache (lines 97-114) with `cx.matches_any_pattern`. Behavior is unchanged
+except that an invalid pattern now also emits the shared stderr diagnostic
+(previously silent) — its existing `[invalid` test still passes (assertions read
+offenses/stdout, not stderr).
 
 **Tests (TDD — failing test first)**:
 
