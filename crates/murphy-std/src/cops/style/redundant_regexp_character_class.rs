@@ -263,6 +263,7 @@ fn parse_single_element_class(body: &[u8], start: usize) -> Option<(usize, Vec<u
 /// An element is one of:
 /// - A single non-special byte
 /// - A backslash escape `\X` (two bytes)
+///
 /// Returns the raw bytes of the element, or `None` if we hit EOF unexpectedly.
 fn read_one_element(body: &[u8], i: &mut usize) -> Option<Vec<u8>> {
     if *i >= body.len() {
@@ -299,7 +300,7 @@ fn is_redundant(elem: &[u8], is_extended: bool) -> bool {
             return false;
         }
         // Octal `[\1]`–`[\7]` — backreference outside class.
-        if c.is_ascii_digit() && c >= b'1' && c <= b'7' {
+        if c.is_ascii_digit() && (b'1'..=b'7').contains(&c) {
             return false;
         }
         // Other backslash escapes: `[\s]`, `[\d]`, `[\n]`, `[\.]` → redundant.

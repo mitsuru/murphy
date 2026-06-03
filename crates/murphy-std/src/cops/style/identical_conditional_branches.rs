@@ -218,11 +218,10 @@ fn duplicated_expressions(node: NodeId, exprs: &[NodeId], cx: &Cx<'_>) -> bool {
     if is_assignment(expr, cx) {
         let condition_variable = assignable_condition_value(node, cx);
         let assigned_var = assigned_lhs_name(expr, cx);
-        if let (Some(cond_var), Some(asgn_var)) = (condition_variable, assigned_var) {
-            if cond_var == asgn_var {
+        if let (Some(cond_var), Some(asgn_var)) = (condition_variable, assigned_var)
+            && cond_var == asgn_var {
                 return false;
             }
-        }
     }
 
     true
@@ -292,11 +291,11 @@ fn last_child_of_parent(node: NodeId, cx: &Cx<'_>) -> bool {
     // For Begin/Kwbegin parents, use cx.list for zero-copy traversal.
     match cx.kind(parent) {
         NodeKind::Begin(list) | NodeKind::Kwbegin(list) => {
-            cx.list(*list).last().map_or(false, |&last| last == node)
+            cx.list(*list).last().is_some_and(|&last| last == node)
         }
         _ => {
             let children = cx.children(parent);
-            children.last().map_or(false, |&last| last == node)
+            children.last().is_some_and(|&last| last == node)
         }
     }
 }

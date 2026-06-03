@@ -77,6 +77,7 @@ pub struct TernaryParenthesesOptions {
 }
 
 #[derive(Default, CopOptionEnum, Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum TernaryStyle {
     #[option(value = "require_no_parentheses")]
     #[default]

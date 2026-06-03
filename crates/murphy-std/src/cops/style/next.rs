@@ -68,7 +68,7 @@ use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, OptNode
 
 const MSG: &str = "Use `next` to skip iteration.";
 
-/// Exit types whose presence in the if branch prevents the cop from flagging.
+// Exit types whose presence in the if branch prevents the cop from flagging.
 
 /// Enumerator methods that trigger the cop for blocks.
 const ENUMERATOR_METHODS: &[&str] = &[
@@ -303,11 +303,10 @@ fn has_nested_if_with_else(node: NodeId, cx: &Cx<'_>) -> bool {
     };
 
     for child_opt in [then_, else_] {
-        if let Some(child) = child_opt.get() {
-            if matches!(cx.kind(child), NodeKind::If { .. }) && cx.is_else(child) {
+        if let Some(child) = child_opt.get()
+            && matches!(cx.kind(child), NodeKind::If { .. }) && cx.is_else(child) {
                 return true;
             }
-        }
     }
     if matches!(cx.kind(cond), NodeKind::If { .. }) && cx.is_else(cond) {
         return true;
@@ -487,7 +486,7 @@ fn autocorrect_block(if_node: NodeId, cx: &Cx<'_>) {
 }
 
 /// Returns the leading whitespace of the line containing `offset`.
-fn compute_line_indent<'a>(offset: u32, source: &'a [u8]) -> &'a str {
+fn compute_line_indent(offset: u32, source: &[u8]) -> &str {
     let offset = offset as usize;
     // Find the start of the line.
     let line_start = source[..offset]

@@ -107,11 +107,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     // Skip Rails.cache receiver.
-    if let Some(recv) = cx.call_receiver(call).get() {
-        if is_rails_cache(recv, cx) {
+    if let Some(recv) = cx.call_receiver(call).get()
+        && is_rails_cache(recv, cx) {
             return;
         }
-    }
 
     // Determine if body is acceptable.
     let opts = Options::default();
@@ -125,7 +124,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                 cx.raw_source(cx.range(body_id)).to_string()
             } else if matches!(kind, NodeKind::Str(_)) {
                 // String bodies only fire when frozen_string_literal is enabled.
-                if !cx.frozen_string_literal_comment().is_some_and(|c| c.value_bool == 1) {
+                if cx.frozen_string_literal_comment().is_none_or(|c| c.value_bool != 1) {
                     return;
                 }
                 cx.raw_source(cx.range(body_id)).to_string()
@@ -164,11 +163,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
 
     let good = format!("fetch({key_src_for_autocorrect}, {default_value_src})");
-    let bad = if body_node.is_none() {
-        format!("fetch({key_src}) {{}}")
-    } else {
-        let body_src = cx.raw_source(cx.range(body_node.unwrap()));
+    let bad = if let Some(body_id) = body_node {
+        let body_src = cx.raw_source(cx.range(body_id));
         format!("fetch({key_src}) {{ {body_src} }}")
+    } else {
+        format!("fetch({key_src}) {{}}")
     };
 
     let msg = MSG

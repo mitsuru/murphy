@@ -128,11 +128,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // Grandparent guard: skip if grandparent is also modifier-form to avoid
     // double-reporting in triple+ chains (matches RuboCop's ignore_node behavior).
-    if let Some(grandparent) = cx.parent(parent).get() {
-        if cx.is_modifier_form(grandparent) {
+    if let Some(grandparent) = cx.parent(parent).get()
+        && cx.is_modifier_form(grandparent) {
             return;
         }
-    }
 
     // Offense: keyword range of this (inner) modifier node.
     let offense_range = modifier_keyword_range(node, cx);

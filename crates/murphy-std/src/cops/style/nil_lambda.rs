@@ -162,9 +162,9 @@ fn is_proc_node(node: NodeId, cx: &Cx<'_>) -> bool {
     }
 
     // `Proc.new { }` — call to `new` on const `Proc` (with or without explicit cbase)
-    if method_name == "new" {
-        if let Some(recv_id) = receiver.get() {
-            if let NodeKind::Const { name, scope } = *cx.kind(recv_id) {
+    if method_name == "new"
+        && let Some(recv_id) = receiver.get()
+            && let NodeKind::Const { name, scope } = *cx.kind(recv_id) {
                 let const_name = cx.symbol_str(name);
                 // Match `Proc` and `::Proc`
                 if const_name == "Proc" {
@@ -177,8 +177,6 @@ fn is_proc_node(node: NodeId, cx: &Cx<'_>) -> bool {
                     }
                 }
             }
-        }
-    }
 
     false
 }

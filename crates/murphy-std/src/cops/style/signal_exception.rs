@@ -84,11 +84,10 @@ impl SignalException {
         }
 
         // Only flag bare calls (no receiver) or Kernel.fail / Kernel.raise.
-        if let Some(recv_id) = receiver.get() {
-            if !is_kernel_const(recv_id, cx) {
+        if let Some(recv_id) = receiver.get()
+            && !is_kernel_const(recv_id, cx) {
                 return;
             }
-        }
 
         match opts.enforced_style {
             EnforcedStyle::OnlyRaise => {
@@ -147,11 +146,10 @@ fn is_inside_resbody(node: NodeId, cx: &Cx<'_>) -> bool {
             NodeKind::Resbody { body, .. } => {
                 // We're inside a resbody -- confirm we are in its body subtree,
                 // not in the exception list.
-                if let Some(body_id) = body.get() {
-                    if child_id == body_id || is_same_or_descendant(child_id, body_id, cx) {
+                if let Some(body_id) = body.get()
+                    && (child_id == body_id || is_same_or_descendant(child_id, body_id, cx)) {
                         return true;
                     }
-                }
                 // We were in the exception list -- not in the handler body.
                 return false;
             }

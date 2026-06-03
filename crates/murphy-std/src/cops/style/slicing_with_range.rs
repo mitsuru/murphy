@@ -108,8 +108,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Pattern 2: endless range opportunity.
     // `ary[n..-1]` where begin is present and not a nil literal, end is -1.
     // Already-endless (`ary[n..]`) is not flagged (end absent).
-    if let Some(begin_id) = begin_.get() {
-        if !is_nil_literal(begin_id, cx) && is_minus_one(end_, cx) {
+    if let Some(begin_id) = begin_.get()
+        && !is_nil_literal(begin_id, cx) && is_minus_one(end_, cx) {
             let begin_src = cx.raw_source(cx.range(begin_id));
             let op = if exclusive { "..." } else { ".." };
             let prefer_bracket = format!("[{begin_src}{op}]");
@@ -121,14 +121,13 @@ fn check(node: NodeId, cx: &Cx<'_>) {
             cx.emit_edit(cx.range(end_id), "");
             return;
         }
-    }
 
     // Pattern 3: beginless range with explicit nil begin.
     // `ary[nil..n]` — begin is a nil literal node, end is present.
     // The form `ary[..n]` (begin absent) is already optimal and not flagged.
-    if let Some(begin_id) = begin_.get() {
-        if is_nil_literal(begin_id, cx) {
-            if let Some(end_id) = end_.get() {
+    if let Some(begin_id) = begin_.get()
+        && is_nil_literal(begin_id, cx)
+            && let Some(end_id) = end_.get() {
                 let end_src = cx.raw_source(cx.range(end_id));
                 let op = if exclusive { "..." } else { ".." };
                 let prefer_bracket = format!("[{op}{end_src}]");
@@ -138,8 +137,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                 // Autocorrect: remove the nil begin node.
                 cx.emit_edit(cx.range(begin_id), "");
             }
-        }
-    }
 }
 
 /// Returns `true` if `opt` holds an integer literal `0`.

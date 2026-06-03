@@ -81,11 +81,10 @@ impl IfWithSemicolon {
         }
 
         // Skip when the parent is an `If` node (handles elsif and nested ifs).
-        if let Some(parent) = cx.parent(node).get() {
-            if matches!(cx.kind(parent), NodeKind::If { .. }) {
+        if let Some(parent) = cx.parent(node).get()
+            && matches!(cx.kind(parent), NodeKind::If { .. }) {
                 return;
             }
-        }
 
         // Detect the semicolon: the token immediately after the condition end
         // must be an `Other` token with text `b";"`.

@@ -122,15 +122,14 @@ fn match_map_to_hash(to_h_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
                 return None;
             }
             let arg = arg_list[0];
-            if let NodeKind::BlockPass(inner) = *cx.kind(arg) {
-                if inner
+            if let NodeKind::BlockPass(inner) = *cx.kind(arg)
+                && inner
                     .get()
                     .map(|n| matches!(cx.kind(n), NodeKind::Sym(_)))
                     .unwrap_or(false)
                 {
                     return Some(receiver_id);
                 }
-            }
             None
         }
         _ => None,
@@ -139,13 +138,11 @@ fn match_map_to_hash(to_h_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
 
 fn check(to_h_node: NodeId, cx: &Cx<'_>) {
     // Guard: skip if to_h already has a block attached.
-    if let Some(parent) = cx.parent(to_h_node).get() {
-        if let NodeKind::Block { call, .. } = *cx.kind(parent) {
-            if call == to_h_node {
+    if let Some(parent) = cx.parent(to_h_node).get()
+        && let NodeKind::Block { call, .. } = *cx.kind(parent)
+            && call == to_h_node {
                 return;
             }
-        }
-    }
 
     let Some(map_node) = match_map_to_hash(to_h_node, cx) else {
         return;
@@ -181,12 +178,11 @@ fn check(to_h_node: NodeId, cx: &Cx<'_>) {
     // it with the outer to_h dot source. This transfers dot ownership so that
     // `x&.map { }.to_h` becomes `x&.to_h { }` and `x.map { }&.to_h` becomes
     // `x&.to_h { }`.
-    if let Some(map_dot_range) = cx.call_operator_loc(map_node) {
-        if let Some(to_h_dot_range) = cx.call_operator_loc(to_h_node) {
+    if let Some(map_dot_range) = cx.call_operator_loc(map_node)
+        && let Some(to_h_dot_range) = cx.call_operator_loc(to_h_node) {
             let to_h_dot = cx.raw_source(to_h_dot_range);
             cx.emit_edit(map_dot_range, to_h_dot);
         }
-    }
 
     // Edit 3: rename the map/collect selector to `to_h`.
     cx.emit_edit(map_selector, "to_h");

@@ -116,11 +116,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // Parent guard: if the parent is also File.dirname, we are the inner node
     // — skip to avoid double-reporting. Only the outermost fires.
-    if let Some(parent) = cx.parent(node).get() {
-        if is_file_dirname(parent, cx) {
+    if let Some(parent) = cx.parent(node).get()
+        && is_file_dirname(parent, cx) {
             return;
         }
-    }
 
     // First argument must itself be File.dirname (level >= 2).
     let NodeKind::Send { args, .. } = *cx.kind(node) else {

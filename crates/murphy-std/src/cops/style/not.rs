@@ -138,9 +138,9 @@ fn requires_parens(receiver: NodeId, cx: &Cx<'_>) -> bool {
 
     // send_type? && binary_operation?
     // binary_operation? = operator_method? && expression.begin != selector.begin
-    if matches!(cx.kind(receiver), NodeKind::Send { .. }) {
-        if let Some(method) = cx.method_name(receiver) {
-            if is_operator_method(method) {
+    if matches!(cx.kind(receiver), NodeKind::Send { .. })
+        && let Some(method) = cx.method_name(receiver)
+            && is_operator_method(method) {
                 // Check that the expression does not start at the selector
                 // (i.e., there is a receiver to the left of the operator).
                 let expr_start = cx.range(receiver).start;
@@ -149,8 +149,6 @@ fn requires_parens(receiver: NodeId, cx: &Cx<'_>) -> bool {
                     return true;
                 }
             }
-        }
-    }
 
     // if_type? && ternary?
     if matches!(cx.kind(receiver), NodeKind::If { .. }) && cx.is_ternary(receiver) {

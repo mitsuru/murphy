@@ -222,7 +222,7 @@ done
 ### 5. Cleanup
 # Capture paths before leaving the worktree
 WT=\$(git rev-parse --show-toplevel)
-MAIN_REPO=\$(git worktree list | awk 'NR==1 {print \$1}')
+MAIN_REPO=\$(git worktree list --porcelain | awk '/^worktree / {print substr(\$0, 10); exit}')
 
 # Remove the remote cop branch (keeps origin tidy)
 git push origin --delete "\$COP_BRANCH" || true

@@ -211,11 +211,10 @@ fn is_array_const(node: NodeId, cx: &Cx<'_>) -> bool {
     }
     // Allow nil scope (bare `Array`) and cbase scope (`::Array`),
     // but reject namespaced constants like `Foo::Array`.
-    if let Some(scope_id) = scope.get() {
-        if !matches!(cx.kind(scope_id), NodeKind::Cbase) {
+    if let Some(scope_id) = scope.get()
+        && !matches!(cx.kind(scope_id), NodeKind::Cbase) {
             return false;
         }
-    }
     true
 }
 

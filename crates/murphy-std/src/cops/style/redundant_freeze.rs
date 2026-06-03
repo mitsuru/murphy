@@ -124,13 +124,11 @@ fn is_redundant_freeze_receiver(receiver: NodeId, cx: &Cx<'_>) -> bool {
 
     // 4. Plain `str` with `# frozen_string_literal: true` pragma.
     //    `dstr` is intentionally excluded (not frozen by the pragma in Ruby 3.0+).
-    if matches!(cx.kind(receiver), NodeKind::Str(_)) {
-        if let Some(comment) = cx.frozen_string_literal_comment() {
-            if comment.value_bool == 1 {
+    if matches!(cx.kind(receiver), NodeKind::Str(_))
+        && let Some(comment) = cx.frozen_string_literal_comment()
+            && comment.value_bool == 1 {
                 return true;
             }
-        }
-    }
 
     // 5. Operations that produce immutable values.
     operation_produces_immutable(receiver, cx)

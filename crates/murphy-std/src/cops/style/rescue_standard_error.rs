@@ -79,13 +79,11 @@ impl RescueStandardError {
 
         // Skip modifier-form rescue (`foo rescue bar`).
         // The containing Rescue node has no `end` keyword for modifier-form.
-        if let Some(parent) = cx.parent(node).get() {
-            if matches!(cx.kind(parent), NodeKind::Rescue { .. }) {
-                if cx.loc(parent).end_keyword() == Range::ZERO {
+        if let Some(parent) = cx.parent(node).get()
+            && matches!(cx.kind(parent), NodeKind::Rescue { .. })
+                && cx.loc(parent).end_keyword() == Range::ZERO {
                     return;
                 }
-            }
-        }
 
         let exception_list = cx.list(exceptions);
 

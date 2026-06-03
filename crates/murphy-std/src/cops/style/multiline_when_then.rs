@@ -127,8 +127,8 @@ fn find_then_token(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
 /// or the length of the source if none is found. Used to bound `then`-token
 /// search when the `when` branch has no body.
 fn first_newline_or_end(src: &[u8], from: usize) -> u32 {
-    for i in from..src.len() {
-        if src[i] == b'\n' {
+    for (i, &byte) in src.iter().enumerate().skip(from) {
+        if byte == b'\n' {
             return i as u32;
         }
     }

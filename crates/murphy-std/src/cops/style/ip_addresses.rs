@@ -124,7 +124,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 fn starts_with_hex_or_colon(s: &str) -> bool {
     s.as_bytes()
         .first()
-        .map_or(false, |&b| b == b':' || b.is_ascii_hexdigit())
+        .is_some_and(|&b| b == b':' || b.is_ascii_hexdigit())
 }
 
 fn is_ip_address(s: &str) -> bool {

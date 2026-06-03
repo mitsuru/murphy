@@ -127,11 +127,10 @@ fn if_branch_is_true_type_and_else_is_not(node: NodeId, cx: &Cx<'_>, opts: &Redu
         return false;
     }
     // Condition method must not be in AllowedMethods.
-    if let Some(method_name) = cx.method_name(cond) {
-        if opts.allowed_methods.iter().any(|m| m == method_name) {
+    if let Some(method_name) = cx.method_name(cond)
+        && opts.allowed_methods.iter().any(|m| m == method_name) {
             return false;
         }
-    }
     // if_branch must be True_.
     let if_branch = match cx.if_then_branch(node).get() {
         Some(b) => b,
@@ -234,11 +233,10 @@ fn branches_have_method_with_cond(node: NodeId, cx: &Cx<'_>) -> bool {
     // Must not be hash key access `[]`.
     if if_method == else_method {
         // Check method name != `[]`
-        if let Some(name) = cx.method_name(if_branch) {
-            if name == "[]" {
+        if let Some(name) = cx.method_name(if_branch)
+            && name == "[]" {
                 return false;
             }
-        }
     }
 
     // Must be the same method name.
@@ -310,11 +308,10 @@ fn is_offense(node: NodeId, cx: &Cx<'_>, opts: &RedundantConditionOptions) -> bo
     }
 
     // Skip if else_branch is a `[]=` hash key assignment send.
-    if let NodeKind::Send { method, .. } = *cx.kind(else_branch) {
-        if cx.symbol_str(method) == "[]=" {
+    if let NodeKind::Send { method, .. } = *cx.kind(else_branch)
+        && cx.symbol_str(method) == "[]=" {
             return false;
         }
-    }
 
     // Check synonymous_condition_and_branch?
     let synonymous = condition_equals_if_branch(node, cx)

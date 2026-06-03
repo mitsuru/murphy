@@ -164,9 +164,7 @@ fn redundant_assignment_check(asgn: NodeId, ret: NodeId, cx: &Cx<'_>) -> Option<
     else {
         return None;
     };
-    let Some(value_id) = asgn_value.get() else {
-        return None;
-    };
+    let value_id = asgn_value.get()?;
     let NodeKind::Lvar(ret_name) = *cx.kind(ret) else {
         return None;
     };
