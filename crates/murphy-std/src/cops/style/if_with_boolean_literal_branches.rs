@@ -311,7 +311,8 @@ fn check(node: NodeId, cx: &Cx<'_>, allowed: &[String]) {
             .get()
             .map(|b| node_indentation(b, cx))
             .unwrap_or("");
-        let edit_src = format!("else\n{then_indent}{replacement}\nend");
+        let nl = if cx.source().contains("\r\n") { "\r\n" } else { "\n" };
+        let edit_src = format!("else{nl}{then_indent}{replacement}{nl}end");
         cx.emit_edit(cx.range(node), &edit_src);
     } else {
         cx.emit_edit(cx.range(node), &replacement);

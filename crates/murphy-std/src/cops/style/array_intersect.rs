@@ -150,7 +150,7 @@ impl ArrayIntersect {
             let array1_src = cx.raw_source(cx.range(array1));
             let array2_src = cx.raw_source(cx.range(array2));
             let replacement = format!("{bang}{array1_src}{dot}intersect?({array2_src})");
-            emit(node, &replacement, cx);
+            emit_checked_block(node, &replacement, call, call_method_name, cx);
         }
     }
 
@@ -188,7 +188,7 @@ impl ArrayIntersect {
             let array1_src = cx.raw_source(cx.range(array1));
             let array2_src = cx.raw_source(cx.range(array2));
             let replacement = format!("{bang}{array1_src}{dot}intersect?({array2_src})");
-            emit(node, &replacement, cx);
+            emit_checked_block(node, &replacement, send, call_method_name, cx);
         }
     }
 
@@ -223,7 +223,7 @@ impl ArrayIntersect {
             let array1_src = cx.raw_source(cx.range(array1));
             let array2_src = cx.raw_source(cx.range(array2));
             let replacement = format!("{bang}{array1_src}{dot}intersect?({array2_src})");
-            emit(node, &replacement, cx);
+            emit_checked_block(node, &replacement, send, call_method_name, cx);
         }
     }
 }
@@ -259,7 +259,8 @@ fn check_call(node: NodeId, cx: &Cx<'_>) {
     // Comparison methods: `> 0`, `!= 0`, `== 0`.
     if matches!(method_name, ">" | "!=" | "==") {
         if let Some(replacement) = check_size_check(recv_id, method_name, outer_args, cx) {
-            emit(node, &replacement, cx);
+            let intersection_id = cx.call_receiver(recv_id).get().unwrap_or(recv_id);
+            emit_checked(node, &replacement, intersection_id, node, method_name, cx);
         }
         return;
     }
@@ -271,7 +272,7 @@ fn check_call(node: NodeId, cx: &Cx<'_>) {
 
     // Check if receiver is `intersection(arg)` directly.
     if let Some(replacement) = check_intersection_predicate(recv_id, method_name, cx) {
-        emit(node, &replacement, cx);
+        emit_checked(node, &replacement, recv_id, node, method_name, cx);
         return;
     }
 
@@ -281,7 +282,8 @@ fn check_call(node: NodeId, cx: &Cx<'_>) {
     if matches!(method_name, "positive?" | "zero?") &&
         let Some(replacement) = check_size_predicate(recv_id, method_name, cx)
     {
-        emit(node, &replacement, cx);
+        let intersection_id = cx.call_receiver(recv_id).get().unwrap_or(recv_id);
+        emit_checked(node, &replacement, intersection_id, node, method_name, cx);
     }
 }
 
@@ -382,6 +384,56 @@ fn emit(node: NodeId, replacement: &str, cx: &Cx<'_>) {
     let msg = format!("Use `{replacement}` instead of `{existing}`.");
     cx.emit_offense(cx.range(node), &msg, None);
     cx.emit_edit(cx.range(node), replacement);
+}
+
+/// Emit offense-only (no autocorrect).
+fn emit_offense_only(node: NodeId, replacement: &str, cx: &Cx<'_>) {
+    let existing = cx.raw_source(cx.range(node));
+    let msg = format!("Use `{replacement}` instead of `{existing}`.");
+    cx.emit_offense(cx.range(node), &msg, None);
+}
+
+/// Emit with csend safety check for chained-call patterns.
+/// Skips autocorrect when: inner intersection is `&.` and outer is `.` (mixed),
+/// or inner is `&.` with a negating method (would change `nil` to `!nil == true`).
+fn emit_checked(
+    node: NodeId,
+    replacement: &str,
+    intersection_node: NodeId,
+    outer_node: NodeId,
+    method_name: &str,
+    cx: &Cx<'_>,
+) {
+    let inner_is_csend = matches!(cx.kind(intersection_node), NodeKind::Csend { .. });
+    let safe = if inner_is_csend {
+        let outer_is_csend = matches!(cx.kind(outer_node), NodeKind::Csend { .. });
+        outer_is_csend && !is_negating(method_name)
+    } else {
+        true
+    };
+    if safe {
+        emit(node, replacement, cx);
+    } else {
+        emit_offense_only(node, replacement, cx);
+    }
+}
+
+/// Emit with csend safety check for block-pattern calls (block/numblock/itblock).
+/// Only the call node itself can be csend in these forms; negating + csend is unsafe.
+fn emit_checked_block(
+    node: NodeId,
+    replacement: &str,
+    call_node: NodeId,
+    method_name: &str,
+    cx: &Cx<'_>,
+) {
+    let is_csend = matches!(cx.kind(call_node), NodeKind::Csend { .. });
+    let safe = !(is_csend && is_negating(method_name));
+    if safe {
+        emit(node, replacement, cx);
+    } else {
+        emit_offense_only(node, replacement, cx);
+    }
 }
 
 /// Returns `Some(array2)` if `body` is `array2.member?(param_sym)`.
@@ -660,14 +712,11 @@ mod tests {
 
     #[test]
     fn flags_csend_intersection_with_dot_any() {
-        // array1&.intersection(array2).any? — inner csend, outer regular send.
-        test::<ArrayIntersect>().expect_correction(
-            indoc! {r#"
-                array1&.intersection(array2).any?
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `array1&.intersect?(array2)` instead of `array1&.intersection(array2).any?`.
-            "#},
-            "array1&.intersect?(array2)\n",
-        );
+        // Autocorrect suppressed: inner csend + outer send changes nil semantics.
+        test::<ArrayIntersect>().expect_offense(indoc! {r#"
+            array1&.intersection(array2).any?
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `array1&.intersect?(array2)` instead of `array1&.intersection(array2).any?`.
+        "#});
     }
 
     #[test]
@@ -684,14 +733,11 @@ mod tests {
 
     #[test]
     fn flags_csend_intersection_count_gt_zero() {
-        // array1&.intersection(array2).count > 0 — csend inner, regular outer comparison.
-        test::<ArrayIntersect>().expect_correction(
-            indoc! {r#"
-                array1&.intersection(array2).count > 0
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `array1&.intersect?(array2)` instead of `array1&.intersection(array2).count > 0`.
-            "#},
-            "array1&.intersect?(array2)\n",
-        );
+        // Autocorrect suppressed: inner csend + outer send changes nil semantics.
+        test::<ArrayIntersect>().expect_offense(indoc! {r#"
+            array1&.intersection(array2).count > 0
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `array1&.intersect?(array2)` instead of `array1&.intersection(array2).count > 0`.
+        "#});
     }
 }
 
