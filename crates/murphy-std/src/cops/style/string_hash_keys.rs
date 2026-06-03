@@ -69,12 +69,11 @@ impl StringHashKeys {
         // contains backslash escapes), we skip the edit to avoid producing a
         // symbol with a different value (e.g. :a\n vs :"a" + newline).
         let raw = cx.raw_source(key_range);
-        if let Some((body, safe)) = parse_string_content(raw) {
-            if safe {
+        if let Some((body, safe)) = parse_string_content(raw)
+            && safe {
                 let symbol_text = symbol_inspect(body);
                 cx.emit_edit(key_range, &symbol_text);
             }
-        }
     }
 }
 
@@ -412,7 +411,6 @@ mod tests {
         test::<StringHashKeys>().expect_no_offenses("Open3.popen3('ls', 'HOME' => '/tmp')\n");
     }
     #[test]
-    #[test]
     fn parse_string_content_simple_returns_safe() {
         // "foo" -> body "foo", safe=true (no backslashes)
         let (body, safe) = parse_string_content(r#""foo""#).unwrap();
@@ -420,7 +418,6 @@ mod tests {
         assert!(safe);
     }
 
-    #[test]
     #[test]
     fn parse_string_content_with_backslash_returns_unsafe() {
         // A double-quoted body containing a backslash should be unsafe.

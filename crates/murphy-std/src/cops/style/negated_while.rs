@@ -76,11 +76,10 @@ fn single_negative(cond: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     }
     let recv = receiver.get()?;
     // Exclude double negation: receiver must not itself be a `!` Send.
-    if let NodeKind::Send { method: m, .. } = cx.kind(recv) {
-        if cx.symbol_str(*m) == "!" {
+    if let NodeKind::Send { method: m, .. } = cx.kind(recv)
+        && cx.symbol_str(*m) == "!" {
             return None;
         }
-    }
     Some(recv)
 }
 

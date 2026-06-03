@@ -149,13 +149,11 @@ fn invertible(node: NodeId, cx: &Cx<'_>) -> bool {
             }
             // Check inheritance: `Foo < Bar` should not be flagged if
             // first arg is a mixed-case constant (class name).
-            if m == "<" {
-                if let Some(&first_arg) = cx.list(*args).first() {
-                    if is_class_inheritance_check(first_arg, cx) {
+            if m == "<"
+                && let Some(&first_arg) = cx.list(*args).first()
+                    && is_class_inheritance_check(first_arg, cx) {
                         return false;
                     }
-                }
-            }
             inverse_of(m).is_some()
         }
         NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {

@@ -111,11 +111,10 @@ impl HashEachMethods {
     #[on_node(kind = "send", methods = ["each"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         // Only handle when the parent is NOT a Block (to avoid double-firing).
-        if let Some(parent) = cx.parent(node).get() {
-            if matches!(cx.kind(parent), NodeKind::Block { call, .. } if *call == node) {
+        if let Some(parent) = cx.parent(node).get()
+            && matches!(cx.kind(parent), NodeKind::Block { call, .. } if *call == node) {
                 return;
             }
-        }
         // Must have exactly one block-pass arg.
         let arg_list = cx.call_arguments(node);
         if arg_list.len() != 1 {
@@ -314,11 +313,10 @@ fn check_each_arguments(block_node: NodeId, each_call: NodeId, cx: &Cx<'_>) {
 
 /// Returns true when `name` appears as an lvar in any descendant of `body`.
 fn is_lvar_used(body: NodeId, name: &str, cx: &Cx<'_>) -> bool {
-    if let NodeKind::Lvar(sym) = *cx.kind(body) {
-        if cx.symbol_str(sym) == name {
+    if let NodeKind::Lvar(sym) = *cx.kind(body)
+        && cx.symbol_str(sym) == name {
             return true;
         }
-    }
     cx.descendants(body).iter().any(|&d| {
         if let NodeKind::Lvar(sym) = *cx.kind(d) {
             cx.symbol_str(sym) == name

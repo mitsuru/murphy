@@ -188,7 +188,7 @@ fn requires_parens(node: NodeId, cx: &Cx<'_>) -> bool {
 fn multi_argument(node: NodeId, arg_list: &[NodeId], cx: &Cx<'_>) {
     let node_range = cx.range(node);
 
-    if arg_list.len() % 2 != 0 {
+    if !arg_list.len().is_multiple_of(2) {
         // Odd count is a bug — offense but no autocorrect.
         cx.emit_offense(node_range, MSG_LITERAL_MULTI_ARG, None);
     } else {
@@ -214,11 +214,10 @@ fn is_hash_const(node: NodeId, cx: &Cx<'_>) -> bool {
     if cx.symbol_str(name) != "Hash" {
         return false;
     }
-    if let Some(scope_id) = scope.get() {
-        if !matches!(cx.kind(scope_id), NodeKind::Cbase) {
+    if let Some(scope_id) = scope.get()
+        && !matches!(cx.kind(scope_id), NodeKind::Cbase) {
             return false;
         }
-    }
     true
 }
 

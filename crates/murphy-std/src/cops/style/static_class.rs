@@ -133,9 +133,9 @@ impl StaticClass {
 
         // 3. For each `def self.method_name`: delete the `self.` prefix.
         for_each_element(body, cx, |el| {
-            if let NodeKind::Def { receiver, .. } = *cx.kind(el) {
-                if let Some(recv_id) = receiver.get() {
-                    if matches!(cx.kind(recv_id), NodeKind::SelfExpr) {
+            if let NodeKind::Def { receiver, .. } = *cx.kind(el)
+                && let Some(recv_id) = receiver.get()
+                    && matches!(cx.kind(recv_id), NodeKind::SelfExpr) {
                         // Delete from start of `self` through end of `.` dot.
                         // Use token_after(recv.end) to find the `.` dot token,
                         // then delete up to the end of the dot.
@@ -151,8 +151,6 @@ impl StaticClass {
                         };
                         cx.emit_edit(self_dot_range, "");
                     }
-                }
-            }
         });
     }
 }

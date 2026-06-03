@@ -145,8 +145,9 @@ enum SortKind {
 /// 1. Plain `send :sort` with no args → `(sort_node, Sort)` (csend excluded, see below)
 /// 2. Plain `send :sort_by` with exactly one block-pass arg → `(sort_by_node, SortBy)` (csend excluded)
 /// 3. Block/Numblock/Itblock wrapping a `sort_by` call → `(sort_by_call_inside_block, SortBy)`
+///
 /// Note: Block wrapping `sort` (comparison block) is intentionally excluded —
-///       `sort { |a, b| b <=> a }.first` is NOT equivalent to `min { |a, b| b <=> a }`.
+///    `sort { |a, b| b <=> a }.first` is NOT equivalent to `min { |a, b| b <=> a }`.
 fn extract_sort_receiver(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, SortKind)> {
     match *cx.kind(receiver) {
         // Case 1 & 2: plain send only (NOT csend).

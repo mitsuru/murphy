@@ -180,7 +180,7 @@ fn extract_filter_call(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> 
     match *cx.kind(receiver) {
         // Shape 1: block wrapping a select call (send or csend inside the block).
         NodeKind::Block { call, .. } => {
-            if cx.method_name(call).map_or(false, |n| FILTER_METHODS.contains(&n)) {
+            if cx.method_name(call).is_some_and(|n| FILTER_METHODS.contains(&n)) {
                 Some((call, true))
             } else {
                 None
@@ -188,7 +188,7 @@ fn extract_filter_call(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> 
         }
         // Shape 1b: numblock wrapping a select call.
         NodeKind::Numblock { send: call, .. } => {
-            if cx.method_name(call).map_or(false, |n| FILTER_METHODS.contains(&n)) {
+            if cx.method_name(call).is_some_and(|n| FILTER_METHODS.contains(&n)) {
                 Some((call, true))
             } else {
                 None
@@ -196,7 +196,7 @@ fn extract_filter_call(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> 
         }
         // Shape 1c: itblock wrapping a select call.
         NodeKind::Itblock { send: call, .. } => {
-            if cx.method_name(call).map_or(false, |n| FILTER_METHODS.contains(&n)) {
+            if cx.method_name(call).is_some_and(|n| FILTER_METHODS.contains(&n)) {
                 Some((call, true))
             } else {
                 None
@@ -212,7 +212,7 @@ fn extract_filter_call(receiver: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> 
             // One block-pass arg: `arr.select(&:foo).any?` — recognized.
             if args_list.len() == 1
                 && matches!(cx.kind(args_list[0]), NodeKind::BlockPass(_))
-                && cx.method_name(receiver).map_or(false, |n| FILTER_METHODS.contains(&n))
+                && cx.method_name(receiver).is_some_and(|n| FILTER_METHODS.contains(&n))
             {
                 Some((receiver, false))
             } else {

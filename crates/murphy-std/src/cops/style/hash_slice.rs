@@ -179,13 +179,11 @@ fn check(send_node: NodeId, cx: &Cx<'_>) {
 
 /// Strip a leading `!` (send with method `!`) and return `(inner, negated)`.
 fn strip_negation(node: NodeId, cx: &Cx<'_>) -> (NodeId, bool) {
-    if matches!(cx.kind(node), NodeKind::Send { .. }) {
-        if cx.method_name(node) == Some("!") && cx.call_arguments(node).is_empty() {
-            if let Some(recv) = cx.call_receiver(node).get() {
+    if matches!(cx.kind(node), NodeKind::Send { .. })
+        && cx.method_name(node) == Some("!") && cx.call_arguments(node).is_empty()
+            && let Some(recv) = cx.call_receiver(node).get() {
                 return (recv, true);
             }
-        }
-    }
     (node, false)
 }
 

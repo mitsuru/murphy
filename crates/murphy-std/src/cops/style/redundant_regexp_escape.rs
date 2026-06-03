@@ -131,7 +131,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                 char_class_depth > 0,
             ) {
                 // Offense: the backslash at body_start + i is redundant.
-                let abs_start = (node_start + body_start as u32 + i as u32) as u32;
+                let abs_start = node_start + body_start as u32 + i as u32;
                 let offense_range = Range {
                     start: abs_start,
                     end: abs_start + 2,
@@ -224,6 +224,7 @@ fn collect_interpolation_spans(
 
 /// Returns `true` if the escape `\escaped` at body offset `i` is allowed
 /// (i.e., is NOT redundant — should be kept).
+#[allow(clippy::too_many_arguments)]
 fn is_allowed_escape(
     src: &[u8],
     body_start: usize,
@@ -256,19 +257,18 @@ fn is_allowed_escape(
     //    Examples: `/#\@foo/` — 0 backslashes before `#` (even) → `#` unescaped, keep `\@`.
     //              `/\#\@foo/` — 1 backslash before `#` (odd) → `#` escaped, `\@` is redundant.
     //              `/\\#\@foo/` — 2 backslashes before `#` (even) → `#` unescaped, keep `\@`.
-    if let Some(prev) = char_before {
-        if prev == b'#' && INTERPOLATION_SIGILS.contains(&escaped) {
+    if let Some(prev) = char_before
+        && prev == b'#' && INTERPOLATION_SIGILS.contains(&escaped) {
             let body = &src[body_start..];
             // Count consecutive backslashes immediately before the `#` (at body[i-1]).
             let hash_pos = i - 1; // position of `#` within body
             let preceding_backslashes = count_preceding_backslashes(body, hash_pos);
-            if preceding_backslashes % 2 == 0 {
+            if preceding_backslashes.is_multiple_of(2) {
                 // Even number of backslashes → `#` is literal/unescaped → keep `\@`/`\$`.
                 return true;
             }
             // Odd backslashes → `#` is escaped → `\@`/`\$` is redundant (fall through).
         }
-    }
 
     if within_char_class {
         // 5a. Within char class: only `-` is potentially allowed (non-boundary).

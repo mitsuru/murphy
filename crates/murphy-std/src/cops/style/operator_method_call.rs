@@ -233,11 +233,10 @@ fn is_chained_receiver(node: NodeId, cx: &Cx<'_>) -> bool {
     }
     // The node is the receiver of the parent, not an argument.
     // If `node` IS the first argument of parent, it's not the receiver.
-    if let Some(first_arg) = cx.first_argument(parent).get() {
-        if first_arg == node {
+    if let Some(first_arg) = cx.first_argument(parent).get()
+        && first_arg == node {
             return false;
         }
-    }
     true
 }
 

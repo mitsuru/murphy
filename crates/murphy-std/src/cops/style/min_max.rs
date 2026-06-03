@@ -59,11 +59,10 @@ impl MinMax {
     fn check_array(&self, node: NodeId, cx: &Cx<'_>) {
         // Skip if this array is the direct value of a `return` node — the
         // `return` handler covers that case to get the correct offense range.
-        if let Some(parent) = cx.parent(node).get() {
-            if matches!(cx.kind(parent), NodeKind::Return(_)) {
+        if let Some(parent) = cx.parent(node).get()
+            && matches!(cx.kind(parent), NodeKind::Return(_)) {
                 return;
             }
-        }
         check_array_node(node, cx);
     }
 

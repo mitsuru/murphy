@@ -112,15 +112,14 @@ fn match_map_to_set(to_set_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
                 return None;
             }
             let arg = arg_list[0];
-            if let NodeKind::BlockPass(inner) = *cx.kind(arg) {
-                if inner
+            if let NodeKind::BlockPass(inner) = *cx.kind(arg)
+                && inner
                     .get()
                     .map(|n| matches!(cx.kind(n), NodeKind::Sym(_)))
                     .unwrap_or(false)
                 {
                     return Some(receiver_id);
                 }
-            }
             None
         }
         _ => None,
@@ -131,13 +130,11 @@ fn check(to_set_node: NodeId, cx: &Cx<'_>) {
     // Guard: skip if to_set already has a block attached.
     // In Murphy's AST, when `to_set { }` has a block, the parent is a Block
     // node whose `call` field == to_set_node.
-    if let Some(parent) = cx.parent(to_set_node).get() {
-        if let NodeKind::Block { call, .. } = *cx.kind(parent) {
-            if call == to_set_node {
+    if let Some(parent) = cx.parent(to_set_node).get()
+        && let NodeKind::Block { call, .. } = *cx.kind(parent)
+            && call == to_set_node {
                 return;
             }
-        }
-    }
 
     let Some(map_node) = match_map_to_set(to_set_node, cx) else {
         return;

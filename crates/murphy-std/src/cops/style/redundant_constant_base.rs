@@ -68,16 +68,15 @@ fn is_in_nesting_body(needle: NodeId, ancestor: NodeId, cx: &Cx<'_>) -> bool {
             };
             // needle must be in body, not in superclass.
             // Check superclass first: if needle is in superclass subtree, NOT in body.
-            if let Some(super_id) = superclass.get() {
-                if needle == super_id
+            if let Some(super_id) = superclass.get()
+                && (needle == super_id
                     || cx
                         .ancestors(needle)
                         .take_while(|&a| a != ancestor)
-                        .any(|a| a == super_id)
+                        .any(|a| a == super_id))
                 {
                     return false;
                 }
-            }
             // Check if needle is in body.
             needle == body_id
                 || cx

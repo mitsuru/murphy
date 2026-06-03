@@ -129,7 +129,7 @@ fn check(node: NodeId, var_kind: VarKind, cx: &Cx<'_>) {
             if !var_matches(lhs, lhs_name, var_kind, cx) {
                 return;
             }
-            let msg = format!("Use self-assignment shorthand `&&=`.");
+            let msg = "Use self-assignment shorthand `&&=`.".to_string();
             cx.emit_offense(cx.range(node), &msg, None);
             emit_boolean_correction(node, value_id, "&&", rhs, cx);
         }
@@ -137,7 +137,7 @@ fn check(node: NodeId, var_kind: VarKind, cx: &Cx<'_>) {
             if !var_matches(lhs, lhs_name, var_kind, cx) {
                 return;
             }
-            let msg = format!("Use self-assignment shorthand `||=`.");
+            let msg = "Use self-assignment shorthand `||=`.".to_string();
             cx.emit_offense(cx.range(node), &msg, None);
             emit_boolean_correction(node, value_id, "||", rhs, cx);
         }

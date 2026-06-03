@@ -74,11 +74,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
     // Allow nil scope (bare `Regexp`) and cbase scope (`::Regexp`), but reject
     // namespaced constants like `Foo::Regexp`.
-    if let Some(scope_id) = scope.get() {
-        if !matches!(cx.kind(scope_id), NodeKind::Cbase) {
+    if let Some(scope_id) = scope.get()
+        && !matches!(cx.kind(scope_id), NodeKind::Cbase) {
             return;
         }
-    }
 
     // Exactly one argument that is a regexp literal.
     let arg_list = cx.list(args);

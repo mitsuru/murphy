@@ -67,20 +67,18 @@ pub struct InfiniteLoop;
 impl InfiniteLoop {
     #[on_node(kind = "while")]
     fn check_while(&self, node: NodeId, cx: &Cx<'_>) {
-        if let NodeKind::While { cond, .. } = *cx.kind(node) {
-            if is_truthy_literal(cond, cx) {
+        if let NodeKind::While { cond, .. } = *cx.kind(node)
+            && is_truthy_literal(cond, cx) {
                 check(node, cx);
             }
-        }
     }
 
     #[on_node(kind = "until")]
     fn check_until(&self, node: NodeId, cx: &Cx<'_>) {
-        if let NodeKind::Until { cond, .. } = *cx.kind(node) {
-            if is_falsey_literal(cond, cx) {
+        if let NodeKind::Until { cond, .. } = *cx.kind(node)
+            && is_falsey_literal(cond, cx) {
                 check(node, cx);
             }
-        }
     }
 }
 

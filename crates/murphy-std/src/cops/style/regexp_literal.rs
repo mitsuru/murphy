@@ -179,11 +179,10 @@ fn regexp_body_contains_slash(node: NodeId, cx: &Cx<'_>) -> bool {
             for &part in cx.list(parts) {
                 match cx.kind(part) {
                     // Plain string content — use the interned value.
-                    NodeKind::Str(sid) => {
-                        if cx.string_str(*sid).contains('/') {
+                    NodeKind::Str(sid)
+                        if cx.string_str(*sid).contains('/') => {
                             return true;
                         }
-                    }
                     // Interpolation nodes — do not recurse; we only check
                     // static content for the inner-slash check.
                     _ => {}
@@ -195,8 +194,8 @@ fn regexp_body_contains_slash(node: NodeId, cx: &Cx<'_>) -> bool {
     }
 }
 
-/// Returns `true` if the regexp body contains bare (unescaped) `{` or `}`
-/// in the raw source. Used to skip `%r{}` autocorrect when the body would
+// Returns `true` if the regexp body contains bare (unescaped) `{` or `}`
+// in the raw source. Used to skip `%r{}` autocorrect when the body would
 
 /// Emit the autocorrect edit — swap delimiters and fix inner slash escaping.
 ///

@@ -234,8 +234,8 @@ fn check_arithmetic(node: NodeId, method: &str, cx: &Cx<'_>) -> Option<String> {
     let arg = args[0];
 
     // Case 1: rand_op_integer — receiver is rand call, arg is int
-    if let Some(rand) = extract_rand_call(receiver, cx) {
-        if let NodeKind::Int(offset) = *cx.kind(arg) {
+    if let Some(rand) = extract_rand_call(receiver, cx)
+        && let NodeKind::Int(offset) = *cx.kind(arg) {
             let (lo, hi) = match method {
                 "+" => (rand.left + offset, rand.right + offset),
                 "-" => (rand.left - offset, rand.right - offset),
@@ -243,11 +243,10 @@ fn check_arithmetic(node: NodeId, method: &str, cx: &Cx<'_>) -> Option<String> {
             };
             return Some(corrected(rand.node, lo, hi, cx));
         }
-    }
 
     // Case 2: integer_op_rand — receiver is int, arg is rand call
-    if let NodeKind::Int(offset) = *cx.kind(receiver) {
-        if let Some(rand) = extract_rand_call(arg, cx) {
+    if let NodeKind::Int(offset) = *cx.kind(receiver)
+        && let Some(rand) = extract_rand_call(arg, cx) {
             let (lo, hi) = match method {
                 "+" => (offset + rand.left, offset + rand.right),
                 // k - rand(n) → (k - right)..(k - left)
@@ -256,7 +255,6 @@ fn check_arithmetic(node: NodeId, method: &str, cx: &Cx<'_>) -> Option<String> {
             };
             return Some(corrected(rand.node, lo, hi, cx));
         }
-    }
 
     None
 }

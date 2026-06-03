@@ -206,18 +206,16 @@ fn is_same_name_assignment(node: NodeId, method_name: &str, cx: &Cx<'_>) -> bool
                 return true;
             }
             NodeKind::OrAsgn { target, .. } | NodeKind::AndAsgn { target, .. } => {
-                if let NodeKind::Lvasgn { name, .. } = *cx.kind(*target) {
-                    if cx.symbol_str(name) == method_name {
+                if let NodeKind::Lvasgn { name, .. } = *cx.kind(*target)
+                    && cx.symbol_str(name) == method_name {
                         return true;
                     }
-                }
             }
             NodeKind::OpAsgn { target, .. } => {
-                if let NodeKind::Lvasgn { name, .. } = *cx.kind(*target) {
-                    if cx.symbol_str(name) == method_name {
+                if let NodeKind::Lvasgn { name, .. } = *cx.kind(*target)
+                    && cx.symbol_str(name) == method_name {
                         return true;
                     }
-                }
             }
             // Stop at scope-creating boundaries.
             NodeKind::Def { .. }

@@ -102,8 +102,8 @@ fn closing_delimiter_start(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
     let src = cx.source().as_bytes();
     // Look for the token whose range.end == node_end.
     let idx = toks.partition_point(|t| t.range.end < node_end);
-    if let Some(tok) = toks.get(idx) {
-        if tok.range.end == node_end {
+    if let Some(tok) = toks.get(idx)
+        && tok.range.end == node_end {
             // Verify it's `end` or `}`.
             let is_end = tok.kind == SourceTokenKind::Other
                 && &src[tok.range.start as usize..tok.range.end as usize] == b"end";
@@ -112,7 +112,6 @@ fn closing_delimiter_start(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
                 return Some(tok.range.start);
             }
         }
-    }
     // No closing delimiter found — malformed or unexpected AST shape.
     None
 }

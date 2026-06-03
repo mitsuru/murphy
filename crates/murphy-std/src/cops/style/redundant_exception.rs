@@ -89,9 +89,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Try compact pattern: raise RuntimeError.new(message) (exactly 1 arg = send :new)
     if args.len() == 1 {
         let arg = args[0];
-        if let NodeKind::Send { receiver: new_recv, args: new_args, .. } = *cx.kind(arg) {
-            if let Some(recv_id) = new_recv.get() {
-                if cx.is_global_const(recv_id, "RuntimeError")
+        if let NodeKind::Send { receiver: new_recv, args: new_args, .. } = *cx.kind(arg)
+            && let Some(recv_id) = new_recv.get()
+                && cx.is_global_const(recv_id, "RuntimeError")
                     && cx.method_name(arg) == Some("new")
                 {
                     let new_args_list = cx.list(new_args);
@@ -101,8 +101,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                         autocorrect_compact(arg, message, cx);
                     }
                 }
-            }
-        }
     }
 }
 

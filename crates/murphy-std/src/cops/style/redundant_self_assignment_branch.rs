@@ -133,11 +133,10 @@ fn inconvertible_to_modifier(
         }
     }
     // elsif: else-branch is an If node with `elsif` keyword
-    if let Some(else_b) = else_branch.get() {
-        if matches!(cx.kind(else_b), NodeKind::If { .. }) && cx.is_elsif(else_b) {
+    if let Some(else_b) = else_branch.get()
+        && matches!(cx.kind(else_b), NodeKind::If { .. }) && cx.is_elsif(else_b) {
             return true;
         }
-    }
     false
 }
 

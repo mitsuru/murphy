@@ -212,8 +212,8 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
                 return true; // cross-type: or + and
             }
             // mixed_precedence_or?: only `or`-type but mixing symbolic/keyword.
-            let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicOr);
-            let has_kw = ops.iter().any(|&op| op == OpKind::KeywordOr);
+            let has_sym = ops.contains(&OpKind::SymbolicOr);
+            let has_kw = ops.contains(&OpKind::KeywordOr);
             has_sym && has_kw
         }
         NodeKind::And { .. } => {
@@ -224,8 +224,8 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
                 return true; // cross-type: and + or
             }
             // mixed_precedence_and?: only `and`-type but mixing symbolic/keyword.
-            let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicAnd);
-            let has_kw = ops.iter().any(|&op| op == OpKind::KeywordAnd);
+            let has_sym = ops.contains(&OpKind::SymbolicAnd);
+            let has_kw = ops.contains(&OpKind::KeywordAnd);
             has_sym && has_kw
         }
         NodeKind::Unknown => {
@@ -243,13 +243,13 @@ fn is_mixed_logical_operator(cond: NodeId, cx: &Cx<'_>) -> bool {
             }
             // Same-type symbolic/keyword mixing.
             if has_and {
-                let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicAnd);
-                let has_kw = ops.iter().any(|&op| op == OpKind::KeywordAnd);
+                let has_sym = ops.contains(&OpKind::SymbolicAnd);
+                let has_kw = ops.contains(&OpKind::KeywordAnd);
                 return has_sym && has_kw;
             }
             if has_or {
-                let has_sym = ops.iter().any(|&op| op == OpKind::SymbolicOr);
-                let has_kw = ops.iter().any(|&op| op == OpKind::KeywordOr);
+                let has_sym = ops.contains(&OpKind::SymbolicOr);
+                let has_kw = ops.contains(&OpKind::KeywordOr);
                 return has_sym && has_kw;
             }
             false

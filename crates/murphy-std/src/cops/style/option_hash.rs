@@ -135,11 +135,10 @@ fn check(def_node: NodeId, cx: &Cx<'_>) {
         NodeKind::Def { body, .. } | NodeKind::Defs { body, .. } => body,
         _ => return,
     };
-    if let Some(body_node) = body_opt.get() {
-        if subtree_contains_zsuper(cx, body_node) {
+    if let Some(body_node) = body_opt.get()
+        && subtree_contains_zsuper(cx, body_node) {
             return;
         }
-    }
 
     // Offense on the optarg node.
     cx.emit_offense(cx.range(last_arg), MSG, None);

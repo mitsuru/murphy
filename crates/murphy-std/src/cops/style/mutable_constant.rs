@@ -229,13 +229,11 @@ fn is_flagged_strict(node: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
     // Plain str with frozen_string_literal: true — skip.
-    if let NodeKind::Str(_) = cx.kind(node) {
-        if let Some(comment) = cx.frozen_string_literal_comment() {
-            if comment.value_bool == 1 {
+    if let NodeKind::Str(_) = cx.kind(node)
+        && let Some(comment) = cx.frozen_string_literal_comment()
+            && comment.value_bool == 1 {
                 return false;
             }
-        }
-    }
     // Everything else is mutable — flag it.
     true
 }

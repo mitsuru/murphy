@@ -276,7 +276,7 @@ fn trivial_reader_names_match(
     };
     let ivar_name = cx.symbol_str(ivar_sym);
     // Strip trailing `?` or `=` before comparing (mirrors RuboCop's names_match?).
-    let method_base = method_name.trim_end_matches(|c| c == '?' || c == '=');
+    let method_base = method_name.trim_end_matches(['?', '=']);
     let names_match = ivar_name
         .strip_prefix('@')
         .is_some_and(|n| n == method_base);
@@ -320,9 +320,7 @@ fn trivial_writer_names_match(
     else {
         return None;
     };
-    let Some(val_id) = value.get() else {
-        return None;
-    };
+    let val_id = value.get()?;
     let NodeKind::Lvar(val_sym) = *cx.kind(val_id) else {
         return None;
     };

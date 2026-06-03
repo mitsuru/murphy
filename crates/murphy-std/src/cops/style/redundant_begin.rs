@@ -91,15 +91,14 @@ impl RedundantBegin {
 
         match cx.kind(parent) {
             // --- def / defs: flag when begin is the sole body ---
-            NodeKind::Def { .. } | NodeKind::Defs { .. } => {
+            NodeKind::Def { .. } | NodeKind::Defs { .. }
                 // The begin is the direct body of the method.
                 // It is redundant regardless of rescue/ensure (RuboCop removes the
                 // begin/end, keeping the rescue/ensure on the method itself).
                 // Empty begin blocks are never flagged.
-                if !is_empty_begin(node, cx) {
+                if !is_empty_begin(node, cx) => {
                     emit_offense(node, cx);
                 }
-            }
 
             // --- while/until: flag when no rescue/ensure ---
             NodeKind::While { post, .. } | NodeKind::Until { post, .. } => {
@@ -129,11 +128,10 @@ impl RedundantBegin {
             }
 
             // --- if/unless/case branches: flag when no rescue/ensure ---
-            NodeKind::If { .. } | NodeKind::Case { .. } | NodeKind::When { .. } => {
-                if !has_rescue_or_ensure(node, cx) && !is_empty_begin(node, cx) {
+            NodeKind::If { .. } | NodeKind::Case { .. } | NodeKind::When { .. }
+                if !has_rescue_or_ensure(node, cx) && !is_empty_begin(node, cx) => {
                     emit_offense(node, cx);
                 }
-            }
 
             // --- standalone begin inside a program body (parent is Begin) ---
             NodeKind::Begin(_) => {

@@ -93,6 +93,7 @@ fn is_any_block(id: NodeId, cx: &Cx<'_>) -> bool {
 /// block/numblock/itblock node. That means the outer call _itself_ has a
 /// block, so we suppress the offense (matches RuboCop's `ignore_node`).
 fn send_has_block_parent(send_node: NodeId, cx: &Cx<'_>) -> bool {
+    #[allow(clippy::never_loop)]
     for ancestor in cx.ancestors(send_node) {
         match *cx.kind(ancestor) {
             NodeKind::Block { call, .. } if call == send_node => return true,
@@ -152,14 +153,13 @@ fn find_end_token(block_node: NodeId, cx: &Cx<'_>) -> Option<Range> {
     let toks = cx.sorted_tokens();
     let src = cx.source().as_bytes();
     let idx = toks.partition_point(|t| t.range.end < node_end);
-    if let Some(tok) = toks.get(idx) {
-        if tok.range.end == node_end
+    if let Some(tok) = toks.get(idx)
+        && tok.range.end == node_end
             && tok.kind == SourceTokenKind::Other
             && &src[tok.range.start as usize..tok.range.end as usize] == b"end"
         {
             return Some(tok.range);
         }
-    }
     None
 }
 

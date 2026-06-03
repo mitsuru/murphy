@@ -309,7 +309,7 @@ fn last_arg_precedes_newline(last_arg: NodeId, close_tok: SourceToken, cx: &Cx<'
 
 fn is_followed_by_newline_after_optional_comment(s: &str) -> bool {
     // Skip leading whitespace (but not newline).
-    let rest = s.trim_start_matches(|c| c == ' ' || c == '\t');
+    let rest = s.trim_start_matches([' ', '\t']);
     // If there's a `#` comment, skip to end of line.
     let rest = if rest.starts_with('#') {
         match rest.find('\n') {

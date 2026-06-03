@@ -101,7 +101,7 @@ fn is_gvar(id: NodeId, cx: &Cx<'_>) -> bool {
 fn is_operator_method(name: &str) -> bool {
     name.chars()
         .next()
-        .map_or(false, |c| !c.is_alphanumeric() && c != '_')
+        .is_some_and(|c| !c.is_alphanumeric() && c != '_')
 }
 
 /// Returns `true` when the node should be wrapped in parentheses when used as
@@ -122,7 +122,7 @@ fn requires_parens(id: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Parenthesize the source if needed.
-fn parenthesized_source<'a>(id: NodeId, cx: &'a Cx<'_>) -> String {
+fn parenthesized_source(id: NodeId, cx: &Cx<'_>) -> String {
     let src = cx.raw_source(cx.range(id));
     if requires_parens(id, cx) {
         format!("({src})")
@@ -133,16 +133,14 @@ fn parenthesized_source<'a>(id: NodeId, cx: &'a Cx<'_>) -> String {
 
 /// Returns `true` when the given node is a negated call (parent is `!`).
 fn is_negated(id: NodeId, cx: &Cx<'_>) -> bool {
-    if let Some(parent) = cx.parent(id).get() {
-        if let NodeKind::Send { method, args, receiver, .. } = cx.kind(parent) {
+    if let Some(parent) = cx.parent(id).get()
+        && let NodeKind::Send { method, args, receiver, .. } = cx.kind(parent) {
             let method_name = cx.symbol_str(*method);
-            if method_name == "!" {
-                if let Some(recv_id) = receiver.get() {
+            if method_name == "!"
+                && let Some(recv_id) = receiver.get() {
                     return recv_id == id && cx.list(*args).is_empty();
                 }
-            }
         }
-    }
     false
 }
 
@@ -152,11 +150,10 @@ fn is_allowed(id: NodeId, cx: &Cx<'_>, allowed: &[String]) -> bool {
         return false;
     }
     // Check the node's own method name.
-    if let Some(name) = cx.method_name(id) {
-        if allowed.iter().any(|m| m == name) {
+    if let Some(name) = cx.method_name(id)
+        && allowed.iter().any(|m| m == name) {
             return true;
         }
-    }
     // Walk ancestors: any send or block ancestor with an allowed method name.
     for ancestor in cx.ancestors(id) {
         match cx.kind(ancestor) {
@@ -165,11 +162,10 @@ fn is_allowed(id: NodeId, cx: &Cx<'_>, allowed: &[String]) -> bool {
             | NodeKind::Block { .. }
             | NodeKind::Numblock { .. }
             | NodeKind::Itblock { .. } => {
-                if let Some(name) = cx.method_name(ancestor) {
-                    if allowed.iter().any(|m| m == name) {
+                if let Some(name) = cx.method_name(ancestor)
+                    && allowed.iter().any(|m| m == name) {
                         return true;
                     }
-                }
             }
             _ => {}
         }

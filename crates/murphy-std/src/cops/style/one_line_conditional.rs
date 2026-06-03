@@ -111,11 +111,10 @@ fn check(node: NodeId, cx: &Cx<'_>, always_multiline: bool) {
     };
 
     // Skip if then branch is a `begin` node (multiple statements).
-    if let Some(then_) = cx.if_then_branch(node).get() {
-        if matches!(cx.kind(then_), NodeKind::Begin(_)) {
+    if let Some(then_) = cx.if_then_branch(node).get()
+        && matches!(cx.kind(then_), NodeKind::Begin(_)) {
             return;
         }
-    }
 
     // Determine correction mode.
     let use_multiline = always_multiline || cannot_replace_to_ternary(else_branch, cx);
@@ -160,11 +159,10 @@ fn is_flaggable_one_liner(node: NodeId, cx: &Cx<'_>) -> bool {
     if cx.if_else_branch(node).get().is_none() {
         return false;
     }
-    if let Some(then_) = cx.if_then_branch(node).get() {
-        if matches!(cx.kind(then_), NodeKind::Begin(_)) {
+    if let Some(then_) = cx.if_then_branch(node).get()
+        && matches!(cx.kind(then_), NodeKind::Begin(_)) {
             return false;
         }
-    }
     true
 }
 
@@ -247,14 +245,13 @@ fn requires_parentheses(node: NodeId, cx: &Cx<'_>) -> bool {
     if cx.is_assignment(node) {
         return true;
     }
-    if let NodeKind::Send { method, args, .. } | NodeKind::Csend { method, args, .. } = cx.kind(node) {
-        if !cx.list(*args).is_empty()
+    if let NodeKind::Send { method, args, .. } | NodeKind::Csend { method, args, .. } = cx.kind(node)
+        && !cx.list(*args).is_empty()
             && !cx.is_parenthesized(node)
             && !is_operator_method(cx.symbol_str(*method))
         {
             return true;
         }
-    }
     keyword_with_changed_precedence(node, cx)
 }
 

@@ -183,11 +183,10 @@ fn has_interpolation_syntax(src: &str) -> bool {
     let bytes = src.as_bytes();
     let mut i = 0;
     while i + 1 < bytes.len() {
-        if bytes[i] == b'#' && bytes[i + 1] == b'{' {
-            if bytes[i + 2..].iter().any(|&b| b == b'}') {
+        if bytes[i] == b'#' && bytes[i + 1] == b'{'
+            && bytes[i + 2..].contains(&b'}') {
                 return true;
             }
-        }
         i += 1;
     }
     false

@@ -111,14 +111,13 @@ fn is_valid_prev_method(node: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
     // Parent of this node must not be a block
-    if let Some(parent) = cx.parent(node).get() {
-        if matches!(
+    if let Some(parent) = cx.parent(node).get()
+        && matches!(
             cx.kind(parent),
             NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. }
         ) {
             return false;
         }
-    }
     // Must not have block-pass last arg
     if has_block_pass_last_arg(node, cx) {
         return false;

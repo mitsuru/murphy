@@ -185,14 +185,13 @@ fn find_end_token(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
     let toks = cx.sorted_tokens();
     let src = cx.source().as_bytes();
     let idx = toks.partition_point(|t| t.range.end < node_end);
-    if let Some(tok) = toks.get(idx) {
-        if tok.range.end == node_end
+    if let Some(tok) = toks.get(idx)
+        && tok.range.end == node_end
             && tok.kind == SourceTokenKind::Other
             && &src[tok.range.start as usize..tok.range.end as usize] == b"end"
         {
             return Some(tok.range);
         }
-    }
     None
 }
 
