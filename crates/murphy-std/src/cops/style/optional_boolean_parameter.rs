@@ -17,9 +17,9 @@
 //!   ["respond_to_missing?"] matching RuboCop's upstream default.
 //!   AllowedPatterns is supported (Vec<String> of regex patterns, unanchored
 //!   matching via the shared `cx.matches_any_pattern` helper). Parity gap:
-//!   Rust regex does not support Ruby regex features (look-ahead,
-//!   back-references, Unicode properties). Invalid patterns are diagnosed
-//!   once via stderr and skipped (no exemption, no panic).
+//!   Rust regex does not support some Ruby regex features (look-ahead and
+//!   back-references). Invalid patterns are diagnosed once via stderr and
+//!   skipped (no exemption, no panic).
 //!   No autocorrect (RuboCop marks it unsafe; method signature changes
 //!   implicitly change behavior).
 //! ```

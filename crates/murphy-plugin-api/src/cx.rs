@@ -2882,8 +2882,15 @@ static REPORTED_INVALID: LazyLock<Mutex<HashSet<String>>> =
 /// Each distinct pattern is compiled once per thread and cached. A pattern
 /// that fails to compile is reported once (stderr) and skipped.
 pub(crate) fn allowed_pattern_match(name: &str, patterns: &[String]) -> bool {
-    patterns.iter().any(|pat| {
-        PATTERN_CACHE.with(|cache| {
+    // Fast path for the common (default) empty-list case: no thread-local
+    // access at all.
+    if patterns.is_empty() {
+        return false;
+    }
+    // Enter the thread-local cache once for the whole iteration, rather than
+    // per pattern.
+    PATTERN_CACHE.with(|cache| {
+        patterns.iter().any(|pat| {
             // Fast path: cache hit, no clone. The `borrow()` ends when this
             // `if let` block returns, so it never overlaps the miss-path
             // `borrow_mut()` below.
