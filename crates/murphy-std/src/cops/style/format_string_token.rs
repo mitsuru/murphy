@@ -16,7 +16,10 @@
 //!   fires when the string is in a format context (format/sprintf/printf/%).
 //!   In conservative mode: only strings in format contexts are scanned.
 //!   MaxUnannotatedPlaceholdersAllowed (default: 1) is supported.
-//!   AllowedMethods and AllowedPatterns are supported.
+//!   AllowedMethods and AllowedPatterns are supported. AllowedPatterns uses
+//!   real regex (RE2 / Rust `regex`, unanchored) via `cx.matches_any_pattern`;
+//!   lookahead/backreferences are unsupported and such patterns are diagnosed
+//!   (stderr) and skipped.
 //!
 //!   Autocorrect is available for annotated↔template conversions (swapping
 //!   `%<name>type` ↔ `%{name}` when the sequence has a name). Unannotated
@@ -314,12 +317,10 @@ fn is_allowed_method(
             if opts.allowed_methods.iter().any(|m| m == name) {
                 return true;
             }
-            // Pattern matching: simple substring match (RuboCop uses Regexp).
-            if opts
-                .allowed_patterns
-                .iter()
-                .any(|p| name.contains(p.as_str()))
-            {
+            // Pattern matching: real regex (RE2 / Rust `regex`, unanchored) via
+            // `cx.matches_any_pattern`. Lookahead/backreferences are unsupported
+            // and such patterns are diagnosed (stderr) and skipped.
+            if cx.matches_any_pattern(name, &opts.allowed_patterns) {
                 return true;
             }
             break;
@@ -775,6 +776,18 @@ mod tests {
                 ..FormatStringTokenOptions::default()
             })
             .expect_no_offenses("redirect('foo/%{bar_id}')\n");
+    }
+
+    #[test]
+    fn allowed_patterns_uses_regex() {
+        // `^format$` anchors to the enclosing method name `format`; the old
+        // substring scan can never match (the name contains no `^`/`$`).
+        test::<FormatStringToken>()
+            .with_options(&FormatStringTokenOptions {
+                allowed_patterns: vec!["^format$".to_string()],
+                ..FormatStringTokenOptions::default()
+            })
+            .expect_no_offenses("format('%{greeting}', greeting: 'Hello')\n");
     }
 
     // --- % operator ---

@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn max_zero_is_a_config_error() {
-        use murphy_plugin_api::{ConfigError, CopOptions};
+        use murphy_plugin_api::CopOptions;
         let err = SafeNavigationChainLengthOptions::from_config_json(br#"{"Max": 0}"#)
             .expect_err("Max: 0 should be a config error");
         assert!(
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn max_negative_is_a_config_error() {
-        use murphy_plugin_api::{ConfigError, CopOptions};
+        use murphy_plugin_api::CopOptions;
         let err = SafeNavigationChainLengthOptions::from_config_json(br#"{"Max": -1}"#)
             .expect_err("Max: -1 should be a config error");
         assert!(

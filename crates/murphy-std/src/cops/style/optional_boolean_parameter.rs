@@ -16,9 +16,10 @@
 //!   AllowedMethods is supported (Vec<String>); defaults to
 //!   ["respond_to_missing?"] matching RuboCop's upstream default.
 //!   AllowedPatterns is supported (Vec<String> of regex patterns, unanchored
-//!   matching via Rust's `regex` crate). Parity gap: Rust regex does not
-//!   support Ruby regex features (look-ahead, back-references, Unicode
-//!   properties). Invalid patterns are silently skipped (no panic).
+//!   matching via the shared `cx.matches_any_pattern` helper). Parity gap:
+//!   Rust regex does not support some Ruby regex features (look-ahead and
+//!   back-references). Invalid patterns are diagnosed once via stderr and
+//!   skipped (no exemption, no panic).
 //!   No autocorrect (RuboCop marks it unsafe; method signature changes
 //!   implicitly change behavior).
 //! ```
@@ -40,7 +41,7 @@
 //! end
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, regex};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
 
 const MSG: &str =
     "Prefer keyword arguments for arguments with a boolean default value; \
@@ -95,21 +96,8 @@ fn check_def(node: NodeId, cx: &Cx<'_>) {
             return;
         }
         // AllowedPatterns: unanchored regex match (mirrors RuboCop's
-        // `pattern.match?(name)`). Compiled regexes are cached per-thread
-        // to avoid recompiling on every method def node.
-        thread_local! {
-            static REGEX_CACHE: std::cell::RefCell<std::collections::HashMap<String, Option<regex::Regex>>> =
-                std::cell::RefCell::new(std::collections::HashMap::new());
-        }
-        if opts.allowed_patterns.iter().any(|pat| {
-            REGEX_CACHE.with(|cache| {
-                let mut cache = cache.borrow_mut();
-                let re = cache
-                    .entry(pat.clone())
-                    .or_insert_with(|| regex::Regex::new(pat).ok());
-                re.as_ref().is_some_and(|re| re.is_match(name))
-            })
-        }) {
+        // `pattern.match?(name)`), via the shared cached helper.
+        if cx.matches_any_pattern(name, &opts.allowed_patterns) {
             return;
         }
     }
@@ -327,9 +315,9 @@ mod tests {
     }
 
     #[test]
-    fn skips_invalid_pattern_silently() {
-        // An invalid regex pattern should not panic; the method gets no
-        // exemption but the cop still runs normally.
+    fn skips_invalid_pattern() {
+        // An invalid regex pattern is diagnosed (stderr) and skipped: the
+        // method gets no exemption but the cop still runs normally (no panic).
         let opts = Options {
             allowed_methods: vec![],
             allowed_patterns: vec!["[invalid".to_string()],

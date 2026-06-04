@@ -1,6 +1,9 @@
 //! `Cx<'a>` — the single surface through which a cop reads the AST.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
+use std::sync::{LazyLock, Mutex};
 
 use murphy_ast::{
     AstNode, CallClosingLoc, CallOperatorLoc, Comment, CommentKind, MagicComment, MagicCommentKind,
@@ -2781,6 +2784,13 @@ impl<'a> Cx<'a> {
         self.options::<T>().unwrap_or_default()
     }
 
+    /// True if `name` matches any of `patterns` as an unanchored RE2 regex.
+    /// Compiled regexes are cached; invalid patterns are reported once and
+    /// skipped. See `allowed_pattern_match`.
+    pub fn matches_any_pattern(&self, name: &str, patterns: &[String]) -> bool {
+        allowed_pattern_match(name, patterns)
+    }
+
     /// The source text covered by `range`.
     pub fn raw_source(&self, range: Range) -> &'a str {
         let src: &[u8] = unsafe { slice(self.raw.source, self.raw.source_len) };
@@ -2852,6 +2862,74 @@ impl<'a> Cx<'a> {
         // Safety: see `emit_offense`.
         let fns = unsafe { &*self.raw.fns };
         unsafe { (fns.emit_edit)(self.raw.sink, &edit) };
+    }
+}
+
+// --- AllowedPatterns regex matching (murphy-b3n5) ---
+
+thread_local! {
+    /// Per-thread compiled-regex cache for AllowedPatterns. `None` caches a
+    /// compile failure so a bad pattern is compiled at most once per thread.
+    static PATTERN_CACHE: RefCell<HashMap<String, Option<regex::Regex>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Dedups the invalid-pattern diagnostic across threads (cold path only).
+static REPORTED_INVALID: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// True if `name` matches any entry in `patterns` as an unanchored RE2 regex.
+/// Each distinct pattern is compiled once per thread and cached. A pattern
+/// that fails to compile is reported once (stderr) and skipped.
+pub(crate) fn allowed_pattern_match(name: &str, patterns: &[String]) -> bool {
+    // Fast path for the common (default) empty-list case: no thread-local
+    // access at all.
+    if patterns.is_empty() {
+        return false;
+    }
+    // Enter the thread-local cache once for the whole iteration, rather than
+    // per pattern.
+    PATTERN_CACHE.with(|cache| {
+        patterns.iter().any(|pat| {
+            // Fast path: cache hit, no clone. The `borrow()` ends when this
+            // `if let` block returns, so it never overlaps the miss-path
+            // `borrow_mut()` below.
+            if let Some(compiled) = cache.borrow().get(pat) {
+                return compiled.as_ref().is_some_and(|re| re.is_match(name));
+            }
+            // Miss: compile once, clone the key only now.
+            let compiled = match regex::Regex::new(pat) {
+                Ok(re) => Some(re),
+                Err(err) => {
+                    report_invalid_pattern(pat, &err);
+                    None
+                }
+            };
+            let matched = compiled.as_ref().is_some_and(|re| re.is_match(name));
+            cache.borrow_mut().insert(pat.clone(), compiled);
+            matched
+        })
+    })
+}
+
+/// Returns `true` the first time `pattern` is seen (and records it), `false`
+/// afterwards — so the caller emits the diagnostic exactly once per pattern.
+/// Split out from `report_invalid_pattern` so the dedup decision is unit-
+/// testable without capturing stderr.
+fn should_report_invalid(pattern: &str) -> bool {
+    REPORTED_INVALID
+        .lock()
+        .expect("REPORTED_INVALID poisoned")
+        .insert(pattern.to_string())
+}
+
+/// Emit a one-time stderr diagnostic for a pattern that failed to compile.
+/// stderr (not stdout) because ADR 0006 freezes the stdout offense-JSON
+/// contract. Confined to one function so a future structured `cx.warn()`
+/// channel only needs to change here.
+fn report_invalid_pattern(pattern: &str, err: &regex::Error) {
+    if should_report_invalid(pattern) {
+        eprintln!("murphy: AllowedPatterns: invalid regex `{pattern}`: {err}; pattern ignored");
     }
 }
 
@@ -3839,6 +3917,65 @@ mod tests {
 
         let options = cx.options_or_default::<TestOptions>();
         assert_eq!(options.style, "");
+    }
+
+    #[test]
+    fn matches_any_pattern_anchored_regex() {
+        // `^equal` is a valid regex that the old substring scan could never match
+        // (the method name contains no `^`), but an anchored regex matches.
+        assert!(super::allowed_pattern_match(
+            "equal?",
+            &["^equal".to_string()]
+        ));
+        assert!(!super::allowed_pattern_match(
+            "not_equal?",
+            &["^equal".to_string()]
+        ));
+    }
+
+    #[test]
+    fn matches_any_pattern_metacharacters() {
+        assert!(super::allowed_pattern_match("eql?", &["eq.?l".to_string()]));
+        assert!(!super::allowed_pattern_match("xyz", &["eq.?l".to_string()]));
+    }
+
+    #[test]
+    fn matches_any_pattern_plain_string_is_substring() {
+        // A metacharacter-free pattern behaves like the old `.contains()`.
+        assert!(super::allowed_pattern_match(
+            "respond_to_missing?",
+            &["respond_to".to_string()]
+        ));
+        assert!(!super::allowed_pattern_match(
+            "foo",
+            &["respond_to".to_string()]
+        ));
+    }
+
+    #[test]
+    fn matches_any_pattern_invalid_is_skipped_not_panicking() {
+        // Unbalanced `[` fails to compile; must not panic and must not match.
+        assert!(!super::allowed_pattern_match(
+            "anything",
+            &["[invalid".to_string()]
+        ));
+    }
+
+    #[test]
+    fn matches_any_pattern_empty_list_is_false() {
+        assert!(!super::allowed_pattern_match("anything", &[]));
+    }
+
+    #[test]
+    fn report_invalid_pattern_dedup_reports_once() {
+        // Use a unique pattern string so this test is independent of others
+        // that may touch the process-global REPORTED_INVALID set.
+        let pat = "((unique-dedup-probe-task1";
+        assert!(super::should_report_invalid(pat), "first sighting reports");
+        assert!(
+            !super::should_report_invalid(pat),
+            "second sighting is deduped"
+        );
     }
 
     use std::cell::RefCell;
