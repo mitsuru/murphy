@@ -8,19 +8,17 @@
 //! upstream_cop: Style/NegatedWhile
 //! upstream_version_checked: 1.69.0
 //! status: partial
-//! gap_issues:
-//!   - murphy-imxw
+//! gap_issues: []
 //! notes: >
-//!   Murphy handles `while !foo`, `until !foo` (block and modifier form), and
-//!   `not(expr)` style. Autocorrect swaps the keyword and replaces the
-//!   condition with the receiver source (mirrors RuboCop ConditionCorrector).
-//!   Parity gaps vs RuboCop:
-//!   - `while (not a_condition)` — space-`not` inside parens parses as Unknown;
-//!     offense silently skipped.
-//!   - `until (var = foo; !bar)` — begin-sequence condition parses as Unknown;
-//!     silently skipped.
-//!   - `something while(!x.even?)` — parenthesized bang parses as Unknown;
-//!     silently skipped.
+//!   Murphy handles `while !foo`, `until !foo`, and `while (!expr)` (block and
+//!   modifier form), and `not(expr)` style. Autocorrect swaps the keyword and
+//!   replaces the condition with the receiver source. Parenthesized conditions
+//!   (`(!x.even?)`) are now detected via NodeKind::Begin (murphy-imxw).
+//!   Remaining gaps:
+//!   - `while (not a_condition)` — `not` with space inside parens; the inner
+//!     node is Send{not}, not supported yet.
+//!   - `until (var = foo; !bar)` — multi-statement parenthesized condition
+//!     with `!` on last stmt; not yet implemented.
 //! ```
 //!
 //! ## Matched shapes
@@ -37,6 +35,7 @@
 //!    which handles both `!expr` (removes `!`) and `not(expr)` (removes `not(…)`).
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use crate::cops::util::{emit_edit_with_preceding_space, unwrap_parenthesized};
 
 const MSG: &str = "Favor `%s` over `%s` for negative conditions.";
 
@@ -95,8 +94,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         _ => return,
     };
 
+    // Unwrap a parenthesized condition: `(!x.even?)` is now Begin([Send{!}]).
+    // Try the inner node for the negation check; keep `cond` for range/autocorrect.
+    let effective_cond = unwrap_parenthesized(cond, cx);
+
     // Condition must be a single `!` negation.
-    let Some(recv) = single_negative(cond, cx) else {
+    let Some(recv) = single_negative(effective_cond, cx) else {
         return;
     };
 
@@ -138,8 +141,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Using replace-whole-condition handles both `!expr` (strips `!`) and
     // `not(expr)` (strips `not(` and the closing `)`), matching RuboCop's
     // ConditionCorrector which does `replace(condition, condition.children.first.source)`.
+    // Use emit_edit_with_preceding_space to guard against `while(!expr)` → `untilx`.
     let recv_src = cx.raw_source(cx.range(recv));
-    cx.emit_edit(cx.range(cond), recv_src);
+    emit_edit_with_preceding_space(cx.range(cond), recv_src, cx);
 }
 
 /// For modifier-form while/until (`body while/until cond`), `cx.loc().keyword()`
@@ -252,6 +256,19 @@ mod tests {
             "some_method while not(a_condition)\n\
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor `until` over `while` for negative conditions.\n",
             "some_method until a_condition\n",
+        );
+    }
+
+    // ----- parenthesized bang condition (murphy-imxw) -----
+
+    #[test]
+    fn flags_while_with_parenthesized_negation() {
+        // `something while(!x.even?)` — condition was Unknown before murphy-imxw;
+        // now Begin([Send{!}]).
+        test::<NegatedWhile>().expect_correction(
+            "something while(!x.even?)\n\
+             ^^^^^^^^^^^^^^^^^^^^^^^^^ Favor `until` over `while` for negative conditions.\n",
+            "something until x.even?\n",
         );
     }
 

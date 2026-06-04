@@ -8,17 +8,13 @@
 //! upstream_cop: Style/NegatedIf
 //! upstream_version_checked: 1.69.0
 //! status: partial
-//! gap_issues:
-//!   - murphy-imxw
+//! gap_issues: []
 //! notes: >
-//!   Murphy handles `if !foo` and `if not(expr)` (modifier and block
-//!   form). Autocorrect replaces `if` with `unless` and replaces the condition
-//!   with the receiver source. EnforcedStyle: both/prefix/postfix is supported.
-//!   Parity gaps vs RuboCop:
-//!   - `something if (!x.even?)` — parenthesized bang parses as Unknown
-//!     in Murphy; the offense is silently skipped.
-//!   - `if (not a_condition)` — space-`not` inside parens parses as Unknown;
-//!     offense silently skipped.
+//!   Murphy handles `if !foo`, `if not(expr)`, and `if (!expr)` (modifier and
+//!   block form). Autocorrect replaces `if` with `unless` and replaces the
+//!   condition with the receiver source. EnforcedStyle: both/prefix/postfix is
+//!   supported. Parenthesized conditions (`(!x.even?)`) are now detected via
+//!   the NodeKind::Begin representation (murphy-imxw).
 //! ```
 //!
 //! ## Matched shapes
@@ -39,6 +35,7 @@
 //!    which handles both `!expr` (removes `!`) and `not(expr)` (removes `not(…)`).
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use crate::cops::util::{emit_edit_with_preceding_space, unwrap_parenthesized};
 
 const MSG: &str = "Favor `unless` over `if` for negative conditions.";
 
@@ -129,8 +126,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
     let cond = *cond;
 
+    // Unwrap a parenthesized condition: `(!x.even?)` is now Begin([Send{!}]).
+    // Try the inner node for the negation check; keep `cond` for range/autocorrect.
+    let effective_cond = unwrap_parenthesized(cond, cx);
+
     // Condition must be a single `!` negation.
-    let Some(recv) = single_negative(cond, cx) else {
+    let Some(recv) = single_negative(effective_cond, cx) else {
         return;
     };
 
@@ -162,8 +163,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // Using replace-whole-condition handles both `!expr` (strips `!`) and
     // `not(expr)` (strips `not(` and the closing `)`), matching RuboCop's
     // ConditionCorrector which does `replace(condition, condition.children.first.source)`.
+    // Use emit_edit_with_preceding_space to guard against `if(!expr)` → `unlessx`.
     let recv_src = cx.raw_source(cx.range(recv));
-    cx.emit_edit(cx.range(cond), recv_src);
+    emit_edit_with_preceding_space(cx.range(cond), recv_src, cx);
 }
 
 #[cfg(test)]
@@ -253,6 +255,30 @@ mod tests {
             "something if not(a_condition)\n\
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor `unless` over `if` for negative conditions.\n",
             "something unless a_condition\n",
+        );
+    }
+
+    // ----- parenthesized bang condition (murphy-imxw) -----
+
+    #[test]
+    fn flags_modifier_if_with_parenthesized_negation() {
+        // `something if (!x.even?)` — condition is `(!x.even?)` which was
+        // Unknown before murphy-imxw; now Begin([Send{!}]).
+        test::<NegatedIf>().expect_correction(
+            "something if (!x.even?)\n\
+             ^^^^^^^^^^^^^^^^^^^^^^^ Favor `unless` over `if` for negative conditions.\n",
+            "something unless x.even?\n",
+        );
+    }
+
+    #[test]
+    fn flags_modifier_if_with_parenthesized_negation_no_space() {
+        // `return if(!valid?)` — no space between `if` and `(`.
+        // Autocorrect must insert a space: `return unless valid?`.
+        test::<NegatedIf>().expect_correction(
+            "return if(!valid?)\n\
+             ^^^^^^^^^^^^^^^^^^ Favor `unless` over `if` for negative conditions.\n",
+            "return unless valid?\n",
         );
     }
 

@@ -1263,6 +1263,27 @@ impl Translator {
             return self.builder.push(NodeKind::Postexe(body), range);
         }
 
+        // --- parentheses ---
+        if let Some(p) = node.as_parentheses_node() {
+            // Lower (expr) to Begin, same representation as begin...end.
+            // The LeftParen token at range.start distinguishes this from begin...end.
+            // body() is normally a StatementsNode; fall back to direct translation
+            // for non-StatementsNode bodies (matches translate_body pattern).
+            let ids: Vec<NodeId> = match p.body() {
+                None => vec![],
+                Some(body) => match body.as_statements_node() {
+                    Some(stmts) => stmts
+                        .body()
+                        .iter()
+                        .map(|n| self.translate_node(&n))
+                        .collect(),
+                    None => vec![self.translate_node(&body)],
+                },
+            };
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Begin(list), range);
+        }
+
         // Task 17 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
@@ -4075,6 +4096,23 @@ mod tests {
             !sexp.contains("(unknown)"),
             "no Unknown in hash const_pattern: {sexp}"
         );
+    }
+
+    #[test]
+    fn parentheses_node_lowers_to_begin() {
+        // `(foo)` must translate to Begin([Send]) — not Unknown.
+        let ast = translate("(foo)", "test.rb");
+        let root = ast.root();
+        // Root is Begin([(foo)])
+        let NodeKind::Begin(list) = ast.kind(root) else {
+            panic!("expected Begin at root, got {:?}", ast.kind(root));
+        };
+        assert_eq!(list.len, 1, "expected single child inside (foo)");
+        // Outer Begin range must start with `(`.
+        let range = ast.range(root);
+        let src = "(foo)".as_bytes();
+        assert_eq!(src[range.start as usize], b'(');
+        assert_eq!(src[(range.end - 1) as usize], b')');
     }
 
     #[test]

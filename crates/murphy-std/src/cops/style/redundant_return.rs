@@ -8,8 +8,7 @@
 //! upstream_cop: Style/RedundantReturn
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-imxw
+//! gap_issues: []
 //! notes: >
 //!   Scope: only the last statement of the method body is checked. RuboCop
 //!   also recurses into if/elsif/else and case/when branch tails; that
@@ -21,9 +20,8 @@
 //!   (return a, b → Return(Array)) are always skipped.
 //!   return [a, b] is indistinguishable from return a, b at the AST level;
 //!   both are skipped.
-//!   return(value): offense is emitted but no autocorrect (parens form parses
-//!   as Unknown in Murphy's translator; deleting the prefix would leave a
-//!   dangling `)` — user must hand-fix).
+//!   return(value): offense is emitted and autocorrect applies three surgical
+//!   edits to delete `return`, `(`, and `)`, leaving just `value`.
 //!   Autocorrect: `return value` → delete `return ` prefix (from return node
 //!   start to value node start). Bare `return` → replace with `nil`.
 //!   def/defs (singleton method definitions): both handled via separate hooks.
@@ -58,7 +56,7 @@
 //!   `value_node.range.start` (removes the `return ` prefix including space).
 //! - bare `return`: replace the whole `return` node range with `nil`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -147,20 +145,36 @@ fn check_return(node: NodeId, cx: &Cx<'_>) {
             let value_range = cx.range(val_id);
             cx.emit_offense(return_range, "Redundant `return` detected.", None);
 
-            // Skip autocorrect for Unknown values: `return(expr)` parses the
-            // parenthesised form as Unknown; deleting the prefix blindly would
-            // leave the `)` behind. Emit the offense only so the user can
-            // hand-fix without risking a corrupt autocorrect.
-            if matches!(cx.kind(val_id), NodeKind::Unknown) {
-                return;
+            use crate::cops::util::is_parenthesized;
+            if is_parenthesized(val_id, cx) {
+                // `return(expr)`: three surgical edits to remove return, (, and ).
+                // Verify token kinds defensively even though is_parenthesized already
+                // guarantees a LeftParen at value_range.start.
+                let lp = cx.token_after(value_range.start)
+                    .filter(|t| t.kind == SourceTokenKind::LeftParen);
+                let rp = cx.token_before(value_range.end)
+                    .filter(|t| t.kind == SourceTokenKind::RightParen);
+                // Edit 1: delete "return" (return node start to begin node start).
+                cx.emit_edit(
+                    Range { start: return_range.start, end: value_range.start },
+                    "",
+                );
+                // Edit 2: delete opening `(`.
+                if let Some(t) = lp {
+                    cx.emit_edit(t.range, "");
+                }
+                // Edit 3: delete closing `)`.
+                if let Some(t) = rp {
+                    cx.emit_edit(t.range, "");
+                }
+            } else {
+                // `return expr`: delete "return " prefix.
+                let keyword_range = Range {
+                    start: return_range.start,
+                    end: value_range.start,
+                };
+                cx.emit_edit(keyword_range, "");
             }
-
-            // Delete from return-node start to value start (removes "return ").
-            let keyword_range = Range {
-                start: return_range.start,
-                end: value_range.start,
-            };
-            cx.emit_edit(keyword_range, "");
         }
     }
 }
@@ -364,17 +378,23 @@ mod tests {
     // --- Parenthesised return form ---
 
     #[test]
-    fn flags_offense_but_no_autocorrect_for_return_parens() {
-        // `return(value)` parses as Return(Unknown) in Murphy's translator.
-        // The cop flags it (it IS redundant) but must NOT attempt to delete
-        // the prefix, because the parenthesised form would leave a dangling `)`.
-        // The user must hand-fix.
-        test::<RedundantReturn>().expect_offense(indoc! {r#"
-            def foo
-              return(42)
-              ^^^^^^^^^^ Redundant `return` detected.
-            end
-        "#});
+    fn flags_and_autocorrects_return_with_parens() {
+        // `return(value)` lowers to Return(Begin([Int(42)])) via is_parenthesized.
+        // Autocorrect applies three surgical edits: delete "return", "(", and ")"
+        // leaving just `42`.
+        test::<RedundantReturn>().expect_correction(
+            indoc! {r#"
+                def foo
+                  return(42)
+                  ^^^^^^^^^^ Redundant `return` detected.
+                end
+            "#},
+            indoc! {r#"
+                def foo
+                  42
+                end
+            "#},
+        );
     }
 }
 murphy_plugin_api::submit_cop!(RedundantReturn);

@@ -62,6 +62,7 @@
 //! `select`/`reject`/`filter` through the closing brace/`end` of the block.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
+use crate::cops::util::unwrap_parenthesized;
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -259,9 +260,12 @@ fn extract_key_expr(
                 return None;
             }
             let cmp_recv = cmp_recv_opt.get()?;
-            // The receiver must not be a range or unknown (range_include? guard).
-            // In Murphy, ranges in parentheses appear as Unknown — skip them.
-            if matches!(cx.kind(cmp_recv), NodeKind::Unknown | NodeKind::RangeExpr { .. }) {
+            // Unwrap parentheses before checking the kind so that valid
+            // parenthesized collections like `([:a, :b]).include?(k)` are not
+            // rejected. After unwrapping, skip if the effective receiver is a
+            // range (range_include? guard) or an opaque/unknown node.
+            let effective_recv = unwrap_parenthesized(cmp_recv, cx);
+            if matches!(cx.kind(effective_recv), NodeKind::Unknown | NodeKind::RangeExpr { .. }) {
                 return None;
             }
             // The receiver must not be the value lvar (using_value_variable? guard).

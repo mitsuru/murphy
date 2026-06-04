@@ -125,9 +125,9 @@ fn check_each_block(node: NodeId, cx: &Cx<'_>) {
 
 /// Extract `(exclusive, min, max)` from an integer range node.
 ///
-/// Handles both:
-/// - `NodeKind::RangeExpr` (bare unparenthesized range, rare in `.each` context)
-/// - `NodeKind::Unknown` (parenthesized range like `(0...10)`)
+/// Handles:
+/// - `NodeKind::RangeExpr` (bare range like `0...10`)
+/// - `NodeKind::Begin` with one child (parenthesized range like `(0...10)`)
 fn extract_int_range(recv: NodeId, cx: &Cx<'_>) -> Option<(bool, i64, i64)> {
     match *cx.kind(recv) {
         NodeKind::RangeExpr {
@@ -145,46 +145,20 @@ fn extract_int_range(recv: NodeId, cx: &Cx<'_>) -> Option<(bool, i64, i64)> {
             };
             Some((exclusive, min, max))
         }
-        NodeKind::Unknown => {
-            // Parenthesized range: parse the raw source text.
-            parse_parenthesized_range(recv, cx)
+        NodeKind::Begin(list) => {
+            // Parenthesized range `(0...10)` — unwrap single child and recurse.
+            let children = cx.list(list);
+            if children.len() == 1 {
+                extract_int_range(children[0], cx)
+            } else {
+                None
+            }
         }
         _ => None,
     }
 }
 
-/// Parse a parenthesized range from raw source text.
-///
-/// Matches patterns like `(N..M)` and `(N...M)` where N and M are integer
-/// literals (with optional sign).
-fn parse_parenthesized_range(node: NodeId, cx: &Cx<'_>) -> Option<(bool, i64, i64)> {
-    let src = cx.raw_source(cx.range(node));
-    let src = src.trim();
 
-    // Must be wrapped in parentheses.
-    let inner = src.strip_prefix('(')?.strip_suffix(')')?;
-
-    // Find `...` or `..` operator.
-    let (exclusive, idx) = if let Some(i) = inner.find("...") {
-        (true, i)
-    } else if let Some(i) = inner.find("..") {
-        (false, i)
-    } else {
-        return None;
-    };
-
-    let lhs = inner[..idx].trim();
-    let rhs = if exclusive {
-        inner[idx + 3..].trim()
-    } else {
-        inner[idx + 2..].trim()
-    };
-
-    let min: i64 = lhs.parse().ok()?;
-    let max: i64 = rhs.parse().ok()?;
-
-    Some((exclusive, min, max))
-}
 
 #[cfg(test)]
 mod tests {
