@@ -62,7 +62,7 @@
 //! `select`/`reject`/`filter` through the closing brace/`end` of the block.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, Symbol, cop};
-use crate::cops::util::is_parenthesized;
+use crate::cops::util::unwrap_parenthesized;
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -260,15 +260,12 @@ fn extract_key_expr(
                 return None;
             }
             let cmp_recv = cmp_recv_opt.get()?;
-            // The receiver must not be a range, opaque, or parenthesized expression
-            // (range_include? guard).
-            // - `NodeKind::Unknown` covers unimplemented prism nodes (not ParenthesesNode,
-            //   which now lowers to Begin, but other opaque shapes still fall through).
-            // - `NodeKind::RangeExpr` covers literal range receivers like `1..5`.
-            // - `is_parenthesized` covers `(1..5)` which is now Begin + LeftParen.
-            if matches!(cx.kind(cmp_recv), NodeKind::Unknown | NodeKind::RangeExpr { .. })
-                || is_parenthesized(cmp_recv, cx)
-            {
+            // Unwrap parentheses before checking the kind so that valid
+            // parenthesized collections like `([:a, :b]).include?(k)` are not
+            // rejected. After unwrapping, skip if the effective receiver is a
+            // range (range_include? guard) or an opaque/unknown node.
+            let effective_recv = unwrap_parenthesized(cmp_recv, cx);
+            if matches!(cx.kind(effective_recv), NodeKind::Unknown | NodeKind::RangeExpr { .. }) {
                 return None;
             }
             // The receiver must not be the value lvar (using_value_variable? guard).

@@ -166,7 +166,7 @@ fn check_condition(node: NodeId, cond: NodeId, cx: &Cx<'_>) {
     let NodeKind::Begin(list) = cx.kind(cond) else {
         return;
     };
-    if cx.list(*list).len() > 1 {
+    if cx.list(*list).len() != 1 {
         return;
     }
 
