@@ -123,7 +123,13 @@ fn check(node: NodeId, cx: &Cx<'_>, opts: &TernaryParenthesesOptions) {
 
     match opts.enforced_style {
         TernaryStyle::RequireNoParentheses => {
-            if is_paren {
+            // Only remove parens when the Begin has exactly one child.
+            // Multi-statement `(a; b) ? 1 : 2` must not collapse to
+            // `a; b ? 1 : 2` — the `;` would change the condition boundary.
+            if is_paren
+                && let NodeKind::Begin(list) = cx.kind(cond)
+                && let [_single] = cx.list(*list)
+            {
                 let msg = MSG.replace("%<command>s", "Omit");
                 cx.emit_offense(cx.range(node), &msg, None);
                 // Autocorrect: remove parens if safe to do so.
@@ -361,6 +367,13 @@ mod tests {
                 foo = (bar = baz) ? a : b
                       ^^^^^^^^^^^^^^^^^^^ Omit parentheses for ternary conditions.
             "});
+    }
+
+    #[test]
+    fn no_parens_no_offense_multi_stmt_parens() {
+        // `(a; b) ? 1 : 2` — multi-statement Begin; removing parens would change
+        // the condition boundary to `a; b ? 1 : 2`. Must not flag.
+        test::<TernaryParentheses>().expect_no_offenses("foo = (a; b) ? 1 : 2\n");
     }
 
     // ----- require_parentheses -----
