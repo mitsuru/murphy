@@ -636,16 +636,23 @@ mod tests {
     // expressions. This is a known v1 parity gap.
 
     #[test]
-    fn no_offense_begin_wrapped_condition_parity_gap() {
-        // In RuboCop, `(foo?)` (begin node) would trigger. In Murphy, it becomes
-        // `Unknown` (not a `Begin` node), so no offense is emitted.
-        test::<IfWithBooleanLiteralBranches>().expect_no_offenses(indoc! {"
-            if (foo?)
-              true
-            else
-              false
-            end
-        "});
+    fn corrects_parenthesized_predicate_condition() {
+        // `(foo?)` now lowers to `Begin([Send{foo?}])` via the ParenthesesNode
+        // translator fix. `return_boolean_value` unwraps the Begin and detects
+        // the predicate, closing the former v1 parity gap.
+        test::<IfWithBooleanLiteralBranches>().expect_correction(
+            indoc! {"
+                if (foo?)
+                ^^ Remove redundant `if` with boolean literal branches.
+                  true
+                else
+                  false
+                end
+            "},
+            indoc! {"
+                (foo?)
+            "},
+        );
     }
 
     // --- Require parentheses for opposite + comparison ---

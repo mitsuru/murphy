@@ -456,11 +456,9 @@ mod tests {
     }
 
     #[test]
-    fn range_include_with_parenthesized_range_is_v1_gap() {
-        // `(1..5)` is a `NodeKind::Unknown` in Murphy v1 (parenthesized range
-        // without a dedicated lowering). The include?/cover? range path
-        // silently produces a false-negative — this is documented in the
-        // murphy-parity block as a known v1 limitation.
+    fn range_include_with_parenthesized_range() {
+        // `(1..5)` now lowers to `Begin([RangeExpr])` via the ParenthesesNode
+        // translator fix. `deparenthesize` unwraps it, so the range path fires.
         let src = indoc! {r#"
             if (1..5).include?(x)
               :low
@@ -470,7 +468,7 @@ mod tests {
               :high
             end
         "#};
-        assert_eq!(hits(src), 0, "known v1 gap: parenthesized range (a..b) is Unknown");
+        assert_eq!(hits(src), 1);
     }
 
     #[test]
