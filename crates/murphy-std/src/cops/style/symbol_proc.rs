@@ -7,30 +7,40 @@
 //! upstream_cop: Style/SymbolProc
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-pfcb
 //! notes: >
-//!   Flags blocks (and numblocks) that call a single argument-less method on
-//!   their sole block parameter. Autocorrects to `&:method_name` syntax.
+//!   Flags blocks (numblocks, and itblocks) that call a single argument-less
+//!   method on their sole block parameter. Autocorrects to `&:method_name`.
 //!
 //!   Covered:
 //!     - Normal Block: `map { |s| s.upcase }` -> `map(&:upcase)`
 //!     - Numblock (max_n == 1): `map { _1.upcase }` -> `map(&:upcase)`
+//!     - Itblock (Ruby 3.4 `it`): `map { it.upcase }` -> `map(&:upcase)`
 //!     - Lambda (->): `->(x) { x.method }` -> `lambda(&:method)`
 //!     - proc/Proc.new blocks: `proc { |x| x.method }` -> `proc(&:method)`
 //!     - Blocks on calls with arguments:
 //!       `do_something(foo) { |o| o.bar }` -> `do_something(foo, &:bar)`
-//!     - AllowedMethods: default ["define_method"]
+//!     - AllowedMethods: default ["define_method"] (exact match on dispatch
+//!       method name)
+//!     - AllowedPatterns: regex match on dispatch method name, via the shared
+//!       `cx.matches_any_pattern` helper (RE2 / Rust `regex`, unanchored).
+//!       Look-ahead and back-references are unsupported; such patterns are
+//!       diagnosed (stderr) and skipped.
 //!     - AllowComments: skip if block has inline comments (default false)
 //!     - AllowMethodsWithArguments: skip if call has args (default false)
 //!     - Unsafe hash: skip .reject/.select on hash literal receiver
 //!     - Unsafe array: skip .min/.max on array literal receiver
 //!
 //!   Gaps:
-//!     - AllowedPatterns (regex): not supported — derive only covers Vec<String>.
-//!     - AllCops::ActiveSupportExtensionsEnabled: no AllCops config infra;
-//!       Murphy always uses the false/default path (lambda/proc/Proc.new
-//!       blocks ARE flagged, matching the default RuboCop behavior).
-//!     - itblock (Ruby 3.4 `it` param): not handled — on_node lacks itblock.
+//!     - AllCops::ActiveSupportExtensionsEnabled (murphy-pfcb): no AllCops
+//!       config infra. RuboCop exempts lambda/proc/Proc.new blocks only when
+//!       this is true; Murphy always uses the false/default path (those blocks
+//!       ARE flagged), matching the default RuboCop behavior. Only diverges
+//!       when a user sets the flag to true.
+//!     - AllowComments does not yet exclude rubocop:disable-only comments
+//!       (`comments_contain_disables?`); a block whose sole comment is a
+//!       disable directive is still treated as "has comments".
 //! ```
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, Symbol, cop};
@@ -61,6 +71,12 @@ pub struct Options {
         description = "Method names that are always allowed (not flagged)."
     )]
     pub allowed_methods: Vec<String>,
+
+    #[option(
+        default = [],
+        description = "Regex patterns for dispatch method names that are always allowed (not flagged)."
+    )]
+    pub allowed_patterns: Vec<String>,
 }
 
 #[cop(
@@ -81,6 +97,13 @@ impl SymbolProc {
     /// Handles numbered-parameter `Numblock` nodes: `method { _1.foo }`.
     #[on_node(kind = "numblock")]
     fn check_numblock(&self, node: NodeId, cx: &Cx<'_>) {
+        let opts = cx.options_or_default::<Options>();
+        check_any_block(node, cx, &opts);
+    }
+
+    /// Handles `it`-parameter `Itblock` nodes (Ruby 3.4): `method { it.foo }`.
+    #[on_node(kind = "itblock")]
+    fn check_itblock(&self, node: NodeId, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<Options>();
         check_any_block(node, cx, &opts);
     }
@@ -116,8 +139,14 @@ fn check_any_block(node: NodeId, cx: &Cx<'_>, opts: &Options) {
         return;
     }
 
-    // Allowed methods check
+    // Allowed methods check (exact match on the dispatch method name).
     if opts.allowed_methods.iter().any(|m| m == block_method) {
+        return;
+    }
+
+    // AllowedPatterns: regex match on the dispatch method name (RuboCop checks
+    // `dispatch_node.method_name` against AllowedPatterns).
+    if cx.matches_any_pattern(block_method, &opts.allowed_patterns) {
         return;
     }
 
@@ -181,7 +210,12 @@ fn extract_symbol_proc_pattern<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<(Node
                 return None;
             }
             let body_id = body.get()?;
-            extract_body_send_numblock(body_id, cx).map(|m| (send, m))
+            extract_body_send_implicit(body_id, "_1", cx).map(|m| (send, m))
+        }
+        NodeKind::Itblock { send, body } => {
+            // Ruby 3.4 `it` parameter: `method { it.foo }` -> `method(&:foo)`.
+            let body_id = body.get()?;
+            extract_body_send_implicit(body_id, "it", cx).map(|m| (send, m))
         }
         _ => None,
     }
@@ -210,8 +244,15 @@ fn extract_body_send<'a>(body_id: NodeId, param_sym: Symbol, cx: &'a Cx<'_>) -> 
     Some(cx.symbol_str(method))
 }
 
-/// Extract method name from a Numblock body where receiver is `Lvar(_1)`.
-fn extract_body_send_numblock<'a>(body_id: NodeId, cx: &'a Cx<'_>) -> Option<&'a str> {
+/// Extract the method name from an implicit-parameter block body where the
+/// receiver is `Lvar(<expected>)` with no arguments. Shared by Numblock
+/// (`expected == "_1"`) and Itblock (`expected == "it"`); both represent their
+/// implicit parameter as an `Lvar` in the body subtree.
+fn extract_body_send_implicit<'a>(
+    body_id: NodeId,
+    expected: &str,
+    cx: &'a Cx<'_>,
+) -> Option<&'a str> {
     let NodeKind::Send {
         receiver,
         method,
@@ -224,7 +265,7 @@ fn extract_body_send_numblock<'a>(body_id: NodeId, cx: &'a Cx<'_>) -> Option<&'a
     let NodeKind::Lvar(sym) = *cx.kind(recv_id) else {
         return None;
     };
-    if cx.symbol_str(sym) != "_1" {
+    if cx.symbol_str(sym) != expected {
         return None;
     }
     if !cx.list(args).is_empty() {
@@ -313,7 +354,7 @@ fn block_opener_to_closer(node: NodeId, cx: &Cx<'_>) -> Range {
                 selector_end.max(paren_close_end)
             }
         }
-        NodeKind::Numblock { send, .. } => {
+        NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => {
             let selector_end = cx.selector(send).end;
             let paren_close_end = cx.loc(send).end().end;
             selector_end.max(paren_close_end)
@@ -694,6 +735,74 @@ mod tests {
             "},
             "Proc.new(&:method)\n",
         );
+    }
+
+    // --- Itblock (Ruby 3.4 `it` parameter) ---
+
+    #[test]
+    fn flags_itblock() {
+        test::<SymbolProc>().expect_offense(indoc! {"
+            something { it.foo }
+                      ^^^^^^^^^^ Pass `&:foo` as an argument to `something` instead of a block.
+        "});
+    }
+
+    #[test]
+    fn corrects_itblock() {
+        test::<SymbolProc>().expect_correction(
+            indoc! {"
+                something { it.foo }
+                          ^^^^^^^^^^ Pass `&:foo` as an argument to `something` instead of a block.
+            "},
+            "something(&:foo)\n",
+        );
+    }
+
+    #[test]
+    fn accepts_itblock_with_args_in_body() {
+        test::<SymbolProc>().expect_no_offenses("something { it.foo(bar) }\n");
+    }
+
+    #[test]
+    fn accepts_itblock_not_called_on_it() {
+        // `it` is not the receiver — `x` here is a method call, not the
+        // implicit block parameter, so this is not convertible.
+        test::<SymbolProc>().expect_no_offenses("something { x.foo }\n");
+    }
+
+    // --- AllowedPatterns ---
+
+    #[test]
+    fn respects_allowed_patterns() {
+        use super::Options;
+        // `^map` matches the dispatch method name `map`; the block is exempt.
+        test::<SymbolProc>()
+            .with_options(&Options {
+                allow_methods_with_arguments: false,
+                allow_comments: false,
+                allowed_methods: vec![],
+                allowed_patterns: vec!["^map".to_string()],
+            })
+            .expect_no_offenses("coll.map { |e| e.upcase }\n");
+    }
+
+    #[test]
+    fn allowed_patterns_uses_regex_anchors() {
+        use super::Options;
+        // `\Aupcase\z`-style anchoring: `^reduce$` matches `reduce` only, so a
+        // `map` dispatch is still flagged. Confirms regex semantics (substring
+        // would never match `^reduce$`).
+        test::<SymbolProc>()
+            .with_options(&Options {
+                allow_methods_with_arguments: false,
+                allow_comments: false,
+                allowed_methods: vec![],
+                allowed_patterns: vec!["^reduce$".to_string()],
+            })
+            .expect_offense(indoc! {"
+                coll.map { |e| e.upcase }
+                         ^^^^^^^^^^^^^^^^ Pass `&:upcase` as an argument to `map` instead of a block.
+            "});
     }
 }
 murphy_plugin_api::submit_cop!(SymbolProc);
