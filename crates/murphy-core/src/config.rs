@@ -463,10 +463,19 @@ impl MurphyConfig {
     /// `ActiveSupportExtensionsEnabled` flag. The resolution order is
     /// `std(false) < pack layers < user`: the user's explicit value — set
     /// directly OR inherited via `inherit_from` — still wins over pack layers.
+    ///
+    /// This intentionally resolves ONLY the `ActiveSupportExtensionsEnabled`
+    /// flag; Include/Exclude and cop-rule pack defaults flow through
+    /// [`MurphyConfig::load_with_defaults`], so the name's "layers" is scoped to
+    /// that flag by design.
     pub fn apply_pack_default_layers(&mut self, pack_yamls: &[&str]) {
         if self.user_set_active_support_extensions_enabled {
             return; // user wins; pack layers are only defaults
         }
+        // Entry invariant: when the user did not set the flag, the std base is
+        // false. Reset explicitly so the method is idempotent and does not depend
+        // on no prior load path having written the field.
+        self.active_support_extensions_enabled = false;
         for yaml in pack_yamls {
             if let Some(v) =
                 DefaultCopsData::from_yaml(yaml).allcops_active_support_extensions_enabled
@@ -1713,6 +1722,19 @@ Style/StringLiterals:
         let mut cfg = MurphyConfig::from_yaml_str("").unwrap();
         cfg.apply_pack_default_layers(&[]);
         assert!(!cfg.active_support_extensions_enabled);
+    }
+
+    #[test]
+    fn keyless_pack_layer_preserves_earlier_value() {
+        let mut cfg = MurphyConfig::from_yaml_str("").unwrap();
+        cfg.apply_pack_default_layers(&[
+            "AllCops:\n  ActiveSupportExtensionsEnabled: true\n",
+            "AllCops:\n  Include:\n    - 'x'\n", // no ASE key
+        ]);
+        assert!(
+            cfg.active_support_extensions_enabled,
+            "keyless layer must not clobber earlier value"
+        );
     }
 
     #[test]
