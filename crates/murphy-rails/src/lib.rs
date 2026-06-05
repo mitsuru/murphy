@@ -26,6 +26,11 @@ use murphy_plugin_api::{Cx, NoOptions, cop, register_cops, submit_cop};
 pub const BUNDLED_DEFAULTS_YAML: &str = include_str!("../config/default.yml");
 
 /// Pure data symbol the host reads after dlopen (not a behavior callback).
+///
+/// The `RawSlice` points at this `.so`'s `'static` rodata, valid only while
+/// the `libloading::Library` is held. The host must copy the bytes to an
+/// owned value while the `Library` is alive (see
+/// `murphy_core::plugin_loader::load_plugin_pack`).
 #[unsafe(no_mangle)]
 pub static MURPHY_PLUGIN_DEFAULT_CONFIG: murphy_plugin_api::RawSlice =
     murphy_plugin_api::RawSlice::from_str(BUNDLED_DEFAULTS_YAML);

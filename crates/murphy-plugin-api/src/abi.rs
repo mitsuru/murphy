@@ -24,7 +24,11 @@ pub struct RawSlice {
 
 // Safety: a RawSlice is an immutable, non-owning view. The pointee's
 // validity and thread-safety are the host's responsibility under the
-// ADR 0038 safety contract (the arena is immutable during dispatch).
+// ADR 0038 safety contract. This covers both shapes a RawSlice takes:
+// a view into the immutable arena during dispatch, and a pack's exported
+// `static RawSlice` (e.g. `MURPHY_PLUGIN_DEFAULT_CONFIG`) pointing at
+// immutable `'static` rodata inside the loaded `.so`. Both pointees are
+// read-only and never mutated, so sharing the view across threads is sound.
 unsafe impl Sync for RawSlice {}
 unsafe impl Send for RawSlice {}
 

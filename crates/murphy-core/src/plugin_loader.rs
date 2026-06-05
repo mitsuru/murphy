@@ -317,6 +317,11 @@ pub struct LoadedPluginPack {
     /// is via [`Self::cops`], which ties the lifetime to `&self`.
     cops_ptr: *const PluginCopV1,
     cops_len: usize,
+    /// Owned copy of the pack's bundled `default.yml` (the bytes the pack's
+    /// exported `MURPHY_PLUGIN_DEFAULT_CONFIG` `RawSlice` points at), or
+    /// `None` when the pack exports no such symbol. Copied at load time
+    /// while `_library` is alive so it outlives the borrow.
+    default_config_yaml: Option<String>,
     _library: libloading::Library,
 }
 
@@ -342,6 +347,14 @@ impl LoadedPluginPack {
             // mapped for the lifetime of `&self`.
             unsafe { std::slice::from_raw_parts(self.cops_ptr, self.cops_len) }
         }
+    }
+
+    /// The pack's bundled `default.yml` text, if it exported one via
+    /// `MURPHY_PLUGIN_DEFAULT_CONFIG`. The bytes were copied to an owned
+    /// `String` at load time, so this borrow is independent of the live
+    /// `.so` mapping.
+    pub fn default_config_yaml(&self) -> Option<&str> {
+        self.default_config_yaml.as_deref()
     }
 }
 
@@ -383,10 +396,41 @@ pub fn load_plugin_pack(path: &std::path::Path) -> Result<LoadedPluginPack, Load
     // `(ptr, len)` alongside the library handle keeps that lifetime
     // bound enforced through `LoadedPluginPack::cops`'s borrow.
     let (cops_ptr, cops_len) = unsafe { validate_registration(&reg)? };
+
+    // Optional bundled config: read the pack's `MURPHY_PLUGIN_DEFAULT_CONFIG`
+    // data symbol (a `RawSlice` over the pack's embedded `default.yml`).
+    // Absence is normal — not every pack ships config.
+    let default_config_yaml = {
+        match unsafe {
+            library.get::<*const murphy_plugin_api::RawSlice>(b"MURPHY_PLUGIN_DEFAULT_CONFIG\0")
+        } {
+            Ok(sym) => {
+                // Safety: `sym` resolves to the pack's exported `static
+                // RawSlice`. `*sym` is a pointer to that static; `**sym`
+                // reads the `RawSlice` value, whose `ptr`/`len` describe
+                // `'static` rodata inside the `.so`, valid while `library`
+                // is held. Copy to an owned `String` now so it outlives the
+                // borrow and stays valid after `library` moves into the
+                // struct.
+                let slice = unsafe { **sym };
+                if slice.ptr.is_null() || slice.len == 0 {
+                    None
+                } else {
+                    // Safety: `ptr`/`len` are the pack's `'static` rodata
+                    // (validated non-null/non-empty above), valid for this read.
+                    let bytes = unsafe { std::slice::from_raw_parts(slice.ptr, slice.len) };
+                    std::str::from_utf8(bytes).ok().map(|s| s.to_owned())
+                }
+            }
+            Err(_) => None, // symbol absent → pack ships no bundled config
+        }
+    };
+
     Ok(LoadedPluginPack {
         path: path.to_path_buf(),
         cops_ptr,
         cops_len,
+        default_config_yaml,
         _library: library,
     })
 }

@@ -1057,7 +1057,7 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     if debug {
         eprintln!("murphy: debug: config load start elapsed_ms=0");
     }
-    let config =
+    let mut config =
         MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
             .map_err(|e| AppError::setup(e.to_string()))?;
     if debug {
@@ -1072,6 +1072,12 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
     }
     let registry = CopRegistry::discover_with_config(Path::new("."), &config, builtin_pack())
         .map_err(|e| AppError::setup(e.to_string()))?;
+    // Layer every loaded pack's bundled `default.yml` `AllCops` defaults
+    // (e.g. `ActiveSupportExtensionsEnabled`) below user config, so loading
+    // a pack such as murphy-rails flips its defaults on unless the user
+    // overrode them. Must run before any `lint_source`/`run_to_fixpoint`
+    // call, which read `config.active_support_extensions_enabled`.
+    config.apply_pack_default_layers(&registry.pack_default_configs());
     // Warn (once per run) if the user opted back into a cop that's disabled
     // by default (via bundled defaults or arena migration). The enable is
     // honoured but the cop does not run until its implementation ships.

@@ -303,6 +303,26 @@ impl CopRegistry {
     pub fn mruby_cop_paths(&self) -> &[PathBuf] {
         &self.mruby_cop_paths
     }
+
+    /// Each loaded dynamic pack's bundled `default.yml` text, in pack
+    /// registration order. Packs that ship no bundled config (no
+    /// `MURPHY_PLUGIN_DEFAULT_CONFIG` symbol) are skipped. The host feeds
+    /// these to [`MurphyConfig::apply_pack_default_layers`] so a pack's
+    /// `AllCops` defaults (e.g. `ActiveSupportExtensionsEnabled`) layer in
+    /// below user config.
+    #[cfg(not(target_os = "windows"))]
+    pub fn pack_default_configs(&self) -> Vec<&str> {
+        self.packs
+            .iter()
+            .filter_map(|p| p.default_config_yaml())
+            .collect()
+    }
+
+    /// Windows ships no dynamic packs, so there is never any bundled config.
+    #[cfg(target_os = "windows")]
+    pub fn pack_default_configs(&self) -> Vec<&str> {
+        Vec::new()
+    }
 }
 
 fn cop_supports_target_ruby_version(cop: &PluginCopV1, target: RubyVersion) -> bool {
