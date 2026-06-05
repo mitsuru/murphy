@@ -401,6 +401,11 @@ pub fn load_plugin_pack(path: &std::path::Path) -> Result<LoadedPluginPack, Load
     // data symbol (a `RawSlice` over the pack's embedded `default.yml`).
     // Absence is normal — not every pack ships config.
     let default_config_yaml = {
+        // Safety: the type parameter must be `*const RawSlice`, not `RawSlice`.
+        // libloading reinterprets the symbol's *address* as `T`; the symbol is
+        // an exported `static RawSlice`, so its address is a `*const RawSlice`.
+        // Requesting `RawSlice` directly would treat the struct's first bytes as
+        // a pointer and read garbage. A null/absent symbol surfaces as `Err`.
         match unsafe {
             library.get::<*const murphy_plugin_api::RawSlice>(b"MURPHY_PLUGIN_DEFAULT_CONFIG\0")
         } {

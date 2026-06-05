@@ -81,7 +81,6 @@ pub struct CopRegistry {
     /// borrows in [`Self::cops`] are valid for as long as this field is
     /// alive.
     #[cfg(not(target_os = "windows"))]
-    #[allow(dead_code)]
     packs: Vec<LoadedPluginPack>,
     /// Enumerated `cops/*.rb` paths (sorted). Always empty when the
     /// `mruby-user-cops` feature is off.
