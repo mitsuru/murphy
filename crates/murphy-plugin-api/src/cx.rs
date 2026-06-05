@@ -3050,6 +3050,23 @@ mod tests {
     }
 
     #[test]
+    fn active_support_extensions_enabled_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.active_support_extensions_enabled = true;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.active_support_extensions_enabled());
+
+        let default_raw = cx_raw_for(&ast, &fns);
+        let default_cx = unsafe { Cx::from_raw(&default_raw) };
+        assert!(!default_cx.active_support_extensions_enabled());
+    }
+
+    #[test]
     fn magic_comment_helpers_expose_structured_file_metadata() {
         let src = "#!/usr/bin/env ruby\n# frozen_string_literal: true\n# encoding: utf-8\nnil\n";
         let ast = murphy_translate::translate(src, "t.rb");
