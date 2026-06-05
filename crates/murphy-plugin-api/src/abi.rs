@@ -1,7 +1,10 @@
 //! `#[repr(C)]` types that cross the plugin ABI boundary (ADR 0038).
 //!
-//! Every struct here has a frozen layout: the `#[cfg(test)]` `offset_of!`
-//! assertions are the freeze guard. New fields append at the end only.
+//! Every `#[repr(C)]` struct here has a frozen layout: the `#[cfg(test)]`
+//! `offset_of!` assertions are the freeze guard. New fields append at the end
+//! only. The sole exception is [`AllCopsContext`], a plain host-side
+//! convenience struct (not `#[repr(C)]`, not on the wire) that lives here for
+//! proximity to the `CxRaw` fields it unpacks into; it has no layout freeze.
 
 use std::ffi::c_void;
 
