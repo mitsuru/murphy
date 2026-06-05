@@ -136,6 +136,7 @@ pub fn test<T: NodeCop + Default>() -> Tester<T> {
     Tester {
         options_json: DEFAULT_OPTIONS_JSON.to_string(),
         target_rails_version: None,
+        active_support_extensions_enabled: false,
         _phantom: PhantomData,
     }
 }
@@ -150,6 +151,7 @@ pub fn test<T: NodeCop + Default>() -> Tester<T> {
 pub struct Tester<T: NodeCop + Default> {
     options_json: String,
     target_rails_version: Option<crate::RubyVersion>,
+    active_support_extensions_enabled: bool,
     _phantom: PhantomData<fn() -> T>,
 }
 
@@ -169,19 +171,35 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Set `AllCops.ActiveSupportExtensionsEnabled` for this cop test.
+    pub fn with_active_support_extensions_enabled(mut self, enabled: bool) -> Self {
+        self.active_support_extensions_enabled = enabled;
+        self
+    }
+
     /// Assert the cop emits exactly the offenses described by the caret
     /// annotations in `annotated`. See the module docs for the
     /// annotation grammar.
     #[track_caller]
     pub fn expect_offense(&self, annotated: &str) -> &Self {
-        assert_offenses_match_inner::<T>(annotated, &self.options_json, self.target_rails_version);
+        assert_offenses_match_inner::<T>(
+            annotated,
+            &self.options_json,
+            self.target_rails_version,
+            self.active_support_extensions_enabled,
+        );
         self
     }
 
     /// Assert the cop emits no offenses against `src`.
     #[track_caller]
     pub fn expect_no_offenses(&self, src: &str) -> &Self {
-        assert_no_offenses_inner::<T>(src, &self.options_json, self.target_rails_version);
+        assert_no_offenses_inner::<T>(
+            src,
+            &self.options_json,
+            self.target_rails_version,
+            self.active_support_extensions_enabled,
+        );
         self
     }
 
@@ -194,6 +212,7 @@ impl<T: NodeCop + Default> Tester<T> {
             after,
             &self.options_json,
             self.target_rails_version,
+            self.active_support_extensions_enabled,
         );
         self
     }
@@ -203,7 +222,12 @@ impl<T: NodeCop + Default> Tester<T> {
     /// [`Tester::expect_offense`] when both must hold.
     #[track_caller]
     pub fn expect_no_corrections(&self, src: &str) -> &Self {
-        assert_no_corrections_inner::<T>(src, &self.options_json, self.target_rails_version);
+        assert_no_corrections_inner::<T>(
+            src,
+            &self.options_json,
+            self.target_rails_version,
+            self.active_support_extensions_enabled,
+        );
         self
     }
 }
@@ -213,6 +237,7 @@ fn assert_no_offenses_inner<T: NodeCop + Default>(
     src: &str,
     options_json: &str,
     target_rails_version: Option<crate::RubyVersion>,
+    active_support_extensions_enabled: bool,
 ) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
@@ -222,6 +247,7 @@ fn assert_no_offenses_inner<T: NodeCop + Default>(
         src,
         options_json,
         target_rails_version,
+        active_support_extensions_enabled,
     );
     if !offenses.is_empty() {
         panic!(
@@ -317,6 +343,7 @@ fn assert_offenses_match_inner<T: NodeCop + Default>(
     annotated: &str,
     options_json: &str,
     target_rails_version: Option<crate::RubyVersion>,
+    active_support_extensions_enabled: bool,
 ) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
@@ -328,6 +355,7 @@ fn assert_offenses_match_inner<T: NodeCop + Default>(
         &cleaned,
         options_json,
         target_rails_version,
+        active_support_extensions_enabled,
     );
     assert_offenses_match("expect_offense", &cleaned, &expected, &actuals);
 }
@@ -386,6 +414,7 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
     expected_after: &str,
     options_json: &str,
     target_rails_version: Option<crate::RubyVersion>,
+    active_support_extensions_enabled: bool,
 ) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
@@ -398,6 +427,7 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
         &cleaned,
         options_json,
         target_rails_version,
+        active_support_extensions_enabled,
     );
     assert_offenses_match("expect_correction", &cleaned, &expected, &captured.offenses);
 
@@ -416,6 +446,7 @@ fn assert_no_corrections_inner<T: NodeCop + Default>(
     src: &str,
     options_json: &str,
     target_rails_version: Option<crate::RubyVersion>,
+    active_support_extensions_enabled: bool,
 ) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
@@ -426,6 +457,7 @@ fn assert_no_corrections_inner<T: NodeCop + Default>(
         src,
         options_json,
         target_rails_version,
+        active_support_extensions_enabled,
     );
     if !captured.edits.is_empty() {
         panic!(
@@ -621,18 +653,20 @@ fn run_cop_with_options_json<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
 ) -> Vec<CapturedOffense> {
-    run_cop_with_options_json_and_target_rails_version::<T>(source, options_json, None)
+    run_cop_with_options_json_and_target_rails_version::<T>(source, options_json, None, false)
 }
 
 fn run_cop_with_options_json_and_target_rails_version<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
     target_rails_version: Option<crate::RubyVersion>,
+    active_support_extensions_enabled: bool,
 ) -> Vec<CapturedOffense> {
     run_cop_with_options_and_edits_json_and_target_rails_version::<T>(
         source,
         options_json,
         target_rails_version,
+        active_support_extensions_enabled,
     )
     .offenses
 }
@@ -641,13 +675,19 @@ fn run_cop_with_options_and_edits_json<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
 ) -> CapturedRun {
-    run_cop_with_options_and_edits_json_and_target_rails_version::<T>(source, options_json, None)
+    run_cop_with_options_and_edits_json_and_target_rails_version::<T>(
+        source,
+        options_json,
+        None,
+        false,
+    )
 }
 
 fn run_cop_with_options_and_edits_json_and_target_rails_version<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
     target_rails_version: Option<crate::RubyVersion>,
+    active_support_extensions_enabled: bool,
 ) -> CapturedRun {
     let ast = murphy_translate::translate(source, "t.rb");
     let var_model = crate::var_semantic_model::VarSemanticModel::build(&ast);
@@ -678,6 +718,7 @@ fn run_cop_with_options_and_edits_json_and_target_rails_version<T: NodeCop + Def
         options_slice,
         &var_model,
         target_rails_version,
+        active_support_extensions_enabled,
     );
     let cx = unsafe { Cx::from_raw(&raw) };
 
@@ -785,6 +826,7 @@ fn cx_raw_for(
     options_json: RawSlice,
     var_model: &crate::var_semantic_model::VarSemanticModel,
     target_rails_version: Option<crate::RubyVersion>,
+    active_support_extensions_enabled: bool,
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -820,7 +862,7 @@ fn cx_raw_for(
             len: file_path.len(),
         },
         target_rails_version: crate::RubyVersion::to_wire(target_rails_version),
-        active_support_extensions_enabled: false,
+        active_support_extensions_enabled,
     }
 }
 
