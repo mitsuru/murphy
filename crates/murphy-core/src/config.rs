@@ -1093,6 +1093,36 @@ mod tests {
     }
 
     #[test]
+    fn allcops_context_bundles_resolved_scalars() {
+        // The sole aggregation point MurphyConfig -> AllCopsContext. Use
+        // non-default values for *both* fields so an accidental swap or a
+        // dropped field would change the asserted output. (A literal swap
+        // would not compile — the fields differ in type — but an omission
+        // that leaves a field at its default would slip through without this.)
+        let cfg = MurphyConfig::from_yaml_str(
+            "AllCops:\n  TargetRailsVersion: 5.2\n  ActiveSupportExtensionsEnabled: true\n",
+        )
+        .expect("config parses");
+
+        let ctx = cfg.allcops_context();
+        assert_eq!(ctx.target_rails_version, Some(RubyVersion::new(5, 2)));
+        assert!(ctx.active_support_extensions_enabled);
+        // And the context mirrors the config's own resolved fields exactly.
+        assert_eq!(ctx.target_rails_version, cfg.target_rails_version);
+        assert_eq!(
+            ctx.active_support_extensions_enabled,
+            cfg.active_support_extensions_enabled
+        );
+
+        // Defaults flow through untouched.
+        let default_ctx = MurphyConfig::from_yaml_str("")
+            .expect("empty config parses")
+            .allcops_context();
+        assert_eq!(default_ctx.target_rails_version, None);
+        assert!(!default_ctx.active_support_extensions_enabled);
+    }
+
+    #[test]
     fn default_cops_data_parses_active_support_flag() {
         assert_eq!(
             DefaultCopsData::from_yaml("AllCops:\n  ActiveSupportExtensionsEnabled: true\n")
