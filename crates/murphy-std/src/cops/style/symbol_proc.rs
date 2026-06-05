@@ -297,6 +297,8 @@ fn extract_body_send_implicit<'a>(
 /// `Proc` constant (nil or `::` scope), not a named scope like `Foo::Proc`,
 /// mirroring RuboCop's `(const {nil? cbase} :Proc)` pattern.
 fn is_lambda_or_proc_dispatch(node: NodeId, call: NodeId, block_method: &str, cx: &Cx<'_>) -> bool {
+    // Intentionally redundant with the caller's `block_method == "lambda"`
+    // derivation (kept for self-protection / RuboCop `proc_node?` parity).
     if cx.is_lambda_literal(node) {
         return true;
     }
@@ -869,6 +871,27 @@ mod tests {
         test::<SymbolProc>()
             .with_active_support_extensions_enabled(true)
             .expect_no_offenses("Proc.new { |x| x.method }\n");
+    }
+
+    #[test]
+    fn exempts_lambda_keyword_when_active_support_enabled() {
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
+            .expect_no_offenses("lambda { |x| x.method }\n");
+    }
+
+    #[test]
+    fn flags_namespaced_proc_new_when_active_support_enabled() {
+        // Regression guard for the `top_level` scope tightening in
+        // `is_lambda_or_proc_dispatch`: `Foo::Proc.new` is a named-scope
+        // constant, NOT top-level `Proc`/`::Proc`, so it is still flagged even
+        // when ActiveSupportExtensionsEnabled is true.
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
+            .expect_offense(indoc! {"
+                Foo::Proc.new { |x| x.method }
+                              ^^^^^^^^^^^^^^^^ Pass `&:method` as an argument to `new` instead of a block.
+            "});
     }
 
     #[test]
