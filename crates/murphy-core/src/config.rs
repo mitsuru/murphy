@@ -1053,6 +1053,11 @@ mod tests {
             Some(true),
         );
         assert_eq!(
+            DefaultCopsData::from_yaml("AllCops:\n  ActiveSupportExtensionsEnabled: false\n")
+                .allcops_active_support_extensions_enabled,
+            Some(false),
+        );
+        assert_eq!(
             DefaultCopsData::from_yaml("AllCops:\n  Include:\n    - '**/*.rb'\n")
                 .allcops_active_support_extensions_enabled,
             None,
