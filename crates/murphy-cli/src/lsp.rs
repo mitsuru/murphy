@@ -10,13 +10,17 @@ const LSP_ERROR_METHOD_NOT_FOUND: i32 = -32601;
 const LSP_ERROR_INVALID_PARAMS: i32 = -32602;
 
 pub fn run(_args: &[String]) -> Result<u8, super::AppError> {
-    let config =
+    let mut config =
         MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
             .map_err(|e| super::AppError::setup(e.to_string()))?;
 
     let registry =
         CopRegistry::discover_with_config(Path::new("."), &config, super::builtin_pack())
             .map_err(|e| super::AppError::setup(e.to_string()))?;
+    // Layer loaded packs' bundled `default.yml` `AllCops` defaults below user
+    // config before any `lint_source` call (which reads
+    // `config.active_support_extensions_enabled`).
+    config.apply_pack_default_layers(&registry.pack_default_configs());
 
     let mut open_documents: HashMap<String, String> = HashMap::new();
 

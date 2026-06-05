@@ -265,6 +265,7 @@ mod tests {
             alloc_node_slice: crate::unavailable_alloc_node_slice,
             file_path: RawSlice::from_str("t.rb"),
             target_rails_version: 0,
+            active_support_extensions_enabled: false,
         }
     }
 

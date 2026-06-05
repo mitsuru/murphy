@@ -9,6 +9,13 @@ use crate::ConfigError;
 pub struct MurphyConfig {
     pub target_ruby_version: RubyVersion,
     pub target_rails_version: Option<RubyVersion>,
+    pub active_support_extensions_enabled: bool,
+    /// True when the user explicitly set `ActiveSupportExtensionsEnabled` —
+    /// directly in `.murphy.yml` OR via `inherit_from`. Derived from the
+    /// *merged* `ParsedYaml` (post-`merge_over`), mirroring `saw_include` /
+    /// `saw_exclude`. Read by [`MurphyConfig::apply_pack_default_layers`] so a
+    /// user value wins over pack-bundled `default.yml` layers.
+    pub(crate) user_set_active_support_extensions_enabled: bool,
     pub files: FilesConfig,
     pub cops: CopsConfig,
     pub plugins: Vec<PluginConfig>,
@@ -90,6 +97,8 @@ pub struct DefaultCopsData {
     pub allcops_include: Vec<String>,
     /// `AllCops.Exclude` patterns from the YAML.
     pub allcops_exclude: Vec<String>,
+    /// `AllCops.ActiveSupportExtensionsEnabled` flag from the YAML.
+    pub allcops_active_support_extensions_enabled: Option<bool>,
     /// Per-cop defaults keyed by cop name.
     pub cop_rules: BTreeMap<String, DefaultCopRule>,
 }
@@ -123,6 +132,11 @@ impl DefaultCopsData {
                     }
                     if let Some(exc) = all_cops.get(&Yaml::String("Exclude".to_string())) {
                         result.allcops_exclude = yaml_string_list(exc);
+                    }
+                    if let Some(Yaml::Boolean(b)) =
+                        all_cops.get(&Yaml::String("ActiveSupportExtensionsEnabled".to_string()))
+                    {
+                        result.allcops_active_support_extensions_enabled = Some(*b);
                     }
                 }
                 continue;
@@ -199,6 +213,7 @@ fn default_target_ruby_version() -> RubyVersion {
 struct ParsedYaml {
     target_ruby_version: Option<RubyVersion>,
     target_rails_version: Option<RubyVersion>,
+    active_support_extensions_enabled: Option<bool>,
     include: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
     cops_path: Option<PathBuf>,
@@ -218,6 +233,9 @@ impl ParsedYaml {
         ParsedYaml {
             target_ruby_version: self.target_ruby_version.or(base.target_ruby_version),
             target_rails_version: self.target_rails_version.or(base.target_rails_version),
+            active_support_extensions_enabled: self
+                .active_support_extensions_enabled
+                .or(base.active_support_extensions_enabled),
             include: self.include.or(base.include),
             exclude: self.exclude.or(base.exclude),
             cops_path: self.cops_path.or(base.cops_path),
@@ -252,6 +270,15 @@ impl ParsedYaml {
                 .target_ruby_version
                 .unwrap_or_else(default_target_ruby_version),
             target_rails_version: self.target_rails_version,
+            active_support_extensions_enabled: self
+                .active_support_extensions_enabled
+                .unwrap_or(false),
+            // Mirror `saw_include`/`saw_exclude`: snapshot set-ness from the
+            // *merged* `ParsedYaml`, so a value arriving via `inherit_from`
+            // counts as user-set.
+            user_set_active_support_extensions_enabled: self
+                .active_support_extensions_enabled
+                .is_some(),
             files: FilesConfig {
                 include: self.include.unwrap_or_else(default_include),
                 exclude: self.exclude.unwrap_or_default(),
@@ -296,6 +323,8 @@ impl Default for MurphyConfig {
         Self {
             target_ruby_version: default_target_ruby_version(),
             target_rails_version: None,
+            active_support_extensions_enabled: false,
+            user_set_active_support_extensions_enabled: false,
             files: FilesConfig {
                 include: default_include(),
                 exclude: Vec::new(),
@@ -428,6 +457,32 @@ impl MurphyConfig {
     /// True when the user wrote `Enabled: true` for a cop in `.murphy.yml`.
     pub fn is_explicitly_enabled(&self, name: &str) -> bool {
         self.cops.rules.get(name).and_then(|rule| rule.enabled) == Some(true)
+    }
+
+    /// Merge pack-bundled `default.yml` layers (later overrides earlier) for the
+    /// `ActiveSupportExtensionsEnabled` flag. The resolution order is
+    /// `std(false) < pack layers < user`: the user's explicit value — set
+    /// directly OR inherited via `inherit_from` — still wins over pack layers.
+    ///
+    /// This intentionally resolves ONLY the `ActiveSupportExtensionsEnabled`
+    /// flag; Include/Exclude and cop-rule pack defaults flow through
+    /// [`MurphyConfig::load_with_defaults`], so the name's "layers" is scoped to
+    /// that flag by design.
+    pub fn apply_pack_default_layers(&mut self, pack_yamls: &[&str]) {
+        if self.user_set_active_support_extensions_enabled {
+            return; // user wins; pack layers are only defaults
+        }
+        // Entry invariant: when the user did not set the flag, the std base is
+        // false. Reset explicitly so the method is idempotent and does not depend
+        // on no prior load path having written the field.
+        self.active_support_extensions_enabled = false;
+        for yaml in pack_yamls {
+            if let Some(v) =
+                DefaultCopsData::from_yaml(yaml).allcops_active_support_extensions_enabled
+            {
+                self.active_support_extensions_enabled = v; // later layer overrides
+            }
+        }
     }
 
     pub fn severity_override(&self, name: &str) -> Option<Severity> {
@@ -583,6 +638,11 @@ fn parse_yaml_str(text: &str) -> Result<ParsedYaml, ConfigError> {
                         && let Some(rv) = parse_ruby_version(v)
                     {
                         parsed.target_rails_version = Some(rv);
+                    }
+                    if let Some(Yaml::Boolean(b)) =
+                        all_cops.get(&Yaml::String("ActiveSupportExtensionsEnabled".to_string()))
+                    {
+                        parsed.active_support_extensions_enabled = Some(*b);
                     }
                 }
             }
@@ -1012,6 +1072,34 @@ mod tests {
         let cfg = MurphyConfig::from_yaml_str("AllCops:\n  TargetRailsVersion: 7.1.3\n")
             .expect("config parses");
         assert_eq!(cfg.target_rails_version, Some(RubyVersion::new(7, 1)));
+    }
+
+    #[test]
+    fn parses_active_support_extensions_enabled_from_all_cops() {
+        let cfg = MurphyConfig::from_yaml_str("AllCops:\n  ActiveSupportExtensionsEnabled: true\n")
+            .unwrap();
+        assert!(cfg.active_support_extensions_enabled);
+        let cfg = MurphyConfig::from_yaml_str("").unwrap();
+        assert!(!cfg.active_support_extensions_enabled, "default false");
+    }
+
+    #[test]
+    fn default_cops_data_parses_active_support_flag() {
+        assert_eq!(
+            DefaultCopsData::from_yaml("AllCops:\n  ActiveSupportExtensionsEnabled: true\n")
+                .allcops_active_support_extensions_enabled,
+            Some(true),
+        );
+        assert_eq!(
+            DefaultCopsData::from_yaml("AllCops:\n  ActiveSupportExtensionsEnabled: false\n")
+                .allcops_active_support_extensions_enabled,
+            Some(false),
+        );
+        assert_eq!(
+            DefaultCopsData::from_yaml("AllCops:\n  Include:\n    - '**/*.rb'\n")
+                .allcops_active_support_extensions_enabled,
+            None,
+        );
     }
 
     #[test]
@@ -1605,5 +1693,85 @@ Style/StringLiterals:
         );
         let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
         assert_eq!(cfg.files.include, vec!["app/**/*.rb"]);
+    }
+
+    // --- apply_pack_default_layers tests ---
+
+    #[test]
+    fn pack_layer_flips_active_support_default() {
+        // user did not set it; a pack layer says true -> resolves true.
+        let mut cfg = MurphyConfig::from_yaml_str("").unwrap();
+        cfg.apply_pack_default_layers(&["AllCops:\n  ActiveSupportExtensionsEnabled: true\n"]);
+        assert!(cfg.active_support_extensions_enabled);
+    }
+
+    #[test]
+    fn user_value_beats_pack_layer() {
+        let mut cfg =
+            MurphyConfig::from_yaml_str("AllCops:\n  ActiveSupportExtensionsEnabled: false\n")
+                .unwrap();
+        cfg.apply_pack_default_layers(&["AllCops:\n  ActiveSupportExtensionsEnabled: true\n"]);
+        assert!(
+            !cfg.active_support_extensions_enabled,
+            "explicit user false wins"
+        );
+    }
+
+    #[test]
+    fn no_pack_layer_leaves_default_false() {
+        let mut cfg = MurphyConfig::from_yaml_str("").unwrap();
+        cfg.apply_pack_default_layers(&[]);
+        assert!(!cfg.active_support_extensions_enabled);
+    }
+
+    #[test]
+    fn keyless_pack_layer_preserves_earlier_value() {
+        let mut cfg = MurphyConfig::from_yaml_str("").unwrap();
+        cfg.apply_pack_default_layers(&[
+            "AllCops:\n  ActiveSupportExtensionsEnabled: true\n",
+            "AllCops:\n  Include:\n    - 'x'\n", // no ASE key
+        ]);
+        assert!(
+            cfg.active_support_extensions_enabled,
+            "keyless layer must not clobber earlier value"
+        );
+    }
+
+    #[test]
+    fn later_pack_layer_overrides_earlier() {
+        // earlier true, later false -> later wins (when user did not set).
+        let mut cfg = MurphyConfig::from_yaml_str("").unwrap();
+        cfg.apply_pack_default_layers(&[
+            "AllCops:\n  ActiveSupportExtensionsEnabled: true\n",
+            "AllCops:\n  ActiveSupportExtensionsEnabled: false\n",
+        ]);
+        assert!(
+            !cfg.active_support_extensions_enabled,
+            "later layer overrides earlier"
+        );
+    }
+
+    #[test]
+    fn inherited_user_false_beats_pack_layer_on_disk() {
+        // base.yml sets it false; .murphy.yml inherits base + lists the rails pack.
+        // The inherited value is still a *user* setting, so the pack layer must
+        // NOT override it. Pins that user_set is computed AFTER merge_over.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("base.yml"),
+            "AllCops:\n  ActiveSupportExtensionsEnabled: false\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".murphy.yml"),
+            "inherit_from: base.yml\nplugins:\n  - murphy-rails\n",
+        )
+        .unwrap();
+        let mut cfg = MurphyConfig::load(dir.path()).unwrap();
+        cfg.apply_pack_default_layers(&["AllCops:\n  ActiveSupportExtensionsEnabled: true\n"]);
+        assert!(
+            !cfg.active_support_extensions_enabled,
+            "inherited user false wins over pack layer"
+        );
     }
 }

@@ -186,3 +186,230 @@ fn rails_rule_section_does_not_error_lint_setup() {
         .assert()
         .code(0);
 }
+
+/// Resolve the `murphy-example-pack` cdylib artifact (which ships NO
+/// bundled `default.yml`), mirroring [`rails_pack_path`].
+fn example_pack_path() -> std::path::PathBuf {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+        });
+    let (prefix, ext) = if cfg!(target_os = "macos") {
+        ("libmurphy_example_pack", "dylib")
+    } else {
+        ("libmurphy_example_pack", "so")
+    };
+    let top = target_dir.join("debug").join(format!("{prefix}.{ext}"));
+    if top.exists() {
+        return top;
+    }
+    let deps = target_dir.join("debug").join("deps");
+    let deps_no_hash = deps.join(format!("{prefix}.{ext}"));
+    if deps_no_hash.exists() {
+        return deps_no_hash;
+    }
+    if let Ok(entries) = std::fs::read_dir(&deps) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(prefix)
+                && name.ends_with(&format!(".{ext}"))
+                && name.as_bytes().get(prefix.len()) == Some(&b'-')
+            {
+                return entry.path();
+            }
+        }
+    }
+    top
+}
+
+#[test]
+fn loader_reads_rails_pack_bundled_default_config() {
+    // The rails pack exports `MURPHY_PLUGIN_DEFAULT_CONFIG` pointing at its
+    // embedded `config/default.yml`. The loader must copy those bytes to an
+    // owned String, surfaced via `default_config_yaml()`.
+    let pack = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    let loaded =
+        murphy_core::plugin_loader::load_plugin_pack(&pack).expect("rails pack loads cleanly");
+
+    let yaml = loaded
+        .default_config_yaml()
+        .expect("rails pack ships a bundled default.yml");
+    assert!(
+        yaml.contains("ActiveSupportExtensionsEnabled"),
+        "rails default.yml should set the ASE default, got: {yaml:?}"
+    );
+}
+
+#[test]
+fn loader_yields_none_for_pack_without_bundled_config() {
+    // The example pack exports no `MURPHY_PLUGIN_DEFAULT_CONFIG` symbol;
+    // absence is normal and must yield `None` (not an error).
+    let pack = example_pack_path()
+        .canonicalize()
+        .expect("example-pack artifact should exist");
+
+    let loaded =
+        murphy_core::plugin_loader::load_plugin_pack(&pack).expect("example pack loads cleanly");
+
+    assert!(
+        loaded.default_config_yaml().is_none(),
+        "example pack ships no bundled config → None"
+    );
+}
+
+#[test]
+fn registry_pack_default_configs_aggregates_and_skips_none() {
+    use murphy_core::{CopRegistry, MurphyConfig};
+
+    let rails = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+    let example = example_pack_path()
+        .canonicalize()
+        .expect("example-pack artifact should exist");
+
+    let dir = tempdir().expect("tempdir");
+    // Load BOTH packs: rails ships a default.yml (Some), example does not
+    // (None). `pack_default_configs()` must surface exactly the rails layer.
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\n  - name: murphy-example-pack\n    path: {:?}\n",
+        rails.display().to_string(),
+        example.display().to_string(),
+    );
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write yml");
+
+    let config = MurphyConfig::load(dir.path()).expect("config loads");
+    let registry = CopRegistry::discover_with_config(dir.path(), &config, &[])
+        .expect("registry discovers both packs");
+
+    let layers = registry.pack_default_configs();
+    assert_eq!(
+        layers.len(),
+        1,
+        "only the rails pack ships a bundled default.yml (example skipped as None)"
+    );
+    assert!(layers[0].contains("ActiveSupportExtensionsEnabled"));
+}
+
+#[test]
+fn applying_rails_pack_layer_flips_active_support_extensions_enabled() {
+    // The single behaviour this wiring exists to produce: loading the rails
+    // pack (whose default.yml sets ASE true) flips the run-level config's
+    // `active_support_extensions_enabled` from its std-default false to true.
+    //
+    // Built against the PRODUCTION constructor `load_with_defaults` with
+    // `murphy_std::BUNDLED_DEFAULTS_YAML` (which carries
+    // `AllCops.ActiveSupportExtensionsEnabled: false` in its base layer).
+    // That base default lives in `base_defaults`, NOT in the user-set channel,
+    // so `apply_pack_default_layers` must NOT treat it as a user override and
+    // must still let the pack layer flip ASE on. Using `load` (no defaults)
+    // would mask a regression where the std default makes `user_set` true and
+    // early-returns.
+    use murphy_core::{CopRegistry, MurphyConfig};
+
+    let rails = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    let dir = tempdir().expect("tempdir");
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\n",
+        rails.display().to_string(),
+    );
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write yml");
+
+    let mut config =
+        MurphyConfig::load_with_defaults(dir.path(), murphy_std::BUNDLED_DEFAULTS_YAML)
+            .expect("config loads with std defaults");
+    assert!(
+        !config.active_support_extensions_enabled,
+        "std default is false before any pack layer"
+    );
+
+    let registry = CopRegistry::discover_with_config(dir.path(), &config, &[])
+        .expect("registry discovers the rails pack");
+    config.apply_pack_default_layers(&registry.pack_default_configs());
+
+    assert!(
+        config.active_support_extensions_enabled,
+        "loading the rails pack must flip ASE true even with std defaults folded in"
+    );
+}
+
+#[test]
+fn rails_pack_exempts_lambda_symbol_proc_through_full_lint_pipeline() {
+    // End-to-end payoff: a `->(x) { x.method }` lambda is a `Style/SymbolProc`
+    // candidate, but RuboCop (with rubocop-rails) exempts lambda/proc blocks
+    // under `AllCops.ActiveSupportExtensionsEnabled`. The rails pack's bundled
+    // `default.yml` sets that flag true. This test runs the REAL `murphy lint`
+    // binary through its full pipeline (embedded default.yml → loader symbol
+    // read → `apply_pack_default_layers` → ASE flag → dispatch → Cx accessor →
+    // SymbolProc exemption) and asserts the lambda offense is suppressed.
+    //
+    // The CONTROL arm (same fixture, NO pack) asserts the SAME lambda STILL
+    // flags `Style/SymbolProc`, proving the pack is what causes the exemption
+    // — not that the cop simply never fires on this shape.
+    let pack = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    // A lambda whose sole parameter is the receiver of a single method call —
+    // the canonical SymbolProc shape, and exactly Mastodon's
+    // `normalizes :x, with: ->(v) { v.strip }` form.
+    let fixture = "# frozen_string_literal: true\nFOO = ->(v) { v.strip }\n";
+
+    // ── pack-loaded arm: lambda exemption active, NO SymbolProc offense ──
+    let with_pack = tempdir().expect("tempdir");
+    let rb = with_pack.path().join("lam.rb");
+    fs::write(&rb, fixture).expect("write rb");
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\n",
+        pack.display().to_string()
+    );
+    fs::write(with_pack.path().join(".murphy.yml"), yml).expect("write yml");
+
+    // Pin exit 0: the lambda is the only offense candidate and it must be
+    // exempted, so a clean run is exit 0. Pinning the code guards the
+    // absence-assertion below from passing vacuously on a setup/internal
+    // error (exit 2/3) that would also produce no `Style/SymbolProc` line.
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(with_pack.path())
+        .arg("lint")
+        .arg(&rb)
+        .assert()
+        .code(0);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        !stdout.contains("Style/SymbolProc"),
+        "rails pack must exempt the lambda from Style/SymbolProc; got:\n{stdout}"
+    );
+
+    // ── control arm: SAME fixture, NO pack → SymbolProc fires ──
+    let no_pack = tempdir().expect("tempdir");
+    let rb2 = no_pack.path().join("lam.rb");
+    fs::write(&rb2, fixture).expect("write rb");
+    // No `.murphy.yml` at all: ASE defaults false, so the lambda is NOT exempt.
+
+    // Pin exit 1: the lambda is NOT exempt here, so the lint must report the
+    // offense and exit 1 (offenses found). This rules out a vacuous pass from
+    // a setup error and confirms the offense line below comes from a real run.
+    let assert2 = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(no_pack.path())
+        .arg("lint")
+        .arg(&rb2)
+        .assert()
+        .code(1);
+    let stdout2 = String::from_utf8_lossy(&assert2.get_output().stdout);
+    assert!(
+        stdout2.contains("Style/SymbolProc"),
+        "without the rails pack the lambda MUST flag Style/SymbolProc (proves \
+         the pack is the cause of the exemption); got:\n{stdout2}"
+    );
+}

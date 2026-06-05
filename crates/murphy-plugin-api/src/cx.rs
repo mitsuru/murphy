@@ -496,6 +496,11 @@ impl<'a> Cx<'a> {
             .is_none_or(|target| target >= RubyVersion::new(major, minor))
     }
 
+    /// Configured `AllCops.ActiveSupportExtensionsEnabled` (default false).
+    pub fn active_support_extensions_enabled(&self) -> bool {
+        self.raw.active_support_extensions_enabled
+    }
+
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
     pub fn alloc_node_slice(&self, elements: &[NodeId]) -> &'a [NodeId] {
         if elements.is_empty() {
@@ -2994,6 +2999,7 @@ mod tests {
                 len: file_path.len(),
             },
             target_rails_version: 0,
+            active_support_extensions_enabled: false,
         }
     }
 
@@ -3041,6 +3047,23 @@ mod tests {
 
         assert_eq!(cx.target_rails_version(), None);
         assert!(cx.rails_version_at_least(6, 0));
+    }
+
+    #[test]
+    fn active_support_extensions_enabled_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.active_support_extensions_enabled = true;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.active_support_extensions_enabled());
+
+        let default_raw = cx_raw_for(&ast, &fns);
+        let default_cx = unsafe { Cx::from_raw(&default_raw) };
+        assert!(!default_cx.active_support_extensions_enabled());
     }
 
     #[test]

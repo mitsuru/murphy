@@ -7,8 +7,7 @@
 //! upstream_cop: Style/SymbolProc
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-pfcb
+//! gap_issues: []
 //! notes: >
 //!   Flags blocks (numblocks, and itblocks) that call a single argument-less
 //!   method on their sole block parameter. Autocorrects to `&:method_name`.
@@ -31,13 +30,16 @@
 //!     - AllowMethodsWithArguments: skip if call has args (default false)
 //!     - Unsafe hash: skip .reject/.select on hash literal receiver
 //!     - Unsafe array: skip .min/.max on array literal receiver
+//!     - AllCops::ActiveSupportExtensionsEnabled: when true, lambda/proc/
+//!       Proc.new blocks are exempt (mirrors RuboCop's
+//!       `proc_node?(dispatch) || LAMBDA_OR_PROC.include?(method_name)`). The
+//!       flag is driven by the rails pack default and the shared
+//!       `cx.active_support_extensions_enabled()` accessor; the default
+//!       (false) path still flags those blocks, matching RuboCop's default.
+//!       Proc.new is exempted only for a top-level `Proc`/`::Proc` constant,
+//!       not a named scope like `Foo::Proc`.
 //!
 //!   Gaps:
-//!     - AllCops::ActiveSupportExtensionsEnabled (murphy-pfcb): no AllCops
-//!       config infra. RuboCop exempts lambda/proc/Proc.new blocks only when
-//!       this is true; Murphy always uses the false/default path (those blocks
-//!       ARE flagged), matching the default RuboCop behavior. Only diverges
-//!       when a user sets the flag to true.
 //!     - AllowComments does not yet exclude rubocop:disable-only comments
 //!       (`comments_contain_disables?`); a block whose sole comment is a
 //!       disable directive is still treated as "has comments".
@@ -128,6 +130,14 @@ fn check_any_block(node: NodeId, cx: &Cx<'_>, opts: &Options) {
     } else {
         return;
     };
+
+    // ActiveSupport extensions enabled: lambda/proc/Proc.new are exempt
+    // (mirrors RuboCop's `proc_node?(dispatch) || LAMBDA_OR_PROC.include?` guard).
+    if cx.active_support_extensions_enabled()
+        && is_lambda_or_proc_dispatch(node, call, block_method, cx)
+    {
+        return;
+    }
 
     // Unsafe hash usage: hash.reject / hash.select
     if is_unsafe_hash_usage(call, block_method, cx) {
@@ -277,6 +287,41 @@ fn extract_body_send_implicit<'a>(
 // ---------------------------------------------------------------------------
 // Exclusion helpers
 // ---------------------------------------------------------------------------
+
+/// Returns `true` if the block dispatch is a `lambda`/`proc`/`Proc.new` form,
+/// matching RuboCop's `proc_node?(dispatch) || LAMBDA_OR_PROC.include?(name)`
+/// guard used under `ActiveSupportExtensionsEnabled`.
+///
+/// `proc_node?` matches `->` lambda literals and `Proc.new`; `LAMBDA_OR_PROC`
+/// is `[:lambda, :proc]`. The `Proc.new` branch only accepts a top-level
+/// `Proc` constant (nil or `::` scope), not a named scope like `Foo::Proc`,
+/// mirroring RuboCop's `(const {nil? cbase} :Proc)` pattern.
+fn is_lambda_or_proc_dispatch(node: NodeId, call: NodeId, block_method: &str, cx: &Cx<'_>) -> bool {
+    // Intentionally redundant with the caller's `block_method == "lambda"`
+    // derivation (kept for self-protection / RuboCop `proc_node?` parity).
+    if cx.is_lambda_literal(node) {
+        return true;
+    }
+    if matches!(block_method, "lambda" | "proc") {
+        return true;
+    }
+    if block_method != "new" {
+        return false;
+    }
+    let Some(recv) = cx.call_receiver(call).get() else {
+        return false;
+    };
+    let NodeKind::Const { scope, name } = *cx.kind(recv) else {
+        return false;
+    };
+    // Only top-level `Proc` (nil scope) or `::Proc` (cbase scope), not a named
+    // scope like `Foo::Proc`.
+    let top_level = match scope.get() {
+        None => true,
+        Some(s) => matches!(cx.kind(s), NodeKind::Cbase),
+    };
+    top_level && cx.symbol_str(name) == "Proc"
+}
 
 fn is_unsafe_hash_usage(call: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
     if !matches!(method_name, "reject" | "select") {
@@ -799,6 +844,62 @@ mod tests {
                 allowed_methods: vec![],
                 allowed_patterns: vec!["^reduce$".to_string()],
             })
+            .expect_offense(indoc! {"
+                coll.map { |e| e.upcase }
+                         ^^^^^^^^^^^^^^^^ Pass `&:upcase` as an argument to `map` instead of a block.
+            "});
+    }
+
+    // --- ActiveSupportExtensionsEnabled: lambda/proc/Proc.new exemption ---
+
+    #[test]
+    fn exempts_lambda_when_active_support_enabled() {
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
+            .expect_no_offenses("->(x) { x.method }\n");
+    }
+
+    #[test]
+    fn exempts_proc_when_active_support_enabled() {
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
+            .expect_no_offenses("proc { |x| x.method }\n");
+    }
+
+    #[test]
+    fn exempts_proc_new_when_active_support_enabled() {
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
+            .expect_no_offenses("Proc.new { |x| x.method }\n");
+    }
+
+    #[test]
+    fn exempts_lambda_keyword_when_active_support_enabled() {
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
+            .expect_no_offenses("lambda { |x| x.method }\n");
+    }
+
+    #[test]
+    fn flags_namespaced_proc_new_when_active_support_enabled() {
+        // Regression guard for the `top_level` scope tightening in
+        // `is_lambda_or_proc_dispatch`: `Foo::Proc.new` is a named-scope
+        // constant, NOT top-level `Proc`/`::Proc`, so it is still flagged even
+        // when ActiveSupportExtensionsEnabled is true.
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
+            .expect_offense(indoc! {"
+                Foo::Proc.new { |x| x.method }
+                              ^^^^^^^^^^^^^^^^ Pass `&:method` as an argument to `new` instead of a block.
+            "});
+    }
+
+    #[test]
+    fn flags_regular_block_even_when_active_support_enabled() {
+        // The exemption is lambda/proc-only; a normal block is still flagged
+        // even when the flag is enabled.
+        test::<SymbolProc>()
+            .with_active_support_extensions_enabled(true)
             .expect_offense(indoc! {"
                 coll.map { |e| e.upcase }
                          ^^^^^^^^^^^^^^^^ Pass `&:upcase` as an argument to `map` instead of a block.

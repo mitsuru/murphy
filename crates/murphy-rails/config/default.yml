@@ -1,0 +1,4 @@
+# Murphy rails pack bundled defaults — mirrors rubocop-rails: enable
+# ActiveSupport extension awareness for cops that consult it.
+AllCops:
+  ActiveSupportExtensionsEnabled: true
