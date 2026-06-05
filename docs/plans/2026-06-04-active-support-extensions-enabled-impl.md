@@ -152,7 +152,36 @@ fn no_pack_layer_leaves_default_false() {
     cfg.apply_pack_default_layers(&[]);
     assert!(!cfg.active_support_extensions_enabled);
 }
+
+#[test]
+fn inherited_user_false_beats_pack_layer_on_disk() {
+    // base.yml sets it false; .murphy.yml inherits base + lists the rails pack.
+    // The inherited value is still a *user* setting, so the pack layer must
+    // NOT override it. Pins that user_set is computed AFTER merge_over.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("base.yml"),
+        "AllCops:\n  ActiveSupportExtensionsEnabled: false\n",
+    ).unwrap();
+    std::fs::write(
+        dir.path().join(".murphy.yml"),
+        "inherit_from: base.yml\nplugins:\n  - murphy-rails\n",
+    ).unwrap();
+    let mut cfg = MurphyConfig::load(dir.path()).unwrap();
+    cfg.apply_pack_default_layers(&["AllCops:\n  ActiveSupportExtensionsEnabled: true\n"]);
+    assert!(!cfg.active_support_extensions_enabled, "inherited user false wins over pack layer");
+}
 ```
+
+> **user_set timing (advisor).** `user_set_active_support_extensions_enabled`
+> MUST be computed **after** `merge_over`, so a value pulled in via
+> `inherit_from` counts as user-set (it does in RuboCop). Concretely: the
+> `saw_*`/`user_set` flag is the `.is_some()` of the *merged* `ParsedYaml`
+> option, not of the leaf file alone — `merge_over` must propagate the
+> `Option` (and thus its set-ness) before `into_murphy_config` snapshots
+> `user_set`. Mirror the existing `saw_include`/`saw_exclude` merge order
+> exactly. (Use the leaf file's path layout for the disk test;
+> `MurphyConfig::load` is the entry that walks `inherit_from`.)
 
 **Step 2: Run** `cargo test -p murphy-core pack_layer 2>&1 | tail` and `user_value_beats` → FAIL (no method).
 
@@ -218,6 +247,22 @@ pub static MURPHY_PLUGIN_DEFAULT_CONFIG: murphy_plugin_api::RawSlice =
 
 **Step 3: Verify** `cargo build -p murphy-rails 2>&1 | tail -3` → builds; confirm the symbol is exported:
 `nm -D target/debug/libmurphy_rails.so 2>/dev/null | grep MURPHY_PLUGIN_DEFAULT_CONFIG` (Linux) → one entry.
+
+> **Fallback if `nm -D` shows nothing.** A `#[no_mangle] pub static` can be
+> dropped from `.dynsym` by `--gc-sections` because nothing in the crate
+> references it. If the symbol is absent, do **NOT** spelunk `#[used]`,
+> `#[used(linker)]`, or linker flags — switch to the **function-accessor**
+> form, which the linker keeps because it is an exported callable:
+> ```rust
+> #[no_mangle]
+> pub extern "C" fn murphy_plugin_default_config() -> murphy_plugin_api::RawSlice {
+>     murphy_plugin_api::RawSlice::from_str(BUNDLED_DEFAULTS_YAML)
+> }
+> ```
+> Then the loader (Task 7) resolves `b"murphy_plugin_default_config\0"` as
+> `library.get::<extern "C" fn() -> RawSlice>` and calls it instead of
+> dereferencing a `*const RawSlice`. Pick whichever the build actually
+> exports; keep both sides (rails export + loader read) consistent.
 
 **Step 4: Commit** `feat(rails): embed default.yml + MURPHY_PLUGIN_DEFAULT_CONFIG data symbol (murphy-pfcb)`
 
@@ -349,10 +394,15 @@ All green. `crates/murphy-cli/tests/rails_pack_e2e.rs` must still load the (rebu
 
 **Step 3: Real-world check (Mastodon)**
 ```bash
-cargo build --release -p murphy-cli
+# CRITICAL: build the rails cdylib too. `murphy-rails` is a [dev-dependencies]
+# of murphy-cli, so `cargo build --release -p murphy-cli` does NOT rebuild
+# libmurphy_rails.so — the stale .so lacks the new symbol, the loader returns
+# None, ASE stays false, and you get a false-negative 11 offenses with all
+# unit tests still green. Build the workspace (or name both crates):
+cargo build --release            # or: cargo build --release -p murphy-cli -p murphy-rails
 cd /home/ubuntu/mastodon && ~/projects/murphy/target/release/murphy lint 2>/dev/null | grep -c "Style/SymbolProc:"
 ```
-Expected: **0** (was 11). Note: the release `libmurphy_rails.so` must carry the new symbol — it is rebuilt by the same `cargo build --release`.
+Expected: **0** (was 11). Verify the freshly-built release `libmurphy_rails.so` carries the symbol: `nm -D target/release/libmurphy_rails.so | grep MURPHY_PLUGIN_DEFAULT_CONFIG`.
 
 **Step 4: Commit** any gate fixups.
 
