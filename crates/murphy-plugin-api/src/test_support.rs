@@ -818,6 +818,11 @@ fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
 /// Build a `CxRaw` borrowing from `ast`, `fns`, `sink`, `var_model`, and the
 /// caller's per-test options JSON blob. The returned value contains raw
 /// pointers; the caller keeps all five alive for the duration of the dispatch.
+// Each AllCops context scalar (target_rails_version, ActiveSupportExtensionsEnabled,
+// …) is threaded positionally; this private test helper exceeds clippy's arg
+// limit as a result. Tracked for an options-struct refactor (murphy-pfcb
+// follow-up); allow here rather than churn the threading mid-feature.
+#[allow(clippy::too_many_arguments)]
 fn cx_raw_for(
     ast: &Ast,
     fns: &FnTable,
