@@ -1,7 +1,10 @@
 //! `#[repr(C)]` types that cross the plugin ABI boundary (ADR 0038).
 //!
-//! Every struct here has a frozen layout: the `#[cfg(test)]` `offset_of!`
-//! assertions are the freeze guard. New fields append at the end only.
+//! Every `#[repr(C)]` struct here has a frozen layout: the `#[cfg(test)]`
+//! `offset_of!` assertions are the freeze guard. New fields append at the end
+//! only. The sole exception is [`AllCopsContext`], a plain host-side
+//! convenience struct (not `#[repr(C)]`, not on the wire) that lives here for
+//! proximity to the `CxRaw` fields it unpacks into; it has no layout freeze.
 
 use std::ffi::c_void;
 
@@ -273,6 +276,22 @@ impl RubyVersion {
             Some(Self::new(wire / 100, wire % 100))
         }
     }
+}
+
+/// Host-resolved `AllCops.*` context scalars threaded into every cop's
+/// `CxRaw` for one run. Bundles the growing set of run-wide AllCops knobs
+/// (`TargetRailsVersion`, `ActiveSupportExtensionsEnabled`, …) so dispatch
+/// and test-support signatures don't grow one positional parameter per knob.
+///
+/// This is a plain host-side convenience struct — **not** `#[repr(C)]` and
+/// **not** part of the plugin wire ABI. `build_cx_raw` unpacks it into the
+/// individual `CxRaw` fields; do not add it to the `CxRaw` offset assertions.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AllCopsContext {
+    /// `AllCops.TargetRailsVersion` (`None` = unset).
+    pub target_rails_version: Option<RubyVersion>,
+    /// `AllCops.ActiveSupportExtensionsEnabled` (default `false`).
+    pub active_support_extensions_enabled: bool,
 }
 
 /// The dispatch entry for one cop: invoked once per matching node.

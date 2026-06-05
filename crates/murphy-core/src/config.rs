@@ -1,5 +1,5 @@
 use crate::Severity;
-use murphy_plugin_api::RubyVersion;
+use murphy_plugin_api::{AllCopsContext, RubyVersion};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -534,6 +534,15 @@ impl MurphyConfig {
             .rules
             .values()
             .any(|rule| !rule.include.is_empty() || !rule.exclude.is_empty())
+    }
+
+    /// The run-wide `AllCops.*` context scalars resolved from this config,
+    /// bundled for threading into dispatch (and thus every cop's `CxRaw`).
+    pub fn allcops_context(&self) -> AllCopsContext {
+        AllCopsContext {
+            target_rails_version: self.target_rails_version,
+            active_support_extensions_enabled: self.active_support_extensions_enabled,
+        }
     }
 
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
@@ -1081,6 +1090,36 @@ mod tests {
         assert!(cfg.active_support_extensions_enabled);
         let cfg = MurphyConfig::from_yaml_str("").unwrap();
         assert!(!cfg.active_support_extensions_enabled, "default false");
+    }
+
+    #[test]
+    fn allcops_context_bundles_resolved_scalars() {
+        // The sole aggregation point MurphyConfig -> AllCopsContext. Use
+        // non-default values for *both* fields so an accidental swap or a
+        // dropped field would change the asserted output. (A literal swap
+        // would not compile — the fields differ in type — but an omission
+        // that leaves a field at its default would slip through without this.)
+        let cfg = MurphyConfig::from_yaml_str(
+            "AllCops:\n  TargetRailsVersion: 5.2\n  ActiveSupportExtensionsEnabled: true\n",
+        )
+        .expect("config parses");
+
+        let ctx = cfg.allcops_context();
+        assert_eq!(ctx.target_rails_version, Some(RubyVersion::new(5, 2)));
+        assert!(ctx.active_support_extensions_enabled);
+        // And the context mirrors the config's own resolved fields exactly.
+        assert_eq!(ctx.target_rails_version, cfg.target_rails_version);
+        assert_eq!(
+            ctx.active_support_extensions_enabled,
+            cfg.active_support_extensions_enabled
+        );
+
+        // Defaults flow through untouched.
+        let default_ctx = MurphyConfig::from_yaml_str("")
+            .expect("empty config parses")
+            .allcops_context();
+        assert_eq!(default_ctx.target_rails_version, None);
+        assert!(!default_ctx.active_support_extensions_enabled);
     }
 
     #[test]
