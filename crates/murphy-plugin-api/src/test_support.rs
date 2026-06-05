@@ -135,8 +135,7 @@ pub fn assert_cop_parity_metadata_for_crate(manifest_dir: impl AsRef<Path>) {
 pub fn test<T: NodeCop + Default>() -> Tester<T> {
     Tester {
         options_json: DEFAULT_OPTIONS_JSON.to_string(),
-        target_rails_version: None,
-        active_support_extensions_enabled: false,
+        context: crate::AllCopsContext::default(),
         _phantom: PhantomData,
     }
 }
@@ -150,8 +149,7 @@ pub fn test<T: NodeCop + Default>() -> Tester<T> {
 /// value.
 pub struct Tester<T: NodeCop + Default> {
     options_json: String,
-    target_rails_version: Option<crate::RubyVersion>,
-    active_support_extensions_enabled: bool,
+    context: crate::AllCopsContext,
     _phantom: PhantomData<fn() -> T>,
 }
 
@@ -167,13 +165,13 @@ impl<T: NodeCop + Default> Tester<T> {
 
     /// Set `AllCops.TargetRailsVersion` for this cop test.
     pub fn with_target_rails_version(mut self, major: u16, minor: u16) -> Self {
-        self.target_rails_version = Some(crate::RubyVersion::new(major, minor));
+        self.context.target_rails_version = Some(crate::RubyVersion::new(major, minor));
         self
     }
 
     /// Set `AllCops.ActiveSupportExtensionsEnabled` for this cop test.
     pub fn with_active_support_extensions_enabled(mut self, enabled: bool) -> Self {
-        self.active_support_extensions_enabled = enabled;
+        self.context.active_support_extensions_enabled = enabled;
         self
     }
 
@@ -182,24 +180,14 @@ impl<T: NodeCop + Default> Tester<T> {
     /// annotation grammar.
     #[track_caller]
     pub fn expect_offense(&self, annotated: &str) -> &Self {
-        assert_offenses_match_inner::<T>(
-            annotated,
-            &self.options_json,
-            self.target_rails_version,
-            self.active_support_extensions_enabled,
-        );
+        assert_offenses_match_inner::<T>(annotated, &self.options_json, self.context);
         self
     }
 
     /// Assert the cop emits no offenses against `src`.
     #[track_caller]
     pub fn expect_no_offenses(&self, src: &str) -> &Self {
-        assert_no_offenses_inner::<T>(
-            src,
-            &self.options_json,
-            self.target_rails_version,
-            self.active_support_extensions_enabled,
-        );
+        assert_no_offenses_inner::<T>(src, &self.options_json, self.context);
         self
     }
 
@@ -207,13 +195,7 @@ impl<T: NodeCop + Default> Tester<T> {
     /// and that applying its autocorrect edits produces `after`.
     #[track_caller]
     pub fn expect_correction(&self, annotated: &str, after: &str) -> &Self {
-        assert_correction_match_inner::<T>(
-            annotated,
-            after,
-            &self.options_json,
-            self.target_rails_version,
-            self.active_support_extensions_enabled,
-        );
+        assert_correction_match_inner::<T>(annotated, after, &self.options_json, self.context);
         self
     }
 
@@ -222,12 +204,7 @@ impl<T: NodeCop + Default> Tester<T> {
     /// [`Tester::expect_offense`] when both must hold.
     #[track_caller]
     pub fn expect_no_corrections(&self, src: &str) -> &Self {
-        assert_no_corrections_inner::<T>(
-            src,
-            &self.options_json,
-            self.target_rails_version,
-            self.active_support_extensions_enabled,
-        );
+        assert_no_corrections_inner::<T>(src, &self.options_json, self.context);
         self
     }
 }
@@ -236,19 +213,13 @@ impl<T: NodeCop + Default> Tester<T> {
 fn assert_no_offenses_inner<T: NodeCop + Default>(
     src: &str,
     options_json: &str,
-    target_rails_version: Option<crate::RubyVersion>,
-    active_support_extensions_enabled: bool,
+    ctx: crate::AllCopsContext,
 ) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!("expect_no_offenses must not contain annotations; use expect_offense instead");
     }
-    let offenses = run_cop_with_options_json_and_target_rails_version::<T>(
-        src,
-        options_json,
-        target_rails_version,
-        active_support_extensions_enabled,
-    );
+    let offenses = run_cop_with_options_json_and_context::<T>(src, options_json, ctx);
     if !offenses.is_empty() {
         panic!(
             "expect_no_offenses found {} offense(s) for {}",
@@ -342,8 +313,7 @@ fn nth_char_byte(line: &str, n: usize) -> usize {
 fn assert_offenses_match_inner<T: NodeCop + Default>(
     annotated: &str,
     options_json: &str,
-    target_rails_version: Option<crate::RubyVersion>,
-    active_support_extensions_enabled: bool,
+    ctx: crate::AllCopsContext,
 ) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
@@ -351,12 +321,7 @@ fn assert_offenses_match_inner<T: NodeCop + Default>(
             "expect_offense must contain at least one annotation; use expect_no_offenses instead"
         );
     }
-    let actuals = run_cop_with_options_json_and_target_rails_version::<T>(
-        &cleaned,
-        options_json,
-        target_rails_version,
-        active_support_extensions_enabled,
-    );
+    let actuals = run_cop_with_options_json_and_context::<T>(&cleaned, options_json, ctx);
     assert_offenses_match("expect_offense", &cleaned, &expected, &actuals);
 }
 
@@ -413,8 +378,7 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
     annotated: &str,
     expected_after: &str,
     options_json: &str,
-    target_rails_version: Option<crate::RubyVersion>,
-    active_support_extensions_enabled: bool,
+    ctx: crate::AllCopsContext,
 ) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
@@ -423,12 +387,8 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
         );
     }
 
-    let captured = run_cop_with_options_and_edits_json_and_target_rails_version::<T>(
-        &cleaned,
-        options_json,
-        target_rails_version,
-        active_support_extensions_enabled,
-    );
+    let captured =
+        run_cop_with_options_and_edits_json_and_context::<T>(&cleaned, options_json, ctx);
     assert_offenses_match("expect_correction", &cleaned, &expected, &captured.offenses);
 
     let actual_after = apply_captured_edits(&cleaned, &captured.edits);
@@ -445,20 +405,14 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
 fn assert_no_corrections_inner<T: NodeCop + Default>(
     src: &str,
     options_json: &str,
-    target_rails_version: Option<crate::RubyVersion>,
-    active_support_extensions_enabled: bool,
+    ctx: crate::AllCopsContext,
 ) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!("expect_no_corrections must not contain annotations; use expect_correction instead");
     }
 
-    let captured = run_cop_with_options_and_edits_json_and_target_rails_version::<T>(
-        src,
-        options_json,
-        target_rails_version,
-        active_support_extensions_enabled,
-    );
+    let captured = run_cop_with_options_and_edits_json_and_context::<T>(src, options_json, ctx);
     if !captured.edits.is_empty() {
         panic!(
             "expect_no_corrections found {} edit(s) for {}",
@@ -653,41 +607,36 @@ fn run_cop_with_options_json<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
 ) -> Vec<CapturedOffense> {
-    run_cop_with_options_json_and_target_rails_version::<T>(source, options_json, None, false)
-}
-
-fn run_cop_with_options_json_and_target_rails_version<T: NodeCop + Default>(
-    source: &str,
-    options_json: &str,
-    target_rails_version: Option<crate::RubyVersion>,
-    active_support_extensions_enabled: bool,
-) -> Vec<CapturedOffense> {
-    run_cop_with_options_and_edits_json_and_target_rails_version::<T>(
+    run_cop_with_options_json_and_context::<T>(
         source,
         options_json,
-        target_rails_version,
-        active_support_extensions_enabled,
+        crate::AllCopsContext::default(),
     )
-    .offenses
+}
+
+fn run_cop_with_options_json_and_context<T: NodeCop + Default>(
+    source: &str,
+    options_json: &str,
+    ctx: crate::AllCopsContext,
+) -> Vec<CapturedOffense> {
+    run_cop_with_options_and_edits_json_and_context::<T>(source, options_json, ctx).offenses
 }
 
 fn run_cop_with_options_and_edits_json<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
 ) -> CapturedRun {
-    run_cop_with_options_and_edits_json_and_target_rails_version::<T>(
+    run_cop_with_options_and_edits_json_and_context::<T>(
         source,
         options_json,
-        None,
-        false,
+        crate::AllCopsContext::default(),
     )
 }
 
-fn run_cop_with_options_and_edits_json_and_target_rails_version<T: NodeCop + Default>(
+fn run_cop_with_options_and_edits_json_and_context<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
-    target_rails_version: Option<crate::RubyVersion>,
-    active_support_extensions_enabled: bool,
+    ctx: crate::AllCopsContext,
 ) -> CapturedRun {
     let ast = murphy_translate::translate(source, "t.rb");
     let var_model = crate::var_semantic_model::VarSemanticModel::build(&ast);
@@ -710,16 +659,7 @@ fn run_cop_with_options_and_edits_json_and_target_rails_version<T: NodeCop + Def
         ptr: options_json.as_ptr(),
         len: options_json.len(),
     };
-    let raw = cx_raw_for(
-        &ast,
-        &fns,
-        cop_name,
-        &sink,
-        options_slice,
-        &var_model,
-        target_rails_version,
-        active_support_extensions_enabled,
-    );
+    let raw = cx_raw_for(&ast, &fns, cop_name, &sink, options_slice, &var_model, ctx);
     let cx = unsafe { Cx::from_raw(&raw) };
 
     if T::KINDS.is_empty() {
@@ -818,11 +758,6 @@ fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
 /// Build a `CxRaw` borrowing from `ast`, `fns`, `sink`, `var_model`, and the
 /// caller's per-test options JSON blob. The returned value contains raw
 /// pointers; the caller keeps all five alive for the duration of the dispatch.
-// Each AllCops context scalar (target_rails_version, ActiveSupportExtensionsEnabled,
-// …) is threaded positionally; this private test helper exceeds clippy's arg
-// limit as a result. Tracked for an options-struct refactor (murphy-pfcb
-// follow-up); allow here rather than churn the threading mid-feature.
-#[allow(clippy::too_many_arguments)]
 fn cx_raw_for(
     ast: &Ast,
     fns: &FnTable,
@@ -830,8 +765,7 @@ fn cx_raw_for(
     sink: &RefCell<Sink>,
     options_json: RawSlice,
     var_model: &crate::var_semantic_model::VarSemanticModel,
-    target_rails_version: Option<crate::RubyVersion>,
-    active_support_extensions_enabled: bool,
+    ctx: crate::AllCopsContext,
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -866,8 +800,8 @@ fn cx_raw_for(
             ptr: file_path.as_ptr(),
             len: file_path.len(),
         },
-        target_rails_version: crate::RubyVersion::to_wire(target_rails_version),
-        active_support_extensions_enabled,
+        target_rails_version: crate::RubyVersion::to_wire(ctx.target_rails_version),
+        active_support_extensions_enabled: ctx.active_support_extensions_enabled,
     }
 }
 

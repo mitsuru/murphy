@@ -33,8 +33,8 @@ use std::ffi::c_void;
 use murphy_ast::{Ast, NodeId, NodeKind};
 use murphy_plugin_api::var_semantic_model::VarSemanticModel;
 use murphy_plugin_api::{
-    CxRaw, FnTable, NodeKindTag as PluginNodeKindTag, PluginCopV1, RawEdit, RawOffense, RawSlice,
-    RubyVersion, SEVERITY_UNSET,
+    AllCopsContext, CxRaw, FnTable, NodeKindTag as PluginNodeKindTag, PluginCopV1, RawEdit,
+    RawOffense, RawSlice, RubyVersion, SEVERITY_UNSET,
 };
 
 /// The `NodeKindTag` for [`NodeKind::Send`] (frozen by ADR 0037).
@@ -188,8 +188,7 @@ fn build_cx_raw(
     sink: &mut OffenseSink,
     var_model: &VarSemanticModel,
     node_slice_arena: &mut NodeSliceArena,
-    target_rails_version: Option<RubyVersion>,
-    active_support_extensions_enabled: bool,
+    ctx: AllCopsContext,
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -224,8 +223,8 @@ fn build_cx_raw(
             ptr: file_path.as_ptr(),
             len: file_path.len(),
         },
-        target_rails_version: RubyVersion::to_wire(target_rails_version),
-        active_support_extensions_enabled,
+        target_rails_version: RubyVersion::to_wire(ctx.target_rails_version),
+        active_support_extensions_enabled: ctx.active_support_extensions_enabled,
     }
 }
 
@@ -262,31 +261,23 @@ pub fn run_cops_with_options(
     sink: &mut OffenseSink,
     options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
-    // `false`: this option-only entry point carries no resolved config; the
-    // native SymbolProc consumer reaches the flag via the cli path that calls
-    // `run_cops_with_options_and_target_rails_version` directly.
-    run_cops_with_options_and_target_rails_version(ast, cops, sink, None, false, options_for);
+    // Default context: this option-only entry point carries no resolved config;
+    // the native SymbolProc consumer reaches the flag via the cli path that
+    // calls `run_cops_with_options_and_context` directly.
+    run_cops_with_options_and_context(ast, cops, sink, AllCopsContext::default(), options_for);
 }
 
-pub fn run_cops_with_options_and_target_rails_version(
+pub fn run_cops_with_options_and_context(
     ast: &Ast,
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
-    target_rails_version: Option<RubyVersion>,
-    active_support_extensions_enabled: bool,
+    ctx: AllCopsContext,
     mut options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
     let var_model = VarSemanticModel::build(ast);
     let index = DispatchIndex::build(ast);
     let mut node_slice_arena = NodeSliceArena::default();
-    let mut base = build_cx_raw(
-        ast,
-        sink,
-        &var_model,
-        &mut node_slice_arena,
-        target_rails_version,
-        active_support_extensions_enabled,
-    );
+    let mut base = build_cx_raw(ast, sink, &var_model, &mut node_slice_arena, ctx);
     for cop in cops {
         base.cop_name = cop.name;
         let name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("");
@@ -457,12 +448,15 @@ mod tests {
         let ast = ast_nil_and_int();
         let mut sink = OffenseSink::new("t.rb");
 
-        run_cops_with_options_and_target_rails_version(
+        run_cops_with_options_and_context(
             &ast,
             &[&TARGET_RAILS_VERSION_COP],
             &mut sink,
-            Some(RubyVersion::new(5, 2)),
-            false, // this test only exercises target_rails_version threading
+            // this test only exercises target_rails_version threading
+            AllCopsContext {
+                target_rails_version: Some(RubyVersion::new(5, 2)),
+                ..AllCopsContext::default()
+            },
             |_| b"{}".to_vec(),
         );
 
@@ -506,12 +500,15 @@ mod tests {
         let ast = ast_nil_and_int();
         let mut sink = OffenseSink::new("t.rb");
 
-        run_cops_with_options_and_target_rails_version(
+        run_cops_with_options_and_context(
             &ast,
             &[&ACTIVE_SUPPORT_COP],
             &mut sink,
-            None, // this test only exercises active_support_extensions_enabled threading
-            true,
+            // this test only exercises active_support_extensions_enabled threading
+            AllCopsContext {
+                active_support_extensions_enabled: true,
+                ..AllCopsContext::default()
+            },
             |_| b"{}".to_vec(),
         );
 
@@ -521,12 +518,11 @@ mod tests {
         ACTIVE_SUPPORT_SEEN.store(true, Ordering::SeqCst);
         let mut sink = OffenseSink::new("t.rb");
 
-        run_cops_with_options_and_target_rails_version(
+        run_cops_with_options_and_context(
             &ast,
             &[&ACTIVE_SUPPORT_COP],
             &mut sink,
-            None,
-            false,
+            AllCopsContext::default(),
             |_| b"{}".to_vec(),
         );
 

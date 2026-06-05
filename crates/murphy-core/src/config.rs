@@ -1,5 +1,5 @@
 use crate::Severity;
-use murphy_plugin_api::RubyVersion;
+use murphy_plugin_api::{AllCopsContext, RubyVersion};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -534,6 +534,15 @@ impl MurphyConfig {
             .rules
             .values()
             .any(|rule| !rule.include.is_empty() || !rule.exclude.is_empty())
+    }
+
+    /// The run-wide `AllCops.*` context scalars resolved from this config,
+    /// bundled for threading into dispatch (and thus every cop's `CxRaw`).
+    pub fn allcops_context(&self) -> AllCopsContext {
+        AllCopsContext {
+            target_rails_version: self.target_rails_version,
+            active_support_extensions_enabled: self.active_support_extensions_enabled,
+        }
     }
 
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
