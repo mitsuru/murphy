@@ -224,6 +224,9 @@ fn build_cx_raw(
             len: file_path.len(),
         },
         target_rails_version: RubyVersion::to_wire(target_rails_version),
+        // TEMPORARY stub (Task 3): wired for real in Task 5 once `build_cx_raw`
+        // threads the resolved `MurphyConfig.active_support_extensions_enabled`.
+        active_support_extensions_enabled: false,
     }
 }
 

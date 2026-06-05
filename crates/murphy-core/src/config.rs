@@ -9,6 +9,7 @@ use crate::ConfigError;
 pub struct MurphyConfig {
     pub target_ruby_version: RubyVersion,
     pub target_rails_version: Option<RubyVersion>,
+    pub active_support_extensions_enabled: bool,
     pub files: FilesConfig,
     pub cops: CopsConfig,
     pub plugins: Vec<PluginConfig>,
@@ -90,6 +91,8 @@ pub struct DefaultCopsData {
     pub allcops_include: Vec<String>,
     /// `AllCops.Exclude` patterns from the YAML.
     pub allcops_exclude: Vec<String>,
+    /// `AllCops.ActiveSupportExtensionsEnabled` flag from the YAML.
+    pub allcops_active_support_extensions_enabled: Option<bool>,
     /// Per-cop defaults keyed by cop name.
     pub cop_rules: BTreeMap<String, DefaultCopRule>,
 }
@@ -123,6 +126,11 @@ impl DefaultCopsData {
                     }
                     if let Some(exc) = all_cops.get(&Yaml::String("Exclude".to_string())) {
                         result.allcops_exclude = yaml_string_list(exc);
+                    }
+                    if let Some(Yaml::Boolean(b)) =
+                        all_cops.get(&Yaml::String("ActiveSupportExtensionsEnabled".to_string()))
+                    {
+                        result.allcops_active_support_extensions_enabled = Some(*b);
                     }
                 }
                 continue;
@@ -199,6 +207,7 @@ fn default_target_ruby_version() -> RubyVersion {
 struct ParsedYaml {
     target_ruby_version: Option<RubyVersion>,
     target_rails_version: Option<RubyVersion>,
+    active_support_extensions_enabled: Option<bool>,
     include: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
     cops_path: Option<PathBuf>,
@@ -218,6 +227,9 @@ impl ParsedYaml {
         ParsedYaml {
             target_ruby_version: self.target_ruby_version.or(base.target_ruby_version),
             target_rails_version: self.target_rails_version.or(base.target_rails_version),
+            active_support_extensions_enabled: self
+                .active_support_extensions_enabled
+                .or(base.active_support_extensions_enabled),
             include: self.include.or(base.include),
             exclude: self.exclude.or(base.exclude),
             cops_path: self.cops_path.or(base.cops_path),
@@ -252,6 +264,9 @@ impl ParsedYaml {
                 .target_ruby_version
                 .unwrap_or_else(default_target_ruby_version),
             target_rails_version: self.target_rails_version,
+            active_support_extensions_enabled: self
+                .active_support_extensions_enabled
+                .unwrap_or(false),
             files: FilesConfig {
                 include: self.include.unwrap_or_else(default_include),
                 exclude: self.exclude.unwrap_or_default(),
@@ -296,6 +311,7 @@ impl Default for MurphyConfig {
         Self {
             target_ruby_version: default_target_ruby_version(),
             target_rails_version: None,
+            active_support_extensions_enabled: false,
             files: FilesConfig {
                 include: default_include(),
                 exclude: Vec::new(),
@@ -583,6 +599,11 @@ fn parse_yaml_str(text: &str) -> Result<ParsedYaml, ConfigError> {
                         && let Some(rv) = parse_ruby_version(v)
                     {
                         parsed.target_rails_version = Some(rv);
+                    }
+                    if let Some(Yaml::Boolean(b)) =
+                        all_cops.get(&Yaml::String("ActiveSupportExtensionsEnabled".to_string()))
+                    {
+                        parsed.active_support_extensions_enabled = Some(*b);
                     }
                 }
             }
@@ -1012,6 +1033,30 @@ mod tests {
         let cfg = MurphyConfig::from_yaml_str("AllCops:\n  TargetRailsVersion: 7.1.3\n")
             .expect("config parses");
         assert_eq!(cfg.target_rails_version, Some(RubyVersion::new(7, 1)));
+    }
+
+    #[test]
+    fn parses_active_support_extensions_enabled_from_all_cops() {
+        let cfg =
+            MurphyConfig::from_yaml_str("AllCops:\n  ActiveSupportExtensionsEnabled: true\n")
+                .unwrap();
+        assert!(cfg.active_support_extensions_enabled);
+        let cfg = MurphyConfig::from_yaml_str("").unwrap();
+        assert!(!cfg.active_support_extensions_enabled, "default false");
+    }
+
+    #[test]
+    fn default_cops_data_parses_active_support_flag() {
+        assert_eq!(
+            DefaultCopsData::from_yaml("AllCops:\n  ActiveSupportExtensionsEnabled: true\n")
+                .allcops_active_support_extensions_enabled,
+            Some(true),
+        );
+        assert_eq!(
+            DefaultCopsData::from_yaml("AllCops:\n  Include:\n    - '**/*.rb'\n")
+                .allcops_active_support_extensions_enabled,
+            None,
+        );
     }
 
     #[test]
