@@ -340,3 +340,76 @@ fn applying_rails_pack_layer_flips_active_support_extensions_enabled() {
         "loading the rails pack must flip ASE true even with std defaults folded in"
     );
 }
+
+#[test]
+fn rails_pack_exempts_lambda_symbol_proc_through_full_lint_pipeline() {
+    // End-to-end payoff: a `->(x) { x.method }` lambda is a `Style/SymbolProc`
+    // candidate, but RuboCop (with rubocop-rails) exempts lambda/proc blocks
+    // under `AllCops.ActiveSupportExtensionsEnabled`. The rails pack's bundled
+    // `default.yml` sets that flag true. This test runs the REAL `murphy lint`
+    // binary through its full pipeline (embedded default.yml → loader symbol
+    // read → `apply_pack_default_layers` → ASE flag → dispatch → Cx accessor →
+    // SymbolProc exemption) and asserts the lambda offense is suppressed.
+    //
+    // The CONTROL arm (same fixture, NO pack) asserts the SAME lambda STILL
+    // flags `Style/SymbolProc`, proving the pack is what causes the exemption
+    // — not that the cop simply never fires on this shape.
+    let pack = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    // A lambda whose sole parameter is the receiver of a single method call —
+    // the canonical SymbolProc shape, and exactly Mastodon's
+    // `normalizes :x, with: ->(v) { v.strip }` form.
+    let fixture = "# frozen_string_literal: true\nFOO = ->(v) { v.strip }\n";
+
+    // ── pack-loaded arm: lambda exemption active, NO SymbolProc offense ──
+    let with_pack = tempdir().expect("tempdir");
+    let rb = with_pack.path().join("lam.rb");
+    fs::write(&rb, fixture).expect("write rb");
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\n",
+        pack.display().to_string()
+    );
+    fs::write(with_pack.path().join(".murphy.yml"), yml).expect("write yml");
+
+    // Pin exit 0: the lambda is the only offense candidate and it must be
+    // exempted, so a clean run is exit 0. Pinning the code guards the
+    // absence-assertion below from passing vacuously on a setup/internal
+    // error (exit 2/3) that would also produce no `Style/SymbolProc` line.
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(with_pack.path())
+        .arg("lint")
+        .arg(&rb)
+        .assert()
+        .code(0);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        !stdout.contains("Style/SymbolProc"),
+        "rails pack must exempt the lambda from Style/SymbolProc; got:\n{stdout}"
+    );
+
+    // ── control arm: SAME fixture, NO pack → SymbolProc fires ──
+    let no_pack = tempdir().expect("tempdir");
+    let rb2 = no_pack.path().join("lam.rb");
+    fs::write(&rb2, fixture).expect("write rb");
+    // No `.murphy.yml` at all: ASE defaults false, so the lambda is NOT exempt.
+
+    // Pin exit 1: the lambda is NOT exempt here, so the lint must report the
+    // offense and exit 1 (offenses found). This rules out a vacuous pass from
+    // a setup error and confirms the offense line below comes from a real run.
+    let assert2 = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(no_pack.path())
+        .arg("lint")
+        .arg(&rb2)
+        .assert()
+        .code(1);
+    let stdout2 = String::from_utf8_lossy(&assert2.get_output().stdout);
+    assert!(
+        stdout2.contains("Style/SymbolProc"),
+        "without the rails pack the lambda MUST flag Style/SymbolProc (proves \
+         the pack is the cause of the exemption); got:\n{stdout2}"
+    );
+}
