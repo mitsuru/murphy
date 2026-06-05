@@ -189,6 +189,7 @@ fn build_cx_raw(
     var_model: &VarSemanticModel,
     node_slice_arena: &mut NodeSliceArena,
     target_rails_version: Option<RubyVersion>,
+    active_support_extensions_enabled: bool,
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -224,9 +225,7 @@ fn build_cx_raw(
             len: file_path.len(),
         },
         target_rails_version: RubyVersion::to_wire(target_rails_version),
-        // TEMPORARY stub (Task 3): wired for real in Task 5 once `build_cx_raw`
-        // threads the resolved `MurphyConfig.active_support_extensions_enabled`.
-        active_support_extensions_enabled: false,
+        active_support_extensions_enabled,
     }
 }
 
@@ -263,7 +262,10 @@ pub fn run_cops_with_options(
     sink: &mut OffenseSink,
     options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
-    run_cops_with_options_and_target_rails_version(ast, cops, sink, None, options_for);
+    // `false`: this option-only entry point carries no resolved config; the
+    // native SymbolProc consumer reaches the flag via the cli path that calls
+    // `run_cops_with_options_and_target_rails_version` directly.
+    run_cops_with_options_and_target_rails_version(ast, cops, sink, None, false, options_for);
 }
 
 pub fn run_cops_with_options_and_target_rails_version(
@@ -271,6 +273,7 @@ pub fn run_cops_with_options_and_target_rails_version(
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
     target_rails_version: Option<RubyVersion>,
+    active_support_extensions_enabled: bool,
     mut options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
     let var_model = VarSemanticModel::build(ast);
@@ -282,6 +285,7 @@ pub fn run_cops_with_options_and_target_rails_version(
         &var_model,
         &mut node_slice_arena,
         target_rails_version,
+        active_support_extensions_enabled,
     );
     for cop in cops {
         base.cop_name = cop.name;
@@ -458,6 +462,7 @@ mod tests {
             &[&TARGET_RAILS_VERSION_COP],
             &mut sink,
             Some(RubyVersion::new(5, 2)),
+            false, // this test only exercises target_rails_version threading
             |_| b"{}".to_vec(),
         );
 

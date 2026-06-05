@@ -423,6 +423,7 @@ fn lint_source(
                 &scoped_cops,
                 &mut sink,
                 config.target_rails_version,
+                config.active_support_extensions_enabled,
                 |name| config.cop_options_json(name),
             );
             let mut offenses = sink.into_offenses();
@@ -562,6 +563,7 @@ fn lint_source_timed(
                 &scoped_cops,
                 &mut sink,
                 config.target_rails_version,
+                config.active_support_extensions_enabled,
                 |name| config.cop_options_json(name),
             );
             let mut offenses = sink.into_offenses();
