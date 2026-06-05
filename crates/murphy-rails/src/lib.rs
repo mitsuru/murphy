@@ -22,6 +22,14 @@
 
 use murphy_plugin_api::{Cx, NoOptions, cop, register_cops, submit_cop};
 
+/// default.yml embedded in the .so as a resource.
+pub const BUNDLED_DEFAULTS_YAML: &str = include_str!("../config/default.yml");
+
+/// Pure data symbol the host reads after dlopen (not a behavior callback).
+#[unsafe(no_mangle)]
+pub static MURPHY_PLUGIN_DEFAULT_CONFIG: murphy_plugin_api::RawSlice =
+    murphy_plugin_api::RawSlice::from_str(BUNDLED_DEFAULTS_YAML);
+
 // Cops in separate files register themselves via submit_cop! in their own modules.
 pub mod cops;
 
