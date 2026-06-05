@@ -472,6 +472,67 @@ mod tests {
         );
     }
 
+    // Separate per-test atomic: a shared static would race the
+    // target_rails_version test under `cargo test`'s parallel lib runs.
+    static ACTIVE_SUPPORT_SEEN: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    unsafe extern "C" fn active_support_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let cx = unsafe { &*cx };
+        ACTIVE_SUPPORT_SEEN.store(cx.active_support_extensions_enabled, Ordering::SeqCst);
+        0
+    }
+    static ACTIVE_SUPPORT_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/ActiveSupportExtensions"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: active_support_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_active_support_extensions_enabled_to_cx_raw() {
+        // `true` path: the flag threaded through build_cx_raw reaches the cop.
+        ACTIVE_SUPPORT_SEEN.store(false, Ordering::SeqCst);
+        let ast = ast_nil_and_int();
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_target_rails_version(
+            &ast,
+            &[&ACTIVE_SUPPORT_COP],
+            &mut sink,
+            None, // this test only exercises active_support_extensions_enabled threading
+            true,
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(ACTIVE_SUPPORT_SEEN.load(Ordering::SeqCst));
+
+        // `false` path: the default flows through as `false`, not a stale `true`.
+        ACTIVE_SUPPORT_SEEN.store(true, Ordering::SeqCst);
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_target_rails_version(
+            &ast,
+            &[&ACTIVE_SUPPORT_COP],
+            &mut sink,
+            None,
+            false,
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(!ACTIVE_SUPPORT_SEEN.load(Ordering::SeqCst));
+    }
+
     // (1) DispatchIndex correctly buckets the arena's nodes by tag.
     #[test]
     fn dispatch_index_groups_cops_by_kind() {
