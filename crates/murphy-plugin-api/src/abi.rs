@@ -197,6 +197,11 @@ pub struct CxRaw {
     pub file_path: RawSlice,
     /// Optional `AllCops.TargetRailsVersion` for per-cop Rails feature gates.
     pub target_rails_version: u16,
+    /// `AllCops.ActiveSupportExtensionsEnabled` (default false). Tail-appended
+    /// under ABI v4 lockstep (murphy-pfcb); fits existing padding so
+    /// `size_of::<CxRaw>()` is unchanged. Per project policy the numeric ABI is
+    /// not bumped for tail-appended CxRaw fields.
+    pub active_support_extensions_enabled: bool,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -223,6 +228,8 @@ pub struct CxRaw {
 ///
 /// `CxRaw::file_path` was tail-appended under ABI v4 lockstep for murphy-vmg5.
 /// `CxRaw::target_rails_version` was tail-appended under ABI v4 lockstep for murphy-8iym.
+/// `CxRaw::active_support_extensions_enabled` was tail-appended into existing
+/// padding under ABI v4 lockstep for murphy-pfcb (size unchanged).
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -419,6 +426,7 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, alloc_node_slice), 216);
         assert_eq!(offset_of!(CxRaw, file_path), 224);
         assert_eq!(offset_of!(CxRaw, target_rails_version), 240);
+        assert_eq!(offset_of!(CxRaw, active_support_extensions_enabled), 242);
         assert_eq!(size_of::<CxRaw>(), 248);
     }
 

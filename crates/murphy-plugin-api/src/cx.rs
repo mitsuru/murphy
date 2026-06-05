@@ -496,6 +496,11 @@ impl<'a> Cx<'a> {
             .is_none_or(|target| target >= RubyVersion::new(major, minor))
     }
 
+    /// Configured `AllCops.ActiveSupportExtensionsEnabled` (default false).
+    pub fn active_support_extensions_enabled(&self) -> bool {
+        self.raw.active_support_extensions_enabled
+    }
+
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
     pub fn alloc_node_slice(&self, elements: &[NodeId]) -> &'a [NodeId] {
         if elements.is_empty() {
@@ -2994,6 +2999,7 @@ mod tests {
                 len: file_path.len(),
             },
             target_rails_version: 0,
+            active_support_extensions_enabled: false,
         }
     }
 

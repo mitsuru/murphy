@@ -820,6 +820,7 @@ fn cx_raw_for(
             len: file_path.len(),
         },
         target_rails_version: crate::RubyVersion::to_wire(target_rails_version),
+        active_support_extensions_enabled: false,
     }
 }
 
