@@ -502,6 +502,11 @@ fn complex_content(name: &str) -> bool {
     if name.contains(' ') {
         return true;
     }
+    // Fast-path: if no opening delimiter exists, only closing delimiters
+    // would remain after stripping (or nothing at all).
+    if !name.contains('[') && !name.contains('(') {
+        return name.contains(']') || name.contains(')');
+    }
     let stripped = strip_balanced_delimiter_pairs(name);
     stripped.contains('[')
         || stripped.contains(']')
@@ -572,12 +577,8 @@ fn strip_balanced_delimiter_pairs(s: &str) -> String {
 /// and hash — cannot be represented literally inside `%i[…]` tokens or
 /// would be misinterpreted by the `%I` parser without escaping.
 fn needs_percent_i(name: &str) -> bool {
-    name.contains('\\')
-        || name.contains('\t')
-        || name.contains('\n')
-        || name.contains('\r')
-        || name.contains('\x0C')
-        || name.contains('#')
+    name.chars()
+        .any(|c| matches!(c, '\\' | '\t' | '\n' | '\r' | '\x0C' | '#'))
 }
 
 /// Escapes a symbol value for use inside `%I[…]`.
