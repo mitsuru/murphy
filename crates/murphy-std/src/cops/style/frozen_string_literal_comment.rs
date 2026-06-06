@@ -5,27 +5,27 @@
 //! upstream: rubocop
 //! upstream_cop: Style/FrozenStringLiteralComment
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-q2w9
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   v1 implements `EnforcedStyle: always` (require the magic comment to be
-//!   present with any value) — the "absent" path only.  The `never` style
-//!   (flag files that *have* the comment), the `always_true` style (reject
-//!   `false` values), and disabled-value handling are deferred to murphy-q2w9.
-//!   Autocorrect inserts `# frozen_string_literal: true` at the correct position
-//!   (after shebang / encoding comment if present), matching RuboCop's behaviour.
-//!   The correction is unsafe (frozen strings reject mutation) — same as RuboCop.
+//!   Implements all supported `EnforcedStyle` values: `always`, `always_true`,
+//!   and `never`.  Autocorrect inserts `# frozen_string_literal: true` at the
+//!   correct position (after shebang / encoding comment if present), enables
+//!   disabled comments for `always_true`, and removes existing comments for
+//!   `never`.  The correction is unsafe (frozen strings reject mutation) — same
+//!   as RuboCop.
 //! ```
 //!
 //! magic comment at the top of every Ruby file.
 //!
 //! ## What is checked
 //!
-//! In `always` mode (the default and only implemented mode) the cop flags any
-//! file that does not contain a `# frozen_string_literal:` magic comment in its
-//! leading comment block.  A comment with `false` as the value is still accepted
-//! (it is present; checking the value is the job of `always_true` mode).
+//! In `always` mode (the default) the cop flags any file that does not contain a
+//! `# frozen_string_literal:` magic comment in its leading comment block.  A
+//! comment with `false` as the value is still accepted.  In `always_true` mode,
+//! a missing comment is flagged and an existing disabled comment must be set to
+//! `true`.  In `never` mode, any existing frozen string literal comment is
+//! flagged.
 //!
 //! ## Offense position
 //!
@@ -46,60 +46,133 @@
 //! Insertion is implemented as `cx.emit_edit` with an empty range at the
 //! target byte offset (a pure insertion).
 
-use murphy_plugin_api::{Cx, Range, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, Range, cop};
+
+const MSG_MISSING_TRUE: &str = "Missing magic comment `# frozen_string_literal: true`.";
+const MSG_MISSING: &str = "Missing frozen string literal comment.";
+const MSG_UNNECESSARY: &str = "Unnecessary frozen string literal comment.";
+const MSG_DISABLED: &str = "Frozen string literal comment must be set to `true`.";
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct FrozenStringLiteralComment;
 
+#[derive(CopOptions)]
+pub struct FrozenStringLiteralCommentOptions {
+    #[option(
+        name = "EnforcedStyle",
+        default = "always",
+        description = "Whether to require, require true, or forbid the frozen string literal comment."
+    )]
+    pub enforced_style: FrozenStringLiteralStyle,
+}
+
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
+pub enum FrozenStringLiteralStyle {
+    #[option(value = "always")]
+    Always,
+    #[option(value = "always_true")]
+    AlwaysTrue,
+    #[option(value = "never")]
+    Never,
+}
+
 #[cop(
     name = "Style/FrozenStringLiteralComment",
     description = "Require the `# frozen_string_literal: true` magic comment at the top of every file.",
     default_severity = "warning",
-    default_enabled = false
+    default_enabled = false,
+    options = FrozenStringLiteralCommentOptions,
 )]
 impl FrozenStringLiteralComment {
     #[on_new_investigation]
     fn check_file(&self, cx: &Cx<'_>) {
-        let src = cx.source();
         // Skip completely empty files — no Ruby to lint.
-        if src.is_empty() {
+        if cx.source().is_empty() {
             return;
         }
 
-        // If the comment is already present (any value) we're done.
-        if cx.frozen_string_literal_comment().is_some() {
-            return;
+        match cx
+            .options_or_default::<FrozenStringLiteralCommentOptions>()
+            .enforced_style
+        {
+            FrozenStringLiteralStyle::Always => ensure_comment(cx, MSG_MISSING),
+            FrozenStringLiteralStyle::AlwaysTrue => ensure_enabled_comment(cx),
+            FrozenStringLiteralStyle::Never => ensure_no_comment(cx),
         }
-
-        // Report on the first line of the file.
-        let first_line_end = src
-            .as_bytes()
-            .iter()
-            .position(|&b| b == b'\n')
-            .unwrap_or(src.len());
-        let offense_range = Range {
-            start: 0,
-            end: first_line_end as u32,
-        };
-
-        cx.emit_offense(
-            offense_range,
-            "Missing frozen string literal comment.",
-            None,
-        );
-
-        // Autocorrect: find the right insertion point.
-        let insert_at = insertion_point(cx);
-        // A zero-length edit at `insert_at` is a pure insertion.
-        cx.emit_edit(
-            Range {
-                start: insert_at,
-                end: insert_at,
-            },
-            "# frozen_string_literal: true\n",
-        );
     }
+}
+
+fn ensure_no_comment(cx: &Cx<'_>) {
+    let Some(comment) = cx.frozen_string_literal_comment() else {
+        return;
+    };
+
+    cx.emit_offense(comment.range, MSG_UNNECESSARY, None);
+    cx.emit_edit(line_range_with_newline(cx, comment.range), "");
+}
+
+fn ensure_comment(cx: &Cx<'_>, message: &'static str) {
+    if cx.frozen_string_literal_comment().is_some() {
+        return;
+    }
+
+    cx.emit_offense(first_line_range(cx), message, None);
+    emit_insert_comment(cx);
+}
+
+fn ensure_enabled_comment(cx: &Cx<'_>) {
+    let Some(comment) = cx.frozen_string_literal_comment() else {
+        ensure_comment(cx, MSG_MISSING_TRUE);
+        return;
+    };
+
+    if comment.value_bool == 1 {
+        return;
+    }
+
+    cx.emit_offense(comment.range, MSG_DISABLED, None);
+    cx.emit_edit(comment.value_range, "true");
+}
+
+fn first_line_range(cx: &Cx<'_>) -> Range {
+    let src = cx.source();
+    let first_line_end = src
+        .as_bytes()
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(src.len());
+    Range {
+        start: 0,
+        end: first_line_end as u32,
+    }
+}
+
+fn line_range_with_newline(cx: &Cx<'_>, range: Range) -> Range {
+    let src = cx.source().as_bytes();
+    let start = src[..range.start as usize]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |pos| pos + 1);
+    let end = src[range.end as usize..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(src.len(), |pos| range.end as usize + pos + 1);
+    Range {
+        start: start as u32,
+        end: end as u32,
+    }
+}
+
+fn emit_insert_comment(cx: &Cx<'_>) {
+    let insert_at = insertion_point(cx);
+    cx.emit_edit(
+        Range {
+            start: insert_at,
+            end: insert_at,
+        },
+        "# frozen_string_literal: true\n",
+    );
 }
 
 /// Compute the byte offset where the frozen_string_literal comment should be
@@ -156,8 +229,20 @@ fn insertion_point(cx: &Cx<'_>) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::FrozenStringLiteralComment;
+    use super::{FrozenStringLiteralComment, FrozenStringLiteralCommentOptions, FrozenStringLiteralStyle};
     use murphy_plugin_api::test_support::{indoc, test};
+
+    fn always_true_opts() -> FrozenStringLiteralCommentOptions {
+        FrozenStringLiteralCommentOptions {
+            enforced_style: FrozenStringLiteralStyle::AlwaysTrue,
+        }
+    }
+
+    fn never_opts() -> FrozenStringLiteralCommentOptions {
+        FrozenStringLiteralCommentOptions {
+            enforced_style: FrozenStringLiteralStyle::Never,
+        }
+    }
 
     // ---- offense detection ---------------------------------------------------
 
@@ -265,6 +350,66 @@ mod tests {
     fn no_offense_after_shebang_with_magic_comment() {
         test::<FrozenStringLiteralComment>()
             .expect_no_offenses("#!/usr/bin/env ruby\n# frozen_string_literal: true\nx = 1\n");
+    }
+
+    #[test]
+    fn always_true_flags_disabled_magic_comment() {
+        test::<FrozenStringLiteralComment>()
+            .with_options(&always_true_opts())
+            .expect_offense(indoc! {"
+                # frozen_string_literal: false
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Frozen string literal comment must be set to `true`.
+                x = 1
+            "});
+    }
+
+    #[test]
+    fn always_true_autocorrects_disabled_magic_comment() {
+        test::<FrozenStringLiteralComment>()
+            .with_options(&always_true_opts())
+            .expect_correction(
+                indoc! {"
+                    # frozen_string_literal: false
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Frozen string literal comment must be set to `true`.
+                    x = 1
+                "},
+                "# frozen_string_literal: true\nx = 1\n",
+            );
+    }
+
+    #[test]
+    fn always_true_flags_missing_magic_comment_with_true_message() {
+        test::<FrozenStringLiteralComment>()
+            .with_options(&always_true_opts())
+            .expect_offense(indoc! {r#"
+                x = 1
+                ^^^^^ Missing magic comment `# frozen_string_literal: true`.
+            "#});
+    }
+
+    #[test]
+    fn never_flags_present_magic_comment() {
+        test::<FrozenStringLiteralComment>()
+            .with_options(&never_opts())
+            .expect_offense(indoc! {"
+                # frozen_string_literal: true
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unnecessary frozen string literal comment.
+                x = 1
+            "});
+    }
+
+    #[test]
+    fn never_autocorrects_by_removing_magic_comment_line() {
+        test::<FrozenStringLiteralComment>()
+            .with_options(&never_opts())
+            .expect_correction(
+                indoc! {"
+                    # frozen_string_literal: true
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Unnecessary frozen string literal comment.
+                    x = 1
+                "},
+                "x = 1\n",
+            );
     }
 }
 murphy_plugin_api::submit_cop!(FrozenStringLiteralComment);
