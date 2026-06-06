@@ -183,6 +183,7 @@ fn check_brackets_style(
         &parts.tokens,
         array_src,
         parts.interpolation_enabled,
+        parts.close,
     );
     let range = cx.range(node);
     let is_multiline = array_src.contains('\n');
@@ -206,6 +207,7 @@ fn check_brackets_style(
 struct PercentSymbolParts {
     tokens: Vec<String>,
     interpolation_enabled: bool,
+    close: char,
 }
 
 fn percent_symbol_tokens(src: &str) -> Option<PercentSymbolParts> {
@@ -225,12 +227,13 @@ fn percent_symbol_tokens(src: &str) -> Option<PercentSymbolParts> {
     let body_start = open_idx + open.len_utf8();
     let body = &src[body_start..close_idx];
     Some(PercentSymbolParts {
-        tokens: split_percent_symbol_body(body),
+        tokens: split_percent_symbol_body(body, close),
         interpolation_enabled: kind == 'I',
+        close,
     })
 }
 
-fn split_percent_symbol_body(body: &str) -> Vec<String> {
+fn split_percent_symbol_body(body: &str, close: char) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut escaped = false;
@@ -239,7 +242,12 @@ fn split_percent_symbol_body(body: &str) -> Vec<String> {
 
     while let Some(ch) = chars.next() {
         if escaped {
-            current.push(ch);
+            if ch == '\\' || ch == close || ch.is_whitespace() {
+                current.push(ch);
+            } else {
+                current.push('\\');
+                current.push(ch);
+            }
             escaped = false;
             continue;
         }
@@ -289,14 +297,15 @@ fn build_bracketed_array_from_tokens(
     tokens: &[String],
     src: &str,
     interpolation_enabled: bool,
+    close: char,
 ) -> String {
     if tokens.is_empty() {
         return "[]".to_string();
     }
 
     if src.contains('\n') {
-        let item_indent = first_item_indent(src);
-        let close_indent = closing_delimiter_indent(src);
+        let item_indent = first_item_indent(src, close);
+        let close_indent = closing_delimiter_indent(src, close);
         let mut out = String::from("[\n");
         for (i, token) in tokens.iter().enumerate() {
             out.push_str(&item_indent);
@@ -355,11 +364,14 @@ fn escape_double_quoted_symbol(name: &str) -> String {
     out
 }
 
-fn first_item_indent(src: &str) -> String {
+fn first_item_indent(src: &str, close: char) -> String {
     src.lines()
         .skip(1)
         .find_map(|line| {
-            if line.trim().is_empty() || line.trim() == ")" || line.trim() == "]" {
+            let trimmed = line.trim();
+            if trimmed.is_empty()
+                || (trimmed.len() == close.len_utf8() && trimmed.starts_with(close))
+            {
                 None
             } else {
                 Some(line.chars().take_while(|c| c.is_whitespace()).collect())
@@ -368,12 +380,12 @@ fn first_item_indent(src: &str) -> String {
         .unwrap_or_default()
 }
 
-fn closing_delimiter_indent(src: &str) -> String {
+fn closing_delimiter_indent(src: &str, close: char) -> String {
     src.lines()
         .rev()
         .find_map(|line| {
             let trimmed = line.trim();
-            if trimmed == ")" || trimmed == "]" {
+            if trimmed.len() == close.len_utf8() && trimmed.starts_with(close) {
                 Some(line.chars().take_while(|c| c.is_whitespace()).collect())
             } else {
                 None
@@ -559,6 +571,40 @@ mod tests {
                 "##},
                 r##"x = [:'#{foo}']
 "##,
+            );
+    }
+
+    #[test]
+    fn brackets_style_preserves_backslash_before_non_escapable_character() {
+        test::<SymbolArray>()
+            .with_options(&brackets_options())
+            .expect_correction(
+                indoc! {r#"
+                    x = %i(foo\bar)
+                        ^^^^^^^^^^^ Use `[:'foo\\bar']` for an array of symbols.
+                "#},
+                "x = [:'foo\\\\bar']\n",
+            );
+    }
+
+    #[test]
+    fn brackets_style_uses_actual_closing_delimiter_indent() {
+        test::<SymbolArray>()
+            .with_options(&brackets_options())
+            .expect_correction(
+                indoc! {r#"
+                    x = %i{
+                        ^^^ Use an array literal `[...]` for an array of symbols.
+                        one
+                        two
+                      }
+                "#},
+                indoc! {r#"
+                    x = [
+                        :one,
+                        :two
+                      ]
+                "#},
             );
     }
 
