@@ -5,22 +5,25 @@
 //! upstream: rubocop
 //! upstream_cop: Style/SymbolArray
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-xzv0
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Implements both `EnforcedStyle` values: percent (default) flags
-//!   bracket-style symbol arrays and suggests `%i[]`; brackets flags `%i`/`%I`
-//!   symbol arrays and suggests bracket arrays. MinSize is implemented
-//!   (default 2, matching RuboCop). Percent-style conversion is conservative
-//!   for complex symbols; brackets-style conversion quotes symbols that cannot
-//!   be emitted bare. Remaining percent-mode complex symbol parity is tracked
-//!   in murphy-xzv0.
+//!   bracket-style symbol arrays and suggests `%i[]` or `%I[]`; brackets
+//!   flags `%i`/`%I` symbol arrays and suggests bracket arrays. MinSize
+//!   is implemented (default 2, matching RuboCop). Percent-mode complex
+//!   content detection uses the same `complex_content?`-style logic as
+//!   RuboCop 1.86.2: balanced delimiter pairs (`[…]`, `(…)`) are allowed,
+//!   while bare spaces and unpaired delimiters cause the array to be
+//!   skipped. Symbols with embedded whitespace (tabs, newlines) use `%I`
+//!   with proper escape sequences. Known v1 limitations: no
+//!   `Style/PercentLiteralDelimiters` support (always uses `[]`);
+//!   multi-line formatting is not preserved.
 //! ```
 //!
 //! Dispatches on `NodeKind::Array`. In percent mode, flags bracket arrays
-//! where every element is a plain `NodeKind::Sym` with a simple identifier
-//! name and whose length meets `MinSize`. In brackets mode, flags `%i` / `%I`
+//! where every element is a plain `NodeKind::Sym` with non-complex content
+//! and whose length meets `MinSize`. In brackets mode, flags `%i` / `%I`
 //! arrays and rewrites them to `[:a, :b]` form.
 //!
 //! ## Checks
@@ -30,17 +33,19 @@
 //! 1. The source text does **not** already start with `%i` or `%I`
 //!    (percent-literal guard — avoids flagging what we'd produce).
 //! 2. Every child is `NodeKind::Sym` (no dynamic `dsym` elements).
-//! 3. Every symbol's name is a *simple identifier*: starts with `[a-zA-Z_]`,
-//!    followed by `[a-zA-Z0-9_]`, optionally ending with `!` or `?`.
-//!    Symbols with embedded spaces, quotes, or delimiter chars are skipped.
+//! 3. No symbol value has "complex content" — a literal space ` `, or an
+//!    unpaired delimiter character (`[` `]` `(` `)`) after removing balanced
+//!    `[…]` and `(…)` pairs with no inner whitespace or nested same-type
+//!    delimiters (mirrors RuboCop 1.86.2 `complex_content?`).
 //! 4. The number of elements ≥ `MinSize` (default 2).
 //!
 //! ## Autocorrect
 //!
 //! Whole-node interpolation. Percent mode collects each symbol's name via
-//! `cx.symbol_str`, formats `%i[name1 name2 …]`, and replaces the full array
-//! range. Brackets mode builds `[:name1, :name2]`, quoting symbols such as
-//! `four-five` as `:'four-five'`.
+//! `cx.symbol_str`, formats `%i[name1 name2 …]` (or `%I[name1 name2 …]` when
+//! symbol values contain characters that need escape sequences), and replaces
+//! the full array range. Brackets mode builds `[:name1, :name2]`, quoting
+//! symbols such as `four-five` as `:'four-five'`.
 //!
 //! Per `.claude/rules/autocorrect-pattern.md`: whole-node replacement is the
 //! correct form here because the rewrite fundamentally reshapes the AST
@@ -130,25 +135,40 @@ fn check_percent_style(
         return;
     }
 
-    // All elements must be plain Sym nodes with simple identifier names.
-    // Non-allocating check first; only build the replacement string if we
-    // will actually emit an offense.
-    let all_simple = elements.iter().all(|&elem| {
+    // All elements must be plain Sym nodes that can be safely represented
+    // in a percent literal.  A symbol has "complex content" when its value
+    // contains a literal space or an un-balanced delimiter character
+    // (`[` `]` `(` `)`) — RuboCop 1.86.2 `complex_content?`.
+    let has_complex = elements.iter().any(|&elem| {
         if let NodeKind::Sym(sym) = *cx.kind(elem) {
-            is_simple_identifier(cx.symbol_str(sym))
+            complex_content(cx.symbol_str(sym))
+        } else {
+            true
+        }
+    });
+    if has_complex {
+        return;
+    }
+
+    // Detect whether any symbol value contains characters that require %I
+    // (tab, newline, CR, FF, backslash, or `#{`-like sequences).
+    let use_interpolation = elements.iter().any(|&elem| {
+        if let NodeKind::Sym(sym) = *cx.kind(elem) {
+            needs_percent_i(cx.symbol_str(sym))
         } else {
             false
         }
     });
-    if !all_simple {
-        return;
-    }
 
     let range = cx.range(node);
     cx.emit_offense(range, "Use `%i` or `%I` for an array of symbols.", None);
 
     // Autocorrect: whole-node replacement with percent literal.
-    let mut replacement = String::from("%i[");
+    let mut replacement = if use_interpolation {
+        String::from("%I[")
+    } else {
+        String::from("%i[")
+    };
     for (i, &elem) in elements.iter().enumerate() {
         if i > 0 {
             replacement.push(' ');
@@ -156,7 +176,12 @@ fn check_percent_style(
         let NodeKind::Sym(sym) = *cx.kind(elem) else {
             unreachable!("checked above")
         };
-        replacement.push_str(cx.symbol_str(sym));
+        let name = cx.symbol_str(sym);
+        if use_interpolation {
+            replacement.push_str(&escape_for_percent_i(name));
+        } else {
+            replacement.push_str(name);
+        }
     }
     replacement.push(']');
     cx.emit_edit(range, &replacement);
@@ -462,6 +487,127 @@ fn is_simple_identifier(name: &str) -> bool {
     body.iter().all(|&b| b == b'_' || b.is_ascii_alphanumeric())
 }
 
+/// Returns `true` when the symbol value contains "complex content" that
+/// prevents it from being safely represented bare inside `%i[…]` or
+/// `%I[…]`.
+///
+/// A value is "complex" when it contains:
+/// 1. A literal space (` `), or
+/// 2. An unbalanced delimiter character (`[` `]` `(` `)`) — after removing
+///    balanced `[…]` and `(…)` pairs whose inner content contains no
+///    whitespace or nested same-type delimiters.
+///
+/// Mirrors RuboCop 1.86.2 `Style/SymbolArray#complex_content?`.
+fn complex_content(name: &str) -> bool {
+    if name.contains(' ') {
+        return true;
+    }
+    // Fast-path: if no opening delimiter exists, only closing delimiters
+    // would remain after stripping (or nothing at all).
+    if !name.contains('[') && !name.contains('(') {
+        return name.contains(']') || name.contains(')');
+    }
+    let stripped = strip_balanced_delimiter_pairs(name);
+    stripped.contains('[')
+        || stripped.contains(']')
+        || stripped.contains('(')
+        || stripped.contains(')')
+}
+
+/// Removes balanced `[…]` and `(…)` delimiter pairs from a symbol value
+/// when the content between the delimiters contains no whitespace and no
+/// nested same-type delimiters.
+///
+/// Mirrors the RuboCop regex `(\[[^\s\[\]]*\])|(\([^\s()]*\))`.
+fn strip_balanced_delimiter_pairs(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '[' {
+            let mut j = i + 1;
+            while j < chars.len() {
+                let c = chars[j];
+                if c == ']' {
+                    i = j + 1;
+                    break;
+                }
+                if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '[' || c == ']' {
+                    out.push(chars[i]);
+                    i += 1;
+                    break;
+                }
+                j += 1;
+            }
+            if j >= chars.len() {
+                out.push(chars[i]);
+                i += 1;
+            }
+        } else if chars[i] == '(' {
+            let mut j = i + 1;
+            while j < chars.len() {
+                let c = chars[j];
+                if c == ')' {
+                    i = j + 1;
+                    break;
+                }
+                if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '(' || c == ')' {
+                    out.push(chars[i]);
+                    i += 1;
+                    break;
+                }
+                j += 1;
+            }
+            if j >= chars.len() {
+                out.push(chars[i]);
+                i += 1;
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Returns `true` when the symbol value contains characters that require
+/// `%I` (interpolating percent array) instead of `%i` (non-interpolating).
+///
+/// These characters — tab, newline, carriage return, form feed, backslash,
+/// and hash — cannot be represented literally inside `%i[…]` tokens or
+/// would be misinterpreted by the `%I` parser without escaping.
+fn needs_percent_i(name: &str) -> bool {
+    name.chars()
+        .any(|c| matches!(c, '\\' | '\t' | '\n' | '\r' | '\x0C' | '#'))
+}
+
+/// Escapes a symbol value for use inside `%I[…]`.
+///
+/// | Input char | Escape |
+/// |---|---|
+/// | `\\` | `\\\\` |
+/// | `\t` (tab) | `\\t` |
+/// | `\n` (newline) | `\\n` |
+/// | `\r` (CR) | `\\r` |
+/// | `\x0C` (FF) | `\\f` |
+/// | `#` | `\\#` |
+/// | Others | literal |
+fn escape_for_percent_i(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\x0C' => out.push_str("\\f"),
+            '#' => out.push_str("\\#"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EnforcedStyle, SymbolArray, SymbolArrayOptions};
@@ -757,6 +903,275 @@ mod tests {
         let opts = SymbolArrayOptions::default();
         assert_eq!(opts.enforced_style, EnforcedStyle::Percent);
         assert_eq!(opts.min_size, 2);
+    }
+
+    // ---- percent-mode gap fixes (murphy-xzv0) --------------------------------
+
+    #[test]
+    fn percent_flags_instance_variable_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_offense(indoc! {r#"
+                x = [:@foo, :@bar]
+                    ^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+            "#});
+    }
+
+    #[test]
+    fn percent_corrects_instance_variable_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [:@foo, :@bar]
+                        ^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+                "#},
+                "x = %i[@foo @bar]\n",
+            );
+    }
+
+    #[test]
+    fn percent_flags_class_variable_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_offense(indoc! {r#"
+                x = [:@@foo, :@@bar]
+                    ^^^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+            "#});
+    }
+
+    #[test]
+    fn percent_corrects_class_variable_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [:@@foo, :@@bar]
+                        ^^^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+                "#},
+                "x = %i[@@foo @@bar]\n",
+            );
+    }
+
+    #[test]
+    fn percent_flags_global_variable_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_offense(indoc! {r#"
+                x = [:$baz, :$qux]
+                    ^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+            "#});
+    }
+
+    #[test]
+    fn percent_corrects_global_variable_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [:$baz, :$qux]
+                        ^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+                "#},
+                "x = %i[$baz $qux]\n",
+            );
+    }
+
+    #[test]
+    fn percent_flags_operator_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_offense(indoc! {r#"
+                x = [:==, :!=, :|]
+                    ^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+            "#});
+    }
+
+    #[test]
+    fn percent_corrects_operator_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [:==, :!=, :|]
+                        ^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+                "#},
+                "x = %i[== != |]\n",
+            );
+    }
+
+    #[test]
+    fn percent_flags_bracket_method_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_offense(indoc! {r#"
+                x = [:[]]
+                    ^^^^^ Use `%i` or `%I` for an array of symbols.
+            "#});
+    }
+
+    #[test]
+    fn percent_corrects_bracket_method_symbols() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [:[]]
+                        ^^^^^ Use `%i` or `%I` for an array of symbols.
+                "#},
+                "x = %i[[]]\n",
+            );
+    }
+
+    #[test]
+    fn percent_flags_symbol_with_balanced_delimiters() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_offense(indoc! {r#"
+                x = [:"foo[bar]", :"baz(qux)"]
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+            "#});
+    }
+
+    #[test]
+    fn percent_corrects_symbol_with_balanced_delimiters() {
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [:"foo[bar]", :"baz(qux)"]
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+                "#},
+                "x = %i[foo[bar] baz(qux)]\n",
+            );
+    }
+
+    #[test]
+    fn percent_skips_symbol_with_unbalanced_delimiter() {
+        // `:"foo]"` has an unpaired `]` after removing balanced pairs.
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_no_offenses("x = [:one, :\"foo]\", :two]\n");
+    }
+
+    #[test]
+    fn percent_skips_symbol_with_space_in_delimiters() {
+        // `:[ ]` contains space inside delimiters → complex.
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_no_offenses("x = [:one, :\"[ ]\"]\n");
+    }
+
+    #[test]
+    fn corrects_with_interpolation_for_tab() {
+        // `:"\t"` contains a literal tab → needs `%I` with `\t` escape.
+        test::<SymbolArray>()
+            .with_options(&SymbolArrayOptions {
+                enforced_style: EnforcedStyle::Percent,
+                min_size: 0,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [:"\t", :three]
+                        ^^^^^^^^^^^^^^^ Use `%i` or `%I` for an array of symbols.
+                "#},
+                "x = %I[\\t three]\n",
+            );
+    }
+
+    // ---- complex_content / strip_balanced_delimiter_pairs / escape ----------
+
+    #[test]
+    fn complex_content_detects_space() {
+        use super::complex_content;
+        assert!(complex_content("foo bar"));
+    }
+
+    #[test]
+    fn complex_content_detects_unbalanced_bracket() {
+        use super::complex_content;
+        assert!(complex_content("foo]"));
+        assert!(complex_content("[bar"));
+    }
+
+    #[test]
+    fn complex_content_accepts_balanced_delimiters() {
+        use super::complex_content;
+        assert!(!complex_content("foo[bar]"));
+        assert!(!complex_content("baz(qux)"));
+        assert!(!complex_content("[]"));
+        assert!(!complex_content("()"));
+    }
+
+    #[test]
+    fn complex_content_accepts_operators() {
+        use super::complex_content;
+        assert!(!complex_content("=="));
+        assert!(!complex_content("!="));
+        assert!(!complex_content("|"));
+        assert!(!complex_content("[]"));
+        assert!(!complex_content("[]="));
+    }
+
+    #[test]
+    fn complex_content_accepts_variables() {
+        use super::complex_content;
+        assert!(!complex_content("@foo"));
+        assert!(!complex_content("@@bar"));
+        assert!(!complex_content("$baz"));
+        assert!(!complex_content("$!"));
+    }
+
+    #[test]
+    fn escape_for_percent_i_handles_control_chars() {
+        use super::escape_for_percent_i;
+        assert_eq!(escape_for_percent_i("\t"), "\\t");
+        assert_eq!(escape_for_percent_i("\n"), "\\n");
+        assert_eq!(escape_for_percent_i("\r"), "\\r");
+        assert_eq!(escape_for_percent_i("foo"), "foo");
+        assert_eq!(escape_for_percent_i("foo#bar"), "foo\\#bar");
+        assert_eq!(escape_for_percent_i("foo\\bar"), "foo\\\\bar");
     }
 }
 murphy_plugin_api::submit_cop!(SymbolArray);
