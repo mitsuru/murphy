@@ -107,7 +107,7 @@ bd close <id>         # Complete work
 
    ```bash
    git pull --rebase
-   bd sync
+   bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```
