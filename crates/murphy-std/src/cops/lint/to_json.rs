@@ -1,3 +1,17 @@
+//! `Lint/ToJSON` — check that `#to_json` requires an optional argument to
+//! be parsable via `JSON.generate(obj)`.
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Lint/ToJSON
+//! upstream_version_checked: 1.87.0
+//! status: verified
+//! gap_issues: []
+//! notes: >
+//!   Mirrors RuboCop's Lint/ToJSON cop: a `def to_json` with no parameters
+//!   is flagged and autocorrected to `def to_json(*_args)`. Also handles
+//!   singleton methods (`def self.to_json`).
+
 use murphy_plugin_api::{Cx, NodeId, NodeKind, NoOptions, Range, cop};
 
 #[derive(Default)]
@@ -18,7 +32,6 @@ impl ToJSON {
         let NodeKind::Args(list) = *cx.kind(args) else { return; };
         if !cx.list(list).is_empty() { return; }
         let node_range = cx.range(node);
-        let src = cx.raw_source(node_range);
         let keyword_len = "def".len() as u32;
         let name_start = node_range.start + keyword_len;
         let name_end = name_start + cx.symbol_str(name).len() as u32;
@@ -59,15 +72,14 @@ impl ToJSON {
 #[cfg(test)]
 mod tests {
     use super::ToJSON;
-    use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::test_support::test;
 
     #[test]
     fn flags_to_json_without_args() {
-        fn hits(src: &str) -> usize {
-            use murphy_plugin_api::test_support::run_cop;
-            run_cop::<ToJSON>(src).len()
-        }
-        assert!(hits("def to_json\nend\n") > 0);
+        use murphy_plugin_api::test_support::run_cop;
+        let offenses = run_cop::<ToJSON>("def to_json\nend\n");
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].cop_name, "Lint/ToJSON");
     }
 
     #[test]
