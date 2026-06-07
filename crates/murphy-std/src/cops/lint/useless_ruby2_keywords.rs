@@ -28,7 +28,7 @@
 //! There is no safe mechanical rewrite: removal may not be desirable
 //! (the method may need `ruby2_keywords` for delegation semantics).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
 
 fn msg(method_name: &str) -> String {
     format!("`ruby2_keywords` is unnecessary for method `{method_name}`.")
@@ -79,7 +79,11 @@ pub struct UselessRuby2Keywords;
 impl UselessRuby2Keywords {
     #[on_node(kind = "send", methods = ["ruby2_keywords"])]
     fn check_ruby2_keywords(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { method: _, args, .. } = *cx.kind(node) else {
+        let NodeKind::Send { receiver, method: _, args, .. } = *cx.kind(node) else {
+            return;
+        };
+        // Only flag bare `ruby2_keywords` calls (no explicit receiver).
+        if receiver != OptNodeId::NONE {
             return;
         };
         let args_list = cx.list(args);

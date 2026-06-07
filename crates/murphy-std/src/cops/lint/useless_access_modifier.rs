@@ -221,17 +221,20 @@ impl UselessAccessModifier {
 
     #[on_node(kind = "begin")]
     fn check_begin(&self, node: NodeId, cx: &Cx<'_>) {
-        // Only check top-level begin (no parent = file scope)
+        // Only check top-level begin (no parent = file scope).
         if !cx.parent(node).is_none() {
             return;
         }
         let children = body_children(node, cx);
+        // At top level every bare access modifier is useless.
+        // Recurse into nested scopes for their own checks.
         for &child in &children {
             if let Some(mod_name) = is_bare_access_modifier(child, cx) {
                 cx.emit_offense(cx.range(child), &msg(mod_name), None);
+            } else if is_start_of_new_scope(child, cx) {
+                check_node(child, cx, false);
             }
         }
-        check_scope_body(&children, false, cx);
     }
 }
 
