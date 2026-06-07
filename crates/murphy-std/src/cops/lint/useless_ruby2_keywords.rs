@@ -108,17 +108,16 @@ impl UselessRuby2Keywords {
                 }
                 NodeKind::Sym(method_name) => {
                     let target = cx.symbol_str(method_name);
-                    // Walk up ancestors; for each ancestor, scan its direct
-                    // children for a matching `def` (not nested scopes).
-                    for ancestor in cx.ancestors(node) {
-                        if let Some(def_id) = find_def_in_scope(ancestor, target, cx) {
+                    // Look for a `def` matching the symbol among the direct
+                    // children of the immediate parent (same lexical scope).
+                    if let Some(parent) = cx.parent(node).get() {
+                        if let Some(def_id) = find_def_in_scope(parent, target, cx) {
                             let NodeKind::Def { args: def_args, .. } = *cx.kind(def_id) else {
-                                continue;
+                                return;
                             };
                             if is_useless(def_args, cx) {
                                 cx.emit_offense(cx.range(node), &msg(target), None);
                             }
-                            break;
                         }
                     }
                 }
@@ -126,24 +125,6 @@ impl UselessRuby2Keywords {
             }
         }
     }
-}
-
-fn has_useless_ruby2_keywords(args_id: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Args(list) = *cx.kind(args_id) else {
-        return true;
-    };
-    let params = cx.list(list);
-    if params.is_empty() {
-        return true;
-    }
-    let has_restarg = params.iter().any(|p| matches!(*cx.kind(*p), NodeKind::Restarg(_)));
-    let has_kw = params
-        .iter()
-        .any(|p| matches!(*cx.kind(*p), NodeKind::Kwarg(_) | NodeKind::Kwoptarg { .. } | NodeKind::Kwrestarg(_)));
-    if has_restarg && !has_kw {
-        return false;
-    }
-    true
 }
 
 #[cfg(test)]
