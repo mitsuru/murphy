@@ -47,26 +47,7 @@ fn is_embedded_expression(child: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn is_literal_value(child: NodeId, cx: &Cx<'_>) -> bool {
-    match *cx.kind(child) {
-        NodeKind::Int(_) | NodeKind::Float(_) | NodeKind::Nil
-        | NodeKind::True_ | NodeKind::False_ => true,
-        NodeKind::Sym(_) => true,
-        NodeKind::Begin(list) => {
-            let items = cx.list(list);
-            items.len() == 1 && is_literal_value(items[0], cx)
-        }
-        NodeKind::Array(list) => cx.list(list).iter().all(|&e| is_literal_value(e, cx)),
-        NodeKind::Hash(list) => cx.list(list).iter().all(|&e| {
-            if let NodeKind::Pair { key, value } = *cx.kind(e) {
-                is_literal_value(key, cx) && is_literal_value(value, cx)
-            } else { false }
-        }),
-        NodeKind::RangeExpr { begin_, end_, .. } => {
-            begin_.get().map_or(true, |b| is_literal_value(b, cx))
-                && end_.get().map_or(true, |e| is_literal_value(e, cx))
-        }
-        _ => false,
-    }
+    cx.is_recursive_literal(child)
 }
 
 #[cfg(test)]

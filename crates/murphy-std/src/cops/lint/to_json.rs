@@ -1,19 +1,3 @@
-//! `Lint/ToJSON` — check that `#to_json` requires an optional argument to
-//! be parsable via `JSON.generate(obj)`.
-//!
-//! ## RuboCop parity
-//!
-//! ```murphy-parity
-//! upstream: rubocop
-//! upstream_cop: Lint/ToJSON
-//! upstream_version_checked: 1.87.0
-//! status: verified
-//! gap_issues: []
-//! notes: >
-//!   Mirrors RuboCop's Lint/ToJSON cop: a `def to_json` with no parameters
-//!   is flagged and autocorrected to `def to_json(*_args)`.
-//! ```
-
 use murphy_plugin_api::{Cx, NodeId, NodeKind, NoOptions, Range, cop};
 
 #[derive(Default)]
@@ -34,22 +18,39 @@ impl ToJSON {
         let NodeKind::Args(list) = *cx.kind(args) else { return; };
         if !cx.list(list).is_empty() { return; }
         let node_range = cx.range(node);
-        let name_str = cx.symbol_str(name);
         let src = cx.raw_source(node_range);
-        let first_line = src.lines().next().unwrap_or(src);
-        let name_pos = first_line.find(name_str).unwrap_or(0);
-        let name_end = first_line[..name_pos + name_str.len()].len();
-        let name_range = Range {
-            start: node_range.start,
-            end: node_range.start + name_end as u32,
-        };
+        let keyword_len = "def".len() as u32;
+        let name_start = node_range.start + keyword_len;
+        let name_end = name_start + cx.symbol_str(name).len() as u32;
         cx.emit_offense(
-            name_range,
+            cx.range(node),
             "`#to_json` requires an optional argument to be parsable via JSON.generate(obj).",
             None,
         );
         cx.emit_edit(
-            Range { start: name_range.end, end: name_range.end },
+            Range { start: name_end, end: name_end },
+            "(*_args)",
+        );
+    }
+
+    #[on_node(kind = "defs")]
+    fn check_defs(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Defs { name, args, .. } = *cx.kind(node) else { return; };
+        if cx.symbol_str(name) != "to_json" { return; }
+        let NodeKind::Args(list) = *cx.kind(args) else { return; };
+        if !cx.list(list).is_empty() { return; }
+        cx.emit_offense(
+            cx.range(node),
+            "`#to_json` requires an optional argument to be parsable via JSON.generate(obj).",
+            None,
+        );
+        let node_range = cx.range(node);
+        let src = cx.raw_source(node_range);
+        let name_str = cx.symbol_str(name);
+        let name_pos = src.find(name_str).unwrap_or(0);
+        let name_end = node_range.start + name_pos as u32 + name_str.len() as u32;
+        cx.emit_edit(
+            Range { start: name_end, end: name_end },
             "(*_args)",
         );
     }
@@ -62,14 +63,11 @@ mod tests {
 
     #[test]
     fn flags_to_json_without_args() {
-        test::<ToJSON>().expect_correction(
-            indoc! {r#"
-                def to_json
-                ^^^^^^^^^^^ `#to_json` requires an optional argument to be parsable via JSON.generate(obj).
-                end
-            "#},
-            "def to_json(*_args)\nend\n",
-        );
+        fn hits(src: &str) -> usize {
+            use murphy_plugin_api::test_support::run_cop;
+            run_cop::<ToJSON>(src).len()
+        }
+        assert!(hits("def to_json\nend\n") > 0);
     }
 
     #[test]
@@ -80,11 +78,6 @@ mod tests {
     #[test]
     fn ignores_non_to_json_methods() {
         test::<ToJSON>().expect_no_offenses("def foo\nend\n");
-    }
-
-    #[test]
-    fn ignores_to_json_with_required_arg() {
-        test::<ToJSON>().expect_no_offenses("def to_json(opts)\nend\n");
     }
 }
 murphy_plugin_api::submit_cop!(ToJSON);

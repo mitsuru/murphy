@@ -38,12 +38,12 @@ impl InterpolationCheck {
         if is_in_regexp_or_heredoc(cx, node) {
             return;
         }
+        let Some(content) = src.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else { return; };
         cx.emit_offense(
             cx.range(node),
             "Interpolation in single quoted string detected. Use double quoted strings if you need interpolation.",
             None,
         );
-        let content = &src[1..src.len() - 1];
         if content.contains('"') {
             cx.emit_edit(cx.range(node), &format!("%{{{content}}}"));
         } else {

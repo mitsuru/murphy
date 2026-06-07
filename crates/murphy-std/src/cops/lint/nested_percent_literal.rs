@@ -43,7 +43,9 @@ impl NestedPercentLiteral {
         let elements = cx.array_elements(node);
         for &child in elements {
             let child_src = cx.raw_source(cx.range(child));
-            if PERCENT_PREFIXES.iter().any(|p| child_src.starts_with(p)) {
+            if child_src.len() >= 3
+                && child_src.chars().nth(2).is_some_and(|c| !c.is_alphanumeric())
+                && PERCENT_PREFIXES.iter().any(|p| child_src.starts_with(p)) {
                 cx.emit_offense(
                     cx.range(node),
                     "Within percent literals, nested percent literals do not function and may be unwanted in the result.",

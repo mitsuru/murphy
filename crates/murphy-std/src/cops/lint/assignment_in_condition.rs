@@ -99,20 +99,13 @@ impl AssignmentInCondition {
 }
 
 fn is_assignment_kind(cx: &Cx<'_>, id: NodeId) -> bool {
-    match *cx.kind(id) {
-        NodeKind::Lvasgn { .. }
-        | NodeKind::Ivasgn { .. }
-        | NodeKind::Gvasgn { .. }
-        | NodeKind::Cvasgn { .. }
-        | NodeKind::Casgn { .. } => true,
-        NodeKind::Send { .. } => cx.is_assignment_method(id),
-        _ => false,
-    }
+    cx.is_assignment(id)
+        || (matches!(*cx.kind(id), NodeKind::Send { .. }) && cx.is_assignment_method(id))
 }
 
 fn is_safe_assignment(cx: &Cx<'_>, id: NodeId) -> bool {
     let Some(parent_id) = cx.parent(id).get() else { return false; };
-    matches!(*cx.kind(parent_id), NodeKind::Begin(_))
+    crate::cops::util::is_parenthesized(parent_id, cx)
 }
 
 fn is_in_any_block(cx: &Cx<'_>, id: NodeId, stop: NodeId) -> bool {

@@ -34,7 +34,7 @@ impl RequireRangeParentheses {
         let Some(begin_id) = begin_.get() else { return; };
         let Some(end_id) = end_.get() else { return; };
         if let Some(parent_id) = cx.parent(node).get() {
-            if matches!(*cx.kind(parent_id), NodeKind::Begin(_)) {
+            if crate::cops::util::is_parenthesized(parent_id, cx) {
                 return;
             }
         }

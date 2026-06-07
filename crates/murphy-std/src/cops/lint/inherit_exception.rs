@@ -57,11 +57,7 @@ impl InheritException {
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         let receiver = cx.call_receiver(node);
         let Some(recv_id) = receiver.get() else { return; };
-        let is_class_new = match *cx.kind(recv_id) {
-            NodeKind::Const { scope: _, name } => cx.symbol_str(name) == "Class",
-            _ => false,
-        };
-        if !is_class_new {
+        if !cx.is_global_const(recv_id, "Class") {
             return;
         }
         let args = cx.call_arguments(node);
@@ -81,10 +77,7 @@ impl InheritException {
 }
 
 fn is_exception_const(cx: &Cx<'_>, id: NodeId) -> bool {
-    match *cx.kind(id) {
-        NodeKind::Const { scope: _, name } => cx.symbol_str(name) == "Exception",
-        _ => false,
-    }
+    cx.is_global_const(id, "Exception")
 }
 
 fn has_preceding_exception_sibling(cx: &Cx<'_>, class_node: NodeId, superclass_id: NodeId) -> bool {

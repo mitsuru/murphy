@@ -19,10 +19,6 @@ use murphy_plugin_api::{Cx, NodeId, NodeKind, NoOptions, Range, cop};
 #[derive(Default)]
 pub struct PercentSymbolArray;
 
-const PERCENT_ARRAY_STARTS: &[&str] = &[
-    "%i(", "%I(", "%i[", "%I[", "%i{", "%I{", "%i<", "%I<",
-];
-
 #[cop(
     name = "Lint/PercentSymbolArray",
     description = "Check for colons and commas in `%i`/`%I` arrays.",
@@ -34,7 +30,7 @@ impl PercentSymbolArray {
     #[on_node(kind = "array")]
     fn check_array(&self, node: NodeId, cx: &Cx<'_>) {
         let src = cx.raw_source(cx.range(node));
-        if !PERCENT_ARRAY_STARTS.iter().any(|prefix| src.starts_with(prefix)) {
+        if !src.starts_with("%i") && !src.starts_with("%I") {
             return;
         }
         let elements = cx.array_elements(node);
