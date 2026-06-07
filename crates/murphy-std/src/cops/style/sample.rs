@@ -197,6 +197,11 @@ fn sample_size_two_args(first: NodeId, second: NodeId, cx: &Cx<'_>) -> SampleSiz
     let NodeKind::Int(second_val) = *cx.kind(second) else {
         return SampleSize::Unknown;
     };
+    // Negative length (`shuffle[0, -1]`) returns `nil`, not an Array subset —
+    // not equivalent to `sample(-1)` which raises `ArgumentError`.
+    if second_val < 0 {
+        return SampleSize::Unknown;
+    }
     SampleSize::Computable(Some(second_val.to_string()))
 }
 
@@ -607,6 +612,17 @@ mod tests {
     #[test]
     fn accepts_shuffle_index_var_n() {
         test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle[foo, 3]\n");
+    }
+
+    #[test]
+    fn accepts_shuffle_index_neg_n() {
+        // `shuffle[0, -1]` returns nil; `sample(-1)` raises ArgumentError.
+        test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle[0, -1]\n");
+    }
+
+    #[test]
+    fn accepts_shuffle_slice_neg_n() {
+        test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle.slice(0, -1)\n");
     }
 
     #[test]
