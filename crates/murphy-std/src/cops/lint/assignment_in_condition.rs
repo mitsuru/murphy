@@ -63,7 +63,7 @@ impl AssignmentInCondition {
 
 impl AssignmentInCondition {
     fn check_condition(&self, cond: NodeId, cx: &Cx<'_>) {
-        let opts = Options::default();
+        let opts = cx.options_or_default::<Options>();
         let descendants = cx.descendants(cond);
         let mut all_ids = vec![cond];
         all_ids.extend(descendants);

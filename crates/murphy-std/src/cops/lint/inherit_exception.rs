@@ -44,7 +44,8 @@ impl InheritException {
         if has_preceding_exception_sibling(cx, node, super_id) {
             return;
         }
-        let preferred = preferred_base_class();
+        let opts = cx.options_or_default::<Options>();
+        let preferred = preferred_base_class(&opts);
         cx.emit_offense(
             cx.range(super_id),
             &format!("Inherit from `{preferred}` instead of `Exception`."),
@@ -66,7 +67,8 @@ impl InheritException {
         if !is_exception_const(cx, first) {
             return;
         }
-        let preferred = preferred_base_class();
+        let opts = cx.options_or_default::<Options>();
+        let preferred = preferred_base_class(&opts);
         cx.emit_offense(
             cx.range(first),
             &format!("Inherit from `{preferred}` instead of `Exception`."),
@@ -94,13 +96,16 @@ fn has_preceding_exception_sibling(cx: &Cx<'_>, class_node: NodeId, superclass_i
     false
 }
 
-fn preferred_base_class() -> &'static str {
-    "StandardError"
+fn preferred_base_class(opts: &Options) -> &str {
+    match opts.enforced_style.as_str() {
+        "runtime_error" => "RuntimeError",
+        _ => "StandardError",
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::InheritException;
+    use super::{InheritException, Options};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -119,6 +124,29 @@ mod tests {
     #[test]
     fn ignores_class_with_no_superclass() {
         test::<InheritException>().expect_no_offenses("class C; end\n");
+    }
+
+    #[test]
+    fn flags_class_runtime_error() {
+        test::<InheritException>()
+            .with_options(&Options { enforced_style: "runtime_error".into() })
+            .expect_offense(indoc! {r#"
+                class C < Exception; end
+                          ^^^^^^^^^ Inherit from `RuntimeError` instead of `Exception`.
+            "#});
+    }
+
+    #[test]
+    fn autocorrects_to_runtime_error() {
+        test::<InheritException>()
+            .with_options(&Options { enforced_style: "runtime_error".into() })
+            .expect_correction(
+                indoc! {r#"
+                    class C < Exception; end
+                              ^^^^^^^^^ Inherit from `RuntimeError` instead of `Exception`.
+                "#},
+                "class C < RuntimeError; end\n",
+            );
     }
 
     #[test]

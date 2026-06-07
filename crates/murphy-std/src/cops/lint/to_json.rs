@@ -25,31 +25,39 @@ pub struct ToJSON;
     options = NoOptions
 )]
 impl ToJSON {
-    #[on_node(kind = "def")]
-    fn check_def(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Def { name, args, .. } = *cx.kind(node) else { return; };
-        if cx.symbol_str(name) != "to_json" { return; }
-        let NodeKind::Args(list) = *cx.kind(args) else { return; };
-        if !cx.list(list).is_empty() { return; }
-        let node_range = cx.range(node);
-        let src = cx.raw_source(node_range);
+    fn method_name_end(node: NodeId, cx: &Cx<'_>, name: &str) -> Option<u32> {
+        let src = cx.raw_source(cx.range(node));
+        let name_pos = src.find(name)?;
+        Some(cx.range(node).start + name_pos as u32 + name.len() as u32)
+    }
+
+    fn emit(node: NodeId, cx: &Cx<'_>, name: murphy_plugin_api::Symbol) {
+        let name_str = cx.symbol_str(name);
+        let Some(name_end) = Self::method_name_end(node, cx, name_str) else { return; };
+        let src = cx.raw_source(cx.range(node));
         let first_line_end = src.find('\n').unwrap_or(src.len());
         let offense_range = Range {
-            start: node_range.start,
-            end: node_range.start + first_line_end as u32,
+            start: cx.range(node).start,
+            end: cx.range(node).start + first_line_end as u32,
         };
         cx.emit_offense(
             offense_range,
             "`#to_json` requires an optional argument to be parsable via JSON.generate(obj).",
             None,
         );
-        let name_str = cx.symbol_str(name);
-        let name_pos = src.find(name_str).unwrap_or(0);
-        let name_end = node_range.start + name_pos as u32 + name_str.len() as u32;
         cx.emit_edit(
             Range { start: name_end, end: name_end },
             "(*_args)",
         );
+    }
+
+    #[on_node(kind = "def")]
+    fn check_def(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Def { name, args, .. } = *cx.kind(node) else { return; };
+        if cx.symbol_str(name) != "to_json" { return; }
+        let NodeKind::Args(list) = *cx.kind(args) else { return; };
+        if !cx.list(list).is_empty() { return; }
+        Self::emit(node, cx, name);
     }
 
     #[on_node(kind = "defs")]
@@ -58,20 +66,7 @@ impl ToJSON {
         if cx.symbol_str(name) != "to_json" { return; }
         let NodeKind::Args(list) = *cx.kind(args) else { return; };
         if !cx.list(list).is_empty() { return; }
-        cx.emit_offense(
-            cx.range(node),
-            "`#to_json` requires an optional argument to be parsable via JSON.generate(obj).",
-            None,
-        );
-        let node_range = cx.range(node);
-        let src = cx.raw_source(node_range);
-        let name_str = cx.symbol_str(name);
-        let name_pos = src.find(name_str).unwrap_or(0);
-        let name_end = node_range.start + name_pos as u32 + name_str.len() as u32;
-        cx.emit_edit(
-            Range { start: name_end, end: name_end },
-            "(*_args)",
-        );
+        Self::emit(node, cx, name);
     }
 }
 
@@ -82,11 +77,14 @@ mod tests {
 
     #[test]
     fn flags_to_json_without_args() {
-        test::<ToJSON>().expect_offense(indoc! {r#"
-            def to_json
-            ^^^^^^^^^^^ `#to_json` requires an optional argument to be parsable via JSON.generate(obj).
-            end
-        "#});
+        test::<ToJSON>().expect_correction(
+            indoc! {r#"
+                def to_json
+                ^^^^^^^^^^^ `#to_json` requires an optional argument to be parsable via JSON.generate(obj).
+                end
+            "#},
+            "def to_json(*_args)\nend\n",
+        );
     }
 
     #[test]
