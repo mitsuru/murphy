@@ -19,6 +19,11 @@
 //!
 //!   Known v1 limitation: no per-cop file-pattern gating. The cop fires on
 //!   any file; no `Include`/`Exclude` patterns are supported.
+//!
+//!   Safe-navigation edge case: `obj&.shuffle.first` is corrected to
+//!   `obj&.sample`, mirroring RuboCop. When `obj` is nil, the original
+//!   raises NoMethodError on `.first`; the corrected form returns nil.
+//!   This is the same behavioral change RuboCop applies.
 //! ```
 //!
 //! ## Matched shapes
