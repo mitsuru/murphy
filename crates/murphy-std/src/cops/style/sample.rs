@@ -14,11 +14,11 @@
 //!   `shuffle[0, N]`, `shuffle[0..N]`, `shuffle[0...N]`,
 //!   `shuffle.slice(0, N)`, `shuffle.slice(0..N)`, `shuffle.slice(0...N)`,
 //!   and `shuffle(random: RNG).first` / similar variants.
-//!   Both plain send (`obj.shuffle.first`) and safe-navigation receiver
-//!   (`obj&.shuffle.first`) are handled. Safe-navigation *accessor*
-//!   (`obj.shuffle&.first`, outer csend) is not flagged — the cop only
-//!   acts on plain-send accessors, matching the conservative approach
-//!   used by other std cops (cf. `Style/RedundantSort`).
+//!   Only plain-send accessors (`obj.shuffle.first`) are handled.
+//!   Safe-navigation at any level (`obj&.shuffle.first`, `obj.shuffle&.first`)
+//!   is not flagged — the cop only acts on plain-send receivers and
+//!   accessors, matching the conservative approach used by other std
+//!   cops (cf. `Style/RedundantSort`).
 //!
 //!   Known v1 limitation: no per-cop file-pattern gating. The cop fires on
 //!   any file; no `Include`/`Exclude` patterns are supported.
@@ -69,9 +69,10 @@ impl Sample {
     }
 
     // Note: no csend handler — safe-navigation *accessor* (`obj.shuffle&.first`)
-    // is not flagged. The `check_send` handler already covers the case where
-    // `shuffle` itself is called with `&.` (`obj&.shuffle.first`), since the
-    // outer accessor `.first` is still a plain Send.
+    // is not flagged. And `is_shuffle_call` rejects csend receivers, so
+    // `obj&.shuffle.first` is also not flagged. Only plain-send-all-the-way
+    // chains are handled, matching the conservative approach established
+    // by `Style/RedundantSort`.
 }
 
 // ---------------------------------------------------------------------------
@@ -139,12 +140,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     cx.emit_edit(offense_range, &correction);
 }
 
-/// Whether a node is a `shuffle` method call (Send or Csend, any receiver).
+/// Whether a node is a plain `shuffle` method call (Send only — csend excluded
+/// to avoid changing nil-safety behavior, matching `Style/RedundantSort`).
 fn is_shuffle_call(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
-        NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => {
-            cx.symbol_str(method) == "shuffle"
-        }
+        NodeKind::Send { method, .. } => cx.symbol_str(method) == "shuffle",
         _ => false,
     }
 }
@@ -267,25 +267,14 @@ mod tests {
     }
 
     #[test]
-    fn flags_safe_nav_shuffle_first() {
-        test::<Sample>().expect_correction(
-            indoc! {r#"
-                [1, 2, 3]&.shuffle.first
-                           ^^^^^^^^^^^^^^ Use `sample` instead of `shuffle.first`.
-            "#},
-            "[1, 2, 3]&.sample\n",
-        );
+    fn accepts_safe_nav_shuffle_first() {
+        // csend receiver excluded to avoid nil-safety behavior change.
+        test::<Sample>().expect_no_offenses("[1, 2, 3]&.shuffle.first\n");
     }
 
     #[test]
-    fn flags_safe_nav_shuffle_last() {
-        test::<Sample>().expect_correction(
-            indoc! {r#"
-                [1, 2, 3]&.shuffle.last
-                           ^^^^^^^^^^^^^ Use `sample` instead of `shuffle.last`.
-            "#},
-            "[1, 2, 3]&.sample\n",
-        );
+    fn accepts_safe_nav_shuffle_last() {
+        test::<Sample>().expect_no_offenses("[1, 2, 3]&.shuffle.last\n");
     }
 
     // ----- shuffle[0] / shuffle[-1] -----
