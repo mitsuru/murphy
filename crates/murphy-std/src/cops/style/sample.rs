@@ -166,7 +166,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     cx.emit_edit(offense_range, &correction);
 }
 
-/// Whether a node is a Hash or Pair node (keyword-argument syntax).
+/// Whether a node looks like keyword-argument syntax (`key: val` bare in
+/// the args list, which Murph represents as Hash), or a bare Pair node.
+/// Positional `{ key: val }` hash literals also produce Hash, but the
+/// distinction is not readily available at the NodeKind level — this is
+/// conservatively permissive and matches RuboCop's behaviour.
 fn is_hash_or_pair(node: NodeId, cx: &Cx<'_>) -> bool {
     matches!(cx.kind(node), NodeKind::Hash { .. } | NodeKind::Pair { .. })
 }
@@ -419,11 +423,11 @@ mod tests {
 
     #[test]
     fn flags_shuffle_index_beginless_erange() {
-        // [...3] is Ruby 2.7+ syntax; begin omitted == 0 for sample purposes.
+        // [...] is Ruby 2.7+ syntax; begin omitted == 0 for sample purposes.
         test::<Sample>().expect_correction(
             indoc! {r#"
-                [1, 2, 3].shuffle[0...3]
-                          ^^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle[0...3]`.
+                [1, 2, 3].shuffle[...3]
+                          ^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle[...3]`.
             "#},
             "[1, 2, 3].sample(3)\n",
         );
