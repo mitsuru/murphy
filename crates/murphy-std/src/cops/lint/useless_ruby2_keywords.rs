@@ -34,6 +34,38 @@ fn msg(method_name: &str) -> String {
     format!("`ruby2_keywords` is unnecessary for method `{method_name}`.")
 }
 
+/// Check if `ruby2_keywords` is useless for the given method args.
+fn is_useless(args_id: NodeId, cx: &Cx<'_>) -> bool {
+    let NodeKind::Args(list) = *cx.kind(args_id) else {
+        return true;
+    };
+    let params = cx.list(list);
+    if params.is_empty() {
+        return true;
+    }
+    let has_rest = params.iter().any(|p| matches!(*cx.kind(*p), NodeKind::Restarg(_)));
+    let has_kw = params.iter().any(|p| {
+        matches!(
+            *cx.kind(*p),
+            NodeKind::Kwarg(_) | NodeKind::Kwoptarg { .. } | NodeKind::Kwrestarg(_)
+        )
+    });
+    !(has_rest && !has_kw)
+}
+
+/// Find a `Def` with the given name among the children of `parent`
+/// (not nested in class/module/sclass boundaries).
+fn find_def_in_scope(parent: NodeId, target: &str, cx: &Cx<'_>) -> Option<NodeId> {
+    for child in cx.children(parent) {
+        if let NodeKind::Def { name, .. } = *cx.kind(child) {
+            if cx.symbol_str(name) == target {
+                return Some(child);
+            }
+        }
+    }
+    None
+}
+
 #[derive(Default)]
 pub struct UselessRuby2Keywords;
 
@@ -47,47 +79,47 @@ pub struct UselessRuby2Keywords;
 impl UselessRuby2Keywords {
     #[on_node(kind = "send", methods = ["ruby2_keywords"])]
     fn check_ruby2_keywords(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { args, .. } = *cx.kind(node) else {
+        let NodeKind::Send { method: _, args, .. } = *cx.kind(node) else {
             return;
         };
         let args_list = cx.list(args);
-        let Some(&first_arg) = args_list.first() else {
+        if args_list.is_empty() {
             return;
-        };
+        }
 
-        match *cx.kind(first_arg) {
-            NodeKind::Def {
-                name,
-                args: def_args,
-                ..
-            } => {
-                if has_useless_ruby2_keywords(def_args, cx) {
-                    let msg = msg(cx.symbol_str(name));
-                    cx.emit_offense(cx.range(node), &msg, None);
+        for &arg in args_list {
+            match *cx.kind(arg) {
+                NodeKind::Def {
+                    name,
+                    args: def_args,
+                    ..
+                } => {
+                    if is_useless(def_args, cx) {
+                        cx.emit_offense(
+                            cx.range(node),
+                            &msg(cx.symbol_str(name)),
+                            None,
+                        );
+                    }
                 }
-            }
-            NodeKind::Sym(method_name) => {
-                let target = cx.symbol_str(method_name);
-                for ancestor in cx.ancestors(node) {
-                    for desc in cx.descendants(ancestor) {
-                        if let NodeKind::Def {
-                            name,
-                            args: def_args,
-                            ..
-                        } = *cx.kind(desc)
-                        {
-                            if cx.symbol_str(name) == target
-                                && has_useless_ruby2_keywords(def_args, cx)
-                            {
-                                let msg = msg(target);
-                                cx.emit_offense(cx.range(node), &msg, None);
-                                return;
+                NodeKind::Sym(method_name) => {
+                    let target = cx.symbol_str(method_name);
+                    // Walk up ancestors; for each ancestor, scan its direct
+                    // children for a matching `def` (not nested scopes).
+                    for ancestor in cx.ancestors(node) {
+                        if let Some(def_id) = find_def_in_scope(ancestor, target, cx) {
+                            let NodeKind::Def { args: def_args, .. } = *cx.kind(def_id) else {
+                                continue;
+                            };
+                            if is_useless(def_args, cx) {
+                                cx.emit_offense(cx.range(node), &msg(target), None);
                             }
+                            break;
                         }
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 }

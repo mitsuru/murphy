@@ -130,6 +130,7 @@ fn body_children(node: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
 /// Check a scope body for redundant access modifiers. Returns (last_visibility, unused_modifier_node).
 fn check_scope_body(
     children: &[NodeId],
+    leading_public_redundant: bool,
     cx: &Cx<'_>,
 ) -> (Option<&'static str>, Option<NodeId>) {
     let mut cur_vis: Option<&'static str> = None;
@@ -140,27 +141,22 @@ fn check_scope_body(
             match cur_vis {
                 Some(prev) if prev == mod_name => {
                     // Repeated modifier
-                    cx.emit_offense(
-                        cx.range(child),
-                        &msg( mod_name),
-                        None,
-                    );
-                    // Keep cur_vis, reset unused to this node
+                    cx.emit_offense(cx.range(child), &msg(mod_name), None);
                     unused = Some(child);
                 }
                 Some(prev) => {
-                    // New visibility level
+                    // New visibility level — report previous if unused
                     if let Some(unused_node) = unused {
-                        cx.emit_offense(
-                            cx.range(unused_node),
-                            &msg( prev),
-                            None,
-                        );
+                        cx.emit_offense(cx.range(unused_node), &msg(prev), None);
                     }
                     cur_vis = Some(mod_name);
                     unused = Some(child);
                 }
                 None => {
+                    // First modifier in this scope.
+                    if leading_public_redundant && mod_name == "public" {
+                        cx.emit_offense(cx.range(child), &msg("public"), None);
+                    }
                     cur_vis = Some(mod_name);
                     unused = Some(child);
                 }
@@ -168,19 +164,16 @@ fn check_scope_body(
         } else if is_method_definition(child, cx) {
             unused = None;
         } else if child != cx.root() && is_start_of_new_scope(child, cx) {
-            check_node(child, cx);
+            check_node(child, cx, false);
         } else if !matches!(*cx.kind(child), NodeKind::Def { receiver, .. }
             if receiver != OptNodeId::NONE)
         {
-            // Recurse into children (e.g., begin blocks)
             let sub_children = body_children(child, cx);
             if !sub_children.is_empty() {
-                let (_sub_vis, sub_unused) = check_scope_body(&sub_children, cx);
+                let (_sub_vis, sub_unused) = check_scope_body(&sub_children, false, cx);
                 if sub_unused.is_none() {
                     continue;
                 }
-                // A sub-scope had an unused modifier; that was already reported
-                // by the recursive call. Don't propagate it up.
             }
         }
     }
@@ -188,19 +181,15 @@ fn check_scope_body(
     (cur_vis, unused)
 }
 
-fn check_node(node: NodeId, cx: &Cx<'_>) {
+fn check_node(node: NodeId, cx: &Cx<'_>, leading_public_redundant: bool) {
     let children = body_children(node, cx);
     if children.is_empty() {
         return;
     }
-    let (_cur_vis, unused) = check_scope_body(&children, cx);
+    let (_, unused) = check_scope_body(&children, leading_public_redundant, cx);
     if let Some(unused_node) = unused {
         let mod_name = is_bare_access_modifier(unused_node, cx).unwrap_or("access");
-        cx.emit_offense(
-            cx.range(unused_node),
-            &msg( mod_name),
-            None,
-        );
+        cx.emit_offense(cx.range(unused_node), &msg(mod_name), None);
     }
 }
 
@@ -217,26 +206,17 @@ pub struct UselessAccessModifier;
 impl UselessAccessModifier {
     #[on_node(kind = "class")]
     fn check_class(&self, node: NodeId, cx: &Cx<'_>) {
-        // Check leading public: if the first modifier is `public`, it's redundant.
-        let children = body_children(node, cx);
-        if let Some(first) = children.first().filter(|&f| is_bare_access_modifier(*f, cx) == Some("public")) {
-            cx.emit_offense(cx.range(*first), &msg("public"), None);
-        }
-        check_node(node, cx);
+        check_node(node, cx, true);
     }
 
     #[on_node(kind = "module")]
     fn check_module(&self, node: NodeId, cx: &Cx<'_>) {
-        let children = body_children(node, cx);
-        if let Some(first) = children.first().filter(|&f| is_bare_access_modifier(*f, cx) == Some("public")) {
-            cx.emit_offense(cx.range(*first), &msg("public"), None);
-        }
-        check_node(node, cx);
+        check_node(node, cx, true);
     }
 
     #[on_node(kind = "sclass")]
     fn check_sclass(&self, node: NodeId, cx: &Cx<'_>) {
-        check_node(node, cx);
+        check_node(node, cx, false);
     }
 
     #[on_node(kind = "begin")]
@@ -248,10 +228,10 @@ impl UselessAccessModifier {
         let children = body_children(node, cx);
         for &child in &children {
             if let Some(mod_name) = is_bare_access_modifier(child, cx) {
-                cx.emit_offense(cx.range(child), &msg( mod_name), None);
+                cx.emit_offense(cx.range(child), &msg(mod_name), None);
             }
         }
-        check_scope_body(&children, cx);
+        check_scope_body(&children, false, cx);
     }
 }
 
