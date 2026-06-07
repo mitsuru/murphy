@@ -55,7 +55,7 @@ impl UselessDefined {
     #[on_node(kind = "defined")]
     fn check_defined(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Defined(arg) = *cx.kind(node) else {
-            return;
+            unreachable!()
         };
         let arg_kind = cx.kind(arg);
         let Some(type_name) = arg_type_name(arg_kind) else {

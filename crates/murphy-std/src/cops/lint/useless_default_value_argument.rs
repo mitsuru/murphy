@@ -111,6 +111,12 @@ impl UselessDefaultValueArgument {
         let default_value = args_list[1];
 
         // Must NOT be a keyword-style hash without braces (e.g. `default: value`).
+        // This distinguishes `x.fetch(key, {})` (braced empty hash = default value)
+        // from `x.fetch(key, default: value)` (keyword-arg hash = not a default).
+        // Heuristic: check if source starts with `{`. In practice Ruby keyword args
+        // without braces never start with `{`, so this is safe despite not parsing
+        // the AST structure. A more robust alternative would inspect the hash's pair
+        // nodes directly via NodeKind::Pair.
         if let NodeKind::Hash(_) = *cx.kind(default_value) {
             let src = cx.raw_source(cx.range(default_value));
             if !src.starts_with('{') {

@@ -145,6 +145,12 @@ fn use_exception_variable_in_ensure(resbody: NodeId, cx: &Cx<'_>) -> bool {
     for ancestor in cx.ancestors(resbody) {
         if let NodeKind::Ensure { ensure_, .. } = *cx.kind(ancestor) {
             if let Some(ensure_body) = ensure_.get() {
+                // NOTE: This simple descendant walk does not account for
+                // variable shadowing (e.g. block args or inner Lvasgn in the
+                // ensure body with the same name). A more robust
+                // implementation would walk ancestor chains from each Lvar to
+                // check for intervening bindings. In practice the common case
+                // (bare `ensure; do_something(e); end`) works correctly.
                 for desc in cx.descendants(ensure_body) {
                     if let NodeKind::Lvar(s) = *cx.kind(desc) {
                         if cx.symbol_str(s) == var_name {

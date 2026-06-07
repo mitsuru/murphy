@@ -142,16 +142,16 @@ fn report_offense(
     let NodeKind::Or { lhs, rhs } = *cx.kind(or_node) else {
         return;
     };
-    let lhs_source = cx.raw_source(cx.range(truthy_node));
-    let rhs_source = cx.raw_source(cx.range(rhs));
+    let truthy_source = cx.raw_source(cx.range(truthy_node));
+    let never_evaluated_source = cx.raw_source(cx.range(rhs));
     let replacement = if replace_with_truthy {
-        lhs_source.to_string()
+        truthy_source.to_string()
     } else {
         cx.raw_source(cx.range(lhs)).to_string()
     };
     let msg = format!(
         "`{}` will never evaluate because `{}` always returns a truthy value.",
-        rhs_source, lhs_source
+        never_evaluated_source, truthy_source
     );
     cx.emit_offense(cx.range(or_node), &msg, None);
     cx.emit_edit(cx.range(or_node), &replacement);

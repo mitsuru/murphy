@@ -50,11 +50,14 @@ fn is_useless(args_id: NodeId, cx: &Cx<'_>) -> bool {
             NodeKind::Kwarg(_) | NodeKind::Kwoptarg { .. } | NodeKind::Kwrestarg(_)
         )
     });
-    !(has_rest && !has_kw)
+    // ruby2_keywords is only useful when there is *args AND no keyword args.
+    // Useless unless: has rest arg AND no keyword args.
+    !has_rest || has_kw
 }
 
-/// Find a `Def` with the given name among the children of `parent`
-/// (not nested in class/module/sclass boundaries).
+/// Find a `Def` with the given name among the direct children of `parent`.
+/// Uses `cx.children()` which returns only immediate children, so it will not
+/// traverse into nested `class`/`module`/`sclass` bodies.
 fn find_def_in_scope(parent: NodeId, target: &str, cx: &Cx<'_>) -> Option<NodeId> {
     for child in cx.children(parent) {
         if let NodeKind::Def { name, .. } = *cx.kind(child) {
