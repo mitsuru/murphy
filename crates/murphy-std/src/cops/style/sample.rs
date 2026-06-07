@@ -15,15 +15,13 @@
 //!   `shuffle.slice(0, N)`, `shuffle.slice(0..N)`, `shuffle.slice(0...N)`,
 //!   and `shuffle(random: RNG).first` / similar variants.
 //!   Both plain send (`obj.shuffle.first`) and safe-navigation receiver
-//!   (`obj&.shuffle.first`) are handled.
+//!   (`obj&.shuffle.first`) are handled. Safe-navigation *accessor*
+//!   (`obj.shuffle&.first`, outer csend) is not flagged — the cop only
+//!   acts on plain-send accessors, matching the conservative approach
+//!   used by other std cops (cf. `Style/RedundantSort`).
 //!
 //!   Known v1 limitation: no per-cop file-pattern gating. The cop fires on
 //!   any file; no `Include`/`Exclude` patterns are supported.
-//!
-//!   Safe-navigation edge case: `obj&.shuffle.first` is corrected to
-//!   `obj&.sample`, mirroring RuboCop. When `obj` is nil, the original
-//!   raises NoMethodError on `.first`; the corrected form returns nil.
-//!   This is the same behavioral change RuboCop applies.
 //! ```
 //!
 //! ## Matched shapes
@@ -70,15 +68,10 @@ impl Sample {
         check(node, cx);
     }
 
-    #[on_node(kind = "csend")]
-    fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if matches!(cx.symbol_str(method), "first" | "last" | "[]" | "at" | "slice") {
-            check(node, cx);
-        }
-    }
+    // Note: no csend handler — safe-navigation *accessor* (`obj.shuffle&.first`)
+    // is not flagged. The `check_send` handler already covers the case where
+    // `shuffle` itself is called with `&.` (`obj&.shuffle.first`), since the
+    // outer accessor `.first` is still a plain Send.
 }
 
 // ---------------------------------------------------------------------------
