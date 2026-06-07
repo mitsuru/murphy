@@ -74,13 +74,19 @@ impl UselessOr {
     }
 }
 
-/// Returns `true` if `node` is a `Send` (not `Csend`) whose method is known
-/// to always return a truthy value even when called on `nil` (e.g.,
-/// `nil.to_s` returns `""`).
+/// Returns `true` if `node` is a `Send` (not `Csend`) with an explicit
+/// receiver whose method is known to always return a truthy value even
+/// when called on `nil` (e.g., `nil.to_s` returns `""`).
+/// Bare calls (implicit-self, e.g. `to_s || fallback`) are NOT flagged
+/// because they could be user-defined methods.
 fn is_truthy_return_method(node: NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { method, .. } = *cx.kind(node) else {
+    let NodeKind::Send { receiver, method, .. } = *cx.kind(node) else {
         return false;
     };
+    // Require an explicit receiver (bare `to_s` may be user-defined).
+    if receiver.is_none() {
+        return false;
+    }
     let name = cx.symbol_str(method);
     matches!(
         name,
