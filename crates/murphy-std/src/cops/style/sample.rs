@@ -81,11 +81,18 @@ impl Sample {
 
 /// Check if `node` is a shuffle-based accessor that should use `sample`.
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // The receiver must be a shuffle call (plain Send or Csend).
+    // The receiver must be a plain shuffle call (Send only).
     let Some(receiver_id) = cx.call_receiver(node).get() else {
         return;
     };
     if !is_shuffle_call(receiver_id, cx) {
+        return;
+    }
+
+    // `shuffle` accepts only keyword arguments. If there are positional args
+    // the call raises ArgumentError — skip to avoid changing semantics.
+    let shuffle_args = cx.call_arguments(receiver_id);
+    if shuffle_args.iter().any(|id| !is_hash_or_pair(*id, cx)) {
         return;
     }
 
@@ -97,6 +104,14 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         "first" | "last" => {
             // `first(1, 2)` is syntactically valid but raises ArgumentError.
             if method_args.len() > 1 {
+                return;
+            }
+            // `first(random: rng)` is keyword syntax — would raise ArgumentError,
+            // skip to avoid changing semantics.
+            if method_args
+                .first()
+                .is_some_and(|id| is_hash_or_pair(*id, cx))
+            {
                 return;
             }
             method_args
@@ -115,10 +130,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
 
     // Build the shuffle-args source (keyword args like `random: Random.new`).
-    let shuffle_args_source: Option<String> = {
-        let shuffle_args = cx.call_arguments(receiver_id);
-        shuffle_args.first().map(|id| cx.raw_source(cx.range(*id)).to_string())
-    };
+    // Only the first keyword arg is used, matching RuboCop's `extract_source`.
+    // All positional args are already rejected above.
+    let shuffle_args_source: Option<String> = shuffle_args
+        .first()
+        .map(|id| cx.raw_source(cx.range(*id)).to_string());
 
     // Build correction text: `sample`, `sample(N)`, or `sample(N, random: ...)`.
     let mut parts: Vec<&str> = Vec::new();
@@ -148,6 +164,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     cx.emit_offense(offense_range, &message, None);
     cx.emit_edit(offense_range, &correction);
+}
+
+/// Whether a node is a Hash or Pair node (keyword-argument syntax).
+fn is_hash_or_pair(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(cx.kind(node), NodeKind::Hash { .. } | NodeKind::Pair { .. })
 }
 
 /// Whether a node is a plain `shuffle` method call (Send only — csend excluded
@@ -574,6 +595,18 @@ mod tests {
     #[test]
     fn accepts_shuffle_last_extra_args() {
         test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle.last(1, 2)\n");
+    }
+
+    #[test]
+    fn accepts_shuffle_first_keyword_arg() {
+        // `first(random: rng)` raises ArgumentError — skip.
+        test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle.first(random: rng)\n");
+    }
+
+    #[test]
+    fn accepts_shuffle_with_positional_arg() {
+        // `shuffle(2)` raises ArgumentError — skip.
+        test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle(2).first\n");
     }
 
     #[test]
