@@ -94,10 +94,20 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // Determine the sample argument.
     let sample_arg: Option<String> = match method_name {
-        "first" | "last" => method_args
-            .first()
-            .map(|id| cx.raw_source(cx.range(*id)).to_string()),
-        "[]" | "at" | "slice" => match sample_size(method_args, cx) {
+        "first" | "last" => {
+            // `first(1, 2)` is syntactically valid but raises ArgumentError.
+            if method_args.len() > 1 {
+                return;
+            }
+            method_args
+                .first()
+                .map(|id| cx.raw_source(cx.range(*id)).to_string())
+        }
+        "[]" | "slice" => match sample_size(method_args, cx) {
+            SampleSize::Computable(arg) => arg,
+            SampleSize::Unknown => return,
+        },
+        "at" => match sample_size_at(method_args, cx) {
             SampleSize::Computable(arg) => arg,
             SampleSize::Unknown => return,
         },
@@ -161,13 +171,26 @@ enum SampleSize {
     Unknown,
 }
 
-/// Determine if the method arguments to `[]` / `at` / `slice` represent a
+/// Determine if the method arguments to `[]` / `slice` represent a
 /// sample-compatible access pattern.
 fn sample_size(args: &[NodeId], cx: &Cx<'_>) -> SampleSize {
     match args.len() {
         0 => SampleSize::Unknown,
         1 => sample_size_one_arg(args[0], cx),
         2 => sample_size_two_args(args[0], args[1], cx),
+        _ => SampleSize::Unknown,
+    }
+}
+
+/// Determine if the method arguments to `at` represent a sample-compatible
+/// access pattern. `at` does not accept Range arguments (raises TypeError),
+/// so only bare integer arguments 0 and -1 are considered.
+fn sample_size_at(args: &[NodeId], cx: &Cx<'_>) -> SampleSize {
+    match args.len() {
+        1 => match *cx.kind(args[0]) {
+            NodeKind::Int(n) if n == 0 || n == -1 => SampleSize::Computable(None),
+            _ => SampleSize::Unknown,
+        },
         _ => SampleSize::Unknown,
     }
 }
@@ -534,6 +557,23 @@ mod tests {
     #[test]
     fn accepts_shuffle_at_var() {
         test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle.at(foo)\n");
+    }
+
+    #[test]
+    fn accepts_shuffle_at_range() {
+        // `at` does not accept Range arguments (TypeError).
+        test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle.at(0..3)\n");
+    }
+
+    #[test]
+    fn accepts_shuffle_first_extra_args() {
+        // `first(1, 2)` raises ArgumentError.
+        test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle.first(1, 2)\n");
+    }
+
+    #[test]
+    fn accepts_shuffle_last_extra_args() {
+        test::<Sample>().expect_no_offenses("[1, 2, 3].shuffle.last(1, 2)\n");
     }
 
     #[test]
