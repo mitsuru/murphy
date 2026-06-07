@@ -19,3 +19,4 @@ librust_out.rlib
 # Claude session worktrees (analogous to .worktrees/)
 .claude/worktrees/
 .beads/interactions.jsonl
+mise.local.toml
