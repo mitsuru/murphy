@@ -32,14 +32,20 @@ impl ToJSON {
         let NodeKind::Args(list) = *cx.kind(args) else { return; };
         if !cx.list(list).is_empty() { return; }
         let node_range = cx.range(node);
-        let keyword_len = "def".len() as u32;
-        let name_start = node_range.start + keyword_len;
-        let name_end = name_start + cx.symbol_str(name).len() as u32;
+        let src = cx.raw_source(node_range);
+        let first_line_end = src.find('\n').unwrap_or(src.len());
+        let offense_range = Range {
+            start: node_range.start,
+            end: node_range.start + first_line_end as u32,
+        };
         cx.emit_offense(
-            cx.range(node),
+            offense_range,
             "`#to_json` requires an optional argument to be parsable via JSON.generate(obj).",
             None,
         );
+        let name_str = cx.symbol_str(name);
+        let name_pos = src.find(name_str).unwrap_or(0);
+        let name_end = node_range.start + name_pos as u32 + name_str.len() as u32;
         cx.emit_edit(
             Range { start: name_end, end: name_end },
             "(*_args)",
@@ -72,14 +78,15 @@ impl ToJSON {
 #[cfg(test)]
 mod tests {
     use super::ToJSON;
-    use murphy_plugin_api::test_support::test;
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
     fn flags_to_json_without_args() {
-        use murphy_plugin_api::test_support::run_cop;
-        let offenses = run_cop::<ToJSON>("def to_json\nend\n");
-        assert_eq!(offenses.len(), 1);
-        assert_eq!(offenses[0].cop_name, "Lint/ToJSON");
+        test::<ToJSON>().expect_offense(indoc! {r#"
+            def to_json
+            ^^^^^^^^^^^ `#to_json` requires an optional argument to be parsable via JSON.generate(obj).
+            end
+        "#});
     }
 
     #[test]
