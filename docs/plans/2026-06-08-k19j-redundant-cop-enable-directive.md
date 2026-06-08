@@ -14,6 +14,8 @@
 
 **Working directory:** `/home/ubuntu/projects/murphy/.worktrees/k19j-redundant-enable` (run `eval "$(mise activate bash)"` per shell).
 
+**Recommended execution order (de-risked):** `2 → 5 → 1 → 3 → 4 → 6 → 7`. Tasks 2+5 deliver a working seed-less cop first (Task 2's `config_disabled_cops()` is a stub returning empty, Task 5's cop depends only on the primitive existing). The riskiest part — the `CxRaw` tail-append (offset asserts, 4 macros-test literals, **struct size grows**) — comes after, so a snag in ABI wiring never holds the working cop hostage. Tasks are numbered as identifiers, not execution order.
+
 ---
 
 ## Design decisions (from beads murphy-k19j design)
@@ -72,7 +74,7 @@ Extend the ABI-evolution doc block (~236-239) with a `murphy-k19j` line noting t
 
 **Step 2: Add offset assertions**
 
-Find the CxRaw `offset_of!` test block in `abi.rs` (near line 414). Add assertions for the two new fields at the tail (mirror the existing pattern — assert each new field's offset follows the prior field). Keep the existing `size_of::<CxRaw>()` guard consistent (the two pointer-sized + usize fields grow the struct; update any hard-coded size assertion accordingly).
+Find the CxRaw `offset_of!` test block in `abi.rs` (near line 414). Add assertions for the two new fields at the tail (mirror the existing pattern — assert each new field's offset follows the prior field). **`size_of::<CxRaw>()` WILL change** — unlike `active_support_extensions_enabled` (a `bool` that fit existing padding), `*const RawSlice` + `usize` is 16 bytes and does not fit in the post-`bool` padding, so the struct grows. Any hard-coded `size_of::<CxRaw>()` assertion MUST be updated; do not assume size is unchanged. Update the field doc to say the size grows (not "size unchanged" like the active_support note).
 
 **Step 3: Update every CxRaw construction site**
 
@@ -181,6 +183,36 @@ fn extra_enabled_directives_skips_inline_directives() {
     let cx = unsafe { Cx::from_raw(&raw) };
     assert!(cx.extra_enabled_directives().is_empty());
 }
+
+#[test]
+fn extra_enabled_directives_disable_all_then_enable_specific_not_redundant() {
+    // `disable all` disables Foo, so `enable Foo` is a valid enable, NOT redundant.
+    let source = concat!(
+        "# rubocop:disable all\n",
+        "foo\n",
+        "# rubocop:enable Foo\n",
+    );
+    let ast = murphy_translate::translate(source, "t.rb");
+    let fns = FnTable { emit_offense: noop_offense, emit_edit: noop_edit };
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert!(cx.extra_enabled_directives().is_empty());
+}
+
+#[test]
+fn extra_enabled_directives_disable_all_then_enable_all_not_redundant() {
+    // RuboCop docstring "good" example: disable all -> enable all is valid.
+    let source = concat!(
+        "# rubocop:disable all\n",
+        "foo\n",
+        "# rubocop:enable all\n",
+    );
+    let ast = murphy_translate::translate(source, "t.rb");
+    let fns = FnTable { emit_offense: noop_offense, emit_edit: noop_edit };
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+    assert!(cx.extra_enabled_directives().is_empty());
+}
 ```
 
 **Step 2: Run to verify it fails**
@@ -203,11 +235,17 @@ pub fn extra_enabled_directives(&self) -> Vec<RedundantEnable<'a>> {
     use std::collections::HashMap;
     let directives = self.comment_directives();
 
-    // Seed: config-disabled cops start with count 1 (RRuboCop registry.disabled).
+    // Seed: config-disabled cops start with count 1 (RuboCop registry.disabled).
     let mut count: HashMap<&str, i32> = HashMap::new();
     for name in self.config_disabled_cops() {
         *count.entry(name).or_insert(0) += 1;
     }
+    // `all` is treated as an opaque global rather than expanded to every cop
+    // name (no registry access). disable_all_depth proxies "everything is
+    // disabled" so `disable all -> enable X / enable all` is never a false
+    // positive. Cost: a redundant specific-enable AFTER a `disable all` is a
+    // false NEGATIVE (safe direction) — see the deferred `all`/department gap.
+    let mut disable_all_depth: i32 = 0;
 
     // Group consecutive directives by comment_range so per-comment redundancy
     // and `all_in_directive` can be decided. comment_directives() emits the
@@ -229,19 +267,28 @@ pub fn extra_enabled_directives(&self) -> Vec<RedundantEnable<'a>> {
             continue;
         }
 
+        let is_all = group.iter().any(|d| d.cop.is_none());
         match d0.kind {
             CommentDirectiveKind::Disable => {
-                for d in group {
-                    if let Some(cop) = d.cop {
-                        *count.entry(cop).or_insert(0) += 1;
+                if is_all {
+                    disable_all_depth += 1;
+                } else {
+                    for d in group {
+                        if let Some(cop) = d.cop {
+                            *count.entry(cop).or_insert(0) += 1;
+                        }
                     }
                 }
             }
             CommentDirectiveKind::Enable => {
-                // enable all (cop == None): decrement every positive count;
-                // redundant iff none were positive.
-                if group.iter().any(|d| d.cop.is_none()) {
+                if is_all {
+                    // enable all: cancels one `disable all` and/or every positive
+                    // per-cop count; redundant iff it enabled nothing.
                     let mut enabled_any = false;
+                    if disable_all_depth > 0 {
+                        disable_all_depth -= 1;
+                        enabled_any = true;
+                    }
                     for v in count.values_mut() {
                         if *v > 0 {
                             *v -= 1;
@@ -263,7 +310,11 @@ pub fn extra_enabled_directives(&self) -> Vec<RedundantEnable<'a>> {
                         total += 1;
                         let slot = count.entry(cop).or_insert(0);
                         if *slot > 0 {
-                            *slot -= 1;
+                            *slot -= 1; // explicitly disabled -> valid enable
+                        } else if disable_all_depth > 0 {
+                            // disabled by an active `disable all` -> valid enable.
+                            // Conservative: do not decrement disable_all_depth
+                            // (a specific enable can't fully cancel a global all).
                         } else {
                             redundant.push(cop);
                         }
@@ -580,7 +631,7 @@ Expected: PASS. Verify idempotence (expect_correction reaching fixpoint is check
 
 **Step 5: Update parity metadata**
 
-In the cop's `//! ```murphy-parity` block: `status: partial` → `status: complete`; remove the "cannot be implemented" note; add a department-directive gap note referencing the Task 7 follow-up issue. Remove the obsolete "Known v1 limitation" doc section.
+In the cop's `//! ```murphy-parity` block: `status: partial` → `status: complete`; remove the "cannot be implemented" note; add a gap note referencing the Task 7 follow-up issue, worded to cover BOTH gaps: *"The `all` keyword and department names (e.g. `Lint`) are treated as opaque/global rather than expanded to concrete cop names (no registry access). Redundant enables that depend on such expansion are not detected (a safe false negative); a valid enable is never falsely flagged."* Remove the obsolete "Known v1 limitation" doc section.
 
 **Step 6: Commit**
 
@@ -619,9 +670,9 @@ git commit -m "test(cli): config-disabled seed parity for RedundantCopEnableDire
 **Step 1: File the follow-up beads issue**
 
 ```bash
-bd create --title="Infra: expand department-level rubocop:enable/disable directives to cop names" \
+bd create --title="Infra: expand 'all' + department rubocop:enable/disable directives to cop names" \
   --type=task --priority=3 \
-  --description="RedundantCopEnableDirective (murphy-k19j) handles cop-name-level enable/disable only. RuboCop expands department directives (e.g. # rubocop:disable Lint) to member cop names via the registry. extra_enabled_directives() treats a department token as an opaque cop name, so department-scoped enable/disable pairing is not parity-correct. Needs registry department->cops resolution exposed to the directive count-pass."
+  --description="RedundantCopEnableDirective (murphy-k19j) handles cop-name-level enable/disable only. extra_enabled_directives() treats both the 'all' keyword and department names (e.g. # rubocop:disable Lint) as opaque/global rather than expanding them to concrete cop names. RuboCop expands both via the registry. Consequences (safe direction, false negatives only): a specific enable after 'disable all' is not detected as redundant even when it is; department-scoped enable/disable pairing is not parity-correct. Needs registry 'all'/department -> cops resolution exposed to the directive count-pass (relates to murphy-y3h2 cross-cop/registry access)."
 ```
 
 Note the new issue ID in the cop's parity gap note (Task 5 Step 5) — amend if needed.
