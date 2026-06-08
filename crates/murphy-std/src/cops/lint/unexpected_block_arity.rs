@@ -10,11 +10,11 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/UnexpectedBlockArity
 //! upstream_version_checked: 1.87.0
-//! status: partial
+//! status: verified
 //! gap_issues: []
 //! notes: >
-//!   Handles regular blocks with hardcoded method-to-arity mapping.
-//!   Numblock and itblock variants are not yet supported.
+//!   Handles Block, Numblock, and Itblock nodes with hardcoded method-to-arity mapping.
+//!   Numblock uses max_n as positional arity; Itblock uses arity 1.
 //!   Configurable Methods option is not yet supported.
 //! ```
 //!
@@ -61,17 +61,45 @@ impl UnexpectedBlockArity {
         let NodeKind::Block { call, args, .. } = *cx.kind(node) else {
             return;
         };
-        let NodeKind::Send { receiver, method, .. } = *cx.kind(call) else {
-            return;
-        };
-        if receiver.is_none() {
-            return;
-        }
-        let method_name = cx.symbol_str(method);
-        let Some(expected) = expected_arity(method_name) else {
+        let Some((method_name, expected)) = method_and_expected(call, cx) else {
             return;
         };
         let actual = count_positional_args(cx, args);
+        self.check_arity(node, &method_name, expected, actual, cx);
+    }
+
+    #[on_node(kind = "numblock")]
+    fn check_numblock(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Numblock { send, max_n, .. } = *cx.kind(node) else {
+            return;
+        };
+        let Some((method_name, expected)) = method_and_expected(send, cx) else {
+            return;
+        };
+        self.check_arity(node, &method_name, expected, max_n as usize, cx);
+    }
+
+    #[on_node(kind = "itblock")]
+    fn check_itblock(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Itblock { send, .. } = *cx.kind(node) else {
+            return;
+        };
+        let Some((method_name, expected)) = method_and_expected(send, cx) else {
+            return;
+        };
+        self.check_arity(node, &method_name, expected, 1, cx);
+    }
+}
+
+impl UnexpectedBlockArity {
+    fn check_arity(
+        &self,
+        node: NodeId,
+        method_name: &str,
+        expected: usize,
+        actual: usize,
+        cx: &Cx<'_>,
+    ) {
         if actual >= expected {
             return;
         }
@@ -80,6 +108,18 @@ impl UnexpectedBlockArity {
         );
         cx.emit_offense(cx.range(node), &msg, None);
     }
+}
+
+fn method_and_expected(call: NodeId, cx: &Cx<'_>) -> Option<(String, usize)> {
+    let NodeKind::Send { receiver, method, .. } = *cx.kind(call) else {
+        return None;
+    };
+    if receiver.is_none() {
+        return None;
+    }
+    let method_name = cx.symbol_str(method).to_string();
+    let expected = expected_arity(&method_name)?;
+    Some((method_name, expected))
 }
 
 fn count_positional_args(cx: &Cx<'_>, args_node: NodeId) -> usize {
@@ -202,13 +242,33 @@ mod tests {
     }
 
     #[test]
-    fn flags_multiple_offenses() {
+    fn flags_numblock_one_param() {
         test::<UnexpectedBlockArity>().expect_offense(indoc! {r#"
-            values.reduce { |a| a }
-            ^^^^^^^^^^^^^^^^^^^^^^^ `reduce` expects at least 2 positional arguments, got 1.
-            values.inject { }
-            ^^^^^^^^^^^^^^^^^ `inject` expects at least 2 positional arguments, got 0.
+            values.reduce { _1 }
+            ^^^^^^^^^^^^^^^^^^^^ `reduce` expects at least 2 positional arguments, got 1.
         "#});
+    }
+
+    #[test]
+    fn accepts_numblock_two_params() {
+        test::<UnexpectedBlockArity>().expect_no_offenses(indoc! {"
+            values.reduce { _1 + _2 }
+        "});
+    }
+
+    #[test]
+    fn flags_itblock() {
+        test::<UnexpectedBlockArity>().expect_offense(indoc! {r#"
+            values.reduce { it }
+            ^^^^^^^^^^^^^^^^^^^^ `reduce` expects at least 2 positional arguments, got 1.
+        "#});
+    }
+
+    #[test]
+    fn accepts_numblock_max_by_two_params() {
+        test::<UnexpectedBlockArity>().expect_no_offenses(indoc! {"
+            values.max_by { _1 + _2 }
+        "});
     }
 }
 
