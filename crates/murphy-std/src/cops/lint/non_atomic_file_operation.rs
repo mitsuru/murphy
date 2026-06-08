@@ -354,21 +354,26 @@ fn is_negated_condition(if_node: NodeId, cx: &Cx<'_>) -> bool {
     cond.get().is_some_and(|c| cx.is_negation_method(c))
 }
 
-/// Searches the If node for a file existence check (`FileTest.exist?`, etc.).
-/// Returns `Some(exist_node_id)` if found.
+/// Searches the `if`/`unless`/`elsif` condition for a file existence check
+/// (`FileTest.exist?`, etc.). Only looks within the condition subtree, not the
+/// body, to avoid matching existence checks inside the operation arguments.
 fn find_existence_check(if_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    for &desc in cx.descendants(if_node).iter() {
+    let cond = cx.if_condition(if_node);
+    let Some(cond_id) = cond.get() else {
+        return None;
+    };
+    if let Some((node, _)) = as_existence_check(cond_id, cx) {
+        return Some(node);
+    }
+    // Check descendants of the condition node (e.g., `!(File.exist?(path))`
+    // wraps the existence check in a Send/Not node).
+    for &desc in cx.descendants(cond_id).iter() {
+        if desc == cond_id {
+            continue;
+        }
         if let Some((node, _)) = as_existence_check(desc, cx) {
             return Some(node);
         }
-    }
-    // Also check the condition directly (it might be the first child but
-    // descendants already covers it; this is a belt-and-suspenders check).
-    let cond = cx.if_condition(if_node);
-    if let Some(cond_id) = cond.get()
-        && let Some((node, _)) = as_existence_check(cond_id, cx)
-    {
-        return Some(node);
     }
     None
 }
@@ -1001,6 +1006,17 @@ mod tests {
     fn accepts_nested_constant_receiver() {
         test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
             MyApp::FileUtils.remove(path) if File.exist?(path)
+        "#});
+    }
+
+    #[test]
+    fn accepts_exist_check_in_body_not_condition() {
+        // Existence check inside the operation's arguments (body side) should
+        // not trigger the cop — only the if/unless condition counts.
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            if enabled
+              FileUtils.remove(path, verbose: File.exist?(other))
+            end
         "#});
     }
 
