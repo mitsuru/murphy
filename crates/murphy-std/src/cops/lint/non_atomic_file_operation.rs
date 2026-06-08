@@ -247,9 +247,13 @@ fn replacement_method(name: &str) -> &str {
     }
 }
 
-/// Returns `true` when the receiver (OptNodeId) is one of the supported
-/// file-utility constants: `FileUtils`, `Dir`, or `File` (or their
+/// Returns `true` when the receiver (OptNodeId) is a top-level
+/// file-utility constant: `FileUtils`, `Dir`, or `File` (or their
 /// `::`-prefixed fully-qualified forms).
+///
+/// Murphy normalises `::X` to `Const { scope: None, name: X }`, same as
+/// bare `X`, so both `FileUtils` and `::FileUtils` match. Nested scopes
+/// like `Foo::FileUtils` are rejected — they may define different methods.
 fn is_valid_operation_receiver(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
     let Some(recv_id) = receiver.get() else {
         return false;
@@ -257,20 +261,12 @@ fn is_valid_operation_receiver(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
     let NodeKind::Const { name, scope } = *cx.kind(recv_id) else {
         return false;
     };
-    let name_str = cx.symbol_str(name);
-    // Fully-qualified `::FileUtils` — scope is cbase (scope == NONE means top-level).
-    // Murphy normalises `::X` to `Const { scope: None, name: X }`, same as bare `X`.
-    // So both `FileUtils` and `::FileUtils` match the same check.
-    if OPERATION_RECEIVERS.contains(&name_str) {
-        return true;
+    // scope must be None (top-level or cbase `::X`). Nested `Foo::FileUtils`
+    // is rejected because the inner class may not have the expected methods.
+    if scope.get().is_some() {
+        return false;
     }
-    // Allow `Foo::FileUtils` nested paths too (e.g. `Rake::FileUtils`).
-    if let Some(s) = scope.get() {
-        if matches!(*cx.kind(s), NodeKind::Const { .. }) {
-            return OPERATION_RECEIVERS.contains(&name_str);
-        }
-    }
-    false
+    OPERATION_RECEIVERS.contains(&cx.symbol_str(name))
 }
 
 /// Checks whether the file operation node has a `force: false` keyword argument.
@@ -866,6 +862,13 @@ mod tests {
     fn accepts_non_file_utility_constant_receiver() {
         test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
             Storage.remove(path) if File.exist?(path)
+        "#});
+    }
+
+    #[test]
+    fn accepts_nested_constant_receiver() {
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            MyApp::FileUtils.remove(path) if File.exist?(path)
         "#});
     }
 
