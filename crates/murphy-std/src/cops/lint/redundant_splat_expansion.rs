@@ -86,16 +86,16 @@ fn replacement(node: NodeId, inner: NodeId, parent: Option<NodeId>, cx: &Cx<'_>)
         return None;
     }
     if let NodeKind::Array(list) = *cx.kind(inner) {
-        let elements: Vec<_> = cx
-            .list(list)
-            .iter()
-            .map(|&child| cx.raw_source(cx.range(child)).to_string())
-            .collect();
         if parent.is_some_and(|p| {
             is_call(p, cx)
                 || bracketed_array(p, cx)
                 || matches!(cx.kind(p), NodeKind::When { .. } | NodeKind::Resbody { .. })
         }) {
+            let elements: Vec<_> = cx
+                .list(list)
+                .iter()
+                .map(|&child| cx.raw_source(cx.range(child)))
+                .collect();
             return Some(elements.join(", "));
         }
         return Some(cx.raw_source(cx.range(inner)).to_string());

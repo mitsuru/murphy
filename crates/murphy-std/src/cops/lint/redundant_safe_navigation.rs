@@ -59,9 +59,21 @@ impl RedundantSafeNavigation {
 }
 
 fn is_redundant_safe_navigation(node: NodeId, receiver: NodeId, cx: &Cx<'_>) -> bool {
+    let receiver = unwrap_begin(receiver, cx);
     assume_receiver_instance_exists(receiver, cx)
         || guaranteed_instance_receiver(receiver, cx)
         || (is_nil_safe_method(cx.method_name(node)) && is_condition(node, cx))
+}
+
+fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
+    loop {
+        match *cx.kind(node) {
+            NodeKind::Begin(list) | NodeKind::Kwbegin(list) if cx.list(list).len() == 1 => {
+                node = cx.list(list)[0];
+            }
+            _ => return node,
+        }
+    }
 }
 
 fn assume_receiver_instance_exists(receiver: NodeId, cx: &Cx<'_>) -> bool {
@@ -145,5 +157,24 @@ mod tests {
     #[test]
     fn accepts_conversion_after_safe_navigation() {
         test::<RedundantSafeNavigation>().expect_no_offenses("foo&.to_s&.upcase\n");
+    }
+
+    #[test]
+    fn flags_parenthesized_non_nil_receivers() {
+        test::<RedundantSafeNavigation>()
+            .expect_correction(
+                indoc! {r#"
+                    (self)&.foo
+                          ^^ Redundant safe navigation detected, use `.` instead.
+                "#},
+                "(self).foo\n",
+            )
+            .expect_correction(
+                indoc! {r#"
+                    (('x'))&.upcase
+                           ^^ Redundant safe navigation detected, use `.` instead.
+                "#},
+                "(('x')).upcase\n",
+            );
     }
 }

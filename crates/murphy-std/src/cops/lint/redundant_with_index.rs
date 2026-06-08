@@ -107,7 +107,7 @@ fn plain_block_arg_count(args: NodeId, cx: &Cx<'_>) -> usize {
     };
     cx.list(list)
         .iter()
-        .filter(|&&arg| matches!(cx.kind(arg), NodeKind::Arg(_)))
+        .filter(|&&arg| !matches!(cx.kind(arg), NodeKind::Shadowarg(_) | NodeKind::Blockarg(_)))
         .count()
 }
 
@@ -222,6 +222,11 @@ mod tests {
             .expect_no_offenses("ary.each_with_index { |v, i| v; i }\n")
             .expect_no_offenses("ary.with_index { |v| v }\n")
             .expect_no_offenses("with_index { _1 }\n");
+    }
+
+    #[test]
+    fn accepts_destructured_value_with_index_argument() {
+        test::<RedundantWithIndex>().expect_no_offenses("ary.each_with_index { |(a, b), i| a }\n");
     }
 }
 

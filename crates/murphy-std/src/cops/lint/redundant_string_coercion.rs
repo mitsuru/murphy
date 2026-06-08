@@ -88,7 +88,7 @@ fn interpolation_expression_parent(node: NodeId, container: NodeId, cx: &Cx<'_>)
         return false;
     };
     matches!(cx.kind(parent), NodeKind::Begin(_) | NodeKind::Kwbegin(_))
-        && cx.descendants(container).contains(&parent)
+        && cx.ancestors(parent).any(|ancestor| ancestor == container)
 }
 
 fn is_to_s_without_args(node: NodeId, cx: &Cx<'_>) -> bool {

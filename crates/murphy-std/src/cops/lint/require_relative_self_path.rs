@@ -67,7 +67,11 @@ fn normalize_path(path: &Path) -> PathBuf {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                out.pop();
+                if let Some(Component::Normal(_)) = out.components().last() {
+                    out.pop();
+                } else {
+                    out.push(component.as_os_str());
+                }
             }
             other => out.push(other.as_os_str()),
         }
@@ -94,5 +98,10 @@ mod tests {
     fn accepts_same_basename_in_different_directory() {
         test::<RequireRelativeSelfPath>()
             .expect_no_offenses("require_relative '../serializers/t'\n");
+    }
+
+    #[test]
+    fn accepts_leading_parent_directory_that_cannot_be_normalized_away() {
+        test::<RequireRelativeSelfPath>().expect_no_offenses("require_relative '../t'\n");
     }
 }

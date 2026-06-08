@@ -97,7 +97,7 @@ fn plain_block_arg_count(args: NodeId, cx: &Cx<'_>) -> usize {
     };
     cx.list(list)
         .iter()
-        .filter(|&&arg| matches!(cx.kind(arg), NodeKind::Arg(_)))
+        .filter(|&&arg| !matches!(cx.kind(arg), NodeKind::Shadowarg(_) | NodeKind::Blockarg(_)))
         .count()
 }
 
@@ -176,6 +176,12 @@ mod tests {
         test::<RedundantWithObject>()
             .expect_no_offenses("ary.each_with_object([]) { |v, o| v; o }\n")
             .expect_no_offenses("ary.each_with_object { |v| v }\n");
+    }
+
+    #[test]
+    fn accepts_destructured_value_with_object_argument() {
+        test::<RedundantWithObject>()
+            .expect_no_offenses("ary.each_with_object([]) { |(a, b), o| a }\n");
     }
 }
 
