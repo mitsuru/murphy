@@ -275,6 +275,10 @@ pub fn run_cops_with_options_and_context(
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
     ctx: AllCopsContext,
+    // Run-wide config-disabled cop seed for `Cx::extra_enabled_directives()`.
+    // Kept as a separate borrowed param rather than bundled into the
+    // `Copy`/`Default` `AllCopsContext`, which a `&[RawSlice]` would burden with
+    // a lifetime parameter. Bundle here if the positional list grows further.
     config_disabled_cops: &[RawSlice],
     mut options_for: impl FnMut(&str) -> Vec<u8>,
 ) {

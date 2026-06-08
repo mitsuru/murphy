@@ -50,6 +50,20 @@ impl RawSlice {
         }
     }
 
+    /// Borrow any `&str` as a `RawSlice`.
+    ///
+    /// Unlike [`from_str`](Self::from_str) this accepts a non-`'static`
+    /// borrow, so the resulting `RawSlice` is only valid while `s` lives.
+    /// Constructing it is safe (it only stores ptr+len); the caller must keep
+    /// `s` alive until the `RawSlice` is read via the `unsafe`
+    /// [`as_bytes`](Self::as_bytes).
+    pub fn borrowed(s: &str) -> RawSlice {
+        RawSlice {
+            ptr: s.as_ptr(),
+            len: s.len(),
+        }
+    }
+
     /// Reconstruct the byte slice.
     ///
     /// # Safety

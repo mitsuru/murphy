@@ -421,10 +421,7 @@ fn lint_source(
             // Borrows config-owned cop-name strings; must outlive the dispatch call.
             let disabled_names: Vec<RawSlice> = config
                 .disabled_cop_names()
-                .map(|n| RawSlice {
-                    ptr: n.as_ptr(),
-                    len: n.len(),
-                })
+                .map(RawSlice::borrowed)
                 .collect();
             dispatch::run_cops_with_options_and_context(
                 &ast,
@@ -569,10 +566,7 @@ fn lint_source_timed(
             // Borrows config-owned cop-name strings; must outlive the dispatch call.
             let disabled_names: Vec<RawSlice> = config
                 .disabled_cop_names()
-                .map(|n| RawSlice {
-                    ptr: n.as_ptr(),
-                    len: n.len(),
-                })
+                .map(RawSlice::borrowed)
                 .collect();
             dispatch::run_cops_with_options_and_context(
                 &ast,
