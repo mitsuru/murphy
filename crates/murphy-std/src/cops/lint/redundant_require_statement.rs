@@ -58,12 +58,7 @@ impl RedundantRequireStatement {
 fn is_redundant_feature(feature: &str) -> bool {
     matches!(
         feature,
-        "enumerator"
-            | "thread"
-            | "rational"
-            | "complex"
-            | "ruby2_keywords"
-            | "fiber"
+        "enumerator" | "thread" | "rational" | "complex" | "ruby2_keywords" | "fiber"
     )
 }
 

@@ -13,7 +13,8 @@
 //!   `Array.new` into assignments, method arguments, array literals, `when`, and
 //!   `rescue` positions where Murphy exposes the splat node. Known v1 limitation:
 //!   percent literal expansion and the `AllowPercentLiteralArrayArgument` option
-//!   are not implemented; empty array splats are conservatively ignored.
+//!   are not implemented; empty array splats are conservatively ignored, and
+//!   `Array.new` offenses are not autocorrected.
 //! ```
 
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
@@ -82,7 +83,7 @@ fn empty_array(node: NodeId, cx: &Cx<'_>) -> bool {
 
 fn replacement(node: NodeId, inner: NodeId, parent: Option<NodeId>, cx: &Cx<'_>) -> Option<String> {
     if is_array_new(inner, cx) {
-        return Some(cx.raw_source(cx.range(inner)).to_string());
+        return None;
     }
     if let NodeKind::Array(list) = *cx.kind(inner) {
         let elements: Vec<_> = cx
@@ -180,5 +181,10 @@ mod tests {
         test::<RedundantSplatExpansion>()
             .expect_no_offenses("a = *items\n")
             .expect_no_offenses("do_something(*[])\n");
+    }
+
+    #[test]
+    fn does_not_correct_array_new_splat_in_call() {
+        test::<RedundantSplatExpansion>().expect_no_corrections("do_something(*Array.new)\n");
     }
 }

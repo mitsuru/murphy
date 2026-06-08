@@ -9,9 +9,9 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Initial port covers plain local/instance/class/global/constant assignments
-//!   where the RHS is the same variable. Method, safe-navigation, multiple, and
-//!   shorthand assignment forms are v1 gaps.
+//!   Initial port covers plain local/instance/class/global/unscoped-constant
+//!   assignments where the RHS is the same variable. Method, safe-navigation,
+//!   multiple, shorthand assignment, and scoped constant forms are v1 gaps.
 //! ```
 
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Symbol};
@@ -79,7 +79,12 @@ fn assignment_parts(
         NodeKind::Ivasgn { name, value } => Some((VarKind::Instance, name, value)),
         NodeKind::Cvasgn { name, value } => Some((VarKind::Class, name, value)),
         NodeKind::Gvasgn { name, value } => Some((VarKind::Global, name, value)),
-        NodeKind::Casgn { name, value, .. } => Some((VarKind::Const, name, value)),
+        NodeKind::Casgn { scope, name, value } => {
+            if scope.get().is_some() {
+                return None;
+            }
+            Some((VarKind::Const, name, value))
+        }
         _ => None,
     }
 }
@@ -90,7 +95,9 @@ fn matches_var(node: NodeId, kind: VarKind, name: Symbol, cx: &Cx<'_>) -> bool {
         | (VarKind::Instance, NodeKind::Ivar(sym))
         | (VarKind::Class, NodeKind::Cvar(sym))
         | (VarKind::Global, NodeKind::Gvar(sym)) => sym == name,
-        (VarKind::Const, NodeKind::Const { name: sym, .. }) => sym == name,
+        (VarKind::Const, NodeKind::Const { scope, name: sym }) => {
+            scope.get().is_none() && sym == name
+        }
         _ => false,
     }
 }
@@ -113,5 +120,12 @@ mod tests {
     #[test]
     fn accepts_different_assignment() {
         test::<SelfAssignment>().expect_no_offenses("foo = bar\n");
+    }
+
+    #[test]
+    fn accepts_scoped_constant_assignments() {
+        test::<SelfAssignment>()
+            .expect_no_offenses("Foo::BAR = BAR\n")
+            .expect_no_offenses("Foo::BAR = Other::BAR\n");
     }
 }

@@ -10,9 +10,10 @@
 //! gap_issues: []
 //! notes: >
 //!   Initial Murphy v1 port covers the common block, numblock, itblock, and
-//!   safe-navigation shapes with autocorrection. It intentionally limits
-//!   detection to calls whose block uses only one logical argument, matching
-//!   RuboCop's redundant-object criterion.
+//!   safe-navigation shapes. It intentionally limits detection to calls whose
+//!   block uses only one logical argument, matching RuboCop's redundant-object
+//!   criterion. Autocorrection is disabled because replacing `each_with_object`
+//!   with `each` can change the expression return value.
 //! ```
 
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
@@ -57,18 +58,8 @@ fn check(block: NodeId, cx: &Cx<'_>) {
 
     if method == "each_with_object" {
         cx.emit_offense(range, "Use `each` instead of `each_with_object`.", None);
-        cx.emit_edit(range, "each");
     } else {
         cx.emit_offense(range, "Remove redundant `with_object`.", None);
-        if let Some(dot) = cx.call_operator_loc(call) {
-            cx.emit_edit(
-                Range {
-                    start: dot.start,
-                    end: range.end,
-                },
-                "",
-            );
-        }
     }
 }
 
@@ -153,55 +144,31 @@ mod tests {
     use super::RedundantWithObject;
 
     #[test]
-    fn corrects_each_with_object_block() {
-        test::<RedundantWithObject>().expect_correction(
-            indoc! {r#"
+    fn flags_each_with_object_block_without_autocorrection() {
+        test::<RedundantWithObject>()
+            .expect_offense(indoc! {r#"
                 ary.each_with_object([]) { |v| v }
                     ^^^^^^^^^^^^^^^^^^^^ Use `each` instead of `each_with_object`.
-            "#},
-            "ary.each { |v| v }\n",
-        );
+            "#})
+            .expect_no_corrections("ary.each_with_object([]) { |v| v }\n");
     }
 
     #[test]
-    fn corrects_safe_navigation_each_with_object() {
-        test::<RedundantWithObject>().expect_correction(
-            indoc! {r#"
-                ary&.each_with_object([]) { |v| v }
-                     ^^^^^^^^^^^^^^^^^^^^ Use `each` instead of `each_with_object`.
-            "#},
-            "ary&.each { |v| v }\n",
-        );
-    }
-
-    #[test]
-    fn corrects_chained_with_object() {
-        test::<RedundantWithObject>().expect_correction(
-            indoc! {r#"
-                ary.each.with_object([]) { |v| v }
-                         ^^^^^^^^^^^^^^^ Remove redundant `with_object`.
-            "#},
-            "ary.each { |v| v }\n",
-        );
-    }
-
-    #[test]
-    fn corrects_numblock_and_itblock() {
+    fn does_not_correct_safe_navigation_each_with_object() {
         test::<RedundantWithObject>()
-            .expect_correction(
-                indoc! {r#"
-                    ary.each_with_object([]) { _1 }
-                        ^^^^^^^^^^^^^^^^^^^^ Use `each` instead of `each_with_object`.
-                "#},
-                "ary.each { _1 }\n",
-            )
-            .expect_correction(
-                indoc! {r#"
-                    ary.each.with_object([]) { it }
-                             ^^^^^^^^^^^^^^^ Remove redundant `with_object`.
-                "#},
-                "ary.each { it }\n",
-            );
+            .expect_no_corrections("ary&.each_with_object([]) { |v| v }\n");
+    }
+
+    #[test]
+    fn does_not_correct_chained_with_object() {
+        test::<RedundantWithObject>().expect_no_corrections("ary.each.with_object([]) { |v| v }\n");
+    }
+
+    #[test]
+    fn does_not_correct_numblock_and_itblock() {
+        test::<RedundantWithObject>()
+            .expect_no_corrections("ary.each_with_object([]) { _1 }\n")
+            .expect_no_corrections("ary.each.with_object([]) { it }\n");
     }
 
     #[test]
