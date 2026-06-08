@@ -80,19 +80,33 @@ fn offense_range(node: NodeId, cx: &Cx<'_>) -> Range {
 fn comment_between_rescue_and_end(node: NodeId, cx: &Cx<'_>) -> bool {
     let r = cx.range(node);
     let source = cx.source();
-    let end = cx
-        .ancestors(node)
-        .find_map(|ancestor| match cx.kind(ancestor) {
-            NodeKind::Rescue { .. } | NodeKind::Def { .. } | NodeKind::Defs { .. } | NodeKind::Block { .. } | NodeKind::Kwbegin(_) => {
-                Some(cx.range(ancestor).end)
-            }
-            _ => None,
-        })
-        .unwrap_or(r.end);
+    let end = current_resbody_end(node, cx).unwrap_or(r.end);
     source[r.start as usize..end as usize]
         .lines()
         .skip(1)
         .any(|line| line.trim_start().starts_with('#'))
+}
+
+fn current_resbody_end(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
+    let rescue = cx
+        .ancestors(node)
+        .find(|&ancestor| matches!(cx.kind(ancestor), NodeKind::Rescue { .. }))?;
+    let NodeKind::Rescue { resbodies, else_, .. } = *cx.kind(rescue) else {
+        return None;
+    };
+    let resbodies = cx.list(resbodies);
+    let idx = resbodies.iter().position(|&resbody| resbody == node)?;
+    if let Some(&next_resbody) = resbodies.get(idx + 1) {
+        return Some(cx.range(next_resbody).start);
+    }
+    if let Some(else_id) = else_.get() {
+        return Some(cx.range(else_id).start);
+    }
+    let end_keyword = cx.loc(rescue).end_keyword();
+    if end_keyword != Range::ZERO {
+        return Some(end_keyword.start);
+    }
+    Some(cx.range(rescue).end)
 }
 
 murphy_plugin_api::submit_cop!(SuppressedException);
@@ -109,6 +123,19 @@ mod tests {
               something
             rescue
             ^^^^^^ Do not suppress exceptions.
+            end
+        "#});
+    }
+
+    #[test]
+    fn later_rescue_comments_do_not_allow_empty_rescue() {
+        test::<SuppressedException>().expect_offense(indoc! {r#"
+            begin
+              something
+            rescue Foo
+            ^^^^^^^^^^ Do not suppress exceptions.
+            rescue Bar
+              # handled elsewhere
             end
         "#});
     }
