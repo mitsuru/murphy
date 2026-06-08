@@ -60,7 +60,16 @@ impl MultipleComparison {
             return;
         };
 
-        let (inner_args, inner_method) = match *cx.kind(recv_id) {
+        let mut check_id = recv_id;
+        while let NodeKind::Begin(list) = *cx.kind(check_id) {
+            let children = cx.list(list);
+            if children.len() == 1 {
+                check_id = children[0];
+            } else {
+                break;
+            }
+        }
+        let (inner_args, inner_method) = match *cx.kind(check_id) {
             NodeKind::Send { args, method, .. } => (args, method),
             NodeKind::Csend { args, method, .. } => (args, method),
             _ => return,
@@ -94,7 +103,16 @@ impl MultipleComparison {
 }
 
 fn is_set_operation(node: NodeId, cx: &Cx<'_>) -> bool {
-    match *cx.kind(node) {
+    let mut id = node;
+    while let NodeKind::Begin(list) = *cx.kind(id) {
+        let children = cx.list(list);
+        if children.len() == 1 {
+            id = children[0];
+        } else {
+            break;
+        }
+    }
+    match *cx.kind(id) {
         NodeKind::Send { method, .. } | NodeKind::Csend { method, .. } => {
             SET_OPERATORS.contains(&cx.symbol_str(method))
         }

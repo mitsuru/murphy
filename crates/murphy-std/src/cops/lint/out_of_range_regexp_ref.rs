@@ -253,7 +253,16 @@ enum CountResult {
 
 /// Attempt to count capture groups in a regexp node.
 fn try_count_regexp_captures(node_id: NodeId, cx: &Cx<'_>) -> CountResult {
-    let NodeKind::Regexp { parts, .. } = *cx.kind(node_id) else {
+    let mut id = node_id;
+    while let NodeKind::Begin(list) = *cx.kind(id) {
+        let children = cx.list(list);
+        if children.len() == 1 {
+            id = children[0];
+        } else {
+            break;
+        }
+    }
+    let NodeKind::Regexp { parts, .. } = *cx.kind(id) else {
         return CountResult::NotRegexp;
     };
 

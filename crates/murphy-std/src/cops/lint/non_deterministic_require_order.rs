@@ -178,13 +178,22 @@ fn identify_dir_call(call: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> {
 /// Check if `node` is `Dir.glob(...)` or `Dir[...]` (the `[]` or `glob` methods
 /// called on `Dir` constant), suitable for `.each` chaining.
 fn unsorted_dir_glob(node: &NodeId, cx: &Cx<'_>) -> bool {
-    let NodeKind::Send { args, .. } = *cx.kind(*node) else {
+    let mut id = *node;
+    while let NodeKind::Begin(list) = *cx.kind(id) {
+        let children = cx.list(list);
+        if children.len() == 1 {
+            id = children[0];
+        } else {
+            break;
+        }
+    }
+    let NodeKind::Send { .. } = *cx.kind(id) else {
         return false;
     };
-    if !is_dir_const_receiver(*node, cx) {
+    if !is_dir_const_receiver(id, cx) {
         return false;
     }
-    let args = cx.list(args);
+    let args = cx.call_arguments(id);
     if args.is_empty() {
         return false;
     }
@@ -195,7 +204,7 @@ fn unsorted_dir_glob(node: &NodeId, cx: &Cx<'_>) -> bool {
     {
         return false;
     }
-    matches!(cx.method_name(*node), Some("[]") | Some("glob"))
+    matches!(cx.method_name(id), Some("[]") | Some("glob"))
 }
 
 /// Check if `node` is a direct `Dir.glob(...)` call (the method itself, used

@@ -275,12 +275,22 @@ fn is_valid_operation_receiver(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
     let Some(recv_id) = receiver.get() else {
         return false;
     };
-    let NodeKind::Const { name, scope } = *cx.kind(recv_id) else {
+    let mut id = recv_id;
+    while let NodeKind::Begin(list) = *cx.kind(id) {
+        let children = cx.list(list);
+        if children.len() == 1 {
+            id = children[0];
+        } else {
+            break;
+        }
+    }
+    let NodeKind::Const { name, scope } = *cx.kind(id) else {
         return false;
     };
-    // scope must be None (top-level or cbase `::X`). Nested `Foo::FileUtils`
-    // is rejected because the inner class may not have the expected methods.
-    if scope.get().is_some() {
+    // Scope must be None (bare `FileUtils`) or cbase (`::FileUtils`).
+    // Nested `Foo::FileUtils` is rejected — the inner class may define
+    // different methods.
+    if scope.get().is_some_and(|s| !matches!(*cx.kind(s), NodeKind::Cbase)) {
         return false;
     }
     OPERATION_RECEIVERS.contains(&cx.symbol_str(name))
@@ -289,8 +299,18 @@ fn is_valid_operation_receiver(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
 /// Returns `true` when the receiver is the `Dir` constant.
 fn is_dir_receiver(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
     receiver.get().is_some_and(|recv| {
-        if let NodeKind::Const { name, scope } = *cx.kind(recv) {
-            scope.get().is_none() && cx.symbol_str(name) == "Dir"
+        let mut id = recv;
+        while let NodeKind::Begin(list) = *cx.kind(id) {
+            let children = cx.list(list);
+            if children.len() == 1 {
+                id = children[0];
+            } else {
+                break;
+            }
+        }
+        if let NodeKind::Const { name, scope } = *cx.kind(id) {
+            scope.get().is_none_or(|s| matches!(*cx.kind(s), NodeKind::Cbase))
+                && cx.symbol_str(name) == "Dir"
         } else {
             false
         }
@@ -452,7 +472,17 @@ fn as_existence_check<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<(NodeId, &'a s
 
     let recv = receiver.get()?;
 
-    let NodeKind::Const { name, scope } = *cx.kind(recv) else {
+    let mut id = recv;
+    while let NodeKind::Begin(list) = *cx.kind(id) {
+        let children = cx.list(list);
+        if children.len() == 1 {
+            id = children[0];
+        } else {
+            break;
+        }
+    }
+
+    let NodeKind::Const { name, scope } = *cx.kind(id) else {
         return None;
     };
 

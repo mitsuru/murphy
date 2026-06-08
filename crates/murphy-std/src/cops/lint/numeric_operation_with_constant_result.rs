@@ -93,13 +93,19 @@ impl NumericOperationWithConstantResult {
 }
 
 fn is_variable_or_implicit_call(node: NodeId, cx: &Cx<'_>) -> bool {
-    match *cx.kind(node) {
+    let mut id = node;
+    while let NodeKind::Begin(list) = *cx.kind(id) {
+        let children = cx.list(list);
+        if children.len() == 1 {
+            id = children[0];
+        } else {
+            break;
+        }
+    }
+    match *cx.kind(id) {
         NodeKind::Lvar(_) => true,
-        NodeKind::Send {
-            receiver, args, ..
-        } if receiver == OptNodeId::NONE => {
-            let args_list = cx.list(args);
-            args_list.is_empty()
+        NodeKind::Send { .. } if cx.call_receiver(id) == OptNodeId::NONE => {
+            cx.call_arguments(id).is_empty()
         }
         _ => false,
     }

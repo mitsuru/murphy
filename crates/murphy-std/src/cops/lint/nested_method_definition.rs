@@ -65,8 +65,17 @@ const EVAL_EXEC_METHODS: &[&str] = &[
 /// variable, constant, or method call — those indicate a method being
 /// defined on a specific object, not a global method definition.
 fn is_allowed_def_receiver(receiver_id: NodeId, cx: &Cx<'_>) -> bool {
+    let mut id = receiver_id;
+    while let NodeKind::Begin(list) = *cx.kind(id) {
+        let children = cx.list(list);
+        if children.len() == 1 {
+            id = children[0];
+        } else {
+            break;
+        }
+    }
     matches!(
-        *cx.kind(receiver_id),
+        *cx.kind(id),
         NodeKind::Lvar(_)
             | NodeKind::Ivar(_)
             | NodeKind::Cvar(_)

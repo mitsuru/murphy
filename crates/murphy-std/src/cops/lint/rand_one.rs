@@ -48,7 +48,16 @@ impl RandOne {
 
         // Gate: bare rand (no receiver) or Kernel/::Kernel receiver
         if let Some(recv) = receiver.get() {
-            let NodeKind::Const { name, scope } = *cx.kind(recv) else {
+            let mut id = recv;
+            while let NodeKind::Begin(list) = *cx.kind(id) {
+                let children = cx.list(list);
+                if children.len() == 1 {
+                    id = children[0];
+                } else {
+                    break;
+                }
+            }
+            let NodeKind::Const { name, scope } = *cx.kind(id) else {
                 return;
             };
             if cx.symbol_str(name) != "Kernel" {

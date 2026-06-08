@@ -139,6 +139,14 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 /// Returns `None` if a bare send (no receiver) is encountered mid-chain.
 fn top_receiver(mut node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     loop {
+        while let NodeKind::Begin(list) = *cx.kind(node) {
+            let children = cx.list(list);
+            if children.len() == 1 {
+                node = children[0];
+            } else {
+                break;
+            }
+        }
         match *cx.kind(node) {
             NodeKind::Send { receiver, .. } => {
                 node = receiver.get()?;

@@ -80,8 +80,9 @@ fn is_inside_assignment(node: NodeId, cx: &Cx<'_>) -> bool {
             | NodeKind::Cvasgn { .. }
             | NodeKind::Gvasgn { .. }
             | NodeKind::Casgn { .. }
-            | NodeKind::OpAsgn { .. }
-            | NodeKind::OrAsgn { .. } => return true,
+            |             NodeKind::OpAsgn { .. }
+            | NodeKind::OrAsgn { .. }
+            | NodeKind::AndAsgn { .. } => return true,
             NodeKind::Def { .. } | NodeKind::Defs { .. } => return false,
             _ => {}
         }
