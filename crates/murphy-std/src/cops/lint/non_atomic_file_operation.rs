@@ -132,15 +132,23 @@ impl NonAtomicFileOperation {
             return;
         }
 
-        // Condition must not be a complex conditional (&& / ||)
+        // Condition must not be a complex conditional (&& / ||) anywhere
+        // in the condition subtree (handles negated compounds like
+        // `!(exist? || disabled)`).
         let cond = cx.if_condition(parent);
-        if let Some(cond_id) = cond.get()
-            && matches!(
-                *cx.kind(cond_id),
-                NodeKind::And { .. } | NodeKind::Or { .. }
-            )
-        {
-            return;
+        if let Some(cond_id) = cond.get() {
+            if matches!(*cx.kind(cond_id), NodeKind::And { .. } | NodeKind::Or { .. }) {
+                return;
+            }
+            // Check inside negation wrappers too.
+            for &desc in cx.descendants(cond_id).iter() {
+                if desc == cond_id {
+                    continue;
+                }
+                if matches!(*cx.kind(desc), NodeKind::And { .. } | NodeKind::Or { .. }) {
+                    return;
+                }
+            }
         }
 
         // No `force: false` option
@@ -976,6 +984,16 @@ mod tests {
         test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
             if FileTest.exist?(path) || condition
               FileUtils.mkdir(path)
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_negated_complex_conditional() {
+        // !(exist? || disabled) is still complex — should not trigger.
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            unless !(FileTest.exist?(path) || disabled)
+              FileUtils.makedirs(path)
             end
         "#});
     }
