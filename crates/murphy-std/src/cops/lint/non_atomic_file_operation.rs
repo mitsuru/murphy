@@ -148,6 +148,13 @@ impl NonAtomicFileOperation {
             return;
         }
 
+        // Check condition polarity: make ops need "not exists" (unless/negated if);
+        // remove ops need "exists" (bare if).
+        let method_name = cx.symbol_str(method);
+        if !condition_matches_method(parent, method_name, cx) {
+            return;
+        }
+
         // Find existence check within the If node
         let Some(exist_node) = find_existence_check(parent, cx) else {
             return;
@@ -187,7 +194,6 @@ impl NonAtomicFileOperation {
             _ => return,
         }
 
-        let method_name = cx.symbol_str(method);
         let exist_method_name = cx.symbol_str(exist_method_sym);
         let is_force = is_force_method_name(method_name);
 
@@ -283,6 +289,47 @@ fn has_explicit_not_force(node: NodeId, cx: &Cx<'_>) -> bool {
     false
 }
 
+/// Returns `true` when the condition polarity matches the file operation type:
+/// - Make ops (`mkdir`): must be `unless` or negated `if` (= "not exists")
+/// - Remove ops (`remove`, `delete`, etc.): must be bare `if` (= "exists")
+/// Force methods use whichever polarity their non-force counterpart uses.
+fn condition_matches_method(if_node: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
+    let keyword_src = cx.raw_source(cx.if_keyword_loc(if_node));
+
+    let is_make = MAKE_METHODS.contains(&method_name);
+    let is_remove = REMOVE_METHODS.contains(&method_name)
+        || RECURSIVE_REMOVE_METHODS.contains(&method_name);
+    let is_make_force = MAKE_FORCE_METHODS.contains(&method_name);
+    let is_remove_force = REMOVE_FORCE_METHODS.contains(&method_name);
+
+    // elsif: same polarity as `if` (condition-true → execute body)
+    if keyword_src == "elsif" {
+        // Only remove ops fire for `elsif exist?` (condition true = exists).
+        // Make ops on elsif would mean "create when exists" which is wrong.
+        return is_remove || is_remove_force;
+    }
+
+    let is_unless = keyword_src == "unless";
+    let is_negated = is_negated_condition(if_node, cx);
+
+    if is_make || is_make_force {
+        // `unless exist?` or `if !exist?`
+        is_unless || is_negated
+    } else if is_remove || is_remove_force {
+        // `if exist?`
+        keyword_src == "if" && !is_negated
+    } else {
+        true
+    }
+}
+
+/// Returns `true` when the condition of the `If` node is negated
+/// (the `!` operator wrapped).
+fn is_negated_condition(if_node: NodeId, cx: &Cx<'_>) -> bool {
+    let cond = cx.if_condition(if_node);
+    cond.get().is_some_and(|c| cx.is_negation_method(c))
+}
+
 /// Searches the If node for a file existence check (`FileTest.exist?`, etc.).
 /// Returns `Some(exist_node_id)` if found.
 fn find_existence_check(if_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
@@ -346,35 +393,63 @@ fn as_existence_check<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<(NodeId, &'a s
 /// Emit an edit to replace the method name with the atomic equivalent.
 fn emit_method_replacement(node: NodeId, current_name: &str, cx: &Cx<'_>) {
     let replacement = replacement_method(current_name);
-    // Find the method name within the node's source range.
     let r = cx.range(node);
     let src = cx.raw_source(r);
-    // Find the method name token: after the last `.` separator or at the start.
-    let method_range = if let Some(dot) = src.rfind('.') {
-        Range {
-            start: r.start + (dot + 1) as u32,
-            end: r.start + (dot + 1 + current_name.len()) as u32,
+
+    // When the receiver is `Dir` or `File` (not `FileUtils`), replace the whole
+    // receiver.method expression with `FileUtils.<replacement>` so the autocorrect
+    // produces a working call (e.g. `Dir.mkdir(path)` → `FileUtils.mkdir_p(path)`).
+    let NodeKind::Send { receiver, .. } = *cx.kind(node) else { return };
+    let needs_receiver_replace = receiver.get().is_some_and(|recv| {
+        if let NodeKind::Const { name, scope } = *cx.kind(recv) {
+            if scope.get().is_none() {
+                let n = cx.symbol_str(name);
+                return n == "Dir" || n == "File";
+            }
         }
-    } else if let Some(open_paren) = src.find('(') {
-        // Bare method call with parens: `mkdir(path)` → method is before `(`
-        Range {
-            start: r.start,
-            end: r.start + open_paren as u32,
-        }
-    } else if let Some(space) = src.find(' ') {
-        // Bare method call with space: `mkdir path` → method is before space
-        Range {
-            start: r.start,
-            end: r.start + space as u32,
-        }
+        false
+    });
+
+    if needs_receiver_replace {
+        // Find the receiver+dot+method portion and replace with FileUtils.replacement.
+        // The method name starts after the last `(` or ` ` or `.`.
+        let method_start = if let Some(dot) = src.rfind('.') {
+            r.start + dot as u32 + 1
+        } else if let Some(open_paren) = src.find('(') {
+            r.start
+        } else if let Some(space) = src.find(' ') {
+            r.start
+        } else {
+            r.start
+        };
+        let method_end = method_start + current_name.len() as u32;
+        let edit_range = Range { start: r.start, end: method_end };
+        cx.emit_edit(edit_range, &format!("FileUtils.{replacement}"));
     } else {
-        // Bare method call with no args: `mkdir`
-        Range {
-            start: r.start,
-            end: r.end,
-        }
-    };
-    cx.emit_edit(method_range, replacement);
+        // Standard: just replace the method name.
+        let method_range = if let Some(dot) = src.rfind('.') {
+            Range {
+                start: r.start + (dot + 1) as u32,
+                end: r.start + (dot + 1 + current_name.len()) as u32,
+            }
+        } else if let Some(open_paren) = src.find('(') {
+            Range {
+                start: r.start,
+                end: r.start + open_paren as u32,
+            }
+        } else if let Some(space) = src.find(' ') {
+            Range {
+                start: r.start,
+                end: r.start + space as u32,
+            }
+        } else {
+            Range {
+                start: r.start,
+                end: r.end,
+            }
+        };
+        cx.emit_edit(method_range, replacement);
+    }
 }
 
 /// Emit edits to remove the existence-check condition range from the source.
@@ -800,6 +875,39 @@ mod tests {
     }
 
     #[test]
+    fn accepts_make_with_if_exists() {
+        // mkdir guarded by `if exist?` — wrong polarity for make ops,
+        // mkdir_p would create if not exists, changing behaviour.
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            FileUtils.mkdir(path) if FileTest.exist?(path)
+        "#});
+    }
+
+    #[test]
+    fn accepts_remove_with_unless_exists() {
+        // remove guarded by `unless exist?` — wrong polarity for remove ops.
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            FileUtils.remove(path) unless FileTest.exist?(path)
+        "#});
+    }
+
+    #[test]
+    fn accepts_makedirs_with_if_exists() {
+        // force make method but wrong polarity.
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            FileUtils.makedirs(path) if FileTest.exist?(path)
+        "#});
+    }
+
+    #[test]
+    fn accepts_rm_f_with_unless_exists() {
+        // force remove method but wrong polarity.
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            FileUtils.rm_f(path) unless FileTest.exist?(path)
+        "#});
+    }
+
+    #[test]
     fn accepts_other_processing_in_body() {
         test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
             unless FileTest.exist?(path)
@@ -939,5 +1047,29 @@ mod tests {
         );
         assert!(!run.offenses.is_empty(), "should have offense");
         assert_eq!(run.edits.len(), 0, "should have no autocorrect edits for elsif");
+    }
+
+    #[test]
+    fn corrects_dir_mkdir_to_fileutils_mkdir_p() {
+        test::<NonAtomicFileOperation>().expect_correction(
+            indoc! {r#"
+                Dir.mkdir(path) unless Dir.exist?(path)
+                ^^^^^^^^^^^^^^^ Use atomic file operation method `FileUtils.mkdir_p`.
+                                ^^^^^^^^^^^^^^^^^^^^^^^ Remove unnecessary existence check `Dir.exist?`.
+            "#},
+            "FileUtils.mkdir_p(path)\n",
+        );
+    }
+
+    #[test]
+    fn corrects_file_delete_to_fileutils_rm_f() {
+        test::<NonAtomicFileOperation>().expect_correction(
+            indoc! {r#"
+                File.delete(path) if File.exist?(path)
+                ^^^^^^^^^^^^^^^^^ Use atomic file operation method `FileUtils.rm_f`.
+                                  ^^^^^^^^^^^^^^^^^^^^ Remove unnecessary existence check `File.exist?`.
+            "#},
+            "FileUtils.rm_f(path)\n",
+        );
     }
 }
