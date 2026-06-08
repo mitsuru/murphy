@@ -130,11 +130,11 @@ fn comma_removal_range(comment_src: &str, name_idx: usize, name_len: usize) -> O
         })
     } else {
         // No surrounding comma: RuboCop falls back to removing the whole
-        // comment. In practice this branch is unreachable — a single redundant
-        // name always yields `all_in_directive == true` (handled separately by
-        // whole-comment removal), so every comma-removal case has >= 2 names
-        // and thus a surrounding comma. Kept as a faithful, defensive port of
-        // RuboCop's `range_to_remove` else-branch.
+        // comment. This IS reached for prefix-name cases — e.g. redundant
+        // `Style/For` listed alongside `Style/FormatString`, where `find`
+        // matches the prefix mid-token so neither neighbour is a comma (see the
+        // `prefix_cop_name_matches_rubocop_index_semantics` parity-lock test).
+        // A faithful port of RuboCop's `range_to_remove` else-branch.
         Some(Range {
             start: 0,
             end: comment_src.len() as u32,
