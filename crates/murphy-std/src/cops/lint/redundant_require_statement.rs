@@ -15,7 +15,7 @@
 //!   sensitive gating and modifier-form autocorrection are documented v1 gaps.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
 
 #[derive(Default)]
 pub struct RedundantRequireStatement;
@@ -51,8 +51,21 @@ impl RedundantRequireStatement {
             "Remove unnecessary `require` statement.",
             None,
         );
-        cx.emit_edit(cx.range_by_whole_lines(cx.range(node), true), "");
+        let range = cx.range(node);
+        if is_standalone_line(range, cx.source()) {
+            cx.emit_edit(cx.range_by_whole_lines(range, true), "");
+        }
     }
+}
+
+fn is_standalone_line(range: Range, source: &str) -> bool {
+    let start = range.start as usize;
+    let end = range.end as usize;
+    let line_start = source[..start].rfind('\n').map_or(0, |idx| idx + 1);
+    let line_end = source[end..]
+        .find('\n')
+        .map_or(source.len(), |idx| end + idx);
+    source[line_start..start].trim().is_empty() && source[end..line_end].trim().is_empty()
 }
 
 fn is_redundant_feature(feature: &str) -> bool {
@@ -100,5 +113,10 @@ mod tests {
             require 'set'
             require 'pathname'
         "#});
+    }
+
+    #[test]
+    fn does_not_correct_non_standalone_require() {
+        test::<RedundantRequireStatement>().expect_no_corrections("setup; require 'thread'; run\n");
     }
 }
