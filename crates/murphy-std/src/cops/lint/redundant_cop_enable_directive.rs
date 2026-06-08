@@ -7,7 +7,7 @@
 //! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues:
-//!   - murphy-k19j
+//!   - murphy-8b8m
 //! notes: >
 //!   The `all` keyword and department names (e.g. `Lint`) are treated as
 //!   opaque/global rather than expanded to concrete cop names (the host has
@@ -16,8 +16,8 @@
 //!   enable that only partially overlaps an active disable — are not detected
 //!   (a safe false negative). A valid enable is never falsely flagged. The
 //!   `extra_enabled_directives` primitive's `disable_all_depth` proxy keeps
-//!   those cases on the conservative side. A follow-up issue will track
-//!   registry-backed `all`/department expansion (TODO: murphy-k19j follow-up).
+//!   those cases on the conservative side. Registry-backed `all`/department
+//!   expansion is tracked by murphy-8b8m.
 //!   Redundant cop names that are prefixes of other listed cops (and the `all`
 //!   keyword / department names) are located by a `comment.text.index`-style
 //!   search exactly as RuboCop does — this reproduces RuboCop's behavior rather
