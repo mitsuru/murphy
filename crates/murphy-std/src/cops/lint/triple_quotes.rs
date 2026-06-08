@@ -37,11 +37,6 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 const MSG: &str =
     "Delimiting a string with multiple quotes has no effect, use a single quote instead.";
 
-fn has_triple_opening_quotes(src: &str) -> bool {
-    let count = src.chars().take_while(|&c| c == '"' || c == '\'').count();
-    count >= 3
-}
-
 fn has_empty_str_child(children: &[NodeId], cx: &Cx<'_>) -> bool {
     children.iter().any(|&child| {
         matches!(cx.kind(child), NodeKind::Str(sid) if cx.string_str(*sid).is_empty())
@@ -66,14 +61,14 @@ impl TripleQuotes {
         };
         let node_range = cx.range(node);
         let src = cx.raw_source(node_range);
-        if !has_triple_opening_quotes(src) {
+        let num_quotes = src.chars().take_while(|&c| c == '"' || c == '\'').count();
+        if num_quotes < 3 {
             return;
         }
         let child_nodes = cx.list(children);
         if !has_empty_str_child(child_nodes, cx) {
             return;
         }
-        let num_quotes = src.chars().take_while(|&c| c == '"' || c == '\'').count();
         cx.emit_offense(
             Range {
                 start: node_range.start,

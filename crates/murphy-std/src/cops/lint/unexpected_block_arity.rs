@@ -111,13 +111,10 @@ impl UnexpectedBlockArity {
 }
 
 fn method_and_expected(call: NodeId, cx: &Cx<'_>) -> Option<(String, usize)> {
-    let NodeKind::Send { receiver, method, .. } = *cx.kind(call) else {
-        return None;
-    };
-    if receiver.is_none() {
+    if cx.call_receiver(call).is_none() {
         return None;
     }
-    let method_name = cx.symbol_str(method).to_string();
+    let method_name = cx.method_name(call)?.to_string();
     let expected = expected_arity(&method_name)?;
     Some((method_name, expected))
 }

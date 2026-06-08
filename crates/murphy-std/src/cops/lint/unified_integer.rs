@@ -41,18 +41,11 @@ pub struct UnifiedInteger;
 impl UnifiedInteger {
     #[on_node(kind = "const")]
     fn check_const(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Const { scope, name } = *cx.kind(node) else {
-            return;
-        };
-        if !scope.is_none() {
-            return;
+        if cx.is_global_const(node, "Fixnum") {
+            cx.emit_offense(cx.range(node), "Use `Integer` instead of `Fixnum`.", None);
+        } else if cx.is_global_const(node, "Bignum") {
+            cx.emit_offense(cx.range(node), "Use `Integer` instead of `Bignum`.", None);
         }
-        let name_str = cx.symbol_str(name);
-        if name_str != "Fixnum" && name_str != "Bignum" {
-            return;
-        }
-        let msg = format!("Use `Integer` instead of `{name_str}`.");
-        cx.emit_offense(cx.range(node), &msg, None);
     }
 }
 

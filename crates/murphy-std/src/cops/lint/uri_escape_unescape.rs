@@ -67,11 +67,7 @@ impl UriEscapeUnescape {
             return;
         }
         let Some(receiver_id) = receiver.get() else { return; };
-        let NodeKind::Const { scope, name } = *cx.kind(receiver_id) else { return; };
-        if !scope.is_none() {
-            return;
-        }
-        if cx.symbol_str(name) != "URI" {
+        if !cx.is_global_const(receiver_id, "URI") {
             return;
         }
         cx.emit_offense(cx.range(node), &message(method_str), None);

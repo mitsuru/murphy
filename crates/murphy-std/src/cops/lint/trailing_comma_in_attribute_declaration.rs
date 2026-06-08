@@ -57,17 +57,12 @@ impl TrailingCommaInAttributeDeclaration {
         let last_arg = *args.last().unwrap();
         let last_arg_end = cx.range(last_arg).end;
 
-        // Search all tokens for a comma after the last argument
-        let comma_range = cx
-            .sorted_tokens()
-            .iter()
-            .find(|tok| tok.kind == SourceTokenKind::Comma && tok.range.start >= last_arg_end)
-            .map(|tok| tok.range);
-
-        if let Some(range) = comma_range
-            && range.start < last_arg_end + 3
+        // Search for a comma immediately after the last argument
+        if let Some(tok) = cx.token_after(last_arg_end)
+            && tok.kind == SourceTokenKind::Comma
+            && tok.range.start < last_arg_end + 3
         {
-            cx.emit_offense(range, MSG, None);
+            cx.emit_offense(tok.range, MSG, None);
             return;
         }
 

@@ -205,19 +205,23 @@ fn lvar_used(node: NodeId, name: Symbol, cx: &Cx<'_>) -> bool {
 }
 
 fn element_modified(node: NodeId, el_name: Symbol, cx: &Cx<'_>) -> bool {
-    let mut nodes = vec![node];
-    nodes.extend(cx.descendants(node));
-    for &d in &nodes {
-        match *cx.kind(d) {
+    if is_element_modified_node(node, el_name, cx) {
+        return true;
+    }
+    cx.descendants(node)
+        .iter()
+        .any(|&d| is_element_modified_node(d, el_name, cx))
+}
+
+fn is_element_modified_node(d: NodeId, el_name: Symbol, cx: &Cx<'_>) -> bool {
+    match *cx.kind(d) {
             NodeKind::Lvasgn { name, value } if name == el_name && value.get().is_some() => {
                 return true;
             }
             NodeKind::OpAsgn { target, .. }
             | NodeKind::OrAsgn { target, .. }
             | NodeKind::AndAsgn { target, .. } => {
-                if matches!(*cx.kind(target), NodeKind::Lvasgn { name: n, .. } if n == el_name) {
-                    return true;
-                }
+                matches!(*cx.kind(target), NodeKind::Lvasgn { name: n, .. } if n == el_name)
             }
             NodeKind::Send { receiver, method, args, .. } => {
                 let m = cx.symbol_str(method);
@@ -250,12 +254,11 @@ fn element_modified(node: NodeId, el_name: Symbol, cx: &Cx<'_>) -> bool {
                         return true;
                     }
                 }
+                false
             }
-            _ => {}
+            _ => false,
         }
     }
-    false
-}
 
 fn acceptable_return(node: NodeId, el_name: Symbol, cx: &Cx<'_>) -> bool {
     let vars = collect_expression_vars(node, cx);
