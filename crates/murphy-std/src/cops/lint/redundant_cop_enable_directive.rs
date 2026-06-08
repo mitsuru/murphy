@@ -18,6 +18,12 @@
 //!   `extra_enabled_directives` primitive's `disable_all_depth` proxy keeps
 //!   those cases on the conservative side. A follow-up issue will track
 //!   registry-backed `all`/department expansion (TODO: murphy-k19j follow-up).
+//!   Redundant cop names that are prefixes of other listed cops (and the `all`
+//!   keyword / department names) are located by a `comment.text.index`-style
+//!   search exactly as RuboCop does — this reproduces RuboCop's behavior rather
+//!   than "correcting" it (e.g. `Style/For` matches inside `Style/FormatString`).
+//!   A malformed directive that repeats the same cop name (`enable Foo, Foo`) is
+//!   not specially handled (deferred).
 //! ```
 
 use murphy_plugin_api::{Cx, NoOptions, Range, RangeSide, SpaceRangeOptions, cop};
@@ -241,6 +247,38 @@ mod tests {
                                  ^^^^^^^^^^^^^^^^^ Unnecessary enabling of Layout/LineLength.
             "#},
             "# rubocop:disable Style/StringLiterals\nfoo\n# rubocop:enable Style/StringLiterals\n",
+        );
+    }
+
+    // Parity lock: a redundant cop name that is a prefix of another listed cop is
+    // located via find/comment.text.index exactly like RuboCop 1.87.0 — identical
+    // offense column AND identical (byte-for-byte) autocorrect (whole comment text
+    // removed, trailing newline retained). Do NOT "fix" this by carrying exact
+    // per-name ranges; that would diverge from RuboCop and break parity.
+    #[test]
+    fn prefix_cop_name_matches_rubocop_index_semantics() {
+        // `Style/For` is the 9-char prefix of `Style/FormatString`, so
+        // `find`/`comment.text.index` lands the caret at the start of the
+        // `Style/FormatString` token (column 18). Because that match sits
+        // mid-token, neither side is bordered by a comma, so RuboCop's
+        // `range_to_remove` falls through to removing the *whole* enable
+        // comment (the no-surrounding-comma fallback). The comment text is
+        // deleted but its newline is retained, leaving a trailing blank line.
+        test::<RedundantCopEnableDirective>().expect_offense(indoc! {r#"
+            # rubocop:disable Style/FormatString
+            foo
+            # rubocop:enable Style/FormatString, Style/For
+                             ^^^^^^^^^ Unnecessary enabling of Style/For.
+        "#});
+
+        test::<RedundantCopEnableDirective>().expect_correction(
+            indoc! {r#"
+                # rubocop:disable Style/FormatString
+                foo
+                # rubocop:enable Style/FormatString, Style/For
+                                 ^^^^^^^^^ Unnecessary enabling of Style/For.
+            "#},
+            "# rubocop:disable Style/FormatString\nfoo\n\n",
         );
     }
 
