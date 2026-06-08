@@ -53,7 +53,7 @@
 //!
 //! - **Operators**: `a + b` → `a\nb` (replaces the Send with receiver + newline
 //!   + first argument). Unary `!b`, `+b`, `~b` → replaced by argument source.
-//!   Dot-form `b.!` → replaced by receiver source.
+//!     Dot-form `b.!` → replaced by receiver source.
 //! - **Variables / constants / literals / self**: removed (with surrounding
 //!   whitespace on the left). Autocorrect is suppressed when the expression is
 //!   inside an `if`/`case`/`when`/`in_pattern` (guard clause) or inside a
@@ -154,7 +154,7 @@ impl Void {
 
         for &child in &children[..last_idx] {
             check_void_op(child, cx);
-            check_expression(child, cx, inside_each_block);
+            check_expression(child, cx);
         }
     }
 
@@ -186,7 +186,7 @@ impl Void {
 
         for &child in &children[..last_idx] {
             check_void_op(child, cx);
-            check_expression(child, cx, inside_each_block);
+            check_expression(child, cx);
         }
     }
 
@@ -222,7 +222,7 @@ impl Void {
             return;
         }
         check_void_op(body, cx);
-        check_expression(body, cx, false);
+        check_expression(body, cx);
     }
 }
 
@@ -362,7 +362,7 @@ fn check_block_body(node: NodeId, cx: &Cx<'_>) {
     // For tap blocks (and others that are void context):
     // The single body expression IS checked.
     check_void_op(body_id, cx);
-    check_expression(body_id, cx, false);
+    check_expression(body_id, cx);
 }
 
 /// Handle numblock / itblock dispatch.
@@ -386,14 +386,14 @@ fn check_numitblock_body(node: NodeId, cx: &Cx<'_>) {
         return;
     }
     check_void_op(body_id, cx);
-    check_expression(body_id, cx, false);
+    check_expression(body_id, cx);
 }
 
 // ── core check functions ────────────────────────────────────────────────────
 
 /// Dispatch entry for a single expression: checks for if/case/case_match
 /// branching or direct void checks.
-fn check_expression(expr: NodeId, cx: &Cx<'_>, inside_each_block: bool) {
+fn check_expression(expr: NodeId, cx: &Cx<'_>) {
     match *cx.kind(expr) {
         NodeKind::If { then_, else_, .. } => {
             // RuboCop checks both the then-branch (body) and the else-branch
@@ -408,26 +408,24 @@ fn check_expression(expr: NodeId, cx: &Cx<'_>, inside_each_block: bool) {
         }
         NodeKind::Case { whens, else_, .. } => {
             for when_id in cx.list(whens) {
-                if let NodeKind::When { body, .. } = *cx.kind(*when_id) {
-                    if let Some(body_id) = body.get() {
-                        check_expression(body_id, cx, inside_each_block);
+                if let NodeKind::When { body, .. } = *cx.kind(*when_id)
+                    && let Some(body_id) = body.get() {
+                        check_expression(body_id, cx);
                     }
-                }
             }
             if let Some(else_id) = else_.get() {
-                check_expression(else_id, cx, inside_each_block);
+                check_expression(else_id, cx);
             }
         }
         NodeKind::CaseMatch { in_patterns, else_body, .. } => {
             for in_id in cx.list(in_patterns) {
-                if let NodeKind::InPattern { body, .. } = *cx.kind(*in_id) {
-                    if let Some(body_id) = body.get() {
-                        check_expression(body_id, cx, inside_each_block);
+                if let NodeKind::InPattern { body, .. } = *cx.kind(*in_id)
+                    && let Some(body_id) = body.get() {
+                        check_expression(body_id, cx);
                     }
-                }
             }
             if let Some(else_id) = else_body.get() {
-                check_expression(else_id, cx, inside_each_block);
+                check_expression(else_id, cx);
             }
         }
         _ => {
@@ -580,14 +578,12 @@ fn check_void_expression(node: NodeId, cx: &Cx<'_>) {
     if let NodeKind::Block { call, .. }
     | NodeKind::Numblock { send: call, .. }
     | NodeKind::Itblock { send: call, .. } = *cx.kind(node)
-    {
-        if is_lambda_or_proc_call(call, cx) {
+        && is_lambda_or_proc_call(call, cx) {
             let src = cx.raw_source(cx.range(node));
             let msg = format!("`{src}` used in void context.");
             cx.emit_offense(cx.range(node), &msg, None);
             autocorrect_void_expression(node, cx);
         }
-    }
 }
 
 /// Check `expr` for void non-mutating methods (when option enabled).
@@ -633,7 +629,7 @@ fn check_nonmutating(node: NodeId, cx: &Cx<'_>) {
         NodeKind::Csend { method, .. } => method,
         _ => return,
     };
-    let method_range = symbol_range(&cx.raw_source(cx.range(target_id)), cx.range(target_id).start, method_sym, cx);
+    let method_range = symbol_range(cx.raw_source(cx.range(target_id)), cx.range(target_id).start, method_sym, cx);
     cx.emit_edit(method_range, &suggestion);
 }
 
@@ -655,13 +651,11 @@ fn is_lambda_or_proc_call(call: NodeId, cx: &Cx<'_>) -> bool {
     if (method_str == "proc" || method_str == "lambda") && opt_receiver.get().is_none() {
         return true;
     }
-    if method_str == "new" {
-        if let Some(recv) = opt_receiver.get() {
-            if let NodeKind::Const { name, .. } = *cx.kind(recv) {
+    if method_str == "new"
+        && let Some(recv) = opt_receiver.get()
+            && let NodeKind::Const { name, .. } = *cx.kind(recv) {
                 return cx.symbol_str(name) == "Proc";
             }
-        }
-    }
     false
 }
 

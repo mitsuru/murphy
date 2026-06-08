@@ -63,11 +63,10 @@ impl UselessConstantScoping {
 fn after_private_modifier(left_siblings: &[NodeId], cx: &Cx<'_>) -> bool {
     let mut last_bare_name: Option<&str> = None;
     for &sibling in left_siblings {
-        if cx.is_bare_access_modifier(sibling) {
-            if let Some(name) = cx.method_name(sibling) {
+        if cx.is_bare_access_modifier(sibling)
+            && let Some(name) = cx.method_name(sibling) {
                 last_bare_name = Some(name);
             }
-        }
     }
     last_bare_name == Some("private")
 }
@@ -76,11 +75,10 @@ fn private_constantize(right_siblings: &[NodeId], const_name: Symbol, cx: &Cx<'_
     for &sibling in right_siblings {
         if cx.method_name(sibling) == Some("private_constant") {
             for &arg in cx.call_arguments(sibling) {
-                if let NodeKind::Sym(sym) = *cx.kind(arg) {
-                    if sym == const_name {
+                if let NodeKind::Sym(sym) = *cx.kind(arg)
+                    && sym == const_name {
                         return true;
                     }
-                }
             }
         }
     }

@@ -81,10 +81,10 @@ impl UselessDefaultValueArgument {
 
         match method_name {
             "fetch" => {
-                self.check_fetch(receiver_opt, &args_list, cx);
+                self.check_fetch(receiver_opt, args_list, cx);
             }
             "new" => {
-                self.check_array_new(receiver_opt, &args_list, cx);
+                self.check_array_new(receiver_opt, args_list, cx);
             }
             _ => {}
         }

@@ -26,7 +26,7 @@
 //!
 //! There is no safe autocorrect.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop};
 
 #[derive(Default)]
 pub struct UnifiedInteger;

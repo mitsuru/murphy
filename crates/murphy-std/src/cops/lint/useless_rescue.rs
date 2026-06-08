@@ -115,10 +115,10 @@ fn only_reraising(resbody: NodeId, cx: &Cx<'_>) -> bool {
     let arg_id = args_list[0];
     match *cx.kind(arg_id) {
         NodeKind::Lvar(s) => {
-            let exc_var_matches = var.get().is_some_and(|var_id| {
+            
+            var.get().is_some_and(|var_id| {
                 matches!(*cx.kind(var_id), NodeKind::Lvasgn { name, .. } if cx.symbol_str(name) == cx.symbol_str(s))
-            });
-            exc_var_matches
+            })
         }
         NodeKind::Gvar(s) => {
             let name = cx.symbol_str(s);
@@ -152,11 +152,10 @@ fn use_exception_variable_in_ensure(resbody: NodeId, cx: &Cx<'_>) -> bool {
                 // check for intervening bindings. In practice the common case
                 // (bare `ensure; do_something(e); end`) works correctly.
                 for desc in cx.descendants(ensure_body) {
-                    if let NodeKind::Lvar(s) = *cx.kind(desc) {
-                        if cx.symbol_str(s) == var_name {
+                    if let NodeKind::Lvar(s) = *cx.kind(desc)
+                        && cx.symbol_str(s) == var_name {
                             return true;
                         }
-                    }
                 }
             }
             return false;

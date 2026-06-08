@@ -72,14 +72,13 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // 2. If the parent is a Send whose method is NOT an access modifier
     //    (public / protected / private / module_function), skip — the def is
     //    being passed as an argument to something that may wrap it.
-    if let Some(parent) = cx.parent(node).get() {
-        if let NodeKind::Send { method, .. } = *cx.kind(parent) {
+    if let Some(parent) = cx.parent(node).get()
+        && let NodeKind::Send { method, .. } = *cx.kind(parent) {
             let name = cx.symbol_str(method);
             if !matches!(name, "public" | "protected" | "private" | "module_function") {
                 return;
             }
         }
-    }
 
     // 3. Body must be present and be a delegation (zsuper or super with
     //    source-matching args).

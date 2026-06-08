@@ -65,11 +65,10 @@ impl UselessOr {
                     Some(p)
                 }
             });
-            if let Some(parent_id) = parent {
-                if matches!(*cx.kind(parent_id), NodeKind::Or { .. }) {
+            if let Some(parent_id) = parent
+                && matches!(*cx.kind(parent_id), NodeKind::Or { .. }) {
                     report_offense(parent_id, rhs, cx, false);
                 }
-            }
         }
     }
 }

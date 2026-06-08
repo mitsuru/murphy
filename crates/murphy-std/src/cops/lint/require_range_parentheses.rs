@@ -33,11 +33,10 @@ impl RequireRangeParentheses {
         let NodeKind::RangeExpr { begin_, end_, exclusive } = *cx.kind(node) else { return; };
         let Some(begin_id) = begin_.get() else { return; };
         let Some(end_id) = end_.get() else { return; };
-        if let Some(parent_id) = cx.parent(node).get() {
-            if crate::cops::util::is_parenthesized(parent_id, cx) {
+        if let Some(parent_id) = cx.parent(node).get()
+            && crate::cops::util::is_parenthesized(parent_id, cx) {
                 return;
             }
-        }
         let operator_end = cx.range(begin_id).end;
         let end_start = cx.range(end_id).start;
         let between = cx.raw_source(Range { start: operator_end, end: end_start });

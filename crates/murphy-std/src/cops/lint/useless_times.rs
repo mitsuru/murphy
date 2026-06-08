@@ -204,11 +204,10 @@ fn autocorrect_one_times_block(blk: NodeId, send_node: NodeId, cx: &Cx<'_>) {
     };
 
     // Check if the block arg is reassigned in the body.
-    if let Some(ref arg) = block_arg_name {
-        if block_reassigns_arg(blk, arg, cx) {
+    if let Some(ref arg) = block_arg_name
+        && block_reassigns_arg(blk, arg, cx) {
             return; // No autocorrect when arg is reassigned.
         }
-    }
 
     // Extract the body source and substitute the block arg.
     let body_src = cx.raw_source(cx.range(body_id));
@@ -236,7 +235,7 @@ fn autocorrect_one_times_block(blk: NodeId, send_node: NodeId, cx: &Cx<'_>) {
         }
         fix_multiline_indentation(&result, blk, cx)
     } else {
-        fix_multiline_indentation(&body_src, blk, cx)
+        fix_multiline_indentation(body_src, blk, cx)
     };
 
     cx.emit_edit(cx.range(send_node), &replacement);
@@ -275,11 +274,10 @@ fn block_reassigns_arg(blk: NodeId, arg_name: &str, cx: &Cx<'_>) -> bool {
         return false;
     };
     for desc in cx.descendants(body_id) {
-        if let NodeKind::Lvasgn { name, .. } = *cx.kind(desc) {
-            if cx.symbol_str(name) == arg_name {
+        if let NodeKind::Lvasgn { name, .. } = *cx.kind(desc)
+            && cx.symbol_str(name) == arg_name {
                 return true;
             }
-        }
     }
     false
 }

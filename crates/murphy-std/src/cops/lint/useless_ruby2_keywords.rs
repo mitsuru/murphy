@@ -60,11 +60,10 @@ fn is_useless(args_id: NodeId, cx: &Cx<'_>) -> bool {
 /// traverse into nested `class`/`module`/`sclass` bodies.
 fn find_def_in_scope(parent: NodeId, target: &str, cx: &Cx<'_>) -> Option<NodeId> {
     for child in cx.children(parent) {
-        if let NodeKind::Def { name, .. } = *cx.kind(child) {
-            if cx.symbol_str(name) == target {
+        if let NodeKind::Def { name, .. } = *cx.kind(child)
+            && cx.symbol_str(name) == target {
                 return Some(child);
             }
-        }
     }
     None
 }
@@ -100,21 +99,20 @@ impl UselessRuby2Keywords {
                     name,
                     args: def_args,
                     ..
-                } => {
-                    if is_useless(def_args, cx) {
+                }
+                    if is_useless(def_args, cx) => {
                         cx.emit_offense(
                             cx.range(node),
                             &msg(cx.symbol_str(name)),
                             None,
                         );
                     }
-                }
                 NodeKind::Sym(method_name) => {
                     let target = cx.symbol_str(method_name);
                     // Look for a `def` matching the symbol among the direct
                     // children of the immediate parent (same lexical scope).
-                    if let Some(parent) = cx.parent(node).get() {
-                        if let Some(def_id) = find_def_in_scope(parent, target, cx) {
+                    if let Some(parent) = cx.parent(node).get()
+                        && let Some(def_id) = find_def_in_scope(parent, target, cx) {
                             let NodeKind::Def { args: def_args, .. } = *cx.kind(def_id) else {
                                 return;
                             };
@@ -122,7 +120,6 @@ impl UselessRuby2Keywords {
                                 cx.emit_offense(cx.range(node), &msg(target), None);
                             }
                         }
-                    }
                 }
                 _ => {}
             }

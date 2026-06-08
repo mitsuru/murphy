@@ -254,10 +254,10 @@ fn process_masgn(lhs: NodeId, rhs: NodeId, local: &mut HashMap<String, bool>, cx
         let Some(name) = target_name(*t, cx) else {
             continue;
         };
-        let is_local = rhs_children.get(i).map_or(true, |&child| {
+        let is_local = rhs_children.get(i).is_none_or(|&child| {
             if is_variable_read(child, cx) {
                 variable_name(child, cx)
-                    .and_then(|n| local.get(n).map(|&v| v))
+                    .and_then(|n| local.get(n).copied())
                     .unwrap_or(false)
             } else {
                 is_constructor_or_literal(child, cx)
@@ -279,7 +279,7 @@ fn process_logical_op_asgn(
     };
     let is_local = if is_variable_read(value, cx) {
         variable_name(value, cx)
-            .and_then(|n| local.get(n).map(|&v| v))
+            .and_then(|n| local.get(n).copied())
             .unwrap_or(false)
     } else {
         is_constructor_or_literal(value, cx)

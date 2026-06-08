@@ -44,15 +44,14 @@ impl UselessElseWithoutRescue {
     #[on_new_investigation]
     fn check_file(&self, cx: &Cx<'_>) {
         for id in cx.descendants(cx.root()) {
-            if let NodeKind::Rescue { resbodies, else_, .. } = *cx.kind(id) {
-                if cx.list(resbodies).is_empty() && else_.get().is_some() {
+            if let NodeKind::Rescue { resbodies, else_, .. } = *cx.kind(id)
+                && cx.list(resbodies).is_empty() && else_.get().is_some() {
                     cx.emit_offense(
                         cx.range(else_.get().unwrap()),
                         "`else` without `rescue` is useless.",
                         None,
                     );
                 }
-            }
         }
     }
 }

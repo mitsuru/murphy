@@ -72,12 +72,11 @@ fn is_in_regexp_or_heredoc(cx: &Cx<'_>, node: NodeId) -> bool {
     if matches!(*cx.kind(parent_id), NodeKind::Regexp { .. }) {
         return true;
     }
-    if matches!(*cx.kind(parent_id), NodeKind::Dstr(_)) {
-        if let Some(gp) = cx.parent(parent_id).get() {
+    if matches!(*cx.kind(parent_id), NodeKind::Dstr(_))
+        && let Some(gp) = cx.parent(parent_id).get() {
             let src = cx.raw_source(cx.range(gp));
             return src.contains("<<~") || src.contains("<<-") || src.contains("<<\"");
         }
-    }
     false
 }
 

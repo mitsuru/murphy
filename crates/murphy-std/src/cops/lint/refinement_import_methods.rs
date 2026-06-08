@@ -51,12 +51,11 @@ impl RefinementImportMethods {
 fn inside_refine_block(node: NodeId, cx: &Cx<'_>) -> bool {
     for ancestor in cx.ancestors(node) {
         match *cx.kind(ancestor) {
-            NodeKind::Block { call, .. } => {
+            NodeKind::Block { call, .. }
                 if cx.method_name(call) == Some("refine") && cx.call_receiver(call).get().is_none()
-                {
+                => {
                     return true;
                 }
-            }
             NodeKind::Def { .. }
             | NodeKind::Defs { .. }
             | NodeKind::Class { .. }
