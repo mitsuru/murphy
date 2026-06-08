@@ -81,6 +81,10 @@ const EXIST_METHODS: &[&str] = &["exist?", "exists?"];
 /// Receiver constant names for existence checks.
 const EXIST_RECEIVERS: &[&str] = &["FileTest", "File", "Dir", "Shell"];
 
+/// Receiver constant names that are valid for file operations (FileUtils, Dir, File).
+/// Only operations on these receivers are flagged and autocorrected.
+const OPERATION_RECEIVERS: &[&str] = &["FileUtils", "Dir", "File"];
+
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
 pub struct NonAtomicFileOperation;
@@ -105,11 +109,8 @@ impl NonAtomicFileOperation {
             return;
         };
 
-        // Receiver must be a constant (FileUtils, ::FileUtils, etc.)
-        if !receiver
-            .get()
-            .is_some_and(|r| matches!(*cx.kind(r), NodeKind::Const { .. }))
-        {
+        // Receiver must be a known file-utility constant (FileUtils, Dir, File).
+        if !is_valid_operation_receiver(receiver, cx) {
             return;
         }
 
@@ -244,6 +245,32 @@ fn replacement_method(name: &str) -> &str {
     } else {
         name
     }
+}
+
+/// Returns `true` when the receiver (OptNodeId) is one of the supported
+/// file-utility constants: `FileUtils`, `Dir`, or `File` (or their
+/// `::`-prefixed fully-qualified forms).
+fn is_valid_operation_receiver(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
+    let Some(recv_id) = receiver.get() else {
+        return false;
+    };
+    let NodeKind::Const { name, scope } = *cx.kind(recv_id) else {
+        return false;
+    };
+    let name_str = cx.symbol_str(name);
+    // Fully-qualified `::FileUtils` — scope is cbase (scope == NONE means top-level).
+    // Murphy normalises `::X` to `Const { scope: None, name: X }`, same as bare `X`.
+    // So both `FileUtils` and `::FileUtils` match the same check.
+    if OPERATION_RECEIVERS.contains(&name_str) {
+        return true;
+    }
+    // Allow `Foo::FileUtils` nested paths too (e.g. `Rake::FileUtils`).
+    if let Some(s) = scope.get() {
+        if matches!(*cx.kind(s), NodeKind::Const { .. }) {
+            return OPERATION_RECEIVERS.contains(&name_str);
+        }
+    }
+    false
 }
 
 /// Checks whether the file operation node has a `force: false` keyword argument.
@@ -832,6 +859,13 @@ mod tests {
     fn accepts_non_constant_receiver() {
         test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
             storage[:files].delete(file) unless File.exists?(file)
+        "#});
+    }
+
+    #[test]
+    fn accepts_non_file_utility_constant_receiver() {
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            Storage.remove(path) if File.exist?(path)
         "#});
     }
 
