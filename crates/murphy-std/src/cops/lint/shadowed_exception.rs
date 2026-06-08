@@ -63,8 +63,8 @@ impl ShadowedException {
             }
         }
 
-        for (idx, pair) in groups.windows(2).enumerate() {
-            if shadows_later(&pair[0], &pair[1]) {
+        for idx in 0..groups.len() {
+            if groups[idx + 1..].iter().any(|later| shadows_later(&groups[idx], later)) {
                 cx.emit_offense(rescue_line_range(rescues[idx], cx), MSG, None);
                 return;
             }
@@ -193,6 +193,22 @@ mod tests {
               handle_exception
             rescue StandardError
               handle_standard_error
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_shadowed_exception_with_intervening_unknown_rescue() {
+        test::<ShadowedException>().expect_offense(indoc! {r#"
+            begin
+              something
+            rescue StandardError
+            ^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+              handle_standard_error
+            rescue UnknownException
+              handle_unknown
+            rescue RuntimeError
+              handle_runtime_error
             end
         "#});
     }

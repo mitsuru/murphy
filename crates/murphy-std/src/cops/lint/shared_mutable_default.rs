@@ -132,6 +132,8 @@ mod tests {
             Hash.new(nil)
             Hash.new([].freeze)
             Hash.new({}.freeze)
+            Hash.new([].freeze, capacity: 42)
+            Hash.new({}.freeze, capacity: 42)
             Hash.new(Array.new.freeze)
             Hash.new(Hash.new.freeze)
             Hash.new(capacity: 42)
