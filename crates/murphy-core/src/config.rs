@@ -545,6 +545,18 @@ impl MurphyConfig {
         }
     }
 
+    /// Cop names the resolved config disables (`Enabled: false`), for seeding
+    /// `Cx::extra_enabled_directives()`. Mirrors RuboCop's `registry.disabled(config)`
+    /// for the explicitly-configured subset (default-disabled-but-unconfigured cops
+    /// are out of scope — see murphy-k19j parity note).
+    pub fn disabled_cop_names(&self) -> impl Iterator<Item = &str> {
+        self.cops
+            .rules
+            .iter()
+            .filter(|(_, rule)| rule.enabled == Some(false))
+            .map(|(name, _)| name.as_str())
+    }
+
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
         let default_opts = self.base_defaults.cop_rules.get(name).map(|r| &r.options);
         let user_opts = self.cops.rules.get(name).map(|r| &r.options);
@@ -1285,6 +1297,17 @@ Style/StringLiterals:
         let parsed: serde_json::Value = serde_json::from_slice(&json).expect("valid JSON");
         assert_eq!(parsed["EnforcedStyle"], "compact");
         assert_eq!(parsed["MaxLength"], 120);
+    }
+
+    #[test]
+    fn disabled_cop_names_lists_enabled_false_rules() {
+        let cfg = MurphyConfig::from_yaml_str(
+            "Style/StringLiterals:\n  Enabled: false\nLint/Debugger:\n  Enabled: true\n",
+        )
+        .expect("config parses");
+        let names: Vec<&str> = cfg.disabled_cop_names().collect();
+        assert!(names.contains(&"Style/StringLiterals"));
+        assert!(!names.contains(&"Lint/Debugger"));
     }
 
     #[test]

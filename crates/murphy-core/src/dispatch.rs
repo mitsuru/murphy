@@ -189,6 +189,7 @@ fn build_cx_raw(
     var_model: &VarSemanticModel,
     node_slice_arena: &mut NodeSliceArena,
     ctx: AllCopsContext,
+    config_disabled_cops: &[RawSlice],
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -225,8 +226,8 @@ fn build_cx_raw(
         },
         target_rails_version: RubyVersion::to_wire(ctx.target_rails_version),
         active_support_extensions_enabled: ctx.active_support_extensions_enabled,
-        config_disabled_cops: std::ptr::null(),
-        config_disabled_cops_len: 0,
+        config_disabled_cops: config_disabled_cops.as_ptr(),
+        config_disabled_cops_len: config_disabled_cops.len(),
     }
 }
 
@@ -266,7 +267,7 @@ pub fn run_cops_with_options(
     // Default context: this option-only entry point carries no resolved config;
     // the native SymbolProc consumer reaches the flag via the cli path that
     // calls `run_cops_with_options_and_context` directly.
-    run_cops_with_options_and_context(ast, cops, sink, AllCopsContext::default(), options_for);
+    run_cops_with_options_and_context(ast, cops, sink, AllCopsContext::default(), &[], options_for);
 }
 
 pub fn run_cops_with_options_and_context(
@@ -274,12 +275,20 @@ pub fn run_cops_with_options_and_context(
     cops: &[&PluginCopV1],
     sink: &mut OffenseSink,
     ctx: AllCopsContext,
+    config_disabled_cops: &[RawSlice],
     mut options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
     let var_model = VarSemanticModel::build(ast);
     let index = DispatchIndex::build(ast);
     let mut node_slice_arena = NodeSliceArena::default();
-    let mut base = build_cx_raw(ast, sink, &var_model, &mut node_slice_arena, ctx);
+    let mut base = build_cx_raw(
+        ast,
+        sink,
+        &var_model,
+        &mut node_slice_arena,
+        ctx,
+        config_disabled_cops,
+    );
     for cop in cops {
         base.cop_name = cop.name;
         let name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("");
@@ -459,6 +468,7 @@ mod tests {
                 target_rails_version: Some(RubyVersion::new(5, 2)),
                 ..AllCopsContext::default()
             },
+            &[],
             |_| b"{}".to_vec(),
         );
 
@@ -511,6 +521,7 @@ mod tests {
                 active_support_extensions_enabled: true,
                 ..AllCopsContext::default()
             },
+            &[],
             |_| b"{}".to_vec(),
         );
 
@@ -525,6 +536,7 @@ mod tests {
             &[&ACTIVE_SUPPORT_COP],
             &mut sink,
             AllCopsContext::default(),
+            &[],
             |_| b"{}".to_vec(),
         );
 
