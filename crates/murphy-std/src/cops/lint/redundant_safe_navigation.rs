@@ -74,12 +74,10 @@ fn assume_receiver_instance_exists(receiver: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn guaranteed_instance_receiver(receiver: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(
-        cx.kind(receiver),
-        NodeKind::Send { .. } | NodeKind::Csend { .. }
-    ) && cx
-        .method_name(receiver)
-        .is_some_and(|method| GUARANTEED_INSTANCE_METHODS.contains(&method))
+    matches!(cx.kind(receiver), NodeKind::Send { .. })
+        && cx
+            .method_name(receiver)
+            .is_some_and(|method| GUARANTEED_INSTANCE_METHODS.contains(&method))
 }
 
 fn is_nil_safe_method(method: Option<&str>) -> bool {
@@ -142,5 +140,10 @@ mod tests {
     #[test]
     fn accepts_safe_navigation_that_can_return_nil() {
         test::<RedundantSafeNavigation>().expect_no_offenses("foo&.bar\n");
+    }
+
+    #[test]
+    fn accepts_conversion_after_safe_navigation() {
+        test::<RedundantSafeNavigation>().expect_no_offenses("foo&.to_s&.upcase\n");
     }
 }
