@@ -43,7 +43,7 @@ comments on merged PRs (#280–#328).
 // Good — use Cx helpers
 fn is_static_method_definition(node: NodeId, cx: &Cx<'_>) -> bool {
     matches!(*cx.kind(node), NodeKind::Def { .. })
-        || (cx.call_receiver(node).is_none()
+        || (cx.call_receiver(node).get().is_none()
             && cx.method_name(node).is_some_and(|m| matches!(m, "attr" | "attr_reader" | "attr_writer" | "attr_accessor")))
 }
 
@@ -68,10 +68,11 @@ let args_list = cx.list(args);
 
 ```rust
 // Avoid — destructuring NodeKind::Def inline
-let NodeKind::Def { method, class, module, .. } = *cx.kind(node) else {
+let NodeKind::Def { name, .. } = *cx.kind(node) else {
     return;
 };
-// ... manual scope checks
+let method_str = cx.symbol_str(name);
+// ... manual scope checks via cx.def_receiver(node), etc.
 ```
 
 ```rust
