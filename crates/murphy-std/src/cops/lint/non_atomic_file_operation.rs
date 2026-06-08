@@ -353,11 +353,38 @@ fn condition_matches_method(if_node: NodeId, method_name: &str, cx: &Cx<'_>) -> 
     }
 }
 
-/// Returns `true` when the condition of the `If` node is negated
-/// (the `!` operator wrapped).
+/// Returns `true` when the condition of the `If` node is negated — i.e. the
+/// top-level operator chain is `!` with an odd number of `!` calls (so `!x`
+/// is negated, `!!x` is not, `!!!x` is, etc.).
 fn is_negated_condition(if_node: NodeId, cx: &Cx<'_>) -> bool {
-    let cond = cx.if_condition(if_node);
-    cond.get().is_some_and(|c| cx.is_negation_method(c))
+    let mut cond = cx.if_condition(if_node);
+    let mut count = 0u32;
+    loop {
+        let Some(cond_id) = cond.get() else {
+            return count % 2 == 1;
+        };
+        let NodeKind::Send {
+            receiver,
+            method,
+            args,
+            ..
+        } = *cx.kind(cond_id)
+        else {
+            return count % 2 == 1;
+        };
+        if cx.symbol_str(method) != "!" {
+            return count % 2 == 1;
+        }
+        count += 1;
+        let args_list = cx.list(args);
+        if !args_list.is_empty() {
+            cond = OptNodeId::some(args_list[0]);
+        } else if let Some(recv) = receiver.get() {
+            cond = OptNodeId::some(recv);
+        } else {
+            return count % 2 == 1;
+        }
+    }
 }
 
 /// Searches the `if`/`unless`/`elsif` condition for a file existence check
@@ -936,6 +963,26 @@ mod tests {
         // mkdir_p would create if not exists, changing behaviour.
         test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
             FileUtils.mkdir(path) if FileTest.exist?(path)
+        "#});
+    }
+
+    #[test]
+    fn accepts_make_with_double_negated_if() {
+        // `if !!exist?` = `if exist?` (double negation cancels) —
+        // wrong polarity for make ops.
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            FileUtils.makedirs(path) if !!FileTest.exist?(path)
+        "#});
+    }
+
+    #[test]
+    fn flags_make_with_triple_negated_if() {
+        // `if !!!exist?` = `if !exist?` (triple = single negation) —
+        // correct polarity for make ops. makedirs is already a force method,
+        // so only the existence-check offense fires.
+        test::<NonAtomicFileOperation>().expect_offense(indoc! {r#"
+            FileUtils.makedirs(path) if !!!FileTest.exist?(path)
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Remove unnecessary existence check `FileTest.exist?`.
         "#});
     }
 
