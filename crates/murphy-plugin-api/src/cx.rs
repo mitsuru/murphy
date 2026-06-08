@@ -77,6 +77,19 @@ pub struct CommentDirective<'a> {
     pub cop: Option<&'a str>,
 }
 
+/// One redundant `# rubocop:enable` comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedundantEnable<'a> {
+    /// Range of the whole enable comment (`# rubocop:enable A, B`).
+    pub comment_range: Range,
+    /// The redundant cop names within that comment, in source order.
+    /// `enable all` redundancy is represented as the single sentinel `"all"`.
+    pub cop_names: Vec<&'a str>,
+    /// True when EVERY cop named by the directive is redundant
+    /// (RuboCop's `directive.match?(cop_names)`); drives whole-comment removal.
+    pub all_in_directive: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommentDirectiveKind {
     Disable,
@@ -2629,6 +2642,124 @@ impl<'a> Cx<'a> {
         comment_directives_from_comments(self.source(), self.comments())
     }
 
+    /// Config-disabled cop names (RuboCop's `registry.disabled` seed).
+    ///
+    /// Temporary stub returning an empty iterator until the CxRaw config-seed
+    /// field is added in a later task; replaced then.
+    fn config_disabled_cops(&self) -> std::vec::IntoIter<&'a str> {
+        Vec::new().into_iter() // replaced in a later task (config seed)
+    }
+
+    /// Redundant `# rubocop:enable` comments — Murphy's analog of RuboCop's
+    /// `CommentConfig#extra_enabled_comments`. Walks `comment_directives()` in
+    /// source order with a per-cop disable-count map (seeded by
+    /// `config_disabled_cops`); an enable for a cop whose count is zero is
+    /// redundant. Inline (same-line) directives are skipped, matching RuboCop's
+    /// `comment_only_line?`.
+    pub fn extra_enabled_directives(&self) -> Vec<RedundantEnable<'a>> {
+        use std::collections::HashMap;
+        let directives = self.comment_directives();
+
+        // Seed: config-disabled cops start with count 1 (RuboCop registry.disabled).
+        let mut count: HashMap<&str, i32> = HashMap::new();
+        for name in self.config_disabled_cops() {
+            *count.entry(name).or_insert(0) += 1;
+        }
+        // `all` is treated as an opaque global rather than expanded to every cop
+        // name (no registry access). disable_all_depth proxies "everything is
+        // disabled" so `disable all -> enable X / enable all` is never a false
+        // positive. Cost: a redundant specific-enable AFTER a `disable all` is a
+        // false NEGATIVE (safe direction) — see the deferred `all`/department gap.
+        let mut disable_all_depth: i32 = 0;
+
+        // Group consecutive directives by comment_range so per-comment redundancy
+        // and `all_in_directive` can be decided. comment_directives() emits the
+        // per-cop split for one comment contiguously and in source order.
+        let mut out: Vec<RedundantEnable<'a>> = Vec::new();
+        let mut i = 0;
+        while i < directives.len() {
+            let d0 = &directives[i];
+            // Collect the run sharing this comment_range.
+            let mut j = i;
+            while j < directives.len() && directives[j].comment_range == d0.comment_range {
+                j += 1;
+            }
+            let group = &directives[i..j];
+            i = j;
+
+            // Skip inline directives (RuboCop comment_only_line? == false).
+            if d0.scope == CommentDirectiveScope::SameLine {
+                continue;
+            }
+
+            let is_all = group.iter().any(|d| d.cop.is_none());
+            match d0.kind {
+                CommentDirectiveKind::Disable => {
+                    if is_all {
+                        disable_all_depth += 1;
+                    } else {
+                        for d in group {
+                            if let Some(cop) = d.cop {
+                                *count.entry(cop).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+                CommentDirectiveKind::Enable => {
+                    if is_all {
+                        // enable all: cancels one `disable all` and/or every positive
+                        // per-cop count; redundant iff it enabled nothing.
+                        let mut enabled_any = false;
+                        if disable_all_depth > 0 {
+                            disable_all_depth -= 1;
+                            enabled_any = true;
+                        }
+                        for v in count.values_mut() {
+                            if *v > 0 {
+                                *v -= 1;
+                                enabled_any = true;
+                            }
+                        }
+                        if !enabled_any {
+                            out.push(RedundantEnable {
+                                comment_range: d0.comment_range,
+                                cop_names: vec!["all"],
+                                all_in_directive: true,
+                            });
+                        }
+                    } else {
+                        let mut redundant: Vec<&str> = Vec::new();
+                        let mut total = 0;
+                        for d in group {
+                            let Some(cop) = d.cop else { continue };
+                            total += 1;
+                            let slot = count.entry(cop).or_insert(0);
+                            if *slot > 0 {
+                                *slot -= 1; // explicitly disabled -> valid enable
+                            } else if disable_all_depth > 0 {
+                                // disabled by an active `disable all` -> valid enable.
+                                // Conservative: do not decrement disable_all_depth
+                                // (a specific enable can't fully cancel a global all).
+                            } else {
+                                redundant.push(cop);
+                            }
+                        }
+                        if !redundant.is_empty() {
+                            let all_in_directive = redundant.len() == total;
+                            out.push(RedundantEnable {
+                                comment_range: d0.comment_range,
+                                cop_names: redundant,
+                                all_in_directive,
+                            });
+                        }
+                    }
+                }
+                CommentDirectiveKind::Todo => {}
+            }
+        }
+        out
+    }
+
     /// The file's source tokens, in source order.
     pub fn sorted_tokens(&self) -> &'a [SourceToken] {
         unsafe { slice(self.raw.sorted_tokens, self.raw.sorted_tokens_len) }
@@ -3337,6 +3468,115 @@ mod tests {
         assert_eq!(directives[0].scope, CommentDirectiveScope::File);
         assert_eq!(directives[0].cop, None);
         assert_eq!(cx.raw_source(directives[0].affected_range), source);
+    }
+
+    #[test]
+    fn extra_enabled_directives_flags_enable_without_disable() {
+        let source = concat!("foo = 1\n", "# rubocop:enable Layout/LineLength\n",);
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let extras = cx.extra_enabled_directives();
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].cop_names, vec!["Layout/LineLength"]);
+        assert!(extras[0].all_in_directive);
+    }
+
+    #[test]
+    fn extra_enabled_directives_ignores_paired_disable_enable() {
+        let source = concat!(
+            "# rubocop:disable Style/StringLiterals\n",
+            "foo = \"1\"\n",
+            "# rubocop:enable Style/StringLiterals\n",
+        );
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.extra_enabled_directives().is_empty());
+    }
+
+    #[test]
+    fn extra_enabled_directives_partial_redundancy() {
+        // A disabled, B never disabled -> only B redundant, not all_in_directive.
+        let source = concat!("# rubocop:disable A\n", "foo\n", "# rubocop:enable A, B\n",);
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let extras = cx.extra_enabled_directives();
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].cop_names, vec!["B"]);
+        assert!(!extras[0].all_in_directive);
+    }
+
+    #[test]
+    fn extra_enabled_directives_enable_all_with_nothing_disabled() {
+        let source = "foo\n# rubocop:enable all\n";
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        let extras = cx.extra_enabled_directives();
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].cop_names, vec!["all"]);
+        assert!(extras[0].all_in_directive);
+    }
+
+    #[test]
+    fn extra_enabled_directives_skips_inline_directives() {
+        // Same-line (inline) enable is not a comment-only line -> skipped.
+        let source = "foo # rubocop:enable Layout/LineLength\n";
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.extra_enabled_directives().is_empty());
+    }
+
+    #[test]
+    fn extra_enabled_directives_disable_all_then_enable_specific_not_redundant() {
+        // `disable all` disables Foo, so `enable Foo` is a valid enable, NOT redundant.
+        let source = concat!("# rubocop:disable all\n", "foo\n", "# rubocop:enable Foo\n",);
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.extra_enabled_directives().is_empty());
+    }
+
+    #[test]
+    fn extra_enabled_directives_disable_all_then_enable_all_not_redundant() {
+        // RuboCop docstring "good" example: disable all -> enable all is valid.
+        let source = concat!("# rubocop:disable all\n", "foo\n", "# rubocop:enable all\n",);
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.extra_enabled_directives().is_empty());
     }
 
     fn cx_for_source(source: &str) -> (Ast, FnTable) {

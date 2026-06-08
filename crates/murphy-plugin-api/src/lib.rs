@@ -45,7 +45,8 @@ pub use config_error::{ConfigError, ConfigErrorKind};
 pub use cop::Cop;
 pub use cx::{
     CommentDirective, CommentDirectiveKind, CommentDirectiveScope, Cx, LocRef, RangeSide,
-    SpaceRangeOptions, comment_directives_from_comments, unavailable_alloc_node_slice,
+    RedundantEnable, SpaceRangeOptions, comment_directives_from_comments,
+    unavailable_alloc_node_slice,
 };
 pub use node_cop::NodeCop;
 pub use options::{CopOptionEnum, CopOptions, NoOptions};
