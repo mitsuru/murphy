@@ -78,6 +78,10 @@ pub struct CommentDirective<'a> {
 }
 
 /// One redundant `# rubocop:enable` comment.
+///
+/// When the whole-file `enable all` is what is redundant, this is the single
+/// entry with `cop_names == ["all"]` and `all_in_directive == true`; that
+/// pairing is how it is distinguished from a cop literally named `all`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedundantEnable<'a> {
     /// Range of the whole enable comment (`# rubocop:enable A, B`).
@@ -3569,6 +3573,47 @@ mod tests {
     fn extra_enabled_directives_disable_all_then_enable_all_not_redundant() {
         // RuboCop docstring "good" example: disable all -> enable all is valid.
         let source = concat!("# rubocop:disable all\n", "foo\n", "# rubocop:enable all\n",);
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.extra_enabled_directives().is_empty());
+    }
+
+    #[test]
+    fn extra_enabled_directives_enable_all_after_specific_disables_not_redundant() {
+        // Two cops disabled by name, then `enable all` re-enables both -> the
+        // enable-all is doing real work, so it is NOT redundant. Exercises the
+        // per-cop count decrement in the enable-all branch.
+        let source = concat!(
+            "# rubocop:disable A\n",
+            "# rubocop:disable B\n",
+            "foo\n",
+            "# rubocop:enable all\n",
+        );
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.extra_enabled_directives().is_empty());
+    }
+
+    #[test]
+    fn extra_enabled_directives_double_disable_single_enable_not_redundant() {
+        // disable A twice, enable A once -> count still 1 (still disabled), so the
+        // single enable is valid, NOT redundant.
+        let source = concat!(
+            "# rubocop:disable A\n",
+            "# rubocop:disable A\n",
+            "foo\n",
+            "# rubocop:enable A\n",
+        );
         let ast = murphy_translate::translate(source, "t.rb");
         let fns = FnTable {
             emit_offense: noop_offense,
