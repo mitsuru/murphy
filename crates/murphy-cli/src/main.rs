@@ -33,7 +33,7 @@ use murphy_core::{
     aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
     migrate_rubocop_yml_to_murphy_yml, parse, parse_with_cache, run_to_fixpoint,
 };
-use murphy_plugin_api::{PluginCopV1, PluginRegistration, tristate_from_wire};
+use murphy_plugin_api::{PluginCopV1, PluginRegistration, RawSlice, tristate_from_wire};
 use murphy_reporting::{OutputFormat, format_lint_output};
 
 /// The standard built-in cop pack (`murphy-std`), unpacked once and
@@ -418,11 +418,17 @@ fn lint_source(
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
+            // Borrows config-owned cop-name strings; must outlive the dispatch call.
+            let disabled_names: Vec<RawSlice> = config
+                .disabled_cop_names()
+                .map(RawSlice::borrowed)
+                .collect();
             dispatch::run_cops_with_options_and_context(
                 &ast,
                 &scoped_cops,
                 &mut sink,
                 config.allcops_context(),
+                &disabled_names,
                 |name| config.cop_options_json(name),
             );
             let mut offenses = sink.into_offenses();
@@ -557,11 +563,17 @@ fn lint_source_timed(
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
+            // Borrows config-owned cop-name strings; must outlive the dispatch call.
+            let disabled_names: Vec<RawSlice> = config
+                .disabled_cop_names()
+                .map(RawSlice::borrowed)
+                .collect();
             dispatch::run_cops_with_options_and_context(
                 &ast,
                 &scoped_cops,
                 &mut sink,
                 config.allcops_context(),
+                &disabled_names,
                 |name| config.cop_options_json(name),
             );
             let mut offenses = sink.into_offenses();

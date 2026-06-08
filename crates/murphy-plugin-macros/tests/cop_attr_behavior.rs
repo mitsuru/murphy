@@ -64,6 +64,8 @@ fn cx_raw_for<'a>(ast: &'a murphy_ast::Ast, fns: &'a FnTable) -> CxRaw {
         file_path: RawSlice::from_str("t.rb"),
         target_rails_version: 0,
         active_support_extensions_enabled: false,
+        config_disabled_cops: std::ptr::null(),
+        config_disabled_cops_len: 0,
     }
 }
 

@@ -1098,3 +1098,77 @@ fn inherit_from_cycle_exits_2() {
         assert.get_output().stdout
     );
 }
+
+/// End-to-end lock for the config-disabled-cop seed in
+/// `Lint/RedundantCopEnableDirective` (config → dispatch → CxRaw → cop).
+///
+/// An own-line `# rubocop:enable Foo` is normally flagged because `Foo` has no
+/// matching active disable. The host seeds the cop with cops disabled via
+/// `.murphy.yml` (`Enabled: false`), so such an enable for a *config-disabled*
+/// cop is NOT flagged. This asserts both halves:
+///
+/// 1. Seed suppresses: with `Layout/LineLength: { Enabled: false }`, the same
+///    `# rubocop:enable Layout/LineLength` yields no
+///    `Lint/RedundantCopEnableDirective` offense.
+/// 2. Non-seeded still fires: without that config, the directive *is* flagged —
+///    proving (1) is the seed, not silence.
+///
+/// `Style/FrozenStringLiteralComment` also fires on the fixture, so both halves
+/// scope their assertion to the `Lint/RedundantCopEnableDirective` cop.
+#[test]
+fn redundant_cop_enable_directive_respects_config_disabled_seed() {
+    const REDUNDANT_ENABLE_FIXTURE: &str = "# rubocop:enable Layout/LineLength\n";
+    const COP_NAME: &str = "Lint/RedundantCopEnableDirective";
+
+    let redundant_enable_offenses = |root: &std::path::Path| -> Vec<serde_json::Value> {
+        let assert = Command::cargo_bin("murphy")
+            .expect("murphy binary builds")
+            .current_dir(root)
+            .arg("lint")
+            .arg("--format")
+            .arg("json")
+            .arg("fixture.rb")
+            .assert()
+            .code(1);
+
+        let parsed: Vec<serde_json::Value> = serde_json::from_slice(&assert.get_output().stdout)
+            .expect("stdout must be a JSON array");
+        parsed
+            .into_iter()
+            .filter(|o| o["cop_name"] == COP_NAME)
+            .collect()
+    };
+
+    // Half 1: config disables Layout/LineLength → seed suppresses the directive.
+    let seeded = tempdir().expect("create tempdir");
+    let seeded_root = seeded.path();
+    fs::write(seeded_root.join("fixture.rb"), REDUNDANT_ENABLE_FIXTURE).expect("write fixture.rb");
+    fs::write(
+        seeded_root.join(".murphy.yml"),
+        "Layout/LineLength:\n  Enabled: false\n",
+    )
+    .expect("write .murphy.yml");
+
+    let seeded_offenses = redundant_enable_offenses(seeded_root);
+    assert!(
+        seeded_offenses.is_empty(),
+        "config-disabled cop must NOT be flagged by {COP_NAME}, got {seeded_offenses:?}"
+    );
+
+    // Half 2: no such config → the same directive IS flagged (seed, not silence).
+    let unseeded = tempdir().expect("create tempdir");
+    let unseeded_root = unseeded.path();
+    fs::write(unseeded_root.join("fixture.rb"), REDUNDANT_ENABLE_FIXTURE)
+        .expect("write fixture.rb");
+
+    let unseeded_offenses = redundant_enable_offenses(unseeded_root);
+    assert_eq!(
+        unseeded_offenses.len(),
+        1,
+        "non-seeded directive must be flagged by {COP_NAME}, got {unseeded_offenses:?}"
+    );
+    assert_eq!(
+        unseeded_offenses[0]["message"],
+        "Unnecessary enabling of Layout/LineLength."
+    );
+}
