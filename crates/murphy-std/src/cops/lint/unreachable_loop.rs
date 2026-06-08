@@ -150,9 +150,25 @@ fn is_break_statement(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn contains_next(node: NodeId, cx: &Cx<'_>) -> bool {
-    cx.descendants(node).iter().any(|&d| {
-        matches!(*cx.kind(d), NodeKind::Next(_) | NodeKind::Retry)
-    })
+    if matches!(*cx.kind(node), NodeKind::Next(_) | NodeKind::Retry) {
+        return true;
+    }
+    if is_block_or_loop(node, cx) {
+        return false;
+    }
+    cx.children(node).iter().any(|&c| contains_next(c, cx))
+}
+
+fn is_block_or_loop(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(
+        *cx.kind(node),
+        NodeKind::Block { .. }
+            | NodeKind::Numblock { .. }
+            | NodeKind::Itblock { .. }
+            | NodeKind::While { .. }
+            | NodeKind::Until { .. }
+            | NodeKind::For { .. }
+    )
 }
 
 fn preceded_by_continue(break_stmt: NodeId, siblings: &[NodeId], cx: &Cx<'_>) -> bool {
@@ -312,6 +328,17 @@ mod tests {
               next
             end
         "});
+    }
+
+    #[test]
+    fn flags_while_with_inner_block_next_then_break() {
+        test::<UnreachableLoop>().expect_offense(indoc! {r#"
+            while cond
+            ^^^^^ This loop will have at most one iteration.
+              xs.each { next if skip? }
+              break
+            end
+        "#});
     }
 }
 
