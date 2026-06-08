@@ -361,23 +361,44 @@ fn is_negated_condition(if_node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Searches the `if`/`unless`/`elsif` condition for a file existence check
-/// (`FileTest.exist?`, etc.). Only looks within the condition subtree, not the
-/// body, to avoid matching existence checks inside the operation arguments.
+/// (`FileTest.exist?`, etc.). Only accepts existence checks that are the
+/// condition itself or directly negated. Rejects checks nested inside other
+/// method call arguments.
 fn find_existence_check(if_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     let cond = cx.if_condition(if_node);
     let Some(cond_id) = cond.get() else {
         return None;
     };
+
+    // Check if the condition node itself is an existence check.
     if let Some((node, _)) = as_existence_check(cond_id, cx) {
         return Some(node);
     }
-    // Check descendants of the condition node (e.g., `!(File.exist?(path))`
-    // wraps the existence check in a Send/Not node).
+
+    // Walk descendants. Only accept existence checks that are NOT inside
+    // another method call's argument list.
     for &desc in cx.descendants(cond_id).iter() {
         if desc == cond_id {
             continue;
         }
         if let Some((node, _)) = as_existence_check(desc, cx) {
+            // Check if node is an argument to some enclosing Send/Csend
+            // that is not the negation operator `!`.
+            if let Some(parent) = cx.parent(node).get() {
+                match *cx.kind(parent) {
+                    NodeKind::Send { args, method, .. } | NodeKind::Csend { args, method, .. } => {
+                        let method_str = cx.symbol_str(method);
+                        // Allow `!exist?` (negation) and `exist?` itself.
+                        if method_str != "!" {
+                            let in_args = cx.list(args).iter().any(|&a| a == node);
+                            if in_args {
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             return Some(node);
         }
     }
@@ -992,6 +1013,17 @@ mod tests {
         test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
             unless !(FileTest.exist?(path) || disabled)
               FileUtils.makedirs(path)
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_exist_check_as_method_argument() {
+        // allowed?(File.exist?(path)) — the existence check is a sub-expression,
+        // not the actual condition. Should not trigger.
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            if allowed?(File.exist?(path))
+              FileUtils.remove(path)
             end
         "#});
     }
