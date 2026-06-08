@@ -85,6 +85,10 @@ fn redundant_call(block: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     if !matches!(method, "each_with_object" | "with_object") {
         return None;
     }
+    if method == "with_object" {
+        let receiver = cx.call_receiver(call).get()?;
+        cx.call_receiver(receiver).get()?;
+    }
     if cx.call_arguments(call).is_empty() {
         return None;
     }
@@ -117,6 +121,7 @@ fn find_block_opener(from: u32, to: u32, cx: &Cx<'_>) -> Option<u32> {
     let end = to as usize;
     while i < end {
         match source[i] {
+            b'\'' | b'"' => i = skip_quoted_string(source, i, end),
             b'{' => return Some(i as u32),
             b'd' if source.get(i..i + 2) == Some(b"do") && word_boundary(source, i, i + 2) => {
                 return Some(i as u32);
@@ -125,6 +130,21 @@ fn find_block_opener(from: u32, to: u32, cx: &Cx<'_>) -> Option<u32> {
         }
     }
     None
+}
+
+fn skip_quoted_string(source: &[u8], start: usize, end: usize) -> usize {
+    let quote = source[start];
+    let mut i = start + 1;
+    while i < end {
+        if source[i] == b'\\' {
+            i += 2;
+        } else if source[i] == quote {
+            return i + 1;
+        } else {
+            i += 1;
+        }
+    }
+    i
 }
 
 fn word_boundary(source: &[u8], start: usize, end: usize) -> bool {
@@ -176,6 +196,11 @@ mod tests {
         test::<RedundantWithObject>()
             .expect_no_offenses("ary.each_with_object([]) { |v, o| v; o }\n")
             .expect_no_offenses("ary.each_with_object { |v| v }\n");
+    }
+
+    #[test]
+    fn accepts_standalone_with_object_method() {
+        test::<RedundantWithObject>().expect_no_offenses("object.with_object([]) { |v| v }\n");
     }
 
     #[test]

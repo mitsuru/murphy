@@ -127,6 +127,7 @@ fn find_block_opener(from: u32, to: u32, cx: &Cx<'_>) -> Option<u32> {
     let end = to as usize;
     while i < end {
         match source[i] {
+            b'\'' | b'"' => i = skip_quoted_string(source, i, end),
             b'{' => return Some(i as u32),
             b'd' if source.get(i..i + 2) == Some(b"do") && word_boundary(source, i, i + 2) => {
                 return Some(i as u32);
@@ -135,6 +136,21 @@ fn find_block_opener(from: u32, to: u32, cx: &Cx<'_>) -> Option<u32> {
         }
     }
     None
+}
+
+fn skip_quoted_string(source: &[u8], start: usize, end: usize) -> usize {
+    let quote = source[start];
+    let mut i = start + 1;
+    while i < end {
+        if source[i] == b'\\' {
+            i += 2;
+        } else if source[i] == quote {
+            return i + 1;
+        } else {
+            i += 1;
+        }
+    }
+    i
 }
 
 fn word_boundary(source: &[u8], start: usize, end: usize) -> bool {
@@ -159,6 +175,17 @@ mod tests {
             indoc! {r#"
                 ary.each_with_index { |v| v }
                     ^^^^^^^^^^^^^^^ Use `each` instead of `each_with_index`.
+            "#},
+            "ary.each { |v| v }\n",
+        );
+    }
+
+    #[test]
+    fn skips_block_opener_inside_string_literal() {
+        test::<RedundantWithIndex>().expect_correction(
+            indoc! {r#"
+                ary.each_with_index("{") { |v| v }
+                    ^^^^^^^^^^^^^^^^^^^^ Use `each` instead of `each_with_index`.
             "#},
             "ary.each { |v| v }\n",
         );

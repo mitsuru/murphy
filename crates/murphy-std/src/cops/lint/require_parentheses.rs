@@ -49,12 +49,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         && args
             .last()
             .is_some_and(|&arg| matches!(cx.kind(arg), NodeKind::And { .. } | NodeKind::Or { .. }));
-    let ambiguous_ternary_arg = args.first().is_some_and(|&arg| {
-        matches!(cx.kind(arg), NodeKind::If { .. })
-            && cx
-                .descendants(arg)
-                .into_iter()
-                .any(|child| matches!(cx.kind(child), NodeKind::And { .. } | NodeKind::Or { .. }))
+    let ambiguous_ternary_arg = args.first().is_some_and(|&arg| match *cx.kind(arg) {
+        NodeKind::If { cond, .. } => matches!(cx.kind(cond), NodeKind::And { .. } | NodeKind::Or { .. }),
+        _ => false,
     });
     if ambiguous_predicate_arg || ambiguous_ternary_arg {
         cx.emit_offense(
@@ -83,5 +80,10 @@ mod tests {
     #[test]
     fn accepts_parenthesized_call() {
         test::<RequireParentheses>().expect_no_offenses("foo?(a && b)\n");
+    }
+
+    #[test]
+    fn accepts_ternary_with_logical_operator_only_in_branches() {
+        test::<RequireParentheses>().expect_no_offenses("foo a ? b && c : d\n");
     }
 }

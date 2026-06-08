@@ -158,6 +158,17 @@ mod tests {
     }
 
     #[test]
+    fn flags_and_corrects_redundant_safe_navigation_on_right_of_or() {
+        test::<SafeNavigationConsistency>().expect_correction(
+            indoc! {r#"
+                foo.bar || foo&.baz
+                              ^^ Use `.` instead of unnecessary `&.`.
+            "#},
+            "foo.bar || foo.baz\n",
+        );
+    }
+
+    #[test]
     fn accepts_safe_navigation_on_left_of_and() {
         test::<SafeNavigationConsistency>().expect_no_offenses("foo&.bar && foo.baz\n");
     }

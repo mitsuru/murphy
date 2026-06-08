@@ -52,8 +52,10 @@ fn inside_refine_block(node: NodeId, cx: &Cx<'_>) -> bool {
     for ancestor in cx.ancestors(node) {
         match *cx.kind(ancestor) {
             NodeKind::Block { call, .. } => {
-                return cx.method_name(call) == Some("refine")
-                    && cx.call_receiver(call).get().is_none();
+                if cx.method_name(call) == Some("refine") && cx.call_receiver(call).get().is_none()
+                {
+                    return true;
+                }
             }
             NodeKind::Def { .. }
             | NodeKind::Defs { .. }
@@ -87,6 +89,18 @@ mod tests {
             refine Foo do
               prepend Bar
               ^^^^^^^ Use `import_methods` instead of `prepend` because it is deprecated in Ruby 3.1.
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_include_in_nested_block_inside_refine() {
+        test::<RefinementImportMethods>().expect_offense(indoc! {r#"
+            refine Foo do
+              items.each do
+                include Bar
+                ^^^^^^^ Use `import_methods` instead of `include` because it is deprecated in Ruby 3.1.
+              end
             end
         "#});
     }

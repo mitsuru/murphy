@@ -63,9 +63,17 @@ fn is_dir_glob(node: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
     let args = cx.list(args);
+    if args.iter().any(|&arg| matches!(cx.kind(arg), NodeKind::Splat(_))) {
+        return false;
+    }
+    if args
+        .iter()
+        .any(|&arg| cx.raw_source(cx.range(arg)).contains("sort: false"))
+    {
+        return false;
+    }
     match cx.method_name(node) {
-        Some("glob") => args.len() == 1 && !matches!(cx.kind(args[0]), NodeKind::Splat(_)),
-        Some("[]") => args.len() == 1 && !matches!(cx.kind(args[0]), NodeKind::Splat(_)),
+        Some("glob" | "[]") => !args.is_empty(),
         _ => false,
     }
 }
@@ -86,6 +94,32 @@ mod tests {
             "#},
             "Dir.glob('*.rb')\n",
         );
+    }
+
+    #[test]
+    fn flags_and_corrects_dir_glob_sort_with_options() {
+        test::<RedundantDirGlobSort>()
+            .expect_correction(
+                indoc! {r#"
+                    Dir.glob('*.rb', base: '.').sort
+                                                ^^^^ Remove redundant sort.
+                "#},
+                "Dir.glob('*.rb', base: '.')\n",
+            )
+            .expect_correction(
+                indoc! {r#"
+                    Dir['*.rb', base: '.'].sort
+                                           ^^^^ Remove redundant sort.
+                "#},
+                "Dir['*.rb', base: '.']\n",
+            );
+    }
+
+    #[test]
+    fn accepts_dir_glob_sort_with_splat_argument() {
+        test::<RedundantDirGlobSort>()
+            .expect_no_offenses("Dir.glob(*patterns).sort\n")
+            .expect_no_offenses("Dir.glob('*.rb', sort: false).sort\n");
     }
 
     #[test]
