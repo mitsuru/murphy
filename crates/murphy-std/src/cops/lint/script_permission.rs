@@ -10,13 +10,12 @@
 //! gap_issues: []
 //! notes: >
 //!   Murphy v1 exposes source text and file path but not executable file stat
-//!   metadata, and `emit_edit` cannot chmod. This port is report-only for files
-//!   whose source starts with a shebang; exact non-executable filtering and
-//!   chmod autocorrection are documented v1 gaps.
+//!   metadata, and `emit_edit` cannot chmod. This port does not report offenses
+//!   until executable-permission metadata is available; non-executable filtering
+//!   and chmod autocorrection are documented v1 gaps.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, Range};
-use std::path::Path;
+use murphy_plugin_api::{cop, Cx, NoOptions};
 
 #[derive(Default)]
 pub struct ScriptPermission;
@@ -30,19 +29,9 @@ pub struct ScriptPermission;
 )]
 impl ScriptPermission {
     #[on_new_investigation]
-    fn check_file(&self, cx: &Cx<'_>) {
-        let source = cx.source();
-        if !source.starts_with("#!") {
-            return;
-        }
-
-        let end = source.find('\n').unwrap_or(source.len()) as u32;
-        let basename = Path::new(cx.file_path())
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(cx.file_path());
-        let message = format!("Script file {basename} doesn't have execute permission.");
-        cx.emit_offense(Range { start: 0, end }, &message, None);
+    fn check_file(&self, _cx: &Cx<'_>) {
+        // Avoid false positives: Murphy's current cop API does not expose file
+        // mode metadata, so we cannot distinguish executable from non-executable scripts.
     }
 }
 
@@ -54,10 +43,9 @@ mod tests {
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
-    fn reports_shebang_source() {
-        test::<ScriptPermission>().expect_offense(indoc! {r#"
+    fn accepts_shebang_source_without_permission_metadata() {
+        test::<ScriptPermission>().expect_no_offenses(indoc! {r#"
             #!/usr/bin/env ruby
-            ^^^^^^^^^^^^^^^^^^^^ Script file t.rb doesn't have execute permission.
             puts 'hello'
         "#});
     }

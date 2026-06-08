@@ -64,8 +64,6 @@ fn is_redundant_feature(feature: &str) -> bool {
             | "complex"
             | "ruby2_keywords"
             | "fiber"
-            | "set"
-            | "pathname"
     )
 }
 
@@ -99,5 +97,13 @@ mod tests {
     #[test]
     fn accepts_non_redundant_require() {
         test::<RedundantRequireStatement>().expect_no_offenses("require 'json'\n");
+    }
+
+    #[test]
+    fn accepts_default_gems_that_are_not_preloaded() {
+        test::<RedundantRequireStatement>().expect_no_offenses(indoc! {r#"
+            require 'set'
+            require 'pathname'
+        "#});
     }
 }
