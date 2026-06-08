@@ -108,7 +108,7 @@ fn flat_statements(node: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
 
 fn is_break_statement(node: NodeId, cx: &Cx<'_>) -> bool {
     match cx.kind(node) {
-        NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Next(_) => true,
+        NodeKind::Return(_) | NodeKind::Break(_) => true,
 
         NodeKind::Send { receiver, method, .. } => {
             let method_str = cx.symbol_str(*method);
@@ -301,6 +301,15 @@ mod tests {
         test::<UnreachableLoop>().expect_no_offenses(indoc! {"
             while x > 0
               x -= 1
+            end
+        "});
+    }
+
+    #[test]
+    fn does_not_flag_while_with_only_next() {
+        test::<UnreachableLoop>().expect_no_offenses(indoc! {"
+            while x
+              next
             end
         "});
     }
