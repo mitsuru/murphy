@@ -10,14 +10,12 @@
 //! gap_issues: []
 //! notes: >
 //!   Initial v1 port covers regexp literals used directly as `if`, `unless`,
-//!   `while`, and `until` conditions and autocorrects them to `/re/ =~ $_`.
-//!   Murphy does not expose RuboCop's `match-current-line` hook as a dispatched
-//!   AST node, so this cop uses a conservative raw-source scan for simple
-//!   line-leading conditions. Negated/modifier/nested conditions and
-//!   ignored-node handling are documented v1 gaps.
+//!   `while`, and `until` AST conditions and autocorrects them to `/re/ =~ $_`.
+//!   Negated conditions and RuboCop's exact `match-current-line` dispatch are
+//!   documented v1 gaps.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
 
 const MSG: &str =
     "Do not use regexp literal as a condition. The regexp literal matches `$_` implicitly.";
@@ -33,67 +31,40 @@ pub struct RegexpAsCondition;
     options = NoOptions,
 )]
 impl RegexpAsCondition {
-    #[on_new_investigation]
-    fn check_file(&self, cx: &Cx<'_>) {
-        let mut offset = 0usize;
-        for line in cx.source().split_inclusive('\n') {
-            check_line(line, offset, cx);
-            offset += line.len();
-        }
+    #[on_node(kind = "if")]
+    fn check_if(&self, node: NodeId, cx: &Cx<'_>) {
+        check_cond(node, cx);
+    }
+
+    #[on_node(kind = "while")]
+    fn check_while(&self, node: NodeId, cx: &Cx<'_>) {
+        check_cond(node, cx);
+    }
+
+    #[on_node(kind = "until")]
+    fn check_until(&self, node: NodeId, cx: &Cx<'_>) {
+        check_cond(node, cx);
     }
 }
 
-fn check_line(line: &str, line_offset: usize, cx: &Cx<'_>) {
-    let leading = line.len() - line.trim_start().len();
-    let trimmed = line.trim_start();
-    let Some(after_keyword) = condition_tail(trimmed) else {
-        return;
+fn check_cond(node: NodeId, cx: &Cx<'_>) {
+    let cond = match *cx.kind(node) {
+        NodeKind::If { cond, .. } | NodeKind::While { cond, .. } | NodeKind::Until { cond, .. } => {
+            cond
+        }
+        _ => return,
     };
-    let tail_leading = after_keyword.len() - after_keyword.trim_start().len();
-    let tail = after_keyword.trim_start();
-    if !tail.starts_with('/') {
+    if !matches!(cx.kind(cond), NodeKind::Regexp { .. } | NodeKind::Unknown) {
         return;
     }
-    let Some(end) = regexp_literal_end(tail) else {
-        return;
-    };
-    if tail[end..].trim_start().starts_with("=~") {
-        return;
-    }
-
-    let start = line_offset + leading + (trimmed.len() - after_keyword.len()) + tail_leading;
-    let range = Range {
-        start: start as u32,
-        end: (start + end) as u32,
-    };
+    let range = cx.range(cond);
     let source = cx.raw_source(range);
+    if !source.trim_start().starts_with('/') {
+        return;
+    }
     let replacement = format!("{source} =~ $_");
     cx.emit_offense(range, MSG, None);
     cx.emit_edit(range, &replacement);
-}
-
-fn condition_tail(trimmed: &str) -> Option<&str> {
-    ["if", "unless", "while", "until"]
-        .iter()
-        .find_map(|keyword| {
-            trimmed
-                .strip_prefix(keyword)
-                .filter(|tail| tail.starts_with(char::is_whitespace))
-        })
-}
-
-fn regexp_literal_end(source: &str) -> Option<usize> {
-    let mut escaped = false;
-    for (idx, ch) in source.char_indices().skip(1) {
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '/' {
-            return Some(idx + ch.len_utf8());
-        }
-    }
-    None
 }
 
 murphy_plugin_api::submit_cop!(RegexpAsCondition);
@@ -129,5 +100,10 @@ mod tests {
     #[test]
     fn accepts_explicit_match() {
         test::<RegexpAsCondition>().expect_no_offenses("if /foo/ =~ line\n  work\nend\n");
+    }
+
+    #[test]
+    fn accepts_heredoc_text_that_looks_like_condition() {
+        test::<RegexpAsCondition>().expect_no_offenses("text = <<~RUBY\n  if /foo/\nRUBY\n");
     }
 }

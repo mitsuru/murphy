@@ -9,13 +9,14 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Initial port detects literal self-requires by comparing the requested stem
-//!   with the current file stem. Directory-sensitive path normalization is a v1
-//!   gap.
+//!   Initial port detects literal self-requires by resolving the requested path
+//!   relative to the current file directory and comparing the normalized path
+//!   against the current file path. Filesystem symlink/canonicalize behavior is
+//!   a v1 gap.
 //! ```
 
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Default)]
 pub struct RequireRelativeSelfPath;
@@ -31,9 +32,7 @@ impl RequireRelativeSelfPath {
         let NodeKind::Str(sid) = *cx.kind(*arg) else {
             return;
         };
-        let required = Path::new(cx.string_str(sid));
-        let current = Path::new(cx.file_path());
-        if required.file_stem() == current.file_stem() {
+        if resolves_to_current_file(cx.string_str(sid), cx.file_path()) {
             cx.emit_offense(
                 cx.range(node),
                 "Remove the `require_relative` that requires itself.",
@@ -42,6 +41,38 @@ impl RequireRelativeSelfPath {
             cx.emit_edit(cx.range(node), "");
         }
     }
+}
+
+fn resolves_to_current_file(required: &str, current_file: &str) -> bool {
+    let current = normalize_path(Path::new(current_file));
+    let required_path = Path::new(required);
+    let base = if required_path.is_absolute() {
+        required_path.to_path_buf()
+    } else {
+        Path::new(current_file)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(required_path)
+    };
+    let mut candidate = normalize_path(&base);
+    if candidate.extension().is_none() {
+        candidate.set_extension("rb");
+    }
+    candidate == current
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 murphy_plugin_api::submit_cop!(RequireRelativeSelfPath);
@@ -57,5 +88,11 @@ mod tests {
             require_relative 't'
             ^^^^^^^^^^^^^^^^^^^^^^ Remove the `require_relative` that requires itself.
         "#});
+    }
+
+    #[test]
+    fn accepts_same_basename_in_different_directory() {
+        test::<RequireRelativeSelfPath>()
+            .expect_no_offenses("require_relative '../serializers/t'\n");
     }
 }

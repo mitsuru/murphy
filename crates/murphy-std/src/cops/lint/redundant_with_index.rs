@@ -57,7 +57,7 @@ fn check(block: NodeId, cx: &Cx<'_>) {
 
     if method == "each_with_index" {
         cx.emit_offense(range, "Use `each` instead of `each_with_index`.", None);
-        cx.emit_edit(cx.selector(call), "each");
+        cx.emit_edit(range, "each");
     } else {
         cx.emit_offense(range, "Remove redundant `with_index`.", None);
         if let Some(dot) = cx.call_operator_loc(call) {
@@ -172,6 +172,17 @@ mod tests {
                      ^^^^^^^^^^^^^^^ Use `each` instead of `each_with_index`.
             "#},
             "ary&.each { |v| v }\n",
+        );
+    }
+
+    #[test]
+    fn removes_each_with_index_offset_argument() {
+        test::<RedundantWithIndex>().expect_correction(
+            indoc! {r#"
+                ary.each_with_index(1) { |v| v }
+                    ^^^^^^^^^^^^^^^^^^ Use `each` instead of `each_with_index`.
+            "#},
+            "ary.each { |v| v }\n",
         );
     }
 
