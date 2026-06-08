@@ -79,6 +79,8 @@ fn arguments_match(passed_args: &[NodeId], def_node: NodeId, cx: &Cx<'_>) -> boo
     };
     let def_args = cx.list(def_args_list);
     let mut passed_idx = 0;
+    let mut keyword_names = Vec::new();
+    let mut kwrest_name = None;
     for &def_arg in def_args {
         if matches!(cx.kind(def_arg), NodeKind::Blockarg(_)) {
             continue;
@@ -100,6 +102,7 @@ fn arguments_match(passed_args: &[NodeId], def_node: NodeId, cx: &Cx<'_>) -> boo
                 }
             }
             NodeKind::Kwarg(name) | NodeKind::Kwoptarg { name, .. } => {
+                keyword_names.push(name);
                 if !passed_args[passed_idx..]
                     .iter()
                     .any(|&arg| hash_has_keyword_pair(arg, name, cx))
@@ -108,6 +111,7 @@ fn arguments_match(passed_args: &[NodeId], def_node: NodeId, cx: &Cx<'_>) -> boo
                 }
             }
             NodeKind::Kwrestarg(name) => {
+                kwrest_name = Some(name);
                 if !passed_args[passed_idx..]
                     .iter()
                     .any(|&arg| kwsplat_name_is(arg, name, cx) || hash_has_kwsplat(arg, name, cx))
@@ -124,7 +128,9 @@ fn arguments_match(passed_args: &[NodeId], def_node: NodeId, cx: &Cx<'_>) -> boo
             _ => return false,
         }
     }
-    true
+    passed_args[passed_idx..]
+        .iter()
+        .all(|&arg| extra_argument_is_expected_keyword(arg, &keyword_names, kwrest_name, cx))
 }
 
 fn lvar_name_is(node: NodeId, name: murphy_plugin_api::Symbol, cx: &Cx<'_>) -> bool {
@@ -152,6 +158,29 @@ fn hash_has_keyword_pair(node: NodeId, name: murphy_plugin_api::Symbol, cx: &Cx<
         };
         matches!(*cx.kind(key), NodeKind::Sym(sym) if cx.symbol_str(sym) == cx.symbol_str(name))
             && lvar_name_is(value, name, cx)
+    })
+}
+
+fn extra_argument_is_expected_keyword(
+    node: NodeId,
+    keyword_names: &[murphy_plugin_api::Symbol],
+    kwrest_name: Option<murphy_plugin_api::Symbol>,
+    cx: &Cx<'_>,
+) -> bool {
+    if kwrest_name.is_some_and(|name| kwsplat_name_is(node, name, cx)) {
+        return true;
+    }
+    let NodeKind::Hash(pairs) = *cx.kind(node) else {
+        return false;
+    };
+    cx.list(pairs).iter().all(|&pair| {
+        let NodeKind::Pair { key, value } = *cx.kind(pair) else {
+            return kwrest_name.is_some_and(|name| kwsplat_name_is(pair, name, cx));
+        };
+        keyword_names.iter().any(|&name| {
+            matches!(*cx.kind(key), NodeKind::Sym(sym) if cx.symbol_str(sym) == cx.symbol_str(name))
+                && lvar_name_is(value, name, cx)
+        })
     })
 }
 
@@ -202,5 +231,15 @@ mod tests {
                   return to_enum(:not_m) unless block_given?
                 end
             "#});
+    }
+
+    #[test]
+    fn flags_unexpected_extra_positional_argument() {
+        test::<ToEnumArguments>().expect_offense(indoc! {r#"
+            def m(x)
+              return to_enum(:m, x, :extra) unless block_given?
+                     ^^^^^^^^^^^^^^^^^^^^^^ Ensure you correctly provided all the arguments.
+            end
+        "#});
     }
 }
