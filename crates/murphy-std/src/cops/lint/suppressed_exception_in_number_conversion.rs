@@ -141,11 +141,11 @@ fn is_numeric_constructor_call(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
         NodeKind::Send { receiver, method, args } => {
             constructor_receiver(receiver.get(), cx)
-                && numeric_constructor_arity(cx.symbol_str(method), cx.list(args).len())
+                && numeric_constructor_arity(cx.symbol_str(method), cx.list(args), cx)
         }
         NodeKind::Csend { receiver, method, args } => {
             constructor_receiver(Some(receiver), cx)
-                && numeric_constructor_arity(cx.symbol_str(method), cx.list(args).len())
+                && numeric_constructor_arity(cx.symbol_str(method), cx.list(args), cx)
         }
         _ => false,
     }
@@ -158,12 +158,28 @@ fn constructor_receiver(receiver: Option<NodeId>, cx: &Cx<'_>) -> bool {
     }
 }
 
-fn numeric_constructor_arity(method: &str, arity: usize) -> bool {
+fn numeric_constructor_arity(method: &str, args: &[NodeId], cx: &Cx<'_>) -> bool {
+    if args.iter().any(|&arg| contains_exception_keyword(arg, cx)) {
+        return false;
+    }
+    let arity = args.len();
     match method {
         "Integer" | "BigDecimal" | "Complex" | "Rational" => matches!(arity, 1 | 2),
         "Float" => arity == 1,
         _ => false,
     }
+}
+
+fn contains_exception_keyword(node: NodeId, cx: &Cx<'_>) -> bool {
+    let NodeKind::Hash(pairs) = *cx.kind(node) else {
+        return false;
+    };
+    cx.list(pairs).iter().any(|&pair| {
+        let NodeKind::Pair { key, .. } = *cx.kind(pair) else {
+            return false;
+        };
+        matches!(*cx.kind(key), NodeKind::Sym(sym) if cx.symbol_str(sym) == "exception")
+    })
 }
 
 fn preferred_call(node: NodeId, cx: &Cx<'_>) -> Option<String> {
@@ -314,6 +330,10 @@ mod tests {
     fn accepts_non_matching_rescues() {
         test::<SuppressedExceptionInNumberConversion>().expect_no_offenses(indoc! {r#"
             Integer(42, exception: false)
+            Integer(arg, exception: true) rescue nil
+            BigDecimal(arg, exception: true) rescue nil
+            Complex(arg, exception: true) rescue nil
+            Rational(arg, exception: true) rescue nil
             Integer(arg) rescue 42
             Float(arg, unexpected_arg) rescue nil
 
