@@ -246,6 +246,21 @@ mod tests {
     }
 
     #[test]
+    fn accepts_leading_bracket_in_percent_r_slash_regexp() {
+        test::<UnescapedBracketInRegexp>().expect_no_offenses(indoc! {r#"
+            %r/]/
+        "#});
+    }
+
+    #[test]
+    fn flags_bracket_in_percent_r_slash_regexp() {
+        test::<UnescapedBracketInRegexp>().expect_offense(indoc! {r#"
+            %r/abc]123/
+                  ^ Regular expression has `]` without escape.
+        "#});
+    }
+
+    #[test]
     fn accepts_character_class_with_lookbehind() {
         test::<UnescapedBracketInRegexp>().expect_no_offenses(indoc! {r#"
             /(?<=[<>=:])/
