@@ -119,6 +119,7 @@ fn const_name(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     let name = cx.symbol_str(name);
     match scope.get() {
         None => Some(name.to_string()),
+        Some(scope) if matches!(cx.kind(scope), NodeKind::Cbase) => Some(name.to_string()),
         Some(scope) => const_name(scope, cx).map(|prefix| format!("{prefix}::{name}")),
     }
 }
@@ -132,6 +133,7 @@ fn known_exception_name(name: String) -> Option<&'static str> {
         "NoMethodError" => Some("NoMethodError"),
         "ZeroDivisionError" => Some("ZeroDivisionError"),
         "ArgumentError" => Some("ArgumentError"),
+        "SystemCallError" => Some("SystemCallError"),
         "Interrupt" => Some("Interrupt"),
         "SignalException" => Some("SignalException"),
         name if name.starts_with("Errno::") => Some("SystemCallError"),
@@ -170,7 +172,12 @@ fn is_ancestor(a: &str, b: &str) -> bool {
         "Exception" => b != "Exception",
         "StandardError" => matches!(
             b,
-            "RuntimeError" | "NameError" | "NoMethodError" | "ZeroDivisionError" | "ArgumentError"
+            "RuntimeError"
+                | "NameError"
+                | "NoMethodError"
+                | "ZeroDivisionError"
+                | "ArgumentError"
+                | "SystemCallError"
         ),
         "NameError" => b == "NoMethodError",
         "SignalException" => b == "Interrupt",
@@ -230,6 +237,41 @@ mod tests {
                 rescue NameError, NameError
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
                   foo
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_top_level_prefixed_and_system_call_error_shadowing() {
+        test::<ShadowedException>()
+            .expect_offense(indoc! {r#"
+                begin
+                  something
+                rescue ::StandardError
+                ^^^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+                  handle_standard_error
+                rescue RuntimeError
+                  handle_runtime_error
+                end
+            "#})
+            .expect_offense(indoc! {r#"
+                begin
+                  something
+                rescue StandardError
+                ^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+                  handle_standard_error
+                rescue SystemCallError
+                  handle_system_call_error
+                end
+            "#})
+            .expect_offense(indoc! {r#"
+                begin
+                  something
+                rescue StandardError
+                ^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+                  handle_standard_error
+                rescue Errno::ENOENT
+                  handle_errno
                 end
             "#});
     }

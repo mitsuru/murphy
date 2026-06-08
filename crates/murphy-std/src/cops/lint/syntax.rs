@@ -31,7 +31,19 @@ pub struct Syntax;
 )]
 impl Syntax {
     #[on_new_investigation]
+    // TODO(murphy-zpgm): report parser diagnostics once Cx exposes parse errors to plugin cops.
     fn check_file(&self, _cx: &Cx<'_>) {}
 }
 
 murphy_plugin_api::submit_cop!(Syntax);
+
+#[cfg(test)]
+mod tests {
+    use super::Syntax;
+    use murphy_plugin_api::test_support::test;
+
+    #[test]
+    fn registered_placeholder_produces_no_offenses() {
+        test::<Syntax>().expect_no_offenses("x = 1\n");
+    }
+}

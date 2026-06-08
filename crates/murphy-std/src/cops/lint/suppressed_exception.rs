@@ -63,9 +63,8 @@ fn offense_range(node: NodeId, cx: &Cx<'_>) -> Range {
         && cx.loc(rescue).end_keyword() == Range::ZERO
     {
         let rescue_range = cx.range(rescue);
-        let src = cx.raw_source(rescue_range);
-        if let Some(pos) = src.find("rescue") {
-            return Range { start: rescue_range.start + pos as u32, end: rescue_range.end };
+        if let Some(tok) = cx.tokens_in(rescue_range).iter().find(|&&tok| cx.token_text(tok) == "rescue") {
+            return Range { start: tok.range.start, end: rescue_range.end };
         }
     }
     let r = cx.range(node);
@@ -156,6 +155,16 @@ mod tests {
             .with_options(&SuppressedExceptionOptions { allow_comments: false, allow_nil: false })
             .expect_offense(indoc! {r#"
                 something rescue nil
+                          ^^^^^^^^^^ Do not suppress exceptions.
+            "#});
+    }
+
+    #[test]
+    fn modifier_rescue_range_uses_rescue_keyword_token() {
+        test::<SuppressedException>()
+            .with_options(&SuppressedExceptionOptions { allow_nil: false, ..Default::default() })
+            .expect_offense(indoc! {r#"
+                rescue_me rescue nil
                           ^^^^^^^^^^ Do not suppress exceptions.
             "#});
     }
