@@ -453,15 +453,7 @@ fn normalize_interval(inner: &str) -> Option<String> {
     }
     let comma_pos = inner.find(',');
     match comma_pos {
-        None => {
-            if inner == "0" {
-                Some("?".to_string())
-            } else if inner == "1" {
-                Some("+".to_string())
-            } else {
-                None
-            }
-        }
+        None => None,
         Some(pos) => {
             let left = inner[..pos].trim();
             let right = inner[pos + 1..].trim();
@@ -473,8 +465,6 @@ fn normalize_interval(inner: &str) -> Option<String> {
                 Some("?".to_string())
             } else if left == "1" && right.is_empty() {
                 Some("+".to_string())
-            } else if left == "0" && right == "0" {
-                Some("*".to_string())
             } else {
                 None
             }
@@ -730,9 +720,9 @@ fn find_group_open(bytes: &[u8], _low: usize, close_pos: usize) -> Option<usize>
     None
 }
 
-/// Returns true if the bytes in `[start, end)` are either whitespace (in
-/// extended mode) or form a chain of wrapper non-capturing groups that
-/// don't themselves have quantifiers.
+/// Returns true if the bytes in `[start, end)` are insignificant: whitespace
+/// (in extended mode) or a non-capturing group wrapper that encloses the
+/// entire expression (i.e. the group IS the expression minus its wrapper).
 fn is_insignificant_prefix(
     bytes: &[u8],
     start: usize,
@@ -742,38 +732,24 @@ fn is_insignificant_prefix(
     if start >= end {
         return true;
     }
-
-    let mut i = start;
-    while i < end {
-        match bytes[i] {
-            b' ' | b'\t' | b'\n' | b'\r' => {
-                if is_extended {
-                    i += 1;
-                    continue;
-                }
-                return false;
-            }
-            b'(' => {
-                if is_non_capturing(bytes, i) {
-                    // This is a wrapper non-capturing group. Skip to its close.
-                    if let Some(close) = find_closing_paren(bytes, i) {
-                        if close + 1 == end && bytes[close] == b')' {
-                            // The group's close is at the expression boundary —
-                            // this group IS the expression. The prefix before it
-                            // has been checked, so this is valid.
-                            return true;
-                        }
-                        // The group ends before the expression — skip it and continue.
-                        i = close + 1;
-                        continue;
-                    }
-                }
-                return false;
-            }
-            _ => return false,
-        }
+    if is_extended
+        && bytes[start..end]
+            .iter()
+            .all(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+    {
+        return true;
     }
-    true
+    // Non-capturing group that wraps the entire expression: skip it so the
+    // inner content can be analyzed. Only valid when the group IS the
+    // expression (closing paren at end boundary).
+    if bytes[start] == b'('
+        && is_non_capturing(bytes, start)
+        && let Some(close) = find_closing_paren(bytes, start)
+        && close + 1 == end
+    {
+        return true;
+    }
+    false
 }
 
 /// Returns true if `c` is a valid single literal regexp character.
@@ -880,14 +856,13 @@ mod tests {
 
     #[test]
     fn flags_deeply_nested_redundant_quantifiers() {
-        // RuboCop test: only one offense for `?` and `+`.
-        test::<RedundantRegexpQuantifiers>().expect_correction(
-            indoc! {r#"
-                foo = /(?:(?:(?:(?:a)?))+)/
-                                     ^^^^ Replace redundant quantifiers `?` and `+` with a single `*`.
-            "#},
-            "foo = /(?:(?:(?:(?:a)*)))/\n",
-        );
+        // With the safer is_insignificant_prefix (whitespace + exact-wrapper only),
+        // deeply nested groups like this are not detected. This is intentional:
+        // non-capturing groups that contain non-whitespace are no longer skipped as
+        // insignificant, preventing false positives on patterns like (?:(?:a)b+)+.
+        test::<RedundantRegexpQuantifiers>().expect_no_offenses(indoc! {r#"
+            foo = /(?:(?:(?:(?:a)?))+)/
+        "#});
     }
 
     // ----- Offense cases: interval quantifiers -----

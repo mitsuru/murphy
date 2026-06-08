@@ -38,8 +38,16 @@ pub struct RaiseException;
 impl RaiseException {
     #[on_node(kind = "send", methods = ["raise", "fail"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.call_receiver(node).get().is_some() {
-            return;
+        if let Some(recv) = cx.call_receiver(node).get() {
+            let is_kernel = if let NodeKind::Const { name, scope } = *cx.kind(recv) {
+                cx.symbol_str(name) == "Kernel"
+                    && scope.get().map_or(true, |s| matches!(*cx.kind(s), NodeKind::Cbase))
+            } else {
+                false
+            };
+            if !is_kernel {
+                return;
+            }
         }
         let args = cx.call_arguments(node);
         let Some(&first) = args.first() else {
