@@ -802,6 +802,8 @@ fn cx_raw_for(
         },
         target_rails_version: crate::RubyVersion::to_wire(ctx.target_rails_version),
         active_support_extensions_enabled: ctx.active_support_extensions_enabled,
+        config_disabled_cops: std::ptr::null(),
+        config_disabled_cops_len: 0,
     }
 }
 

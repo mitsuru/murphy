@@ -205,10 +205,19 @@ pub struct CxRaw {
     /// Optional `AllCops.TargetRailsVersion` for per-cop Rails feature gates.
     pub target_rails_version: u16,
     /// `AllCops.ActiveSupportExtensionsEnabled` (default false). Tail-appended
-    /// under ABI v4 lockstep (murphy-pfcb); fits existing padding so
-    /// `size_of::<CxRaw>()` is unchanged. Per project policy the numeric ABI is
-    /// not bumped for tail-appended CxRaw fields.
+    /// under ABI v4 lockstep (murphy-pfcb); fits existing padding so this field
+    /// itself leaves `size_of::<CxRaw>()` unchanged. Per project policy the
+    /// numeric ABI is not bumped for tail-appended CxRaw fields.
     pub active_support_extensions_enabled: bool,
+    /// Cop names disabled by config (`Enabled: false` in `.murphy.yml`), the
+    /// seed for `Cx::extra_enabled_directives()` — RuboCop's
+    /// `registry.disabled(config)`. Run-wide; the same slice is shared by every
+    /// cop in a run. Tail-appended under ABI v4 lockstep (murphy-k19j); empty
+    /// (`null`/`0`) on option-only entry points. NOTE: unlike
+    /// `active_support_extensions_enabled` this grows `size_of::<CxRaw>()`
+    /// (a pointer+len do not fit the trailing padding).
+    pub config_disabled_cops: *const RawSlice,
+    pub config_disabled_cops_len: usize,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -237,6 +246,8 @@ pub struct CxRaw {
 /// `CxRaw::target_rails_version` was tail-appended under ABI v4 lockstep for murphy-8iym.
 /// `CxRaw::active_support_extensions_enabled` was tail-appended into existing
 /// padding under ABI v4 lockstep for murphy-pfcb (size unchanged).
+/// `CxRaw::config_disabled_cops` (+`_len`) was tail-appended under ABI v4
+/// lockstep for murphy-k19j; unlike the prior field it grows `size_of::<CxRaw>()`.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -450,7 +461,9 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, file_path), 224);
         assert_eq!(offset_of!(CxRaw, target_rails_version), 240);
         assert_eq!(offset_of!(CxRaw, active_support_extensions_enabled), 242);
-        assert_eq!(size_of::<CxRaw>(), 248);
+        assert_eq!(offset_of!(CxRaw, config_disabled_cops), 248);
+        assert_eq!(offset_of!(CxRaw, config_disabled_cops_len), 256);
+        assert_eq!(size_of::<CxRaw>(), 264);
     }
 
     #[test]
