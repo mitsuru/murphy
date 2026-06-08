@@ -224,7 +224,12 @@ impl NonAtomicFileOperation {
         }
 
         // Autocorrect: replace method name
-        if !is_force {
+        // Suppress for Dir.mkdir(path, mode) — FileUtils.mkdir_p expects
+        // keyword `mode:` arg, not a positional integer.
+        let has_too_many_args = method_name == "mkdir"
+            && is_dir_receiver(receiver, cx)
+            && cx.list(args).len() >= 2;
+        if !is_force && !has_too_many_args {
             emit_method_replacement(node, method_name, cx);
         }
 
@@ -275,6 +280,17 @@ fn is_valid_operation_receiver(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
     OPERATION_RECEIVERS.contains(&cx.symbol_str(name))
 }
 
+/// Returns `true` when the receiver is the `Dir` constant.
+fn is_dir_receiver(receiver: OptNodeId, cx: &Cx<'_>) -> bool {
+    receiver.get().is_some_and(|recv| {
+        if let NodeKind::Const { name, scope } = *cx.kind(recv) {
+            scope.get().is_none() && cx.symbol_str(name) == "Dir"
+        } else {
+            false
+        }
+    })
+}
+
 /// Checks whether the file operation node has a `force: false` keyword argument.
 fn has_explicit_not_force(node: NodeId, cx: &Cx<'_>) -> bool {
     for &desc in cx.descendants(node).iter() {
@@ -293,31 +309,39 @@ fn has_explicit_not_force(node: NodeId, cx: &Cx<'_>) -> bool {
 /// - Make ops (`mkdir`): must be `unless` or negated `if` (= "not exists")
 /// - Remove ops (`remove`, `delete`, etc.): must be bare `if` (= "exists")
 /// Force methods use whichever polarity their non-force counterpart uses.
+/// Returns `true` when the condition polarity matches the file operation type:
+/// - Make ops (`mkdir`): body must execute when file does NOT exist
+/// - Remove ops (`remove`, `delete`, etc.): body must execute when file DOES exist
+///
+/// Handles `unless !condition` (double-negative = body executes when condition true).
 fn condition_matches_method(if_node: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
     let keyword_src = cx.raw_source(cx.if_keyword_loc(if_node));
-
-    let is_make = MAKE_METHODS.contains(&method_name);
-    let is_remove = REMOVE_METHODS.contains(&method_name)
-        || RECURSIVE_REMOVE_METHODS.contains(&method_name);
-    let is_make_force = MAKE_FORCE_METHODS.contains(&method_name);
-    let is_remove_force = REMOVE_FORCE_METHODS.contains(&method_name);
-
-    // elsif: same polarity as `if` (condition-true → execute body)
-    if keyword_src == "elsif" {
-        // Only remove ops fire for `elsif exist?` (condition true = exists).
-        // Make ops on elsif would mean "create when exists" which is wrong.
-        return is_remove || is_remove_force;
-    }
-
-    let is_unless = keyword_src == "unless";
     let is_negated = is_negated_condition(if_node, cx);
 
-    if is_make || is_make_force {
-        // `unless exist?` or `if !exist?`
-        is_unless || is_negated
-    } else if is_remove || is_remove_force {
-        // `if exist?`
-        keyword_src == "if" && !is_negated
+    // Determine whether the body executes when the condition is TRUE.
+    // if/elsif cond     → body when cond true
+    // if/elsif !cond    → body when cond FALSE
+    // unless cond       → body when cond FALSE
+    // unless !cond      → body when cond TRUE (double negative)
+    let body_executes_when_exists = match (keyword_src, is_negated) {
+        ("if", false) | ("elsif", false) => true,
+        ("if", true) | ("elsif", true) => false,
+        ("unless", false) => false,
+        ("unless", true) => true,
+        _ => return false,
+    };
+
+    let is_make = MAKE_METHODS.contains(&method_name) || MAKE_FORCE_METHODS.contains(&method_name);
+    let is_remove = REMOVE_METHODS.contains(&method_name)
+        || RECURSIVE_REMOVE_METHODS.contains(&method_name)
+        || REMOVE_FORCE_METHODS.contains(&method_name);
+
+    if is_make {
+        // `mkdir` should fire when file does NOT exist
+        !body_executes_when_exists
+    } else if is_remove {
+        // `remove` should fire when file DOES exist
+        body_executes_when_exists
     } else {
         true
     }
@@ -980,6 +1004,32 @@ mod tests {
         "#});
     }
 
+    #[test]
+    fn accepts_make_with_unless_negated() {
+        // `unless !exist?` means "execute when file exists" — wrong for make ops.
+        test::<NonAtomicFileOperation>().expect_no_offenses(indoc! {r#"
+            FileUtils.mkdir(path) unless !FileTest.exist?(path)
+        "#});
+    }
+
+    #[test]
+    fn flags_remove_with_unless_negated() {
+        // `unless !exist?` means "execute when file exists" — correct for remove ops.
+        use murphy_plugin_api::test_support::run_cop;
+        let offenses = run_cop::<NonAtomicFileOperation>(
+            "FileUtils.remove(path) unless !FileTest.exist?(path)\n",
+        );
+        assert_eq!(offenses.len(), 2, "should have 2 offenses");
+        assert!(
+            offenses.iter().any(|o| o.message.contains("Use atomic file operation method")),
+            "should have method replacement offense"
+        );
+        assert!(
+            offenses.iter().any(|o| o.message.contains("Remove unnecessary existence check")),
+            "should have existence check offense"
+        );
+    }
+
     // ── autocorrect: basic block form ───────────────────────────────────
 
     #[test]
@@ -1070,6 +1120,23 @@ mod tests {
                                   ^^^^^^^^^^^^^^^^^^^^ Remove unnecessary existence check `File.exist?`.
             "#},
             "FileUtils.rm_f(path)\n",
+        );
+    }
+
+    #[test]
+    fn no_method_correction_for_dir_mkdir_with_mode() {
+        // Dir.mkdir with 2 args: autocorrect suppressed because FileUtils.mkdir_p
+        // expects keyword `mode:` not positional integer.
+        use murphy_plugin_api::test_support::run_cop_with_edits;
+        let run = run_cop_with_edits::<NonAtomicFileOperation>(
+            "Dir.mkdir(path, 0o755) unless Dir.exist?(path)\n",
+        );
+        assert!(!run.offenses.is_empty(), "should have existence-check offense");
+        // Should NOT have a method-replacement edit (would break the call).
+        assert!(
+            !run.edits.iter().any(|e| e.replacement == "mkdir_p"
+                || e.replacement.contains("FileUtils")),
+            "should not autocorrect method replacement for Dir.mkdir with multiple args"
         );
     }
 }
