@@ -216,7 +216,7 @@ fn element_modified(node: NodeId, el_name: Symbol, cx: &Cx<'_>) -> bool {
 fn is_element_modified_node(d: NodeId, el_name: Symbol, cx: &Cx<'_>) -> bool {
     match *cx.kind(d) {
             NodeKind::Lvasgn { name, value } if name == el_name && value.get().is_some() => {
-                return true;
+                true
             }
             NodeKind::OpAsgn { target, .. }
             | NodeKind::OrAsgn { target, .. }

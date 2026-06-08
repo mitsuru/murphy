@@ -51,7 +51,7 @@ impl InheritException {
             &format!("Inherit from `{preferred}` instead of `Exception`."),
             None,
         );
-        cx.emit_edit(cx.range(super_id), &format!("{preferred}"));
+        cx.emit_edit(cx.range(super_id), preferred);
     }
 
     #[on_node(kind = "send", methods = ["new"])]
@@ -74,7 +74,7 @@ impl InheritException {
             &format!("Inherit from `{preferred}` instead of `Exception`."),
             None,
         );
-        cx.emit_edit(cx.range(first), &format!("{preferred}"));
+        cx.emit_edit(cx.range(first), preferred);
     }
 }
 

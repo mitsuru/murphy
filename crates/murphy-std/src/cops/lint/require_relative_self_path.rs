@@ -67,7 +67,7 @@ fn normalize_path(path: &Path) -> PathBuf {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                if let Some(Component::Normal(_)) = out.components().last() {
+                if let Some(Component::Normal(_)) = out.components().next_back() {
                     out.pop();
                 } else {
                     out.push(component.as_os_str());
