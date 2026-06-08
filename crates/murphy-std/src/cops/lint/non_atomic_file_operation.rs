@@ -226,8 +226,8 @@ impl NonAtomicFileOperation {
         );
         cx.emit_offense(check_range, &msg, None);
 
-        // Autocorrect (suppressed for elsif)
-        if cx.is_elsif(parent) {
+        // Autocorrect (suppressed for elsif and then-forms)
+        if cx.is_elsif(parent) || cx.is_then(parent) {
             return;
         }
 
@@ -1131,6 +1131,16 @@ mod tests {
         );
         assert!(!run.offenses.is_empty(), "should have offense");
         assert_eq!(run.edits.len(), 0, "should have no autocorrect edits for elsif");
+    }
+
+    #[test]
+    fn no_corrections_for_then_form() {
+        use murphy_plugin_api::test_support::run_cop_with_edits;
+        let run = run_cop_with_edits::<NonAtomicFileOperation>(
+            "if FileTest.exist?(path) then FileUtils.remove(path) end\n",
+        );
+        assert!(!run.offenses.is_empty(), "should have offense");
+        assert_eq!(run.edits.len(), 0, "should have no autocorrect edits for then-form");
     }
 
     #[test]
