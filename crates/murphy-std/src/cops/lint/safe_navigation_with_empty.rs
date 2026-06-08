@@ -67,7 +67,7 @@ mod tests {
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
-    fn flags_and_corrects_safe_navigation_empty_in_condition() {
+    fn flags_and_corrects_safe_navigation_empty_in_unless_condition() {
         test::<SafeNavigationWithEmpty>().expect_correction(
             indoc! {r#"
                 foo = []
@@ -75,6 +75,20 @@ mod tests {
                               ^^^^^^^^^^^ Avoid calling `empty?` with the safe navigation operator in conditionals.
             "#},
             "foo = []\nreturn unless foo && foo.empty?\n",
+        );
+    }
+
+    #[test]
+    fn flags_and_corrects_safe_navigation_empty_in_if_condition() {
+        test::<SafeNavigationWithEmpty>().expect_correction(
+            indoc! {r#"
+                foo = []
+                if foo&.empty?
+                   ^^^^^^^^^^^ Avoid calling `empty?` with the safe navigation operator in conditionals.
+                  work
+                end
+            "#},
+            "foo = []\nif foo && foo.empty?\n  work\nend\n",
         );
     }
 
