@@ -2648,10 +2648,19 @@ impl<'a> Cx<'a> {
 
     /// Config-disabled cop names (RuboCop's `registry.disabled` seed).
     ///
-    /// Temporary stub returning an empty iterator until the CxRaw config-seed
-    /// field is added in a later task; replaced then.
-    fn config_disabled_cops(&self) -> std::vec::IntoIter<&'a str> {
-        Vec::new().into_iter() // replaced in a later task (config seed)
+    /// Reads the run-wide `CxRaw::config_disabled_cops` slice the host fills
+    /// from `.murphy.yml` `Enabled: false` rules. Non-UTF-8 entries are
+    /// skipped.
+    fn config_disabled_cops(&self) -> impl Iterator<Item = &'a str> {
+        let slices = unsafe {
+            slice(
+                self.raw.config_disabled_cops,
+                self.raw.config_disabled_cops_len,
+            )
+        };
+        slices
+            .iter()
+            .filter_map(|s| std::str::from_utf8(unsafe { s.as_bytes() }).ok())
     }
 
     /// Redundant `# rubocop:enable` comments — Murphy's analog of RuboCop's
@@ -3491,6 +3500,34 @@ mod tests {
         assert_eq!(extras.len(), 1);
         assert_eq!(extras[0].cop_names, vec!["Layout/LineLength"]);
         assert!(extras[0].all_in_directive);
+    }
+
+    /// Build a `CxRaw` whose `config_disabled_cops` seed points at `disabled`,
+    /// borrowed for `'a` (the caller keeps the slice alive).
+    fn cx_raw_with_disabled<'a>(ast: &'a Ast, fns: &'a FnTable, disabled: &'a [RawSlice]) -> CxRaw {
+        let mut raw = cx_raw_for(ast, fns);
+        raw.config_disabled_cops = disabled.as_ptr();
+        raw.config_disabled_cops_len = disabled.len();
+        raw
+    }
+
+    #[test]
+    fn extra_enabled_directives_seed_suppresses_config_disabled_enable() {
+        // Layout/LineLength is disabled in config -> a `# rubocop:enable
+        // Layout/LineLength` with no inline `disable` is NOT redundant. This is
+        // the seeded inverse of `flags_enable_without_disable`, which flags the
+        // same enable when the seed is empty.
+        let source = concat!("foo = 1\n", "# rubocop:enable Layout/LineLength\n",);
+        let ast = murphy_translate::translate(source, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let disabled = [RawSlice::from_str("Layout/LineLength")];
+        let raw = cx_raw_with_disabled(&ast, &fns, &disabled);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert!(cx.extra_enabled_directives().is_empty());
     }
 
     #[test]
