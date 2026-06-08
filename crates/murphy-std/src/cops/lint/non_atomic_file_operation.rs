@@ -226,18 +226,16 @@ impl NonAtomicFileOperation {
         );
         cx.emit_offense(check_range, &msg, None);
 
-        // Autocorrect (suppressed for elsif and then-forms)
-        if cx.is_elsif(parent) || cx.is_then(parent) {
+        // Autocorrect (suppressed for elsif, then-forms, and Dir.mkdir with 2+ args)
+        let has_too_many_args = method_name == "mkdir"
+            && is_dir_receiver(receiver, cx)
+            && cx.list(args).len() >= 2;
+        if cx.is_elsif(parent) || cx.is_then(parent) || has_too_many_args {
             return;
         }
 
         // Autocorrect: replace method name
-        // Suppress for Dir.mkdir(path, mode) — FileUtils.mkdir_p expects
-        // keyword `mode:` arg, not a positional integer.
-        let has_too_many_args = method_name == "mkdir"
-            && is_dir_receiver(receiver, cx)
-            && cx.list(args).len() >= 2;
-        if !is_force && !has_too_many_args {
+        if !is_force {
             emit_method_replacement(node, method_name, cx);
         }
 
@@ -1168,19 +1166,15 @@ mod tests {
     }
 
     #[test]
-    fn no_method_correction_for_dir_mkdir_with_mode() {
-        // Dir.mkdir with 2 args: autocorrect suppressed because FileUtils.mkdir_p
-        // expects keyword `mode:` not positional integer.
+    fn no_corrections_for_dir_mkdir_with_mode() {
+        // Dir.mkdir with 2 args: all autocorrect suppressed because
+        // FileUtils.mkdir_p expects keyword mode: not positional integer,
+        // and removing the guard would make the code unsafe.
         use murphy_plugin_api::test_support::run_cop_with_edits;
         let run = run_cop_with_edits::<NonAtomicFileOperation>(
             "Dir.mkdir(path, 0o755) unless Dir.exist?(path)\n",
         );
-        assert!(!run.offenses.is_empty(), "should have existence-check offense");
-        // Should NOT have a method-replacement edit (would break the call).
-        assert!(
-            !run.edits.iter().any(|e| e.replacement == "mkdir_p"
-                || e.replacement.contains("FileUtils")),
-            "should not autocorrect method replacement for Dir.mkdir with multiple args"
-        );
+        assert!(!run.offenses.is_empty(), "should have offenses");
+        assert_eq!(run.edits.len(), 0, "should have no autocorrect edits for Dir.mkdir with mode arg");
     }
 }
