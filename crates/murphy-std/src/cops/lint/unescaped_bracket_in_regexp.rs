@@ -78,6 +78,7 @@ fn regexp_body_bounds(src: &str) -> (usize, usize) {
 fn find_unescaped_brackets(s: &str, body_start: usize, body_end: usize) -> Vec<usize> {
     let mut positions = Vec::new();
     let mut in_cc = false;
+    let mut cc_just_opened = false;
     let mut chars = s.char_indices();
 
     while let Some((idx, ch)) = chars.next() {
@@ -87,18 +88,28 @@ fn find_unescaped_brackets(s: &str, body_start: usize, body_end: usize) -> Vec<u
         match ch {
             '\\' => {
                 chars.next();
+                cc_just_opened = false;
             }
             '[' if !in_cc => {
                 in_cc = true;
+                cc_just_opened = true;
+            }
+            '^' if cc_just_opened => {
+                cc_just_opened = true;
             }
             ']' => {
-                if in_cc {
+                if cc_just_opened {
+                    cc_just_opened = false;
+                } else if in_cc {
                     in_cc = false;
+                    cc_just_opened = false;
                 } else if idx > body_start {
                     positions.push(idx);
                 }
             }
-            _ => {}
+            _ => {
+                cc_just_opened = false;
+            }
         }
     }
     positions

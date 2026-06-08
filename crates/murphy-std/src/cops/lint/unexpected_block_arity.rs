@@ -33,9 +33,9 @@ const METHODS: &[(&str, usize)] = &[
     ("each_with_object", 2),
     ("inject", 2),
     ("max", 2),
-    ("max_by", 2),
+    ("max_by", 1),
     ("min", 2),
-    ("minmax_by", 2),
+    ("minmax_by", 1),
     ("reduce", 2),
 ];
 
