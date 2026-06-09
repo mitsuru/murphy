@@ -119,17 +119,35 @@ fn implicit_namespace_allowed(node: NodeId, cx: &Cx<'_>, opts: &RaiseExceptionOp
 }
 
 fn namespace_allowed(node: NodeId, cx: &Cx<'_>, opts: &RaiseExceptionOptions) -> bool {
-    let NodeKind::Const { name, scope } = *cx.kind(node) else {
-        return false;
-    };
-    if scope.get().is_none() {
-        let namespace = cx.symbol_str(name);
-        return opts
-            .allowed_implicit_namespaces
-            .iter()
-            .any(|allowed| allowed == namespace);
+    top_level_const_allowed(node, cx, opts)
+}
+
+fn top_level_const_allowed(mut node: NodeId, cx: &Cx<'_>, opts: &RaiseExceptionOptions) -> bool {
+    loop {
+        let NodeKind::Const { name, scope } = *cx.kind(node) else {
+            return false;
+        };
+        match scope.get() {
+            Some(parent) if matches!(*cx.kind(parent), NodeKind::Const { .. }) => {
+                node = parent;
+            }
+            Some(parent) if matches!(*cx.kind(parent), NodeKind::Cbase) => {
+                let namespace = cx.symbol_str(name);
+                return opts
+                    .allowed_implicit_namespaces
+                    .iter()
+                    .any(|allowed| allowed == namespace);
+            }
+            Some(_) => return false,
+            None => {
+                let namespace = cx.symbol_str(name);
+                return opts
+                    .allowed_implicit_namespaces
+                    .iter()
+                    .any(|allowed| allowed == namespace);
+            }
+        }
     }
-    false
 }
 
 murphy_plugin_api::submit_cop!(RaiseException);
@@ -209,6 +227,30 @@ mod tests {
             module Gem
               def self.foo
                 raise Exception
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_qualified_default_allowed_implicit_namespace() {
+        test::<RaiseException>().expect_no_offenses(indoc! {r#"
+            module Gem::Foo
+              def self.foo
+                raise Exception
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_nested_default_allowed_implicit_namespace() {
+        test::<RaiseException>().expect_no_offenses(indoc! {r#"
+            module Gem
+              module Foo
+                def self.foo
+                  raise Exception
+                end
               end
             end
         "#});
