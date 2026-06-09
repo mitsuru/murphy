@@ -197,7 +197,7 @@ fn scan_char_class(class: &[u8], class_offset: u32, cx: &Cx<'_>) {
 fn regexp_range_replacement(open: u8, close: u8) -> String {
     match (ascii_case(open), ascii_case(close)) {
         (Some(b'U'), Some(b'L')) => format_range(open, b'Z') + &format_range(b'a', close),
-        (Some(b'L'), Some(b'U')) => format_range(open, b'z') + &format_range(close, b'Z'),
+        (Some(b'L'), Some(b'U')) => format_range(open, b'z') + &format_range(b'A', close),
         _ => String::new(),
     }
 }
@@ -251,6 +251,17 @@ mod tests {
                         ^^^ Ranges from upper to lower case ASCII letters may include unintended characters. Instead of `A-z` (which also includes several symbols) specify each range individually: `A-Za-z` and individually specify any symbols.
             "#},
             "foo = /[A-Za-z]/\n",
+        );
+    }
+
+    #[test]
+    fn corrects_lower_to_upper_regexp_ranges() {
+        test::<MixedCaseRange>().expect_correction(
+            indoc! {r#"
+                foo = /[g-T]/
+                        ^^^ Ranges from upper to lower case ASCII letters may include unintended characters. Instead of `A-z` (which also includes several symbols) specify each range individually: `A-Za-z` and individually specify any symbols.
+            "#},
+            "foo = /[g-zA-T]/\n",
         );
     }
 
