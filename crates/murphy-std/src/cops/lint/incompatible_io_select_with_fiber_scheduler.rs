@@ -66,8 +66,7 @@ fn is_io_select(node: NodeId, cx: &Cx<'_>) -> bool {
     let Some(recv) = cx.call_receiver(node).get() else {
         return false;
     };
-    matches!(*cx.kind(recv), NodeKind::Const { name, scope }
-        if cx.symbol_str(name) == "IO" && scope.get().is_none_or(|scope| matches!(cx.kind(scope), NodeKind::Cbase)))
+    cx.is_global_const(recv, "IO")
 }
 
 fn single_io_array(node: Option<NodeId>, cx: &Cx<'_>) -> Option<NodeId> {

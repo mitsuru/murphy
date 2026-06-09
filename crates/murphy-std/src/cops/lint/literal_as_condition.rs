@@ -113,6 +113,17 @@ impl LiteralAsCondition {
             check_literal(receiver, cx);
         }
     }
+
+    #[on_node(kind = "not")]
+    fn check_not(&self, node: NodeId, cx: &Cx<'_>) {
+        if !condition_operand(node, cx) {
+            return;
+        }
+        let NodeKind::Not(inner) = *cx.kind(node) else {
+            return;
+        };
+        check_literal(inner, cx);
+    }
 }
 
 fn check_literal(node: NodeId, cx: &Cx<'_>) {
@@ -134,7 +145,7 @@ fn condition_operand(node: NodeId, cx: &Cx<'_>) -> bool {
         }
         NodeKind::Case { subject, .. } => subject.get() == Some(node),
         NodeKind::Send { method, .. } => cx.symbol_str(method) == "!" && condition_operand(parent, cx),
-        NodeKind::And { .. } | NodeKind::Or { .. } => condition_operand(parent, cx),
+        NodeKind::And { .. } | NodeKind::Or { .. } | NodeKind::Not(_) => condition_operand(parent, cx),
         _ => false,
     }
 }
@@ -191,16 +202,33 @@ mod tests {
 
     #[test]
     fn flags_bare_negated_literal_like_rubocop() {
-        test::<LiteralAsCondition>().expect_offense(indoc! {r#"
-            !nil
-             ^^^ Literal `nil` appeared as a condition.
-        "#});
+        test::<LiteralAsCondition>()
+            .expect_offense(indoc! {r#"
+                !nil
+                 ^^^ Literal `nil` appeared as a condition.
+            "#})
+            .expect_offense(indoc! {r#"
+                not nil
+                    ^^^ Literal `nil` appeared as a condition.
+            "#});
     }
 
     #[test]
     fn accepts_negated_literal_outside_condition_context() {
         test::<LiteralAsCondition>()
             .expect_no_offenses("value = !nil\n")
-            .expect_no_offenses("foo(!false)\n");
+            .expect_no_offenses("foo(!false)\n")
+            .expect_no_offenses("value = not nil\n")
+            .expect_no_offenses("foo(not false)\n");
+    }
+
+    #[test]
+    fn flags_keyword_negation_inside_condition_expression() {
+        test::<LiteralAsCondition>().expect_offense(indoc! {r#"
+            if not nil
+                   ^^^ Literal `nil` appeared as a condition.
+              top
+            end
+        "#});
     }
 }

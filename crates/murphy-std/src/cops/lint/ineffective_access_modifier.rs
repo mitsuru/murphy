@@ -55,7 +55,7 @@ fn check_scope(node: NodeId, cx: &Cx<'_>) {
 fn check_children(
     children: &[NodeId],
     mut modifier: Option<NodeId>,
-    ignored: &[String],
+    ignored: &[&str],
     cx: &Cx<'_>,
 ) -> Option<NodeId> {
     for &child in children {
@@ -74,7 +74,7 @@ fn check_children(
             let Some(modifier_node) = modifier else {
                 continue;
             };
-            if ignored.iter().any(|name| name == &singleton_def_name(child, cx)) {
+            if singleton_def_name(child, cx).is_some_and(|name| ignored.contains(&name)) {
                 continue;
             }
             let modifier_name = bare_modifier(modifier_node, cx).unwrap_or("private");
@@ -118,20 +118,18 @@ fn bare_modifier(node: NodeId, cx: &Cx<'_>) -> Option<&'static str> {
     }
 }
 
-fn private_class_method_names(children: &[NodeId], cx: &Cx<'_>) -> Vec<String> {
+fn private_class_method_names<'a>(children: &[NodeId], cx: &Cx<'a>) -> Vec<&'a str> {
     let mut names = Vec::new();
     collect_private_class_method_names(children, cx, &mut names);
     names
 }
 
-fn collect_private_class_method_names(children: &[NodeId], cx: &Cx<'_>, names: &mut Vec<String>) {
+fn collect_private_class_method_names<'a>(children: &[NodeId], cx: &Cx<'a>, names: &mut Vec<&'a str>) {
     for &child in children {
         match *cx.kind(child) {
-            NodeKind::Send { receiver, method, args }
-                if receiver == OptNodeId::NONE && cx.symbol_str(method) == "private_class_method" =>
-            {
-                names.extend(cx.list(args).iter().filter_map(|&arg| match *cx.kind(arg) {
-                    NodeKind::Sym(sym) => Some(cx.symbol_str(sym).to_string()),
+            NodeKind::Send { method, .. } if cx.call_receiver(child) == OptNodeId::NONE && cx.symbol_str(method) == "private_class_method" => {
+                names.extend(cx.call_arguments(child).iter().filter_map(|&arg| match *cx.kind(arg) {
+                    NodeKind::Sym(sym) => Some(cx.symbol_str(sym)),
                     _ => None,
                 }));
             }
@@ -148,10 +146,10 @@ fn is_singleton_def(node: NodeId, cx: &Cx<'_>) -> bool {
         || matches!(cx.kind(node), NodeKind::Defs { .. })
 }
 
-fn singleton_def_name(node: NodeId, cx: &Cx<'_>) -> String {
+fn singleton_def_name<'a>(node: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
     match *cx.kind(node) {
-        NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => cx.symbol_str(name).to_string(),
-        _ => String::new(),
+        NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => Some(cx.symbol_str(name)),
+        _ => None,
     }
 }
 
