@@ -53,6 +53,9 @@ impl InterpolationCheck {
 }
 
 fn contains_interpolation_like(src: &str) -> bool {
+    if src.len() < 2 || !src.ends_with('\'') {
+        return false;
+    }
     let inner = &src[1..src.len() - 1];
     let mut chars = inner.char_indices();
     while let Some((i, c)) = chars.next() {
@@ -102,6 +105,11 @@ mod tests {
     #[test]
     fn ignores_plain_string() {
         assert_eq!(hits("'foo'"), 0);
+    }
+
+    #[test]
+    fn ignores_unterminated_single_quote() {
+        assert_eq!(hits("'"), 0);
     }
 
     #[test]
