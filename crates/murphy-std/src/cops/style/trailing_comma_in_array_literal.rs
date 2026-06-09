@@ -201,19 +201,18 @@ fn elements_and_close_on_separate_lines(
     else {
         return false;
     };
-    if line_index(cx.source(), open_tok.range.start)
-        == line_index(cx.source(), cx.range(elements[0]).start)
-    {
+    if !has_newline_between(open_tok.range.end, cx.range(elements[0]).start, cx) {
         return false;
     }
 
-    let mut seen = std::collections::BTreeSet::new();
-    for elem in elements {
-        if !seen.insert(line_index(cx.source(), cx.range(*elem).start)) {
+    for window in elements.windows(2) {
+        if !has_newline_between(cx.range(window[0]).end, cx.range(window[1]).start, cx) {
             return false;
         }
     }
-    !seen.contains(&line_index(cx.source(), close_tok.range.start))
+
+    let last_elem = *elements.last().expect("non-empty array elements");
+    has_newline_between(cx.range(last_elem).end, close_tok.range.start, cx)
 }
 
 fn find_opening_bracket(cx: &Cx<'_>, from: u32, to: u32) -> Option<SourceToken> {
@@ -235,13 +234,6 @@ fn has_newline_between(from: u32, to: u32, cx: &Cx<'_>) -> bool {
         return false;
     }
     cx.source().as_bytes()[from as usize..to as usize].contains(&b'\n')
-}
-
-fn line_index(source: &str, offset: u32) -> usize {
-    source.as_bytes()[..offset as usize]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
 }
 
 #[cfg(test)]
@@ -311,6 +303,19 @@ mod tests {
                 value = [[{
                   'name' => ['Author 1'],
                 }]]
+            "});
+    }
+
+    #[test]
+    fn comma_style_does_not_require_comma_when_close_bracket_shares_last_element_line() {
+        test::<TrailingCommaInArrayLiteral>()
+            .with_options(&TrailingCommaInArrayLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::Comma,
+            })
+            .expect_no_offenses(indoc! {"
+                x = [
+                  method_call(
+                    1)]
             "});
     }
 
