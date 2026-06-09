@@ -45,42 +45,17 @@ impl FileOpen {
         if has_block(node, cx) {
             return;
         }
-        // Flag all blockless File.open except when the value is passed
-        // as an argument (caller manages the lifecycle).
-        let is_receiver_of_parent = |p| match cx.kind(p) {
-            NodeKind::Send { receiver, .. } => receiver.get() == Some(node),
-            _ => false,
-        };
-        let emit = {
-            let parent = cx.parent(node);
-            match parent.get() {
-                Some(p) if is_assignment(p, cx) || is_receiver_of_parent(p) => true,
-                Some(p) => !is_argument_of_send(p, node, cx),
-                None => true,
-            }
-        };
-        if emit {
+        // Flag all blockless File.open. Only skip when the parent is a Send
+        // where this node is the receiver (chained call pattern like
+        // `File.open('f').read` - those will be caught by their inner Send
+        // being the root of the chain instead, avoiding double-reporting).
+        let is_chained_call_receiver = cx.parent(node).get().is_some_and(|p| {
+            matches!(cx.kind(p), NodeKind::Send { receiver, .. } if receiver.get() == Some(node))
+        });
+        if !is_chained_call_receiver {
             cx.emit_offense(cx.range(node), MSG, None);
         }
     }
-}
-
-fn is_assignment(parent: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(
-        cx.kind(parent),
-        NodeKind::Lvasgn { .. }
-            | NodeKind::Ivasgn { .. }
-            | NodeKind::Gvasgn { .. }
-            | NodeKind::Cvasgn { .. }
-    )
-}
-
-fn is_argument_of_send(parent: NodeId, node: NodeId, cx: &Cx<'_>) -> bool {
-    let args = match cx.kind(parent) {
-        NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => *args,
-        _ => return false,
-    };
-    cx.list(args).iter().any(|&a| a == node)
 }
 
 fn has_block(node: NodeId, cx: &Cx<'_>) -> bool {

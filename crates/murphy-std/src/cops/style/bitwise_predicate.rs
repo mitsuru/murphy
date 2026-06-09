@@ -143,7 +143,7 @@ mod tests {
                 (variable & flags) > 0
                 ^^^^^^^^^^^^^^^^^^^^^^ Use a bitwise predicate method instead.
             "},
-            "variable.anybits?(flags)\n",
+            "(variable).anybits?(flags)\n",
         );
     }
 

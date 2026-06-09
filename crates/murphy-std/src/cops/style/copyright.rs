@@ -44,9 +44,9 @@ impl Copyright {
         }
         // v1 limitation: uses substring matching instead of full regex.
         // RuboCop's regex-based matching is not yet supported.
-        let comments = cx.comments();
-        let found = comments.first().is_some_and(|first| {
-            cx.raw_source(first.range).contains(&opts.notice)
+        // Check all comments (first comment block heuristic is a v1 gap).
+        let found = cx.comments().iter().any(|comment| {
+            cx.raw_source(comment.range).contains(&opts.notice)
         });
         if !found {
             cx.emit_offense(
