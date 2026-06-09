@@ -37,7 +37,7 @@ impl CollectionQuerying {
         let Some(recv_id) = receiver.get() else {
             return;
         };
-        let NodeKind::Send { receiver: count_recv, method: count_method, .. } = *cx.kind(recv_id) else {
+        let NodeKind::Send { receiver: count_recv, method: count_method, args: count_args } = *cx.kind(recv_id) else {
             return;
         };
         let count_method_str = cx.symbol_str(count_method);
@@ -45,6 +45,10 @@ impl CollectionQuerying {
             return;
         }
         if count_recv == murphy_plugin_api::OptNodeId::NONE {
+            return;
+        }
+        // Only flag bare `count` calls (no arguments, no block).
+        if !cx.list(count_args).is_empty() {
             return;
         }
         let method_str = cx.symbol_str(method);
