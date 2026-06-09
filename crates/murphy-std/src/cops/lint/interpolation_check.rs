@@ -53,10 +53,7 @@ impl InterpolationCheck {
 }
 
 fn contains_interpolation_like(src: &str) -> bool {
-    if src.len() < 2 || !src.ends_with('\'') {
-        return false;
-    }
-    let inner = &src[1..src.len() - 1];
+    let Some(inner) = src.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else { return false; };
     let mut chars = inner.char_indices();
     while let Some((i, c)) = chars.next() {
         if c == '\\' {
