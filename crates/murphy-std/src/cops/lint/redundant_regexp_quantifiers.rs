@@ -578,11 +578,11 @@ fn find_last_quantifiable_expression(
                         }
                     }
                     let normalized = normalize_interval(interval)?;
-                    if open > start {
-                        if find_expression_end_before(bytes, start, open, is_extended).is_some() {
-                            let display = format!("{{{}}}", interval);
-                            return Some(Quantifier { start: open, end: i, normalized, display });
-                        }
+                    if open > start
+                        && find_expression_end_before(bytes, start, open, is_extended).is_some()
+                    {
+                        let display = format!("{{{}}}", interval);
+                        return Some(Quantifier { start: open, end: i, normalized, display });
                     }
                     i = open;
                 }
@@ -595,11 +595,11 @@ fn find_last_quantifiable_expression(
                         continue;
                     }
                 }
-                if i > start {
-                    if find_expression_end_before(bytes, start, i, is_extended).is_some() {
-                        let display = (bytes[i] as char).to_string();
-                        return Some(Quantifier { start: i, end: i, normalized: display.clone(), display });
-                    }
+                if i > start
+                    && find_expression_end_before(bytes, start, i, is_extended).is_some()
+                {
+                    let display = (bytes[i] as char).to_string();
+                    return Some(Quantifier { start: i, end: i, normalized: display.clone(), display });
                 }
                 continue;
             }
@@ -619,10 +619,8 @@ fn find_opening_brace(bytes: &[u8], min_pos: usize, close_pos: usize) -> Option<
     let mut i = close_pos;
     while i > min_pos {
         i -= 1;
-        if bytes[i] == b'{' {
-            if i == min_pos || bytes[i - 1] != b'\\' {
-                return Some(i);
-            }
+        if bytes[i] == b'{' && (i == min_pos || bytes[i - 1] != b'\\') {
+            return Some(i);
         }
     }
     None
@@ -662,25 +660,25 @@ fn find_expression_end_before(
     // Non-capturing group (?:...) before the quantifier.
     if bytes[expr_end] == b')' {
         let group_open = find_group_open(bytes, low_bound, expr_end)?;
-        if is_non_capturing(bytes, group_open) {
-            if is_insignificant_prefix(bytes, low_bound, group_open, is_extended) {
-                return Some(quant_pos);
-            }
+        if is_non_capturing(bytes, group_open)
+            && is_insignificant_prefix(bytes, low_bound, group_open, is_extended)
+        {
+            return Some(quant_pos);
         }
         return None;
     }
 
     // Single char or escape before the quantifier.
     if bytes[expr_end] == b'\\' {
-        if expr_end >= low_bound {
-            if is_insignificant_prefix(bytes, low_bound, expr_end, is_extended) {
-                return Some(quant_pos);
-            }
-        }
-    } else if is_single_char(bytes[expr_end]) {
-        if is_insignificant_prefix(bytes, low_bound, expr_end, is_extended) {
+        if expr_end >= low_bound
+            && is_insignificant_prefix(bytes, low_bound, expr_end, is_extended)
+        {
             return Some(quant_pos);
         }
+    } else if is_single_char(bytes[expr_end])
+        && is_insignificant_prefix(bytes, low_bound, expr_end, is_extended)
+    {
+        return Some(quant_pos);
     }
 
     None
@@ -691,10 +689,8 @@ fn find_char_class_start(bytes: &[u8], low: usize, close_pos: usize) -> Option<u
     let mut i = close_pos;
     while i > low {
         i -= 1;
-        if bytes[i] == b'[' {
-            if i == low || bytes[i - 1] != b'\\' {
-                return Some(i);
-            }
+        if bytes[i] == b'[' && (i == low || bytes[i - 1] != b'\\') {
+            return Some(i);
         }
     }
     None

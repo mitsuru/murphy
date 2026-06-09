@@ -6,21 +6,18 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/OutOfRangeRegexpRef
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-zvzj
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Ported from RuboCop Lint/OutOfRangeRegexpRef. A whole-file descendant scan
 //!   walks the AST in pre-order, tracking the capture-group count from the last
 //!   regexp literal used in a matching context and checking each NthRef ($1, $2,
 //!   …) against it.
-//!   Gaps vs RuboCop:
-//!     - `when` clause regexps are not tracked.
-//!     - `in` pattern-match regexps are not tracked.
-//!     - Safe-navigation (`&.`) with regexp methods is not tracked.
-//!     - `Regexp.new` / `Regexp.compile` calls are not tracked.
-//!     - RuboCop's `match_with_lvasgn` hook and `after_send` hook provide
-//!       precise ordering; Murphy approximates via pre-order descendant walk.
+//!   `when` clause regexps, `in` pattern-match regexps, safe-navigation
+//!   regexp calls, and literal regexp receivers/arguments are tracked.
+//!   Known v1 limitation: `Regexp.new` / `Regexp.compile` calls are not
+//!   tracked because the plugin API does not expose regexp parsing for dynamic
+//!   string values.
 //! ```
 //!
 //! ## Matched shapes
@@ -124,22 +121,30 @@ impl OutOfRangeRegexpRef {
                         valid_ref = count;
                     }
                 }
-                NodeKind::Send { .. } => {
+                NodeKind::Send { .. } | NodeKind::Csend { .. } => {
                     // If the receiver is an NthRef, check it BEFORE updating
                     // valid_ref from the Send's arguments. This matches
                     // RuboCop's `after_send` ordering (children then parent).
-                    if let NodeKind::Send { receiver, .. } = *cx.kind(id) {
-                        if let Some(recv_id) = receiver.get() {
-                            if let NodeKind::NthRef(n) = cx.kind(recv_id) {
-                                if *n > valid_ref {
-                                    emit_nth_ref_offense(*n, valid_ref, recv_id, cx);
-                                }
-                                handled_nth_refs.insert(recv_id);
-                            }
+                    if let Some(recv_id) = call_receiver(id, cx)
+                        && let NodeKind::NthRef(n) = cx.kind(recv_id)
+                    {
+                        if *n > valid_ref {
+                            emit_nth_ref_offense(*n, valid_ref, recv_id, cx);
                         }
+                        handled_nth_refs.insert(recv_id);
                     }
 
                     if let Some(count) = regexp_count_in_send(id, cx) {
+                        valid_ref = count;
+                    }
+                }
+                NodeKind::When { conds, .. } => {
+                    if let Some(count) = max_regexp_count(cx.list(*conds), cx) {
+                        valid_ref = count;
+                    }
+                }
+                NodeKind::InPattern { pattern, .. } => {
+                    if let Some(count) = max_regexp_count(&[*pattern], cx) {
                         valid_ref = count;
                     }
                 }
@@ -192,8 +197,10 @@ fn regexp_count_in_match_with_lvasgn(call: NodeId, cx: &Cx<'_>) -> Option<u32> {
 /// Check if a `Send` node has a regexp in a matching position (receiver or
 /// first argument) with an appropriate method, and return the capture count.
 fn regexp_count_in_send(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
-    let NodeKind::Send { receiver, method, args } = *cx.kind(node) else {
-        return None;
+    let (receiver, method, args) = match *cx.kind(node) {
+        NodeKind::Send { receiver, method, args } => (receiver.get(), method, args),
+        NodeKind::Csend { receiver, method, args } => (Some(receiver), method, args),
+        _ => return None,
     };
     let method_str = cx.symbol_str(method);
     let is_receiver_method = REGEXP_RECEIVER_METHODS.contains(&method_str);
@@ -204,21 +211,21 @@ fn regexp_count_in_send(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
     }
 
     // Receiver regexp: e.g. `/(re)/.match(str)`.
-    if is_receiver_method {
-        if let Some(recv_id) = receiver.get() {
-            match try_count_regexp_captures(recv_id, cx) {
-                CountResult::Count(n) => return Some(n),
-                CountResult::Unknown => return Some(UNKNOWN),
-                CountResult::NotRegexp => {
-                    // If the method only expects a regexp as receiver
-                    // (e.g. `===`) and the receiver is not a literal,
-                    // we cannot determine the count.
-                    if !is_arg_method {
-                        return Some(UNKNOWN);
-                    }
-                    // Method also accepts regexp as argument (e.g. `=~`, `match`);
-                    // fall through to check arguments.
+    if is_receiver_method
+        && let Some(recv_id) = receiver
+    {
+        match try_count_regexp_captures(recv_id, cx) {
+            CountResult::Count(n) => return Some(n),
+            CountResult::Unknown => return Some(UNKNOWN),
+            CountResult::NotRegexp => {
+                // If the method only expects a regexp as receiver
+                // (e.g. `===`) and the receiver is not a literal,
+                // we cannot determine the count.
+                if !is_arg_method {
+                    return Some(UNKNOWN);
                 }
+                // Method also accepts regexp as argument (e.g. `=~`, `match`);
+                // fall through to check arguments.
             }
         }
     }
@@ -238,6 +245,25 @@ fn regexp_count_in_send(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
     }
 
     None
+}
+
+fn call_receiver(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    match *cx.kind(node) {
+        NodeKind::Send { receiver, .. } => receiver.get(),
+        NodeKind::Csend { receiver, .. } => Some(receiver),
+        _ => None,
+    }
+}
+
+fn max_regexp_count(nodes: &[NodeId], cx: &Cx<'_>) -> Option<u32> {
+    nodes
+        .iter()
+        .flat_map(|&node| std::iter::once(node).chain(cx.descendants(node)))
+        .filter_map(|node| match try_count_regexp_captures(node, cx) {
+            CountResult::Count(count) => Some(count),
+            CountResult::Unknown | CountResult::NotRegexp => None,
+        })
+        .max()
 }
 
 /// Result of attempting to count capture groups.
@@ -314,9 +340,7 @@ fn count_regexp_captures(source: &str) -> u32 {
                 i += 1;
             }
             b']' => {
-                if cc_depth > 0 {
-                    cc_depth -= 1;
-                }
+                cc_depth = cc_depth.saturating_sub(1);
                 i += 1;
             }
             b'(' => {
@@ -522,6 +546,55 @@ mod tests {
 
             foo_bar_regexp =~ "foobar"
             puts $2
+        "#});
+    }
+
+    #[test]
+    fn flags_out_of_range_ref_inside_when_clause() {
+        test::<OutOfRangeRegexpRef>().expect_offense(indoc! {r#"
+            case "foobar"
+            when /(foo)(bar)/
+              $3
+              ^^ $3 is out of range (2 regexp capture groups detected).
+            end
+        "#});
+    }
+
+    #[test]
+    fn uses_max_capture_count_for_multiple_when_conditions() {
+        test::<OutOfRangeRegexpRef>()
+            .expect_no_offenses(indoc! {r#"
+                case "foobarbaz"
+                when /(foo)(bar)/, /(bar)baz/
+                  $2
+                end
+            "#})
+            .expect_offense(indoc! {r#"
+                case "foobarbaz"
+                when /(foo)(bar)/, /(bar)baz/
+                  $3
+                  ^^ $3 is out of range (2 regexp capture groups detected).
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_out_of_range_ref_inside_in_pattern() {
+        test::<OutOfRangeRegexpRef>().expect_offense(indoc! {r#"
+            case "foobar"
+            in /(foo)(bar)/
+              $3
+              ^^ $3 is out of range (2 regexp capture groups detected).
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_safe_navigation_regexp_argument_match() {
+        test::<OutOfRangeRegexpRef>().expect_offense(indoc! {r#"
+            "foobar"&.match(/(foo)(bar)/)
+            puts $3
+                 ^^ $3 is out of range (2 regexp capture groups detected).
         "#});
     }
 
