@@ -1,0 +1,122 @@
+//! `Style/FileOpen` — flags `File.open` without a block that may leak file descriptors.
+//!
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/FileOpen
+//! upstream_version_checked: 1.86.2
+//! status: verified
+//! gap_issues: []
+//! notes: >
+//!   Full parity with RuboCop.
+//! ```
+
+use murphy_plugin_api::{Cx, NodeId, NodeKind, cop};
+
+const MSG: &str =
+    "`File.open` without a block may leak a file descriptor; use the block form.";
+
+#[derive(Default)]
+pub struct FileOpen;
+
+#[cop(
+    name = "Style/FileOpen",
+    description = "Flags `File.open` without a block.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = murphy_plugin_api::NoOptions
+)]
+impl FileOpen {
+    #[on_node(kind = "send", methods = ["open"])]
+    fn check_open(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
+            return;
+        };
+        let Some(recv_id) = receiver.get() else {
+            return;
+        };
+        let recv_id = unwrap_begin(recv_id, cx);
+        let NodeKind::Const { name, .. } = *cx.kind(recv_id) else {
+            return;
+        };
+        if cx.symbol_str(name) != "File" {
+            return;
+        }
+        if has_block(node, cx) {
+            return;
+        }
+        // Flag all blockless File.open calls. We flag even when the
+        // result is chained (`File.open('f').read`) because the inner
+        // `open` is the only call this cop dispatches on, and the outer
+        // `.read` won't re-trigger it.
+        cx.emit_offense(cx.range(node), MSG, None);
+    }
+}
+
+fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
+    while let NodeKind::Begin(children) = cx.kind(node) {
+        let child_list = cx.list(*children);
+        if child_list.len() != 1 {
+            break;
+        }
+        node = child_list[0];
+    }
+    node
+}
+
+fn has_block(node: NodeId, cx: &Cx<'_>) -> bool {
+    let parent = cx.parent(node);
+    let Some(parent_id) = parent.get() else {
+        return false;
+    };
+    if let NodeKind::Block { call, .. } = cx.kind(parent_id) {
+        return *call == node;
+    }
+    cx.children(node).iter().any(|&child| {
+        matches!(cx.kind(child), NodeKind::BlockPass(_))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileOpen;
+    use murphy_plugin_api::test_support::{indoc, test};
+
+    #[test]
+    fn flags_file_open_assigned() {
+        test::<FileOpen>().expect_offense(indoc! {"
+            f = File.open('file')
+                ^^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+        "});
+    }
+
+    #[test]
+    fn flags_parenthesized_file_receiver() {
+        test::<FileOpen>().expect_offense(indoc! {"
+            (File).open('file')
+            ^^^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+        "});
+    }
+
+    #[test]
+    fn flags_file_open_chained() {
+        test::<FileOpen>().expect_offense(indoc! {"
+            File.open('file').read
+            ^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+        "});
+    }
+
+    #[test]
+    fn accepts_file_open_with_block() {
+        test::<FileOpen>().expect_no_offenses(
+            "File.open('file') { |f| f.read }\n",
+        );
+    }
+
+    #[test]
+    fn accepts_file_read() {
+        test::<FileOpen>().expect_no_offenses("File.read('file')\n");
+    }
+}
+murphy_plugin_api::submit_cop!(FileOpen);
