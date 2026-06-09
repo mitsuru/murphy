@@ -72,10 +72,11 @@ impl MapJoin {
             return;
         };
 
+        let method_name_len = cx.symbol_str(method).len() as u32;
         cx.emit_offense(
             murphy_plugin_api::Range {
                 start: map_range.start,
-                end: map_range.start + 3,
+                end: map_range.start + method_name_len,
             },
             MSG,
             None,
@@ -114,6 +115,15 @@ mod tests {
             "},
             "array.join\n",
         );
+    }
+
+    #[test]
+    fn flags_collect_to_s_join_map_range() {
+        // Verify offense range covers full "collect", not just first 3 chars.
+        test::<MapJoin>().expect_offense(indoc! {"
+            array.collect(&:to_s).join
+            ^^^^^^^ Remove redundant `map(&:to_s)` before `join`.
+        "});
     }
 
     #[test]

@@ -117,7 +117,7 @@ mod tests {
                 [[x, low].max, high].min
                 ^^^^^^^^^^^^^^^^^^^^^^^^ Use `Comparable#clamp` instead.
             "},
-            "x.clamp(low, high)\n",
+            "(x).clamp(low, high)\n",
         );
     }
 
