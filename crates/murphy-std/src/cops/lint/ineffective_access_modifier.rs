@@ -57,7 +57,7 @@ fn check_children(
     mut modifier: Option<NodeId>,
     ignored: &[String],
     cx: &Cx<'_>,
-) {
+) -> Option<NodeId> {
     for &child in children {
         if let Some(name) = bare_modifier(child, cx) {
             modifier = (name != "public").then_some(child);
@@ -67,7 +67,7 @@ fn check_children(
             continue;
         }
         if matches!(cx.kind(child), NodeKind::Begin(_) | NodeKind::Kwbegin(_)) {
-            check_children(&body_children(child, cx), modifier, ignored, cx);
+            modifier = check_children(&body_children(child, cx), modifier, ignored, cx);
             continue;
         }
         if is_singleton_def(child, cx) {
@@ -90,6 +90,7 @@ fn check_children(
             cx.emit_offense(cx.loc(child).keyword(), &message, None);
         }
     }
+    modifier
 }
 
 fn body_children(node: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
@@ -190,6 +191,34 @@ mod tests {
                   class << self
                     def method
                     end
+                  end
+                end
+            "#});
+    }
+
+    #[test]
+    fn begin_does_not_create_visibility_scope() {
+        test::<IneffectiveAccessModifier>()
+            .expect_no_offenses(indoc! {r#"
+                class C
+                  private
+                  begin
+                    public
+                  end
+
+                  def self.method
+                  end
+                end
+            "#})
+            .expect_offense(indoc! {r#"
+                class C
+                  public
+                  begin
+                    private
+                  end
+
+                  def self.method
+                  ^^^ `private` (on line 4) does not make singleton methods private. Use `private_class_method` or `private` inside a `class << self` block instead.
                   end
                 end
             "#});

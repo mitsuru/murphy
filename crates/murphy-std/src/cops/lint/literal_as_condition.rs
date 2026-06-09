@@ -185,4 +185,12 @@ mod tests {
             .expect_no_offenses("if test(20)\n  top\nend\n")
             .expect_no_offenses("case x\nwhen 20 then top\nend\n");
     }
+
+    #[test]
+    fn flags_bare_negated_literal_like_rubocop() {
+        test::<LiteralAsCondition>().expect_offense(indoc! {r#"
+            !nil
+             ^^^ Literal `nil` appeared as a condition.
+        "#});
+    }
 }
