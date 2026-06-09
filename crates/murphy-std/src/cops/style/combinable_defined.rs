@@ -64,7 +64,7 @@ impl CombinableDefined {
                 other != dn
                     && other_src.starts_with(val_src)
                     && other_src != val_src
-                    && other_src.as_bytes().get(val_src.len()).map_or(true, |&b| {
+                    && other_src.as_bytes().get(val_src.len()).is_none_or(|&b| {
                         // Must be a nesting delimiter (. or ::), not a longer identifier.
                         b == b'.' || b == b':'
                     })

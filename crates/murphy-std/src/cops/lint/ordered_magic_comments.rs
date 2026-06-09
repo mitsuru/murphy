@@ -172,13 +172,15 @@ fn magic_comment_classification(key: &[u8]) -> CommentClassification {
 
     if eq_normalized(key, b"encoding") || eq_normalized(key, b"coding") {
         CommentClassification::Encoding
-    } else if eq_normalized(key, b"frozen_string_literal") {
-        CommentClassification::Other
-    } else if eq_normalized(key, b"rbs_inline") {
-        CommentClassification::Other
-    } else if eq_normalized(key, b"shareable_constant_value") {
-        CommentClassification::Other
-    } else if eq_normalized(key, b"typed") {
+    } else if [
+        b"frozen_string_literal".as_slice(),
+        b"rbs_inline".as_slice(),
+        b"shareable_constant_value".as_slice(),
+        b"typed".as_slice(),
+    ]
+    .iter()
+    .any(|expected| eq_normalized(key, expected))
+    {
         CommentClassification::Other
     } else {
         CommentClassification::NotMagic

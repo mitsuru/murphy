@@ -117,11 +117,10 @@ impl NestedMethodDefinition {
         // Singleton method with a receiver that is a variable/const/call:
         // `def obj.method` inside another method defines on a specific
         // object, not creating a nested global method.
-        if let Some(recv) = receiver.get() {
-            if is_allowed_def_receiver(recv, cx) {
+        if let Some(recv) = receiver.get()
+            && is_allowed_def_receiver(recv, cx) {
                 return;
             }
-        }
 
         check_nesting(node, cx);
     }

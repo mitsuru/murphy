@@ -102,8 +102,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     if matches!(
         *cx.kind(receiver_id),
         NodeKind::Send { .. } | NodeKind::Csend { .. }
-    ) {
-        if let Some(receiver_method) = cx.method_name(receiver_id) {
+    )
+        && let Some(receiver_method) = cx.method_name(receiver_id) {
             // Skip if receiver is a conversion method (Integer, Float, etc.)
             if CONVERSION_METHODS.contains(&receiver_method) {
                 return;
@@ -113,7 +113,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                 return;
             }
         }
-    }
 
     // Check AllowedClasses: walk up receiver chain to find top receiver
     if let Some(top) = top_receiver(receiver_id, cx)

@@ -124,16 +124,14 @@ fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
 }
 
 fn source_based_clamp_replacement(src: &str) -> Option<String> {
-    if let Some(inner) = src.strip_prefix('(').and_then(|s| s.strip_suffix(").min")) {
-        if let Some(replacement) = source_based_clamp_replacement(&format!("{}.min", inner)) {
+    if let Some(inner) = src.strip_prefix('(').and_then(|s| s.strip_suffix(").min"))
+        && let Some(replacement) = source_based_clamp_replacement(&format!("{}.min", inner)) {
             return Some(replacement);
         }
-    }
-    if let Some(inner) = src.strip_prefix('(').and_then(|s| s.strip_suffix(").max")) {
-        if let Some(replacement) = source_based_clamp_replacement(&format!("{}.max", inner)) {
+    if let Some(inner) = src.strip_prefix('(').and_then(|s| s.strip_suffix(").max"))
+        && let Some(replacement) = source_based_clamp_replacement(&format!("{}.max", inner)) {
             return Some(replacement);
         }
-    }
     if let Some(inner) = src.strip_prefix("[[").and_then(|s| s.strip_suffix("].min")) {
         let (value_and_low, high) = inner.split_once("].max, ")?;
         let (value, low) = value_and_low.split_once(", ")?;

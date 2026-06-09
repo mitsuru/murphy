@@ -332,12 +332,9 @@ fn has_explicit_not_force(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Returns `true` when the condition polarity matches the file operation type:
-/// - Make ops (`mkdir`): must be `unless` or negated `if` (= "not exists")
-/// - Remove ops (`remove`, `delete`, etc.): must be bare `if` (= "exists")
-/// Force methods use whichever polarity their non-force counterpart uses.
-/// Returns `true` when the condition polarity matches the file operation type:
 /// - Make ops (`mkdir`): body must execute when file does NOT exist
 /// - Remove ops (`remove`, `delete`, etc.): body must execute when file DOES exist
+/// - Force methods use whichever polarity their non-force counterpart uses
 ///
 /// Handles `unless !condition` (double-negative = body executes when condition true).
 fn condition_matches_method(if_node: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
@@ -413,9 +410,7 @@ fn is_negated_condition(if_node: NodeId, cx: &Cx<'_>) -> bool {
 /// method call arguments.
 fn find_existence_check(if_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     let cond = cx.if_condition(if_node);
-    let Some(cond_id) = cond.get() else {
-        return None;
-    };
+    let cond_id = cond.get()?;
 
     // Check if the condition node itself is an existence check.
     if let Some((node, _)) = as_existence_check(cond_id, cx) {
@@ -437,7 +432,7 @@ fn find_existence_check(if_node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
                         let method_str = cx.symbol_str(method);
                         // Allow `!exist?` (negation) and `exist?` itself.
                         if method_str != "!" {
-                            let in_args = cx.list(args).iter().any(|&a| a == node);
+                            let in_args = cx.list(args).contains(&node);
                             if in_args {
                                 continue;
                             }
@@ -514,24 +509,19 @@ fn emit_method_replacement(node: NodeId, current_name: &str, cx: &Cx<'_>) {
     // produces a working call (e.g. `Dir.mkdir(path)` → `FileUtils.mkdir_p(path)`).
     let NodeKind::Send { receiver, .. } = *cx.kind(node) else { return };
     let needs_receiver_replace = receiver.get().is_some_and(|recv| {
-        if let NodeKind::Const { name, scope } = *cx.kind(recv) {
-            if scope.get().is_none() {
+        if let NodeKind::Const { name, scope } = *cx.kind(recv)
+            && scope.get().is_none() {
                 let n = cx.symbol_str(name);
                 return n == "Dir" || n == "File";
             }
-        }
         false
     });
 
     if needs_receiver_replace {
         // Find the receiver+dot+method portion and replace with FileUtils.replacement.
-        // The method name starts after the last `(` or ` ` or `.`.
+        // The method name starts after the last `.` when there is a receiver.
         let method_start = if let Some(dot) = src.rfind('.') {
             r.start + dot as u32 + 1
-        } else if let Some(open_paren) = src.find('(') {
-            r.start
-        } else if let Some(space) = src.find(' ') {
-            r.start
         } else {
             r.start
         };
