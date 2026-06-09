@@ -166,11 +166,10 @@ fn identify_dir_call(call: NodeId, cx: &Cx<'_>) -> Option<(NodeId, bool)> {
         if unsorted_dir_glob(&receiver, cx) {
             return Some((receiver, true));
         }
-    } else if method == "glob" || method == "[]" {
-        if is_dir_const_receiver(call, cx) {
+    } else if (method == "glob" || method == "[]")
+        && is_dir_const_receiver(call, cx) {
             return Some((call, false));
         }
-    }
 
     None
 }

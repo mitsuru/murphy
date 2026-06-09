@@ -42,6 +42,7 @@ impl MissingCopEnableDirective {
         for (idx, directive) in directives.iter().enumerate() {
             if directive.kind != CommentDirectiveKind::Disable
                 || directive.scope == CommentDirectiveScope::SameLine
+                || !is_rubocop_directive(directive.comment_range, cx)
             {
                 continue;
             }
@@ -50,6 +51,7 @@ impl MissingCopEnableDirective {
                 candidate.kind == CommentDirectiveKind::Enable
                     && candidate.scope != CommentDirectiveScope::SameLine
                     && candidate.cop == Some(cop)
+                    && is_rubocop_directive(candidate.comment_range, cx)
             });
             let end = enable.map_or(cx.source().len() as u32, |d| d.line_range.start);
             if acceptable_range(directive.line_range.start, end, max_range, cx.source()) {
@@ -71,6 +73,10 @@ impl MissingCopEnableDirective {
             cx.emit_offense(directive.comment_range, &message, None);
         }
     }
+}
+
+fn is_rubocop_directive(range: murphy_plugin_api::Range, cx: &Cx<'_>) -> bool {
+    cx.raw_source(range).trim_start().starts_with("# rubocop:")
 }
 
 fn acceptable_range(start: u32, end: u32, max_range: i64, source: &str) -> bool {
@@ -143,5 +149,13 @@ mod tests {
     #[test]
     fn line_number_accepts_non_char_boundary_offsets() {
         assert_eq!(super::line_number(1, "é\n# rubocop:disable Lint/Foo"), 0);
+    }
+
+    #[test]
+    fn ignores_murphy_disable_directives() {
+        test::<MissingCopEnableDirective>().expect_no_offenses(indoc! {r#"
+            # murphy:disable Lint/Debugger
+            debugger
+        "#});
     }
 }

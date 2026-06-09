@@ -228,7 +228,6 @@ fn regexp_count_in_send(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
                 // fall through to check arguments.
             }
         }
-    }
 
     // First-argument regexp: e.g. `str.match(/(re)/)`.
     if is_arg_method {

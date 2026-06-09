@@ -62,7 +62,7 @@ impl NumericOperationWithConstantResult {
         }
         let method_str = cx.symbol_str(method);
         let lhs_name = cx.raw_source(cx.range(recv_id));
-        if let Some(result) = constant_result(method_str, &lhs_name, args_list[0], cx) {
+        if let Some(result) = constant_result(method_str, lhs_name, args_list[0], cx) {
             let msg = "Numeric operation with a constant result detected.";
             cx.emit_offense(cx.range(node), msg, None);
             let replacement = result.to_string();
