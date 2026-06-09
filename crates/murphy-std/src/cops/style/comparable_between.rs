@@ -60,12 +60,12 @@ fn extract_comparison(a: NodeId, b: NodeId, cx: &Cx<'_>) -> Option<(NodeId, Node
         (">=", "<=") => {
             let a_arg_list = cx.list(a_args);
             let b_arg_list = cx.list(b_args);
-            (a_recv.get()?, b_recv.get()?, a_arg_list.first()?, b_arg_list.first()?)
+            (a_recv.get()?, b_recv.get()?, *a_arg_list.first()?, *b_arg_list.first()?)
         }
         ("<=", ">=") => {
             let a_arg_list = cx.list(a_args);
             let b_arg_list = cx.list(b_args);
-            (a_recv.get()?, b_recv.get()?, a_arg_list.first()?, b_arg_list.first()?)
+            (a_recv.get()?, b_recv.get()?, *a_arg_list.first()?, *b_arg_list.first()?)
         }
         _ => return None,
     };

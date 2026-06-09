@@ -80,9 +80,9 @@ impl ComparableClamp {
         let inner_bound_src = cx.raw_source(cx.range(inner_bound));
         let bound_src = cx.raw_source(cx.range(bound));
         let (low, high) = if method_str == "min" {
-            (&inner_bound_src, &bound_src)
+            (inner_bound_src, bound_src)
         } else {
-            (&bound_src, &inner_bound_src)
+            (bound_src, inner_bound_src)
         };
         let preferred = format!("{}.clamp({}, {})", val_src, low, high);
         cx.emit_offense(cx.range(node), "Use `Comparable#clamp` instead.", None);
