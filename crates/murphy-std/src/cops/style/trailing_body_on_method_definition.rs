@@ -18,6 +18,8 @@
 //!   removes the `;` separator if present. The indentation is fixed at 2
 //!   spaces (configured_indentation_width default). Full alignment-aware
 //!   indentation based on nesting depth is not implemented (gap).
+//!   Rescue/ensure wrappers are peeled before comparing the first protected
+//!   body expression with the `def` line.
 //! ```
 //!
 //! ## Matched shapes
@@ -33,7 +35,7 @@
 //! method name) and the body's first expression with a newline and 2-space
 //! indent.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind};
 
 const MSG: &str = "Place the first line of a multi-line method definition's body on its own line.";
 
@@ -100,14 +102,27 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 }
 
 /// Returns the "first part" of a body node.
-/// If the body is a `begin` (multi-statement), this is the first child.
-/// Otherwise it's the body itself.
+/// If the body is wrapped in `begin`, `rescue`, or `ensure`, unwrap to the
+/// first protected expression before checking whether it shares the `def` line.
 fn first_part(body: NodeId, cx: &Cx<'_>) -> NodeId {
-    if let NodeKind::Begin(list) = cx.kind(body) {
-        let children = cx.list(*list);
-        if let Some(&first_child) = children.first() {
-            return first_child;
+    match *cx.kind(body) {
+        NodeKind::Begin(list) => {
+            let children = cx.list(list);
+            if let Some(&first_child) = children.first() {
+                return first_part(first_child, cx);
+            }
         }
+        NodeKind::Rescue {
+            body: protected, ..
+        }
+        | NodeKind::Ensure {
+            body: protected, ..
+        } => {
+            if let Some(protected) = protected.get() {
+                return first_part(protected, cx);
+            }
+        }
+        _ => {}
     }
     body
 }
@@ -193,6 +208,19 @@ mod tests {
         test::<TrailingBodyOnMethodDefinition>().expect_no_offenses(indoc! {"
             def foo(x)
               bar
+            end
+        "});
+    }
+
+    #[test]
+    fn no_offense_multiline_method_with_rescue_body_on_next_line() {
+        test::<TrailingBodyOnMethodDefinition>().expect_no_offenses(indoc! {"
+            def set_collection_item
+              @collection_item = account.collection_items.accepted.find(params[:id])
+
+              authorize @collection_item.collection, :show?
+            rescue ActiveRecord::RecordNotFound, Mastodon::NotPermittedError
+              not_found
             end
         "});
     }
