@@ -62,7 +62,8 @@ impl CombinableDefined {
                     && other_src.starts_with(val_src)
                     && other_src != val_src
                     && other_src.as_bytes().get(val_src.len()).map_or(true, |&b| {
-                        !b.is_ascii_alphanumeric() && b != b'_'
+                        // Must be a nesting delimiter (. or ::), not a longer identifier.
+                        b == b'.' || b == b':'
                     })
             })
         });
