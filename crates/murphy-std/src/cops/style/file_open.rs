@@ -45,18 +45,17 @@ impl FileOpen {
         if has_block(node, cx) {
             return;
         }
-        // Flag standalone, assigned, or chained File.open (blockless).
-        // Matching RuboCop: flags unless the value is passed to an API
-        // (i.e. the caller manages the lifecycle itself).
+        // Flag all blockless File.open except when the value is passed
+        // as an argument (caller manages the lifecycle).
+        let is_receiver_of_parent = |p| match cx.kind(p) {
+            NodeKind::Send { receiver, .. } => receiver.get() == Some(node),
+            _ => false,
+        };
         let emit = {
             let parent = cx.parent(node);
             match parent.get() {
-                Some(p) => match cx.kind(p) {
-                    NodeKind::Lvasgn { .. } | NodeKind::Ivasgn { .. }
-                    | NodeKind::Gvasgn { .. } | NodeKind::Cvasgn { .. } => true,
-                    NodeKind::Begin(_) => true,
-                    _ => node_used_as_receiver(node, cx),
-                },
+                Some(p) if is_assignment(p, cx) || is_receiver_of_parent(p) => true,
+                Some(p) => !is_argument_of_send(p, node, cx),
                 None => true,
             }
         };
@@ -64,6 +63,24 @@ impl FileOpen {
             cx.emit_offense(cx.range(node), MSG, None);
         }
     }
+}
+
+fn is_assignment(parent: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(
+        cx.kind(parent),
+        NodeKind::Lvasgn { .. }
+            | NodeKind::Ivasgn { .. }
+            | NodeKind::Gvasgn { .. }
+            | NodeKind::Cvasgn { .. }
+    )
+}
+
+fn is_argument_of_send(parent: NodeId, node: NodeId, cx: &Cx<'_>) -> bool {
+    let args = match cx.kind(parent) {
+        NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => *args,
+        _ => return false,
+    };
+    cx.list(args).iter().any(|&a| a == node)
 }
 
 fn has_block(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -76,13 +93,6 @@ fn has_block(node: NodeId, cx: &Cx<'_>) -> bool {
     }
     cx.children(node).iter().any(|&child| {
         matches!(cx.kind(child), NodeKind::BlockPass(_))
-    })
-}
-
-fn node_used_as_receiver(node: NodeId, cx: &Cx<'_>) -> bool {
-    cx.parent(node).get().is_some_and(|parent| match cx.kind(parent) {
-        NodeKind::Send { receiver, .. } => receiver.get() == Some(node),
-        _ => false,
     })
 }
 
