@@ -84,7 +84,7 @@ fn is_literal_safe(node: NodeId, cx: &Cx<'_>) -> bool {
 fn is_floatish(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
         NodeKind::Float(_) => true,
-        NodeKind::Begin(list) => cx.list(list).first().is_some_and(|&child| is_floatish(child, cx)),
+        NodeKind::Begin(list) => cx.list(list).last().is_some_and(|&child| is_floatish(child, cx)),
         NodeKind::Send { receiver, method, args } => {
             let name = cx.symbol_str(method);
             if matches!(name, "to_f" | "Float" | "fdiv") {
@@ -142,6 +142,15 @@ mod tests {
         test::<FloatComparison>()
             .expect_no_offenses("x == 0.0\n")
             .expect_no_offenses("Float(x, exception: false) == nil\n")
+            .expect_no_offenses("(0.1; value) == x\n")
             .expect_no_offenses("(x - 0.1).abs < Float::EPSILON\n");
+    }
+
+    #[test]
+    fn uses_last_expression_value_for_begin_float_detection() {
+        test::<FloatComparison>().expect_offense(indoc! {r#"
+            (side_effect; 0.1) == x
+            ^^^^^^^^^^^^^^^^^^^^^^^ Avoid equality comparisons of floats as they are unreliable.
+        "#});
     }
 }

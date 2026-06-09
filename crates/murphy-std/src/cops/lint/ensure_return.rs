@@ -27,16 +27,41 @@ impl EnsureReturn {
     fn check_ensure(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Ensure { ensure_, .. } = *cx.kind(node) else { return; };
         let Some(ensure_body) = ensure_.get() else { return; };
-        for child in std::iter::once(ensure_body).chain(cx.descendants(ensure_body)) {
-            if matches!(cx.kind(child), NodeKind::Return(_)) {
-                cx.emit_offense(child_range(child, cx), "Do not return from an `ensure` block.", None);
-            }
-        }
+        check_returns_in_ensure_scope(ensure_body, cx);
     }
 }
 
-fn child_range(node: NodeId, cx: &Cx<'_>) -> murphy_plugin_api::Range {
-    cx.range(node)
+fn check_returns_in_ensure_scope(root: NodeId, cx: &Cx<'_>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if is_return_scope_boundary(node, cx) {
+            continue;
+        }
+        if matches!(cx.kind(node), NodeKind::Return(_)) {
+            cx.emit_offense(cx.range(node), "Do not return from an `ensure` block.", None);
+        }
+        stack.extend(cx.children(node));
+    }
+}
+
+fn is_return_scope_boundary(node: NodeId, cx: &Cx<'_>) -> bool {
+    match *cx.kind(node) {
+        NodeKind::Def { .. } | NodeKind::Defs { .. } | NodeKind::Lambda => true,
+        NodeKind::Block { call, .. } => is_lambda_or_proc_call(call, cx),
+        _ => false,
+    }
+}
+
+fn is_lambda_or_proc_call(node: NodeId, cx: &Cx<'_>) -> bool {
+    match *cx.kind(node) {
+        NodeKind::Send { receiver, method, .. } => {
+            let name = cx.symbol_str(method);
+            matches!(name, "lambda" | "proc")
+                || (name == "new"
+                    && receiver.get().is_some_and(|recv| matches!(*cx.kind(recv), NodeKind::Const { name, .. } if cx.symbol_str(name) == "Proc")))
+        }
+        _ => false,
+    }
 }
 
 murphy_plugin_api::submit_cop!(EnsureReturn);
@@ -67,5 +92,27 @@ mod tests {
               cleanup
             end
         "#});
+    }
+
+    #[test]
+    fn ignores_returns_inside_nested_definitions_and_lambdas() {
+        test::<EnsureReturn>()
+            .expect_no_offenses(indoc! {r#"
+                def foo
+                  work
+                ensure
+                  def helper
+                    return 1
+                  end
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                def foo
+                  work
+                ensure
+                  lambda { return 1 }
+                  Proc.new { return 2 }
+                end
+            "#});
     }
 }
