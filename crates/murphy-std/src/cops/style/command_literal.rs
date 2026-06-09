@@ -83,7 +83,7 @@ impl CommandLiteral {
             EnforcedStyle::Mixed => {
                 if is_backtick {
                     let is_multiline = src.contains('\n');
-                    if is_multiline && !has_backtick {
+                    if is_multiline || has_backtick {
                         cx.emit_offense(node_range, "Use `%x` around command string.", None);
                     }
                 } else {

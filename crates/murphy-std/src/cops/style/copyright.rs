@@ -20,7 +20,7 @@ pub struct Copyright;
 
 #[derive(CopOptions)]
 pub struct CopyrightOptions {
-    #[option(default = "", description = "Regex pattern for copyright notice.")]
+    #[option(default = "", description = "Substring to search for in comments (e.g. 'Copyright'). Regex not yet supported.")]
     pub notice: String,
 }
 
@@ -44,8 +44,9 @@ impl Copyright {
         }
         // v1 limitation: uses substring matching instead of full regex.
         // RuboCop's regex-based matching is not yet supported.
-        let found = cx.comments().iter().any(|comment| {
-            cx.raw_source(comment.range).contains(&opts.notice)
+        let comments = cx.comments();
+        let found = comments.first().is_some_and(|first| {
+            cx.raw_source(first.range).contains(&opts.notice)
         });
         if !found {
             cx.emit_offense(

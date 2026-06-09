@@ -52,10 +52,10 @@ impl CommentedKeyword {
                 .rposition(|&b| b == b'\n')
                 .map_or(0, |p| p + 1);
             let line = &bytes[line_start..comment.range.start as usize];
-            let line_str = core::str::from_utf8(line).unwrap_or("").trim();
+            let line_str = core::str::from_utf8(line).unwrap_or_default().trim();
             for &kw in KEYWORDS {
-                if line_str.starts_with(kw) && (line_str.len() == kw.len()
-                    || !line_str[kw.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+                if line_str.starts_with(kw)
+                    && !line_str[kw.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
                 {
                     cx.emit_offense(
                         comment.range,
@@ -106,6 +106,45 @@ mod tests {
         test::<CommentedKeyword>().expect_no_offenses(
             "class X\nend\n",
         );
+    }
+
+    #[test]
+    fn flags_begin_comment() {
+        test::<CommentedKeyword>().expect_offense(indoc! {"
+            begin # start processing
+                  ^^^^^^^^^^^^^^^^^^ Do not place comments on the same line as the `begin` keyword.
+              process
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_def_comment() {
+        test::<CommentedKeyword>().expect_offense(indoc! {"
+            def foo # method definition
+                    ^^^^^^^^^^^^^^^^^^^ Do not place comments on the same line as the `def` keyword.
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_module_comment() {
+        test::<CommentedKeyword>().expect_offense(indoc! {"
+            module M # namespace
+                     ^^^^^^^^^^^ Do not place comments on the same line as the `module` keyword.
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_indented_keyword() {
+        test::<CommentedKeyword>().expect_offense(indoc! {"
+            def foo
+              if cond
+              end # end if
+                  ^^^^^^^^ Do not place comments on the same line as the `end` keyword.
+            end
+        "});
     }
 }
 murphy_plugin_api::submit_cop!(CommentedKeyword);

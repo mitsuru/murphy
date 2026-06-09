@@ -95,17 +95,20 @@ fn has_visibility_declaration(name: &str, parent: NodeId, cx: &Cx<'_>) -> bool {
         if receiver != OptNodeId::NONE {
             continue;
         }
-        let arg_list = cx.list(args);
-        if arg_list.is_empty() {
+        if receiver != OptNodeId::NONE
+            && !receiver.get().is_some_and(|r| matches!(cx.kind(r), NodeKind::SelfExpr))
+        {
             continue;
         }
-        let first_arg = arg_list[0];
-        let sym_name = match cx.kind(first_arg) {
-            NodeKind::Sym(s) => cx.symbol_str(*s),
-            _ => continue,
-        };
-        if sym_name == name {
-            return true;
+        let arg_list = cx.list(args);
+        for &arg in arg_list.iter() {
+            let sym_name = match cx.kind(arg) {
+                NodeKind::Sym(s) => cx.symbol_str(*s),
+                _ => continue,
+            };
+            if sym_name == name {
+                return true;
+            }
         }
     }
     false

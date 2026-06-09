@@ -10,6 +10,8 @@
 //! gap_issues: []
 //! notes: >
 //!   EnforcedStyle: class_keyword (default) and class_new supported.
+//!   class_keyword direction: flags Class.new(constant) and Class.new.
+//!   class_new direction: flags class Foo < Bar; end (v1 gap: not yet implemented).
 //!   AllowedParentClasses is not yet wired.
 //! ```
 
@@ -71,7 +73,10 @@ impl EmptyClassDefinition {
             return;
         }
         let arg_list = cx.list(args);
-        if !arg_list.is_empty() {
+        if arg_list.len() > 1 {
+            return;
+        }
+        if arg_list.len() == 1 {
             let first_arg = arg_list[0];
             if !matches!(cx.kind(first_arg), NodeKind::Const { .. }) {
                 return;
@@ -95,6 +100,14 @@ mod tests {
     }
 
     #[test]
+    fn flags_class_new_without_arguments() {
+        test::<EmptyClassDefinition>().expect_offense(indoc! {"
+            FooError = Class.new
+            ^^^^^^^^^^^^^^^^^^^^ Use the `class` keyword instead of `Class.new` to define an empty class.
+        "});
+    }
+
+    #[test]
     fn accepts_class_keyword() {
         test::<EmptyClassDefinition>().expect_no_offenses(
             "class FooError < StandardError\nend\n",
@@ -106,6 +119,13 @@ mod tests {
         test::<EmptyClassDefinition>()
             .with_options(&EmptyClassDefinitionOptions { enforced_style: EnforcedStyle::ClassNew })
             .expect_no_offenses("FooError = Class.new(StandardError)\n");
+    }
+
+    #[test]
+    fn accepts_class_new_with_non_const_arg() {
+        test::<EmptyClassDefinition>().expect_no_offenses(
+            "FooError = Class.new('some_string')\n",
+        );
     }
 }
 murphy_plugin_api::submit_cop!(EmptyClassDefinition);

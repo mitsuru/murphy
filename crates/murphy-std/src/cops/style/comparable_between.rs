@@ -35,13 +35,14 @@ impl ComparableBetween {
             return;
         };
         if let Some((value, min, max)) = extract_comparison(lhs, rhs, cx) {
-            let preferred = format!("{}.between?({}, {})",
-                cx.raw_source(cx.range(value)),
-                cx.raw_source(cx.range(min)),
-                cx.raw_source(cx.range(max)),
-            );
-            cx.emit_offense(cx.range(node), MSG, None);
-            cx.emit_edit(cx.range(node), &preferred);
+        let val_src = cx.raw_source(cx.range(value));
+        let preferred = format!("({}).between?({}, {})",
+            val_src,
+            cx.raw_source(cx.range(min)),
+            cx.raw_source(cx.range(max)),
+        );
+        cx.emit_offense(cx.range(node), MSG, None);
+        cx.emit_edit(cx.range(node), &preferred);
         }
     }
 }
@@ -56,29 +57,25 @@ fn extract_comparison(a: NodeId, b: NodeId, cx: &Cx<'_>) -> Option<(NodeId, Node
     let a_method_str = cx.symbol_str(a_method);
     let b_method_str = cx.symbol_str(b_method);
 
-    let (a_val, b_val, a_arg, b_arg) = match (a_method_str, b_method_str) {
-        (">=", "<=") => {
-            let a_arg_list = cx.list(a_args);
-            let b_arg_list = cx.list(b_args);
-            (a_recv.get()?, b_recv.get()?, *a_arg_list.first()?, *b_arg_list.first()?)
-        }
-        ("<=", ">=") => {
-            let a_arg_list = cx.list(a_args);
-            let b_arg_list = cx.list(b_args);
-            (a_recv.get()?, b_recv.get()?, *a_arg_list.first()?, *b_arg_list.first()?)
-        }
-        _ => return None,
-    };
+    if !matches!((a_method_str, b_method_str), (">=", "<=") | ("<=", ">=")) {
+        return None;
+    }
+    let a_arg_list = cx.list(a_args);
+    let b_arg_list = cx.list(b_args);
+    let a_val = a_recv.get()?;
+    let b_val = b_recv.get()?;
+    let a_arg = *a_arg_list.first()?;
+    let b_arg = *b_arg_list.first()?;
 
     // Both comparisons must reference the same variable (compare by source text)
     if cx.raw_source(cx.range(a_val)) != cx.raw_source(cx.range(b_val)) {
         return None;
     }
 
-    match (a_method_str, b_method_str) {
-        (">=", "<=") => Some((a_val, a_arg, b_arg)),
-        ("<=", ">=") => Some((a_val, b_arg, a_arg)),
-        _ => None,
+    if a_method_str == ">=" {
+        Some((a_val, a_arg, b_arg))
+    } else {
+        Some((a_val, b_arg, a_arg))
     }
 }
 
@@ -117,6 +114,28 @@ mod tests {
     #[test]
     fn accepts_between() {
         test::<ComparableBetween>().expect_no_offenses("x.between?(min, max)\n");
+    }
+
+    #[test]
+    fn corrects_operator_receiver() {
+        test::<ComparableBetween>().expect_correction(
+            indoc! {"
+                a + b >= min && a + b <= max
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
+            "},
+            "(a + b).between?(min, max)\n",
+        );
+    }
+
+    #[test]
+    fn corrects_method_call_receiver() {
+        test::<ComparableBetween>().expect_correction(
+            indoc! {"
+                foo.bar >= min && foo.bar <= max
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
+            "},
+            "(foo.bar).between?(min, max)\n",
+        );
     }
 
     #[test]

@@ -33,7 +33,12 @@ impl ColonMethodDefinition {
         let NodeKind::Defs { receiver, .. } = *cx.kind(node) else {
             return;
         };
+        // Only flag `def self::foo`, not `def Foo::bar` (constant resolution).
+        if !matches!(*cx.kind(receiver), NodeKind::SelfExpr) {
+            return;
+        }
         let recv_end = cx.range(receiver).end;
+        // NOTE: Assumes `::` immediately follows receiver with no whitespace.
         let gap_src = cx.raw_source(Range {
             start: recv_end,
             end: recv_end + 2,
@@ -69,6 +74,31 @@ mod tests {
         test::<ColonMethodDefinition>().expect_no_offenses(
             "def self.bar\nend\n",
         );
+    }
+
+    #[test]
+    fn accepts_constant_receiver_with_colon() {
+        // `def Foo::bar` uses `::` for constant resolution, not a style issue.
+        test::<ColonMethodDefinition>().expect_no_offenses(
+            "def Foo::bar\nend\n",
+        );
+    }
+
+    #[test]
+    fn flags_colon_method_definition_with_args() {
+        test::<ColonMethodDefinition>().expect_offense(indoc! {"
+            def self::bar(x)
+                   ^^ Do not use `::` for defining class methods.
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_single_line_colon_method_definition() {
+        test::<ColonMethodDefinition>().expect_offense(indoc! {"
+            def self::bar; end
+                   ^^ Do not use `::` for defining class methods.
+        "});
     }
 }
 murphy_plugin_api::submit_cop!(ColonMethodDefinition);

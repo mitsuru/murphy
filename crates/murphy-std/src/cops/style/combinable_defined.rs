@@ -45,26 +45,26 @@ impl CombinableDefined {
         if defined_nodes.len() < 2 {
             return;
         }
-        let has_nested = defined_nodes.iter().any(|&dn| {
+        let sources: Vec<_> = defined_nodes.iter().filter_map(|&dn| {
             let NodeKind::Defined(val_id) = *cx.kind(dn) else {
-                return false;
+                return None;
             };
             match cx.kind(val_id) {
                 NodeKind::Send { .. } | NodeKind::Const { .. } => {
-                    let val_src = cx.raw_source(cx.range(val_id));
-                    defined_nodes.iter().any(|&other| {
-                        if other == dn {
-                            return false;
-                        }
-                        let NodeKind::Defined(ov_id) = *cx.kind(other) else {
-                            return false;
-                        };
-                        let other_src = cx.raw_source(cx.range(ov_id));
-                        other_src.starts_with(val_src) && other_src != val_src
-                    })
+                    Some((dn, cx.raw_source(cx.range(val_id))))
                 }
-                _ => false,
+                _ => None,
             }
+        }).collect();
+        let has_nested = sources.iter().any(|&(dn, val_src)| {
+            sources.iter().any(|&(other, other_src)| {
+                other != dn
+                    && other_src.starts_with(val_src)
+                    && other_src != val_src
+                    && other_src.as_bytes().get(val_src.len()).map_or(true, |&b| {
+                        !b.is_ascii_alphanumeric() && b != b'_'
+                    })
+            })
         });
         if has_nested {
             cx.emit_offense(cx.range(node), "Combine nested `defined?` calls.", None);
@@ -101,6 +101,27 @@ mod tests {
     #[test]
     fn accepts_unrelated_and() {
         test::<CombinableDefined>().expect_no_offenses("a && b\n");
+    }
+
+    #[test]
+    fn accepts_different_base_names_constants() {
+        test::<CombinableDefined>().expect_no_offenses(
+            "defined?(Foo) && defined?(FooBar)\n",
+        );
+    }
+
+    #[test]
+    fn accepts_different_base_names_methods() {
+        test::<CombinableDefined>().expect_no_offenses(
+            "defined?(foo) && defined?(foo_bar)\n",
+        );
+    }
+
+    #[test]
+    fn accepts_unrelated_defineds() {
+        test::<CombinableDefined>().expect_no_offenses(
+            "defined?(A) && defined?(B) && defined?(C)\n",
+        );
     }
 }
 murphy_plugin_api::submit_cop!(CombinableDefined);

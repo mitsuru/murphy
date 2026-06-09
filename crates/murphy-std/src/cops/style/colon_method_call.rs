@@ -37,11 +37,7 @@ impl ColonMethodCall {
             return;
         };
         let recv_end = cx.range(recv_id).end;
-        let gap_src = cx.raw_source(Range {
-            start: recv_end,
-            end: recv_end + 2,
-        });
-        if gap_src != "::" {
+        if !cx.source()[recv_end as usize..].starts_with("::") {
             return;
         }
         let colon_range = Range {

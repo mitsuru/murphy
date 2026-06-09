@@ -62,6 +62,11 @@ impl HashLookupMethod {
         match opts.enforced_style {
             EnforcedStyle::Brackets => {
                 if method_name == "fetch" {
+                    // Skip fetch-with-block: cannot replace with `hash[key]`
+                    // because the block provides a default on KeyError.
+                    if cx.block_node(node).get().is_some() {
+                        return;
+                    }
                     let arg_list = cx.list(args);
                     if arg_list.len() == 1 {
                         cx.emit_offense(cx.range(node), BRACKET_MSG, None);
@@ -124,6 +129,20 @@ mod tests {
         test::<HashLookupMethod>()
             .with_options(&HashLookupMethodOptions { enforced_style: EnforcedStyle::Brackets })
             .expect_no_offenses("hash.fetch(key, default)\n");
+    }
+
+    #[test]
+    fn fetch_with_block_is_ignored() {
+        test::<HashLookupMethod>()
+            .with_options(&HashLookupMethodOptions { enforced_style: EnforcedStyle::Brackets })
+            .expect_no_offenses("hash.fetch(key) { |k| default }\n");
+    }
+
+    #[test]
+    fn brackets_with_two_args_are_ignored() {
+        test::<HashLookupMethod>()
+            .with_options(&HashLookupMethodOptions { enforced_style: EnforcedStyle::Fetch })
+            .expect_no_offenses("hash[key, other]\n");
     }
 
     #[test]

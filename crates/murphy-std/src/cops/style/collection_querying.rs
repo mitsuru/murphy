@@ -54,13 +54,7 @@ impl CollectionQuerying {
         let method_str = cx.symbol_str(method);
         let replacement = match method_str {
             "positive?" => Some("any?"),
-            ">" => {
-                let arg_list = cx.list(args);
-                if arg_list.is_empty() { None }
-                else if cx.raw_source(cx.range(arg_list[0])) == "0" { Some("any?") }
-                else { None }
-            }
-            "!=" => {
+            ">" | "!=" => {
                 let arg_list = cx.list(args);
                 if arg_list.is_empty() { None }
                 else if cx.raw_source(cx.range(arg_list[0])) == "0" { Some("any?") }
@@ -132,6 +126,14 @@ mod tests {
         test::<CollectionQuerying>().expect_offense(indoc! {"
             x.count == 1
             ^^^^^^^^^^^^ Use `one?` instead of `count` comparison.
+        "});
+    }
+
+    #[test]
+    fn flags_count_neq_zero() {
+        test::<CollectionQuerying>().expect_offense(indoc! {"
+            x.count != 0
+            ^^^^^^^^^^^^ Use `any?` instead of `count` comparison.
         "});
     }
 

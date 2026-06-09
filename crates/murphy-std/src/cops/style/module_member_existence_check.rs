@@ -29,21 +29,26 @@ pub struct ModuleMemberExistenceCheck;
     options = murphy_plugin_api::NoOptions
 )]
 impl ModuleMemberExistenceCheck {
-    #[on_node(kind = "send", methods = ["instance_methods"])]
-    fn check_instance_methods(&self, node: NodeId, cx: &Cx<'_>) {
-        let parent = cx.parent(node);
-        let Some(parent_id) = parent.get() else {
+    #[on_node(kind = "send", methods = ["include?", "member?"])]
+    fn check_include_member(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
             return;
         };
-        let NodeKind::Send { method, args: parent_args, .. } = *cx.kind(parent_id) else {
+        let Some(recv_id) = receiver.get() else {
             return;
         };
-        let parent_method = cx.symbol_str(method);
-        if parent_method != "include?" && parent_method != "member?" {
+        let NodeKind::Send { method, args: recv_args, .. } = *cx.kind(recv_id) else {
+            return;
+        };
+        if cx.symbol_str(method) != "instance_methods" {
             return;
         }
-        let parent_arg_list = cx.list(parent_args);
-        if parent_arg_list.is_empty() {
+        let recv_arg_list = cx.list(recv_args);
+        if !recv_arg_list.is_empty() {
+            return;
+        }
+        let arg_list = cx.list(args);
+        if arg_list.is_empty() {
             return;
         }
         cx.emit_offense(cx.range(node), MSG, None);
@@ -82,6 +87,13 @@ mod tests {
     fn accepts_method_defined() {
         test::<ModuleMemberExistenceCheck>().expect_no_offenses(
             "Array.method_defined?(:size)\n",
+        );
+    }
+
+    #[test]
+    fn accepts_instance_methods_with_arg() {
+        test::<ModuleMemberExistenceCheck>().expect_no_offenses(
+            "Array.instance_methods(false).include?(:size)\n",
         );
     }
 }

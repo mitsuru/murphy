@@ -115,8 +115,8 @@ fn assignment_lhs(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     };
     match cx.kind(real) {
         NodeKind::Lvasgn { name, .. } => Some(cx.symbol_str(*name).to_string()),
-        NodeKind::Ivasgn { name, .. } => Some(format!("@{}", cx.symbol_str(*name))),
-        NodeKind::Gvasgn { name, .. } => Some(format!("${}", cx.symbol_str(*name))),
+        NodeKind::Ivasgn { name, .. } => Some(cx.symbol_str(*name).to_string()),
+        NodeKind::Gvasgn { name, .. } => Some(cx.symbol_str(*name).to_string()),
         NodeKind::Casgn { name, .. } => Some(cx.symbol_str(*name).to_string()),
         _ => None,
     }

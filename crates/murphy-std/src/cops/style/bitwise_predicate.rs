@@ -33,7 +33,7 @@ pub struct BitwisePredicate;
     options = murphy_plugin_api::NoOptions
 )]
 impl BitwisePredicate {
-    #[on_node(kind = "send", methods = ["positive?", "zero?", "==", "!=", ">", ">="])]
+    #[on_node(kind = "send", methods = ["positive?", "zero?", "==", "!=", ">"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Send { receiver, method, args } = *cx.kind(node) else {
             return;

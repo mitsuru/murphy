@@ -49,9 +49,14 @@ impl CommentAnnotation {
             }
             let body = text.trim_start_matches('#').trim();
             for kw in &["TODO", "FIXME", "OPTIMIZE", "HACK", "REVIEW"] {
-                let upper_body = body.to_uppercase();
-                if !upper_body.starts_with(kw) {
+                if body.len() < kw.len() || !body[..kw.len()].eq_ignore_ascii_case(kw) {
                     continue;
+                }
+                if body.len() > kw.len() {
+                    let next = body.as_bytes()[kw.len()];
+                    if next.is_ascii_alphanumeric() || next == b'_' {
+                        continue;
+                    }
                 }
                 let actual_kw = &body[..kw.len()];
                 let after_kw = &body[kw.len()..];
@@ -119,6 +124,39 @@ mod tests {
                 require_colon: false,
             })
             .expect_no_offenses("# TODO make better\n");
+    }
+
+    #[test]
+    fn does_not_flag_keyword_embedded_in_word() {
+        test::<CommentAnnotation>()
+            .with_options(&CommentAnnotationOptions {
+                require_colon: true,
+            })
+            .expect_no_offenses("# TODO_LIST is a constant\n");
+    }
+
+    #[test]
+    fn flags_lowercase_keyword() {
+        test::<CommentAnnotation>()
+            .with_options(&CommentAnnotationOptions {
+                require_colon: true,
+            })
+            .expect_offense(indoc! {"
+                # todo: something
+                ^^^^^^^^^^^^^^^^^ Annotation keywords like `TODO` should be all upper case, followed by a colon, and a space.
+            "});
+    }
+
+    #[test]
+    fn flags_keyword_without_note() {
+        test::<CommentAnnotation>()
+            .with_options(&CommentAnnotationOptions {
+                require_colon: true,
+            })
+            .expect_offense(indoc! {"
+                # TODO
+                ^^^^^^ Annotation keywords like `TODO` should be all upper case, followed by a colon, and a space.
+            "});
     }
 }
 murphy_plugin_api::submit_cop!(CommentAnnotation);
