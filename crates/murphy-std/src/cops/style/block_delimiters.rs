@@ -207,9 +207,6 @@ fn is_proper_block_style(node: NodeId, opts: &Options, cx: &Cx<'_>) -> bool {
 
     match opts.enforced_style {
         EnforcedStyle::LineCountBased => {
-            if multiline && uses_braces && cx.is_chained(node) {
-                return true;
-            }
             // Single-line uses braces; multi-line uses do/end.
             // XOR: multiline and uses_braces are opposite when proper.
             multiline ^ uses_braces
@@ -502,9 +499,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_multiline_brace_block_when_chained() {
-        test::<BlockDelimiters>().expect_no_offenses(indoc! {r#"
+    fn flags_multiline_brace_block_when_chained_for_line_count_based() {
+        test::<BlockDelimiters>().expect_offense(indoc! {r#"
             text.scan(MENTION_RE).map { |match|
+                                      ^ Avoid using `{...}` for multi-line blocks.
               match.first.split('@', 2)
             }.uniq
         "#});

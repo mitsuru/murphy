@@ -319,6 +319,117 @@ mod tests {
             "});
     }
 
+    #[test]
+    fn comma_style_flags_missing_comma_when_each_item_on_own_line() {
+        test::<TrailingCommaInArrayLiteral>()
+            .with_options(&TrailingCommaInArrayLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::Comma,
+            })
+            .expect_offense(indoc! {r#"
+                x = [
+                  1,
+                  2
+                   ^ Put a comma after the last item of a multiline array.
+                ]
+            "#});
+    }
+
+    #[test]
+    fn comma_style_corrects_adds_trailing_comma() {
+        test::<TrailingCommaInArrayLiteral>()
+            .with_options(&TrailingCommaInArrayLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::Comma,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [
+                      1,
+                      2
+                       ^ Put a comma after the last item of a multiline array.
+                    ]
+                "#},
+                indoc! {r#"
+                    x = [
+                      1,
+                      2,
+                    ]
+                "#},
+            );
+    }
+
+    #[test]
+    fn consistent_comma_style_flags_missing_trailing_comma_multiline() {
+        test::<TrailingCommaInArrayLiteral>()
+            .with_options(&TrailingCommaInArrayLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::ConsistentComma,
+            })
+            .expect_offense(indoc! {r#"
+                x = [
+                  1, 2,
+                  3
+                   ^ Put a comma after the last item of a multiline array.
+                ]
+            "#});
+    }
+
+    #[test]
+    fn consistent_comma_style_corrects_adds_trailing_comma() {
+        test::<TrailingCommaInArrayLiteral>()
+            .with_options(&TrailingCommaInArrayLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::ConsistentComma,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [
+                      1, 2,
+                      3
+                       ^ Put a comma after the last item of a multiline array.
+                    ]
+                "#},
+                indoc! {r#"
+                    x = [
+                      1, 2,
+                      3,
+                    ]
+                "#},
+            );
+    }
+
+    #[test]
+    fn diff_comma_style_flags_missing_comma_when_last_item_precedes_newline() {
+        test::<TrailingCommaInArrayLiteral>()
+            .with_options(&TrailingCommaInArrayLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::DiffComma,
+            })
+            .expect_offense(indoc! {r#"
+                x = [1,
+                     2
+                      ^ Put a comma after the last item of a multiline array.
+                ]
+            "#});
+    }
+
+    #[test]
+    fn diff_comma_style_corrects_adds_trailing_comma() {
+        test::<TrailingCommaInArrayLiteral>()
+            .with_options(&TrailingCommaInArrayLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::DiffComma,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    x = [1,
+                         2
+                          ^ Put a comma after the last item of a multiline array.
+                    ]
+                "#},
+                indoc! {r#"
+                    x = [1,
+                         2,
+                    ]
+                "#},
+            );
+    }
+
     // --- offense: single-line trailing comma ---
 
     #[test]
