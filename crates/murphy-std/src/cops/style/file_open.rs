@@ -52,8 +52,15 @@ impl FileOpen {
 }
 
 fn has_block(node: NodeId, cx: &Cx<'_>) -> bool {
+    let parent = cx.parent(node);
+    let Some(parent_id) = parent.get() else {
+        return false;
+    };
+    if let NodeKind::Block { call, .. } = cx.kind(parent_id) {
+        return *call == node;
+    }
     cx.children(node).iter().any(|&child| {
-        matches!(cx.kind(child), NodeKind::BlockPass(_) | NodeKind::Block { .. })
+        matches!(cx.kind(child), NodeKind::BlockPass(_))
     })
 }
 

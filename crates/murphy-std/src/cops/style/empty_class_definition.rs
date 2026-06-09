@@ -71,12 +71,11 @@ impl EmptyClassDefinition {
             return;
         }
         let arg_list = cx.list(args);
-        if arg_list.len() != 1 {
-            return;
-        }
-        let first_arg = arg_list[0];
-        if !matches!(cx.kind(first_arg), NodeKind::Const { .. }) {
-            return;
+        if !arg_list.is_empty() {
+            let first_arg = arg_list[0];
+            if !matches!(cx.kind(first_arg), NodeKind::Const { .. }) {
+                return;
+            }
         }
         cx.emit_offense(cx.range(node), MSG_CLASS_KEYWORD, None);
     }
