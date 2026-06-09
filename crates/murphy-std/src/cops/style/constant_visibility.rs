@@ -80,7 +80,32 @@ fn is_module_assignment(node: NodeId, cx: &Cx<'_>) -> bool {
     let Some(val_id) = value.get() else {
         return false;
     };
-    matches!(cx.kind(val_id), NodeKind::Send { .. })
+    let val_id = unwrap_begin(val_id, cx);
+    let NodeKind::Send { receiver, method, .. } = *cx.kind(val_id) else {
+        return false;
+    };
+    if cx.symbol_str(method) != "new" {
+        return false;
+    }
+    let Some(recv_id) = receiver.get() else {
+        return false;
+    };
+    let recv_id = unwrap_begin(recv_id, cx);
+    let NodeKind::Const { name, .. } = *cx.kind(recv_id) else {
+        return false;
+    };
+    matches!(cx.symbol_str(name), "Struct" | "Class" | "Module")
+}
+
+fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
+    while let NodeKind::Begin(children) = cx.kind(node) {
+        let child_list = cx.list(*children);
+        if child_list.len() != 1 {
+            break;
+        }
+        node = child_list[0];
+    }
+    node
 }
 
 fn has_visibility_declaration(name: &str, parent: NodeId, cx: &Cx<'_>) -> bool {
@@ -147,6 +172,18 @@ mod tests {
         test::<ConstantVisibility>()
             .with_options(&ConstantVisibilityOptions { ignore_modules: true })
             .expect_no_offenses("class Foo\n  MyStruct = Struct.new(:x)\nend\n");
+    }
+
+    #[test]
+    fn ignore_modules_enabled_still_flags_regular_send_assignment() {
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_offense(indoc! {"
+                class Foo
+                  BAR = build_value
+                  ^^^^^^^^^^^^^^^^^ Explicitly make `BAR` public or private using either `#public_constant` or `#private_constant`.
+                end
+            "});
     }
 }
 murphy_plugin_api::submit_cop!(ConstantVisibility);

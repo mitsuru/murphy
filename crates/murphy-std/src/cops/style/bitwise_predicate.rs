@@ -41,17 +41,9 @@ impl BitwisePredicate {
         let Some(recv_id) = receiver.get() else {
             return;
         };
-        let begin_children = match cx.kind(recv_id) {
-            NodeKind::Begin(children) => *children,
-            _ => return,
-        };
-        let child_list = cx.list(begin_children);
-        // Require exactly one expression: `(x & flags)`.
-        // Skip multi-expression parentheses: `(x & flags; y)`.
-        if child_list.len() != 1 {
+        let Some(inner_send) = unwrap_parenthesized(recv_id, cx) else {
             return;
-        }
-        let inner_send = child_list[0];
+        };
         let NodeKind::Send { receiver: bit_recv, method: bit_op, args: bit_args } = *cx.kind(inner_send) else {
             return;
         };
@@ -109,6 +101,19 @@ impl BitwisePredicate {
     }
 }
 
+fn unwrap_parenthesized(mut node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    let mut unwrapped = false;
+    while let NodeKind::Begin(children) = cx.kind(node) {
+        let child_list = cx.list(*children);
+        if child_list.len() != 1 {
+            return None;
+        }
+        node = child_list[0];
+        unwrapped = true;
+    }
+    unwrapped.then_some(node)
+}
+
 #[cfg(test)]
 mod tests {
     use super::BitwisePredicate;
@@ -120,6 +125,17 @@ mod tests {
             indoc! {"
                 (variable & flags).positive?
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use a bitwise predicate method instead.
+            "},
+            "(variable).anybits?(flags)\n",
+        );
+    }
+
+    #[test]
+    fn flags_nested_parenthesized_bit_and() {
+        test::<BitwisePredicate>().expect_correction(
+            indoc! {"
+                ((variable & flags)).positive?
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use a bitwise predicate method instead.
             "},
             "(variable).anybits?(flags)\n",
         );

@@ -71,14 +71,8 @@ impl CombinableLoops {
         }
         // Compare receiver expressions by source text (separate node instances
         // of the same expression have distinct NodeIds).
-        let this_recv_src = match this_recv.get() {
-            Some(r) => cx.raw_source(cx.range(r)),
-            None => return,
-        };
-        let prev_recv_src = match prev_recv.get() {
-            Some(r) => cx.raw_source(cx.range(r)),
-            None => return,
-        };
+        let this_recv_src = this_recv.get().map(|r| cx.raw_source(cx.range(r)));
+        let prev_recv_src = prev_recv.get().map(|r| cx.raw_source(cx.range(r)));
         if this_recv_src != prev_recv_src {
             return;
         }
@@ -110,6 +104,22 @@ mod tests {
 
               items.each do |item|
               ^^^^^^^^^^^^^^^^^^^^ Combine this loop with the previous loop.
+                do_something_else(item)
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_combinable_implicit_receiver_each_blocks() {
+        test::<CombinableLoops>().expect_offense(indoc! {"
+            def method
+              each do |item|
+                do_something(item)
+              end
+
+              each do |item|
+              ^^^^^^^^^^^^^^ Combine this loop with the previous loop.
                 do_something_else(item)
               end
             end

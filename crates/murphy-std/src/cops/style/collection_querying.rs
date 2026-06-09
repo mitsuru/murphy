@@ -37,6 +37,7 @@ impl CollectionQuerying {
         let Some(recv_id) = receiver.get() else {
             return;
         };
+        let recv_id = unwrap_begin(recv_id, cx);
         let NodeKind::Send { receiver: count_recv, method: count_method, args: count_args } = *cx.kind(recv_id) else {
             return;
         };
@@ -84,6 +85,17 @@ impl CollectionQuerying {
     }
 }
 
+fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
+    while let NodeKind::Begin(children) = cx.kind(node) {
+        let child_list = cx.list(*children);
+        if child_list.len() != 1 {
+            break;
+        }
+        node = child_list[0];
+    }
+    node
+}
+
 #[cfg(test)]
 mod tests {
     use super::CollectionQuerying;
@@ -94,6 +106,14 @@ mod tests {
         test::<CollectionQuerying>().expect_offense(indoc! {"
             x.count.positive?
             ^^^^^^^^^^^^^^^^^ Use `any?` instead of `count` comparison.
+        "});
+    }
+
+    #[test]
+    fn flags_parenthesized_count_positive() {
+        test::<CollectionQuerying>().expect_offense(indoc! {"
+            (x.count).positive?
+            ^^^^^^^^^^^^^^^^^^^ Use `any?` instead of `count` comparison.
         "});
     }
 

@@ -37,7 +37,8 @@ impl MapJoin {
         let Some(recv_id) = receiver.get() else {
             return;
         };
-        let NodeKind::Send { method, args: map_args, .. } = *cx.kind(recv_id) else {
+        let map_call_id = unwrap_begin(recv_id, cx);
+        let NodeKind::Send { method, args: map_args, .. } = *cx.kind(map_call_id) else {
             return;
         };
         let method_str = cx.symbol_str(method);
@@ -63,8 +64,8 @@ impl MapJoin {
         if sym_src != ":to_s" {
             return;
         }
-        let map_range = cx.range(recv_id);
-        let recv_of_map = match cx.kind(recv_id) {
+        let map_range = cx.range(map_call_id);
+        let recv_of_map = match cx.kind(map_call_id) {
             NodeKind::Send { receiver: r, .. } => r,
             _ => return,
         };
@@ -84,10 +85,21 @@ impl MapJoin {
 
         let map_recv_src = cx.raw_source(cx.range(map_recv_id));
         let node_src = cx.raw_source(cx.range(node));
-        let dot_pos = map_range.end - cx.range(node).start;
+        let dot_pos = cx.range(recv_id).end - cx.range(node).start;
         let after_dot = &node_src[dot_pos as usize..];
         cx.emit_edit(cx.range(node), &format!("{}{}", map_recv_src, after_dot));
     }
+}
+
+fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
+    while let NodeKind::Begin(children) = cx.kind(node) {
+        let child_list = cx.list(*children);
+        if child_list.len() != 1 {
+            break;
+        }
+        node = child_list[0];
+    }
+    node
 }
 
 #[cfg(test)]
@@ -101,6 +113,17 @@ mod tests {
             indoc! {"
                 array.map(&:to_s).join(', ')
                 ^^^ Remove redundant `map(&:to_s)` before `join`.
+            "},
+            "array.join(', ')\n",
+        );
+    }
+
+    #[test]
+    fn flags_parenthesized_map_to_s_join() {
+        test::<MapJoin>().expect_correction(
+            indoc! {"
+                (array.map(&:to_s)).join(', ')
+                 ^^^ Remove redundant `map(&:to_s)` before `join`.
             "},
             "array.join(', ')\n",
         );

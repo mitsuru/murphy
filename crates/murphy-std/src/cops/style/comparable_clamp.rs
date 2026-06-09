@@ -48,6 +48,7 @@ impl ComparableClamp {
         let Some(recv_id) = receiver.get() else {
             return;
         };
+        let recv_id = unwrap_begin(recv_id, cx);
         let NodeKind::Array(outer_elements) = *cx.kind(recv_id) else {
             return;
         };
@@ -85,6 +86,7 @@ impl ComparableClamp {
         let Some(inner_recv_id) = inner_recv.get() else {
             return;
         };
+        let inner_recv_id = unwrap_begin(inner_recv_id, cx);
         let NodeKind::Array(inner_elements) = *cx.kind(inner_recv_id) else {
             return;
         };
@@ -110,14 +112,45 @@ impl ComparableClamp {
     }
 }
 
+fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
+    while let NodeKind::Begin(children) = cx.kind(node) {
+        let child_list = cx.list(*children);
+        if child_list.len() != 1 {
+            break;
+        }
+        node = child_list[0];
+    }
+    node
+}
+
 fn source_based_clamp_replacement(src: &str) -> Option<String> {
+    if let Some(inner) = src.strip_prefix('(').and_then(|s| s.strip_suffix(").min")) {
+        if let Some(replacement) = source_based_clamp_replacement(&format!("{}.min", inner)) {
+            return Some(replacement);
+        }
+    }
+    if let Some(inner) = src.strip_prefix('(').and_then(|s| s.strip_suffix(").max")) {
+        if let Some(replacement) = source_based_clamp_replacement(&format!("{}.max", inner)) {
+            return Some(replacement);
+        }
+    }
     if let Some(inner) = src.strip_prefix("[[").and_then(|s| s.strip_suffix("].min")) {
         let (value_and_low, high) = inner.split_once("].max, ")?;
         let (value, low) = value_and_low.split_once(", ")?;
         return Some(format!("({}).clamp({}, {})", value, low, high));
     }
+    if let Some(inner) = src.strip_prefix("[([").and_then(|s| s.strip_suffix("].min")) {
+        let (value_and_low, high) = inner.split_once("]).max, ")?;
+        let (value, low) = value_and_low.split_once(", ")?;
+        return Some(format!("({}).clamp({}, {})", value, low, high));
+    }
     if let Some(inner) = src.strip_prefix("[[").and_then(|s| s.strip_suffix("].max")) {
         let (value_and_high, low) = inner.split_once("].min, ")?;
+        let (value, high) = value_and_high.split_once(", ")?;
+        return Some(format!("({}).clamp({}, {})", value, low, high));
+    }
+    if let Some(inner) = src.strip_prefix("[([").and_then(|s| s.strip_suffix("].max")) {
+        let (value_and_high, low) = inner.split_once("]).min, ")?;
         let (value, high) = value_and_high.split_once(", ")?;
         return Some(format!("({}).clamp({}, {})", value, low, high));
     }
@@ -135,6 +168,28 @@ mod tests {
             indoc! {"
                 [[x, low].max, high].min
                 ^^^^^^^^^^^^^^^^^^^^^^^^ Use `Comparable#clamp` instead.
+            "},
+            "(x).clamp(low, high)\n",
+        );
+    }
+
+    #[test]
+    fn flags_parenthesized_outer_array() {
+        test::<ComparableClamp>().expect_correction(
+            indoc! {"
+                ([[x, low].max, high]).min
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `Comparable#clamp` instead.
+            "},
+            "(x).clamp(low, high)\n",
+        );
+    }
+
+    #[test]
+    fn flags_parenthesized_inner_array() {
+        test::<ComparableClamp>().expect_correction(
+            indoc! {"
+                [([x, low]).max, high].min
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `Comparable#clamp` instead.
             "},
             "(x).clamp(low, high)\n",
         );

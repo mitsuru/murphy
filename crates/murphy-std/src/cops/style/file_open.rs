@@ -36,6 +36,7 @@ impl FileOpen {
         let Some(recv_id) = receiver.get() else {
             return;
         };
+        let recv_id = unwrap_begin(recv_id, cx);
         let NodeKind::Const { name, .. } = *cx.kind(recv_id) else {
             return;
         };
@@ -51,6 +52,17 @@ impl FileOpen {
         // `.read` won't re-trigger it.
         cx.emit_offense(cx.range(node), MSG, None);
     }
+}
+
+fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
+    while let NodeKind::Begin(children) = cx.kind(node) {
+        let child_list = cx.list(*children);
+        if child_list.len() != 1 {
+            break;
+        }
+        node = child_list[0];
+    }
+    node
 }
 
 fn has_block(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -76,6 +88,14 @@ mod tests {
         test::<FileOpen>().expect_offense(indoc! {"
             f = File.open('file')
                 ^^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+        "});
+    }
+
+    #[test]
+    fn flags_parenthesized_file_receiver() {
+        test::<FileOpen>().expect_offense(indoc! {"
+            (File).open('file')
+            ^^^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
         "});
     }
 

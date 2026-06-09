@@ -38,12 +38,12 @@ impl ConcatArrayLiterals {
         if arg_list.is_empty() {
             return;
         }
-        let all_arrays = arg_list.iter().all(|&a| matches!(cx.kind(a), NodeKind::Array(_)));
+        let all_arrays = arg_list.iter().all(|&a| matches!(cx.kind(unwrap_begin(a, cx)), NodeKind::Array(_)));
         if !all_arrays {
             return;
         }
         let empty_array = arg_list.iter().any(|&a| {
-            if let NodeKind::Array(elements) = cx.kind(a) {
+            if let NodeKind::Array(elements) = cx.kind(unwrap_begin(a, cx)) {
                 cx.list(*elements).is_empty()
             } else {
                 false
@@ -70,7 +70,7 @@ fn build_push_call(node: NodeId, cx: &Cx<'_>) -> String {
         None => String::new(),
     };
     let push_args: Vec<String> = cx.list(args).iter().map(|&a| {
-        let NodeKind::Array(elements) = *cx.kind(a) else {
+        let NodeKind::Array(elements) = *cx.kind(unwrap_begin(a, cx)) else {
             return cx.raw_source(cx.range(a)).to_string();
         };
         let elems: Vec<String> = cx.list(elements).iter()
@@ -84,6 +84,17 @@ fn build_push_call(node: NodeId, cx: &Cx<'_>) -> String {
     format!("{}.push({})", recv_src, push_args.join(", "))
 }
 
+fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
+    while let NodeKind::Begin(children) = cx.kind(node) {
+        let child_list = cx.list(*children);
+        if child_list.len() != 1 {
+            break;
+        }
+        node = child_list[0];
+    }
+    node
+}
+
 #[cfg(test)]
 mod tests {
     use super::ConcatArrayLiterals;
@@ -95,6 +106,17 @@ mod tests {
             indoc! {"
                 list.concat([foo])
                 ^^^^^^^^^^^^^^^^^^ Use `push` with elements as arguments instead of `concat` with an array literal.
+            "},
+            "list.push(foo)\n",
+        );
+    }
+
+    #[test]
+    fn flags_parenthesized_array_arg() {
+        test::<ConcatArrayLiterals>().expect_correction(
+            indoc! {"
+                list.concat(([foo]))
+                ^^^^^^^^^^^^^^^^^^^^ Use `push` with elements as arguments instead of `concat` with an array literal.
             "},
             "list.push(foo)\n",
         );

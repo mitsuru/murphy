@@ -60,6 +60,7 @@ impl EmptyClassDefinition {
         let Some(val_id) = value.get() else {
             return;
         };
+        let val_id = unwrap_begin(val_id, cx);
         let NodeKind::Send { receiver, method, args } = *cx.kind(val_id) else {
             return;
         };
@@ -86,6 +87,17 @@ impl EmptyClassDefinition {
     }
 }
 
+fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
+    while let NodeKind::Begin(children) = cx.kind(node) {
+        let child_list = cx.list(*children);
+        if child_list.len() != 1 {
+            break;
+        }
+        node = child_list[0];
+    }
+    node
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EmptyClassDefinition, EmptyClassDefinitionOptions, EnforcedStyle};
@@ -96,6 +108,14 @@ mod tests {
         test::<EmptyClassDefinition>().expect_offense(indoc! {"
             FooError = Class.new(StandardError)
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the `class` keyword instead of `Class.new` to define an empty class.
+        "});
+    }
+
+    #[test]
+    fn flags_parenthesized_class_new_assignment() {
+        test::<EmptyClassDefinition>().expect_offense(indoc! {"
+            FooError = (Class.new(StandardError))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the `class` keyword instead of `Class.new` to define an empty class.
         "});
     }
 

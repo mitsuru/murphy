@@ -115,13 +115,14 @@ fn first_line_range(range: Range, source: &str) -> Range {
 }
 
 fn assignment_lhs(node: NodeId, cx: &Cx<'_>) -> Option<String> {
-    let real = match cx.kind(node) {
-        NodeKind::Begin(children) => {
-            let list = cx.list(*children);
-            if list.len() == 1 { list[0] } else { return None }
+    let mut real = node;
+    while let NodeKind::Begin(children) = cx.kind(real) {
+        let list = cx.list(*children);
+        if list.len() != 1 {
+            return None;
         }
-        _ => node,
-    };
+        real = list[0];
+    }
     match cx.kind(real) {
         NodeKind::Lvasgn { name, .. } => Some(cx.symbol_str(*name).to_string()),
         NodeKind::Ivasgn { name, .. } => Some(cx.symbol_str(*name).to_string()),
@@ -144,6 +145,18 @@ mod tests {
               bar = 1
             else
               bar = 2
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_nested_parenthesized_assignments() {
+        test::<ConditionalAssignment>().expect_offense(indoc! {"
+            if foo
+            ^^^^^^ Use the return of the conditional for variable assignment and comparison.
+              ((bar = 1))
+            else
+              ((bar = 2))
             end
         "});
     }
