@@ -94,8 +94,12 @@ fn post_keyword_range(node: NodeId, search_start: u32, cx: &Cx<'_>) -> Option<Ra
 
 fn line_indent(offset: u32, source: &str) -> &str {
     let offset = offset as usize;
-    let line_start = source[..offset].rfind('\n').map_or(0, |idx| idx + 1);
-    &source[line_start..offset]
+    let line_start = source
+        .as_bytes()
+        .get(..offset)
+        .and_then(|prefix| prefix.iter().rposition(|&b| b == b'\n'))
+        .map_or(0, |idx| idx + 1);
+    source.get(line_start..offset).unwrap_or("")
 }
 
 murphy_plugin_api::submit_cop!(Loop);
@@ -134,5 +138,10 @@ mod tests {
             "#},
             "loop do\n  something\nbreak if test\nend\n",
         );
+    }
+
+    #[test]
+    fn line_indent_accepts_non_char_boundary_offsets() {
+        assert_eq!(super::line_indent(1, "é\n  end"), "");
     }
 }

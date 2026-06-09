@@ -14,6 +14,8 @@
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
+use crate::cops::util::unwrap_parenthesized;
+
 const CONSTRUCTOR_MSG: &str = "Call `super` to initialize state of the parent class.";
 const CALLBACK_MSG: &str = "Call `super` to invoke callback defined in the parent class.";
 const STATELESS_CLASSES: &[&str] = &["BasicObject", "Object"];
@@ -102,7 +104,7 @@ fn class_new_parent(block: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     if cx.symbol_str(method) != "new" {
         return None;
     }
-    let receiver = receiver.get()?;
+    let receiver = unwrap_parenthesized(receiver.get()?, cx);
     if !matches!(cx.const_name(receiver).as_deref(), Some("Class")) {
         return None;
     }
@@ -110,6 +112,7 @@ fn class_new_parent(block: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
 }
 
 fn allowed_class(id: NodeId, cx: &Cx<'_>) -> bool {
+    let id = unwrap_parenthesized(id, cx);
     let Some(name) = cx.const_name(id) else { return false; };
     if STATELESS_CLASSES.contains(&name.as_str()) {
         return true;
@@ -132,8 +135,11 @@ fn inside_class_module_or_sclass(node: NodeId, cx: &Cx<'_>) -> bool {
 fn first_line_range(node: NodeId, cx: &Cx<'_>) -> Range {
     let range = cx.range(node);
     let start = range.start as usize;
-    let end = cx.source()[start..]
-        .find('\n')
+    let end = cx
+        .source()
+        .as_bytes()
+        .get(start..)
+        .and_then(|suffix| suffix.iter().position(|&b| b == b'\n'))
         .map_or(range.end as usize, |idx| start + idx);
     Range {
         start: range.start,
@@ -186,6 +192,37 @@ mod tests {
             Class.new(Parent) do
               def initialize
               ^^^^^^^^^^^^^^ Call `super` to initialize state of the parent class.
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_class_new_with_parenthesized_receiver() {
+        test::<MissingSuper>().expect_offense(indoc! {r#"
+            (Class).new(Parent) do
+              def initialize
+              ^^^^^^^^^^^^^^ Call `super` to initialize state of the parent class.
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_parenthesized_allowed_parent_class() {
+        test::<MissingSuper>().expect_no_offenses(indoc! {r#"
+            class Child < (Object)
+              def initialize
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_class_new_with_parenthesized_allowed_parent_class() {
+        test::<MissingSuper>().expect_no_offenses(indoc! {r#"
+            Class.new((Object)) do
+              def initialize
               end
             end
         "#});

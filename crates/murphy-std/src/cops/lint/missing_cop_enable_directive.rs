@@ -82,7 +82,14 @@ fn acceptable_range(start: u32, end: u32, max_range: i64, source: &str) -> bool 
 }
 
 fn line_number(offset: u32, source: &str) -> u32 {
-    source[..offset as usize].bytes().filter(|&b| b == b'\n').count() as u32
+    let end = (offset as usize).min(source.len());
+    source
+        .as_bytes()
+        .get(..end)
+        .unwrap_or_default()
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count() as u32
 }
 
 murphy_plugin_api::submit_cop!(MissingCopEnableDirective);
@@ -131,5 +138,10 @@ mod tests {
                 # Some other code
                 # rubocop:enable Layout/SpaceAroundOperators
             "#});
+    }
+
+    #[test]
+    fn line_number_accepts_non_char_boundary_offsets() {
+        assert_eq!(super::line_number(1, "é\n# rubocop:disable Lint/Foo"), 0);
     }
 }
