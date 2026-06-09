@@ -46,20 +46,21 @@ impl FileOpen {
             return;
         }
         // Flag standalone, assigned, or chained File.open (blockless).
-        // Matching RuboCop: flags unless the value is passed to a receiver
-        // (i.e. used as an argument which the caller manages).
-        let is_standalone_or_assigned_or_chained = {
+        // Matching RuboCop: flags unless the value is passed to an API
+        // (i.e. the caller manages the lifecycle itself).
+        let emit = {
             let parent = cx.parent(node);
             match parent.get() {
                 Some(p) => match cx.kind(p) {
                     NodeKind::Lvasgn { .. } | NodeKind::Ivasgn { .. }
                     | NodeKind::Gvasgn { .. } | NodeKind::Cvasgn { .. } => true,
+                    NodeKind::Begin(_) => true,
                     _ => node_used_as_receiver(node, cx),
                 },
                 None => true,
             }
         };
-        if is_standalone_or_assigned_or_chained {
+        if emit {
             cx.emit_offense(cx.range(node), MSG, None);
         }
     }
