@@ -14,7 +14,7 @@
 //!   `for` loops not yet handled.
 //! ```
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
 
 const MSG: &str = "Combine this loop with the previous loop.";
 
@@ -82,8 +82,17 @@ impl CombinableLoops {
         if this_recv_src != prev_recv_src {
             return;
         }
-        cx.emit_offense(cx.range(node), MSG, None);
+        cx.emit_offense(first_line_range(cx.range(node), cx.source()), MSG, None);
     }
+}
+
+fn first_line_range(range: Range, source: &str) -> Range {
+    let bytes = source.as_bytes();
+    let mut end = range.start as usize;
+    while end < range.end as usize && end < bytes.len() && bytes[end] != b'\n' {
+        end += 1;
+    }
+    Range { start: range.start, end: end as u32 }
 }
 
 #[cfg(test)]
@@ -100,7 +109,7 @@ mod tests {
               end
 
               items.each do |item|
-              ^^^^^^^^^^^^^^^^^^^ Combine this loop with the previous loop.
+              ^^^^^^^^^^^^^^^^^^^^ Combine this loop with the previous loop.
                 do_something_else(item)
               end
             end

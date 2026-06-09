@@ -15,7 +15,7 @@
 //!   Autocorrect is a v1 gap.
 //! ```
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, Range, cop};
 
 #[derive(Default)]
 pub struct CommandLiteral;
@@ -59,6 +59,7 @@ impl CommandLiteral {
         let node_range = cx.range(node);
         let src = cx.raw_source(node_range);
         let is_backtick = src.starts_with('`');
+        let offense_range = command_literal_range(node_range, cx.source());
         let body = if is_backtick {
             &src[1..src.len() - 1]
         } else {
@@ -74,31 +75,39 @@ impl CommandLiteral {
             EnforcedStyle::Backticks => {
                 if is_backtick {
                     if !opts.allow_inner_backticks && has_backtick {
-                        cx.emit_offense(node_range, "Use `%x` around command string.", None);
+                        cx.emit_offense(offense_range, "Use `%x` around command string.", None);
                     }
                 } else {
-                    cx.emit_offense(node_range, "Use backticks around command string.", None);
+                    cx.emit_offense(offense_range, "Use backticks around command string.", None);
                 }
             }
             EnforcedStyle::Mixed => {
                 if is_backtick {
                     let is_multiline = src.contains('\n');
                     if is_multiline || has_backtick {
-                        cx.emit_offense(node_range, "Use `%x` around command string.", None);
+                        cx.emit_offense(offense_range, "Use `%x` around command string.", None);
                     }
                 } else {
                     let is_single_line = !src.contains('\n');
                     if is_single_line && !has_backtick {
-                        cx.emit_offense(node_range, "Use backticks around command string.", None);
+                        cx.emit_offense(offense_range, "Use backticks around command string.", None);
                     }
                 }
             }
             EnforcedStyle::PercentX => {
                 if is_backtick {
-                    cx.emit_offense(node_range, "Use `%x` around command string.", None);
+                    cx.emit_offense(offense_range, "Use `%x` around command string.", None);
                 }
             }
         }
+    }
+}
+
+fn command_literal_range(range: Range, source: &str) -> Range {
+    if range.start > 0 && source.as_bytes().get(range.start as usize - 1) == Some(&b'%') {
+        Range { start: range.start - 1, end: range.end }
+    } else {
+        range
     }
 }
 
@@ -111,7 +120,7 @@ mod tests {
     fn backticks_flags_percent_x() {
         test::<CommandLiteral>().expect_offense(indoc! {"
             folders = %x(find . -type d)
-                     ^^^^^^^^^^^^^^^^^^^^ Use backticks around command string.
+                      ^^^^^^^^^^^^^^^^^^ Use backticks around command string.
         "});
     }
 

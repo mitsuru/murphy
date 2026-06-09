@@ -15,7 +15,7 @@
 //!   Autocorrect is a v1 gap (report-only).
 //! ```
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
 const MSG: &str = "Use the return of the conditional for variable assignment and comparison.";
 
@@ -70,7 +70,7 @@ impl ConditionalAssignment {
         if tl != el {
             return;
         }
-        cx.emit_offense(cx.range(node), MSG, None);
+        cx.emit_offense(first_line_range(cx.range(node), cx.source()), MSG, None);
     }
 
     #[on_node(kind = "case")]
@@ -100,9 +100,18 @@ impl ConditionalAssignment {
                 .unwrap_or(false)
         });
         if all_same {
-            cx.emit_offense(cx.range(node), MSG, None);
+            cx.emit_offense(first_line_range(cx.range(node), cx.source()), MSG, None);
         }
     }
+}
+
+fn first_line_range(range: Range, source: &str) -> Range {
+    let bytes = source.as_bytes();
+    let mut end = range.start as usize;
+    while end < range.end as usize && end < bytes.len() && bytes[end] != b'\n' {
+        end += 1;
+    }
+    Range { start: range.start, end: end as u32 }
 }
 
 fn assignment_lhs(node: NodeId, cx: &Cx<'_>) -> Option<String> {
@@ -124,13 +133,14 @@ fn assignment_lhs(node: NodeId, cx: &Cx<'_>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConditionalAssignment, ConditionalAssignmentOptions, EnforcedStyle};
+    use super::ConditionalAssignment;
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
     fn flags_if_else_same_assignment() {
         test::<ConditionalAssignment>().expect_offense(indoc! {"
             if foo
+            ^^^^^^ Use the return of the conditional for variable assignment and comparison.
               bar = 1
             else
               bar = 2
@@ -156,6 +166,7 @@ mod tests {
     fn flags_case_when_same_assignment() {
         test::<ConditionalAssignment>().expect_offense(indoc! {"
             case foo
+            ^^^^^^^^ Use the return of the conditional for variable assignment and comparison.
             when 'a'
               bar = 1
             else

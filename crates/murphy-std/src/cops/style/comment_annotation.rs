@@ -15,7 +15,7 @@
 //!   Autocorrect is a v1 gap.
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, cop};
+use murphy_plugin_api::{CopOptions, Cx, Range, cop};
 
 const MSG_COLON: &str = "should be all upper case, followed by a colon, and a space.";
 const MSG_SPACE: &str = "should be all upper case, followed by a space.";
@@ -72,11 +72,20 @@ impl CommentAnnotation {
                     }
                 }
                 let msg = if opts.require_colon { MSG_COLON } else { MSG_SPACE };
-                cx.emit_offense(comment.range, &format!("Annotation keywords like `{}` {}", kw, msg), None);
+                cx.emit_offense(trim_line_end(comment.range, cx.source()), &format!("Annotation keywords like `{}` {}", kw, msg), None);
                 break;
             }
         }
     }
+}
+
+fn trim_line_end(range: Range, source: &str) -> Range {
+    let mut end = range.end as usize;
+    let bytes = source.as_bytes();
+    while end > range.start as usize && matches!(bytes.get(end - 1), Some(b'\n' | b'\r')) {
+        end -= 1;
+    }
+    Range { start: range.start, end: end as u32 }
 }
 
 #[cfg(test)]
@@ -92,7 +101,7 @@ mod tests {
             })
             .expect_offense(indoc! {"
                 # TODO make better
-                ^^^^^^^^^^^^^^^^^ Annotation keywords like `TODO` should be all upper case, followed by a colon, and a space.
+                ^^^^^^^^^^^^^^^^^^ Annotation keywords like `TODO` should be all upper case, followed by a colon, and a space.
             "});
     }
 
@@ -113,7 +122,7 @@ mod tests {
             })
             .expect_offense(indoc! {"
                 # TODO: make better
-                ^^^^^^^^^^^^^^^^^^ Annotation keywords like `TODO` should be all upper case, followed by a space.
+                ^^^^^^^^^^^^^^^^^^^ Annotation keywords like `TODO` should be all upper case, followed by a space.
             "});
     }
 

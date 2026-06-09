@@ -125,7 +125,7 @@ mod tests {
         test::<ConstantVisibility>().expect_offense(indoc! {"
             class Foo
               BAR = 42
-              ^^^^^^^ Explicitly make `BAR` public or private using either `#public_constant` or `#private_constant`.
+              ^^^^^^^^ Explicitly make `BAR` public or private using either `#public_constant` or `#private_constant`.
             end
         "});
     }

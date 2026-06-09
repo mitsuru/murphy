@@ -28,6 +28,9 @@ pub struct CombinableDefined;
 impl CombinableDefined {
     #[on_node(kind = "and")]
     fn check_and(&self, node: NodeId, cx: &Cx<'_>) {
+        if cx.parent(node).get().is_some_and(|parent| matches!(cx.kind(parent), NodeKind::And { .. })) {
+            return;
+        }
         let mut defined_nodes = Vec::new();
         let mut work = vec![node];
         while let Some(current) = work.pop() {

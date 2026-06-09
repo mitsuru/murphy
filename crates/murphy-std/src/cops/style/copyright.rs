@@ -13,7 +13,7 @@
 //!   AutocorrectNotice is a v1 gap.
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, cop};
+use murphy_plugin_api::{CopOptions, Cx, Range, cop};
 
 #[derive(Default)]
 pub struct Copyright;
@@ -50,7 +50,7 @@ impl Copyright {
         });
         if !found {
             cx.emit_offense(
-                murphy_plugin_api::Range { start: 0, end: 0 },
+                first_line_range(source),
                 &format!("Include a copyright notice matching `{}` before any code.", opts.notice),
                 None,
             );
@@ -58,10 +58,15 @@ impl Copyright {
     }
 }
 
+fn first_line_range(source: &str) -> Range {
+    let end = source.find('\n').unwrap_or(source.len());
+    Range { start: 0, end: end as u32 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Copyright, CopyrightOptions};
-    use murphy_plugin_api::test_support::test;
+    use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
     fn flags_missing_copyright() {
@@ -69,7 +74,10 @@ mod tests {
             .with_options(&CopyrightOptions {
                 notice: "Copyright".to_string(),
             })
-            .expect_offense("x = 1\n");
+            .expect_offense(indoc! {"
+                x = 1
+                ^^^^^ Include a copyright notice matching `Copyright` before any code.
+            "});
     }
 
     #[test]

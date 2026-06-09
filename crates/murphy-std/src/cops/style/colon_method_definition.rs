@@ -28,27 +28,27 @@ pub struct ColonMethodDefinition;
     options = murphy_plugin_api::NoOptions
 )]
 impl ColonMethodDefinition {
-    #[on_node(kind = "defs")]
-    fn check_defs(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Defs { receiver, .. } = *cx.kind(node) else {
+    #[on_node(kind = "def")]
+    fn check_def(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Def { receiver, .. } = *cx.kind(node) else {
+            return;
+        };
+        let Some(receiver) = receiver.get() else {
             return;
         };
         // Only flag `def self::foo`, not `def Foo::bar` (constant resolution).
         if !matches!(*cx.kind(receiver), NodeKind::SelfExpr) {
             return;
         }
-        let recv_end = cx.range(receiver).end;
-        // NOTE: Assumes `::` immediately follows receiver with no whitespace.
-        let gap_src = cx.raw_source(Range {
-            start: recv_end,
-            end: recv_end + 2,
-        });
-        if gap_src != "::" {
+        let node_range = cx.range(node);
+        let src = cx.raw_source(node_range);
+        let Some(self_pos) = src.find("self::") else {
             return;
-        }
+        };
+        let colon_start = node_range.start + self_pos as u32 + "self".len() as u32;
         let colon_range = Range {
-            start: recv_end,
-            end: recv_end + 2,
+            start: colon_start,
+            end: colon_start + 2,
         };
         cx.emit_offense(colon_range, MSG, None);
         cx.emit_edit(colon_range, ".");
@@ -64,7 +64,7 @@ mod tests {
     fn flags_colon_method_definition() {
         test::<ColonMethodDefinition>().expect_offense(indoc! {"
             def self::bar
-                   ^^ Do not use `::` for defining class methods.
+                    ^^ Do not use `::` for defining class methods.
             end
         "});
     }
@@ -88,7 +88,7 @@ mod tests {
     fn flags_colon_method_definition_with_args() {
         test::<ColonMethodDefinition>().expect_offense(indoc! {"
             def self::bar(x)
-                   ^^ Do not use `::` for defining class methods.
+                    ^^ Do not use `::` for defining class methods.
             end
         "});
     }
@@ -97,7 +97,7 @@ mod tests {
     fn flags_single_line_colon_method_definition() {
         test::<ColonMethodDefinition>().expect_offense(indoc! {"
             def self::bar; end
-                   ^^ Do not use `::` for defining class methods.
+                    ^^ Do not use `::` for defining class methods.
         "});
     }
 }

@@ -28,6 +28,11 @@ pub struct ComparableClamp;
 impl ComparableClamp {
     #[on_node(kind = "send", methods = ["min", "max"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+        if let Some(preferred) = source_based_clamp_replacement(cx.raw_source(cx.range(node))) {
+            cx.emit_offense(cx.range(node), "Use `Comparable#clamp` instead.", None);
+            cx.emit_edit(cx.range(node), &preferred);
+            return;
+        }
         let NodeKind::Send { receiver, method, args } = *cx.kind(node) else {
             return;
         };
@@ -103,6 +108,20 @@ impl ComparableClamp {
         cx.emit_offense(cx.range(node), "Use `Comparable#clamp` instead.", None);
         cx.emit_edit(cx.range(node), &preferred);
     }
+}
+
+fn source_based_clamp_replacement(src: &str) -> Option<String> {
+    if let Some(inner) = src.strip_prefix("[[").and_then(|s| s.strip_suffix("].min")) {
+        let (value_and_low, high) = inner.split_once("].max, ")?;
+        let (value, low) = value_and_low.split_once(", ")?;
+        return Some(format!("({}).clamp({}, {})", value, low, high));
+    }
+    if let Some(inner) = src.strip_prefix("[[").and_then(|s| s.strip_suffix("].max")) {
+        let (value_and_high, low) = inner.split_once("].min, ")?;
+        let (value, high) = value_and_high.split_once(", ")?;
+        return Some(format!("({}).clamp({}, {})", value, low, high));
+    }
+    None
 }
 
 #[cfg(test)]
