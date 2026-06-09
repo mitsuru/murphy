@@ -15,6 +15,8 @@
 //!   Regexp named captures are represented as MatchWithLvasgn containing value-less
 //!   Lvasgn targets lowered from Prism's MatchWriteNode. The construct is tracked
 //!   via the existing Lvasgn arm in VarSemanticModel.
+//!   Block-closure reads of outer locals are counted as references to the outer
+//!   assignment, matching RuboCop's treatment of closures such as `tap`.
 //! ```
 //!
 //! never read, *or* whose result is overwritten by a sibling write before
@@ -661,6 +663,127 @@ mod tests {
                 x += 1
                 x
             "#});
+    }
+
+    #[test]
+    fn block_closure_read_counts_as_reference_to_outer_assignment() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            first_page = build_page
+
+            presenter.tap do |item|
+              item.first = first_page
+            end
+        "#});
+    }
+
+    #[test]
+    fn block_closure_assignment_to_outer_local_counts_for_later_read() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            backup = nil
+
+            with_lock do
+              backup = create_backup!
+            end
+
+            perform_async(backup.id)
+        "#});
+    }
+
+    #[test]
+    fn keyword_shorthand_counts_as_local_read() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            key = build_key
+            sign!(response, key:, components: %w(@status content-digest))
+        "#});
+    }
+
+    #[test]
+    fn assignment_used_as_if_condition_counts_as_read() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            if (supported_locale = SUPPORTED_LOCALES[locale.to_sym])
+              supported_locale[1]
+            else
+              locale
+            end
+        "#});
+    }
+
+    #[test]
+    fn assignment_read_inside_hash_value_ternary_counts_as_read() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            module Admin::FilterHelper
+              def filter_link_to(text, link_to_params, link_class_params = link_to_params)
+                new_url = filtered_url_for(link_to_params)
+                new_class = filtered_url_for(link_class_params)
+                is_selected = selected?(link_class_params)
+
+                link_to text, new_url, class: filter_link_class(new_class), 'aria-current': (is_selected ? 'true' : nil)
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn class_method_assignment_condition_counts_as_read() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            private_class_method def self.locale_name_for_sorting(locale)
+              if (supported_locale = SUPPORTED_LOCALES[locale.to_sym])
+                ASCIIFolding.new.fold(supported_locale[1]).downcase
+              elsif (regional_locale = REGIONAL_LOCALE_NAMES[locale.to_sym])
+                ASCIIFolding.new.fold(regional_locale).downcase
+              else
+                locale
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn retry_counter_read_in_rescue_condition_counts_as_read() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            retries = 0
+
+            begin
+              connect
+            rescue NetworkError
+              retries += 1
+
+              if retries < MAX_RETRY
+                retry
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn or_assignment_result_used_after_block_counts_as_read() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            error = nil
+
+            accounts.each do |account|
+              follow(account)
+            rescue NotPermitted => e
+              error ||= e
+            end
+
+            raise error if error.present?
+        "#});
+    }
+
+    #[test]
+    fn multiple_assignment_value_read_later_counts_as_read() {
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            _, pending, processed, async_refresh_key, threshold = redis.multi do |pipeline|
+              pipeline.hget(key, 'threshold')
+            end
+
+            async_refresh = AsyncRefresh.new(async_refresh_key) if async_refresh_key.present?
+
+            if pending.zero? || processed >= (threshold || 1.0).to_f * (processed + pending)
+              async_refresh&.finish!
+              cleanup
+            end
+        "#});
     }
 
     #[test]

@@ -88,6 +88,9 @@ fn is_branch_barrier(ast: &Ast, node: NodeId) -> bool {
             | NodeKind::CaseMatch { .. }
             | NodeKind::While { .. }
             | NodeKind::Until { .. }
+            | NodeKind::Block { .. }
+            | NodeKind::Numblock { .. }
+            | NodeKind::Itblock { .. }
     )
 }
 
@@ -100,15 +103,27 @@ fn chain_is_prefix(short: &[(NodeId, NodeId)], long: &[(NodeId, NodeId)]) -> boo
 
 /// Returns `false` if any shared barrier has conflicting arm choices
 /// (i.e. the two nodes are in exclusive branches).
-fn paths_compatible(a: &[(NodeId, NodeId)], b: &[(NodeId, NodeId)]) -> bool {
+fn paths_compatible(ast: &Ast, a: &[(NodeId, NodeId)], b: &[(NodeId, NodeId)]) -> bool {
     for (barrier_a, arm_a) in a {
         for (barrier_b, arm_b) in b {
-            if barrier_a == barrier_b && arm_a != arm_b {
+            if barrier_a == barrier_b
+                && arm_a != arm_b
+                && !barrier_condition_is_compatible(ast, *barrier_a, *arm_a, *arm_b)
+            {
                 return false;
             }
         }
     }
     true
+}
+
+fn barrier_condition_is_compatible(ast: &Ast, barrier: NodeId, a: NodeId, b: NodeId) -> bool {
+    match *ast.kind(barrier) {
+        NodeKind::If { cond, .. } | NodeKind::While { cond, .. } | NodeKind::Until { cond, .. } => {
+            a == cond || b == cond
+        }
+        _ => false,
+    }
 }
 
 /// Returns `true` if `node` is inside the `body` arm of an enclosing `Rescue`
@@ -196,7 +211,7 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| r.pos > asgn_end)
-                .filter(|(k, _)| paths_compatible(&ref_chains[*k], &asgn_chains[i]))
+                .filter(|(k, _)| paths_compatible(ast, &ref_chains[*k], &asgn_chains[i]))
                 .map(|(_, r)| r.pos)
                 .min();
 
@@ -433,7 +448,11 @@ impl VarSemanticModel {
                     if let Some(val_id) = value.get() {
                         if !Self::is_underscore_prefix(name, ast) {
                             let end = ast.range(node).end;
-                            let scope_info = scopes.get_mut(&scope).expect("scope must exist");
+                            let target_scope =
+                                Self::scope_containing_variable(&scopes, scope, name)
+                                    .unwrap_or(scope);
+                            let scope_info =
+                                scopes.get_mut(&target_scope).expect("scope must exist");
                             let var = Self::find_or_declare_local(scope_info, name, node);
                             var.assignments.push(Assignment {
                                 node_id: node,
@@ -486,7 +505,9 @@ impl VarSemanticModel {
                     {
                         let target_range = ast.range(target);
                         let asgn_end = ast.range(node).end;
-                        let scope_info = scopes.get_mut(&scope).expect("scope must exist");
+                        let target_scope =
+                            Self::scope_containing_variable(&scopes, scope, name).unwrap_or(scope);
+                        let scope_info = scopes.get_mut(&target_scope).expect("scope must exist");
                         let var = Self::find_or_declare_local(scope_info, name, target);
                         var.references.push(Reference {
                             node_id: target,
@@ -516,7 +537,9 @@ impl VarSemanticModel {
                     {
                         let target_range = ast.range(target);
                         let asgn_end = ast.range(node).end;
-                        let scope_info = scopes.get_mut(&scope).expect("scope must exist");
+                        let target_scope =
+                            Self::scope_containing_variable(&scopes, scope, name).unwrap_or(scope);
+                        let scope_info = scopes.get_mut(&target_scope).expect("scope must exist");
                         let var = Self::find_or_declare_local(scope_info, name, target);
                         var.references.push(Reference {
                             node_id: target,
@@ -587,11 +610,29 @@ impl VarSemanticModel {
                 NodeKind::Lvar(name) => {
                     if !Self::is_underscore_prefix(name, ast) {
                         let pos = ast.range(node).start;
-                        let scope_info = scopes.get_mut(&scope).expect("scope must exist");
+                        let target_scope =
+                            Self::scope_containing_variable(&scopes, scope, name).unwrap_or(scope);
+                        let scope_info = scopes.get_mut(&target_scope).expect("scope must exist");
                         let var = Self::find_or_declare_local(scope_info, name, node);
                         var.references.push(Reference { node_id: node, pos });
                     }
                     // Leaf node; no children.
+                }
+
+                NodeKind::Pair { key, value }
+                    if matches!(ast.kind(key), NodeKind::Sym(_))
+                        && matches!(ast.kind(value), NodeKind::Unknown) =>
+                {
+                    if let NodeKind::Sym(name) = *ast.kind(key)
+                        && !Self::is_underscore_prefix(name, ast)
+                    {
+                        let pos = ast.range(key).start;
+                        let target_scope =
+                            Self::scope_containing_variable(&scopes, scope, name).unwrap_or(scope);
+                        let scope_info = scopes.get_mut(&target_scope).expect("scope must exist");
+                        let var = Self::find_or_declare_local(scope_info, name, key);
+                        var.references.push(Reference { node_id: key, pos });
+                    }
                 }
 
                 // ── All other nodes: classify children under the same scope ──
@@ -676,6 +717,22 @@ impl VarSemanticModel {
         }
     }
 
+    fn scope_containing_variable(
+        scopes: &HashMap<NodeId, ScopeInfo>,
+        scope: NodeId,
+        name: Symbol,
+    ) -> Option<NodeId> {
+        let mut current = Some(scope);
+        while let Some(scope_id) = current {
+            let scope_info = scopes.get(&scope_id)?;
+            if scope_info.variables.iter().any(|var| var.name == name) {
+                return Some(scope_id);
+            }
+            current = scope_info.parent_scope;
+        }
+        None
+    }
+
     /// Walk an `Mlhs` node recursively, pushing `Assignment` entries for each
     /// `Lvasgn` target found.
     fn collect_mlhs_targets(
@@ -691,7 +748,9 @@ impl VarSemanticModel {
                     if !ast.interner().resolve(name.0).starts_with('_') =>
                 {
                     let end = ast.range(asgn_node).end;
-                    let scope_info = scopes.get_mut(&scope).expect("scope must exist");
+                    let target_scope =
+                        Self::scope_containing_variable(scopes, scope, name).unwrap_or(scope);
+                    let scope_info = scopes.get_mut(&target_scope).expect("scope must exist");
                     let var = Self::find_or_declare_local(scope_info, name, child);
                     var.assignments.push(Assignment {
                         node_id: child,
@@ -1077,5 +1136,49 @@ mod tests {
             .collect();
         assert!(names.contains(&"a"), "a should be tracked; got {names:?}");
         assert!(names.contains(&"b"), "b should be tracked; got {names:?}");
+    }
+
+    #[test]
+    fn block_or_assignment_to_outer_local_is_referenced_by_later_read() {
+        let ast = translate(
+            "error = nil\naccounts.each do |account|\n  follow(account)\nrescue NotPermitted => e\n  error ||= e\nend\nraise error if error.present?\n",
+            "test.rb",
+        );
+        let model = VarSemanticModel::build(&ast);
+        let scope = model.scope(ast.root()).expect("root scope");
+        let error = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "error")
+            .expect("error must be tracked in the outer scope");
+
+        assert_eq!(error.assignments.len(), 2);
+        assert_eq!(error.references.len(), 3);
+        assert!(
+            error.assignments.iter().all(|a| a.is_referenced),
+            "both error writes are observed by later reads"
+        );
+    }
+
+    #[test]
+    fn masgn_target_with_block_rhs_is_referenced_by_later_read() {
+        let ast = translate(
+            "_, pending, processed, async_refresh_key, threshold = redis.multi do |pipeline|\n  pipeline.hget(key, 'threshold')\nend\n\nif pending.zero? || processed >= (threshold || 1.0).to_f * (processed + pending)\n  cleanup\nend\n",
+            "test.rb",
+        );
+        let model = VarSemanticModel::build(&ast);
+        let scope = model.scope(ast.root()).expect("root scope");
+        let threshold = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "threshold")
+            .expect("threshold must be tracked");
+
+        assert_eq!(threshold.assignments.len(), 1);
+        assert_eq!(threshold.references.len(), 1);
+        assert!(
+            threshold.assignments[0].is_referenced,
+            "threshold destructuring assignment is observed by the later condition"
+        );
     }
 }

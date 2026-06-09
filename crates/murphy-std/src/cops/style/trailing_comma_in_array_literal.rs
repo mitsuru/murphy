@@ -10,11 +10,10 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   EnforcedStyleForMultiline: only "no_comma" (default) is implemented.
-//!   The three comma-adding styles ("comma", "consistent_comma",
-//!   "diff_comma") are not yet implemented — they require multiline layout
-//!   analysis. "no_comma" flags any trailing comma in a square-bracket array
-//!   literal and autocorrects by deleting the comma.
+//!   Supports EnforcedStyleForMultiline values "no_comma" (default), "comma",
+//!   "consistent_comma", and "diff_comma" for square-bracket array literals.
+//!   Single-line arrays never permit a trailing comma. Multiline comma-adding
+//!   styles insert a comma after the last element when required.
 //!   Percent-literal arrays (%w/%i/%W/%I) are skipped (no trailing comma
 //!   syntax).
 //!   Heredoc-as-last-element edge case is not handled (conservative skip not
@@ -26,13 +25,15 @@
 //! Array literals written with `[...]` delimiters whose last element is
 //! followed by a comma before the closing `]`.
 //!
-//! Only fires when `EnforcedStyleForMultiline` is `no_comma` (the default).
+//! Honors `EnforcedStyleForMultiline` for square-bracket arrays.
 //!
 //! ## Autocorrect
 //!
-//! Deletes the trailing comma token (surgical single-edit delete).
+//! Deletes or inserts the trailing comma token (surgical single-edit change).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{
+    cop, CopOptionEnum, CopOptions, Cx, NodeId, Range, SourceToken, SourceTokenKind,
+};
 
 const MSG: &str = "Avoid comma after the last item of an array.";
 
@@ -40,12 +41,35 @@ const MSG: &str = "Avoid comma after the last item of an array.";
 #[derive(Default)]
 pub struct TrailingCommaInArrayLiteral;
 
+#[derive(CopOptions)]
+pub struct TrailingCommaInArrayLiteralOptions {
+    #[option(
+        name = "EnforcedStyleForMultiline",
+        default = "no_comma",
+        description = "Controls when trailing commas are required or forbidden in multiline array literals."
+    )]
+    pub enforced_style_for_multiline: TrailingCommaStyle,
+}
+
+#[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrailingCommaStyle {
+    #[option(value = "no_comma")]
+    #[default]
+    NoComma,
+    #[option(value = "comma")]
+    Comma,
+    #[option(value = "consistent_comma")]
+    ConsistentComma,
+    #[option(value = "diff_comma")]
+    DiffComma,
+}
+
 #[cop(
     name = "Style/TrailingCommaInArrayLiteral",
     description = "Checks for trailing comma in array literals.",
     default_severity = "warning",
     default_enabled = true,
-    options = NoOptions,
+    options = TrailingCommaInArrayLiteralOptions,
 )]
 impl TrailingCommaInArrayLiteral {
     #[on_node(kind = "array")]
@@ -70,15 +94,53 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let last_elem_end = cx.range(last_elem).end;
     let array_end = cx.range(node).end;
 
-    // Search for a Comma token in [last_elem_end, array_end).
-    let Some(comma_range) = find_trailing_comma(cx, last_elem_end, array_end) else {
+    let Some(close_tok) = find_closing_bracket(cx, last_elem_end, array_end) else {
         return;
     };
 
-    cx.emit_offense(comma_range, MSG, None);
+    // Search for a Comma token in [last_elem_end, array_end).
+    let comma_range = find_trailing_comma(cx, last_elem_end, close_tok.range.start);
+    let opts = cx.options_or_default::<TrailingCommaInArrayLiteralOptions>();
 
-    // Autocorrect: delete the trailing comma.
-    cx.emit_edit(comma_range, "");
+    if let Some(comma_range) = comma_range {
+        if !cx.is_single_line(node)
+            && should_have_comma(
+                opts.enforced_style_for_multiline,
+                node,
+                last_elem,
+                close_tok,
+                cx,
+            )
+        {
+            return;
+        }
+
+        cx.emit_offense(comma_range, MSG, None);
+
+        // Autocorrect: delete the trailing comma.
+        cx.emit_edit(comma_range, "");
+        return;
+    }
+
+    if cx.is_single_line(node)
+        || !should_have_comma(
+            opts.enforced_style_for_multiline,
+            node,
+            last_elem,
+            close_tok,
+            cx,
+        )
+    {
+        return;
+    }
+
+    let msg = "Put a comma after the last item of a multiline array.";
+    let insert = Range {
+        start: last_elem_end,
+        end: last_elem_end,
+    };
+    cx.emit_offense(insert, msg, None);
+    cx.emit_edit(insert, ",");
 }
 
 /// Find a trailing comma token in the source range `[from, to)`.
@@ -91,6 +153,95 @@ fn find_trailing_comma(cx: &Cx<'_>, from: u32, to: u32) -> Option<Range> {
     .iter()
     .find(|tok| tok.kind == SourceTokenKind::Comma)
     .map(|tok| tok.range)
+}
+
+fn find_closing_bracket(cx: &Cx<'_>, from: u32, to: u32) -> Option<SourceToken> {
+    let source = cx.source().as_bytes();
+    cx.tokens_in(Range {
+        start: from,
+        end: to,
+    })
+    .iter()
+    .find(|tok| {
+        tok.kind == SourceTokenKind::Other
+            && &source[tok.range.start as usize..tok.range.end as usize] == b"]"
+    })
+    .copied()
+}
+
+fn should_have_comma(
+    style: TrailingCommaStyle,
+    array: NodeId,
+    last_elem: NodeId,
+    close_tok: SourceToken,
+    cx: &Cx<'_>,
+) -> bool {
+    match style {
+        TrailingCommaStyle::NoComma => false,
+        TrailingCommaStyle::Comma => elements_and_close_on_separate_lines(array, close_tok, cx),
+        TrailingCommaStyle::ConsistentComma => cx.is_multiline(array),
+        TrailingCommaStyle::DiffComma => {
+            has_newline_between(cx.range(last_elem).end, close_tok.range.start, cx)
+        }
+    }
+}
+
+fn elements_and_close_on_separate_lines(
+    array: NodeId,
+    close_tok: SourceToken,
+    cx: &Cx<'_>,
+) -> bool {
+    let elements = cx.array_elements(array);
+    if elements.is_empty() || !cx.is_multiline(array) {
+        return false;
+    }
+
+    let Some(open_tok) =
+        find_opening_bracket(cx, cx.range(array).start, cx.range(elements[0]).start)
+    else {
+        return false;
+    };
+    if line_index(cx.source(), open_tok.range.start)
+        == line_index(cx.source(), cx.range(elements[0]).start)
+    {
+        return false;
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    for elem in elements {
+        if !seen.insert(line_index(cx.source(), cx.range(*elem).start)) {
+            return false;
+        }
+    }
+    !seen.contains(&line_index(cx.source(), close_tok.range.start))
+}
+
+fn find_opening_bracket(cx: &Cx<'_>, from: u32, to: u32) -> Option<SourceToken> {
+    let source = cx.source().as_bytes();
+    cx.tokens_in(Range {
+        start: from,
+        end: to,
+    })
+    .iter()
+    .find(|tok| {
+        tok.kind == SourceTokenKind::Other
+            && &source[tok.range.start as usize..tok.range.end as usize] == b"["
+    })
+    .copied()
+}
+
+fn has_newline_between(from: u32, to: u32, cx: &Cx<'_>) -> bool {
+    if from >= to {
+        return false;
+    }
+    cx.source().as_bytes()[from as usize..to as usize].contains(&b'\n')
+}
+
+fn line_index(source: &str, offset: u32) -> usize {
+    source.as_bytes()[..offset as usize]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
 }
 
 #[cfg(test)]
@@ -134,6 +285,33 @@ mod tests {
     #[test]
     fn no_offense_percent_i_array() {
         test::<TrailingCommaInArrayLiteral>().expect_no_offenses("x = %i[foo bar]\n");
+    }
+
+    #[test]
+    fn comma_style_accepts_multiline_trailing_comma() {
+        test::<TrailingCommaInArrayLiteral>()
+            .with_options(&TrailingCommaInArrayLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::Comma,
+            })
+            .expect_no_offenses(indoc! {"
+                x = [
+                  1,
+                  2,
+                ]
+            "});
+    }
+
+    #[test]
+    fn comma_style_does_not_require_comma_for_nested_single_element_on_opener_line() {
+        test::<TrailingCommaInArrayLiteral>()
+            .with_options(&TrailingCommaInArrayLiteralOptions {
+                enforced_style_for_multiline: TrailingCommaStyle::Comma,
+            })
+            .expect_no_offenses(indoc! {"
+                value = [[{
+                  'name' => ['Author 1'],
+                }]]
+            "});
     }
 
     // --- offense: single-line trailing comma ---

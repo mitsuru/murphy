@@ -14,7 +14,8 @@
 //!   `{ || }`). Only stabby lambda literals (`-> { || }`) are excluded —
 //!   matching RuboCop's `lambda_literal?` guard. The `lambda { || }` method
 //!   form IS flagged (consistent with RuboCop behavior). Autocorrect removes the empty pipes and surrounding
-//!   whitespace, leaving only the block opener.
+//!   whitespace, leaving only the block opener. Nested named-argument blocks are
+//!   not confused with an outer no-argument block's empty parameter list.
 //! ```
 //!
 //! ## Matched shapes
@@ -46,7 +47,7 @@
 //! Removes the empty `||` pipes and whitespace before them:
 //! `a do ||` => `a do`, `b { || }` => `b { }`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind};
 
 const MSG: &str = "Omit pipes for the empty block parameters.";
 
@@ -127,6 +128,13 @@ fn find_empty_pipes(block_node: NodeId, args_node: NodeId, cx: &Cx<'_>) -> Optio
 
     let open_pipe = pipes.next()?;
     let close_pipe = pipes.next()?;
+
+    if source[open_pipe.range.end as usize..close_pipe.range.start as usize]
+        .iter()
+        .any(|b| !b.is_ascii_whitespace())
+    {
+        return None;
+    }
 
     Some(Range {
         start: open_pipe.range.start,
@@ -209,6 +217,26 @@ mod tests {
         test::<EmptyBlockParameter>().expect_no_offenses(indoc! {"
             a do |x|
               body
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_each_block_with_named_arg() {
+        test::<EmptyBlockParameter>().expect_no_offenses(indoc! {"
+            domains.each do |domain|
+              next if EmailDomainBlock.exists?(domain: domain)
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_named_arg_block_nested_inside_no_arg_block() {
+        test::<EmptyBlockParameter>().expect_no_offenses(indoc! {"
+            EmailDomainBlock.transaction do
+              domains.each do |domain|
+                next if EmailDomainBlock.exists?(domain: domain)
+              end
             end
         "});
     }

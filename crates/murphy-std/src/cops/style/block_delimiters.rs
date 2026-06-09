@@ -37,6 +37,9 @@
 //!   is not parenthesised, changing `{...}` or `do...end` changes which method
 //!   the block binds to (Ruby precedence). RuboCop's on_send/ignore_node handles
 //!   this; Murphy replicates it via ancestor-walking in is_in_non_parenthesized_arg.
+//!   Single-line vs multiline is determined from the block delimiter to the block
+//!   end, so a single-line brace block after a multiline receiver chain is not
+//!   misclassified as multiline.
 //! ```
 //!
 //! ## Matched shapes
@@ -64,7 +67,9 @@
 //! Autocorrect is intentionally omitted due to operator-precedence and
 //! begin/rescue wrapping hazards (see notes in parity block above).
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{
+    cop, CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind,
+};
 
 // ---------------------------------------------------------------------------
 // Options
@@ -198,10 +203,13 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 /// Whether the block's current delimiter style matches what the enforced style requires.
 fn is_proper_block_style(node: NodeId, opts: &Options, cx: &Cx<'_>) -> bool {
     let uses_braces = is_brace_block(node, cx);
-    let multiline = cx.is_multiline(node);
+    let multiline = is_multiline_block(node, cx);
 
     match opts.enforced_style {
         EnforcedStyle::LineCountBased => {
+            if multiline && uses_braces && cx.is_chained(node) {
+                return true;
+            }
             // Single-line uses braces; multi-line uses do/end.
             // XOR: multiline and uses_braces are opposite when proper.
             multiline ^ uses_braces
@@ -229,7 +237,7 @@ fn is_proper_block_style(node: NodeId, opts: &Options, cx: &Cx<'_>) -> bool {
 /// Build the offense message for the given block and style.
 fn message(node: NodeId, opts: &Options, cx: &Cx<'_>) -> String {
     let uses_braces = is_brace_block(node, cx);
-    let multiline = cx.is_multiline(node);
+    let multiline = is_multiline_block(node, cx);
 
     match opts.enforced_style {
         EnforcedStyle::LineCountBased => {
@@ -278,6 +286,16 @@ fn body_start(node: NodeId, cx: &Cx<'_>) -> u32 {
     }
 }
 
+fn is_multiline_block(node: NodeId, cx: &Cx<'_>) -> bool {
+    let start = find_block_opener(node, cx)
+        .map(|range| range.start)
+        .unwrap_or_else(|| cx.range(node).start);
+    let end = cx.range(node).end;
+    if start >= end {
+        return false;
+    }
+    cx.source().as_bytes()[start as usize..end as usize].contains(&b'\n')
+}
 
 /// Checks if the block uses brace delimiters (`{...}`).
 ///
@@ -293,6 +311,7 @@ fn is_brace_block(node: NodeId, cx: &Cx<'_>) -> bool {
     let src = cx.source().as_bytes();
     let idx = toks.partition_point(|t| t.range.start < from);
     let mut paren_depth: i32 = 0;
+    let mut opener_is_brace = None;
     for tok in &toks[idx..] {
         if tok.range.start >= to {
             break;
@@ -304,18 +323,17 @@ fn is_brace_block(node: NodeId, cx: &Cx<'_>) -> bool {
             SourceTokenKind::RightParen => {
                 paren_depth -= 1;
             }
-            SourceTokenKind::LeftBrace if paren_depth == 0 => return true,
+            SourceTokenKind::LeftBrace if paren_depth == 0 => opener_is_brace = Some(true),
             SourceTokenKind::Other
                 if paren_depth == 0
                     && &src[tok.range.start as usize..tok.range.end as usize] == b"do" =>
             {
-                return false;
+                opener_is_brace = Some(false);
             }
             _ => {}
         }
     }
-    // No opener found — assume brace block (conservative).
-    true
+    opener_is_brace.unwrap_or(true)
 }
 
 /// Finds the block's opening delimiter token range (`{` or `do` keyword).
@@ -330,6 +348,7 @@ fn find_block_opener(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
     let src = cx.source().as_bytes();
     let idx = toks.partition_point(|t| t.range.start < from);
     let mut paren_depth: i32 = 0;
+    let mut opener = None;
     for tok in &toks[idx..] {
         if tok.range.start >= to {
             break;
@@ -341,17 +360,17 @@ fn find_block_opener(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
             SourceTokenKind::RightParen => {
                 paren_depth -= 1;
             }
-            SourceTokenKind::LeftBrace if paren_depth == 0 => return Some(tok.range),
+            SourceTokenKind::LeftBrace if paren_depth == 0 => opener = Some(tok.range),
             SourceTokenKind::Other
                 if paren_depth == 0
                     && &src[tok.range.start as usize..tok.range.end as usize] == b"do" =>
             {
-                return Some(tok.range);
+                opener = Some(tok.range);
             }
             _ => {}
         }
     }
-    None
+    opener
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +489,34 @@ mod tests {
     #[test]
     fn accepts_single_line_brace_block() {
         test::<BlockDelimiters>().expect_no_offenses("items.each { |item| item / 5 }\n");
+    }
+
+    #[test]
+    fn accepts_single_line_brace_block_after_multiline_receiver_chain() {
+        test::<BlockDelimiters>().expect_no_offenses(indoc! {r#"
+            params
+              .permit(:category, :maxCount)
+              .to_unsafe_h
+              .transform_keys { |key| key.to_s.underscore }
+        "#});
+    }
+
+    #[test]
+    fn accepts_multiline_brace_block_when_chained() {
+        test::<BlockDelimiters>().expect_no_offenses(indoc! {r#"
+            text.scan(MENTION_RE).map { |match|
+              match.first.split('@', 2)
+            }.uniq
+        "#});
+    }
+
+    #[test]
+    fn accepts_multiline_do_end_block_on_hash_receiver() {
+        test::<BlockDelimiters>().expect_no_offenses(indoc! {r#"
+            { :account_id => id, key => [value, 0].max }.tap do |values|
+              values.merge!(last_status_at: status_created_at)
+            end
+        "#});
     }
 
     #[test]
@@ -773,4 +820,3 @@ mod tests {
 }
 
 murphy_plugin_api::submit_cop!(BlockDelimiters);
-
