@@ -1,0 +1,122 @@
+//! `Style/MapJoin` — removes redundant `map(&:to_s)` before `join`.
+//!
+//! ## RuboCop parity
+//!
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/MapJoin
+//! upstream_version_checked: 1.86.2
+//! status: partial
+//! gap_issues: []
+//! notes: >
+//!   `map(&:to_s).join(...)` handled. Uses hand-written shape check
+//!   (def_node_matcher does not support block_pass in v1).
+//!   Block form and numblock/itblock forms are v1 gaps.
+//! ```
+
+use murphy_plugin_api::{Cx, NodeId, NodeKind, cop};
+
+const MSG: &str = "Remove redundant `map(&:to_s)` before `join`.";
+
+#[derive(Default)]
+pub struct MapJoin;
+
+#[cop(
+    name = "Style/MapJoin",
+    description = "Remove redundant `map(&:to_s)` before `join`.",
+    default_severity = "warning",
+    default_enabled = true,
+    options = murphy_plugin_api::NoOptions
+)]
+impl MapJoin {
+    #[on_node(kind = "send", methods = ["join"])]
+    fn check_join(&self, node: NodeId, cx: &Cx<'_>) {
+        let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
+            return;
+        };
+        let Some(recv_id) = receiver.get() else {
+            return;
+        };
+        let NodeKind::Send { method, args: map_args, .. } = *cx.kind(recv_id) else {
+            return;
+        };
+        let method_str = cx.symbol_str(method);
+        if method_str != "map" && method_str != "collect" {
+            return;
+        }
+        let map_arg_list = cx.list(map_args);
+        if map_arg_list.len() != 1 {
+            return;
+        }
+        let bp = map_arg_list[0];
+        if !matches!(cx.kind(bp), murphy_plugin_api::NodeKind::BlockPass(_)) {
+            return;
+        }
+        let bp_src = cx.raw_source(cx.range(bp));
+        if !bp_src.contains(":to_s") {
+            return;
+        }
+        let map_range = cx.range(recv_id);
+        let recv_of_map = match cx.kind(recv_id) {
+            NodeKind::Send { receiver: r, .. } => r,
+            _ => return,
+        };
+        let Some(map_recv_id) = recv_of_map.get() else {
+            return;
+        };
+
+        cx.emit_offense(
+            murphy_plugin_api::Range {
+                start: map_range.start,
+                end: map_range.start + 3,
+            },
+            MSG,
+            None,
+        );
+
+        let map_recv_src = cx.raw_source(cx.range(map_recv_id));
+        let node_src = cx.raw_source(cx.range(node));
+        let dot_pos = map_range.end - cx.range(node).start;
+        let after_dot = &node_src[(dot_pos + 1) as usize..];
+        cx.emit_edit(cx.range(node), &format!("{}{}", map_recv_src, after_dot));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MapJoin;
+    use murphy_plugin_api::test_support::{indoc, test};
+
+    #[test]
+    fn flags_map_to_s_join() {
+        test::<MapJoin>().expect_correction(
+            indoc! {"
+                array.map(&:to_s).join(', ')
+                ^^^ Remove redundant `map(&:to_s)` before `join`.
+            "},
+            "array.join(', ')\n",
+        );
+    }
+
+    #[test]
+    fn flags_collect_to_s_join() {
+        test::<MapJoin>().expect_correction(
+            indoc! {"
+                array.collect(&:to_s).join
+                ^^^^^^^ Remove redundant `map(&:to_s)` before `join`.
+            "},
+            "array.join\n",
+        );
+    }
+
+    #[test]
+    fn accepts_plain_join() {
+        test::<MapJoin>().expect_no_offenses("array.join(', ')\n");
+    }
+
+    #[test]
+    fn accepts_map_without_to_s() {
+        test::<MapJoin>().expect_no_offenses("array.map(&:foo).join\n");
+    }
+}
+murphy_plugin_api::submit_cop!(MapJoin);
