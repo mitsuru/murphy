@@ -113,6 +113,11 @@ mod tests {
     }
 
     #[test]
+    fn ignores_unterminated_single_quoted_interpolation() {
+        assert_eq!(hits("'foo #{bar}"), 0);
+    }
+
+    #[test]
     fn handles_string_with_embedded_double_quotes() {
         assert!(hits("'foo \"#{bar}\" baz'") > 0);
     }
