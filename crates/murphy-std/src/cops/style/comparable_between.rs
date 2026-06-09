@@ -91,7 +91,7 @@ mod tests {
                 x >= min && x <= max
                 ^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
             "},
-            "x.between?(min, max)\n",
+            "(x).between?(min, max)\n",
         );
     }
 
@@ -102,7 +102,7 @@ mod tests {
                 x <= max && x >= min
                 ^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
             "},
-            "x.between?(min, max)\n",
+            "(x).between?(min, max)\n",
         );
     }
 
@@ -135,6 +135,17 @@ mod tests {
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
             "},
             "(foo.bar).between?(min, max)\n",
+        );
+    }
+
+    #[test]
+    fn corrects_simple_receiver_with_parens() {
+        test::<ComparableBetween>().expect_correction(
+            indoc! {"
+                x >= min && x <= max
+                ^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
+            "},
+            "(x).between?(min, max)\n",
         );
     }
 
