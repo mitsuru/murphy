@@ -111,8 +111,9 @@ fn emit_exception_offense(node: NodeId, cx: &Cx<'_>, replacement: &str) {
 
 fn implicit_namespace_allowed(node: NodeId, cx: &Cx<'_>, opts: &RaiseExceptionOptions) -> bool {
     cx.ancestors(node).any(|ancestor| {
-        let NodeKind::Module { name, .. } = *cx.kind(ancestor) else {
-            return false;
+        let name = match *cx.kind(ancestor) {
+            NodeKind::Module { name, .. } | NodeKind::Class { name, .. } => name,
+            _ => return false,
         };
         namespace_allowed(name, cx, opts)
     })
@@ -225,6 +226,17 @@ mod tests {
     fn accepts_default_allowed_implicit_namespace() {
         test::<RaiseException>().expect_no_offenses(indoc! {r#"
             module Gem
+              def self.foo
+                raise Exception
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_default_allowed_implicit_namespace_in_class() {
+        test::<RaiseException>().expect_no_offenses(indoc! {r#"
+            class Gem
               def self.foo
                 raise Exception
               end

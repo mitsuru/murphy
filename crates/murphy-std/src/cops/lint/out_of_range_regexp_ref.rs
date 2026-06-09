@@ -261,7 +261,8 @@ fn max_regexp_count(nodes: &[NodeId], cx: &Cx<'_>) -> Option<u32> {
         .flat_map(|&node| std::iter::once(node).chain(cx.descendants(node)))
         .filter_map(|node| match try_count_regexp_captures(node, cx) {
             CountResult::Count(count) => Some(count),
-            CountResult::Unknown | CountResult::NotRegexp => None,
+            CountResult::Unknown => Some(UNKNOWN),
+            CountResult::NotRegexp => None,
         })
         .max()
 }
@@ -579,12 +580,34 @@ mod tests {
     }
 
     #[test]
+    fn does_not_flag_refs_after_unknown_when_regexp() {
+        test::<OutOfRangeRegexpRef>().expect_no_offenses(indoc! {r#"
+            pattern = "(foo)"
+            case "foo"
+            when /#{pattern}/
+              $1
+            end
+        "#});
+    }
+
+    #[test]
     fn flags_out_of_range_ref_inside_in_pattern() {
         test::<OutOfRangeRegexpRef>().expect_offense(indoc! {r#"
             case "foobar"
             in /(foo)(bar)/
               $3
               ^^ $3 is out of range (2 regexp capture groups detected).
+            end
+        "#});
+    }
+
+    #[test]
+    fn does_not_flag_refs_after_unknown_in_pattern_regexp() {
+        test::<OutOfRangeRegexpRef>().expect_no_offenses(indoc! {r#"
+            pattern = "(foo)"
+            case "foo"
+            in /#{pattern}/
+              $1
             end
         "#});
     }
