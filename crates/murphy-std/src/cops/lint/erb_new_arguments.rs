@@ -9,8 +9,9 @@
 //!   - murphy-i1hc
 //! notes: >
 //!   Covers ERB.new/::ERB.new positional safe_level, trim_mode, and eoutvar
-//!   arguments and autocorrects the common legacy positional form. Existing
-//!   duplicate keyword override handling is deferred for v1.
+//!   arguments and autocorrects the common all-positional legacy form. Existing
+//!   keyword/hash preservation and duplicate keyword override handling are
+//!   deferred for v1, so mixed forms are offense-only.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
@@ -42,7 +43,9 @@ impl ErbNewArguments {
             }
             cx.emit_offense(cx.range(arg), &message(idx, arg, cx), None);
         }
-        if let Some(range) = arguments_range(args, cx) {
+        if can_autocorrect(args, cx)
+            && let Some(range) = arguments_range(args, cx)
+        {
             cx.emit_edit(range, &corrected_arguments(args, cx));
         }
     }
@@ -64,6 +67,10 @@ fn arguments_range(args: &[NodeId], cx: &Cx<'_>) -> Option<Range> {
     let first = args.first()?;
     let last = args.last()?;
     Some(Range { start: cx.range(*first).start, end: cx.range(*last).end })
+}
+
+fn can_autocorrect(args: &[NodeId], cx: &Cx<'_>) -> bool {
+    args.len() <= 4 && args.iter().skip(1).all(|&arg| !matches!(cx.kind(arg), NodeKind::Hash(_)))
 }
 
 fn corrected_arguments(args: &[NodeId], cx: &Cx<'_>) -> String {
@@ -102,5 +109,10 @@ mod tests {
     #[test]
     fn accepts_keyword_arguments() {
         test::<ErbNewArguments>().expect_no_offenses("ERB.new(str, trim_mode: '-', eoutvar: '@output_buffer')\n");
+    }
+
+    #[test]
+    fn mixed_keyword_arguments_are_not_autocorrected() {
+        test::<ErbNewArguments>().expect_no_corrections("ERB.new(str, nil, '-', eoutvar: '@out')\n");
     }
 }
