@@ -119,23 +119,28 @@ fn bare_modifier(node: NodeId, cx: &Cx<'_>) -> Option<&'static str> {
 }
 
 fn private_class_method_names(children: &[NodeId], cx: &Cx<'_>) -> Vec<String> {
-    children
-        .iter()
-        .copied()
-        .filter_map(|child| match *cx.kind(child) {
+    let mut names = Vec::new();
+    collect_private_class_method_names(children, cx, &mut names);
+    names
+}
+
+fn collect_private_class_method_names(children: &[NodeId], cx: &Cx<'_>, names: &mut Vec<String>) {
+    for &child in children {
+        match *cx.kind(child) {
             NodeKind::Send { receiver, method, args }
                 if receiver == OptNodeId::NONE && cx.symbol_str(method) == "private_class_method" =>
             {
-                Some(cx.list(args))
+                names.extend(cx.list(args).iter().filter_map(|&arg| match *cx.kind(arg) {
+                    NodeKind::Sym(sym) => Some(cx.symbol_str(sym).to_string()),
+                    _ => None,
+                }));
             }
-            _ => None,
-        })
-        .flatten()
-        .filter_map(|&arg| match *cx.kind(arg) {
-            NodeKind::Sym(sym) => Some(cx.symbol_str(sym).to_string()),
-            _ => None,
-        })
-        .collect()
+            NodeKind::Begin(_) | NodeKind::Kwbegin(_) => {
+                collect_private_class_method_names(&body_children(child, cx), cx, names);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn is_singleton_def(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -222,5 +227,21 @@ mod tests {
                   end
                 end
             "#});
+    }
+
+    #[test]
+    fn private_class_method_inside_begin_is_respected() {
+        test::<IneffectiveAccessModifier>().expect_no_offenses(indoc! {r#"
+            class C
+              private
+
+              begin
+                private_class_method :method
+              end
+
+              def self.method
+              end
+            end
+        "#});
     }
 }

@@ -66,7 +66,8 @@ fn is_io_select(node: NodeId, cx: &Cx<'_>) -> bool {
     let Some(recv) = cx.call_receiver(node).get() else {
         return false;
     };
-    matches!(*cx.kind(recv), NodeKind::Const { name, .. } if cx.symbol_str(name) == "IO")
+    matches!(*cx.kind(recv), NodeKind::Const { name, scope }
+        if cx.symbol_str(name) == "IO" && scope.get().is_none_or(|scope| matches!(cx.kind(scope), NodeKind::Cbase)))
 }
 
 fn single_io_array(node: Option<NodeId>, cx: &Cx<'_>) -> Option<NodeId> {
@@ -136,6 +137,7 @@ mod tests {
             .expect_no_offenses("IO.select([foo, bar], [], [])\n")
             .expect_no_offenses("IO.select([rp], [wp], [])\n")
             .expect_no_offenses("IO.select([rp], [], [excepts])\n")
+            .expect_no_offenses("MyNamespace::IO.select([io], [], [])\n")
             .expect_no_offenses("collection.select { |item| item.ok? }\n");
     }
 }
