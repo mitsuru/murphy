@@ -74,19 +74,17 @@ impl ComparableClamp {
         if inner_list.len() != 2 {
             return;
         }
-        let value = inner_list.iter().find(|&&e| e != bound);
-        let Some(&val) = value else {
-            return;
-        };
+        let inner_val = inner_list[0];
+        let inner_bound = inner_list[1];
+        let val_src = cx.raw_source(cx.range(inner_val));
+        let inner_bound_src = cx.raw_source(cx.range(inner_bound));
+        let bound_src = cx.raw_source(cx.range(bound));
         let (low, high) = if method_str == "min" {
-            (inner_recv_id, bound)
+            (&inner_bound_src, &bound_src)
         } else {
-            (bound, inner_recv_id)
+            (&bound_src, &inner_bound_src)
         };
-        let val_src = cx.raw_source(cx.range(val));
-        let low_src = cx.raw_source(cx.range(low));
-        let high_src = cx.raw_source(cx.range(high));
-        let preferred = format!("{}.clamp({}, {})", val_src, low_src, high_src);
+        let preferred = format!("{}.clamp({}, {})", val_src, low, high);
         cx.emit_offense(cx.range(node), "Use `Comparable#clamp` instead.", None);
         cx.emit_edit(cx.range(node), &preferred);
     }

@@ -69,9 +69,8 @@ impl CombinableLoops {
         if !this_method_str.starts_with("each") && !this_method_str.ends_with("_each") {
             return;
         }
-        if this_recv != prev_recv {
-            return;
-        }
+        // Compare receiver expressions by source text (separate node instances
+        // of the same expression have distinct NodeIds).
         if cx.raw_source(cx.range(this_call)) != cx.raw_source(cx.range(prev_call)) {
             return;
         }

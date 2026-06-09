@@ -70,8 +70,8 @@ fn extract_comparison(a: NodeId, b: NodeId, cx: &Cx<'_>) -> Option<(NodeId, Node
         _ => return None,
     };
 
-    // Both comparisons must reference the same receiver
-    if a_val != b_val {
+    // Both comparisons must reference the same variable (compare by source text)
+    if cx.raw_source(cx.range(a_val)) != cx.raw_source(cx.range(b_val)) {
         return None;
     }
 
