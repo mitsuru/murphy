@@ -9,8 +9,13 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Handles (var & flags).positive? and (var & flags).zero? patterns.
-//!   allbits? pattern ((var & flags) == flags) is handled.
+//!   Handles (var & flags).positive? → var.anybits?(flags),
+//!   (var & flags).zero? → var.nobits?(flags),
+//!   (var & flags).> 0 → var.anybits?(flags),
+//!   (var & flags) == 0 → var.nobits?(flags),
+//!   (var & flags) == flags → var.allbits?(flags).
+//!   `>=` is not handled (v1 gap due to safety concerns).
+//!   `!=` with non-zero is not handled.
 //! ```
 
 use murphy_plugin_api::{Cx, NodeId, NodeKind, cop};
@@ -64,27 +69,32 @@ impl BitwisePredicate {
         let flags_src = cx.raw_source(cx.range(rhs));
         let recv_src = cx.raw_source(cx.range(bit_recv_id));
         let replacement = match method_str {
-            "positive?" | ">" | ">=" => Some(format!("{}.anybits?({})", recv_src, flags_src)),
+            "positive?" => Some(format!("{}.anybits?({})", recv_src, flags_src)),
+            ">" => {
+                let arg_list = cx.list(args);
+                if arg_list.is_empty() { None }
+                else if cx.raw_source(cx.range(arg_list[0])) == "0" {
+                    Some(format!("{}.anybits?({})", recv_src, flags_src))
+                } else { None }
+            }
             "!=" => {
                 let arg_list = cx.list(args);
-                if arg_list.is_empty() || cx.raw_source(cx.range(arg_list[0])) != "0" {
-                    None
-                } else {
+                if arg_list.is_empty() { None }
+                else if cx.raw_source(cx.range(arg_list[0])) == "0" {
                     Some(format!("{}.anybits?({})", recv_src, flags_src))
-                }
+                } else { None }
             }
             "zero?" => Some(format!("{}.nobits?({})", recv_src, flags_src)),
             "==" => {
                 let arg_list = cx.list(args);
-                if arg_list.is_empty() {
-                    None
-                } else {
+                if arg_list.is_empty() { None }
+                else {
                     let arg_src = cx.raw_source(cx.range(arg_list[0]));
-                    if arg_src == flags_src {
-                        Some(format!("{}.allbits?({})", recv_src, flags_src))
-                    } else {
+                    if arg_src == "0" {
                         Some(format!("{}.nobits?({})", recv_src, flags_src))
-                    }
+                    } else if arg_src == flags_src {
+                        Some(format!("{}.allbits?({})", recv_src, flags_src))
+                    } else { None }
                 }
             }
             _ => None,
@@ -125,6 +135,28 @@ mod tests {
     }
 
     #[test]
+    fn flags_gt_zero() {
+        test::<BitwisePredicate>().expect_correction(
+            indoc! {"
+                (variable & flags) > 0
+                ^^^^^^^^^^^^^^^^^^^^^^ Use a bitwise predicate method instead.
+            "},
+            "variable.anybits?(flags)\n",
+        );
+    }
+
+    #[test]
+    fn flags_eq_zero() {
+        test::<BitwisePredicate>().expect_correction(
+            indoc! {"
+                (variable & flags) == 0
+                ^^^^^^^^^^^^^^^^^^^^^^^ Use a bitwise predicate method instead.
+            "},
+            "variable.nobits?(flags)\n",
+        );
+    }
+
+    #[test]
     fn flags_eq_flags() {
         test::<BitwisePredicate>().expect_correction(
             indoc! {"
@@ -133,6 +165,16 @@ mod tests {
             "},
             "variable.allbits?(flags)\n",
         );
+    }
+
+    #[test]
+    fn accepts_gt_non_zero() {
+        test::<BitwisePredicate>().expect_no_offenses("(x & flags) > 1\n");
+    }
+
+    #[test]
+    fn accepts_eq_non_zero_non_flags() {
+        test::<BitwisePredicate>().expect_no_offenses("(x & flags) == 1\n");
     }
 
     #[test]
