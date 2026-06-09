@@ -8,7 +8,7 @@
 //! gap_issues:
 //!   - murphy-py1j
 //! notes: >
-//!   Covers static str/dstr format and sprintf calls plus String#% with array
+//!   Covers static str format and sprintf calls plus String#% with array
 //!   arguments for common unnumbered, numbered, named, and mixed format
 //!   sequences. Full RuboCop::Cop::Utils::FormatString parity is deferred.
 
@@ -68,7 +68,13 @@ fn format_call<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<(&'a str, NodeId, usi
                 return None;
             }
             let passed = match *cx.kind(args[0]) {
-                NodeKind::Array(items) => cx.list(items).len(),
+                NodeKind::Array(items) => {
+                    let items = cx.list(items);
+                    if items.iter().any(|&item| matches!(cx.kind(item), NodeKind::Splat(_))) {
+                        return None;
+                    }
+                    items.len()
+                }
                 NodeKind::Hash(_) => 1,
                 _ => 1,
             };
@@ -79,7 +85,7 @@ fn format_call<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<(&'a str, NodeId, usi
 }
 
 fn is_string(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(cx.kind(node), NodeKind::Str(_) | NodeKind::Dstr(_))
+    matches!(cx.kind(node), NodeKind::Str(_))
 }
 
 struct ParsedFormat {
@@ -172,6 +178,8 @@ mod tests {
         test::<FormatParameterMismatch>()
             .expect_no_offenses("format('A value: %s and another: %i', a, b)\n")
             .expect_no_offenses("'%s %s' % [a, b]\n")
+            .expect_no_offenses("'%s %s' % [a, *rest]\n")
+            .expect_no_offenses("format(\"#{fmt}\", a)\n")
             .expect_no_offenses("format('%% done')\n");
     }
 }

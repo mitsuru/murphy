@@ -9,7 +9,7 @@
 //!   - murphy-9cr.9
 //! notes: >
 //!   Message and default AllowComments:true behavior mirror RuboCop. Runtime
-//!   option overrides are still ABI-blocked like Lint/EmptyWhen.
+//!   option overrides are read through cx.options_or_default.
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
@@ -35,7 +35,7 @@ impl EmptyInPattern {
         if cx.in_pattern_body(node).get().is_some() {
             return;
         }
-        let opts = Options::default();
+        let opts = cx.options_or_default::<Options>();
         if opts.allow_comments
             && let Some(region) = empty_in_body_region(cx, node)
             && !cx.comments_in_range(region).is_empty()
@@ -67,7 +67,7 @@ murphy_plugin_api::submit_cop!(EmptyInPattern);
 
 #[cfg(test)]
 mod tests {
-    use super::EmptyInPattern;
+    use super::{EmptyInPattern, Options};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -92,5 +92,20 @@ mod tests {
               # noop
             end
         "#});
+    }
+
+    #[test]
+    fn flags_comment_only_branch_when_comments_are_not_allowed() {
+        test::<EmptyInPattern>()
+            .with_options(&Options { allow_comments: false })
+            .expect_offense(indoc! {r#"
+                case condition
+                in [a]
+                  do_something
+                in [a, b]
+                ^^^^^^^^^ Avoid `in` branches without a body.
+                  # noop
+                end
+            "#});
     }
 }

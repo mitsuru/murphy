@@ -48,12 +48,14 @@ fn is_return_scope_boundary(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
         NodeKind::Def { .. } | NodeKind::Defs { .. } | NodeKind::Lambda => true,
         NodeKind::Block { call, .. } => is_lambda_or_proc_call(call, cx),
+        NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => is_lambda_or_proc_call(send, cx),
         _ => false,
     }
 }
 
 fn is_lambda_or_proc_call(node: NodeId, cx: &Cx<'_>) -> bool {
     match *cx.kind(node) {
+        NodeKind::Lambda => true,
         NodeKind::Send { receiver, method, .. } => {
             let name = cx.symbol_str(method);
             matches!(name, "lambda" | "proc")
@@ -112,6 +114,19 @@ mod tests {
                 ensure
                   lambda { return 1 }
                   Proc.new { return 2 }
+                end
+            "#});
+    }
+
+    #[test]
+    fn ignores_returns_inside_stabby_and_numbered_lambdas() {
+        test::<EnsureReturn>()
+            .expect_no_offenses(indoc! {r#"
+                def foo
+                  work
+                ensure
+                  -> { return 1 }
+                  -> { return _1 }.call(1)
                 end
             "#});
     }

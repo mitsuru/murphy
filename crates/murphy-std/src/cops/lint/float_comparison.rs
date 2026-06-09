@@ -13,6 +13,7 @@
 //!   Some RuboCop float-instance method refinements are intentionally omitted
 //!   in v1 because Murphy has no type inference.
 
+use crate::cops::util::unwrap_parenthesized;
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
 #[derive(Default)]
@@ -43,7 +44,8 @@ impl FloatComparison {
     fn check_case(&self, node: NodeId, cx: &Cx<'_>) {
         for &when_node in cx.case_when_branches(node) {
             for &condition in cx.when_conditions(when_node) {
-                if is_floatish(condition, cx) && !is_literal_safe(condition, cx) {
+                let unwrapped = unwrap_parenthesized(condition, cx);
+                if matches!(*cx.kind(unwrapped), NodeKind::Float(value) if value != 0.0) {
                     cx.emit_offense(cx.range(condition), "Avoid float literal comparisons in case statements as they are unreliable.", None);
                 }
             }
@@ -59,10 +61,12 @@ fn check_comparison(node: NodeId, cx: &Cx<'_>) {
     };
     let Some(lhs) = lhs else { return; };
     let [rhs] = args else { return; };
-    if is_literal_safe(lhs, cx) || is_literal_safe(*rhs, cx) {
+    let lhs = unwrap_parenthesized(lhs, cx);
+    let rhs = unwrap_parenthesized(*rhs, cx);
+    if is_literal_safe(lhs, cx) || is_literal_safe(rhs, cx) {
         return;
     }
-    if is_floatish(lhs, cx) || is_floatish(*rhs, cx) {
+    if is_floatish(lhs, cx) || is_floatish(rhs, cx) {
         let message = if cx.symbol_str(method) == "!=" {
             "Avoid inequality comparisons of floats as they are unreliable."
         } else {
@@ -138,9 +142,28 @@ mod tests {
     }
 
     #[test]
+    fn case_when_only_flags_float_literals() {
+        test::<FloatComparison>()
+            .expect_no_offenses(indoc! {r#"
+                case value
+                when x.to_f
+                  foo
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                case value
+                when (0.0)
+                  foo
+                end
+            "#});
+    }
+
+    #[test]
     fn accepts_zero_nil_and_epsilon_style_comparisons() {
         test::<FloatComparison>()
             .expect_no_offenses("x == 0.0\n")
+            .expect_no_offenses("x == (0.0)\n")
+            .expect_no_offenses("x == ((0.0))\n")
             .expect_no_offenses("Float(x, exception: false) == nil\n")
             .expect_no_offenses("(0.1; value) == x\n")
             .expect_no_offenses("(x - 0.1).abs < Float::EPSILON\n");
