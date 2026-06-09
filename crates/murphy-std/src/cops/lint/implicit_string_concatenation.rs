@@ -46,7 +46,7 @@ impl ImplicitStringConcatenation {
             if !is_string_literal_part(*lhs, cx) || !is_string_literal_part(*rhs, cx) {
                 continue;
             }
-            if line_number(cx.range(*lhs).end, cx.source()) != line_number(cx.range(*rhs).start, cx.source()) {
+            if !same_line_gap(cx.range(*lhs).end, cx.range(*rhs).start, cx.source()) {
                 continue;
             }
             if !ends_with_string_delimiter(*lhs, cx) {
@@ -105,18 +105,15 @@ fn parent_is_send(node: NodeId, cx: &Cx<'_>) -> bool {
     })
 }
 
-fn line_number(offset: u32, source: &str) -> usize {
-    source.as_bytes()[..offset as usize]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
+fn same_line_gap(lhs_end: u32, rhs_start: u32, source: &str) -> bool {
+    !source.as_bytes()[lhs_end as usize..rhs_start as usize].contains(&b'\n')
 }
 
 murphy_plugin_api::submit_cop!(ImplicitStringConcatenation);
 
 #[cfg(test)]
 mod tests {
-    use super::ImplicitStringConcatenation;
+    use super::{same_line_gap, ImplicitStringConcatenation};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -153,5 +150,13 @@ mod tests {
                   'def'
                 ]
             "#});
+    }
+
+    #[test]
+    fn same_line_gap_checks_only_gap_text() {
+        let source = "prefix\n\"abc\" \"def\"\n\"ghi\"\n\"jkl\"\n";
+
+        assert!(same_line_gap(12, 13, source));
+        assert!(!same_line_gap(24, 25, source));
     }
 }

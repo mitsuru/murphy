@@ -104,8 +104,9 @@ fn heredoc_tokens(
         .iter()
         .find(|tok| tok.kind == SourceTokenKind::HeredocStart)
         .copied()?;
-    let end = cx
-        .sorted_tokens()
+    let sorted_tokens = cx.sorted_tokens();
+    let idx = sorted_tokens.partition_point(|tok| tok.range.start < start.range.end);
+    let end = sorted_tokens[idx..]
         .iter()
         .find(|tok| tok.kind == SourceTokenKind::HeredocEnd && tok.range.start >= start.range.end)
         .copied()?;
