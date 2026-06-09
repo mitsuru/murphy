@@ -99,7 +99,7 @@ impl ComparableClamp {
         } else {
             (bound_src, inner_bound_src)
         };
-        let preferred = format!("{}.clamp({}, {})", val_src, low, high);
+        let preferred = format!("({}).clamp({}, {})", val_src, low, high);
         cx.emit_offense(cx.range(node), "Use `Comparable#clamp` instead.", None);
         cx.emit_edit(cx.range(node), &preferred);
     }

@@ -71,31 +71,31 @@ impl BitwisePredicate {
         let flags_src = cx.raw_source(cx.range(rhs));
         let recv_src = cx.raw_source(cx.range(bit_recv_id));
         let replacement = match method_str {
-            "positive?" => Some(format!("{}.anybits?({})", recv_src, flags_src)),
+            "positive?" => Some(format!("({}).anybits?({})", recv_src, flags_src)),
             ">" => {
                 let arg_list = cx.list(args);
                 if arg_list.is_empty() { None }
                 else if cx.raw_source(cx.range(arg_list[0])) == "0" {
-                    Some(format!("{}.anybits?({})", recv_src, flags_src))
+                    Some(format!("({}).anybits?({})", recv_src, flags_src))
                 } else { None }
             }
             "!=" => {
                 let arg_list = cx.list(args);
                 if arg_list.is_empty() { None }
                 else if cx.raw_source(cx.range(arg_list[0])) == "0" {
-                    Some(format!("{}.anybits?({})", recv_src, flags_src))
+                    Some(format!("({}).anybits?({})", recv_src, flags_src))
                 } else { None }
             }
-            "zero?" => Some(format!("{}.nobits?({})", recv_src, flags_src)),
+            "zero?" => Some(format!("({}).nobits?({})", recv_src, flags_src)),
             "==" => {
                 let arg_list = cx.list(args);
                 if arg_list.is_empty() { None }
                 else {
                     let arg_src = cx.raw_source(cx.range(arg_list[0]));
                     if arg_src == "0" {
-                        Some(format!("{}.nobits?({})", recv_src, flags_src))
+                        Some(format!("({}).nobits?({})", recv_src, flags_src))
                     } else if arg_src == flags_src {
-                        Some(format!("{}.allbits?({})", recv_src, flags_src))
+                        Some(format!("({}).allbits?({})", recv_src, flags_src))
                     } else { None }
                 }
             }
@@ -121,7 +121,7 @@ mod tests {
                 (variable & flags).positive?
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use a bitwise predicate method instead.
             "},
-            "variable.anybits?(flags)\n",
+            "(variable).anybits?(flags)\n",
         );
     }
 
@@ -132,7 +132,7 @@ mod tests {
                 (variable & flags).zero?
                 ^^^^^^^^^^^^^^^^^^^^^^^^ Use a bitwise predicate method instead.
             "},
-            "variable.nobits?(flags)\n",
+            "(variable).nobits?(flags)\n",
         );
     }
 
@@ -154,7 +154,7 @@ mod tests {
                 (variable & flags) == 0
                 ^^^^^^^^^^^^^^^^^^^^^^^ Use a bitwise predicate method instead.
             "},
-            "variable.nobits?(flags)\n",
+            "(variable).nobits?(flags)\n",
         );
     }
 
@@ -165,7 +165,7 @@ mod tests {
                 (variable & flags) == flags
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use a bitwise predicate method instead.
             "},
-            "variable.allbits?(flags)\n",
+            "(variable).allbits?(flags)\n",
         );
     }
 

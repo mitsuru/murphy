@@ -84,7 +84,7 @@ impl MapJoin {
         let map_recv_src = cx.raw_source(cx.range(map_recv_id));
         let node_src = cx.raw_source(cx.range(node));
         let dot_pos = map_range.end - cx.range(node).start;
-        let after_dot = &node_src[(dot_pos + 1) as usize..];
+        let after_dot = &node_src[dot_pos as usize..];
         cx.emit_edit(cx.range(node), &format!("{}{}", map_recv_src, after_dot));
     }
 }
