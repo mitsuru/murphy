@@ -92,9 +92,6 @@ fn has_visibility_declaration(name: &str, parent: NodeId, cx: &Cx<'_>) -> bool {
         if method_str != "public_constant" && method_str != "private_constant" {
             continue;
         }
-        if receiver != OptNodeId::NONE {
-            continue;
-        }
         if receiver != OptNodeId::NONE
             && !receiver.get().is_some_and(|r| matches!(cx.kind(r), NodeKind::SelfExpr))
         {

@@ -12,6 +12,7 @@
 //!   Checks for comments on same line as begin/class/def/end/module.
 //!   Exempts :nodoc:, :yields:, rubocop:disable, steep:ignore.
 //!   Autocorrect is a v1 gap.
+//!   Only checks keyword at start of line (e.g. `foo if bar # c` is missed).
 //! ```
 
 use murphy_plugin_api::{Cx, cop};
