@@ -54,8 +54,8 @@ impl CommentedKeyword {
             let line = &bytes[line_start..comment.range.start as usize];
             let line_str = core::str::from_utf8(line).unwrap_or_default().trim();
             for &kw in KEYWORDS {
-                if line_str.starts_with(kw)
-                    && !line_str[kw.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                if let Some(rest) = line_str.strip_prefix(kw) {
+                    if !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_')
                 {
                     cx.emit_offense(
                         comment.range,
@@ -63,6 +63,7 @@ impl CommentedKeyword {
                         None,
                     );
                     break;
+                }
                 }
             }
         }

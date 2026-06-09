@@ -85,18 +85,6 @@ fn node_used_as_receiver(node: NodeId, cx: &Cx<'_>) -> bool {
     })
 }
 
-fn is_assigned(node: NodeId, cx: &Cx<'_>) -> bool {
-    cx.parent(node).get().is_some_and(|parent| {
-        matches!(
-            cx.kind(parent),
-            NodeKind::Lvasgn { .. }
-                | NodeKind::Ivasgn { .. }
-                | NodeKind::Gvasgn { .. }
-                | NodeKind::Cvasgn { .. }
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::FileOpen;

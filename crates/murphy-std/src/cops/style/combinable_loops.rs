@@ -55,10 +55,10 @@ impl CombinableLoops {
         let NodeKind::Block { call: prev_call, .. } = *cx.kind(prev) else {
             return;
         };
-        let NodeKind::Send { method: this_method, .. } = *cx.kind(this_call) else {
+        let NodeKind::Send { receiver: this_recv, method: this_method, .. } = *cx.kind(this_call) else {
             return;
         };
-        let NodeKind::Send { method: prev_method, .. } = *cx.kind(prev_call) else {
+        let NodeKind::Send { receiver: prev_recv, method: prev_method, .. } = *cx.kind(prev_call) else {
             return;
         };
         let this_method_str = cx.symbol_str(this_method);
@@ -71,7 +71,15 @@ impl CombinableLoops {
         }
         // Compare receiver expressions by source text (separate node instances
         // of the same expression have distinct NodeIds).
-        if cx.raw_source(cx.range(this_call)) != cx.raw_source(cx.range(prev_call)) {
+        let this_recv_src = match this_recv.get() {
+            Some(r) => cx.raw_source(cx.range(r)),
+            None => return,
+        };
+        let prev_recv_src = match prev_recv.get() {
+            Some(r) => cx.raw_source(cx.range(r)),
+            None => return,
+        };
+        if this_recv_src != prev_recv_src {
             return;
         }
         cx.emit_offense(cx.range(node), MSG, None);
