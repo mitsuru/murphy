@@ -45,16 +45,11 @@ impl FileOpen {
         if has_block(node, cx) {
             return;
         }
-        // Flag all blockless File.open. Only skip when the parent is a Send
-        // where this node is the receiver (chained call pattern like
-        // `File.open('f').read` - those will be caught by their inner Send
-        // being the root of the chain instead, avoiding double-reporting).
-        let is_chained_call_receiver = cx.parent(node).get().is_some_and(|p| {
-            matches!(cx.kind(p), NodeKind::Send { receiver, .. } if receiver.get() == Some(node))
-        });
-        if !is_chained_call_receiver {
-            cx.emit_offense(cx.range(node), MSG, None);
-        }
+        // Flag all blockless File.open calls. We flag even when the
+        // result is chained (`File.open('f').read`) because the inner
+        // `open` is the only call this cop dispatches on, and the outer
+        // `.read` won't re-trigger it.
+        cx.emit_offense(cx.range(node), MSG, None);
     }
 }
 
