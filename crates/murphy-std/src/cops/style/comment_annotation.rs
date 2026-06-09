@@ -49,21 +49,21 @@ impl CommentAnnotation {
             }
             let body = text.trim_start_matches('#').trim();
             for kw in &["TODO", "FIXME", "OPTIMIZE", "HACK", "REVIEW"] {
-                if !body.to_uppercase().starts_with(kw) {
+                let upper_body = body.to_uppercase();
+                if !upper_body.starts_with(kw) {
                     continue;
                 }
-                let actual_kw = &body[..kw.len().min(body.len())];
-                if *actual_kw != **kw {
-                    continue;
-                }
+                let actual_kw = &body[..kw.len()];
                 let after_kw = &body[kw.len()..];
-                if opts.require_colon {
-                    if after_kw.starts_with(": ") {
-                        continue;
-                    }
-                } else {
-                    if after_kw.starts_with(' ') {
-                        continue;
+                if *actual_kw == **kw {
+                    if opts.require_colon {
+                        if after_kw.starts_with(": ") {
+                            continue;
+                        }
+                    } else {
+                        if after_kw.starts_with(' ') {
+                            continue;
+                        }
                     }
                 }
                 let msg = if opts.require_colon { MSG_COLON } else { MSG_SPACE };

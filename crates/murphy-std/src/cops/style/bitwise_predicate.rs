@@ -46,7 +46,9 @@ impl BitwisePredicate {
             _ => return,
         };
         let child_list = cx.list(begin_children);
-        if child_list.is_empty() {
+        // Require exactly one expression: `(x & flags)`.
+        // Skip multi-expression parentheses: `(x & flags; y)`.
+        if child_list.len() != 1 {
             return;
         }
         let inner_send = child_list[0];
