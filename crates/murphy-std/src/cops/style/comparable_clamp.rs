@@ -28,9 +28,17 @@ pub struct ComparableClamp;
 impl ComparableClamp {
     #[on_node(kind = "send", methods = ["min", "max"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, method, .. } = *cx.kind(node) else {
+        let NodeKind::Send { receiver, method, args } = *cx.kind(node) else {
             return;
         };
+        // Outer min/max must have no arguments and no block.
+        let arg_list = cx.list(args);
+        if !arg_list.is_empty() {
+            return;
+        }
+        if cx.block_node(node).get().is_some() {
+            return;
+        }
         let method_str = cx.symbol_str(method);
         let Some(recv_id) = receiver.get() else {
             return;
@@ -53,9 +61,14 @@ impl ComparableClamp {
         }
         let inner_send = inner_sends[0];
         let bound = others[0];
-        let NodeKind::Send { receiver: inner_recv, method: inner_method, .. } = *cx.kind(inner_send) else {
+        let NodeKind::Send { receiver: inner_recv, method: inner_method, args: inner_args } = *cx.kind(inner_send) else {
             return;
         };
+        // Inner min/max must have no arguments.
+        let inner_arg_list = cx.list(inner_args);
+        if !inner_arg_list.is_empty() {
+            return;
+        }
         let inner_method_str = cx.symbol_str(inner_method);
         let opposite = matches!(
             (method_str, inner_method_str),

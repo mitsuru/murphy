@@ -45,7 +45,21 @@ impl FileOpen {
         if has_block(node, cx) {
             return;
         }
-        if node_used_as_receiver(node, cx) || is_assigned(node, cx) {
+        // Flag standalone, assigned, or chained File.open (blockless).
+        // Matching RuboCop: flags unless the value is passed to a receiver
+        // (i.e. used as an argument which the caller manages).
+        let is_standalone_or_assigned_or_chained = {
+            let parent = cx.parent(node);
+            match parent.get() {
+                Some(p) => match cx.kind(p) {
+                    NodeKind::Lvasgn { .. } | NodeKind::Ivasgn { .. }
+                    | NodeKind::Gvasgn { .. } | NodeKind::Cvasgn { .. } => true,
+                    _ => node_used_as_receiver(node, cx),
+                },
+                None => true,
+            }
+        };
+        if is_standalone_or_assigned_or_chained {
             cx.emit_offense(cx.range(node), MSG, None);
         }
     }
