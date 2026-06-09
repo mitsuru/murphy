@@ -28,9 +28,12 @@ pub struct ConcatArrayLiterals;
 impl ConcatArrayLiterals {
     #[on_node(kind = "send", methods = ["concat"])]
     fn check_concat(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { args, .. } = *cx.kind(node) else {
+        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
             return;
         };
+        if receiver.get().is_none() {
+            return;
+        }
         let arg_list = cx.list(args);
         if arg_list.is_empty() {
             return;

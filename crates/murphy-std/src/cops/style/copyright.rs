@@ -42,6 +42,8 @@ impl Copyright {
         if source.trim().is_empty() {
             return;
         }
+        // v1 limitation: uses substring matching instead of full regex.
+        // RuboCop's regex-based matching is not yet supported.
         let found = cx.comments().iter().any(|comment| {
             cx.raw_source(comment.range).contains(&opts.notice)
         });

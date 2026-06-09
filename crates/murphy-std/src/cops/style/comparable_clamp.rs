@@ -76,6 +76,8 @@ impl ComparableClamp {
         }
         let inner_val = inner_list[0];
         let inner_bound = inner_list[1];
+        // v1 assumes inner_list[0] = value, inner_list[1] = bound.
+        // [[low, x].max, high].min is not correctly handled (documented gap).
         let val_src = cx.raw_source(cx.range(inner_val));
         let inner_bound_src = cx.raw_source(cx.range(inner_bound));
         let bound_src = cx.raw_source(cx.range(bound));

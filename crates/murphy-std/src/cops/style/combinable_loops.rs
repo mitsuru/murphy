@@ -55,10 +55,10 @@ impl CombinableLoops {
         let NodeKind::Block { call: prev_call, .. } = *cx.kind(prev) else {
             return;
         };
-        let NodeKind::Send { receiver: this_recv, method: this_method, .. } = *cx.kind(this_call) else {
+        let NodeKind::Send { method: this_method, .. } = *cx.kind(this_call) else {
             return;
         };
-        let NodeKind::Send { receiver: prev_recv, method: prev_method, .. } = *cx.kind(prev_call) else {
+        let NodeKind::Send { method: prev_method, .. } = *cx.kind(prev_call) else {
             return;
         };
         let this_method_str = cx.symbol_str(this_method);

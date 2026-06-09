@@ -48,12 +48,19 @@ impl MapJoin {
         if map_arg_list.len() != 1 {
             return;
         }
-        let bp = map_arg_list[0];
-        if !matches!(cx.kind(bp), murphy_plugin_api::NodeKind::BlockPass(_)) {
+        let bp_arg = map_arg_list[0];
+        let opt_sym = match *cx.kind(bp_arg) {
+            murphy_plugin_api::NodeKind::BlockPass(sym) => sym,
+            _ => return,
+        };
+        let Some(sym_id) = opt_sym.get() else {
+            return;
+        };
+        if !matches!(cx.kind(sym_id), murphy_plugin_api::NodeKind::Sym(_)) {
             return;
         }
-        let bp_src = cx.raw_source(cx.range(bp));
-        if !bp_src.contains(":to_s") {
+        let sym_src = cx.raw_source(cx.range(sym_id));
+        if sym_src != ":to_s" {
             return;
         }
         let map_range = cx.range(recv_id);
