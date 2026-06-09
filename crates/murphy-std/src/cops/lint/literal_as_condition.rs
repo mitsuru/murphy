@@ -106,6 +106,9 @@ impl LiteralAsCondition {
 
     #[on_node(kind = "send", methods = ["!"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+        if !condition_operand(node, cx) {
+            return;
+        }
         if let Some(receiver) = cx.call_receiver(node).get() {
             check_literal(receiver, cx);
         }
@@ -192,5 +195,12 @@ mod tests {
             !nil
              ^^^ Literal `nil` appeared as a condition.
         "#});
+    }
+
+    #[test]
+    fn accepts_negated_literal_outside_condition_context() {
+        test::<LiteralAsCondition>()
+            .expect_no_offenses("value = !nil\n")
+            .expect_no_offenses("foo(!false)\n");
     }
 }
