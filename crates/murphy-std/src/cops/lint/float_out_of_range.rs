@@ -27,10 +27,17 @@ impl FloatOutOfRange {
     fn check_float(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Float(value) = *cx.kind(node) else { return; };
         let source = cx.raw_source(cx.range(node));
-        if value.is_infinite() || (value == 0.0 && source.bytes().any(|b| matches!(b, b'1'..=b'9'))) {
+        if value.is_infinite() || (value == 0.0 && mantissa_has_nonzero_digit(source)) {
             cx.emit_offense(cx.range(node), "Float out of range.", None);
         }
     }
+}
+
+fn mantissa_has_nonzero_digit(source: &str) -> bool {
+    source
+        .split(['e', 'E'])
+        .next()
+        .is_some_and(|mantissa| mantissa.bytes().any(|b| matches!(b, b'1'..=b'9')))
 }
 
 murphy_plugin_api::submit_cop!(FloatOutOfRange);
@@ -57,6 +64,8 @@ mod tests {
     fn accepts_representable_floats_and_literal_zero() {
         test::<FloatOutOfRange>()
             .expect_no_offenses("float = 42.9\n")
-            .expect_no_offenses("float = 0.0\n");
+            .expect_no_offenses("float = 0.0\n")
+            .expect_no_offenses("float = 0.0e400\n")
+            .expect_no_offenses("float = 0.0e-400\n");
     }
 }

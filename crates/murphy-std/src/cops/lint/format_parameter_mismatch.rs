@@ -53,7 +53,11 @@ fn format_call<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<(&'a str, NodeId, usi
     match method_name {
         "format" | "sprintf" => {
             let receiver_ok = receiver.get().is_none_or(|recv| matches!(*cx.kind(recv), NodeKind::Const { name, .. } if cx.symbol_str(name) == "Kernel"));
-            if !receiver_ok || args.len() < 2 || !is_string(args[0], cx) || args.iter().skip(1).any(|&arg| matches!(cx.kind(arg), NodeKind::Splat(_))) {
+            if !receiver_ok
+                || args.is_empty()
+                || !is_string(args[0], cx)
+                || args.iter().skip(1).any(|&arg| matches!(cx.kind(arg), NodeKind::Splat(_)))
+            {
                 return None;
             }
             Some((method_name, args[0], args.len() - 1))
@@ -144,10 +148,15 @@ mod tests {
 
     #[test]
     fn flags_format_argument_count_mismatch() {
-        test::<FormatParameterMismatch>().expect_offense(indoc! {r#"
-            format('A value: %s and another: %i', a_value)
-            ^^^^^^ Number of arguments (1) to `format` doesn't match the number of fields (2).
-        "#});
+        test::<FormatParameterMismatch>()
+            .expect_offense(indoc! {r#"
+                format('A value: %s and another: %i', a_value)
+                ^^^^^^ Number of arguments (1) to `format` doesn't match the number of fields (2).
+            "#})
+            .expect_offense(indoc! {r#"
+                format('%s')
+                ^^^^^^ Number of arguments (0) to `format` doesn't match the number of fields (1).
+            "#});
     }
 
     #[test]
