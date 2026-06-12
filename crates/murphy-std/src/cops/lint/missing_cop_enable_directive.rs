@@ -22,7 +22,7 @@ pub struct MissingCopEnableDirective;
 
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(default = 2147483647, description = "Maximum disabled range size in lines.")]
+    #[option(name = "MaximumRangeSize", default = 2147483647, description = "Maximum disabled range size in lines.")]
     pub max_range_size: i64,
 }
 

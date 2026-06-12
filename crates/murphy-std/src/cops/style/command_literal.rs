@@ -33,12 +33,12 @@ pub enum EnforcedStyle {
 
 #[derive(CopOptions)]
 pub struct CommandLiteralOptions {
-    #[option(
+    #[option(name = "EnforcedStyle", 
         default = "backticks",
         description = "Enforced style for command literals."
     )]
     pub enforced_style: EnforcedStyle,
-    #[option(
+    #[option(name = "AllowInnerBackticks", 
         default = false,
         description = "Allow inner backticks."
     )]

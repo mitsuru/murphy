@@ -72,7 +72,7 @@ pub struct Void;
 pub struct VoidOptions {
     /// Whether to check non-mutating methods like `sort`, `collect`, etc.
     /// when used in void context. Defaults to `false` matching RuboCop.
-    #[option(
+    #[option(name = "CheckForMethodsWithNoSideEffects", 
         default = false,
         description = "If true, check non-mutating methods used in void context."
     )]

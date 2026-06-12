@@ -41,7 +41,7 @@ pub struct EmptyConditionalBody;
 /// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(
+    #[option(name = "AllowComments", 
         default = true,
         description = "When true, don't flag a branch whose body region contains only a comment."
     )]

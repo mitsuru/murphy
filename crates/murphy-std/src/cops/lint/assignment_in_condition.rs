@@ -28,7 +28,7 @@ pub struct AssignmentInCondition;
 
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(
+    #[option(name = "AllowSafeAssignment", 
         default = true,
         description = "When true, allow assignments wrapped in parentheses in conditions."
     )]

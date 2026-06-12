@@ -48,12 +48,13 @@ pub struct TodoFormat;
 /// (same staging as `Style/StringLiterals`).
 #[derive(CopOptions)]
 pub struct TodoFormatOptions {
-    #[option(
+    #[option(name = "Tags", 
         default = ["TODO", "FIXME"],
         description = "Tags treated as todo-style markers."
     )]
     pub tags: Vec<String>,
     #[option(
+        name = "RequireAuthor",
         default = false,
         description = "When true, require an @author <name> annotation on the same line."
     )]

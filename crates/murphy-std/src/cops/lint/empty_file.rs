@@ -19,7 +19,7 @@ pub struct EmptyFile;
 
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(default = true, description = "When true, files containing only comments are allowed.")]
+    #[option(name = "AllowComments", default = true, description = "When true, files containing only comments are allowed.")]
     pub allow_comments: bool,
 }
 

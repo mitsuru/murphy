@@ -41,8 +41,8 @@ use std::{fs, vec::Vec};
 use murphy_ast::Ast;
 
 use crate::{
-    Cop, CopOptions, Cx, CxRaw, FnTable, NodeCop, NodeId, Range, RawEdit, RawOffense, RawSlice,
-    Severity,
+    Cop, CopOptions, Cx, CxRaw, FnTable, NodeCop, NodeId, OptionSpec, PluginCopV1, Range, RawEdit,
+    RawOffense, RawSlice, Severity,
 };
 
 /// Re-export of [`indoc::indoc!`] so plugin packs writing
@@ -78,6 +78,48 @@ pub fn assert_cop_parity_metadata_for_crate(manifest_dir: impl AsRef<Path>) {
         failures.is_empty(),
         "missing parity metadata:\n{}",
         failures.join("\n")
+    );
+}
+
+/// Assert that every cop option's config key in `cops` is RuboCop-style
+/// PascalCase (`^[A-Z][A-Za-z0-9]*$`, e.g. `Max`, `EnforcedStyle`,
+/// `MaximumRangeSize`, `CountAsOne`).
+///
+/// A `#[derive(CopOptions)]` field declared without `#[option(name = "...")]`
+/// falls back to its snake_case Rust identifier (`max`, `enforced_style`),
+/// which never matches the PascalCase key users write in `.murphy.yml`, so the
+/// option is silently ignored. Each pack passes its `PACK_COPS` slice; this
+/// guard fails the build the moment a snake_case key sneaks in. See
+/// `murphy-pj12`.
+#[track_caller]
+pub fn assert_pack_option_keys_pascal_case(cops: &[PluginCopV1]) {
+    fn is_pascal_case(key: &str) -> bool {
+        let mut chars = key.chars();
+        chars.next().is_some_and(|c| c.is_ascii_uppercase())
+            && key.chars().all(|c| c.is_ascii_alphanumeric())
+    }
+
+    let mut offenders = Vec::new();
+    for cop in cops {
+        let cop_name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("<bad utf8>");
+        if cop.options_ptr.is_null() {
+            continue;
+        }
+        // Safety: `options_ptr`/`options_len` describe the cop's `OptionSpec`
+        // table, a `'static` slice emitted by the `#[derive(CopOptions)]` macro.
+        let specs: &[OptionSpec] =
+            unsafe { std::slice::from_raw_parts(cop.options_ptr, cop.options_len) };
+        for spec in specs {
+            let key = std::str::from_utf8(unsafe { spec.name.as_bytes() }).unwrap_or("<bad utf8>");
+            if !is_pascal_case(key) {
+                offenders.push(format!("  {cop_name}: `{key}`"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "option keys must be RuboCop-style PascalCase (add `#[option(name = \"...\")]`):\n{}",
+        offenders.join("\n")
     );
 }
 

@@ -33,7 +33,7 @@ pub enum EnforcedStyle {
 
 #[derive(CopOptions)]
 pub struct HashLookupMethodOptions {
-    #[option(
+    #[option(name = "EnforcedStyle", 
         default = "brackets",
         description = "Enforced style for hash lookup."
     )]

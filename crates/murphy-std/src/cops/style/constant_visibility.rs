@@ -17,7 +17,7 @@ use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
 
 #[derive(CopOptions)]
 pub struct ConstantVisibilityOptions {
-    #[option(default = false, description = "Ignore modules (Struct.new, etc.)")]
+    #[option(name = "IgnoreModules", default = false, description = "Ignore modules (Struct.new, etc.)")]
     pub ignore_modules: bool,
 }
 

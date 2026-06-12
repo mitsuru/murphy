@@ -58,7 +58,7 @@ pub struct RedundantFetchBlock;
 /// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(
+    #[option(name = "SafeForConstants", 
         default = false,
         description = "When true, also flag `fetch` blocks whose body is a constant."
     )]

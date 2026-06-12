@@ -48,11 +48,11 @@ pub struct DuplicateBranch;
 
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(default = false, description = "Ignore branches whose body is a literal.")]
+    #[option(name = "IgnoreLiteralBranches", default = false, description = "Ignore branches whose body is a literal.")]
     pub ignore_literal_branches: bool,
-    #[option(default = false, description = "Ignore branches whose body is a constant.")]
+    #[option(name = "IgnoreConstantBranches", default = false, description = "Ignore branches whose body is a constant.")]
     pub ignore_constant_branches: bool,
-    #[option(default = false, description = "Ignore a duplicate else branch in a multi-branch construct.")]
+    #[option(name = "IgnoreDuplicateElseBranch", default = false, description = "Ignore a duplicate else branch in a multi-branch construct.")]
     pub ignore_duplicate_else_branch: bool,
 }
 

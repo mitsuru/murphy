@@ -31,12 +31,12 @@ pub struct EmptyBlock;
 /// Cop options for [`EmptyBlock`], decoded live via `cx.options_or_default`.
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(
+    #[option(name = "AllowEmptyLambdas", 
         default = true,
         description = "When true, don't flag empty lambdas (`-> {}`) and procs (`proc {}`, `Proc.new {}`)."
     )]
     pub allow_empty_lambdas: bool,
-    #[option(
+    #[option(name = "AllowComments", 
         default = true,
         description = "When true, don't flag an empty block whose source range contains a comment."
     )]

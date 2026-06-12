@@ -25,7 +25,7 @@ pub struct CommentAnnotation;
 
 #[derive(CopOptions)]
 pub struct CommentAnnotationOptions {
-    #[option(default = true, description = "Require colon after annotation keyword.")]
+    #[option(name = "RequireColon", default = true, description = "Require colon after annotation keyword.")]
     pub require_colon: bool,
 }
 

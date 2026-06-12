@@ -33,7 +33,7 @@ pub enum EnforcedStyle {
 
 #[derive(CopOptions)]
 pub struct EmptyClassDefinitionOptions {
-    #[option(
+    #[option(name = "EnforcedStyle", 
         default = "class_keyword",
         description = "Enforced style for empty class definitions."
     )]
