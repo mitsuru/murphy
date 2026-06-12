@@ -132,12 +132,13 @@ impl SpaceAroundBlockParameters {
                     cx.range(first).start,
                     "before first block parameter",
                 );
-                // extra space before first (more than one).
+                // extra space before first (more than one). `saturating_sub`
+                // is defensive: the `>` guard already ensures `start >= 1`.
                 if cx.range(first).start > open.range.end {
                     check_no_space(
                         cx,
                         open.range.end,
-                        cx.range(first).start - 1,
+                        cx.range(first).start.saturating_sub(1),
                         "Extra space before first",
                     );
                 }
@@ -151,10 +152,11 @@ impl SpaceAroundBlockParameters {
                     cx.range(last).end,
                     "after last block parameter",
                 );
-                // extra space after last (more than one).
+                // extra space after last (more than one). `saturating_add` is
+                // defensive against u32 overflow at the source-length boundary.
                 check_no_space(
                     cx,
-                    cx.range(last).end + 1,
+                    cx.range(last).end.saturating_add(1),
                     close.range.start,
                     "Extra space after last",
                 );
