@@ -648,7 +648,16 @@ fn skip_inline_space(cx: &Cx<'_>, start: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{HashSyntax, HashSyntaxOptions, HashSyntaxStyle, ShorthandSyntax};
-    use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::test_support::{Tester, indoc, test};
+
+    /// Tester preconfigured with `EnforcedStyle: ruby19_no_mixed_keys` — shared
+    /// by every `ruby19_no_mixed_keys_*` test below.
+    fn ruby19_no_mixed_keys() -> Tester<HashSyntax> {
+        test::<HashSyntax>().with_options(&HashSyntaxOptions {
+            enforced_style: HashSyntaxStyle::Ruby19NoMixedKeys,
+            ..HashSyntaxOptions::default()
+        })
+    }
 
     #[test]
     fn option_defaults_match_rubocop() {
@@ -902,11 +911,7 @@ mod tests {
 
     #[test]
     fn ruby19_no_mixed_keys_flags_mixed_non_symbol_keys() {
-        test::<HashSyntax>()
-            .with_options(&HashSyntaxOptions {
-                enforced_style: HashSyntaxStyle::Ruby19NoMixedKeys,
-                ..HashSyntaxOptions::default()
-            })
+        ruby19_no_mixed_keys()
             .expect_correction(
                 indoc! {r#"
                     x = { a: 0, 'b' => 1 }
@@ -921,22 +926,14 @@ mod tests {
         // A colon-form quoted symbol key (`'@context':`) is already valid
         // ruby19 syntax; combined with bare colon keys the hash is all-colon,
         // not mixed. Matches rubocop 1.87.0 (0 offenses).
-        test::<HashSyntax>()
-            .with_options(&HashSyntaxOptions {
-                enforced_style: HashSyntaxStyle::Ruby19NoMixedKeys,
-                ..HashSyntaxOptions::default()
-            })
+        ruby19_no_mixed_keys()
             .expect_no_offenses("x = { '@context': 0, type: 1 }\n");
     }
 
     #[test]
     fn ruby19_no_mixed_keys_accepts_single_colon_quoted_symbol_key() {
         // A single quoted colon key cannot be "mixed" with anything.
-        test::<HashSyntax>()
-            .with_options(&HashSyntaxOptions {
-                enforced_style: HashSyntaxStyle::Ruby19NoMixedKeys,
-                ..HashSyntaxOptions::default()
-            })
+        ruby19_no_mixed_keys()
             .expect_no_offenses("x = { 'Content-Type': 0 }\n");
     }
 
@@ -945,11 +942,7 @@ mod tests {
         // Dynamic-symbol colon keys (`"#{x}":`) are already ruby19 colon
         // syntax; an all-colon hash of them is not mixed. Matches rubocop
         // (0 offenses) — cf. mastodon redis_configuration_spec.rb.
-        test::<HashSyntax>()
-            .with_options(&HashSyntaxOptions {
-                enforced_style: HashSyntaxStyle::Ruby19NoMixedKeys,
-                ..HashSyntaxOptions::default()
-            })
+        ruby19_no_mixed_keys()
             .expect_no_offenses("x = { \"#{prefix}_A\": 1, \"#{prefix}_B\": 2 }\n");
     }
 
@@ -958,11 +951,7 @@ mod tests {
         // A colon-style dynamic-symbol key mixed with a non-symbol rocket key
         // is a genuine mix; the colon key is flagged to a rocket. Matches
         // rubocop (the can_use_ruby19=true change must not hide real mixes).
-        test::<HashSyntax>()
-            .with_options(&HashSyntaxOptions {
-                enforced_style: HashSyntaxStyle::Ruby19NoMixedKeys,
-                ..HashSyntaxOptions::default()
-            })
+        ruby19_no_mixed_keys()
             .expect_offense(indoc! {r##"
                 x = { "#{k}": 1, 'y' => 2 }
                       ^^^^^^^ Don't mix styles in the same hash.
@@ -973,11 +962,7 @@ mod tests {
     fn ruby19_no_mixed_keys_still_flags_string_rocket_symbol_colon_mix() {
         // Genuine mix: a string rocket key forces the colon symbol key to a
         // rocket. Must remain flagged (matches rubocop).
-        test::<HashSyntax>()
-            .with_options(&HashSyntaxOptions {
-                enforced_style: HashSyntaxStyle::Ruby19NoMixedKeys,
-                ..HashSyntaxOptions::default()
-            })
+        ruby19_no_mixed_keys()
             .expect_correction(
                 indoc! {r#"
                     x = { 'foo' => 1, bar: 2 }
