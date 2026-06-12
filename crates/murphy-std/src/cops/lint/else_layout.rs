@@ -117,9 +117,15 @@ fn else_keyword_range(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
         .if_branch(node)
         .get()
         .map_or(cx.range(node).start, |b| cx.range(b).end);
+    let else_start = cx.range(else_branch).start;
+    // Guard against parser-recovery ranges where the then-branch end overruns
+    // the else-branch start, which would make `gap.start > gap.end`.
+    if then_end > else_start {
+        return None;
+    }
     let gap = Range {
         start: then_end,
-        end: cx.range(else_branch).start,
+        end: else_start,
     };
     cx.tokens_in(gap)
         .iter()
@@ -140,7 +146,15 @@ fn is_single_line(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn same_line(lhs_end: u32, rhs_start: u32, source: &str) -> bool {
-    !source.as_bytes()[lhs_end as usize..rhs_start as usize].contains(&b'\n')
+    let start = lhs_end as usize;
+    let end = rhs_start as usize;
+    // Guard against parser-recovery ranges where `lhs_end > rhs_start` (e.g. a
+    // recovered `0..0` first-else range against a positive keyword offset),
+    // which would panic on the slice.
+    if start >= end {
+        return false;
+    }
+    !source.as_bytes()[start..end].contains(&b'\n')
 }
 
 murphy_plugin_api::submit_cop!(ElseLayout);
