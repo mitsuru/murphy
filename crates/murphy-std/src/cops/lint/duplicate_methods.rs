@@ -179,7 +179,12 @@ fn collect_definers(stmt: NodeId, cx: &Cx<'_>, emit: &mut impl FnMut(MethodKey, 
 
 /// Handle `alias_method` and `attr*` send statements.
 fn collect_send_definers(stmt: NodeId, cx: &Cx<'_>, emit: &mut impl FnMut(MethodKey, Range)) {
-    // Only bare-receiver calls (e.g. `attr_reader`, not `x.attr_reader`).
+    // Macro definers are bare-receiver-only, matching RuboCop's matchers:
+    // `attribute_accessor?` is `(send nil? {:attr_reader ...} ...)` and
+    // `alias_method?` is `(send nil? :alias_method ...)`. Unlike `def`/`defs`
+    // (which model `def self.foo` singletons), a receiver-bearing
+    // `self.attr_reader`/`self.alias_method` is intentionally NOT a definer
+    // here — flagging it would diverge from RuboCop.
     if cx.call_receiver(stmt).get().is_some() {
         return;
     }
