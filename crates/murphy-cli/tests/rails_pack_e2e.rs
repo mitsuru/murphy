@@ -168,9 +168,13 @@ fn rails_rule_section_does_not_error_lint_setup() {
     let dir = tempdir().expect("tempdir");
     let rb = dir.path().join("app.rb");
     // Fixture must not trip any murphy-std built-in cop so the exit code only
-    // reflects the Rails pack's behaviour. An empty class body is inert
-    // against the current standard pack.
-    fs::write(&rb, "# frozen_string_literal: true\nclass Foo\nend\n").expect("write rb");
+    // reflects the Rails pack's behaviour. The class has a body so it does not
+    // trip `Lint/EmptyClass`, and the body is otherwise inert.
+    fs::write(
+        &rb,
+        "# frozen_string_literal: true\nclass Foo\n  def bar; end\nend\n",
+    )
+    .expect("write rb");
 
     let yml = format!(
         "plugins:\n  - name: murphy-rails\n    path: {:?}\nRails/HttpStatus:\n  Enabled: true\n",
