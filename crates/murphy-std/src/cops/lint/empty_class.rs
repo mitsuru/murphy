@@ -6,18 +6,17 @@
 //! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues:
-//!   - murphy-9cr.9
+//!   - murphy-4k23
 //! notes: >
 //!   Detection mirrors RuboCop's on_class / on_sclass: a class with no body
 //!   and no parent class is flagged with CLASS_MSG; a metaclass (`class <<
-//!   self`) with no body is flagged with METACLASS_MSG. Offense highlight is
-//!   clamped to the node's first line (Murphy convention, matching
-//!   `Lint/MissingSuper`) vs RuboCop's whole-node range; the start position
-//!   matches. `AllowComments` defaults to `false` (matching RuboCop) and is
-//!   read live via `cx.options_or_default`, so a configured `AllowComments:
-//!   true` takes effect at dispatch time. murphy-9cr.9 only adds core-side
-//!   schema validation of the option key (a typo'd key is silently ignored
-//!   until then). No autocorrect (RuboCop has none).
+//!   self`) with no body is flagged with METACLASS_MSG. `AllowComments`
+//!   defaults to `false` (matching RuboCop) and is read live via
+//!   `cx.options_or_default`, so a configured `AllowComments: true` takes
+//!   effect at dispatch time. No autocorrect (RuboCop has none). Remaining gap
+//!   (murphy-4k23): the offense highlight is clamped to the node's first line
+//!   (Murphy convention, matching `Lint/MissingSuper`) vs RuboCop's whole-node
+//!   range; the start position matches.
 //! ```
 //!
 //! ## `AllowComments`
@@ -26,8 +25,7 @@
 //! comment-only class body (`class Foo; # comment; end`) is still flagged.
 //! The option is read at dispatch time via `cx.options_or_default::<Options>()`,
 //! so setting `AllowComments: true` in `.murphy.yml` suppresses the offense for
-//! a comment-only body. murphy-9cr.9 will add core-side schema validation of the
-//! option key (until then a mistyped key is silently ignored).
+//! a comment-only body.
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
 

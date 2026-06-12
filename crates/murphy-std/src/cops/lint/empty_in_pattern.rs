@@ -6,10 +6,14 @@
 //! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues:
-//!   - murphy-9cr.9
+//!   - murphy-6rhg
 //! notes: >
-//!   Message and default AllowComments:true behavior mirror RuboCop. Runtime
-//!   option overrides are read through cx.options_or_default.
+//!   Message and default AllowComments:true behavior mirror RuboCop; the
+//!   AllowComments override is read live via cx.options_or_default. Remaining
+//!   gap (murphy-6rhg): the comment-region heuristic ([in.end,
+//!   next_sibling.start)) is not yet verified against RuboCop's comment
+//!   detection, incl. the `comments_contain_disables?` nuance (a
+//!   rubocop:disable directive must not count as an allowing comment).
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
