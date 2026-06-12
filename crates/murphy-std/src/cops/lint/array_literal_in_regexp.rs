@@ -94,7 +94,7 @@ fn all_literal_values(values: &[NodeId], cx: &Cx<'_>) -> bool {
 }
 
 fn register_array_of_literal_values(begin_node: NodeId, values: &[NodeId], cx: &Cx<'_>) {
-    let str_values: Vec<String> = values.iter().map(|&v| literal_to_string(v, cx)).collect();
+    let str_values: Vec<&str> = values.iter().map(|&v| literal_to_string(v, cx)).collect();
 
     // An empty array would naively become `[]` (an invalid empty character
     // class) or `(?:)`. RuboCop emits the former, but Murphy must never produce
@@ -106,10 +106,10 @@ fn register_array_of_literal_values(begin_node: NodeId, values: &[NodeId], cx: &
     }
 
     let (message, replacement) = if str_values.iter().all(|v| v.chars().count() == 1) {
-        let escaped: String = str_values.iter().map(|v| regexp_escape(v)).collect();
+        let escaped: String = str_values.iter().map(|&v| regexp_escape(v)).collect();
         (MSG_CHARACTER_CLASS, format!("[{escaped}]"))
     } else {
-        let escaped: Vec<String> = str_values.iter().map(|v| regexp_escape(v)).collect();
+        let escaped: Vec<String> = str_values.iter().map(|&v| regexp_escape(v)).collect();
         (MSG_ALTERNATION, format!("(?:{})", escaped.join("|")))
     };
 
@@ -120,15 +120,15 @@ fn register_array_of_literal_values(begin_node: NodeId, values: &[NodeId], cx: &
 /// RuboCop maps each value via `value.respond_to?(:value) ? value.value : value.source`.
 /// For str/sym/int/float the parsed value is used; for true/false/nil the
 /// source text (`"true"`, etc.) is used.
-fn literal_to_string(node: NodeId, cx: &Cx<'_>) -> String {
+fn literal_to_string<'a>(node: NodeId, cx: &Cx<'a>) -> &'a str {
     match *cx.kind(node) {
-        NodeKind::Str(id) => cx.string_str(id).to_string(),
-        NodeKind::Sym(id) => cx.symbol_str(id).to_string(),
+        NodeKind::Str(id) => cx.string_str(id),
+        NodeKind::Sym(id) => cx.symbol_str(id),
         // For int/float the parsed `.value` stringifies to the same text as
         // the source for the literals this cop handles; using source avoids
         // float-formatting drift (e.g. `1.0` vs `1`).
         // true/false/nil have no `.value`; RuboCop also falls back to `.source`.
-        _ => cx.raw_source(cx.range(node)).to_string(),
+        _ => cx.raw_source(cx.range(node)),
     }
 }
 

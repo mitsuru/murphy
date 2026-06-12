@@ -107,7 +107,8 @@ fn find_offense_node(mut node: NodeId, regexp_receiver: NodeId, cx: &Cx<'_>) -> 
         };
         // `(node.parent.send_type? && node.receiver) ||
         //  method_chain_to_regexp_receiver?(node, regexp_receiver)`.
-        let parent_is_send = matches!(*cx.kind(parent), NodeKind::Send { .. });
+        let parent_is_send =
+            matches!(*cx.kind(parent), NodeKind::Send { .. } | NodeKind::Csend { .. });
         let node_has_receiver = cx.call_receiver(node).get().is_some();
         if (parent_is_send && node_has_receiver)
             || method_chain_to_regexp_receiver(node, regexp_receiver, cx)
@@ -122,7 +123,7 @@ fn find_offense_node(mut node: NodeId, regexp_receiver: NodeId, cx: &Cx<'_>) -> 
 /// `first_argument_is_regexp?` — node is a send whose first argument is a
 /// regexp literal.
 fn first_argument_is_regexp(node: NodeId, cx: &Cx<'_>) -> bool {
-    if !matches!(*cx.kind(node), NodeKind::Send { .. }) {
+    if !matches!(*cx.kind(node), NodeKind::Send { .. } | NodeKind::Csend { .. }) {
         return false;
     }
     cx.first_argument(node)
@@ -319,6 +320,23 @@ mod tests {
                       ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
                 "#},
                 "p(/pattern/i)\n",
+            );
+    }
+
+    #[test]
+    fn flags_safe_navigation_command() {
+        // `obj&.scan /re/` — a csend with the regexp as its first argument.
+        test::<AmbiguousRegexpLiteral>()
+            .expect_offense(indoc! {r#"
+                obj&.scan /pattern/
+                          ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    obj&.scan /pattern/
+                              ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                "#},
+                "obj&.scan(/pattern/)\n",
             );
     }
 
