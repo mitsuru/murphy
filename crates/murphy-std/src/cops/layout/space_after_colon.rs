@@ -18,7 +18,10 @@
 //!   `Kwarg`, which is value-omitted and has no `on_kwarg` handler in RuboCop,
 //!   so they are skipped here too. Ternary `a ? b : c` and symbol literals
 //!   `:foo` never reach this cop because dispatch is on `Pair`/`Kwoptarg`
-//!   nodes, not a colon token scan.
+//!   nodes, not a colon token scan. Space detection mirrors RuboCop's
+//!   `followed_by_space?` (`/\s/.match?(source[colon.end_pos])`): only the
+//!   single byte right after the colon is inspected, so a colon abutting a
+//!   comment (`a:# c`) is flagged even when the value is on a later line.
 //! ```
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
@@ -53,14 +56,11 @@ impl SpaceAfterColon {
         if !key_src.ends_with(':') {
             return;
         }
-        check_colon(cx, cx.range(key).end, cx.range(value).start);
+        check_colon(cx, cx.range(key).end);
     }
 
     #[on_node(kind = "kwoptarg")]
     fn check_kwoptarg(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Kwoptarg { default, .. } = *cx.kind(node) else {
-            return;
-        };
         // `loc.name` covers the parameter name *and* the trailing colon
         // (`bar:` for `bar: 1`), so the colon ends at `loc.name.end` — exactly
         // like a colon-style hash pair's key range.
@@ -68,29 +68,38 @@ impl SpaceAfterColon {
         if !cx.raw_source(name).ends_with(':') {
             return;
         }
-        check_colon(cx, name.end, cx.range(default).start);
+        check_colon(cx, name.end);
     }
 }
 
-/// Emit an offense when the colon ending at `colon_end` is not followed by a
-/// space before `value_start`. The offense range is the colon itself (1 char).
-fn check_colon(cx: &Cx<'_>, colon_end: u32, value_start: u32) {
-    if colon_end >= value_start {
-        // Colon directly abuts the value: missing space.
-        let colon = Range {
-            start: colon_end - 1,
-            end: colon_end,
-        };
-        cx.emit_offense(colon, "Space missing after colon.", None);
-        cx.emit_edit(
-            Range {
-                start: colon_end,
-                end: colon_end,
-            },
-            " ",
-        );
+/// Emit an offense when the colon ending at `colon_end` is not immediately
+/// followed by whitespace. Mirrors RuboCop's `followed_by_space?`
+/// (`/\s/.match?(source[colon.end_pos])`): only the single byte right after the
+/// colon is inspected, so a colon abutting a comment (`a:# c`) is flagged even
+/// when the value sits on a later line. The offense range is the colon (1 char).
+fn check_colon(cx: &Cx<'_>, colon_end: u32) {
+    // Ruby's `/\s/` matches space, tab, newline, carriage return, form feed,
+    // and vertical tab. A missing byte (colon at EOF) is treated as no space.
+    let followed_by_space = cx
+        .source()
+        .as_bytes()
+        .get(colon_end as usize)
+        .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'\x0b'));
+    if followed_by_space {
+        return;
     }
-    // colon_end < value_start: at least one byte (a space) separates them — OK.
+    let colon = Range {
+        start: colon_end - 1,
+        end: colon_end,
+    };
+    cx.emit_offense(colon, "Space missing after colon.", None);
+    cx.emit_edit(
+        Range {
+            start: colon_end,
+            end: colon_end,
+        },
+        " ",
+    );
 }
 
 murphy_plugin_api::submit_cop!(SpaceAfterColon);
@@ -208,5 +217,28 @@ mod tests {
     #[test]
     fn ignores_hash_value_omission() {
         test::<SpaceAfterColon>().expect_no_offenses("x = 1\ny = 2\n{ x:, y: }\n");
+    }
+
+    /// RuboCop parity: `followed_by_space?` inspects only the single byte right
+    /// after the colon (`source[colon.end_pos] =~ /\s/`). A colon abutting a
+    /// comment (`a:# c`) is flagged even though the value sits on a later line.
+    #[test]
+    fn flags_colon_followed_by_comment() {
+        test::<SpaceAfterColon>().expect_correction(
+            indoc! {r#"
+                { a:# c
+                   ^ Space missing after colon.
+                1 }
+            "#},
+            "{ a: # c\n1 }\n",
+        );
+    }
+
+    /// RuboCop parity: a colon whose value is on the next line with no inline
+    /// content after the colon is accepted — the byte after the colon is `\n`,
+    /// which matches `/\s/`.
+    #[test]
+    fn accepts_colon_followed_by_newline() {
+        test::<SpaceAfterColon>().expect_no_offenses("{ a:\n  1 }\n");
     }
 }
