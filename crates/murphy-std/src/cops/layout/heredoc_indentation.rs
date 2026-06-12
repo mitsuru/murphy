@@ -149,31 +149,56 @@ struct Heredoc {
 
 /// Pair `HeredocStart`/`HeredocEnd` tokens FIFO (Ruby reads heredoc bodies in
 /// opener order) and resolve each into a [`Heredoc`].
+///
+/// Body starts cannot be derived from the opener token alone. When several
+/// heredocs share one opener line — `foo(<<~A, <<~B)` — every opener token
+/// ends on that same line, yet the bodies **stack**: `A`'s body runs from the
+/// byte after the opener line's `\n` to `A`'s terminator, and `B`'s body
+/// starts only after `A`'s terminator line. So body start is resolved at
+/// `HeredocEnd`-time with a running `cursor` that chains past each consumed
+/// terminator: `body_start = max(cursor, opener_line_end)`. The `max` covers
+/// both cases with no explicit "is-stacked?" branch — the opener-line newline
+/// wins for the first/lone heredoc on a line, the cursor wins for every
+/// stacked follower.
 fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
     use std::collections::VecDeque;
     let source = cx.source().as_bytes();
-    // Queue of (opener_start, opener_range, body_start, indent_type).
-    let mut pending: VecDeque<(u32, Range, u32, IndentType)> = VecDeque::new();
+    // Queue of (opener_start, opener_range, indent_type).
+    let mut pending: VecDeque<(u32, Range, IndentType)> = VecDeque::new();
     let mut out: Vec<Heredoc> = Vec::new();
+    // First unconsumed body byte — advances past each terminator line so that
+    // stacked heredocs on one opener line do not overlap.
+    let mut cursor: u32 = 0;
 
     for tok in cx.sorted_tokens() {
         match tok.kind {
             SourceTokenKind::HeredocStart => {
                 let opener = cx.raw_source(tok.range);
                 let indent_type = classify_opener(opener);
-                // +1 skips the `\n` ending the opener line. If the opener is
-                // the file's last bytes (no newline), body_start clamps to EOF.
-                let body_start = (tok.range.end + 1).min(source.len() as u32);
-                pending.push_back((tok.range.start, tok.range, body_start, indent_type));
+                pending.push_back((tok.range.start, tok.range, indent_type));
             }
             SourceTokenKind::HeredocEnd => {
-                if let Some((opener_start, opener, body_start, indent_type)) = pending.pop_front() {
+                if let Some((opener_start, opener, indent_type)) = pending.pop_front() {
+                    // Byte after the `\n` that ends the opener's source line.
+                    // Forward-scan from the opener token end so the result is
+                    // correct regardless of where the opener token stops
+                    // (single heredoc: token ends at the label; stacked: token
+                    // ends mid-line before the next opener / args).
+                    let opener_line_end = next_line_start(source, opener.end);
+                    let body_start = cursor.max(opener_line_end).min(source.len() as u32);
                     let term_line_start = line_start(source, tok.range.start);
+                    // Advance the cursor to the first byte after the terminator
+                    // line so the next stacked heredoc's body begins there. Scan
+                    // forward from the label *start* (`tok.range.start`): the
+                    // first `\n` found ends the terminator's own line. Scanning
+                    // from `tok.range.end` would skip a line, because the
+                    // `HeredocEnd` token already spans the terminator's newline.
+                    cursor = next_line_start(source, tok.range.start);
                     out.push(Heredoc {
                         opener_start,
                         opener,
                         body: Range {
-                            start: body_start,
+                            start: body_start.min(term_line_start),
                             end: term_line_start,
                         },
                         end_line: Range {
@@ -250,6 +275,18 @@ fn line_start(bytes: &[u8], pos: u32) -> u32 {
         .rposition(|&b| b == b'\n')
         .map(|i| i as u32 + 1)
         .unwrap_or(0)
+}
+
+/// Byte offset of the first byte on the line *after* the one containing `pos`.
+/// Forward-scans from `pos` for the next `\n` and returns the byte after it; if
+/// there is no further `\n` (the line runs to EOF), returns the source length.
+fn next_line_start(bytes: &[u8], pos: u32) -> u32 {
+    let pos = (pos as usize).min(bytes.len());
+    bytes[pos..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| (pos + i + 1) as u32)
+        .unwrap_or(bytes.len() as u32)
 }
 
 /// `adjust_squiggly`: re-indent each body line from `body_indent_level` to
@@ -422,6 +459,39 @@ mod tests {
         // A `<<-` heredoc whose body is already indented is not flagged
         // (offense only when body_indent_level is zero).
         test::<HeredocIndentation>().expect_no_offenses("x = <<-RUBY\n  hello\n  RUBY\n");
+    }
+
+    // ── Multiple heredocs on one opener line ──────────────────────────────────
+    //
+    // Regression for the body-range bug where each heredoc body was taken as
+    // `opener_token.end + 1 .. terminator_line_start`. For stacked openers
+    // (`foo(<<~A, <<~B)`), that swallowed the rest of the opener line plus the
+    // sibling heredoc's body, producing destructive autocorrects. Bodies must
+    // stack: `A` runs to its own terminator, `B` starts after `A`'s.
+
+    #[test]
+    fn accepts_correctly_indented_stacked_squiggly_heredocs() {
+        test::<HeredocIndentation>()
+            .expect_no_offenses("foo(<<~A, <<~B)\n  a\nA\n  b\nB\n");
+    }
+
+    #[test]
+    fn corrects_each_stacked_squiggly_body_independently() {
+        // Both bodies are under-indented; each is re-indented to 2 spaces
+        // without touching the opener line or the sibling heredoc. The offense
+        // is anchored to each body's first line.
+        test::<HeredocIndentation>().expect_correction(
+            "foo(<<~A, <<~B)\na\n^ Use 2 spaces for indentation in a heredoc.\nA\nb\n^ Use 2 spaces for indentation in a heredoc.\nB\n",
+            "foo(<<~A, <<~B)\n  a\nA\n  b\nB\n",
+        );
+    }
+
+    #[test]
+    fn handles_empty_first_stacked_heredoc_body() {
+        // `A` has an empty body (skipped); `B` is already correctly indented.
+        // The cursor must still chain past `A`'s terminator so `B`'s body is
+        // located correctly.
+        test::<HeredocIndentation>().expect_no_offenses("foo(<<~A, <<~B)\nA\n  b\nB\n");
     }
 }
 
