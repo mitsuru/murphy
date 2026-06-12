@@ -7,7 +7,7 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/SpaceAfterColon
 //! upstream_version_checked: master
-//! status: complete
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Port of RuboCop's `on_pair` + `on_kwoptarg`. Colon-style hash pairs

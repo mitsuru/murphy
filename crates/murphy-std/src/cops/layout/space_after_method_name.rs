@@ -7,7 +7,7 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/SpaceAfterMethodName
 //! upstream_version_checked: master
-//! status: complete
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Port of RuboCop's `on_def`/`on_defs`. Fires on `def foo (x)` (a space
