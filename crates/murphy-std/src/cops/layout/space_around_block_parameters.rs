@@ -111,13 +111,23 @@ impl SpaceAroundBlockParameters {
         let Some(open) = cx.token_before(cx.range(first).start) else {
             return;
         };
-        if !is_param_open(cx, open, paren_delimited) {
+        let open_ok = if paren_delimited {
+            open.kind == SourceTokenKind::LeftParen
+        } else {
+            is_pipe(cx, open)
+        };
+        if !open_ok {
             return;
         }
         let Some(close) = cx.token_after(cx.range(last).end) else {
             return;
         };
-        if !is_param_close(cx, close, paren_delimited) {
+        let close_ok = if paren_delimited {
+            close.kind == SourceTokenKind::RightParen
+        } else {
+            is_pipe(cx, close)
+        };
+        if !close_ok {
             return;
         }
 
@@ -206,26 +216,6 @@ impl SpaceAroundBlockParameters {
 /// `true` when `token` is a pipe (`Other` kind, source text `|`).
 fn is_pipe(cx: &Cx<'_>, token: murphy_plugin_api::SourceToken) -> bool {
     token.kind == SourceTokenKind::Other && cx.raw_source(token.range) == "|"
-}
-
-/// `true` when `token` is the opening parameter delimiter: `|` for blocks, or
-/// `(` for a stabby-lambda literal (`paren_delimited`).
-fn is_param_open(cx: &Cx<'_>, token: murphy_plugin_api::SourceToken, paren_delimited: bool) -> bool {
-    if paren_delimited {
-        token.kind == SourceTokenKind::LeftParen
-    } else {
-        is_pipe(cx, token)
-    }
-}
-
-/// `true` when `token` is the closing parameter delimiter: `|` for blocks, or
-/// `)` for a stabby-lambda literal (`paren_delimited`).
-fn is_param_close(cx: &Cx<'_>, token: murphy_plugin_api::SourceToken, paren_delimited: bool) -> bool {
-    if paren_delimited {
-        token.kind == SourceTokenKind::RightParen
-    } else {
-        is_pipe(cx, token)
-    }
 }
 
 /// RuboCop's `check_no_space`: offense when `[begin_pos, end_pos)` is a
