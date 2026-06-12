@@ -406,4 +406,41 @@ mod tests {
             "Cop names must be separated by commas. Comment in the directive must start with `--`.\n",
         ));
     }
+
+    // ---- push/pop mode ----
+
+    #[test]
+    fn accepts_bare_push() {
+        // `push`/`pop` need no cop name (RuboCop's `missing_cop_name?` is false).
+        test::<CopDirectiveSyntax>().expect_no_offenses("# rubocop:push\n");
+    }
+
+    #[test]
+    fn accepts_bare_pop() {
+        test::<CopDirectiveSyntax>().expect_no_offenses("# rubocop:pop\n");
+    }
+
+    #[test]
+    fn accepts_push_with_signed_cops() {
+        // push/pop args are `+Cop -Cop`, not the comma-separated cop list.
+        test::<CopDirectiveSyntax>()
+            .expect_no_offenses("# rubocop:push +Layout/LineLength -Style/Encoding\n");
+    }
+
+    #[test]
+    fn accepts_push_with_trailing_comment() {
+        test::<CopDirectiveSyntax>()
+            .expect_no_offenses("# rubocop:push +Layout/LineLength -- reason\n");
+    }
+
+    #[test]
+    fn flags_push_with_unsigned_cop_name() {
+        // A push arg without a `+`/`-` sign is not a valid push/pop arg, so the
+        // tail check fails and the directive is malformed.
+        test::<CopDirectiveSyntax>().expect_offense(concat!(
+            "# rubocop:push Layout/LineLength\n",
+            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Malformed directive comment detected. ",
+            "Cop names must be separated by commas. Comment in the directive must start with `--`.\n",
+        ));
+    }
 }
