@@ -79,9 +79,10 @@ impl MultilineMethodArgumentLineBreaks {
     }
 }
 
-/// Returns the 1-based line number of a byte offset.
-fn line_of(offset: u32, src: &[u8]) -> usize {
-    1 + src[..offset as usize].iter().filter(|&&b| b == b'\n').count()
+/// Whether the source between two byte offsets contains a newline — an
+/// O(span) same-line check that avoids scanning from the file start.
+fn spans_newline(src: &[u8], start: u32, end: u32) -> bool {
+    start < end && src[start as usize..end as usize].contains(&b'\n')
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
@@ -119,30 +120,34 @@ fn check_line_breaks(children: &[NodeId], cx: &Cx<'_>) {
     let opts = cx.options_or_default::<MultilineMethodArgumentLineBreaksOptions>();
     let src = cx.source().as_bytes();
 
-    // `all_on_same_line?`: empty → true (already filtered to non-empty here).
+    // `all_on_same_line?`: the list is single-line when no newline separates
+    // the first element's start from the relevant end of the last element.
+    // With `allow_multiline_final_element` only the start lines are compared
+    // (`same_line?(first, last)`); otherwise `first.first_line ==
+    // last.last_line`.
     let first = children[0];
     let last = children[children.len() - 1];
-    let first_start_line = line_of(cx.range(first).start, src);
-    let last_line = if opts.allow_multiline_final_element {
-        // `same_line?(first, last)` — compare start lines only.
-        line_of(cx.range(last).start, src)
+    let range_end = if opts.allow_multiline_final_element {
+        cx.range(last).start
     } else {
-        // `first.first_line == last.last_line`.
-        line_of(cx.range(last).end, src)
+        cx.range(last).end
     };
-    if first_start_line == last_line {
+    if !spans_newline(src, cx.range(first).start, range_end) {
         return;
     }
 
-    // Offense loop: `last_seen_line = -1`; flag any child whose first line is
-    // `<= last_seen_line`, else advance `last_seen_line` to its last line.
-    let mut last_seen_line: i64 = -1;
-    for &child in children {
-        let first_line = line_of(cx.range(child).start, src) as i64;
-        if last_seen_line >= first_line {
+    // Offense loop (RuboCop's `last_seen_line` logic, relativized): a child is
+    // flagged when it shares a physical line with the last *unflagged* child,
+    // i.e. no newline separates the previous unflagged child's end from this
+    // child's start. A flagged child does not advance the cursor, so multiple
+    // arguments on the same line are each flagged after the first.
+    let mut last_unflagged_end = cx.range(first).end;
+    for &child in &children[1..] {
+        let child_start = cx.range(child).start;
+        if !spans_newline(src, last_unflagged_end, child_start) {
             cx.emit_offense(offending_range(child, cx), MSG, None);
         } else {
-            last_seen_line = line_of(cx.range(child).end, src) as i64;
+            last_unflagged_end = cx.range(child).end;
         }
     }
 }

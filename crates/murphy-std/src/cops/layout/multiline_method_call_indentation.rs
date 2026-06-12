@@ -120,12 +120,19 @@ fn column_of(offset: u32, src: &str) -> usize {
     src[line_start..offset as usize].chars().count()
 }
 
-/// 1-based line of a byte offset.
+/// 1-based line of a byte offset. Used only for the offense message (cold
+/// path); same-line tests use [`spans_newline`] to stay O(span).
 fn line_of(offset: u32, src: &str) -> usize {
     1 + src.as_bytes()[..offset as usize]
         .iter()
         .filter(|&&b| b == b'\n')
         .count()
+}
+
+/// Whether the source between two byte offsets contains a newline — an
+/// O(span) same-line check that avoids scanning from the file start.
+fn spans_newline(src: &str, start: u32, end: u32) -> bool {
+    start < end && src.as_bytes()[start as usize..end as usize].contains(&b'\n')
 }
 
 /// Whether the byte offset is the first non-whitespace byte of its physical
@@ -201,9 +208,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
     // `first_call_alignment_node`: `return if node.loc.dot.line !=
     // node.first_line` — the anchor dot must be on the chain expression's
-    // first line. The chain expression starts at the anchor's full range.
+    // first line. The chain expression starts at the anchor's full range, so
+    // this holds when no newline separates the anchor's start from its dot.
     let anchor_expr_start = cx.range(anchor).start;
-    if line_of(anchor_dot.start, src) != line_of(anchor_expr_start, src) {
+    if spans_newline(src, anchor_expr_start, anchor_dot.start) {
         return;
     }
 

@@ -111,9 +111,10 @@ impl MultilineMethodCallBraceLayout {
     }
 }
 
-/// Returns the 1-based line number of a byte offset.
-fn line_of(offset: u32, src: &[u8]) -> usize {
-    1 + src[..offset as usize].iter().filter(|&&b| b == b'\n').count()
+/// Whether the source between two byte offsets contains a newline — an
+/// O(span) same-line check that avoids scanning from the file start.
+fn spans_newline(src: &[u8], start: u32, end: u32) -> bool {
+    start < end && src[start as usize..end as usize].contains(&b'\n')
 }
 
 /// Whether the last argument contains a heredoc opener (`HeredocStart` token)
@@ -161,19 +162,16 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // pair sits on one physical line. Comparing only the brace tokens (not the
     // whole-node span) reproduces RuboCop's receiver-ignoring single-line
     // check.
-    let open_line = line_of(open.start, src);
-    let close_line = line_of(close.start, src);
-    if open_line == close_line {
+    if !spans_newline(src, open.start, close.start) {
         return;
     }
 
-    // `opening_brace_on_same_line?` = `begin.line == children.first.first_line`.
-    let first_arg_line = line_of(cx.range(first_arg).start, src);
-    // `closing_brace_on_same_line?` = `end.line == children.last.last_line`.
-    let last_arg_line = line_of(cx.range(last_arg).end, src);
-
-    let open_with_first = open_line == first_arg_line;
-    let close_with_last = close_line == last_arg_line;
+    // `opening_brace_on_same_line?` = `begin.line == children.first.first_line`:
+    // no newline between `(` and the first argument's start.
+    let open_with_first = !spans_newline(src, open.start, cx.range(first_arg).start);
+    // `closing_brace_on_same_line?` = `end.line == children.last.last_line`:
+    // no newline between the last argument's end and `)`.
+    let close_with_last = !spans_newline(src, cx.range(last_arg).end, close.start);
 
     match style {
         BraceLayoutStyle::SameLine => {

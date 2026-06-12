@@ -100,9 +100,10 @@ impl MultilineHashBraceLayout {
     }
 }
 
-/// Returns the 1-based line number of a byte offset.
-fn line_of(offset: u32, src: &[u8]) -> usize {
-    1 + src[..offset as usize].iter().filter(|&&b| b == b'\n').count()
+/// Whether the source between two byte offsets contains a newline — an
+/// O(span) same-line check that avoids scanning from the file start.
+fn spans_newline(src: &[u8], start: u32, end: u32) -> bool {
+    start < end && src[start as usize..end as usize].contains(&b'\n')
 }
 
 /// Whether the last element contains a heredoc opener (`HeredocStart` token)
@@ -158,19 +159,16 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     // `node.single_line?` — skip when the brace pair is on one physical line.
-    let open_line = line_of(open.start, src);
-    let close_line = line_of(close.start, src);
-    if open_line == close_line {
+    if !spans_newline(src, open.start, close.start) {
         return;
     }
 
-    // `opening_brace_on_same_line?` = `begin.line == children.first.first_line`.
-    let first_elem_line = line_of(cx.range(first_elem).start, src);
-    // `closing_brace_on_same_line?` = `end.line == children.last.last_line`.
-    let last_elem_line = line_of(cx.range(last_elem).end, src);
-
-    let open_with_first = open_line == first_elem_line;
-    let close_with_last = close_line == last_elem_line;
+    // `opening_brace_on_same_line?` = `begin.line == children.first.first_line`:
+    // no newline between `{` and the first element's start.
+    let open_with_first = !spans_newline(src, open.start, cx.range(first_elem).start);
+    // `closing_brace_on_same_line?` = `end.line == children.last.last_line`:
+    // no newline between the last element's end and `}`.
+    let close_with_last = !spans_newline(src, cx.range(last_elem).end, close.start);
 
     match style {
         BraceLayoutStyle::SameLine => {
