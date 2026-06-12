@@ -7,9 +7,14 @@
 //! upstream_version_checked: 1.86.2
 //! status: partial
 //! gap_issues:
-//!   - murphy-9cr.9
+//!   - murphy-6rhg
 //! notes: >
-//!   Message text aligned with RuboCop MSG. AllowComments default (true) matches RuboCop. AllowComments:false option override is ABI-blocked (options not wired through Cx until murphy-9cr.9).
+//!   Message text aligned with RuboCop MSG. AllowComments (default true,
+//!   matching RuboCop) is read live via `cx.options_or_default`, so a
+//!   configured `AllowComments: false` flags a comment-only `when` body.
+//!   Remaining gap (murphy-6rhg): the comment-region heuristic
+//!   ([when.end, next_sibling.start)) is not yet verified to match
+//!   RuboCop's comment detection in all cases.
 //! ```
 //!
 //!
@@ -17,20 +22,9 @@
 //!
 //! - **`AllowComments`** (default `true`): a `when` branch whose body
 //!   region contains only a comment (`when 1; # noop`) is treated as
-//!   intentionally empty and not flagged. The `allow_comments = false`
-//!   override is exported in the schema but is not yet wired at
-//!   dispatch time — see the "Known v1 limitation" note below.
-//!
-//! ## Known v1 limitation: option overrides not wired through `Cx`
-//!
-//! `allow_comments` is exported via `#[derive(CopOptions)]` so the host
-//! validates `[cops.rules."Lint/EmptyWhen"]` keys, but runtime reads
-//! still come from `Options::default()`. `murphy-9cr.9` will route
-//! overrides through `Cx`; until then, setting
-//! `allow_comments = false` in `murphy.toml` has no effect at dispatch
-//! time. This is the same shape as `RSpec/ExampleLength` and the new
-//! `Lint/UnusedMethodArgument` options — see `references/options.md`
-//! in the port-rubocop-cop skill.
+//!   intentionally empty and not flagged. The option is read live via
+//!   [`Cx::options_or_default`], so setting `AllowComments: false` in
+//!   `.murphy.yml` flags such a branch.
 //!
 //! ## Body-region heuristic
 //!
@@ -47,8 +41,8 @@ use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 #[derive(Default)]
 pub struct EmptyWhen;
 
-/// Cop options for [`EmptyWhen`]. v1: read from `Default` at dispatch
-/// time (`murphy-9cr.9` will wire live overrides through `Cx`).
+/// Cop options for [`EmptyWhen`]. Read live at dispatch time via
+/// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
     #[option(
@@ -71,7 +65,7 @@ impl EmptyWhen {
         if cx.when_body(node).get().is_some() {
             return;
         }
-        let opts = Options::default();
+        let opts = cx.options_or_default::<Options>();
         if opts.allow_comments
             && let Some(region) = empty_when_body_region(cx, node)
             && region_has_comment(cx, region)
@@ -119,7 +113,7 @@ fn region_has_comment(cx: &Cx<'_>, region: Range) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::EmptyWhen;
+    use super::{EmptyWhen, Options};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -198,6 +192,25 @@ mod tests {
                 ^^^^^^ Avoid `when` branches without a body.
                 when 2
                   # noop
+                  :ok
+                end
+            "#});
+    }
+
+    #[test]
+    fn comment_only_body_is_flagged_when_allow_comments_disabled() {
+        // `AllowComments: false` is read live via `cx.options_or_default`, so a
+        // comment-only `when` body is flagged rather than treated as intentional.
+        test::<EmptyWhen>()
+            .with_options(&Options {
+                allow_comments: false,
+            })
+            .expect_offense(indoc! {r#"
+                case value
+                when 1
+                ^^^^^^ Avoid `when` branches without a body.
+                  # noop
+                when 2
                   :ok
                 end
             "#});
