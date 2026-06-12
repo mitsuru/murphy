@@ -347,7 +347,6 @@ fn first_line_range(start: u32, cx: &Cx<'_>) -> Range {
 /// the else body starting at `body_start`.
 fn else_keyword_range(node: NodeId, body_start: u32, cx: &Cx<'_>) -> Option<Range> {
     let node_range = cx.range(node);
-    let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < node_range.start);
 
@@ -356,9 +355,7 @@ fn else_keyword_range(node: NodeId, body_start: u32, cx: &Cx<'_>) -> Option<Rang
         if tok.range.start >= body_start {
             break;
         }
-        if tok.kind == SourceTokenKind::Other
-            && &source[tok.range.start as usize..tok.range.end as usize] == b"else"
-        {
+        if tok.kind == SourceTokenKind::Other && cx.token_text(*tok) == "else" {
             found = Some(tok.range);
         }
     }

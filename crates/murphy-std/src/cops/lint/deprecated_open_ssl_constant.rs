@@ -52,12 +52,17 @@ impl DeprecatedOpenSSLConstant {
     #[on_node(kind = "send", methods = ["new", "digest"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         let args = cx.call_arguments(node);
-        // Skip when an argument is dynamic (variable / call / const): RuboCop
-        // cannot prove the rewrite is correct in that case.
+        // RuboCop skips when an argument is a variable, call, or const because
+        // the rewrite cannot be proven correct. The OpenSSL algorithm
+        // constructors only accept simple static literals (size ints, mode
+        // symbols, name strings), so we use a stricter positive allow-list:
+        // anything other than `Int`/`Sym`/`Str` (e.g. `Dstr`, arrays, hashes)
+        // is also dynamic for our purposes and must not be autocorrected.
         if args.iter().any(|&arg| {
-            cx.is_variable(arg)
-                || matches!(cx.kind(arg), NodeKind::Send { .. } | NodeKind::Csend { .. })
-                || matches!(cx.kind(arg), NodeKind::Const { .. })
+            !matches!(
+                cx.kind(arg),
+                NodeKind::Int(..) | NodeKind::Sym(..) | NodeKind::Str(..)
+            )
         }) {
             return;
         }
@@ -167,18 +172,19 @@ fn scan_three(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// `sanitize_arguments` — strip `:` / `'`, split on `-`, flatten.
+/// `sanitize_arguments` — RuboCop's `arg.str_type? ? arg.value : arg.source`
+/// then `.tr(":'", '')` then `split('-')`, flattened. `string_str` / `symbol_str`
+/// give already-unquoted values for the common `Str` / `Sym` cases; the
+/// fallback strips stray `:` / `'` from raw source to match `tr`.
 fn sanitize_arguments(node: NodeId, cx: &Cx<'_>) -> Vec<String> {
     let mut out = Vec::new();
     for &arg in cx.call_arguments(node) {
         let argument: String = match *cx.kind(arg) {
-            NodeKind::Str(_) => cx
-                .raw_source(cx.range(arg))
-                .trim_matches(|c| c == '\'' || c == '"')
-                .to_string(),
-            _ => cx.raw_source(cx.range(arg)).to_string(),
+            NodeKind::Str(id) => cx.string_str(id).to_string(),
+            NodeKind::Sym(sym) => cx.symbol_str(sym).to_string(),
+            _ => cx.raw_source(cx.range(arg)).replace([':', '\''], ""),
         };
-        for part in argument.replace([':', '\''], "").split('-') {
+        for part in argument.split('-') {
             out.push(part.to_string());
         }
     }
@@ -289,6 +295,16 @@ mod tests {
             OpenSSL::Cipher::AES.new(foo.bar)
             OpenSSL::Cipher::AES.new(SOME_CONST)
         "#});
+    }
+
+    #[test]
+    fn does_not_flag_complex_literal_arguments() {
+        // Interpolated strings, arrays, and hashes are not the simple
+        // Int/Sym/Str literals the rewrite can handle — skip them.
+        test::<DeprecatedOpenSSLConstant>().expect_no_offenses(indoc! {r##"
+            OpenSSL::Cipher::AES.new("#{size}-gcm")
+            OpenSSL::Cipher::AES.new([128])
+        "##});
     }
 
     #[test]
