@@ -1654,7 +1654,41 @@ impl Translator {
         if let Some(mt) = node.as_multi_target_node() {
             return self.translate_mlhs(mt.lefts(), mt.rest(), mt.rights(), range);
         }
-        // constant/call/index target 等は v1 では `translate_node` に委譲。
+        // `CONST = ...` の write 同様、定数 target は値なし `Casgn` に畳む
+        // （`rescue => CONST` の `=> CONST` 束縛、`CONST, x = ...` の masgn 等）。
+        // これがないと `ConstantWriteNode` の target 形は `Unknown` になり、
+        // `Lint/ConstantOverwrittenInRescue` がパターンを認識できない。
+        if let Some(t) = node.as_constant_target_node() {
+            let name = self.sym(&t.name());
+            return self.builder.push(
+                NodeKind::Casgn {
+                    scope: OptNodeId::NONE,
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                range,
+            );
+        }
+        if let Some(t) = node.as_constant_path_target_node() {
+            // `A::B` target: `parent` を scope、`name` を name に畳む。
+            let scope = match t.parent() {
+                Some(p) => OptNodeId::some(self.translate_node(&p)),
+                None => OptNodeId::NONE,
+            };
+            let name = match t.name() {
+                Some(cid) => self.sym(&cid),
+                None => return self.builder.push(NodeKind::Unknown, range),
+            };
+            return self.builder.push(
+                NodeKind::Casgn {
+                    scope,
+                    name,
+                    value: OptNodeId::NONE,
+                },
+                range,
+            );
+        }
+        // call/index target 等は v1 では `translate_node` に委譲。
         self.translate_node(node)
     }
 
@@ -3044,6 +3078,57 @@ mod tests {
                 assert!(var.get().is_some());
             }
             _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translates_rescue_with_constant_target() {
+        // `rescue => Const` の `=> Const` 束縛先は値なし `Casgn` に畳む
+        // （以前は `Unknown` だった）。`Lint/ConstantOverwrittenInRescue` が
+        // この形を `(casgn _ _)` として認識できる前提を保証する。
+        let ast = translate("begin\nrescue => StandardError\nend", "t.rb");
+        let resbody = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Resbody { .. }))
+            .expect("expected a Resbody node");
+        let var = match ast.kind(resbody) {
+            NodeKind::Resbody {
+                exceptions, var, ..
+            } => {
+                assert_eq!(exceptions.len, 0, "rescue => Const は exceptions 空");
+                var.get().expect("var は Some")
+            }
+            _ => unreachable!(),
+        };
+        match ast.kind(var) {
+            NodeKind::Casgn { scope, name, value } => {
+                assert!(scope.is_none(), "単純定数 target は scope None");
+                assert_eq!(ast.interner().resolve(name.0), "StandardError");
+                assert!(value.is_none(), "target は値なし Casgn");
+            }
+            other => panic!("expected Casgn var, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translates_rescue_with_constant_path_target() {
+        // `rescue => Foo::Bar` → var は scope 付き `Casgn`。
+        let ast = translate("begin\nrescue => Foo::Bar\nend", "t.rb");
+        let resbody = ast
+            .descendants(ast.root())
+            .find(|&n| matches!(ast.kind(n), NodeKind::Resbody { .. }))
+            .expect("expected a Resbody node");
+        let var = match ast.kind(resbody) {
+            NodeKind::Resbody { var, .. } => var.get().expect("var は Some"),
+            _ => unreachable!(),
+        };
+        match ast.kind(var) {
+            NodeKind::Casgn { scope, name, value } => {
+                assert!(scope.get().is_some(), "A::B target は scope Some");
+                assert_eq!(ast.interner().resolve(name.0), "Bar");
+                assert!(value.is_none(), "target は値なし Casgn");
+            }
+            other => panic!("expected Casgn var, got {other:?}"),
         }
     }
 

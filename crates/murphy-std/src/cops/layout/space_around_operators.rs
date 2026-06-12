@@ -736,48 +736,7 @@ fn check_operator_no_space(cx: &Cx<'_>, op_range: Range) {
 /// immediately preceding or following source line. Mirrors RuboCop's
 /// `AllowForAlignment` check.
 fn is_alignment_spacing(src: &[u8], op_start: usize) -> bool {
-    let line_start = src[..op_start]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let op_col = op_start - line_start;
-
-    let non_ws_at_col = |line: &[u8]| -> bool {
-        op_col < line.len() && !matches!(line[op_col], b' ' | b'\t' | b'\n' | b'\r')
-    };
-
-    // Check previous line.
-    if line_start > 0 {
-        let prev_end = line_start - 1;
-        let prev_start = src[..prev_end]
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        if non_ws_at_col(&src[prev_start..prev_end]) {
-            return true;
-        }
-    }
-
-    // Check next line.
-    let rest_start = src[op_start..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .map(|i| op_start + i + 1)
-        .unwrap_or(src.len());
-    if rest_start < src.len() {
-        let next_end = src[rest_start..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map(|i| rest_start + i)
-            .unwrap_or(src.len());
-        if non_ws_at_col(&src[rest_start..next_end]) {
-            return true;
-        }
-    }
-
-    false
+    crate::cops::util::is_alignment_at_column(src, op_start)
 }
 
 /// Emit the offense at the operator range and the autocorrect edit that
