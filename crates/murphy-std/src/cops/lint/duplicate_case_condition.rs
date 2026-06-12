@@ -204,4 +204,22 @@ mod tests {
         test::<DuplicateCaseCondition>()
             .expect_no_offenses("case x\nwhen '名前'\n  a\nwhen '住所'\n  b\nend\n");
     }
+
+    #[test]
+    fn whitespace_only_difference_is_not_flagged_documented_divergence() {
+        // Pins the `raw_source` keying limitation documented in the
+        // murphy-parity block: `a + b` and `a+b` are structurally identical
+        // but differ only in whitespace, so they key differently and the
+        // duplicate is NOT flagged. RuboCop, comparing parser nodes, WOULD
+        // flag the second. Matches the `Style/IdenticalConditionalBranches`
+        // approach.
+        test::<DuplicateCaseCondition>().expect_no_offenses(indoc! {r#"
+            case x
+            when a + b
+              first_method
+            when a+b
+              second_method
+            end
+        "#});
+    }
 }

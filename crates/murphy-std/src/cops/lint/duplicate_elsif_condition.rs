@@ -23,7 +23,9 @@
 //!   Murphy keys on `raw_source` text (the same approach as
 //!   `Style/IdenticalConditionalBranches`); this matches for realistic code
 //!   but treats different spellings of the same value as distinct
-//!   (`1` vs `0x1`).
+//!   (`1` vs `0x1`) and treats whitespace-different spellings of the same
+//!   expression as distinct (`x == 1` vs `x==1`), so those duplicates are not
+//!   flagged.
 //! ```
 //!
 //! ## Matched shapes
@@ -196,6 +198,21 @@ mod tests {
               unless x == 1
                 foo
               end
+            end
+        "#});
+    }
+
+    #[test]
+    fn whitespace_only_difference_is_not_flagged_documented_divergence() {
+        // Pins the `raw_source` keying limitation documented in the
+        // murphy-parity block: `x == 1` and `x==1` are structurally identical
+        // but differ only in whitespace, so they key differently and the
+        // duplicate is NOT flagged. RuboCop, comparing parser nodes, WOULD
+        // flag the second. Matches the `Style/IdenticalConditionalBranches`
+        // approach.
+        test::<DuplicateElsifCondition>().expect_no_offenses(indoc! {r#"
+            if x == 1
+            elsif x==1
             end
         "#});
     }
