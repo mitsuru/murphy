@@ -40,7 +40,7 @@
 //! already registered by a prior `Casgn`, `Class`, or `Module` in source order
 //! and not since removed via `remove_const`.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, cop};
 use std::collections::HashSet;
 
 #[derive(Default)]
@@ -99,7 +99,7 @@ impl ConstantReassignment {
                         // `return if namespaces.none?`: top-level `remove_const`
                         // is a no-op for the registry.
                         if !namespaces.is_empty() {
-                            registry.remove(&fully_qualified_name_for(&namespaces, &constant));
+                            registry.remove(&fully_qualified_name_for(&namespaces, constant));
                         }
                     }
                 }
@@ -161,7 +161,7 @@ fn fixed_constant_path(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// `remove_constant`: `(send {nil? self} :remove_const ({sym str} $_))` →
 /// the symbol/string argument's text.
-fn remove_const_arg(node: NodeId, cx: &Cx<'_>) -> Option<String> {
+fn remove_const_arg<'a>(node: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
     if cx.method_name(node) != Some("remove_const") {
         return None;
     }
@@ -174,15 +174,15 @@ fn remove_const_arg(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     let args = cx.call_arguments(node);
     let [arg] = args else { return None };
     match *cx.kind(*arg) {
-        NodeKind::Sym(sym) => Some(cx.symbol_str(sym).to_string()),
-        NodeKind::Str(sid) => Some(cx.string_str(sid).to_string()),
+        NodeKind::Sym(sym) => Some(cx.symbol_str(sym)),
+        NodeKind::Str(sid) => Some(cx.string_str(sid)),
         _ => None,
     }
 }
 
 /// `ancestor_namespaces`: enclosing class/module short names, outermost first.
-fn ancestor_namespaces(node: NodeId, cx: &Cx<'_>) -> Vec<String> {
-    let mut names: Vec<String> = cx
+fn ancestor_namespaces<'a>(node: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
+    let mut names: Vec<&'a str> = cx
         .ancestors(node)
         .filter_map(|a| match *cx.kind(a) {
             NodeKind::Class { name, .. } | NodeKind::Module { name, .. } => {
@@ -196,25 +196,15 @@ fn ancestor_namespaces(node: NodeId, cx: &Cx<'_>) -> Vec<String> {
 }
 
 /// `constant_namespaces`: the casgn's own const-path scope short names.
-fn constant_namespaces(node: NodeId, cx: &Cx<'_>) -> Vec<String> {
+///
+/// Note: Murphy's translate layer drops the `cbase` node, so a `::Foo = ...`
+/// absolute path is indistinguishable from `Foo = ...` here; absolute-path
+/// fidelity is the documented gap (murphy-as93).
+fn constant_namespaces<'a>(node: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
     let NodeKind::Casgn { scope, .. } = *cx.kind(node) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    let mut cur = scope;
-    while let Some(s) = cur.get() {
-        match *cx.kind(s) {
-            NodeKind::Const {
-                scope: inner, name, ..
-            } => {
-                out.push(cx.symbol_str(name).to_string());
-                cur = inner;
-            }
-            _ => break,
-        }
-    }
-    out.reverse();
-    out
+    scope_const_short_names(scope, cx)
 }
 
 /// `fully_qualified_constant_name`: `['', *ancestor_ns, *const_ns, name]
@@ -223,18 +213,17 @@ fn fully_qualified_constant_name(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     let NodeKind::Casgn { name, .. } = *cx.kind(node) else {
         return None;
     };
-    let short = cx.symbol_str(name).to_string();
+    let short = cx.symbol_str(name);
     let mut namespaces = ancestor_namespaces(node, cx);
     namespaces.extend(constant_namespaces(node, cx));
-    Some(fully_qualified_name_for(&namespaces, &short))
+    Some(fully_qualified_name_for(&namespaces, short))
 }
 
 /// `fully_qualified_name_for`: leading `::` plus joined namespaces.
-fn fully_qualified_name_for(namespaces: &[String], constant: &str) -> String {
-    let mut parts = vec![""];
-    for n in namespaces {
-        parts.push(n.as_str());
-    }
+fn fully_qualified_name_for(namespaces: &[&str], constant: &str) -> String {
+    let mut parts = Vec::with_capacity(namespaces.len() + 2);
+    parts.push("");
+    parts.extend_from_slice(namespaces);
     parts.push(constant);
     parts.join("::")
 }
@@ -245,7 +234,7 @@ fn constant_display_name(node: NodeId, cx: &Cx<'_>) -> String {
         return String::new();
     };
     let mut parts = constant_namespaces(node, cx);
-    parts.push(cx.symbol_str(name).to_string());
+    parts.push(cx.symbol_str(name));
     parts.join("::")
 }
 
@@ -260,23 +249,31 @@ fn definition_name(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     let short = const_short_name(name_const, cx)?;
     let mut namespaces = ancestor_namespaces(node, cx);
     namespaces.extend(identifier_namespaces(name_const, cx));
-    Some(fully_qualified_name_for(&namespaces, &short))
+    Some(fully_qualified_name_for(&namespaces, short))
 }
 
 /// Short (rightmost) name of a const node.
-fn const_short_name(const_node: NodeId, cx: &Cx<'_>) -> Option<String> {
+fn const_short_name<'a>(const_node: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
     match *cx.kind(const_node) {
-        NodeKind::Const { name, .. } => Some(cx.symbol_str(name).to_string()),
+        NodeKind::Const { name, .. } => Some(cx.symbol_str(name)),
         _ => None,
     }
 }
 
 /// The const-path namespaces of a class/module identifier (`class A::B` →
 /// `["A"]`).
-fn identifier_namespaces(const_node: NodeId, cx: &Cx<'_>) -> Vec<String> {
+fn identifier_namespaces<'a>(const_node: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
     let NodeKind::Const { scope, .. } = *cx.kind(const_node) else {
         return Vec::new();
     };
+    scope_const_short_names(scope, cx)
+}
+
+/// Walk a const scope chain, collecting each `Const` segment's short name,
+/// outermost first. Shared by `constant_namespaces` and
+/// `identifier_namespaces`. Stops at any non-`Const` scope (Murphy drops the
+/// `cbase` node, so an absolute prefix simply terminates the walk).
+fn scope_const_short_names<'a>(scope: OptNodeId, cx: &Cx<'a>) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut cur = scope;
     while let Some(s) = cur.get() {
@@ -284,7 +281,7 @@ fn identifier_namespaces(const_node: NodeId, cx: &Cx<'_>) -> Vec<String> {
             NodeKind::Const {
                 scope: inner, name, ..
             } => {
-                out.push(cx.symbol_str(name).to_string());
+                out.push(cx.symbol_str(name));
                 cur = inner;
             }
             _ => break,
