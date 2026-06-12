@@ -244,4 +244,19 @@ mod tests {
             end
         "#});
     }
+
+    #[test]
+    fn if_guard_and_unless_guard_with_same_condition_are_distinct() {
+        // `if bar` and `unless bar` are opposite conditions. The guard range
+        // covers the keyword (`if bar` vs `unless bar`), so the identities differ
+        // and no duplicate is reported.
+        test::<DuplicateMatchPattern>().expect_no_offenses(indoc! {r#"
+            case x
+            in foo if bar
+              first_method
+            in foo unless bar
+              second_method
+            end
+        "#});
+    }
 }
