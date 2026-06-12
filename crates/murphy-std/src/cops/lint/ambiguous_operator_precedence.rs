@@ -56,8 +56,9 @@ impl AmbiguousOperatorPrecedence {
         let Some(parent) = cx.parent(node).get() else {
             return;
         };
-        // `return if parent.begin_type?` — already parenthesized.
-        if matches!(*cx.kind(parent), NodeKind::Begin(..)) {
+        // `return if parent.begin_type?` — already parenthesized (`(...)`),
+        // not a `begin...end` (kwbegin) block.
+        if crate::cops::util::is_parenthesized(parent, cx) {
             return;
         }
         // `return unless parent.or_type?`.

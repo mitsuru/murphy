@@ -195,6 +195,103 @@ mod tests {
     }
 
     #[test]
+    fn flags_symbol_array_as_character_class() {
+        test::<ArrayLiteralInRegexp>()
+            .expect_offense(indoc! {r#"
+                /#{%i[a b c]}/
+                 ^^^^^^^^^^^^ Use a character class instead of interpolating an array in a regexp.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    /#{%i[a b c]}/
+                     ^^^^^^^^^^^^ Use a character class instead of interpolating an array in a regexp.
+                "#},
+                "/[abc]/\n",
+            );
+    }
+
+    #[test]
+    fn flags_int_array_as_character_class() {
+        test::<ArrayLiteralInRegexp>()
+            .expect_offense(indoc! {r#"
+                /#{[1, 2, 3]}/
+                 ^^^^^^^^^^^^ Use a character class instead of interpolating an array in a regexp.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    /#{[1, 2, 3]}/
+                     ^^^^^^^^^^^^ Use a character class instead of interpolating an array in a regexp.
+                "#},
+                "/[123]/\n",
+            );
+    }
+
+    #[test]
+    fn escapes_metacharacters_in_character_class() {
+        test::<ArrayLiteralInRegexp>()
+            .expect_offense(indoc! {r#"
+                /#{%w[^ - $ |]}/
+                 ^^^^^^^^^^^^^^ Use a character class instead of interpolating an array in a regexp.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    /#{%w[^ - $ |]}/
+                     ^^^^^^^^^^^^^^ Use a character class instead of interpolating an array in a regexp.
+                "#},
+                "/[\\^\\-\\$\\|]/\n",
+            );
+    }
+
+    #[test]
+    fn flags_float_array_as_alternation_with_escaped_dots() {
+        test::<ArrayLiteralInRegexp>()
+            .expect_offense(indoc! {r#"
+                /#{[1.0, 2.5, 4.7]}/
+                 ^^^^^^^^^^^^^^^^^^ Use alternation instead of interpolating an array in a regexp.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    /#{[1.0, 2.5, 4.7]}/
+                     ^^^^^^^^^^^^^^^^^^ Use alternation instead of interpolating an array in a regexp.
+                "#},
+                "/(?:1\\.0|2\\.5|4\\.7)/\n",
+            );
+    }
+
+    #[test]
+    fn flags_boolean_nil_array_as_alternation() {
+        test::<ArrayLiteralInRegexp>()
+            .expect_offense(indoc! {r#"
+                /#{[true, false, nil]}/
+                 ^^^^^^^^^^^^^^^^^^^^^ Use alternation instead of interpolating an array in a regexp.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    /#{[true, false, nil]}/
+                     ^^^^^^^^^^^^^^^^^^^^^ Use alternation instead of interpolating an array in a regexp.
+                "#},
+                "/(?:true|false|nil)/\n",
+            );
+    }
+
+    #[test]
+    fn flags_range_element_array_without_correction() {
+        // A range element is not a literal type → no autocorrect.
+        test::<ArrayLiteralInRegexp>().expect_offense(indoc! {r#"
+            /#{[1..2]}/
+             ^^^^^^^^^ Use alternation or a character class instead of interpolating an array in a regexp.
+        "#});
+    }
+
+    #[test]
+    fn flags_nested_regexp_element_array_without_correction() {
+        test::<ArrayLiteralInRegexp>().expect_offense(indoc! {r#"
+            /#{[/abc/]}/
+             ^^^^^^^^^^ Use alternation or a character class instead of interpolating an array in a regexp.
+        "#});
+    }
+
+    #[test]
     fn accepts_regexp_without_array_interpolation() {
         test::<ArrayLiteralInRegexp>().expect_no_offenses("/#{foo}/\n");
     }

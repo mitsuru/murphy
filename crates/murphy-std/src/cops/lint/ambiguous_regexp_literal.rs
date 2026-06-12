@@ -21,7 +21,11 @@
 //!   emitting no diagnostic). The `find_offense_node` walk-up (including the
 //!   `method_chain_to_regexp_receiver?` recursion) is ported so chains like
 //!   `do_something /re/.foo bar` are handled. Autocorrect adds parentheses
-//!   around the call's arguments (`add_parentheses`).
+//!   around the call's arguments (`add_parentheses`). The offense is reported
+//!   at the regexp's opening `/` (a single column), matching the parser
+//!   diagnostic's location. All RuboCop spec shapes are covered; `yield`/`super`
+//!   command arguments (not Send nodes, and absent from RuboCop's spec) are not
+//!   flagged.
 //! ```
 //!
 //! ## Matched shapes
@@ -78,7 +82,14 @@ impl AmbiguousRegexpLiteral {
             return;
         }
 
-        cx.emit_offense(cx.range(node), MSG, None);
+        // RuboCop reports at the parser diagnostic's location: the opening
+        // `/` delimiter of the regexp (a single column), not the whole literal.
+        let start = cx.range(node).start;
+        let offense_range = Range {
+            start,
+            end: start + 1,
+        };
+        cx.emit_offense(offense_range, MSG, None);
         add_parentheses(offense_node, cx);
     }
 }
@@ -176,19 +187,122 @@ mod tests {
     use super::AmbiguousRegexpLiteral;
     use murphy_plugin_api::test_support::{indoc, test};
 
+    // RuboCop reports a single-column offense at the opening `/` of the regexp.
+
     #[test]
-    fn flags_unparenthesized_first_argument() {
+    fn flags_single_argument() {
         test::<AmbiguousRegexpLiteral>()
             .expect_offense(indoc! {r#"
-                do_something /pattern/
-                             ^^^^^^^^^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                p /pattern/
+                  ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
             "#})
             .expect_correction(
                 indoc! {r#"
-                    do_something /pattern/
-                                 ^^^^^^^^^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                    p /pattern/
+                      ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
                 "#},
-                "do_something(/pattern/)\n",
+                "p(/pattern/)\n",
+            );
+    }
+
+    #[test]
+    fn flags_multiple_arguments() {
+        test::<AmbiguousRegexpLiteral>()
+            .expect_offense(indoc! {r#"
+                p /pattern/, foo
+                  ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    p /pattern/, foo
+                      ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                "#},
+                "p(/pattern/, foo)\n",
+            );
+    }
+
+    #[test]
+    fn flags_method_sent_to_regexp() {
+        test::<AmbiguousRegexpLiteral>()
+            .expect_offense(indoc! {r#"
+                p /pattern/.do_something
+                  ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    p /pattern/.do_something
+                      ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                "#},
+                "p(/pattern/.do_something)\n",
+            );
+    }
+
+    #[test]
+    fn flags_method_chain_sent_to_regexp() {
+        test::<AmbiguousRegexpLiteral>()
+            .expect_offense(indoc! {r#"
+                p /pattern/.do_something.do_something
+                  ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    p /pattern/.do_something.do_something
+                      ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                "#},
+                "p(/pattern/.do_something.do_something)\n",
+            );
+    }
+
+    #[test]
+    fn flags_nested_command_argument() {
+        // `puts line.grep /pattern/` — the inner `grep` command is the offense
+        // node; only its arguments get parenthesized.
+        test::<AmbiguousRegexpLiteral>()
+            .expect_offense(indoc! {r#"
+                puts line.grep /pattern/
+                               ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    puts line.grep /pattern/
+                                   ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                "#},
+                "puts line.grep(/pattern/)\n",
+            );
+    }
+
+    #[test]
+    fn flags_command_after_receiver_chain() {
+        // `expect('x').to match /Cop/` — `match` is the unparenthesized command.
+        test::<AmbiguousRegexpLiteral>()
+            .expect_offense(indoc! {r#"
+                expect('x').to match /Cop/
+                                     ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    expect('x').to match /Cop/
+                                         ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                "#},
+                "expect('x').to match(/Cop/)\n",
+            );
+    }
+
+    #[test]
+    fn flags_with_block_argument() {
+        test::<AmbiguousRegexpLiteral>()
+            .expect_offense(indoc! {r#"
+                p /pattern/, foo do |arg|
+                  ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                end
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    p /pattern/, foo do |arg|
+                      ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                    end
+                "#},
+                "p(/pattern/, foo) do |arg|\nend\n",
             );
     }
 
@@ -196,60 +310,32 @@ mod tests {
     fn flags_with_regexp_flags() {
         test::<AmbiguousRegexpLiteral>()
             .expect_offense(indoc! {r#"
-                do_something /pattern/i
-                             ^^^^^^^^^^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                p /pattern/i
+                  ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
             "#})
             .expect_correction(
                 indoc! {r#"
-                    do_something /pattern/i
-                                 ^^^^^^^^^^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
+                    p /pattern/i
+                      ^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
                 "#},
-                "do_something(/pattern/i)\n",
-            );
-    }
-
-    #[test]
-    fn flags_through_method_chain() {
-        test::<AmbiguousRegexpLiteral>()
-            .expect_offense(indoc! {r#"
-                obj.scan /pattern/
-                         ^^^^^^^^^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
-            "#})
-            .expect_correction(
-                indoc! {r#"
-                    obj.scan /pattern/
-                             ^^^^^^^^^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
-                "#},
-                "obj.scan(/pattern/)\n",
-            );
-    }
-
-    #[test]
-    fn flags_regexp_at_start_of_chained_first_argument() {
-        // The regexp begins the first argument via a method chain; RuboCop
-        // walks up to the outer command call and parenthesizes it.
-        test::<AmbiguousRegexpLiteral>()
-            .expect_offense(indoc! {r#"
-                do_something /pattern/.foo bar
-                             ^^^^^^^^^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
-            "#})
-            .expect_correction(
-                indoc! {r#"
-                    do_something /pattern/.foo bar
-                                 ^^^^^^^^^ Ambiguous regexp literal. Parenthesize the method arguments if it's surely a regexp literal, or add a whitespace to the right of the `/` if it should be a division.
-                "#},
-                "do_something(/pattern/.foo bar)\n",
+                "p(/pattern/i)\n",
             );
     }
 
     #[test]
     fn accepts_parenthesized_call() {
-        test::<AmbiguousRegexpLiteral>().expect_no_offenses("do_something(/pattern/)\n");
+        test::<AmbiguousRegexpLiteral>().expect_no_offenses("p(/pattern/)\n");
     }
 
     #[test]
     fn accepts_parenthesized_call_with_chained_regexp() {
-        test::<AmbiguousRegexpLiteral>().expect_no_offenses("foo(/pattern/.bar)\n");
+        test::<AmbiguousRegexpLiteral>().expect_no_offenses("p(/pattern/.bar)\n");
+    }
+
+    #[test]
+    fn accepts_regexp_not_in_first_position() {
+        // The regexp is the second argument, so it does not start the arg list.
+        test::<AmbiguousRegexpLiteral>().expect_no_offenses("p foo, /pattern/\n");
     }
 
     #[test]

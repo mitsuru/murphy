@@ -78,11 +78,15 @@ impl AmbiguousRange {
 /// `begin_type? || literal? || rational_literal? || variable? ||
 ///  const_type? || self_type? || (call_type? && acceptable_call?(node))`.
 fn acceptable(node: NodeId, opts: &Options, cx: &Cx<'_>) -> bool {
-    // `begin_type?` — already parenthesized (`(...)`).
-    if matches!(*cx.kind(node), NodeKind::Begin(..)) {
+    // `begin_type?` — already parenthesized (`(...)`). `begin...end` blocks
+    // are a separate kwbegin shape and must fall through.
+    if crate::cops::util::is_parenthesized(node, cx) {
         return true;
     }
     if cx.is_literal(node) {
+        return true;
+    }
+    if is_rational_literal(node, cx) {
         return true;
     }
     if cx.is_variable(node) {
@@ -128,6 +132,24 @@ fn acceptable_call(node: NodeId, opts: &Options, cx: &Cx<'_>) -> bool {
 /// expression (e.g. `-a`, `!b`).
 fn is_unary_operation(node: NodeId, cx: &Cx<'_>) -> bool {
     cx.is_operator_method(node) && cx.loc(node).name.start == cx.range(node).start
+}
+
+/// RuboCop's `rational_literal?`: `(send (int _) :/ (rational _))`, e.g.
+/// `1/10r`.
+fn is_rational_literal(node: NodeId, cx: &Cx<'_>) -> bool {
+    if cx.method_name(node) != Some("/") {
+        return false;
+    }
+    let Some(recv) = cx.call_receiver(node).get() else {
+        return false;
+    };
+    if !matches!(*cx.kind(recv), NodeKind::Int(..)) {
+        return false;
+    }
+    match cx.call_arguments(node) {
+        [arg] => matches!(*cx.kind(*arg), NodeKind::Rational(..)),
+        _ => false,
+    }
 }
 
 murphy_plugin_api::submit_cop!(AmbiguousRange);
@@ -216,8 +238,33 @@ mod tests {
     }
 
     #[test]
-    fn accepts_unary_operation_boundary() {
-        test::<AmbiguousRange>().expect_no_offenses("-a..b\n");
+    fn accepts_unary_minus_operation_boundary() {
+        test::<AmbiguousRange>().expect_no_offenses("-a..10\n");
+    }
+
+    #[test]
+    fn accepts_unary_plus_operation_boundary() {
+        test::<AmbiguousRange>().expect_no_offenses("+a..10\n");
+    }
+
+    #[test]
+    fn accepts_rational_literal_boundary() {
+        test::<AmbiguousRange>().expect_no_offenses("1/10r..1/3r\n");
+    }
+
+    #[test]
+    fn accepts_self_boundary() {
+        test::<AmbiguousRange>().expect_no_offenses("self..42\n");
+    }
+
+    #[test]
+    fn accepts_element_reference_boundary() {
+        test::<AmbiguousRange>().expect_no_offenses("x[1]..2\n");
+    }
+
+    #[test]
+    fn accepts_string_interpolation_literal_boundary() {
+        test::<AmbiguousRange>().expect_no_offenses("\"#{foo}-#{bar}\"..'123-4567'\n");
     }
 
     #[test]
