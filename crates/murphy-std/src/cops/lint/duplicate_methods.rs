@@ -173,6 +173,17 @@ fn collect_definers(stmt: NodeId, cx: &Cx<'_>, emit: &mut impl FnMut(MethodKey, 
             emit(MethodKey::Singleton(receiver_key(receiver, cx), method), def_range(stmt, cx));
         }
         NodeKind::Send { .. } => collect_send_definers(stmt, cx, emit),
+        // A bare `begin...end` does not introduce a new scope in Ruby — methods
+        // defined inside it belong to the surrounding class/module/top-level
+        // scope (RuboCop's `parent_module_name` skips `begin`). Recurse so those
+        // definitions are deduped against their siblings. Note this `Begin` is a
+        // nested statement, never the program root (which `check_program_root`
+        // handles), so there is no double-processing.
+        NodeKind::Begin(list) => {
+            for &child in cx.list(list) {
+                collect_definers(child, cx, emit);
+            }
+        }
         _ => {}
     }
 }
@@ -505,6 +516,26 @@ mod tests {
               alias_method :foo, :foo
               def foo
                 1
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_duplicate_across_begin_block() {
+        // A bare `begin...end` does not introduce a scope; the inner `def foo`
+        // is in the same class scope as the outer one, so it is a duplicate.
+        test::<DuplicateMethods>().expect_offense(indoc! {r#"
+            class C
+              def foo
+                1
+              end
+
+              begin
+                def foo
+                ^^^^^^^ Method `foo` is defined at both line 2 and line 7.
+                  2
+                end
               end
             end
         "#});

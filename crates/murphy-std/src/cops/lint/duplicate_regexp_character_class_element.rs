@@ -244,8 +244,10 @@ fn member_end(class: &[u8], i: usize) -> usize {
         return posix_end + 1;
     }
     // Single byte. Advance over a full UTF-8 char so multi-byte members stay
-    // intact.
-    i + utf8_char_len(class[i])
+    // intact. Clamp to the class length so a truncated/malformed multi-byte
+    // sequence at the end can't push the index past the slice and panic on the
+    // subsequent slicing.
+    (i + utf8_char_len(class[i])).min(class.len())
 }
 
 /// Consume a backslash escape starting at the `\` at index `i`. Handles
@@ -300,7 +302,8 @@ fn escape_end(class: &[u8], i: usize) -> usize {
             }
             j
         }
-        _ => i + 1 + utf8_char_len(c),
+        // Clamp to `len` so a truncated multi-byte escaped char can't overrun.
+        _ => (i + 1 + utf8_char_len(c)).min(len),
     }
 }
 
@@ -420,6 +423,21 @@ mod tests {
         test::<Cop>().expect_offense(indoc! {r#"
             r = %r{[xyx]}
                       ^ Duplicate element inside regexp character class
+        "#});
+    }
+
+    #[test]
+    fn handles_multibyte_chars_without_panic() {
+        // Multi-byte members in a character class must not panic the byte-level
+        // scanner. `[あい]` has two distinct multi-byte members — no offense.
+        test::<Cop>().expect_no_offenses("r = /[あい]/\n");
+    }
+
+    #[test]
+    fn flags_duplicate_multibyte_char() {
+        test::<Cop>().expect_offense(indoc! {r#"
+            r = /[ああ]/
+                   ^ Duplicate element inside regexp character class
         "#});
     }
 
