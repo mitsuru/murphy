@@ -48,7 +48,7 @@ pub struct RescueEnsureAlignment;
     name = "Layout/RescueEnsureAlignment",
     description = "Align `rescue` and `ensure` with their enclosing block keyword.",
     default_severity = "warning",
-    default_enabled = true,
+    default_enabled = true
 )]
 impl RescueEnsureAlignment {
     #[on_node(kind = "resbody")]

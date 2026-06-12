@@ -40,7 +40,7 @@ pub struct SingleLineBlockChain;
     name = "Layout/SingleLineBlockChain",
     description = "Put method call on a separate line if chained to a single line block.",
     default_severity = "warning",
-    default_enabled = true,
+    default_enabled = true
 )]
 impl SingleLineBlockChain {
     #[on_node(kind = "send")]

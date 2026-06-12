@@ -175,8 +175,10 @@ fn whole_expression(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
         let Some(parent) = cx.parent(node).get() else {
             return node;
         };
-        let grow = matches!(*cx.kind(parent), NodeKind::Send { .. } | NodeKind::Csend { .. })
-            || convertible_block(node, parent, cx)
+        let grow = matches!(
+            *cx.kind(parent),
+            NodeKind::Send { .. } | NodeKind::Csend { .. }
+        ) || convertible_block(node, parent, cx)
             || matches!(*cx.kind(parent), NodeKind::And { .. } | NodeKind::Or { .. });
         if grow {
             node = parent;
@@ -211,7 +213,8 @@ fn offense(node: NodeId, cx: &Cx<'_>, inspect_blocks: bool) -> bool {
     if cx.is_operator_keyword(node) {
         return require_backslash(node, cx);
     }
-    !index_access_call_chained(node, cx) && !configured_to_not_be_inspected(node, cx, inspect_blocks)
+    !index_access_call_chained(node, cx)
+        && !configured_to_not_be_inspected(node, cx, inspect_blocks)
 }
 
 /// `suitable_as_single_line?`: fits the line budget, no interior comment, safe
@@ -247,15 +250,11 @@ fn safe_to_split(node: NodeId, cx: &Cx<'_>) -> bool {
             | NodeKind::Rescue { .. }
             | NodeKind::Ensure { .. } => return false,
             // Heredoc or embedded `\n` in a string makes joining unsafe.
-            NodeKind::Str(_) | NodeKind::Dstr(_)
-                if cx.raw_source(cx.range(d)).contains('\n') =>
-            {
+            NodeKind::Str(_) | NodeKind::Dstr(_) if cx.raw_source(cx.range(d)).contains('\n') => {
                 return false;
             }
             // Multiline begin / symbol is unsafe to join.
-            NodeKind::Begin(_) | NodeKind::Sym(_) | NodeKind::Dsym(_)
-                if cx.is_multiline(d) =>
-            {
+            NodeKind::Begin(_) | NodeKind::Sym(_) | NodeKind::Dsym(_) if cx.is_multiline(d) => {
                 return false;
             }
             _ => {}
@@ -299,8 +298,7 @@ fn index_access_call_chained(node: NodeId, cx: &Cx<'_>) -> bool {
 
 fn is_index_send(node: NodeId, cx: &Cx<'_>) -> bool {
     matches!(*cx.kind(node), NodeKind::Index { .. })
-        || (matches!(*cx.kind(node), NodeKind::Send { .. })
-            && cx.method_name(node) == Some("[]"))
+        || (matches!(*cx.kind(node), NodeKind::Send { .. }) && cx.method_name(node) == Some("[]"))
 }
 
 /// `configured_to_not_be_inspected?`: a block (or a multiline-block-bearing
