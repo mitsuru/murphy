@@ -94,19 +94,14 @@ fn find_method_name_range(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
         _ => return None,
     };
     let name_str = cx.symbol_str(name_sym);
-    let name_bytes = name_str.as_bytes();
     let node_range = cx.range(node);
-    let source = cx.source().as_bytes();
 
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < node_range.start);
     toks[idx..]
         .iter()
         .take_while(|t| t.range.start < node_range.end)
-        .find(|t| {
-            t.kind == SourceTokenKind::Other
-                && &source[t.range.start as usize..t.range.end as usize] == name_bytes
-        })
+        .find(|t| t.kind == SourceTokenKind::Other && cx.raw_source(t.range) == name_str)
         .map(|t| t.range)
 }
 
