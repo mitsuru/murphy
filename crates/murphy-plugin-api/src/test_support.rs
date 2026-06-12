@@ -123,6 +123,82 @@ pub fn assert_pack_option_keys_pascal_case(cops: &[PluginCopV1]) {
     );
 }
 
+#[cfg(test)]
+mod option_key_pascal_case_guard_tests {
+    use super::assert_pack_option_keys_pascal_case;
+    use crate::{CxRaw, NodeId, NodeKindTag, OptionSpec, PluginCopV1, RawSlice, SEVERITY_UNSET};
+
+    unsafe extern "C" fn noop_dispatch(_node: NodeId, _cx: *const CxRaw) -> i32 {
+        0
+    }
+
+    static KINDS: &[NodeKindTag] = &[NodeKindTag(1)];
+    static PASCAL_OPTS: &[OptionSpec] = &[opt("Max"), opt("EnforcedStyle")];
+    static SNAKE_OPTS: &[OptionSpec] = &[opt("max"), opt("enforced_style")];
+
+    const fn opt(name: &'static str) -> OptionSpec {
+        OptionSpec {
+            name: RawSlice::from_str(name),
+            ty: RawSlice::from_str("bool"),
+            default_json: RawSlice::EMPTY,
+            description: RawSlice::EMPTY,
+            enum_values_json: RawSlice::EMPTY,
+            replacement: RawSlice::EMPTY,
+            reason: RawSlice::EMPTY,
+        }
+    }
+
+    /// Minimal cop carrying only the fields the guard reads (`name`,
+    /// `options_ptr`, `options_len`); the rest are inert placeholders. An
+    /// empty `options` slice yields a null `options_ptr` to exercise the
+    /// "cop has no options" skip path.
+    fn cop(name: &'static str, options: &'static [OptionSpec]) -> PluginCopV1 {
+        PluginCopV1 {
+            size: std::mem::size_of::<PluginCopV1>(),
+            name: RawSlice::from_str(name),
+            description: RawSlice::EMPTY,
+            default_severity: SEVERITY_UNSET,
+            default_enabled: 255,
+            options_ptr: if options.is_empty() {
+                std::ptr::null()
+            } else {
+                options.as_ptr()
+            },
+            options_len: options.len(),
+            kinds_ptr: KINDS.as_ptr(),
+            kinds_len: KINDS.len(),
+            dispatch: noop_dispatch,
+            send_methods_ptr: std::ptr::null(),
+            send_methods_len: 0,
+            safe: 255,
+            safe_autocorrect: 255,
+            minimum_target_ruby_version: 0,
+        }
+    }
+
+    #[test]
+    fn passes_on_pascal_case_keys() {
+        assert_pack_option_keys_pascal_case(&[cop("Style/Foo", PASCAL_OPTS)]);
+    }
+
+    #[test]
+    fn passes_on_empty_pack() {
+        assert_pack_option_keys_pascal_case(&[]);
+    }
+
+    #[test]
+    fn skips_cop_with_no_options() {
+        // Null `options_ptr` must be skipped, not dereferenced.
+        assert_pack_option_keys_pascal_case(&[cop("Style/Bar", &[])]);
+    }
+
+    #[test]
+    #[should_panic(expected = "PascalCase")]
+    fn panics_on_snake_case_keys() {
+        assert_pack_option_keys_pascal_case(&[cop("Style/Baz", SNAKE_OPTS)]);
+    }
+}
+
 /// Validate the parity metadata of a single source file, pushing a
 /// human-readable message per problem onto `failures`.
 ///

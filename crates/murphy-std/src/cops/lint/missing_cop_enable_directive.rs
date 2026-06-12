@@ -9,7 +9,7 @@
 //!   - murphy-3bod
 //! notes: >
 //!   Mirrors RuboCop's common own-line disable/enable range checks and
-//!   MaxRangeSize option. Registry-backed exemptions for cops disabled in
+//!   MaximumRangeSize option. Registry-backed exemptions for cops disabled in
 //!   config, department expansion, and rubocop:push/pop stack handling are not
 //!   available in the current v1 comment directive surface; those cases are
 //!   conservative v1 limitations.
