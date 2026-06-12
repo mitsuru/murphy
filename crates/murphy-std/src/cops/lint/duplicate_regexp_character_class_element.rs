@@ -449,6 +449,31 @@ mod tests {
     }
 
     #[test]
+    fn flags_each_repeat_of_a_thrice_repeated_char() {
+        // `[xxx]` — both the 2nd and 3rd `x` are duplicates of the 1st, so two
+        // offenses fire (one per `seen` hit), matching RuboCop.
+        test::<Cop>().expect_offense(indoc! {r#"
+            r = /[xxx]/
+                   ^ Duplicate element inside regexp character class
+                    ^ Duplicate element inside regexp character class
+        "#});
+    }
+
+    #[test]
+    fn autocorrects_thrice_repeated_char_in_one_pass() {
+        // Two adjacent, non-overlapping removals collapse `[xxx]` to `[x]` in a
+        // single pass and reach fixpoint (re-run is clean).
+        test::<Cop>().expect_correction(
+            indoc! {r#"
+                r = /[xxx]/
+                       ^ Duplicate element inside regexp character class
+                        ^ Duplicate element inside regexp character class
+            "#},
+            "r = /[x]/\n",
+        );
+    }
+
+    #[test]
     fn autocorrects_duplicate_char() {
         test::<Cop>().expect_correction(
             indoc! {r#"
