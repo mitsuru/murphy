@@ -95,8 +95,11 @@ pub fn assert_cop_parity_metadata_for_crate(manifest_dir: impl AsRef<Path>) {
 pub fn assert_pack_option_keys_pascal_case(cops: &[PluginCopV1]) {
     fn is_pascal_case(key: &str) -> bool {
         let mut chars = key.chars();
+        // The first char is verified ASCII-uppercase (a subset of
+        // alphanumeric), so reuse the same iterator for the remaining chars
+        // rather than re-scanning the key from the start.
         chars.next().is_some_and(|c| c.is_ascii_uppercase())
-            && key.chars().all(|c| c.is_ascii_alphanumeric())
+            && chars.all(|c| c.is_ascii_alphanumeric())
     }
 
     let mut offenders = Vec::new();
