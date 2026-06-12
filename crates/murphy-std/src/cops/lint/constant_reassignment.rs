@@ -11,8 +11,8 @@
 //! version_added: "1.70"
 //! safe: true
 //! supports_autocorrect: false
-//! status: partial
-//! gap_issues: [murphy-as93]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Stateful whole-file cop: a single pre-order walk
 //!   (`on_new_investigation` over `cx.descendants(root)`) builds a
@@ -25,13 +25,18 @@
 //!   ignored. `remove_const :X` unregisters when inside a class/module.
 //!   `||=`/`&&=` are `OrAsgn`/`AndAsgn`, naturally unmatched.
 //!
-//!   GAPS (murphy-as93): (1) compound definition names `class A::B` and
-//!   cbase-absolute keys `::X = 1` are not fully qualified, because Murphy's
-//!   AST drops the `cbase` scope node and rubocop-ast's `each_path` /
-//!   `absolute?` / `short_name` cannot be faithfully reconstructed; such
-//!   constants fall back to their plain const-path name. (2) Cross-file
-//!   detection (`AllCops/UseProjectIndex` + `rubydex`) is out of scope — the
-//!   plugin ABI exposes no project index.
+//!   Compound (`A::B = …`, `class A::B`) and cbase-absolute (`::X = 1`,
+//!   `::Foo::Bar = 1`, `class ::A`) paths are now fully qualified, matching
+//!   RuboCop's `absolute?` / `cbase_type?` branches (murphy-as93 closed).
+//!   Murphy's AST drops the `cbase` scope node, so `absolute?` is recovered
+//!   from source text: an absolute constant path's expression range starts at
+//!   the leading `::`. Absolute casgn keys drop ancestor namespaces; an
+//!   immediate-cbase class/module identifier yields `"::<short>"`.
+//!
+//!   INHERENT LIMITATION (not a fixable gap): cross-file detection
+//!   (`AllCops/UseProjectIndex` + rubydex `CROSS_FILE_MSG`) is out of scope —
+//!   the single-surface plugin ABI exposes no project index. Murphy is a
+//!   per-file cop; only same-file reassignments are detected.
 //! ```
 //!
 //! ## Matched shapes
@@ -197,9 +202,10 @@ fn ancestor_namespaces<'a>(node: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
 
 /// `constant_namespaces`: the casgn's own const-path scope short names.
 ///
-/// Note: Murphy's translate layer drops the `cbase` node, so a `::Foo = ...`
-/// absolute path is indistinguishable from `Foo = ...` here; absolute-path
-/// fidelity is the documented gap (murphy-as93).
+/// Note: Murphy's translate layer drops the `cbase` node, so this walk alone
+/// cannot tell `::Foo::Bar` from `Foo::Bar`. The absolute/relative
+/// distinction is handled by the caller via [`is_cbase_absolute`] (source-text
+/// based), which decides whether ancestor namespaces are prepended.
 fn constant_namespaces<'a>(node: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
     let NodeKind::Casgn { scope, .. } = *cx.kind(node) else {
         return Vec::new();
@@ -207,16 +213,38 @@ fn constant_namespaces<'a>(node: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
     scope_const_short_names(scope, cx)
 }
 
-/// `fully_qualified_constant_name`: `['', *ancestor_ns, *const_ns, name]
-/// .join('::')`. Compound/cbase-absolute paths are a documented gap.
+/// `fully_qualified_constant_name`. RuboCop branches on `node.absolute?`:
+///
+/// - **absolute** (`::X`, `::Foo::Bar`): the constant path is rooted at the
+///   top level, so ancestor namespaces are dropped — the key is
+///   `['', *const_ns, name].join('::')`. A bare cbase like `::X` has no const
+///   namespace (its scope is the cbase, not a const), giving `"::X"`;
+///   `::Foo::Bar` keeps `Foo`, giving `"::Foo::Bar"`.
+/// - **relative** (`X`, `Foo::Bar`): ancestor namespaces are included, as
+///   before.
+///
+/// Murphy's translate layer drops the cbase scope node, so `node.absolute?`
+/// cannot be read from the AST. It is recovered from source text instead: the
+/// casgn's expression range starts at the leading `::` for an absolute path.
 fn fully_qualified_constant_name(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     let NodeKind::Casgn { name, .. } = *cx.kind(node) else {
         return None;
     };
     let short = cx.symbol_str(name);
-    let mut namespaces = ancestor_namespaces(node, cx);
+    let mut namespaces = if is_cbase_absolute(node, cx) {
+        Vec::new()
+    } else {
+        ancestor_namespaces(node, cx)
+    };
     namespaces.extend(constant_namespaces(node, cx));
     Some(fully_qualified_name_for(&namespaces, short))
+}
+
+/// `node.absolute?`: true when the constant path is rooted at the top level
+/// with a leading `::`. Recovered from source text because Murphy's AST drops
+/// the cbase scope node (see [`fully_qualified_constant_name`]).
+fn is_cbase_absolute(node: NodeId, cx: &Cx<'_>) -> bool {
+    cx.raw_source(cx.range(node)).starts_with("::")
 }
 
 /// `fully_qualified_name_for`: leading `::` plus joined namespaces.
@@ -238,18 +266,38 @@ fn constant_display_name(node: NodeId, cx: &Cx<'_>) -> String {
     parts.join("::")
 }
 
-/// `definition_name` for a class/module: ancestor namespaces + the
-/// identifier's path namespaces + its short name. Compound/cbase identifiers
-/// fall back to the short name (documented gap).
+/// `definition_name` for a class/module. RuboCop special-cases an identifier
+/// whose immediate namespace is a cbase (`class ::A`): it drops every ancestor
+/// and yields `"::<short>"`. Only the *immediate* cbase counts —
+/// `class ::A::B`'s identifier namespace is the const `::A` (not a cbase), so
+/// it takes the ordinary ancestors + identifier-namespaces branch.
+///
+/// Murphy's AST drops the cbase node, so "immediate cbase" is reconstructed as:
+/// the rightmost const has no const scope (`identifier.namespace` would be the
+/// dropped cbase) *and* the identifier's source starts with `::`.
 fn definition_name(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     let name_const = match *cx.kind(node) {
         NodeKind::Class { name, .. } | NodeKind::Module { name, .. } => name,
         _ => return None,
     };
     let short = const_short_name(name_const, cx)?;
+    if has_immediate_cbase(name_const, cx) {
+        return Some(fully_qualified_name_for(&[], short));
+    }
     let mut namespaces = ancestor_namespaces(node, cx);
     namespaces.extend(identifier_namespaces(name_const, cx));
     Some(fully_qualified_name_for(&namespaces, short))
+}
+
+/// `identifier.namespace&.cbase_type?`: the const identifier's immediate
+/// namespace is a cbase (`::A` but not `::A::B` and not `A::B`). Reconstructed
+/// from the dropped-cbase AST: rightmost const has no const scope and the
+/// identifier's source begins with `::`.
+fn has_immediate_cbase(name_const: NodeId, cx: &Cx<'_>) -> bool {
+    let NodeKind::Const { scope, .. } = *cx.kind(name_const) else {
+        return false;
+    };
+    scope.get().is_none() && cx.raw_source(cx.range(name_const)).starts_with("::")
 }
 
 /// Short (rightmost) name of a const node.
@@ -421,6 +469,98 @@ mod tests {
               class A; end
             end
             A = 1
+        "#});
+    }
+
+    // --- murphy-as93: cbase-absolute path fidelity ---
+
+    #[test]
+    fn does_not_flag_cbase_absolute_in_class_vs_relative() {
+        // RuboCop: `::X` qualifies to `"::X"` (cbase drops ancestor `A`),
+        // while `X = 1` inside `class A` qualifies to `"::A::X"`. Different
+        // keys → no reassignment. Murphy must not collide them.
+        test::<ConstantReassignment>().expect_no_offenses(indoc! {r#"
+            class A
+              X = 1
+              ::X = 2
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_cbase_absolute_reassignment_at_top_level() {
+        // `::X` and `X` at the top level both qualify to `"::X"`, so the
+        // second assignment is a reassignment.
+        test::<ConstantReassignment>().expect_offense(indoc! {r#"
+            X = :foo
+            ::X = :bar
+            ^^^^^^^^^^ Constant `X` is already assigned in this namespace.
+        "#});
+    }
+
+    #[test]
+    fn flags_cbase_then_relative_reassignment_at_top_level() {
+        test::<ConstantReassignment>().expect_offense(indoc! {r#"
+            ::X = :foo
+            X = :bar
+            ^^^^^^^^ Constant `X` is already assigned in this namespace.
+        "#});
+    }
+
+    #[test]
+    fn flags_cbase_absolute_self_reassignment_in_nested_namespace() {
+        // Two `::X` assignments inside `class A` both qualify to `"::X"`.
+        test::<ConstantReassignment>().expect_offense(indoc! {r#"
+            class A
+              ::X = 1
+              ::X = 2
+              ^^^^^^^ Constant `X` is already assigned in this namespace.
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_cbase_qualified_path_reassignment() {
+        // `::Foo::Bar` qualifies to `"::Foo::Bar"` (namespace `::Foo` is a
+        // const, so it is kept).
+        test::<ConstantReassignment>().expect_offense(indoc! {r#"
+            ::Foo::Bar = 1
+            ::Foo::Bar = 2
+            ^^^^^^^^^^^^^^ Constant `Foo::Bar` is already assigned in this namespace.
+        "#});
+    }
+
+    #[test]
+    fn flags_compound_const_path_reassignment() {
+        // Compound (`A::B = …`) already qualifies to `"::A::B"`; the second
+        // assignment collides. This pins that compound paths keep working.
+        test::<ConstantReassignment>().expect_offense(indoc! {r#"
+            A::B = 1
+            A::B = 2
+            ^^^^^^^^ Constant `A::B` is already assigned in this namespace.
+        "#});
+    }
+
+    #[test]
+    fn flags_cbase_class_definition_then_reassignment() {
+        // `class ::A` defines `"::A"`; the later `A = 1` at top level also
+        // qualifies to `"::A"`, so it is a reassignment.
+        test::<ConstantReassignment>().expect_offense(indoc! {r#"
+            class ::A; end
+            A = 1
+            ^^^^^ Constant `A` is already assigned in this namespace.
+        "#});
+    }
+
+    #[test]
+    fn does_not_flag_cbase_class_definition_inside_other_namespace() {
+        // Inside `module M`, `class ::A` defines top-level `"::A"`, while a
+        // relative `A = 1` inside `M` is `"::M::A"`. Different keys.
+        test::<ConstantReassignment>().expect_no_offenses(indoc! {r#"
+            module M
+              class ::A; end
+              A = 1
+            end
         "#});
     }
 }

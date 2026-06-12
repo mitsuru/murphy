@@ -4,16 +4,23 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/EmptyInPattern
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-6rhg
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Message and default AllowComments:true behavior mirror RuboCop; the
-//!   AllowComments override is read live via cx.options_or_default. Remaining
-//!   gap (murphy-6rhg): the comment-region heuristic ([in.end,
-//!   next_sibling.start)) is not yet verified against RuboCop's comment
-//!   detection, incl. the `comments_contain_disables?` nuance (a
-//!   rubocop:disable directive must not count as an allowing comment).
+//!   AllowComments override is read live via cx.options_or_default. The
+//!   comment-region heuristic ([in.end, next_sibling.start)) is verified
+//!   against RuboCop's `allow_comments?`, including the
+//!   `comments_contain_disables?` nuance via
+//!   `crate::cops::util::region_has_allowing_comment`: a `rubocop:disable
+//!   Lint/EmptyInPattern` (or `disable all`) covering the branch is NOT an
+//!   allowing comment, so the empty `in` branch is still flagged; a directive
+//!   naming a different cop is an ordinary allowing comment (murphy-6rhg
+//!   closed). Scope seam vs RuboCop: only directives *within* the branch body
+//!   region are detected; RuboCop's `comments_contain_disables?` uses
+//!   line-range coverage, so a block-level disable placed *above* the `case`
+//!   would also cover the branch — Murphy does not detect that out-of-region
+//!   form (the in-branch form, the common case, matches).
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
@@ -42,7 +49,7 @@ impl EmptyInPattern {
         let opts = cx.options_or_default::<Options>();
         if opts.allow_comments
             && let Some(region) = empty_in_body_region(cx, node)
-            && !cx.comments_in_range(region).is_empty()
+            && crate::cops::util::region_has_allowing_comment(cx, region, "Lint/EmptyInPattern")
         {
             return;
         }
@@ -111,5 +118,46 @@ mod tests {
                   # noop
                 end
             "#});
+    }
+
+    // murphy-6rhg: `comments_contain_disables?` — a `rubocop:disable` directive
+    // for this cop must NOT count as an allowing comment.
+
+    #[test]
+    fn disable_directive_comment_is_not_an_allowing_comment() {
+        test::<EmptyInPattern>().expect_offense(indoc! {r#"
+            case condition
+            in [a]
+              do_something
+            in [a, b]
+            ^^^^^^^^^ Avoid `in` branches without a body.
+              # rubocop:disable Lint/EmptyInPattern
+            end
+        "#});
+    }
+
+    #[test]
+    fn disable_all_directive_comment_is_not_an_allowing_comment() {
+        test::<EmptyInPattern>().expect_offense(indoc! {r#"
+            case condition
+            in [a]
+              do_something
+            in [a, b]
+            ^^^^^^^^^ Avoid `in` branches without a body.
+              # rubocop:disable all
+            end
+        "#});
+    }
+
+    #[test]
+    fn disable_directive_for_other_cop_still_allows_comment() {
+        test::<EmptyInPattern>().expect_no_offenses(indoc! {r#"
+            case condition
+            in [a]
+              do_something
+            in [a, b]
+              # rubocop:disable Lint/SomethingElse
+            end
+        "#});
     }
 }

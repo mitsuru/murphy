@@ -11,21 +11,30 @@
 //! supports_autocorrect: true
 //! status: partial
 //! gap_issues:
-//!   - murphy-jrcs
+//!   - murphy-484s
 //! notes: >
 //!   Implements the forward-all `...` core path (Ruby 2.7+): flags defs
 //!   whose restarg/kwrestarg/blockarg all have redundant names and are
 //!   forwarded unchanged to all call sites, replacing with `...`.
-//!   Remaining gaps (murphy-jrcs): (1) Anonymous forwarding (`*`, `**`, `&`)
-//!   for Ruby 3.1-3.2+ (UseAnonymousForwarding) is not implemented — Murphy
-//!   has no cx.target_ruby_version() API to gate version-dependent
-//!   behaviour. (2) AllowOnlyRestArgument: false (flagging *args-only
-//!   patterns as ...) is not implemented. (3) The Redundant*ArgumentNames
-//!   config options are hardcoded to their RuboCop defaults — the cop does
-//!   not yet read them via cx.options_or_default (the option-wiring infra
-//!   exists; this is a cop-side gap, not a config-layer one).
-//!   Disable with `[cops.rules."Style/ArgumentsForwarding"] enabled = false`
-//!   if these limitations affect your codebase.
+//!
+//!   murphy-jrcs closed two of the three original gaps: (2)
+//!   `AllowOnlyRestArgument` is now an option (default `true`) that mirrors
+//!   RuboCop's `offensive_block_forwarding?` — when a def declares no
+//!   `&block` and `AllowOnlyRestArgument` is true, forward-all is NOT
+//!   flagged (because `...` also forwards a block, changing behaviour); set
+//!   it to false to flag `*args`/`**kwargs`-only patterns. (3) The three
+//!   `Redundant*ArgumentNames` lists (`RedundantRestArgumentNames`,
+//!   `RedundantKeywordRestArgumentNames`, `RedundantBlockArgumentNames`) are
+//!   now read via `cx.options_or_default`; the empty (anonymous) name and
+//!   any name in the configured list count as redundant, matching RuboCop's
+//!   `redundant_named_arg` (`[keyword+name …] << keyword`).
+//!
+//!   REMAINING GAP (murphy-484s): Anonymous forwarding (`*`, `**`, `&`) for
+//!   Ruby 3.2+ (`UseAnonymousForwarding`) is not implemented — RuboCop gates
+//!   it on `target_ruby_version >= 3.2`, but Murphy's single-surface plugin
+//!   ABI exposes `target_rails_version()` and not `target_ruby_version()`
+//!   (CxRaw has no Ruby-version field). Adding it would cross the ABI
+//!   boundary, so it stays a documented blocker.
 //! ```
 //!
 //! ## Matched shapes
@@ -58,13 +67,53 @@
 //! and replaces the matching splat/kwsplat/block-pass sequence in each
 //! call site with `...`. Parentheses are added when missing.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
-
-const REDUNDANT_REST_NAMES: &[&str] = &["args", "arguments"];
-const REDUNDANT_KWREST_NAMES: &[&str] = &["kwargs", "options", "opts"];
-const REDUNDANT_BLOCK_NAMES: &[&str] = &["blk", "block", "proc"];
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 const FORWARDING_MSG: &str = "Use shorthand syntax `...` for arguments forwarding.";
+
+/// Cop options for [`ArgumentsForwarding`]. Read live at dispatch time via
+/// [`Cx::options_or_default`]. Mirrors RuboCop's config keys and defaults.
+#[derive(CopOptions)]
+pub struct ArgumentsForwardingOptions {
+    /// `AllowOnlyRestArgument` — when `true` (default), a def that forwards
+    /// only a rest and/or kwrest argument (no `&block`) is NOT flagged, because
+    /// `...` would also forward a block and change behaviour. When `false`,
+    /// these patterns are flagged. Mirrors RuboCop's `offensive_block_forwarding?`
+    /// (`@block_arg ? forwarded_block_arg : !allow_only_rest_arguments`).
+    #[option(
+        name = "AllowOnlyRestArgument",
+        default = true,
+        description = "Allow forwarding only a rest/kwrest argument (no block) without flagging."
+    )]
+    pub allow_only_rest_argument: bool,
+
+    /// `RedundantRestArgumentNames` — rest-arg names treated as anonymous-equivalent
+    /// (`*args`, `*arguments`), so they may be replaced with `...`.
+    #[option(
+        name = "RedundantRestArgumentNames",
+        default = ["args", "arguments"],
+        description = "Rest-argument names considered redundant (forwardable as `...`)."
+    )]
+    pub redundant_rest_argument_names: Vec<String>,
+
+    /// `RedundantKeywordRestArgumentNames` — kwrest-arg names treated as
+    /// anonymous-equivalent (`**kwargs`, `**options`, `**opts`).
+    #[option(
+        name = "RedundantKeywordRestArgumentNames",
+        default = ["kwargs", "options", "opts"],
+        description = "Keyword-rest-argument names considered redundant (forwardable as `...`)."
+    )]
+    pub redundant_keyword_rest_argument_names: Vec<String>,
+
+    /// `RedundantBlockArgumentNames` — block-arg names treated as
+    /// anonymous-equivalent (`&blk`, `&block`, `&proc`).
+    #[option(
+        name = "RedundantBlockArgumentNames",
+        default = ["blk", "block", "proc"],
+        description = "Block-argument names considered redundant (forwardable as `...`)."
+    )]
+    pub redundant_block_argument_names: Vec<String>,
+}
 
 #[derive(Default)]
 pub struct ArgumentsForwarding;
@@ -74,7 +123,7 @@ pub struct ArgumentsForwarding;
     description = "Use arguments forwarding.",
     default_severity = "warning",
     default_enabled = true,
-    options = NoOptions,
+    options = ArgumentsForwardingOptions,
 )]
 impl ArgumentsForwarding {
     #[on_node(kind = "def")]
@@ -109,6 +158,8 @@ fn check_def_node(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    let opts = cx.options_or_default::<ArgumentsForwardingOptions>();
+
     let Some(args_id) = cx.def_arguments(node).get() else {
         return;
     };
@@ -129,9 +180,15 @@ fn check_def_node(node: NodeId, cx: &Cx<'_>) {
     let kwrestarg_id = find_arg_kind(&args, cx, |k| matches!(k, NodeKind::Kwrestarg(_)));
     let blockarg_id = find_arg_kind(&args, cx, |k| matches!(k, NodeKind::Blockarg(_)));
 
-    let fwd_restarg = forwardable_restarg(restarg_id, cx);
-    let fwd_kwrestarg = forwardable_kwrestarg(kwrestarg_id, cx);
-    let fwd_blockarg = forwardable_blockarg(blockarg_id, cx);
+    let fwd_restarg =
+        forwardable_restarg(restarg_id, &opts.redundant_rest_argument_names, cx);
+    let fwd_kwrestarg = forwardable_kwrestarg(
+        kwrestarg_id,
+        &opts.redundant_keyword_rest_argument_names,
+        cx,
+    );
+    let fwd_blockarg =
+        forwardable_blockarg(blockarg_id, &opts.redundant_block_argument_names, cx);
 
     if fwd_restarg.is_none() && fwd_kwrestarg.is_none() && fwd_blockarg.is_none() {
         return;
@@ -150,10 +207,12 @@ fn check_def_node(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // AllowOnlyRestArgument: true (default) — skip single-arg-type cases.
-    let only_rest = fwd_restarg.is_some() && fwd_kwrestarg.is_none() && fwd_blockarg.is_none();
-    let only_kwrest = fwd_restarg.is_none() && fwd_kwrestarg.is_some() && fwd_blockarg.is_none();
-    if only_rest || only_kwrest {
+    // RuboCop's `offensive_block_forwarding?`: when the def declares a `&block`
+    // it must be forwarded (enforced above); when it does NOT declare a block,
+    // forward-all is only offensive when `AllowOnlyRestArgument` is false —
+    // because `...` also forwards a block, which would change behaviour. So a
+    // def forwarding only rest and/or kwrest (no block) is skipped by default.
+    if fwd_blockarg.is_none() && opts.allow_only_rest_argument {
         return;
     }
 
@@ -493,43 +552,48 @@ fn find_arg_kind(args: &[NodeId], cx: &Cx<'_>, pred: impl Fn(&NodeKind) -> bool)
     args.iter().copied().find(|&id| pred(cx.kind(id)))
 }
 
-fn forwardable_restarg(id: Option<NodeId>, cx: &Cx<'_>) -> Option<NodeId> {
+/// True when `name` is anonymous (empty — the bare `*`/`**`/`&`) or appears in
+/// the configured redundant-name list. Mirrors RuboCop's `redundant_named_arg`,
+/// whose candidate list is `[keyword+name for name in config] << keyword`, so
+/// the bare keyword (anonymous forwarding) always counts as redundant.
+fn is_redundant_name(name: &str, redundant_names: &[String]) -> bool {
+    name.is_empty() || redundant_names.iter().any(|n| n == name)
+}
+
+fn forwardable_restarg(
+    id: Option<NodeId>,
+    redundant_names: &[String],
+    cx: &Cx<'_>,
+) -> Option<NodeId> {
     let id = id?;
     let NodeKind::Restarg(sym) = *cx.kind(id) else {
         return None;
     };
-    let name = cx.symbol_str(sym);
-    if name.is_empty() || REDUNDANT_REST_NAMES.contains(&name) {
-        Some(id)
-    } else {
-        None
-    }
+    is_redundant_name(cx.symbol_str(sym), redundant_names).then_some(id)
 }
 
-fn forwardable_kwrestarg(id: Option<NodeId>, cx: &Cx<'_>) -> Option<NodeId> {
+fn forwardable_kwrestarg(
+    id: Option<NodeId>,
+    redundant_names: &[String],
+    cx: &Cx<'_>,
+) -> Option<NodeId> {
     let id = id?;
     let NodeKind::Kwrestarg(sym) = *cx.kind(id) else {
         return None;
     };
-    let name = cx.symbol_str(sym);
-    if name.is_empty() || REDUNDANT_KWREST_NAMES.contains(&name) {
-        Some(id)
-    } else {
-        None
-    }
+    is_redundant_name(cx.symbol_str(sym), redundant_names).then_some(id)
 }
 
-fn forwardable_blockarg(id: Option<NodeId>, cx: &Cx<'_>) -> Option<NodeId> {
+fn forwardable_blockarg(
+    id: Option<NodeId>,
+    redundant_names: &[String],
+    cx: &Cx<'_>,
+) -> Option<NodeId> {
     let id = id?;
     let NodeKind::Blockarg(sym) = *cx.kind(id) else {
         return None;
     };
-    let name = cx.symbol_str(sym);
-    if name.is_empty() || REDUNDANT_BLOCK_NAMES.contains(&name) {
-        Some(id)
-    } else {
-        None
-    }
+    is_redundant_name(cx.symbol_str(sym), redundant_names).then_some(id)
 }
 
 fn restarg_name<'a>(id: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
@@ -566,7 +630,7 @@ fn lvar_name<'a>(id: NodeId, cx: &Cx<'a>) -> &'a str {
 
 #[cfg(test)]
 mod tests {
-    use super::ArgumentsForwarding;
+    use super::{ArgumentsForwarding, ArgumentsForwardingOptions};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -810,6 +874,165 @@ mod tests {
               bar(first(*args), second(**kwargs), third(&block))
             end
         "#});
+    }
+
+    // ── AllowOnlyRestArgument ───────────────────────────────────────────────
+
+    #[test]
+    fn options_defaults_match_rubocop() {
+        let d = ArgumentsForwardingOptions::default();
+        assert!(d.allow_only_rest_argument);
+        assert_eq!(d.redundant_rest_argument_names, ["args", "arguments"]);
+        assert_eq!(
+            d.redundant_keyword_rest_argument_names,
+            ["kwargs", "options", "opts"]
+        );
+        assert_eq!(d.redundant_block_argument_names, ["blk", "block", "proc"]);
+    }
+
+    #[test]
+    fn accepts_only_rest_and_kwrest_without_block_by_default() {
+        // RuboCop's `offensive_block_forwarding?`: with no `&block` declared and
+        // `AllowOnlyRestArgument: true` (default), forward-all is NOT offensive,
+        // because `...` would also forward a block and change behaviour.
+        test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
+            def foo(*args, **kwargs)
+              bar(*args, **kwargs)
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_only_rest_arg_when_allow_only_rest_argument_false() {
+        test::<ArgumentsForwarding>()
+            .with_options(&ArgumentsForwardingOptions {
+                allow_only_rest_argument: false,
+                ..Default::default()
+            })
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args)
+                            ^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                      bar(*args)
+                          ^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(...)
+                      bar(...)
+                    end
+                "#},
+            );
+    }
+
+    #[test]
+    fn flags_only_kwrest_arg_when_allow_only_rest_argument_false() {
+        test::<ArgumentsForwarding>()
+            .with_options(&ArgumentsForwardingOptions {
+                allow_only_rest_argument: false,
+                ..Default::default()
+            })
+            .expect_correction(
+                indoc! {r#"
+                    def foo(**kwargs)
+                            ^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                      bar(**kwargs)
+                          ^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(...)
+                      bar(...)
+                    end
+                "#},
+            );
+    }
+
+    #[test]
+    fn flags_rest_and_kwrest_without_block_when_allow_only_rest_argument_false() {
+        test::<ArgumentsForwarding>()
+            .with_options(&ArgumentsForwardingOptions {
+                allow_only_rest_argument: false,
+                ..Default::default()
+            })
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args, **kwargs)
+                            ^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                      bar(*args, **kwargs)
+                          ^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(...)
+                      bar(...)
+                    end
+                "#},
+            );
+    }
+
+    // ── Redundant*ArgumentNames ─────────────────────────────────────────────
+
+    #[test]
+    fn flags_custom_redundant_rest_name() {
+        test::<ArgumentsForwarding>()
+            .with_options(&ArgumentsForwardingOptions {
+                redundant_rest_argument_names: vec!["sploosh".to_string()],
+                ..Default::default()
+            })
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*sploosh, &block)
+                            ^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                      bar(*sploosh, &block)
+                          ^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(...)
+                      bar(...)
+                    end
+                "#},
+            );
+    }
+
+    #[test]
+    fn accepts_default_rest_name_when_not_in_custom_list() {
+        // With a custom `RedundantRestArgumentNames` that omits `args`, the
+        // default `*args` name is now meaningful and forward-all is rejected.
+        test::<ArgumentsForwarding>()
+            .with_options(&ArgumentsForwardingOptions {
+                redundant_rest_argument_names: vec!["sploosh".to_string()],
+                ..Default::default()
+            })
+            .expect_no_offenses(indoc! {r#"
+                def foo(*args, &block)
+                  bar(*args, &block)
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_custom_redundant_block_name() {
+        test::<ArgumentsForwarding>()
+            .with_options(&ArgumentsForwardingOptions {
+                redundant_block_argument_names: vec!["callback".to_string()],
+                ..Default::default()
+            })
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args, &callback)
+                            ^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                      bar(*args, &callback)
+                          ^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(...)
+                      bar(...)
+                    end
+                "#},
+            );
     }
 }
 
