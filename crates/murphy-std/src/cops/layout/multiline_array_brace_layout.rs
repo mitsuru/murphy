@@ -100,9 +100,12 @@ impl MultilineArrayBraceLayout {
     }
 }
 
-/// Returns the 1-based line number of a byte offset.
-fn line_of(offset: u32, src: &[u8]) -> usize {
-    1 + src[..offset as usize].iter().filter(|&&b| b == b'\n').count()
+/// True when no newline separates byte offsets `a` and `b` (i.e. they sit on
+/// the same source line). O(|b - a|) — no scan from the file start, so the cop
+/// stays O(N) over the file rather than O(N²).
+fn same_line(a: u32, b: u32, src: &[u8]) -> bool {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    !src[lo as usize..hi as usize].contains(&b'\n')
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
@@ -129,9 +132,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let src = cx.source().as_bytes();
 
     // RuboCop only fires on multi-line literals; a single-line array is skipped.
-    let open_line = line_of(open_start, src);
-    let close_line = line_of(close_start, src);
-    if open_line == close_line {
+    if same_line(open_start, close_start, src) {
         return;
     }
 
@@ -141,20 +142,17 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // RuboCop `last_line_heredoc?`: if the last element is/contains a heredoc
     // whose terminator ends on or after the array's last line, moving the
     // brace would yield invalid code — skip.
-    if last_line_heredoc(last_element, close_line, cx) {
+    if last_line_heredoc(last_element, close_start, cx) {
         return;
     }
-
-    let first_element_line = line_of(cx.range(first_element).start, src);
-    let last_element_line = line_of(cx.range(last_element).end, src);
 
     let opts = cx.options_or_default::<MultilineArrayBraceLayoutOptions>();
     let style = opts.enforced_style;
 
     // `opening_brace_on_same_line?` = opening `[` shares a line with first element.
-    let open_with_first = open_line == first_element_line;
+    let open_with_first = same_line(open_start, cx.range(first_element).start, src);
     // `closing_brace_on_same_line?` = closing `]` shares a line with last element.
-    let close_with_last = close_line == last_element_line;
+    let close_with_last = same_line(cx.range(last_element).end, close_start, src);
 
     let close_range = Range {
         start: close_start,
@@ -182,24 +180,21 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 }
 
-/// RuboCop `last_line_heredoc?`: true when `node` (or a descendant) is a
-/// heredoc whose terminator ends on or after `parent_last_line`.
+/// RuboCop `last_line_heredoc?`: true when `element` (or a descendant) is a
+/// heredoc whose terminator ends on or after the array's last line.
 ///
-/// Detected via `HeredocStart`/`HeredocEnd` token pairs contained within the
-/// element's range. If any heredoc's terminator line is `>= parent_last_line`,
-/// the brace must not move.
-fn last_line_heredoc(element: NodeId, parent_last_line: usize, cx: &Cx<'_>) -> bool {
+/// Detected via `HeredocEnd` tokens contained within the element's range. A
+/// heredoc terminator is always at or before `close_start` (it is inside the
+/// element, which precedes the closing bracket), so "terminator line >= array
+/// last line" is equivalent to "no newline between the terminator and the
+/// closing bracket" — checked in O(span) rather than from the file start.
+fn last_line_heredoc(element: NodeId, close_start: u32, cx: &Cx<'_>) -> bool {
     let src = cx.source().as_bytes();
     let el = cx.range(element);
-    for tok in cx.tokens_in(el) {
-        if tok.kind == SourceTokenKind::HeredocEnd {
-            let term_line = line_of(tok.range.start, src);
-            if term_line >= parent_last_line {
-                return true;
-            }
-        }
-    }
-    false
+    cx.tokens_in(el)
+        .iter()
+        .filter(|tok| tok.kind == SourceTokenKind::HeredocEnd)
+        .any(|tok| same_line(tok.range.start, close_start, src))
 }
 
 #[cfg(test)]

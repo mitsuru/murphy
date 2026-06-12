@@ -138,7 +138,6 @@ impl LineLength {
         } else {
             Vec::new()
         };
-        let patterns = compile_patterns(&opts.allowed_patterns);
 
         let mut line_start = 0usize;
         let mut line_index = 0usize;
@@ -164,7 +163,6 @@ impl LineLength {
                             &opts,
                             &heredoc_ranges,
                             &comment_ranges,
-                            &patterns,
                         );
                     }
                 }
@@ -190,7 +188,6 @@ fn check_line(
     opts: &LineLengthOptions,
     heredoc_ranges: &[(u32, u32)],
     comment_ranges: &[(u32, u32)],
-    patterns: &[Regex],
 ) {
     let line = &src[line_start..content_end];
     let length = line_length(line);
@@ -200,7 +197,8 @@ fn check_line(
     }
 
     // `allowed_line?`: AllowedPatterns match, shebang, or permitted heredoc.
-    if patterns.iter().any(|re| re.is_match(line)) {
+    // `cx.matches_any_pattern` uses the thread-local regex cache.
+    if cx.matches_any_pattern(line, &opts.allowed_patterns) {
         return;
     }
     if line_index == 0 && line.starts_with("#!") {
@@ -371,11 +369,6 @@ fn qualified_name_exempts(line: &str, max: usize) -> bool {
         return start_col < max && end_col == line.chars().count();
     }
     false
-}
-
-/// Compile the configured `AllowedPatterns`. Invalid patterns are skipped.
-fn compile_patterns(patterns: &[String]) -> Vec<Regex> {
-    patterns.iter().filter_map(|p| Regex::new(p).ok()).collect()
 }
 
 /// FIFO heredoc-body byte ranges (body start..terminator line start).
