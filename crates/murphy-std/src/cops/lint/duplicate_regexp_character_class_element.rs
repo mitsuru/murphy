@@ -442,6 +442,18 @@ mod tests {
     }
 
     #[test]
+    fn handles_escaped_slash_in_char_class() {
+        // An unescaped `/` inside a `/.../ ` char class is a syntax error in
+        // Ruby (the `/` terminates the literal), so it can never reach the cop.
+        // The valid escaped form `\/` must be skipped as one element by the
+        // body scanner; `[\/\/]` has a duplicate `\/`.
+        test::<Cop>().expect_offense(indoc! {r#"
+            r = /[\/\/]/
+                    ^^ Duplicate element inside regexp character class
+        "#});
+    }
+
+    #[test]
     fn skips_interpolated_regexp() {
         test::<Cop>().expect_no_offenses(indoc! {r#"
             r = /[a#{x}a]/
