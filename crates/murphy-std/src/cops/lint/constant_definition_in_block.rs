@@ -21,10 +21,8 @@
 //!   parent is a block. The `casgn` variant additionally requires a `nil`
 //!   scope (relative const assignment `BAR =`, not `Foo::BAR =`). The block's
 //!   method name is the nearest block ancestor's selector; `AllowedMethods`
-//!   (default `enums`) suppresses the offense. The `AllowedMethods` list is
-//!   not user-configurable under the v1 ABI (no `Vec`-of-string runtime
-//!   option), so the default `enums` allow-list is hard-coded — observationally
-//!   identical to RuboCop on a default config.
+//!   (default `[enums]`) suppresses the offense and is user-configurable via a
+//!   `Vec<String>` runtime option, matching RuboCop's `include AllowedMethods`.
 //! ```
 //!
 //! ## Matched shapes
@@ -39,21 +37,27 @@
 //! `const_set` for meta-programming). RuboCop allows `enums` because some DSLs
 //! (e.g. ActiveRecord `enum`) legitimately define constants inside their block.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
 
 #[derive(Default)]
 pub struct ConstantDefinitionInBlock;
 
-/// RuboCop's default `AllowedMethods` for this cop. Not user-configurable under
-/// the v1 ABI; see the parity notes above.
-const ALLOWED_METHODS: &[&str] = &["enums"];
+#[derive(CopOptions)]
+pub struct Options {
+    #[option(
+        name = "AllowedMethods",
+        default = ["enums"],
+        description = "Block method names that may legitimately define constants."
+    )]
+    pub allowed_methods: Vec<String>,
+}
 
 #[cop(
     name = "Lint/ConstantDefinitionInBlock",
     description = "Do not define constants within a block.",
     default_severity = "warning",
     default_enabled = true,
-    options = NoOptions
+    options = Options
 )]
 impl ConstantDefinitionInBlock {
     #[on_node(kind = "casgn")]
@@ -113,18 +117,19 @@ fn defined_in_block(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// RuboCop's `allowed_method?(method_name(node))`: the nearest enclosing block
-/// ancestor's selector is in `AllowedMethods`.
+/// ancestor's selector is in the configured `AllowedMethods`.
 fn enclosing_block_method_allowed(node: NodeId, cx: &Cx<'_>) -> bool {
     let Some(block) = cx.ancestors(node).find(|&a| cx.is_any_block_type(a)) else {
         return false;
     };
+    let opts = cx.options_or_default::<Options>();
     cx.method_name(block)
-        .is_some_and(|m| ALLOWED_METHODS.contains(&m))
+        .is_some_and(|m| opts.allowed_methods.iter().any(|a| a == m))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ConstantDefinitionInBlock;
+    use super::{ConstantDefinitionInBlock, Options};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -196,6 +201,39 @@ mod tests {
               BAR = 42
             end
         "#});
+    }
+
+    #[test]
+    fn allowed_methods_option_suppresses_custom_method() {
+        // A user-configured `AllowedMethods` entry suppresses the offense,
+        // mirroring RuboCop's `include AllowedMethods`.
+        let opts = Options {
+            allowed_methods: vec!["my_dsl".to_string()],
+        };
+        test::<ConstantDefinitionInBlock>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                my_dsl do
+                  BAR = 42
+                end
+            "#});
+    }
+
+    #[test]
+    fn allowed_methods_option_replaces_default_enums() {
+        // Setting `AllowedMethods` replaces the default, so `enums` is no
+        // longer allowed once the user overrides the list.
+        let opts = Options {
+            allowed_methods: vec!["my_dsl".to_string()],
+        };
+        test::<ConstantDefinitionInBlock>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                enums do
+                  BAR = 42
+                  ^^^^^^^^ Do not define constants this way within a block.
+                end
+            "#});
     }
 
     #[test]

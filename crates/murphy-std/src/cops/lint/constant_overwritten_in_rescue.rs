@@ -153,6 +153,26 @@ mod tests {
         );
     }
 
+    /// RuboCop parity (verified against 1.86.2): the autocorrect is
+    /// `corrector.remove(range_between(keyword.end_pos, assoc.end_pos))` — a
+    /// plain removal, not a normalize-to-one-space. For the space-less
+    /// `rescue=>Const` form this collapses to `rescueConst`, byte-for-byte
+    /// identical to RuboCop's own output. Replacing the span with `" "` would
+    /// (a) diverge from RuboCop and (b) double the space in the common
+    /// `rescue => Const` form, so the empty removal is the faithful port.
+    #[test]
+    fn corrects_spaceless_rescue_assoc_like_rubocop() {
+        test::<ConstantOverwrittenInRescue>().expect_correction(
+            indoc! {r#"
+                begin
+                rescue=>StandardError
+                      ^^ `StandardError` is overwritten by `rescue =>`.
+                end
+            "#},
+            "begin\nrescueStandardError\nend\n",
+        );
+    }
+
     #[test]
     fn does_not_flag_proper_rescue() {
         test::<ConstantOverwrittenInRescue>().expect_no_offenses(indoc! {r#"

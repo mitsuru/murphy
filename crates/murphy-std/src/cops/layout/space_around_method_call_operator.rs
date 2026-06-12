@@ -152,7 +152,7 @@ fn double_colon_end(cx: &Cx<'_>, from: u32, to: u32) -> Option<u32> {
     };
     let text = cx.raw_source(gap);
     text.find("::")
-        .map(|i| from + i as u32 + 2 /* len("::") */)
+        .map(|i| from.saturating_add(i as u32).saturating_add(2) /* len("::") */)
 }
 
 /// RuboCop's `check_space`: flag `[begin, end)` only when it is non-empty and

@@ -189,6 +189,35 @@ mod tests {
         "#});
     }
 
+    /// RuboCop parity (verified against 1.86.2 → offense at 1:7): the inner
+    /// segment of a namespaced *definition* name (`class Foo::Bar`) is an
+    /// unqualified `Const { scope: None }` whose immediate parent is the outer
+    /// `Bar` const — not the `class` node — so `parent_defines_module` (a
+    /// single `.parent` hop, mirroring RuboCop's `node.parent&.defined_module`)
+    /// does not skip it. Walking up through `Const` parents would wrongly
+    /// suppress an offense RuboCop emits.
+    #[test]
+    fn flags_inner_const_of_class_definition_namespace() {
+        test::<ConstantResolution>().expect_offense(indoc! {r#"
+            class Foo::Bar
+                  ^^^ Fully qualify this constant to avoid possibly ambiguous resolution.
+            end
+        "#});
+    }
+
+    /// RuboCop parity (verified against 1.86.2 → offense at 3:8 on `Class`): in
+    /// `A::B = Class.new`, the namespace `A`'s immediate parent is the `casgn`
+    /// whose value is `Class.new`, so it is skipped; the bare `Class` receiver
+    /// is flagged. Confirms the immediate-parent check matches RuboCop on the
+    /// `casgn` definition shape.
+    #[test]
+    fn class_new_casgn_skips_namespace_and_flags_constructor() {
+        test::<ConstantResolution>().expect_offense(indoc! {r#"
+            A::B = Class.new
+                   ^^^^^ Fully qualify this constant to avoid possibly ambiguous resolution.
+        "#});
+    }
+
     #[test]
     fn only_restricts_to_listed_names() {
         let opts = Options {
