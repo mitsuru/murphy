@@ -105,10 +105,12 @@ impl TrailingEmptyLines {
             end: source_len as u32,
         };
         // `begin_pos += 1 unless whitespace_at_end.empty?`
-        let report_begin = if whitespace_at_end.is_empty() {
-            begin_pos
-        } else {
-            begin_pos + 1
+        // Advance by the UTF-8 length of the first whitespace char so the
+        // report range never lands mid-codepoint (e.g. a leading ideographic
+        // space `\u{3000}`), and clamp to the source length defensively.
+        let report_begin = match whitespace_at_end.chars().next() {
+            Some(c) => (begin_pos + c.len_utf8()).min(source_len),
+            None => begin_pos,
         };
         let report_range = Range {
             start: report_begin as u32,
