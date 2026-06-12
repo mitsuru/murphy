@@ -124,6 +124,18 @@ mod tests {
     }
 
     #[test]
+    fn flags_do_end_block_trims_to_call() {
+        // The `do … end` block opener must be excluded from the offense range
+        // just like the `{ … }` form; only the call portion is highlighted.
+        test::<EachWithObjectArgument>().expect_offense(indoc! {r#"
+            collection.each_with_object(0) do |e, a|
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ The argument to each_with_object cannot be immutable.
+              a
+            end
+        "#});
+    }
+
+    #[test]
     fn flags_safe_navigation_call() {
         test::<EachWithObjectArgument>().expect_offense(indoc! {r#"
             collection&.each_with_object(0) { |e, a| a }

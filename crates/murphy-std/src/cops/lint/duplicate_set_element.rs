@@ -192,6 +192,20 @@ mod tests {
     }
 
     #[test]
+    fn removes_every_duplicate_in_triple() {
+        // Two duplicates in one construction emit two non-overlapping edits;
+        // applying them must reach the de-duplicated fixpoint in one pass.
+        test::<DuplicateSetElement>().expect_correction(
+            indoc! {r#"
+                Set[:foo, :foo, :foo]
+                          ^^^^ Remove the duplicate element in Set.
+                                ^^^^ Remove the duplicate element in Set.
+            "#},
+            "Set[:foo]\n",
+        );
+    }
+
+    #[test]
     fn flags_duplicate_const_element() {
         test::<DuplicateSetElement>().expect_offense(indoc! {r#"
             Set[FOO, BAR, FOO]
