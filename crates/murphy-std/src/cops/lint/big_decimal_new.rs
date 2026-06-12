@@ -15,7 +15,12 @@
 //!   Offense range is the selector (`new`) only, matching RuboCop's
 //!   `add_offense(node.loc.selector)`. Autocorrect removes `.new` (dot +
 //!   selector) and strips a leading `::` so `::BigDecimal.new(x)` becomes
-//!   `BigDecimal(x)`.
+//!   `BigDecimal(x)`, byte-for-byte matching RuboCop's
+//!   `remove(selector); remove(dot); remove(cbase)`. The degenerate no-arg
+//!   form `BigDecimal.new` corrects to bare `BigDecimal` (not `BigDecimal()`),
+//!   exactly as RuboCop does — RuboCop never inserts `()`. This case is not
+//!   specced upstream (BigDecimal requires an argument) and is kept here only
+//!   to pin the parity behavior.
 //! ```
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, Range};
 
@@ -102,7 +107,10 @@ mod tests {
     }
 
     #[test]
-    fn flags_big_decimal_new_no_args() {
+    fn flags_big_decimal_new_no_args_matches_rubocop() {
+        // Parity pin: RuboCop only removes selector + dot (never inserts `()`),
+        // so the degenerate no-arg form corrects to bare `BigDecimal`, exactly
+        // as RuboCop does. Not specced upstream; pinned here to document parity.
         test::<BigDecimalNew>().expect_correction(
             indoc! {r#"
                 BigDecimal.new
