@@ -161,7 +161,11 @@ fn arg_list_end(cx: &Cx<'_>, paren_offset: usize) -> usize {
         // rather than `SourceTokenKind::LeftParen`/`RightParen`.
         match cx.raw_source(tok.range) {
             "(" => depth += 1,
-            ")" => {
+            // The `depth > 0` guard prevents `usize` underflow: error-tolerant
+            // parsing of incomplete source can surface a `)` while `depth == 0`,
+            // which then falls through to the unbalanced `paren_offset + 1`
+            // fallback below.
+            ")" if depth > 0 => {
                 depth -= 1;
                 if depth == 0 {
                     return tok.range.end as usize;
