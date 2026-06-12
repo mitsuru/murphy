@@ -344,13 +344,14 @@ fn comment_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
 fn uri_exempts(line: &str, max: usize, schemes: &[String]) -> bool {
     for scheme in schemes {
         let needle = format!("{scheme}://");
-        if let Some(pos) = line.find(&needle) {
-            // The URI must run to the end of the line (no trailing whitespace
-            // and no following word), and start before `max`.
+        // Scan EVERY occurrence of the scheme on the line, not just the first:
+        // a short URI earlier on the line must not mask a long URI that runs to
+        // the line's end.
+        for (pos, _) in line.match_indices(&needle) {
+            // The URI must start before column `max` and run to the end of the
+            // line (its tail contains no whitespace).
             let start_col = line[..pos].chars().count();
             let tail = &line[pos..];
-            // Treat the URI as running to end-of-line if there is no whitespace
-            // after it.
             if start_col < max && !tail.chars().any(|c| c.is_whitespace()) {
                 return true;
             }
@@ -549,6 +550,14 @@ mod tests {
     fn uri_exempt_by_default() {
         let url = format!("https://example.com/{}", "a".repeat(130));
         let src = format!("# see {url}\n");
+        assert!(run_cop::<LineLength>(&src).is_empty());
+    }
+
+    #[test]
+    fn uri_exempt_with_earlier_short_uri() {
+        // A short URI earlier on the line must not mask the long trailing URI.
+        let long = "a".repeat(130);
+        let src = format!("# see http://x and https://example.com/{long}\n");
         assert!(run_cop::<LineLength>(&src).is_empty());
     }
 
