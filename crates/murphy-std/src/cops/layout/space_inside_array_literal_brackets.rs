@@ -17,10 +17,13 @@
 //!   EnforcedStyleForEmptyBrackets no_space(default)/space, plus the multiline
 //!   exemptions (a bracket adjacent to a newline is not flagged: RuboCop's
 //!   `next_to_newline?` / `end_has_own_line?`). The `compact` style and the
-//!   multi-dimensional collapse it implies are NOT yet ported (tracked in the
-//!   follow-up gap issue) — compact falls back to the `space` behaviour, which
-//!   is the closest single-style approximation. Comment-after-`[` handling
-//!   (RuboCop's `next_to_comment?`) is covered for the no_space start side.
+//!   multi-dimensional collapse it implies are NOT yet ported (tracked in
+//!   murphy-26l9): under `compact` the non-empty path is intentionally INERT
+//!   (emits nothing) rather than falling back to `space`, so users never get
+//!   RuboCop-incompatible autocorrects for nested arrays. Empty-bracket
+//!   handling (`EnforcedStyleForEmptyBrackets`) still applies under every
+//!   style, matching RuboCop. Comment-after-`[` handling (RuboCop's
+//!   `next_to_comment?`) is covered for the no_space start side.
 //! ```
 
 use murphy_plugin_api::{
@@ -134,10 +137,16 @@ impl SpaceInsideArrayLiteralBrackets {
                 let start_ok = start_ok || bracket_followed_by_comment(left, tokens);
                 no_space_offenses(cx, left, right, start_ok, end_ok);
             }
-            // `compact` is not fully ported; approximate with `space`.
-            ArrayBracketStyle::Space | ArrayBracketStyle::Compact => {
+            ArrayBracketStyle::Space => {
                 space_offenses(cx, left, right, start_ok, end_ok);
             }
+            // `compact` (multi-dimensional collapse) is not yet ported
+            // (murphy-26l9). Emitting `space`-style offenses here would produce
+            // RuboCop-incompatible autocorrects for nested arrays, so the
+            // non-empty path is intentionally inert. Empty-bracket handling
+            // still applies above via `EnforcedStyleForEmptyBrackets`, matching
+            // RuboCop (compact governs only non-empty arrays).
+            ArrayBracketStyle::Compact => {}
         }
     }
 }
@@ -391,6 +400,42 @@ mod tests {
             "offenses: {:?}",
             result.offenses
         );
+    }
+
+    // ── compact style: non-empty path is inert (murphy-26l9) ────────────────
+
+    #[test]
+    fn compact_style_is_inert_on_non_empty_arrays() {
+        // Discriminating test: under `space` this input produces 2 "Use space"
+        // offenses. Under `compact` (not yet ported) it must produce ZERO —
+        // this is what proves compact is NOT silently falling back to `space`.
+        let opts = SpaceInsideArrayLiteralBracketsOptions {
+            enforced_style: ArrayBracketStyle::Compact,
+            empty_style: EmptyArrayBracketStyle::NoSpace,
+        };
+        test::<SpaceInsideArrayLiteralBrackets>()
+            .with_options(&opts)
+            .expect_no_offenses("a = [1, 2]\n");
+    }
+
+    #[test]
+    fn compact_style_still_governs_empty_brackets() {
+        // Empty-bracket handling applies under compact too (RuboCop: compact
+        // governs only non-empty arrays). With no_space empty style, `[ ]` is
+        // still flagged.
+        let opts = SpaceInsideArrayLiteralBracketsOptions {
+            enforced_style: ArrayBracketStyle::Compact,
+            empty_style: EmptyArrayBracketStyle::NoSpace,
+        };
+        test::<SpaceInsideArrayLiteralBrackets>()
+            .with_options(&opts)
+            .expect_correction(
+                indoc! {r#"
+                    a = [ ]
+                        ^^^ Do not use space inside empty array brackets.
+                "#},
+                "a = []\n",
+            );
     }
 
     // ── empty brackets ──────────────────────────────────────────────────────
