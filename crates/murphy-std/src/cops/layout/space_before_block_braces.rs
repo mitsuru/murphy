@@ -17,21 +17,20 @@
 //!   block's call end so a brace argument (`foo({}) { }`) is not mistaken
 //!   for the block opener.
 //!
-//!   GAP 1: `conflict_with_block_delimiters?` is NOT ported. RuboCop
-//!   suppresses the offense when `Style/BlockDelimiters` is
+//!   REMAINING GAP (murphy-vwjm): `conflict_with_block_delimiters?` is NOT
+//!   ported. RuboCop suppresses the offense when `Style/BlockDelimiters` is
 //!   `line_count_based`, this cop's style is `no_space`, and the block is
 //!   multiline — it reads another cop's config. Murphy's single-surface
 //!   plugin ABI does not expose cross-cop config to a cop body, so that
-//!   suppression is a documented divergence. The `config_to_allow_offenses`
+//!   suppression is a documented divergence (no bypass per the
+//!   single-surface boundary). The `config_to_allow_offenses`
 //!   auto-gen-config machinery is intentionally omitted (it is not linting).
 //!
-//!   GAP 2: stabby-lambda literals (`->{ }` / `-> { }`) are NOT flagged.
-//!   They parse as a `Block` over `(lambda)`, but Prism tokenizes the
-//!   lambda-begin `{` as `SourceTokenKind::Other`, not `LeftBrace`, so
-//!   `find_block_braces` cannot locate the opener and skips the block.
-//!   RuboCop flags lambda-literal brace spacing here; Murphy treats it as
-//!   a token-representation gap. The `lambda { }` method form is
-//!   unaffected (its `{` is a real `LeftBrace`).
+//!   CLOSED (murphy-vwjm): stabby-lambda literals (`->{ }` / `-> { }`) are
+//!   now flagged. They parse as a `Block` over `(lambda)`, and although
+//!   Prism tokenizes the lambda-begin `{` as `SourceTokenKind::Other` (not
+//!   `LeftBrace`), `find_block_braces` falls back to locating the `{` by
+//!   source byte for `cx.is_lambda_literal` blocks, matching RuboCop.
 //! ```
 //!
 //! has (style `space`) or does not have (style `no_space`) a space before it.
@@ -188,6 +187,56 @@ fn find_block_braces(node: NodeId, cx: &Cx<'_>) -> Option<(Range, Range)> {
                 }
             }
             _ => {}
+        }
+    }
+
+    // No `LeftBrace` token matched, yet the block ends in `}`. This is a
+    // stabby-lambda literal (`->{ }` / `-> (x) { }`): Prism tokenizes the
+    // lambda-begin `{` as `SourceTokenKind::Other`, not `LeftBrace`, so the
+    // depth scan above never sees it. RuboCop flags lambda-literal brace
+    // spacing the same as any brace block (only `do`/`end` keyword blocks are
+    // skipped), so locate the `{` by source byte for this shape.
+    if cx.is_lambda_literal(node) {
+        return lambda_literal_brace(node, close.range, cx);
+    }
+    None
+}
+
+/// Locate the lambda-begin `{` of a stabby-lambda literal by source byte.
+///
+/// The `{` follows the `->` and an optional argument list (`->(x) { }` /
+/// `-> (x) { }`). The empty-arg `Args` node spans the whole block expression,
+/// so it cannot bound the search; instead scan the token stream from the node
+/// start, skip the leading `->`, skip a parenthesised argument list (tracking
+/// `(`/`)` depth so a default-value brace inside it is not mistaken for the
+/// body opener), then take the first `{`. The matching `}` is the already-
+/// located `close`.
+fn lambda_literal_brace(node: NodeId, close: Range, cx: &Cx<'_>) -> Option<(Range, Range)> {
+    let node_range = cx.range(node);
+    let source = cx.source().as_bytes();
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < node_range.start);
+
+    let mut paren_depth: i32 = 0;
+    for tok in toks[idx..]
+        .iter()
+        .take_while(|t| t.range.start < close.start)
+    {
+        match tok.kind {
+            SourceTokenKind::LeftParen => paren_depth += 1,
+            SourceTokenKind::RightParen => paren_depth -= 1,
+            _ => {
+                let s = tok.range.start as usize;
+                if paren_depth == 0 && s < source.len() && source[s] == b'{' {
+                    return Some((
+                        Range {
+                            start: tok.range.start,
+                            end: tok.range.start + 1,
+                        },
+                        close,
+                    ));
+                }
+            }
         }
     }
     None
@@ -353,11 +402,52 @@ mod tests {
     }
 
     #[test]
-    fn documents_stabby_lambda_token_gap() {
-        // GAP 2: stabby lambda `->{ }` is NOT flagged — its lambda-begin `{`
-        // is tokenized as `Other`, not `LeftBrace`, so the block opener is
-        // invisible to `find_block_braces`. RuboCop would flag this.
-        test::<SpaceBeforeBlockBraces>().expect_no_offenses("->{ x }\n");
+    fn flags_missing_space_for_stabby_lambda_literal() {
+        // Stabby lambda `->{ }` — the lambda-begin `{` is tokenized as `Other`,
+        // not `LeftBrace`, so it is located by source byte. RuboCop flags the
+        // missing space before `{` exactly as for any brace block.
+        test::<SpaceBeforeBlockBraces>().expect_correction(
+            indoc! {r#"
+                ->{ x }
+                  ^ Space missing to the left of {.
+            "#},
+            "-> { x }\n",
+        );
+    }
+
+    #[test]
+    fn accepts_well_spaced_stabby_lambda_literal() {
+        test::<SpaceBeforeBlockBraces>().expect_no_offenses("-> { x }\n");
+    }
+
+    #[test]
+    fn flags_missing_space_for_stabby_lambda_with_args() {
+        // The argument list (`->(x)`) is skipped when locating the body `{`.
+        test::<SpaceBeforeBlockBraces>().expect_correction(
+            indoc! {r#"
+                ->(x){ x }
+                     ^ Space missing to the left of {.
+            "#},
+            "->(x) { x }\n",
+        );
+    }
+
+    #[test]
+    fn accepts_well_spaced_stabby_lambda_with_args() {
+        test::<SpaceBeforeBlockBraces>().expect_no_offenses("->(x) { x }\n");
+    }
+
+    #[test]
+    fn no_space_style_flags_space_for_stabby_lambda_literal() {
+        test::<SpaceBeforeBlockBraces>()
+            .with_options(&no_space_opts())
+            .expect_correction(
+                indoc! {r#"
+                    -> { x }
+                      ^ Space detected to the left of {.
+                "#},
+                "->{ x }\n",
+            );
     }
 
     // ── idempotence ────────────────────────────────────────────────────────
