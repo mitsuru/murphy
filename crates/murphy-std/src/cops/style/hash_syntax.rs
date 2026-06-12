@@ -499,9 +499,15 @@ impl<'a> PairInfo<'a> {
             style,
             key_text,
             key_symbol,
-            can_use_ruby19: key_symbol
-                .map(|sym| acceptable_ruby19_symbol(sym, key_text, opts))
-                .unwrap_or(false),
+            can_use_ruby19: match key_symbol {
+                Some(sym) => acceptable_ruby19_symbol(sym, key_text, opts),
+                // A dynamic-symbol colon key (`"#{x}":`) is already valid
+                // ruby19 colon syntax — there is no static name to convert,
+                // and an all-colon hash of such keys is not "mixed".
+                None => {
+                    style == PairStyle::Colon && matches!(*cx.kind(key), NodeKind::Dsym(_))
+                }
+            },
             value_is_symbol: matches!(*cx.kind(value), NodeKind::Sym(_)),
             operator_range,
             edit_end,
@@ -603,10 +609,16 @@ fn acceptable_ruby19_symbol(sym: &str, key_text: &str, opts: &HashSyntaxOptions)
     if is_bare_ruby19_symbol(sym) {
         return true;
     }
-    let quoted = key_text.strip_prefix(':').filter(|s| {
-        (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"'))
-    });
-    quoted.is_some()
+    // A quoted symbol label can use ruby19 colon syntax whether it is written
+    // as a rocket-style symbol literal (`:'foo'`, leading colon) or is already
+    // in colon-label form (`'foo':`, trailing colon). Strip whichever colon is
+    // present, then check the remainder is a quoted string.
+    let unquoted = key_text
+        .strip_prefix(':')
+        .or_else(|| key_text.strip_suffix(':'))
+        .unwrap_or(key_text);
+    (unquoted.starts_with('\'') && unquoted.ends_with('\''))
+        || (unquoted.starts_with('"') && unquoted.ends_with('"'))
 }
 
 fn is_bare_ruby19_symbol(sym: &str) -> bool {
@@ -636,7 +648,16 @@ fn skip_inline_space(cx: &Cx<'_>, start: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{HashSyntax, HashSyntaxOptions, HashSyntaxStyle, ShorthandSyntax};
-    use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::test_support::{Tester, indoc, test};
+
+    /// Tester preconfigured with `EnforcedStyle: ruby19_no_mixed_keys` — shared
+    /// by every `ruby19_no_mixed_keys_*` test below.
+    fn ruby19_no_mixed_keys() -> Tester<HashSyntax> {
+        test::<HashSyntax>().with_options(&HashSyntaxOptions {
+            enforced_style: HashSyntaxStyle::Ruby19NoMixedKeys,
+            ..HashSyntaxOptions::default()
+        })
+    }
 
     #[test]
     fn option_defaults_match_rubocop() {
@@ -890,17 +911,64 @@ mod tests {
 
     #[test]
     fn ruby19_no_mixed_keys_flags_mixed_non_symbol_keys() {
-        test::<HashSyntax>()
-            .with_options(&HashSyntaxOptions {
-                enforced_style: HashSyntaxStyle::Ruby19NoMixedKeys,
-                ..HashSyntaxOptions::default()
-            })
+        ruby19_no_mixed_keys()
             .expect_correction(
                 indoc! {r#"
                     x = { a: 0, 'b' => 1 }
                           ^^ Don't mix styles in the same hash.
                 "#},
                 "x = { :a => 0, 'b' => 1 }\n",
+            );
+    }
+
+    #[test]
+    fn ruby19_no_mixed_keys_accepts_colon_quoted_symbol_with_bare_keys() {
+        // A colon-form quoted symbol key (`'@context':`) is already valid
+        // ruby19 syntax; combined with bare colon keys the hash is all-colon,
+        // not mixed. Matches rubocop 1.87.0 (0 offenses).
+        ruby19_no_mixed_keys()
+            .expect_no_offenses("x = { '@context': 0, type: 1 }\n");
+    }
+
+    #[test]
+    fn ruby19_no_mixed_keys_accepts_single_colon_quoted_symbol_key() {
+        // A single quoted colon key cannot be "mixed" with anything.
+        ruby19_no_mixed_keys()
+            .expect_no_offenses("x = { 'Content-Type': 0 }\n");
+    }
+
+    #[test]
+    fn ruby19_no_mixed_keys_accepts_interpolated_colon_symbol_keys() {
+        // Dynamic-symbol colon keys (`"#{x}":`) are already ruby19 colon
+        // syntax; an all-colon hash of them is not mixed. Matches rubocop
+        // (0 offenses) — cf. mastodon redis_configuration_spec.rb.
+        ruby19_no_mixed_keys()
+            .expect_no_offenses("x = { \"#{prefix}_A\": 1, \"#{prefix}_B\": 2 }\n");
+    }
+
+    #[test]
+    fn ruby19_no_mixed_keys_flags_dynamic_colon_key_in_genuine_mix() {
+        // A colon-style dynamic-symbol key mixed with a non-symbol rocket key
+        // is a genuine mix; the colon key is flagged to a rocket. Matches
+        // rubocop (the can_use_ruby19=true change must not hide real mixes).
+        ruby19_no_mixed_keys()
+            .expect_offense(indoc! {r##"
+                x = { "#{k}": 1, 'y' => 2 }
+                      ^^^^^^^ Don't mix styles in the same hash.
+            "##});
+    }
+
+    #[test]
+    fn ruby19_no_mixed_keys_still_flags_string_rocket_symbol_colon_mix() {
+        // Genuine mix: a string rocket key forces the colon symbol key to a
+        // rocket. Must remain flagged (matches rubocop).
+        ruby19_no_mixed_keys()
+            .expect_correction(
+                indoc! {r#"
+                    x = { 'foo' => 1, bar: 2 }
+                                      ^^^^ Don't mix styles in the same hash.
+                "#},
+                "x = { 'foo' => 1, :bar => 2 }\n",
             );
     }
 
