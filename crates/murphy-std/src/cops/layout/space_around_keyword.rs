@@ -530,6 +530,26 @@ mod tests {
     }
 
     #[test]
+    fn flags_missing_space_after_defined() {
+        // `defined?:foo` — the char after the `defined?` keyword is `:`, which
+        // is not in the accept set and not `(`, so the after-space is missing.
+        // Proves the `on_defined?` handler actually fires (the keyword token
+        // text is exactly `defined?`, including the `?`).
+        test::<SpaceAroundKeyword>()
+            .expect_offense(indoc! {r#"
+                x = defined?:foo
+                    ^^^^^^^^ Space after keyword `defined?` is missing.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    x = defined?:foo
+                        ^^^^^^^^ Space after keyword `defined?` is missing.
+                "#},
+                "x = defined? :foo\n",
+            );
+    }
+
+    #[test]
     fn leaves_clean_program_without_corrections() {
         test::<SpaceAroundKeyword>().expect_no_corrections(indoc! {r#"
             something 'test' do |x|
