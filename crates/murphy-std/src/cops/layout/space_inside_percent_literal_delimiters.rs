@@ -63,13 +63,20 @@ fn process(node: NodeId, cx: &Cx<'_>, allowed: &[&str]) {
         return;
     }
 
-    // body_range: between the opening delimiter (3 bytes) and the closing
-    // delimiter (1 byte).
-    let body_start = node_range.start + 3;
-    let body_end = node_range.end - 1;
-    if body_start >= body_end {
+    // body_range: between the opening delimiter (`%` + flag + open char) and
+    // the closing delimiter (1 char). Compute boundaries on char boundaries
+    // rather than fixed byte offsets so a multi-byte delimiter never slices
+    // into the middle of a UTF-8 character (which would panic `raw_source`).
+    // The opening is the first three chars; the close is the final char.
+    let body_start_rel = src.char_indices().nth(3).map_or(src.len(), |(idx, _)| idx);
+    let Some((body_end_rel, _)) = src.char_indices().next_back() else {
+        return;
+    };
+    if body_start_rel >= body_end_rel {
         return;
     }
+    let body_start = node_range.start + body_start_rel as u32;
+    let body_end = node_range.start + body_end_rel as u32;
     let body = cx.raw_source(Range {
         start: body_start,
         end: body_end,
@@ -245,5 +252,21 @@ mod tests {
             .expect_no_offenses("%r( foo )\n")
             .expect_no_offenses("%q( foo )\n")
             .expect_no_offenses("%( foo )\n");
+    }
+
+    #[test]
+    fn handles_multibyte_body_without_panicking() {
+        // Multi-byte characters in the body must not confuse the char-boundary
+        // body computation (a fixed `+3`/`-1` byte slice could panic here).
+        test::<Cop>()
+            .expect_no_offenses("%w(あ いう)\n")
+            .expect_correction(
+                indoc! {r#"
+                    %w( あ いう )
+                            ^ Do not use spaces inside percent literal delimiters.
+                       ^ Do not use spaces inside percent literal delimiters.
+                "#},
+                "%w(あ いう)\n",
+            );
     }
 }

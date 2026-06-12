@@ -113,10 +113,13 @@ fn operator_range(node: NodeId, cx: &Cx<'_>, op_len: u32) -> Option<Range> {
 
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < search_start);
+    // `search_end` already collapses to `node_range.end` for an endless range,
+    // so it is the correct upper bound in every case. Using it directly keeps
+    // the search from reaching into a nested range operand (e.g. `1..(2..3)`).
     toks[idx..]
         .iter()
         .take_while(|t| t.range.end <= node_range.end)
-        .filter(|t| t.range.start >= search_start && t.range.end <= search_end.max(node_range.end))
+        .filter(|t| t.range.start >= search_start && t.range.end <= search_end)
         .find(|t| {
             t.kind == SourceTokenKind::Other
                 && t.range.end - t.range.start == op_len
@@ -251,5 +254,21 @@ mod tests {
     #[test]
     fn accepts_multiline_range_without_inline_space() {
         test::<SpaceInsideRangeLiteral>().expect_no_offenses("x = 0..\n    10\n");
+    }
+
+    #[test]
+    fn nested_range_operator_is_scoped_to_outer_node() {
+        // The outer range's operator search must not reach into the nested
+        // `(2..3)` operand. `1..(2..3)` is tight on both operators → no offense;
+        // the inner spaced range is flagged by its own node visit only.
+        test::<SpaceInsideRangeLiteral>()
+            .expect_no_offenses("x = 1..(2..3)\n")
+            .expect_correction(
+                indoc! {r#"
+                    x = 1..(2 .. 3)
+                            ^^^^^^ Space inside range literal.
+                "#},
+                "x = 1..(2..3)\n",
+            );
     }
 }
