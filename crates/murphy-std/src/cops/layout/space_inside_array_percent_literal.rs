@@ -83,11 +83,12 @@ fn contents_range(node_range: Range, src: &str) -> Option<Range> {
     })
 }
 
-/// Find byte ranges (relative to `contents`) of runs of 2+ spaces that are
-/// bounded on the left by a non-space, non-backslash character (allowing
-/// `\ ` escaped-space sequences immediately before the run) and on the right
-/// by a non-space character. Mirrors RuboCop's
-/// `(?:[\S&&[^\\]](?:\\ )*)( {2,})(?=\S)`.
+/// Find byte ranges (relative to `contents`) of the collapsible portion of
+/// runs of spaces between two non-space characters. Mirrors RuboCop's
+/// `(?:[\S&&[^\\]](?:\\ )*)( {2,})(?=\S)`: the run must be preceded by a
+/// non-space character and followed by a non-space character, and any single
+/// leading escaped space (`\ `) is consumed before measuring the collapsible
+/// remainder.
 fn multiple_space_runs(contents: &str) -> Vec<(usize, usize)> {
     let bytes = contents.as_bytes();
     let mut runs = Vec::new();
@@ -97,29 +98,47 @@ fn multiple_space_runs(contents: &str) -> Vec<(usize, usize)> {
             i += 1;
             continue;
         }
-        // Found the start of a space run. Measure it.
+        // Measure the full run of consecutive spaces.
         let run_start = i;
         while i < bytes.len() && bytes[i] == b' ' {
             i += 1;
         }
         let run_end = i;
-        // Need 2+ spaces.
-        if run_end - run_start < 2 {
+
+        // The run must sit between two non-space characters: a leading char
+        // (the regex's `[\S&&[^\\]]…` anchor) and a trailing one (`(?=\S)`).
+        if run_start == 0 || run_end >= bytes.len() {
             continue;
         }
-        // Must be followed by a non-space (i.e. not trailing the contents).
-        if run_end >= bytes.len() {
-            continue;
+
+        // If the first space is an escaped space (`\ `), the backslash
+        // consumes it via `(?:\\ )*`; the collapsible run starts one space
+        // later. The backslash is only an escape when an odd number of
+        // backslashes immediately precede the run (an even count is literal
+        // backslashes, leaving the space unescaped).
+        let collapse_start = if preceding_backslashes(bytes, run_start) % 2 == 1 {
+            run_start + 1
+        } else {
+            run_start
+        };
+
+        // 2+ remaining spaces collapse to one.
+        if run_end - collapse_start >= 2 {
+            runs.push((collapse_start, run_end));
         }
-        // Must be preceded by a non-space, non-backslash character. A bare
-        // trailing backslash means the spaces are escaped (`\ `), which the
-        // regex skips over via `(?:\\ )*`.
-        if run_start == 0 || bytes[run_start - 1] == b'\\' {
-            continue;
-        }
-        runs.push((run_start, run_end));
     }
     runs
+}
+
+/// Count the consecutive `\` bytes immediately before `pos`.
+fn preceding_backslashes(bytes: &[u8], pos: usize) -> usize {
+    let mut count = 0;
+    let mut j = pos;
+    while j > 0 && bytes[j - 1] == b'\\' {
+        count += 1;
+        j -= 1;
+    }
+    count
 }
 
 #[cfg(test)]
@@ -181,7 +200,34 @@ mod tests {
     #[test]
     fn accepts_escaped_space() {
         // `\ ` is an escaped space inside the element, not a separator run.
+        // `a\  b` = escaped space + a single separator space → no offense.
         test::<SpaceInsideArrayPercentLiteral>().expect_no_offenses("%w(a\\  b)\n");
+    }
+
+    #[test]
+    fn flags_extra_spaces_after_escaped_space() {
+        // `a\   b` = escaped space (`\ `) consumed, then 2 separator spaces
+        // remain → collapse those to one (RuboCop's `(?:\\ )*( {2,})`).
+        test::<SpaceInsideArrayPercentLiteral>().expect_correction(
+            indoc! {r#"
+                %w(a\   b)
+                      ^^ Use only a single space inside array percent literal.
+            "#},
+            "%w(a\\  b)\n",
+        );
+    }
+
+    #[test]
+    fn accepts_literal_backslash_before_double_space_is_flagged() {
+        // `a\\  b` = a literal backslash (`\\`, even count) then 2 unescaped
+        // spaces → the run is collapsible.
+        test::<SpaceInsideArrayPercentLiteral>().expect_correction(
+            indoc! {r#"
+                %w(a\\  b)
+                      ^^ Use only a single space inside array percent literal.
+            "#},
+            "%w(a\\\\ b)\n",
+        );
     }
 
     #[test]
