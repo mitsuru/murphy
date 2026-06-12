@@ -243,6 +243,92 @@ pub fn check_children_line_break(
     );
 }
 
+/// 1-based last line of `node` (the line of its final source byte). RuboCop's
+/// `node.last_line`. An empty range falls back to its first line.
+fn last_line_of(node: NodeId, cx: &Cx<'_>) -> u32 {
+    let r = cx.range(node);
+    let end = r.end.saturating_sub(1).max(r.start);
+    line_of(end, cx)
+}
+
+/// Port of RuboCop's `MultilineElementLineBreaks#check_line_breaks`.
+///
+/// `children` are the element nodes in source order (RuboCop passes
+/// `node.children`). Each element after the first must begin on a line
+/// strictly after the previous *kept* element's last line; otherwise an
+/// offense (and a leading-newline autocorrect) is emitted on it.
+///
+/// `ignore_last` mirrors `AllowMultilineFinalElement`: when set, the
+/// single-line guard compares the first and last elements' *start* lines
+/// (`same_line?`) rather than first-element-first-line vs
+/// last-element-last-line, so a multi-line trailing element does not force
+/// the whole collection multi-line.
+pub fn check_element_line_breaks(
+    cx: &Cx<'_>,
+    children: &[NodeId],
+    ignore_last: bool,
+    message: &str,
+) {
+    if all_on_same_line(cx, children, ignore_last) {
+        return;
+    }
+
+    // RuboCop seeds `last_seen_line = -1`; use `Option` so the first child
+    // (which can never trigger `last_seen_line >= first_line`) is handled
+    // without a sentinel.
+    let mut last_seen_line: Option<u32> = None;
+    for &child in children {
+        let first_line = line_of(cx.range(child).start, cx);
+        if last_seen_line.is_some_and(|seen| seen >= first_line) {
+            let start = cx.range(child).start;
+            cx.emit_offense(first_line_range(child, cx), message, None);
+            cx.emit_edit(Range { start, end: start }, "\n");
+        } else {
+            last_seen_line = Some(last_line_of(child, cx));
+        }
+    }
+}
+
+/// RuboCop's `MultilineElementLineBreaks#all_on_same_line?`.
+fn all_on_same_line(cx: &Cx<'_>, nodes: &[NodeId], ignore_last: bool) -> bool {
+    let (Some(&first), Some(&last)) = (nodes.first(), nodes.last()) else {
+        return true;
+    };
+    if ignore_last {
+        // `same_line?(first, last)` — compare start lines.
+        return line_of(cx.range(first).start, cx) == line_of(cx.range(last).start, cx);
+    }
+    line_of(cx.range(first).start, cx) == last_line_of(last, cx)
+}
+
+/// The opener (`do` keyword or `{`) of a block/numblock/itblock — RuboCop's
+/// `BlockNode#loc.begin`. `LocRef::begin` only resolves a `LeftParen`, so this
+/// scans the token stream for the first `do`/`{` after the block's call name.
+/// `None` for a non-block node or a block with no locatable opener.
+pub fn block_opener(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
+    let call = match *cx.kind(node) {
+        NodeKind::Block { call, .. } => call,
+        NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => send,
+        _ => return None,
+    };
+    // Search from the call's selector end (falling back to its start) so a `{`
+    // inside the receiver/arguments cannot be mistaken for the block opener.
+    let search_from = cx.node(call).loc.name.end.max(cx.range(call).start);
+    let node_end = cx.range(node).end;
+    let source = cx.source().as_bytes();
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < search_from);
+    toks[idx..]
+        .iter()
+        .take_while(|t| t.range.start < node_end)
+        .find(|t| {
+            t.kind == SourceTokenKind::LeftBrace
+                || (t.kind == SourceTokenKind::Other
+                    && &source[t.range.start as usize..t.range.end as usize] == b"do")
+        })
+        .map(|t| t.range)
+}
+
 // Note: is_parenthesized is tested indirectly via the cops that use it:
 // - `cops::style::parentheses_around_condition::tests::flags_if_with_paren_condition`
 //   verifies `is_parenthesized` returns true for `(x > 10)`.
