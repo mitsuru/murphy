@@ -211,6 +211,18 @@ mod tests {
         test::<SpaceBeforeFirstArg>().expect_no_offenses("something\n");
     }
 
+    /// A multiline receiver chain (`foo` on line 1, `.bar  baz` on line 2) is
+    /// intentionally skipped: RuboCop's `expect_params_after_method_name?`
+    /// calls `same_line?(first_arg, node)` where `node` is the full send and
+    /// `node.loc.line` is the expression-start line (the receiver's line). With
+    /// the receiver and the argument on different lines, `same_line?` is false,
+    /// so RuboCop does not flag the extra space. Murphy mirrors this by keying
+    /// the same-line check on the node's expression start, not the selector.
+    #[test]
+    fn accepts_multiline_receiver_chain() {
+        test::<SpaceBeforeFirstArg>().expect_no_offenses("foo\n  .bar  baz\n");
+    }
+
     /// `on_csend` dispatch: a safe-navigation call `foo&.bar  baz` is treated
     /// the same as `on_send`.
     #[test]

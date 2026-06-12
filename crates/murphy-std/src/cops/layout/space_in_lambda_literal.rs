@@ -110,7 +110,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
                 // Offense range mirrors RuboCop's `range_of_offense`
                 // (`->` through the argument list); the autocorrect inserts a
                 // single space before `(`.
-                let arg_end = arg_list_end(src, paren_offset);
+                let arg_end = arg_list_end(cx, paren_offset);
                 let offense = Range {
                     start: cx.range(call).start,
                     end: arg_end as u32,
@@ -143,22 +143,32 @@ fn find_open_paren(src: &[u8], from: usize) -> Option<usize> {
 
 /// Find the byte offset just past the matching `)` of the parenthesized
 /// argument list opening at `paren_offset`. Used to size the `require_space`
-/// offense range. Falls back to `paren_offset + 1` if unbalanced.
-fn arg_list_end(src: &[u8], paren_offset: usize) -> usize {
+/// offense range. Matches parens on lexed tokens (via `cx.sorted_tokens()`)
+/// so parentheses inside string literals / symbols / regexps in a default
+/// value (`->(x = "foo)") { }`) do not throw off the depth count. Falls back
+/// to `paren_offset + 1` if the opener is not found or is unbalanced.
+fn arg_list_end(cx: &Cx<'_>, paren_offset: usize) -> usize {
+    let tokens = cx.sorted_tokens();
+    let Some(start_idx) = tokens
+        .iter()
+        .position(|t| t.range.start == paren_offset as u32)
+    else {
+        return paren_offset + 1;
+    };
     let mut depth = 0usize;
-    let mut i = paren_offset;
-    while i < src.len() {
-        match src[i] {
-            b'(' => depth += 1,
-            b')' => {
+    for tok in &tokens[start_idx..] {
+        // The `(` after `->` may lex as `Other`, so match on source bytes
+        // rather than `SourceTokenKind::LeftParen`/`RightParen`.
+        match cx.raw_source(tok.range) {
+            "(" => depth += 1,
+            ")" => {
                 depth -= 1;
                 if depth == 0 {
-                    return i + 1;
+                    return tok.range.end as usize;
                 }
             }
             _ => {}
         }
-        i += 1;
     }
     paren_offset + 1
 }
@@ -242,6 +252,34 @@ mod tests {
         );
         assert_eq!(result.edits.len(), 1, "expected 1 edit");
         assert_eq!(result.edits[0].replacement, " ");
+    }
+
+    /// `require_space` offense range must span the full argument list. A `)`
+    /// inside a default-value string literal (`->(x = "foo)") { }`) must not
+    /// truncate the range — `arg_list_end` matches parens on lexed tokens, so
+    /// the inner `)` is part of one `Str` token and is skipped.
+    #[test]
+    fn require_space_offense_range_spans_string_literal_paren() {
+        let opts = SpaceInLambdaLiteralOptions {
+            enforced_style: SpaceInLambdaLiteralStyle::RequireSpace,
+        };
+        let source = "f = ->(x = \"foo)\") { x }\n";
+        let result = run_cop_with_options_and_edits::<SpaceInLambdaLiteral>(source, &opts);
+        assert_eq!(
+            result.offenses.len(),
+            1,
+            "expected 1 offense, got {:?}",
+            result.offenses
+        );
+        // Offense range runs from `->` through the real closing `)` of the
+        // argument list, i.e. it includes `(x = "foo)")` in full.
+        let end = result.offenses[0].range.end as usize;
+        let real_close = source.rfind(')').expect("closing paren present");
+        assert_eq!(
+            end,
+            real_close + 1,
+            "offense should end just past the real `)`, got byte {end} in {source:?}"
+        );
     }
 
     #[test]
