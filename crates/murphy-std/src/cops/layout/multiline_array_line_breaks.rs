@@ -131,6 +131,21 @@ mod tests {
         "});
     }
 
+    // A kept multi-line element that is NOT last, followed by an element on
+    // the same closing line, must flag the trailing element. This pins the
+    // gap-vs-line equivalence for a multi-line previous element.
+    #[test]
+    fn flags_item_after_multiline_kept_element() {
+        test::<MultilineArrayLineBreaks>().expect_offense(indoc! {"
+            [
+              foo(
+                bar
+              ), c
+                 ^ Each item in a multi-line array must start on a separate line.
+            ]
+        "});
+    }
+
     #[test]
     fn corrects_items_sharing_a_line() {
         test::<MultilineArrayLineBreaks>().expect_correction(

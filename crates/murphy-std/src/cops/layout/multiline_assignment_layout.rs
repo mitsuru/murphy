@@ -37,7 +37,7 @@
 //! `*asgn` writes and setter sends whose multi-line RHS is a supported control
 //! structure laid out against the configured `EnforcedStyle`.
 
-use crate::cops::util::{block_opener, first_line_range, is_parenthesized, line_of};
+use crate::cops::util::{block_opener, first_line_range, gap_has_newline, is_parenthesized};
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, cop};
 
 const NEW_LINE_OFFENSE: &str = "Right hand side of multi-line assignment is on \
@@ -169,6 +169,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     // `return if rhs.single_line? && (!rhs.block_type? || same_line?(node, rhs.loc.begin))`.
+    let src = cx.source().as_bytes();
     if cx.is_single_line(rhs) {
         if !is_block(rhs, cx) {
             return;
@@ -176,15 +177,21 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         let Some(begin) = block_opener(rhs, cx) else {
             return;
         };
-        if line_of(cx.range(node).start, cx) == line_of(begin.start, cx) {
+        // `same_line?(node, rhs.loc.begin)` — node start and block opener share
+        // a line iff no newline lies between them.
+        if !gap_has_newline(src, cx.range(node).start, begin.start) {
             return;
         }
     }
 
+    // The operator and the RHS share a line iff no newline lies between them
+    // (the operator always precedes the RHS).
+    let operator_and_rhs_same_line = !gap_has_newline(src, op.start, cx.range(rhs).start);
+
     match opts.enforced_style {
         MultilineAssignmentLayoutStyle::NewLine => {
             // `return unless same_line?(node.loc.operator, rhs)`.
-            if line_of(op.start, cx) == line_of(cx.range(rhs).start, cx) {
+            if operator_and_rhs_same_line {
                 // RuboCop highlights the whole assignment node, which spans
                 // multiple lines; clamp to its first line for the caret span.
                 cx.emit_offense(first_line_range(node, cx), NEW_LINE_OFFENSE, None);
@@ -192,7 +199,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         }
         MultilineAssignmentLayoutStyle::SameLine => {
             // `return unless node.loc.operator.line != rhs.first_line`.
-            if line_of(op.start, cx) != line_of(cx.range(rhs).start, cx) {
+            if !operator_and_rhs_same_line {
                 cx.emit_offense(first_line_range(node, cx), SAME_LINE_OFFENSE, None);
             }
         }

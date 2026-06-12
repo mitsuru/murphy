@@ -243,14 +243,6 @@ pub fn check_children_line_break(
     );
 }
 
-/// 1-based last line of `node` (the line of its final source byte). RuboCop's
-/// `node.last_line`. An empty range falls back to its first line.
-fn last_line_of(node: NodeId, cx: &Cx<'_>) -> u32 {
-    let r = cx.range(node);
-    let end = r.end.saturating_sub(1).max(r.start);
-    line_of(end, cx)
-}
-
 /// Port of RuboCop's `MultilineElementLineBreaks#check_line_breaks`.
 ///
 /// `children` are the element nodes in source order (RuboCop passes
@@ -263,6 +255,12 @@ fn last_line_of(node: NodeId, cx: &Cx<'_>) -> u32 {
 /// (`same_line?`) rather than first-element-first-line vs
 /// last-element-last-line, so a multi-line trailing element does not force
 /// the whole collection multi-line.
+///
+/// Elements are source-ordered and non-overlapping, so "the previous kept
+/// element's last line equals this element's first line" is equivalent to
+/// "no newline lies between the previous kept element's end and this
+/// element's start". Using that gap check keeps the scan O(N) rather than
+/// recomputing absolute line numbers per element.
 pub fn check_element_line_breaks(
     cx: &Cx<'_>,
     children: &[NodeId],
@@ -273,32 +271,48 @@ pub fn check_element_line_breaks(
         return;
     }
 
-    // RuboCop seeds `last_seen_line = -1`; use `Option` so the first child
-    // (which can never trigger `last_seen_line >= first_line`) is handled
-    // without a sentinel.
-    let mut last_seen_line: Option<u32> = None;
+    let src = cx.source().as_bytes();
+    // RuboCop tracks `last_seen_line`, updated only when a child is *kept*
+    // (does not start its own line). We track the kept node instead and test
+    // the gap to the next child for a newline.
+    let mut last_seen_node: Option<NodeId> = None;
     for &child in children {
-        let first_line = line_of(cx.range(child).start, cx);
-        if last_seen_line.is_some_and(|seen| seen >= first_line) {
+        let on_prev_line = last_seen_node
+            .is_some_and(|prev| !gap_has_newline(src, cx.range(prev).end, cx.range(child).start));
+        if on_prev_line {
             let start = cx.range(child).start;
             cx.emit_offense(first_line_range(child, cx), message, None);
             cx.emit_edit(Range { start, end: start }, "\n");
         } else {
-            last_seen_line = Some(last_line_of(child, cx));
+            last_seen_node = Some(child);
         }
     }
 }
 
-/// RuboCop's `MultilineElementLineBreaks#all_on_same_line?`.
+/// RuboCop's `MultilineElementLineBreaks#all_on_same_line?`. `line_of(a) ==
+/// line_of(b)` iff no newline lies in `[a, b)`, so this is a single gap scan.
 fn all_on_same_line(cx: &Cx<'_>, nodes: &[NodeId], ignore_last: bool) -> bool {
     let (Some(&first), Some(&last)) = (nodes.first(), nodes.last()) else {
         return true;
     };
-    if ignore_last {
-        // `same_line?(first, last)` — compare start lines.
-        return line_of(cx.range(first).start, cx) == line_of(cx.range(last).start, cx);
-    }
-    line_of(cx.range(first).start, cx) == last_line_of(last, cx)
+    let src = cx.source().as_bytes();
+    let start = cx.range(first).start;
+    // default: first.first_line == last.last_line; ignore_last: == last.first_line.
+    let end = if ignore_last {
+        cx.range(last).start
+    } else {
+        cx.range(last).end
+    };
+    !gap_has_newline(src, start, end)
+}
+
+/// Whether the source bytes in `[start, end)` contain a newline. Offsets are
+/// clamped to the source length. Used to test "same line" between two
+/// positions without recomputing absolute line numbers (O(N²)).
+pub fn gap_has_newline(src: &[u8], start: u32, end: u32) -> bool {
+    let lo = (start as usize).min(src.len());
+    let hi = (end as usize).min(src.len()).max(lo);
+    src[lo..hi].contains(&b'\n')
 }
 
 /// The opener (`do` keyword or `{`) of a block/numblock/itblock — RuboCop's

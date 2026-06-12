@@ -42,7 +42,7 @@
 //! Multi-line `block`/`numblock`/`itblock` nodes whose arguments are not on
 //! the opener line, or whose body shares the opener line.
 
-use crate::cops::util::block_opener;
+use crate::cops::util::{block_opener, gap_has_newline};
 use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
 
 const MSG: &str = "Block body expression is on the same line as the block start.";
@@ -81,13 +81,6 @@ impl MultilineBlockLayout {
     }
 }
 
-/// 1-based line number of a byte offset.
-fn line_of(offset: u32, cx: &Cx<'_>) -> u32 {
-    let src = cx.source().as_bytes();
-    let upper = (offset as usize).min(src.len());
-    1 + src[..upper].iter().filter(|&&b| b == b'\n').count() as u32
-}
-
 fn check(node: NodeId, cx: &Cx<'_>) {
     // RuboCop: `return if node.single_line?`.
     if cx.is_single_line(node) {
@@ -97,12 +90,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let Some(opener) = block_opener(node, cx) else {
         return;
     };
-    let opener_line = line_of(opener.start, cx);
 
     // --- argument placement ---
     let args = block_arg_nodes(node, cx);
     if !args.is_empty()
-        && !args_on_beginning_line(opener_line, &args, cx)
+        && !args_on_beginning_line(opener, &args, cx)
         && !line_break_necessary_in_args(node, opener, &args, cx)
     {
         // RuboCop highlights `node.arguments.source_range` — the span from the
@@ -115,22 +107,24 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let Some(body) = cx.block_body(node).get() else {
         return;
     };
-    // RuboCop: `return unless ... same_line?(node.loc.begin, node.body)`.
-    if line_of(cx.range(body).start, cx) == opener_line {
+    // RuboCop: `return unless ... same_line?(node.loc.begin, node.body)`. The
+    // body shares the opener's line iff no newline lies between them.
+    let src = cx.source().as_bytes();
+    if !gap_has_newline(src, opener.start, cx.range(body).start) {
         cx.emit_offense(first_line_range(cx.range(body), cx), MSG, None);
     }
 }
 
 /// RuboCop's `args_on_beginning_line?` (the `node.arguments?` short-circuit is
 /// handled by the caller's `!args.is_empty()` guard): the block opener's line
-/// equals the arguments' *last* line.
-fn args_on_beginning_line(opener_line: u32, args: &[NodeId], cx: &Cx<'_>) -> bool {
+/// equals the arguments' *last* line — i.e. no newline lies between the opener
+/// and the last argument's final byte.
+fn args_on_beginning_line(opener: Range, args: &[NodeId], cx: &Cx<'_>) -> bool {
     let last = *args.last().expect("args is non-empty");
-    let last_line = {
-        let r = cx.range(last);
-        line_of(r.end.saturating_sub(1).max(r.start), cx)
-    };
-    opener_line == last_line
+    let r = cx.range(last);
+    let last_end = r.end.saturating_sub(1).max(r.start);
+    let src = cx.source().as_bytes();
+    !gap_has_newline(src, opener.start, last_end)
 }
 
 /// RuboCop's `line_break_necessary_in_args?`: a line break in the arguments is
