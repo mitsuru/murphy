@@ -66,35 +66,12 @@ pub fn assert_cop_parity_metadata_for_crate(manifest_dir: impl AsRef<Path>) {
     for file in cop_source_files(manifest_dir) {
         let source = fs::read_to_string(&file)
             .unwrap_or_else(|err| panic!("read {}: {err}", file.display()));
-        let cop_names = cop_names_in_source(&source);
-        if cop_names.is_empty() {
-            continue;
-        }
-        let parity_blocks = parity_blocks_in_source(&source);
-
-        for name in cop_names {
-            let Some(block) = parity_blocks
-                .iter()
-                .find(|block| block_matches_cop(block, &name))
-            else {
-                failures.push(format!(
-                    "{}: missing murphy-parity block for {name}",
-                    file.strip_prefix(manifest_dir).unwrap_or(&file).display()
-                ));
-                continue;
-            };
-
-            validate_parity_block(
-                block,
-                &name,
-                &file
-                    .strip_prefix(manifest_dir)
-                    .unwrap_or(&file)
-                    .display()
-                    .to_string(),
-                &mut failures,
-            );
-        }
+        let rel = file
+            .strip_prefix(manifest_dir)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
+        collect_parity_failures(&source, &rel, &mut failures);
     }
 
     assert!(
@@ -102,6 +79,38 @@ pub fn assert_cop_parity_metadata_for_crate(manifest_dir: impl AsRef<Path>) {
         "missing parity metadata:\n{}",
         failures.join("\n")
     );
+}
+
+/// Validate the parity metadata of a single source file, pushing a
+/// human-readable message per problem onto `failures`.
+///
+/// Every registered `#[cop(name = "...")]` cop must carry a matching parity
+/// block. Any parity block that matches no registered cop — whether it is the
+/// only block in an `#[cop]`-less ABI-blocker placeholder (`Style/RedundantParentheses`)
+/// or a stray block sitting alongside real cops — is validated as an *orphan*,
+/// so a `status: blocked` placeholder stays visible to validation instead of
+/// being silently skipped.
+fn collect_parity_failures(source: &str, file: &str, failures: &mut Vec<String>) {
+    let cop_names = cop_names_in_source(source);
+    let parity_blocks = parity_blocks_in_source(source);
+
+    for name in &cop_names {
+        match parity_blocks
+            .iter()
+            .find(|block| block_matches_cop(block, name))
+        {
+            Some(block) => validate_parity_block(block, name, file, failures),
+            None => failures.push(format!("{file}: missing murphy-parity block for {name}")),
+        }
+    }
+
+    // Any block that no registered cop claims — including the sole block of an
+    // `#[cop]`-less placeholder — is validated as an orphan.
+    for block in &parity_blocks {
+        if !cop_names.iter().any(|name| block_matches_cop(block, name)) {
+            validate_orphan_parity_block(block, file, failures);
+        }
+    }
 }
 
 /// Entry point for the tester-builder API. Cop type comes in as a
@@ -887,7 +896,7 @@ fn validate_parity_block(block: &str, name: &str, file: &str, failures: &mut Vec
         return;
     };
 
-    if !matches!(status, "custom" | "partial" | "stub" | "verified") {
+    if !is_known_parity_status(status) {
         failures.push(format!(
             "{file}: murphy-parity block for {name} has unknown status {status:?}"
         ));
@@ -910,7 +919,7 @@ fn validate_parity_block(block: &str, name: &str, file: &str, failures: &mut Vec
         }
     }
 
-    if matches!(status, "partial" | "stub") && !block.contains("gap_issues:") {
+    if status_requires_gap_issues(status) && !block.contains("gap_issues:") {
         failures.push(format!(
             "{file}: {status} murphy-parity block for {name} must list gap_issues"
         ));
@@ -927,6 +936,53 @@ fn validate_parity_block(block: &str, name: &str, file: &str, failures: &mut Vec
             "{file}: Arena-migration registration for {name} must use status: stub"
         ));
     }
+}
+
+/// Validate a parity block that belongs to no registered cop — an ABI-blocker
+/// placeholder (`status: blocked`) or similar. The displayed cop name is taken
+/// from `upstream_cop`/`cop`, falling back to `<orphan>`.
+///
+/// Orphans are validated for status validity and the gap-issue invariant only;
+/// the upstream identity fields are not required, since an orphan has no cop to
+/// dispatch and exists mainly to document why an implementation is absent.
+fn validate_orphan_parity_block(block: &str, file: &str, failures: &mut Vec<String>) {
+    let name = value_after_key(block, "upstream_cop")
+        .or_else(|| value_after_key(block, "cop"))
+        .unwrap_or("<orphan>");
+
+    let Some(status) = value_after_key(block, "status") else {
+        failures.push(format!(
+            "{file}: orphan murphy-parity block for {name} is missing status"
+        ));
+        return;
+    };
+
+    if !is_known_parity_status(status) {
+        failures.push(format!(
+            "{file}: orphan murphy-parity block for {name} has unknown status {status:?}"
+        ));
+    }
+
+    if status_requires_gap_issues(status) && !block.contains("gap_issues:") {
+        failures.push(format!(
+            "{file}: {status} murphy-parity block for {name} must list gap_issues"
+        ));
+    }
+}
+
+/// The set of recognised `status:` values. `blocked` marks a parity target whose
+/// implementation is held back by an infra/ABI change — the cop is intentionally
+/// not registered (see `Style/RedundantParentheses`).
+fn is_known_parity_status(status: &str) -> bool {
+    matches!(
+        status,
+        "custom" | "partial" | "stub" | "verified" | "blocked"
+    )
+}
+
+/// Statuses that must carry a `gap_issues` list (anything short of full parity).
+fn status_requires_gap_issues(status: &str) -> bool {
+    matches!(status, "blocked" | "partial" | "stub")
 }
 
 fn value_after_key<'a>(block: &'a str, key: &str) -> Option<&'a str> {
@@ -955,7 +1011,7 @@ const DEFAULT_OPTIONS_JSON: &str = "{}";
 
 #[cfg(test)]
 mod tests {
-    use super::{cop_names_in_source, parse_annotated, render};
+    use super::{collect_parity_failures, cop_names_in_source, parse_annotated, render};
     use crate::{Cop, Cx, NoOptions, NodeCop, NodeKind, NodeKindTag, Range, RawSlice};
     use murphy_ast::NodeId;
 
@@ -967,6 +1023,132 @@ mod tests {
         "#;
 
         assert_eq!(cop_names_in_source(source), ["Example/Inline"]);
+    }
+
+    // ----- Parity metadata validation (murphy-yyjl) -----
+
+    /// A parity block with no surrounding `#[cop(...)]` registration —
+    /// an ABI-blocker placeholder like `Style/RedundantParentheses`.
+    const ORPHAN_BLOCKED_NO_GAP: &str = "\
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/Foo
+//! status: blocked
+//! notes: blah
+//! ```
+";
+
+    const ORPHAN_BLOCKED_WITH_GAP: &str = "\
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/Foo
+//! status: blocked
+//! gap_issues:
+//!   - murphy-wojl
+//! notes: blah
+//! ```
+";
+
+    #[test]
+    fn orphan_blocked_block_without_gap_issues_is_flagged() {
+        // An orphan parity block (no registered cop) must still be validated,
+        // not silently skipped — a `blocked` placeholder needs its gap_issues.
+        let mut failures = Vec::new();
+        collect_parity_failures(
+            ORPHAN_BLOCKED_NO_GAP,
+            "redundant_parentheses.rs",
+            &mut failures,
+        );
+        assert!(
+            failures.iter().any(|f| f.contains("gap_issues")),
+            "expected a gap_issues failure for a blocked orphan, got {failures:?}"
+        );
+    }
+
+    #[test]
+    fn orphan_blocked_block_with_gap_issues_is_accepted() {
+        // `blocked` is a recognised status and, with gap_issues present, the
+        // orphan placeholder validates cleanly.
+        let mut failures = Vec::new();
+        collect_parity_failures(
+            ORPHAN_BLOCKED_WITH_GAP,
+            "redundant_parentheses.rs",
+            &mut failures,
+        );
+        assert!(
+            failures.is_empty(),
+            "blocked orphan with gap_issues should pass, got {failures:?}"
+        );
+    }
+
+    #[test]
+    fn orphan_block_with_unknown_status_is_flagged() {
+        let source = "\
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/Foo
+//! status: nonsense
+//! gap_issues:
+//!   - murphy-wojl
+//! ```
+";
+        let mut failures = Vec::new();
+        collect_parity_failures(source, "x.rs", &mut failures);
+        assert!(
+            failures.iter().any(|f| f.contains("unknown status")),
+            "expected an unknown-status failure, got {failures:?}"
+        );
+    }
+
+    #[test]
+    fn registered_blocked_status_is_known_but_needs_gap_issues() {
+        // A registered cop using `status: blocked` is recognised (not flagged
+        // as "unknown status") but, like partial/stub, must list gap_issues.
+        let source = "\
+#[cop(name = \"Style/Foo\")]
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/Foo
+//! upstream_version_checked: 1.86.2
+//! status: blocked
+//! notes: blah
+//! ```
+";
+        let mut failures = Vec::new();
+        collect_parity_failures(source, "x.rs", &mut failures);
+        assert_eq!(
+            failures,
+            ["x.rs: blocked murphy-parity block for Style/Foo must list gap_issues"],
+            "`blocked` must be a known status that still requires gap_issues"
+        );
+    }
+
+    #[test]
+    fn stray_block_alongside_registered_cop_is_validated_as_orphan() {
+        // A parity block matching no registered cop, in a file that DOES
+        // register a cop, must still be validated — not silently skipped.
+        let source = "\
+#[cop(name = \"Style/Foo\")]
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/Foo
+//! upstream_version_checked: 1.86.2
+//! status: verified
+//! gap_issues: []
+//! ```
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/Bar
+//! status: blocked
+//! ```
+";
+        let mut failures = Vec::new();
+        collect_parity_failures(source, "x.rs", &mut failures);
+        assert_eq!(
+            failures,
+            ["x.rs: blocked murphy-parity block for Style/Bar must list gap_issues"],
+            "the stray Style/Bar block must be validated as an orphan"
+        );
     }
 
     /// Fixture: emits nothing.

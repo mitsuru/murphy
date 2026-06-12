@@ -44,7 +44,7 @@ a small Rust or script-based checker.
 
 Required fields:
 
-- `status`: one of `stub`, `partial`, `verified`, `custom`
+- `status`: one of `stub`, `partial`, `verified`, `custom`, `blocked`
 - `notes`: short human-readable explanation
 
 Required for RuboCop-derived cops:
@@ -71,6 +71,12 @@ use `notes` to explain why they have no RuboCop ancestor.
 - `verified`: audited against the named upstream version with no known parity
   gaps. `gap_issues` must be empty.
 - `custom`: Murphy-specific cop with no upstream parity target.
+- `blocked`: a parity target whose implementation is held back by an infra/ABI
+  change, so the cop is **not** registered — the file is an empty placeholder
+  carrying only the parity block (see `Style/RedundantParentheses`, blocked on
+  the prism `ParenthesesNode` → `Unknown` translation gap). `gap_issues` must be
+  listed (same gate as `partial`/`stub`). Because there is no `#[cop(...)]`, a
+  `blocked` block is validated as an *orphan* (see Validation).
 
 `verified` is intentionally strict. Small known limitations should keep the cop
 at `partial`, even if the implementation is good enough for most users.
@@ -85,6 +91,16 @@ Add a checker in the implementation phase that:
 4. Fails if `verified` has non-empty `gap_issues`.
 5. Fails if `partial` has no `gap_issues` and no explanatory `notes`.
 6. Allows Rails arena-migration stubs to remain `stub`.
+7. Validates *orphan* blocks — a file that carries a `murphy-parity` block but
+   registers no `#[cop(...)]` (a `blocked` placeholder). Orphans must still name
+   a known status and, when `blocked`/`stub`/`partial`, list `gap_issues`. They
+   are *not* required to carry the upstream identity fields. This keeps an
+   ABI-blocker placeholder visible to validation instead of being silently
+   skipped.
+
+The checker lives in `murphy_plugin_api::test_support` as
+`collect_parity_failures` (unit-tested in place) and is driven per crate by
+`assert_cop_parity_metadata_for_crate`.
 
 The checker does not need live beads integration in v1. It should treat issue
 ids as strings so validation is deterministic and offline.
