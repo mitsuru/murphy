@@ -2,6 +2,28 @@
 
 use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, SourceTokenKind};
 
+/// The portion of `node`'s source range up to (but excluding) the first
+/// newline — i.e. the node's first physical line. Used to clamp whole-node
+/// offenses that RuboCop renders across multiple lines: Murphy's
+/// `expect_offense` annotation grammar cannot express a multiline caret span,
+/// and the codebase convention (see `Lint/MissingSuper`) is to highlight the
+/// node's first line. The start position is byte-identical to RuboCop's
+/// whole-node range, so the reported line/column is faithful.
+pub fn first_line_range(node: NodeId, cx: &Cx<'_>) -> Range {
+    let range = cx.range(node);
+    let start = range.start as usize;
+    let end = cx
+        .source()
+        .as_bytes()
+        .get(start..range.end as usize)
+        .and_then(|line| line.iter().position(|&b| b == b'\n'))
+        .map_or(range.end as usize, |idx| start + idx);
+    Range {
+        start: range.start,
+        end: end as u32,
+    }
+}
+
 /// Returns `true` if `node` is a parenthesized expression `(...)`.
 ///
 /// After the translator change, prism's `ParenthesesNode` lowers to
