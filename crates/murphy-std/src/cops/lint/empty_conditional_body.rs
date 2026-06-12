@@ -31,7 +31,7 @@
 //! is intentionally not ported in this pass. Detection and message match
 //! RuboCop; only the corrector is omitted.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, Range, cop};
 
 #[derive(Default)]
 pub struct EmptyConditionalBody;
@@ -73,9 +73,15 @@ impl EmptyConditionalBody {
         if body.get().is_some() || is_single_line(node, cx) {
             return;
         }
-        // RuboCop: `return if allow_comments?(node)`.
+        // RuboCop: `return if allow_comments?(node)`. The comment must be
+        // *inside this empty branch's body region* — a comment in a sibling
+        // `else`/`elsif` branch must not suppress the offense. The region runs
+        // from the condition's end to the next `else`/`elsif` keyword (or the
+        // node's end for a plain `if`/`unless` with no else).
         let opts = Options::default();
-        if opts.allow_comments && !cx.comments_in_range(cx.range(node)).is_empty() {
+        if opts.allow_comments
+            && !cx.comments_in_range(empty_body_region(node, cx)).is_empty()
+        {
             return;
         }
         let keyword = cx.if_keyword(node);
@@ -94,6 +100,29 @@ fn is_single_line(node: NodeId, cx: &Cx<'_>) -> bool {
     let range = cx.range(node);
     let bytes = cx.source().as_bytes();
     !bytes[range.start as usize..range.end as usize].contains(&b'\n')
+}
+
+/// The source region that would hold this empty branch's body: from the
+/// condition's end to the first following `else`/`elsif` keyword (exclusive),
+/// or to the node's end when there is none. A comment in this region belongs
+/// to *this* branch; a comment past the `else`/`elsif` keyword belongs to a
+/// sibling branch and must not suppress the offense. The slot-based bound is
+/// deliberately avoided: the `else_` slot is `nil` precisely in the comment-only
+/// sibling case, so only the keyword token is a robust boundary.
+fn empty_body_region(node: NodeId, cx: &Cx<'_>) -> Range {
+    let node_range = cx.range(node);
+    let start = cx
+        .if_condition(node)
+        .get()
+        .map_or(node_range.start, |c| cx.range(c).end);
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < start);
+    let end = toks[idx..]
+        .iter()
+        .take_while(|t| t.range.end <= node_range.end)
+        .find(|t| matches!(cx.token_text(**t), "else" | "elsif"))
+        .map_or(node_range.end, |t| t.range.start);
+    Range { start, end }
 }
 
 murphy_plugin_api::submit_cop!(EmptyConditionalBody);
@@ -175,6 +204,22 @@ mod tests {
             if condition
               do_something
             elsif other_condition
+              # noop
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_empty_elsif_when_comment_is_in_else_not_elsif() {
+        // RuboCop spec: a comment in a sibling `else` branch must NOT suppress
+        // the offense for the empty `elsif`. The comment region is scoped to
+        // the empty branch's body, bounded by the next `else`/`elsif` keyword.
+        test::<EmptyConditionalBody>().expect_offense(indoc! {r#"
+            if condition
+              do_something
+            elsif other_condition
+            ^^^^^^^^^^^^^^^^^^^^^^ Avoid `elsif` branches without a body.
+            else
               # noop
             end
         "#});
