@@ -86,15 +86,12 @@ fn is_colon_hash_key(node: NodeId, cx: &Cx<'_>) -> bool {
     cx.raw_source(cx.range(node)).ends_with(':')
 }
 
-/// True when `node` lives inside a `%i[...]` / `%I[...]` percent-literal symbol
-/// array. Plain `[:true]` arrays are not percent literals and still flag.
+/// True when `node` lives inside a percent-literal symbol array
+/// (`%i[...]` / `%I[...]`). Only `%i`/`%I` can contain `sym` children, so
+/// `is_percent_literal` is equivalent to RuboCop's `percent_literal?(:symbol)`
+/// here. Plain `[:true]` arrays are not percent literals and still flag.
 fn in_percent_symbol_array(node: NodeId, cx: &Cx<'_>) -> bool {
-    cx.ancestors(node).any(|a| {
-        matches!(cx.kind(a), NodeKind::Array(_)) && {
-            let src = cx.raw_source(cx.range(a)).trim_start();
-            src.starts_with("%i") || src.starts_with("%I")
-        }
-    })
+    cx.ancestors(node).any(|a| cx.is_percent_literal(a))
 }
 
 murphy_plugin_api::submit_cop!(BooleanSymbol);

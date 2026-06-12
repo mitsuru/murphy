@@ -20,7 +20,7 @@
 //!   message is the source operator text (`&&` vs `and`), extracted from the
 //!   token between the operands, not hardcoded.
 //! ```
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, SourceTokenKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind};
 
 /// Binary operators RuboCop restricts the `send` check to. `&` is deliberately
 /// absent (RuboCop lists only `|` and `^`); all arithmetic/shift operators are
@@ -102,17 +102,14 @@ fn message(op: &str) -> String {
 /// RuboCop reports the literal operator the author wrote, so it is read from
 /// the source rather than hardcoded per node kind.
 fn logical_operator_text<'a>(lhs: NodeId, rhs: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
-    let lhs_end = cx.range(lhs).end;
-    let rhs_start = cx.range(rhs).start;
-    let tok = cx
-        .sorted_tokens()
-        .iter()
-        .find(|t| {
-            t.kind == SourceTokenKind::Other
-                && t.range.start >= lhs_end
-                && t.range.end <= rhs_start
-                && matches!(cx.raw_source(t.range), "&&" | "and" | "||" | "or")
-        })?;
+    let between = Range {
+        start: cx.range(lhs).end,
+        end: cx.range(rhs).start,
+    };
+    let tok = cx.tokens_in(between).iter().find(|t| {
+        t.kind == SourceTokenKind::Other
+            && matches!(cx.raw_source(t.range), "&&" | "and" | "||" | "or")
+    })?;
     Some(cx.raw_source(tok.range))
 }
 

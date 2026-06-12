@@ -17,7 +17,7 @@
 //!   selector) and strips a leading `::` so `::BigDecimal.new(x)` becomes
 //!   `BigDecimal(x)`.
 //! ```
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, Range};
 
 const MSG: &str = "`BigDecimal.new()` is deprecated. Use `BigDecimal()` instead.";
 
@@ -37,12 +37,9 @@ impl BigDecimalNew {
         let Some(receiver) = cx.call_receiver(node).get() else {
             return;
         };
-        // `(const {nil? cbase} :BigDecimal)` — Murphy collapses both bare
-        // `BigDecimal` and `::BigDecimal` to `Const{scope:None}`.
-        let NodeKind::Const { scope, name } = *cx.kind(receiver) else {
-            return;
-        };
-        if scope.get().is_some() || cx.symbol_str(name) != "BigDecimal" {
+        // `(const {nil? cbase} :BigDecimal)`: `is_global_const` accepts both
+        // bare `BigDecimal` and `::BigDecimal`, and excludes `Foo::BigDecimal`.
+        if !cx.is_global_const(receiver, "BigDecimal") {
             return;
         }
 

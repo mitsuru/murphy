@@ -21,8 +21,6 @@
 //!   `self.<name>` and method-call defaults are not circular. This syntax was
 //!   invalid on Ruby 2.7–3.3 but is allowed again since Ruby 3.4.
 //! ```
-use std::collections::HashSet;
-
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
 
 #[derive(Default)]
@@ -66,18 +64,21 @@ fn check_for_circular_argument_references(arg_name: &str, arg_value: NodeId, cx:
 }
 
 /// Mirrors RuboCop's `check_assignment_chain`: walk a chain of `lvasgn`
-/// assignments collecting their target names, then check whether the terminal
-/// `lvar` read refers back to the argument name or to a name assigned earlier
-/// in the chain.
+/// assignments down to its terminal `lvar` read, then report if that read
+/// refers back to the argument name or to a name assigned earlier in the chain.
+///
+/// Two passes over the chain avoid any per-traversal heap allocation: the first
+/// finds the terminal `lvar`, the second checks the terminal name against the
+/// chain's assignment targets. Chains are bounded by source nesting depth, so
+/// the second pass is cheap and there is no fixed-capacity truncation risk.
 fn check_assignment_chain(arg_name: &str, node: NodeId, cx: &Cx<'_>) {
     if !matches!(cx.kind(node), NodeKind::Lvasgn { .. }) {
         return;
     }
 
-    let mut seen_variables: HashSet<&str> = HashSet::new();
+    // Pass 1: walk to the terminal node.
     let mut current = node;
-    while let NodeKind::Lvasgn { name, value } = *cx.kind(current) {
-        seen_variables.insert(cx.symbol_str(name));
+    while let NodeKind::Lvasgn { value, .. } = *cx.kind(current) {
         let Some(value) = value.get() else {
             return;
         };
@@ -88,7 +89,21 @@ fn check_assignment_chain(arg_name: &str, node: NodeId, cx: &Cx<'_>) {
         return;
     };
     let var_name = cx.symbol_str(var);
-    if seen_variables.contains(var_name) || var_name == arg_name {
+
+    // Pass 2: a circular reference if the terminal read names the argument or
+    // any variable assigned along the chain.
+    let mut is_circular = var_name == arg_name;
+    let mut walk = node;
+    while let NodeKind::Lvasgn { name, value } = *cx.kind(walk) {
+        if cx.symbol_str(name) == var_name {
+            is_circular = true;
+            break;
+        }
+        let Some(value) = value.get() else { break };
+        walk = value;
+    }
+
+    if is_circular {
         cx.emit_offense(cx.range(current), &message(arg_name), None);
     }
 }
