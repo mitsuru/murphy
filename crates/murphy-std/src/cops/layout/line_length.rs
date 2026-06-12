@@ -23,9 +23,10 @@
 //!     body are exempt. Heredoc bodies are collected from
 //!     `HeredocStart`/`HeredocEnd` token pairs (the per-delimiter allowlist
 //!     form of `AllowHeredoc` is not yet supported — only the boolean).
-//!   - AllowCopDirectives (default true): a line carrying a trailing
-//!     `# rubocop:` directive is measured without the directive; only the
-//!     length up to the directive is checked.
+//!   - AllowCopDirectives (default true): a line carrying a `# rubocop:`
+//!     directive *comment* (a real `Comment` token, not a `"# rubocop:"`
+//!     substring inside a string literal) is measured without the directive;
+//!     only the length up to the directive is checked.
 //!   - AllowQualifiedName (default true): a line is exempt when a fully
 //!     qualified constant name (`Foo::Bar::Baz`) starts before column `Max`
 //!     and runs to the end of the line.
@@ -132,6 +133,11 @@ impl LineLength {
         } else {
             Vec::new()
         };
+        let comment_ranges = if opts.allow_cop_directives {
+            comment_ranges(cx)
+        } else {
+            Vec::new()
+        };
         let patterns = compile_patterns(&opts.allowed_patterns);
 
         let mut line_start = 0usize;
@@ -157,6 +163,7 @@ impl LineLength {
                             max,
                             &opts,
                             &heredoc_ranges,
+                            &comment_ranges,
                             &patterns,
                         );
                     }
@@ -182,6 +189,7 @@ fn check_line(
     max: usize,
     opts: &LineLengthOptions,
     heredoc_ranges: &[(u32, u32)],
+    comment_ranges: &[(u32, u32)],
     patterns: &[Regex],
 ) {
     let line = &src[line_start..content_end];
@@ -202,13 +210,17 @@ fn check_line(
         return;
     }
 
-    // AllowCopDirectives: measure the line without a trailing directive.
+    // AllowCopDirectives: measure the line without a trailing directive. The
+    // directive must be a real comment (a `Comment` token on this line whose
+    // text is a `# rubocop:` directive), so a `"# rubocop:"` substring inside a
+    // string literal is not mistaken for one.
     if let Some(directive_at) = opts
         .allow_cop_directives
-        .then(|| directive_start(line))
+        .then(|| directive_start(src, line_start, content_end, comment_ranges))
         .flatten()
     {
-        let trimmed = line[..directive_at].trim_end();
+        let directive_col = directive_at - line_start;
+        let trimmed = line[..directive_col].trim_end();
         let trimmed_len = line_length(trimmed);
         if trimmed_len <= max {
             return;
@@ -288,27 +300,43 @@ fn line_in_heredoc(line_start: u32, content_end: u32, ranges: &[(u32, u32)]) -> 
         .any(|&(start, end)| line_start >= start && content_end <= end)
 }
 
-/// The byte offset where a trailing `# rubocop:` directive comment begins on
-/// this line, if any. Detects the directive only when it is the trailing
-/// comment (RuboCop's `directive_on_source_line?`).
-fn directive_start(line: &str) -> Option<usize> {
-    // Find `#` markers; the directive is `# rubocop:` (whitespace tolerant
-    // after `#`). We look for the last `#` that begins a `rubocop:` directive
-    // and is not inside a string — approximated by scanning for the marker.
-    let bytes = line.as_bytes();
-    let mut idx = 0;
-    let mut found = None;
-    while idx < bytes.len() {
-        if bytes[idx] == b'#' {
-            let rest = &line[idx + 1..];
-            let trimmed = rest.trim_start();
-            if trimmed.starts_with("rubocop:") {
-                found = Some(idx);
-            }
+/// The absolute byte offset where a `# rubocop:` directive comment begins on
+/// the line `[line_start, content_end)`, if any. Mirrors RuboCop's
+/// `directive_on_source_line?`: the directive must be a real comment, so only a
+/// `Comment` token whose body is a `rubocop:` directive counts — a
+/// `"# rubocop:"` substring inside a string literal is ignored.
+fn directive_start(
+    src: &str,
+    line_start: usize,
+    content_end: usize,
+    comment_ranges: &[(u32, u32)],
+) -> Option<usize> {
+    for &(c_start, c_end) in comment_ranges {
+        let c_start = c_start as usize;
+        // Only comments that begin on this line.
+        if c_start < line_start || c_start >= content_end {
+            continue;
         }
-        idx += 1;
+        let c_end = (c_end as usize).min(src.len());
+        let comment = &src[c_start..c_end];
+        // `# rubocop:` — whitespace tolerant after the `#`.
+        let is_directive = comment
+            .strip_prefix('#')
+            .is_some_and(|body| body.trim_start().starts_with("rubocop:"));
+        if is_directive {
+            return Some(c_start);
+        }
     }
-    found
+    None
+}
+
+/// Collect `Comment` token byte ranges.
+fn comment_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
+    cx.sorted_tokens()
+        .iter()
+        .filter(|t| t.kind == SourceTokenKind::Comment)
+        .map(|t| (t.range.start, t.range.end))
+        .collect()
 }
 
 /// AllowURI exemption: a `scheme://…` URI starts before column `max` and runs
@@ -487,6 +515,15 @@ mod tests {
         // The code itself is over the limit even without the directive.
         let code = format!("x = {}", "1".repeat(130));
         let src = format!("{code} # rubocop:disable Layout/LineLength\n");
+        assert_eq!(run_cop::<LineLength>(&src).len(), 1);
+    }
+
+    #[test]
+    fn directive_inside_string_literal_is_not_a_directive() {
+        // A `# rubocop:` substring inside a string literal must NOT be treated
+        // as a trailing cop directive — the line still fires.
+        let filler = "x".repeat(110);
+        let src = format!("x = \"{filler} # rubocop:disable Foo\"\n");
         assert_eq!(run_cop::<LineLength>(&src).len(), 1);
     }
 
