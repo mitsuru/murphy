@@ -204,21 +204,55 @@ fn collect_send_definers(stmt: NodeId, cx: &Cx<'_>, emit: &mut impl FnMut(Method
             }
             emit(MethodKey::Instance(new_name.to_string()), range);
         }
-        "attr_reader" | "attr_accessor" | "attr" => {
+        // RuboCop's `on_attr`/`found_attr`: for each named attribute, a reader
+        // defines `name` and a writer defines `name=`.
+        "attr" => {
+            // `attr :foo` is read-only; `attr :foo, true` is read+write. Only the
+            // first argument is the attribute name (the second is the flag).
+            if let Some(name) = args.first().and_then(|&a| sym_name(a, cx)) {
+                let writable = args.len() == 2 && matches!(*cx.kind(args[1]), NodeKind::True_);
+                emit_attr(name, true, writable, range, emit);
+            }
+        }
+        "attr_reader" => {
             for &arg in args {
                 if let Some(name) = sym_name(arg, cx) {
-                    emit(MethodKey::Instance(name.to_string()), range);
+                    emit_attr(name, true, false, range, emit);
                 }
             }
         }
         "attr_writer" => {
             for &arg in args {
                 if let Some(name) = sym_name(arg, cx) {
-                    emit(MethodKey::Instance(format!("{name}=")), range);
+                    emit_attr(name, false, true, range, emit);
+                }
+            }
+        }
+        "attr_accessor" => {
+            for &arg in args {
+                if let Some(name) = sym_name(arg, cx) {
+                    emit_attr(name, true, true, range, emit);
                 }
             }
         }
         _ => {}
+    }
+}
+
+/// Emit the reader (`name`) and/or writer (`name=`) instance methods an
+/// attribute macro defines.
+fn emit_attr(
+    name: &str,
+    readable: bool,
+    writable: bool,
+    range: Range,
+    emit: &mut impl FnMut(MethodKey, Range),
+) {
+    if readable {
+        emit(MethodKey::Instance(name.to_string()), range);
+    }
+    if writable {
+        emit(MethodKey::Instance(format!("{name}=")), range);
     }
 }
 
@@ -398,6 +432,48 @@ mod tests {
               def foo
               ^^^^^^^ Method `foo` is defined at both line 2 and line 4.
                 1
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_attr_accessor_writer_collision_with_def() {
+        // `attr_accessor :foo` defines both `foo` and `foo=`; the explicit
+        // `def foo=` is a duplicate of the generated writer.
+        test::<DuplicateMethods>().expect_offense(indoc! {r#"
+            class C
+              attr_accessor :foo
+
+              def foo=(value)
+              ^^^^^^^^ Method `foo=` is defined at both line 2 and line 4.
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn attr_reader_does_not_define_writer() {
+        // `attr_reader :foo` defines only `foo`, so `def foo=` is not a dup.
+        test::<DuplicateMethods>().expect_no_offenses(indoc! {r#"
+            class C
+              attr_reader :foo
+
+              def foo=(value)
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_attr_with_writable_flag_collision() {
+        // `attr :foo, true` defines both reader and writer.
+        test::<DuplicateMethods>().expect_offense(indoc! {r#"
+            class C
+              attr :foo, true
+
+              def foo=(value)
+              ^^^^^^^^ Method `foo=` is defined at both line 2 and line 4.
               end
             end
         "#});
