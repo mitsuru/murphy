@@ -96,6 +96,15 @@ fn all_literal_values(values: &[NodeId], cx: &Cx<'_>) -> bool {
 fn register_array_of_literal_values(begin_node: NodeId, values: &[NodeId], cx: &Cx<'_>) {
     let str_values: Vec<String> = values.iter().map(|&v| literal_to_string(v, cx)).collect();
 
+    // An empty array would naively become `[]` (an invalid empty character
+    // class) or `(?:)`. RuboCop emits the former, but Murphy must never produce
+    // an autocorrect that fails to parse, so we still report the offense (it is
+    // an array literal in a regexp) but skip the correction.
+    if str_values.is_empty() {
+        cx.emit_offense(cx.range(begin_node), MSG_CHARACTER_CLASS, None);
+        return;
+    }
+
     let (message, replacement) = if str_values.iter().all(|v| v.chars().count() == 1) {
         let escaped: String = str_values.iter().map(|v| regexp_escape(v)).collect();
         (MSG_CHARACTER_CLASS, format!("[{escaped}]"))
@@ -288,6 +297,24 @@ mod tests {
         test::<ArrayLiteralInRegexp>().expect_offense(indoc! {r#"
             /#{[/abc/]}/
              ^^^^^^^^^^ Use alternation or a character class instead of interpolating an array in a regexp.
+        "#});
+    }
+
+    #[test]
+    fn flags_empty_array_without_correction() {
+        // `[]` would become `/[]/` (invalid empty character class); report the
+        // offense but skip the unsafe autocorrect.
+        test::<ArrayLiteralInRegexp>().expect_offense(indoc! {r#"
+            /#{[]}/
+             ^^^^^ Use a character class instead of interpolating an array in a regexp.
+        "#});
+    }
+
+    #[test]
+    fn flags_empty_percent_w_array_without_correction() {
+        test::<ArrayLiteralInRegexp>().expect_offense(indoc! {r#"
+            /#{%w[]}/
+             ^^^^^^^ Use a character class instead of interpolating an array in a regexp.
         "#});
     }
 
