@@ -81,12 +81,11 @@ impl ElseLayout {
 /// RuboCop `check_else`: the first statement of the else block is an offense if
 /// it sits on the same line as the `else` keyword.
 fn check_else(else_branch: NodeId, else_kw: Range, cx: &Cx<'_>) {
-    // An `elsif` chain has the next `If` node in the else slot, not a begin —
-    // it carries no `else` keyword of its own at this level, so skip it (the
-    // nested `If` is visited directly by the per-node dispatch).
-    if matches!(cx.kind(else_branch), NodeKind::If { .. }) {
-        return;
-    }
+    // A true `elsif` carries no `else` keyword at this level, so the caller's
+    // `else_keyword_range` already returned `None` and never reaches here. When
+    // it *does* reach here the else slot may still be a nested `If` — that is
+    // `else if … end` (written with a space), which RuboCop flags — so the
+    // nested `If` must be treated as the first else statement, not skipped.
     let first_else = match cx.kind(else_branch) {
         NodeKind::Begin(list) => match cx.list(*list).first() {
             Some(&first) => first,
@@ -141,8 +140,13 @@ fn is_ternary(node: NodeId, cx: &Cx<'_>) -> bool {
 
 fn is_single_line(node: NodeId, cx: &Cx<'_>) -> bool {
     let range = cx.range(node);
-    !cx.source().as_bytes()[range.start as usize..range.end as usize]
-        .contains(&b'\n')
+    // Defensive slice per `.claude/rules/safe-rust-patterns.md`: a node's own
+    // range is well-formed, but `get` avoids any panic on a degenerate range
+    // and treats a missing slice as "not single-line".
+    cx.source()
+        .as_bytes()
+        .get(range.start as usize..range.end as usize)
+        .is_some_and(|slice| !slice.contains(&b'\n'))
 }
 
 fn same_line(lhs_end: u32, rhs_start: u32, source: &str) -> bool {
@@ -282,5 +286,24 @@ mod tests {
     #[test]
     fn accepts_ternary() {
         test::<ElseLayout>().expect_no_offenses("x = a ? b : c\n");
+    }
+
+    #[test]
+    fn flags_else_if_on_same_line() {
+        // `else if … end` (a nested `if` in the else slot, written with a space)
+        // carries a real `else` keyword, and the nested `if` sits on the `else`
+        // line — RuboCop flags it ("Did you mean to use `elsif`?"). Only a true
+        // `elsif` (no `else` keyword → `else_keyword_range` returns `None`) is
+        // exempt, so the nested-`If` early return that used to skip this case
+        // produced a false negative.
+        test::<ElseLayout>().expect_offense(indoc! {r#"
+            if something
+              test
+            else if other
+                 ^^^^^^^^ Odd `else` layout detected. Did you mean to use `elsif`?
+              bar
+            end
+            end
+        "#});
     }
 }

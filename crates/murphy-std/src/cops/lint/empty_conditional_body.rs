@@ -17,8 +17,10 @@
 //!   the per-node handler fires once per branch (matching RuboCop's per-node
 //!   on_if). Offense highlight is clamped to the node's first line (Murphy
 //!   convention) vs RuboCop's keyword..else range; start position matches.
-//!   `AllowComments` defaults to `true` (matching RuboCop) but the override is
-//!   ABI-blocked until murphy-9cr.9; the default IS the live behavior. The
+//!   `AllowComments` defaults to `true` (matching RuboCop) and is read live via
+//!   `cx.options_or_default`, so a configured `AllowComments: false` flags a
+//!   comment-only branch at dispatch time; murphy-9cr.9 only adds core-side
+//!   schema validation of the option key. The
 //!   `flip_orphaned_else` autocorrect is NOT ported (genuinely structural —
 //!   condition flip + branch removal + line math); detection only.
 //! ```
@@ -36,8 +38,8 @@ use murphy_plugin_api::{CopOptions, Cx, NodeId, Range, cop};
 #[derive(Default)]
 pub struct EmptyConditionalBody;
 
-/// Cop options for [`EmptyConditionalBody`]. v1: read from `Default` at
-/// dispatch time (`murphy-9cr.9` will wire live overrides through `Cx`).
+/// Cop options for [`EmptyConditionalBody`], read at dispatch time via
+/// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
     #[option(
@@ -78,7 +80,7 @@ impl EmptyConditionalBody {
         // `else`/`elsif` branch must not suppress the offense. The region runs
         // from the condition's end to the next `else`/`elsif` keyword (or the
         // node's end for a plain `if`/`unless` with no else).
-        let opts = Options::default();
+        let opts = cx.options_or_default::<Options>();
         if opts.allow_comments
             && !cx.comments_in_range(empty_body_region(node, cx)).is_empty()
         {
@@ -99,7 +101,12 @@ impl EmptyConditionalBody {
 fn is_single_line(node: NodeId, cx: &Cx<'_>) -> bool {
     let range = cx.range(node);
     let bytes = cx.source().as_bytes();
-    !bytes[range.start as usize..range.end as usize].contains(&b'\n')
+    // Defensive slice per `.claude/rules/safe-rust-patterns.md`: a node's own
+    // range is well-formed, but `get` avoids any panic on a degenerate range
+    // and treats a missing slice as "not single-line".
+    bytes
+        .get(range.start as usize..range.end as usize)
+        .is_some_and(|slice| !slice.contains(&b'\n'))
 }
 
 /// The source region that would hold this empty branch's body: from the
@@ -129,7 +136,7 @@ murphy_plugin_api::submit_cop!(EmptyConditionalBody);
 
 #[cfg(test)]
 mod tests {
-    use super::EmptyConditionalBody;
+    use super::{EmptyConditionalBody, Options};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -207,6 +214,24 @@ mod tests {
               # noop
             end
         "#});
+    }
+
+    #[test]
+    fn flags_comment_only_branch_when_allow_comments_disabled() {
+        // `AllowComments: false` is read live via `cx.options_or_default`, so a
+        // comment-only branch is flagged (RuboCop's `AllowComments: false`).
+        test::<EmptyConditionalBody>()
+            .with_options(&Options {
+                allow_comments: false,
+            })
+            .expect_offense(indoc! {r#"
+                if condition
+                  do_something
+                elsif other_condition
+                ^^^^^^^^^^^^^^^^^^^^^^ Avoid `elsif` branches without a body.
+                  # noop
+                end
+            "#});
     }
 
     #[test]

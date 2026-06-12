@@ -13,27 +13,29 @@
 //!   self`) with no body is flagged with METACLASS_MSG. Offense highlight is
 //!   clamped to the node's first line (Murphy convention, matching
 //!   `Lint/MissingSuper`) vs RuboCop's whole-node range; the start position
-//!   matches. `AllowComments` defaults to `false` (matching RuboCop) but
-//!   the override is ABI-blocked until murphy-9cr.9 wires options through Cx;
-//!   the default IS the live behavior. No autocorrect (RuboCop has none).
+//!   matches. `AllowComments` defaults to `false` (matching RuboCop) and is
+//!   read live via `cx.options_or_default`, so a configured `AllowComments:
+//!   true` takes effect at dispatch time. murphy-9cr.9 only adds core-side
+//!   schema validation of the option key (a typo'd key is silently ignored
+//!   until then). No autocorrect (RuboCop has none).
 //! ```
 //!
-//! ## `AllowComments` default and the v1 option-wiring limitation
+//! ## `AllowComments`
 //!
 //! RuboCop's default for `AllowComments` is `false`, so by default a
 //! comment-only class body (`class Foo; # comment; end`) is still flagged.
-//! The option is exported via `#[derive(CopOptions)]` so the host validates
-//! `[cops.rules."Lint/EmptyClass"]` keys, but runtime reads still come from
-//! `Options::default()` — setting `AllowComments = true` has no dispatch-time
-//! effect until murphy-9cr.9. This mirrors `Lint/EmptyWhen`.
+//! The option is read at dispatch time via `cx.options_or_default::<Options>()`,
+//! so setting `AllowComments: true` in `.murphy.yml` suppresses the offense for
+//! a comment-only body. murphy-9cr.9 will add core-side schema validation of the
+//! option key (until then a mistyped key is silently ignored).
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
 
 #[derive(Default)]
 pub struct EmptyClass;
 
-/// Cop options for [`EmptyClass`]. v1: read from `Default` at dispatch
-/// time (`murphy-9cr.9` will wire live overrides through `Cx`).
+/// Cop options for [`EmptyClass`], read at dispatch time via
+/// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
     #[option(
@@ -99,7 +101,7 @@ fn body_or_allowed_comment_lines(
     if body.get().is_some() {
         return true;
     }
-    let opts = Options::default();
+    let opts = cx.options_or_default::<Options>();
     opts.allow_comments && !cx.comments_in_range(cx.range(node)).is_empty()
 }
 
@@ -107,7 +109,7 @@ murphy_plugin_api::submit_cop!(EmptyClass);
 
 #[cfg(test)]
 mod tests {
-    use super::EmptyClass;
+    use super::{EmptyClass, Options};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -164,6 +166,34 @@ mod tests {
               # TODO: implement
             end
         "#});
+    }
+
+    #[test]
+    fn accepts_comment_only_class_when_allow_comments() {
+        // `AllowComments: true` is read live via `cx.options_or_default`, so a
+        // comment-only body is no longer flagged.
+        test::<EmptyClass>()
+            .with_options(&Options {
+                allow_comments: true,
+            })
+            .expect_no_offenses(indoc! {r#"
+                class Foo
+                  # TODO: implement
+                end
+            "#});
+    }
+
+    #[test]
+    fn accepts_comment_only_metaclass_when_allow_comments() {
+        test::<EmptyClass>()
+            .with_options(&Options {
+                allow_comments: true,
+            })
+            .expect_no_offenses(indoc! {r#"
+                class << self
+                  # TODO: implement
+                end
+            "#});
     }
 
     #[test]
