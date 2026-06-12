@@ -5,16 +5,26 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/EmptyWhen
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-6rhg
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Message text aligned with RuboCop MSG. AllowComments (default true,
 //!   matching RuboCop) is read live via `cx.options_or_default`, so a
 //!   configured `AllowComments: false` flags a comment-only `when` body.
-//!   Remaining gap (murphy-6rhg): the comment-region heuristic
-//!   ([when.end, next_sibling.start)) is not yet verified to match
-//!   RuboCop's comment detection in all cases.
+//!   The comment-region heuristic ([when.end, next_sibling.start)) is verified
+//!   against RuboCop's `allow_comments?`: multi-line / multiple conditions
+//!   (region starts past the last condition), trailing comment before `end`,
+//!   and a comment that belongs to the next branch all behave as RuboCop does
+//!   (murphy-6rhg closed). RuboCop's `comments_contain_disables?` nuance is
+//!   replicated via `crate::cops::util::region_has_allowing_comment`: a
+//!   `# rubocop:disable Lint/EmptyWhen` (or `disable all`) covering the branch
+//!   is NOT an allowing comment, so the empty branch is still flagged; a
+//!   directive naming a different cop is an ordinary allowing comment.
+//!   Scope seam vs RuboCop: only directives *within* the branch body region
+//!   are detected. RuboCop's `comments_contain_disables?` uses line-range
+//!   coverage, so a block-level `# rubocop:disable Lint/EmptyWhen` placed
+//!   *above* the `case` would also cover the branch; Murphy does not detect
+//!   that out-of-region form (the in-branch form — the common case — matches).
 //! ```
 //!
 //!
@@ -68,7 +78,7 @@ impl EmptyWhen {
         let opts = cx.options_or_default::<Options>();
         if opts.allow_comments
             && let Some(region) = empty_when_body_region(cx, node)
-            && region_has_comment(cx, region)
+            && crate::cops::util::region_has_allowing_comment(cx, region, "Lint/EmptyWhen")
         {
             return;
         }
@@ -105,10 +115,6 @@ fn empty_when_body_region(cx: &Cx<'_>, when_id: NodeId) -> Option<Range> {
         start: cx.range(when_id).end,
         end: next_start,
     })
-}
-
-fn region_has_comment(cx: &Cx<'_>, region: Range) -> bool {
-    !cx.comments_in_range(region).is_empty()
 }
 
 #[cfg(test)]
@@ -223,6 +229,85 @@ mod tests {
             case x
             when 1
             ^^^^^^ Avoid `when` branches without a body.
+            end
+        "#});
+    }
+
+    // murphy-6rhg: `comments_contain_disables?` — a `rubocop:disable` directive
+    // for this cop must NOT count as an allowing comment.
+
+    #[test]
+    fn disable_directive_comment_is_not_an_allowing_comment() {
+        // RuboCop: allow_comments? = AllowComments && contains_comments? &&
+        // !comments_contain_disables?(node, name). A `# rubocop:disable
+        // Lint/EmptyWhen` covering the branch makes the last clause true, so
+        // the branch is still flagged.
+        test::<EmptyWhen>().expect_offense(indoc! {r#"
+            case value
+            when 1
+            ^^^^^^ Avoid `when` branches without a body.
+              # rubocop:disable Lint/EmptyWhen
+            when 2
+              :ok
+            end
+        "#});
+    }
+
+    #[test]
+    fn disable_all_directive_comment_is_not_an_allowing_comment() {
+        // `rubocop:disable all` covers every cop, including this one.
+        test::<EmptyWhen>().expect_offense(indoc! {r#"
+            case value
+            when 1
+            ^^^^^^ Avoid `when` branches without a body.
+              # rubocop:disable all
+            when 2
+              :ok
+            end
+        "#});
+    }
+
+    #[test]
+    fn disable_directive_for_other_cop_still_allows_comment() {
+        // A directive that does not name this cop is an ordinary comment, so
+        // `AllowComments` still suppresses the empty-branch offense.
+        test::<EmptyWhen>().expect_no_offenses(indoc! {r#"
+            case value
+            when 1
+              # rubocop:disable Lint/SomethingElse
+            when 2
+              :ok
+            end
+        "#});
+    }
+
+    #[test]
+    fn comment_allows_when_with_multiline_conditions() {
+        // Multi-line `when` conditions: the body region heuristic starts at
+        // the `when` node's end (past the last condition), so a following
+        // comment is still detected as the (empty) body.
+        test::<EmptyWhen>().expect_no_offenses(indoc! {r#"
+            case value
+            when 1,
+                 2
+              # noop
+            when 3
+              :ok
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_empty_when_with_multiple_conditions_and_no_comment() {
+        // Multiple conditions on one line; the empty body is still flagged and
+        // the highlight is the whole single-line `when` node (matching
+        // RuboCop's `when_node` range).
+        test::<EmptyWhen>().expect_offense(indoc! {r#"
+            case value
+            when 1, 2
+            ^^^^^^^^^ Avoid `when` branches without a body.
+            when 3
+              :ok
             end
         "#});
     }

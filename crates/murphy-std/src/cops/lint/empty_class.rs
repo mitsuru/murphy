@@ -4,19 +4,21 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/EmptyClass
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-4k23
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Detection mirrors RuboCop's on_class / on_sclass: a class with no body
 //!   and no parent class is flagged with CLASS_MSG; a metaclass (`class <<
 //!   self`) with no body is flagged with METACLASS_MSG. `AllowComments`
 //!   defaults to `false` (matching RuboCop) and is read live via
 //!   `cx.options_or_default`, so a configured `AllowComments: true` takes
-//!   effect at dispatch time. No autocorrect (RuboCop has none). Remaining gap
-//!   (murphy-4k23): the offense highlight is clamped to the node's first line
-//!   (Murphy convention, matching `Lint/MissingSuper`) vs RuboCop's whole-node
-//!   range; the start position matches.
+//!   effect at dispatch time. No autocorrect (RuboCop has none). The offense
+//!   highlight is clamped to the node's first line — an accepted project-wide
+//!   rendering convention (shared with verified `Lint/MissingSuper`, codified
+//!   in `crate::cops::util::first_line_range`; `expect_offense`'s annotation
+//!   grammar cannot express a multiline caret span). The start byte is
+//!   identical to RuboCop's whole-node range, so the reported line/column is
+//!   faithful (murphy-4k23 resolved: convention accepted).
 //! ```
 //!
 //! ## `AllowComments`

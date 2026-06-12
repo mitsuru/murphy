@@ -19,10 +19,12 @@
 //!   the recursion would double-count. The `else` keyword is located in the gap
 //!   between the then-branch end and the else-branch start so a nested `else` in
 //!   the then-branch cannot be matched. The offense highlight is clamped to the
-//!   first statement's first line (Murphy convention) vs RuboCop's full
-//!   `first_else` node range; the start position matches. The autocorrect
-//!   (insert newline + re-indent the else body) is NOT ported in this pass;
-//!   detection only.
+//!   first statement's first line — an accepted project-wide rendering
+//!   convention (shared with verified `Lint/MissingSuper`,
+//!   `crate::cops::util::first_line_range`) vs RuboCop's full `first_else` node
+//!   range; the start byte matches, so line/column is faithful (murphy-4k23
+//!   resolved). The autocorrect (insert newline + re-indent the else body) is
+//!   NOT ported in this pass (murphy-4m6o); detection only.
 //! ```
 //!
 //! ## Deferred: the re-indent autocorrect

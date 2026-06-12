@@ -5,9 +5,8 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/SpaceAroundMethodCallOperator
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-o89j
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Ports RuboCop's three checks: space before `.`/`&.`, space after
 //!   `.`/`&.`, and space after `::` (constant path). Only gaps that are
@@ -19,7 +18,12 @@
 //!   sugar where the selector is absent) is approximated: Murphy lowers
 //!   `a.()` to a `Send` with method `call`. When `loc.name` is unset the
 //!   after-dot gap is measured to the first token after the dot (the
-//!   `(`), so `a. ()` is flagged. See the `call_sugar` tests.
+//!   `(`), so `a. ()` is flagged. The args and multiline edge cases of
+//!   this approximation were verified against RuboCop (murphy-o89j): the
+//!   gap is measured to the `(` whether or not `()` carries args (`a. (b)`
+//!   is flagged, `a.(b)` is clean), and a newline in the gap (`a.\n  (b)`)
+//!   is accepted just like any other multiline chain. See the `call_sugar`
+//!   tests.
 //! ```
 //!
 //! operator (`.`, `&.`, `::`). Mirrors RuboCop's same-named cop:
@@ -302,6 +306,64 @@ mod tests {
                  ^ Avoid using spaces around a method call operator.
             "#},
             "a.()\n",
+        );
+    }
+
+    #[test]
+    fn call_sugar_flags_space_after_dot_with_args() {
+        // `a. (b)`: the after-dot gap is measured to the first token after the
+        // dot — here the `(` — so the single space is flagged. RuboCop's
+        // `!node.loc.selector` branch measures to `loc.begin` (the `(`) too.
+        test::<SpaceAroundMethodCallOperator>().expect_correction(
+            indoc! {r#"
+                a. (b)
+                  ^ Avoid using spaces around a method call operator.
+            "#},
+            "a.(b)\n",
+        );
+    }
+
+    #[test]
+    fn call_sugar_accepts_no_space_with_args() {
+        test::<SpaceAroundMethodCallOperator>().expect_no_offenses("a.(b)\n");
+    }
+
+    #[test]
+    fn call_sugar_flags_multiple_spaces_after_dot_with_args() {
+        test::<SpaceAroundMethodCallOperator>().expect_correction(
+            indoc! {r#"
+                a.  (b)
+                  ^^ Avoid using spaces around a method call operator.
+            "#},
+            "a.(b)\n",
+        );
+    }
+
+    #[test]
+    fn call_sugar_accepts_multiline_after_dot() {
+        // A newline in the after-dot gap (`a.` then `(b)` on the next line)
+        // means the `(` is on its own line; RuboCop's `SPACES_REGEXP`
+        // (`/\A[ \t]+\z/`) rejects gaps containing a newline, so this is
+        // accepted (not flagged).
+        test::<SpaceAroundMethodCallOperator>().expect_no_offenses(indoc! {r#"
+            a.
+              (b)
+        "#});
+    }
+
+    #[test]
+    fn call_sugar_flags_space_after_safe_nav() {
+        // Safe-navigation call sugar (`a&.()`). RuboCop's `on_csend` plus the
+        // `!loc.selector` branch flags `a&. ()` the same way as `a. ()`; Murphy
+        // lowers it to a `Csend` with method `call` and uses the same token-scan
+        // fallback. (RuboCop's spec has no `&.()` example, but the behaviour is
+        // a consistent consequence of both checks.)
+        test::<SpaceAroundMethodCallOperator>().expect_correction(
+            indoc! {r#"
+                a&. ()
+                   ^ Avoid using spaces around a method call operator.
+            "#},
+            "a&.()\n",
         );
     }
 

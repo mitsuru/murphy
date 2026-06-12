@@ -5,9 +5,8 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/Debugger
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-ch9j
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Fixed: multi-level Send chains (Kernel.binding.*), missing default
 //!   entries (Kernel.byebug, Kernel.remote_byebug, save_page,
@@ -16,9 +15,12 @@
 //!   same as X, so ::Pry.rescue and ::Kernel.debugger already match.
 //!   assumed_usage_context guard implemented (closed gap: murphy-rjwo).
 //!   DebuggerMethods/DebuggerRequires are read live via `cx.options_or_default`.
-//!   Remaining structural gaps (murphy-ch9j): DebuggerMethods hash-of-arrays
-//!   config format, and custom methods whose selector is not in the static
-//!   `#[on_node(methods=[...])]` dispatch list. See cop doc comment.
+//!   murphy-ch9j closed: (1) `DebuggerMethods` now accepts both a flat array
+//!   and RuboCop's hash-of-arrays (`category => [method, ...]`) form via a
+//!   hand-rolled `from_config_json` that flattens `values.flatten`; (2) the
+//!   dispatch is a bare `on_node(kind="send")` (no static method filter),
+//!   mirroring RuboCop's plain `on_send`, so a configured custom method whose
+//!   selector is not in the default set is dispatched and flagged.
 //! ```
 //!
 //! `require`s that load one. Defaults mirror RuboCop's `DebuggerMethods`
@@ -54,98 +56,192 @@
 //!   entrypoints to match. Each entry is either a bare method name
 //!   (`"debugger"`) or a `<receiver>.<method>` signature
 //!   (`"binding.pry"`, `"Kernel.debugger"`). Constant receivers can be
-//!   nested (`"Foo::Bar.method"`).
+//!   nested (`"Foo::Bar.method"`). Accepts both RuboCop config shapes: a
+//!   flat array, or a hash-of-arrays grouped by gem category
+//!   (`{ byebug: ["byebug"], pry: ["binding.pry"] }`), which is flattened
+//!   via `values.flatten`.
 //! - **`DebuggerRequires`** -- replaces the default set of required
 //!   libraries that trigger an offense.
 //!
-//! `debugger_methods` / `debugger_requires` are exported via
-//! `#[derive(CopOptions)]` and read live at dispatch time via
-//! [`Cx::options_or_default`], so a configured
-//! `[cops.rules."Lint/Debugger"]` override (e.g. a custom
-//! `DebuggerRequires` entry) takes effect.
+//! Options are hand-rolled (see [`Options`]) and read live at dispatch time
+//! via [`Cx::options_or_default`], so a configured
+//! `[cops.rules."Lint/Debugger"]` override (e.g. a custom `DebuggerRequires`
+//! entry, or a hash-of-arrays `DebuggerMethods`) takes effect.
 //!
-//! ## Remaining structural gaps (murphy-ch9j)
+//! ## Dispatch
 //!
-//! **`DebuggerMethods` hash-of-arrays format**: RuboCop supports
-//! `DebuggerMethods` as either a flat array or a hash-of-arrays
-//! (`category => [method, ...]`). The `#[derive(CopOptions)]` macro
-//! only handles `Vec<String>` (flat list). Supporting the hash form
-//! requires either a hand-rolled `CopOptions::from_config_json` that
-//! flattens `hash.values.flatten`, or a new `CopOptionHashOfArrays`
-//! derive variant. This is blocked on a murphy-plugin-api ABI change.
-//!
-//! **Custom method dispatch**: the `#[on_node(methods=[...])]` list is
-//! static at compile time. A user-configured custom debugger method
-//! whose right-of-`.` selector is not already in the list will not be
-//! dispatched to `check_send`, even though the option value is read.
-//! Closing this requires a catch-all `on_node(kind="send")` handler
-//! or dynamic dispatch wiring.
+//! The cop visits every `send` node (`#[on_node(kind = "send")]`), matching
+//! RuboCop's plain `on_send`. There is no static method filter, so a custom
+//! `DebuggerMethods` entry whose selector is outside the default set still
+//! dispatches and is flagged.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
+use murphy_plugin_api::{ConfigError, CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
 
 #[derive(Default)]
 pub struct Debugger;
 
+/// Default `DebuggerMethods`, mirroring RuboCop's `config/default.yml`.
+const DEFAULT_DEBUGGER_METHODS: &[&str] = &[
+    // bare entrypoints
+    "debugger",
+    "byebug",
+    "remote_byebug",
+    "pry",
+    "save_and_open_page",
+    "save_and_open_screenshot",
+    "save_page",
+    "save_screenshot",
+    "jard",
+    // chained on `binding`
+    "binding.irb",
+    "binding.pry",
+    "binding.remote_pry",
+    "binding.pry_remote",
+    "binding.b",
+    "binding.break",
+    "binding.console",
+    // const-receiver
+    "Kernel.debugger",
+    "Kernel.binding",
+    "Kernel.byebug",
+    "Kernel.remote_byebug",
+    "Pry.rescue",
+    // page.* Capybara helpers
+    "page.save_and_open_page",
+    "page.save_and_open_screenshot",
+    "page.save_page",
+    "page.save_screenshot",
+    // Kernel.binding.* three-level chains
+    "Kernel.binding.b",
+    "Kernel.binding.break",
+    "Kernel.binding.pry",
+    "Kernel.binding.remote_pry",
+    "Kernel.binding.pry_remote",
+    "Kernel.binding.irb",
+];
+
+/// Default `DebuggerRequires`, mirroring RuboCop's `config/default.yml`.
+const DEFAULT_DEBUGGER_REQUIRES: &[&str] = &[
+    "byebug",
+    "capybara/dsl",
+    "debug",
+    "debug/open",
+    "debug/open_nonstop",
+    "debug/start",
+    "pry",
+    "pry-byebug",
+];
+
 /// Cop options for [`Debugger`]. Read live at dispatch time via
 /// [`Cx::options_or_default`].
-#[derive(CopOptions)]
+///
+/// `DebuggerMethods` is hand-rolled (not `#[derive(CopOptions)]`) so it can
+/// accept RuboCop's two shapes: a flat array (`["debugger", ...]`) **or** a
+/// hash-of-arrays grouped by gem category (`{ "byebug": ["byebug"], ... }`),
+/// which is flattened via `values.flatten` exactly as RuboCop does.
+#[derive(Clone, Debug)]
 pub struct Options {
-    #[option(name = "DebuggerMethods", 
-        default = [
-            // bare entrypoints
-            "debugger",
-            "byebug",
-            "remote_byebug",
-            "pry",
-            "save_and_open_page",
-            "save_and_open_screenshot",
-            "save_page",
-            "save_screenshot",
-            "jard",
-            // chained on `binding`
-            "binding.irb",
-            "binding.pry",
-            "binding.remote_pry",
-            "binding.pry_remote",
-            "binding.b",
-            "binding.break",
-            "binding.console",
-            // const-receiver
-            "Kernel.debugger",
-            "Kernel.binding",
-            "Kernel.byebug",
-            "Kernel.remote_byebug",
-            "Pry.rescue",
-            // page.* Capybara helpers
-            "page.save_and_open_page",
-            "page.save_and_open_screenshot",
-            "page.save_page",
-            "page.save_screenshot",
-            // Kernel.binding.* three-level chains
-            "Kernel.binding.b",
-            "Kernel.binding.break",
-            "Kernel.binding.pry",
-            "Kernel.binding.remote_pry",
-            "Kernel.binding.pry_remote",
-            "Kernel.binding.irb",
-        ],
-        description = "Method calls that should be flagged as debugger entry points."
-    )]
     pub debugger_methods: Vec<String>,
-    #[option(name = "DebuggerRequires", 
-        default = [
-            "byebug",
-            "capybara/dsl",
-            "debug",
-            "debug/open",
-            "debug/open_nonstop",
-            "debug/start",
-            "pry",
-            "pry-byebug",
-        ],
-        description = "Libraries whose `require` should be flagged as a debugger require."
-    )]
     pub debugger_requires: Vec<String>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            debugger_methods: DEFAULT_DEBUGGER_METHODS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            debugger_requires: DEFAULT_DEBUGGER_REQUIRES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        }
+    }
+}
+
+/// Decode a flat string array under `field`, surfacing path-qualified
+/// `type_mismatch` errors for the array itself and for non-string elements.
+fn decode_string_array(
+    array: &[serde_json::Value],
+    field: &str,
+) -> Result<Vec<String>, ConfigError> {
+    array
+        .iter()
+        .enumerate()
+        .map(|(i, elem)| {
+            elem.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| ConfigError::type_mismatch(format!("{field}[{i}]"), "string"))
+        })
+        .collect()
+}
+
+impl CopOptions for Options {
+    fn from_config_json(bytes: &[u8]) -> Result<Self, ConfigError> {
+        // Error surface mirrors `#[derive(CopOptions)]`: non-object root →
+        // `not_an_object`; per-field shape mismatches → `type_mismatch` with a
+        // path-qualified field name. Absent fields fall back to defaults.
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(ConfigError::parse)?;
+        let obj = value.as_object().ok_or_else(ConfigError::not_an_object)?;
+
+        let mut opts = Self::default();
+
+        if let Some(methods_value) = obj.get("DebuggerMethods") {
+            opts.debugger_methods = if let Some(array) = methods_value.as_array() {
+                // Flat array: `["debugger", "binding.pry"]`.
+                decode_string_array(array, "DebuggerMethods")?
+            } else if let Some(map) = methods_value.as_object() {
+                // Hash-of-arrays: `{ category => [method, ...] }`, flattened
+                // exactly like RuboCop's `config.values.flatten`.
+                let mut flattened = Vec::new();
+                for (key, group) in map {
+                    let array = group.as_array().ok_or_else(|| {
+                        ConfigError::type_mismatch(
+                            format!("DebuggerMethods.{key}"),
+                            "array of strings",
+                        )
+                    })?;
+                    flattened.extend(decode_string_array(array, &format!("DebuggerMethods.{key}"))?);
+                }
+                flattened
+            } else {
+                return Err(ConfigError::type_mismatch(
+                    "DebuggerMethods",
+                    "array or object of arrays",
+                ));
+            };
+        }
+
+        if let Some(requires_value) = obj.get("DebuggerRequires") {
+            let array = requires_value
+                .as_array()
+                .ok_or_else(|| ConfigError::type_mismatch("DebuggerRequires", "array of strings"))?;
+            opts.debugger_requires = decode_string_array(array, "DebuggerRequires")?;
+        }
+
+        Ok(opts)
+    }
+
+    fn to_config_json(&self) -> String {
+        let methods: Vec<serde_json::Value> = self
+            .debugger_methods
+            .iter()
+            .map(|m| serde_json::Value::String(m.clone()))
+            .collect();
+        let requires: Vec<serde_json::Value> = self
+            .debugger_requires
+            .iter()
+            .map(|r| serde_json::Value::String(r.clone()))
+            .collect();
+        let mut top = serde_json::Map::new();
+        top.insert("DebuggerMethods".to_string(), serde_json::Value::Array(methods));
+        top.insert(
+            "DebuggerRequires".to_string(),
+            serde_json::Value::Array(requires),
+        );
+        serde_json::Value::Object(top).to_string()
+    }
 }
 
 #[cop(
@@ -156,34 +252,12 @@ pub struct Options {
     options = Options
 )]
 impl Debugger {
-    // The method list covers every right-of-`.` name across the default
-    // `debugger_methods` set plus `require` for the requires gate. Custom
-    // `DebuggerMethods` entries that need an unlisted method symbol will
-    // not dispatch through this static filter — a known structural gap
-    // tracked by murphy-ch9j (the option value itself is read live).
-    #[on_node(
-        kind = "send",
-        methods = [
-            "debugger",
-            "byebug",
-            "remote_byebug",
-            "pry",
-            "irb",
-            "b",
-            "break",
-            "console",
-            "remote_pry",
-            "pry_remote",
-            "binding",
-            "rescue",
-            "save_and_open_page",
-            "save_and_open_screenshot",
-            "save_page",
-            "save_screenshot",
-            "jard",
-            "require"
-        ]
-    )]
+    // Visit EVERY send, mirroring RuboCop's plain `on_send`. A static method
+    // filter would exclude custom `DebuggerMethods` entries whose selector is
+    // not in the default set; running on all sends lets a configured custom
+    // method (flat array or hash-of-arrays) dispatch through `check_send`
+    // (murphy-ch9j).
+    #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
         let NodeKind::Send {
             receiver,
@@ -638,6 +712,103 @@ mod tests {
             foo(Kernel.debugger)
                 ^^^^^^^^^^^^^^^ Remove debugger entry point `Kernel.debugger`.
         "#});
+    }
+
+    // --- murphy-ch9j: custom-method dispatch + hash-of-arrays config ---
+
+    #[test]
+    fn flags_custom_bare_debugger_method_from_flat_array() {
+        // A custom `DebuggerMethods` entry whose selector is not in any static
+        // dispatch list must still be flagged — the cop now visits every send.
+        test::<Debugger>()
+            .with_options(&Options {
+                debugger_methods: vec!["my_custom_debugger".to_string()],
+                debugger_requires: vec![],
+            })
+            .expect_offense(indoc! {r#"
+                my_custom_debugger
+                ^^^^^^^^^^^^^^^^^^ Remove debugger entry point `my_custom_debugger`.
+            "#});
+    }
+
+    #[test]
+    fn flags_custom_chained_debugger_method() {
+        test::<Debugger>()
+            .with_options(&Options {
+                debugger_methods: vec!["my_object.my_debug".to_string()],
+                debugger_requires: vec![],
+            })
+            .expect_offense(indoc! {r#"
+                my_object.my_debug
+                ^^^^^^^^^^^^^^^^^^ Remove debugger entry point `my_object.my_debug`.
+            "#});
+    }
+
+    #[test]
+    fn flags_custom_method_from_hash_of_arrays_config() {
+        // RuboCop accepts `DebuggerMethods` as a hash-of-arrays
+        // (`category => [method, ...]`) and flattens `values.flatten`.
+        let opts = <Options as murphy_plugin_api::CopOptions>::from_config_json(
+            br#"{"DebuggerMethods": {"my_gem": ["custom_debug", "another_break"]}}"#,
+        )
+        .expect("hash-of-arrays DebuggerMethods is valid");
+        test::<Debugger>().with_options(&opts).expect_offense(indoc! {r#"
+                custom_debug
+                ^^^^^^^^^^^^ Remove debugger entry point `custom_debug`.
+                another_break
+                ^^^^^^^^^^^^^ Remove debugger entry point `another_break`.
+            "#});
+    }
+
+    #[test]
+    fn accepts_flat_array_debugger_methods_config() {
+        let opts = <Options as murphy_plugin_api::CopOptions>::from_config_json(
+            br#"{"DebuggerMethods": ["custom_debug"]}"#,
+        )
+        .expect("flat-array DebuggerMethods is valid");
+        assert_eq!(opts.debugger_methods, vec!["custom_debug".to_string()]);
+    }
+
+    #[test]
+    fn debugger_methods_wrong_shape_errors() {
+        // A scalar (not array/object) is a shape error, not a silent default.
+        let err = <Options as murphy_plugin_api::CopOptions>::from_config_json(
+            br#"{"DebuggerMethods": "oops"}"#,
+        )
+        .expect_err("scalar DebuggerMethods is invalid");
+        let murphy_plugin_api::ConfigErrorKind::TypeMismatch { field, expected } = err.kind()
+        else {
+            panic!("expected TypeMismatch, got {:?}", err.kind());
+        };
+        assert_eq!(field, "DebuggerMethods");
+        assert_eq!(*expected, "array or object of arrays");
+    }
+
+    #[test]
+    fn debugger_methods_element_wrong_shape_errors() {
+        let err = <Options as murphy_plugin_api::CopOptions>::from_config_json(
+            br#"{"DebuggerMethods": {"g": [1]}}"#,
+        )
+        .expect_err("non-string element is invalid");
+        let murphy_plugin_api::ConfigErrorKind::TypeMismatch { field, expected } = err.kind()
+        else {
+            panic!("expected TypeMismatch, got {:?}", err.kind());
+        };
+        assert_eq!(field, "DebuggerMethods.g[0]");
+        assert_eq!(*expected, "string");
+    }
+
+    #[test]
+    fn debugger_options_roundtrip_via_to_config_json() {
+        let opts = Options {
+            debugger_methods: vec!["custom_debug".to_string()],
+            debugger_requires: vec!["my_lib".to_string()],
+        };
+        let json = <Options as murphy_plugin_api::CopOptions>::to_config_json(&opts);
+        let decoded = <Options as murphy_plugin_api::CopOptions>::from_config_json(json.as_bytes())
+            .expect("roundtrip");
+        assert_eq!(decoded.debugger_methods, opts.debugger_methods);
+        assert_eq!(decoded.debugger_requires, opts.debugger_requires);
     }
 }
 murphy_plugin_api::submit_cop!(Debugger);
