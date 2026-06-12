@@ -5,15 +5,16 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/UnusedMethodArgument
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-qaio
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Fixed logic false positives: zero-arity super (Zsuper), zero-arity binding,
 //!   and fail-with-any-args asymmetry now match RuboCop v1.86.2 behavior.
-//!   murphy-qaio: aligned offense message with RuboCop (name, hint, `(*)`
-//!   clause); added AllowUnusedKeywordArguments and IgnoreEmptyMethods options
-//!   to schema. Option override wiring deferred to murphy-9cr.9.
+//!   Offense message matches RuboCop (name, hint, `(*)` clause).
+//!   All options (IgnoreEmptyMethods, IgnoreNotImplementedMethods,
+//!   NotImplementedExceptions, AllowUnusedKeywordArguments) are read live at
+//!   dispatch time via `cx.options_or_default`, so configured overrides take
+//!   effect. (Closed gap: murphy-qaio.)
 //! ```
 //!
 //! read inside the method body.
@@ -49,15 +50,13 @@
 //!   ` You can also write as \`METHODNAME(*)\` if you want the method to
 //!   accept any arguments but don't care about them.`
 //!
-//! ## Known v1 limitation: option overrides not wired through `Cx`
+//! ## Options
 //!
 //! `ignore_not_implemented_methods`, `not_implemented_exceptions`,
 //! `ignore_empty_methods`, and `allow_unused_keyword_arguments` are
-//! exported via `#[derive(CopOptions)]` so the host validates the
-//! schema, but runtime reads still come from `Options::default()`.
-//! `murphy-9cr.9` will route `[cops.rules."Lint/UnusedMethodArgument"]`
-//! overrides through `Cx`; until then setting these keys in
-//! `murphy.toml` has no effect at dispatch time.
+//! exported via `#[derive(CopOptions)]` and read live at dispatch time via
+//! [`Cx::options_or_default`], so configured
+//! `[cops.rules."Lint/UnusedMethodArgument"]` overrides take effect.
 //!
 //! ## Autocorrect
 //!
@@ -73,8 +72,8 @@ use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, Symbol, cop};
 #[derive(Default)]
 pub struct UnusedMethodArgument;
 
-/// Cop options for [`UnusedMethodArgument`]. v1: options are read from
-/// `Default` at dispatch time (`murphy-9cr.9` will wire live overrides).
+/// Cop options for [`UnusedMethodArgument`]. Read live at dispatch time via
+/// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
     #[option(
@@ -119,7 +118,7 @@ impl UnusedMethodArgument {
             return;
         };
 
-        let opts = Options::default();
+        let opts = cx.options_or_default::<Options>();
 
         // IgnoreEmptyMethods: when true (default), skip methods with no body.
         if opts.ignore_empty_methods && body.get().is_none() {
@@ -507,11 +506,23 @@ fn param_name_and_range(cx: &Cx<'_>, node: NodeId) -> Option<(Symbol, Range)> {
 
 #[cfg(test)]
 mod tests {
-    use super::UnusedMethodArgument;
+    use super::{Options, UnusedMethodArgument};
     use murphy_plugin_api::{
         Range,
         test_support::{indoc, run_cop_with_edits, test},
     };
+
+    #[test]
+    fn allows_unused_kwarg_when_option_enabled() {
+        // `AllowUnusedKeywordArguments: true` is read live via
+        // `cx.options_or_default`, so an unused keyword argument is not flagged.
+        test::<UnusedMethodArgument>()
+            .with_options(&Options {
+                allow_unused_keyword_arguments: true,
+                ..Options::default()
+            })
+            .expect_no_offenses("def foo(bar:)\n  1\nend\n");
+    }
 
     #[test]
     fn flags_unused_method_arguments() {

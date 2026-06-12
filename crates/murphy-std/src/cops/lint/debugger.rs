@@ -7,16 +7,18 @@
 //! upstream_version_checked: 1.86.2
 //! status: partial
 //! gap_issues:
-//!   - murphy-rjwo
+//!   - murphy-ch9j
 //! notes: >
 //!   Fixed: multi-level Send chains (Kernel.binding.*), missing default
 //!   entries (Kernel.byebug, Kernel.remote_byebug, save_page,
 //!   save_screenshot, page.save_*, Kernel.binding.* variants, debug/start).
 //!   Cbase handling not needed: Murphy translates ::X to Const{scope:None}
 //!   same as X, so ::Pry.rescue and ::Kernel.debugger already match.
-//!   assumed_usage_context guard implemented (murphy-rjwo).
-//!   ABI blockers: DebuggerMethods hash-of-arrays config format and custom
-//!   method dispatch are not yet wired (murphy-9cr.9). See cop doc comment.
+//!   assumed_usage_context guard implemented (closed gap: murphy-rjwo).
+//!   DebuggerMethods/DebuggerRequires are read live via `cx.options_or_default`.
+//!   Remaining structural gaps (murphy-ch9j): DebuggerMethods hash-of-arrays
+//!   config format, and custom methods whose selector is not in the static
+//!   `#[on_node(methods=[...])]` dispatch list. See cop doc comment.
 //! ```
 //!
 //! `require`s that load one. Defaults mirror RuboCop's `DebuggerMethods`
@@ -56,16 +58,13 @@
 //! - **`DebuggerRequires`** -- replaces the default set of required
 //!   libraries that trigger an offense.
 //!
-//! ## Known v1 limitation: option overrides not wired through `Cx`
-//!
 //! `debugger_methods` / `debugger_requires` are exported via
-//! `#[derive(CopOptions)]` so the host validates `murphy.toml` entries,
-//! but runtime reads still come from `Options::default()`.
-//! `murphy-9cr.9` will route overrides through `Cx`; until then
-//! `[cops.rules."Lint/Debugger"]` overrides have no effect at dispatch
-//! time. This matches the v1 contract on every other cop with options.
+//! `#[derive(CopOptions)]` and read live at dispatch time via
+//! [`Cx::options_or_default`], so a configured
+//! `[cops.rules."Lint/Debugger"]` override (e.g. a custom
+//! `DebuggerRequires` entry) takes effect.
 //!
-//! ## ABI blockers (Phase 4 -- murphy-rjwo)
+//! ## Remaining structural gaps (murphy-ch9j)
 //!
 //! **`DebuggerMethods` hash-of-arrays format**: RuboCop supports
 //! `DebuggerMethods` as either a flat array or a hash-of-arrays
@@ -73,23 +72,22 @@
 //! only handles `Vec<String>` (flat list). Supporting the hash form
 //! requires either a hand-rolled `CopOptions::from_config_json` that
 //! flattens `hash.values.flatten`, or a new `CopOptionHashOfArrays`
-//! derive variant. This is blocked on a murphy-plugin-api ABI change
-//! and deferred beyond v1.
+//! derive variant. This is blocked on a murphy-plugin-api ABI change.
 //!
 //! **Custom method dispatch**: the `#[on_node(methods=[...])]` list is
-//! static at compile time. User-configured extra debugger methods that
-//! introduce a new right-of-`.` selector not already in the list will
-//! not be dispatched. This requires either dynamic dispatch wiring
-//! through `Cx` or a catch-all `on_node(kind="send")` handler, both
-//! of which are deferred to murphy-9cr.9.
+//! static at compile time. A user-configured custom debugger method
+//! whose right-of-`.` selector is not already in the list will not be
+//! dispatched to `check_send`, even though the option value is read.
+//! Closing this requires a catch-all `on_node(kind="send")` handler
+//! or dynamic dispatch wiring.
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
 
 #[derive(Default)]
 pub struct Debugger;
 
-/// Cop options for [`Debugger`]. v1: read from `Default` at dispatch
-/// time (`murphy-9cr.9` will wire live overrides through `Cx`).
+/// Cop options for [`Debugger`]. Read live at dispatch time via
+/// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
     #[option(
@@ -161,8 +159,8 @@ impl Debugger {
     // The method list covers every right-of-`.` name across the default
     // `debugger_methods` set plus `require` for the requires gate. Custom
     // `DebuggerMethods` entries that need an unlisted method symbol will
-    // not dispatch until murphy-9cr.9 wires options into `Cx`; this is
-    // documented as a v1 limitation alongside the option override one.
+    // not dispatch through this static filter — a known structural gap
+    // tracked by murphy-ch9j (the option value itself is read live).
     #[on_node(
         kind = "send",
         methods = [
@@ -195,7 +193,7 @@ impl Debugger {
         else {
             return;
         };
-        let opts = Options::default();
+        let opts = cx.options_or_default::<Options>();
         let method_str = cx.symbol_str(method);
 
         // `require '<lib>'` with a Str literal argument.
@@ -379,8 +377,23 @@ fn parent_will_match(cx: &Cx<'_>, node: NodeId, current_sig: &str, opts: &Option
 
 #[cfg(test)]
 mod tests {
-    use super::Debugger;
+    use super::{Debugger, Options};
     use murphy_plugin_api::test_support::{indoc, test};
+
+    #[test]
+    fn flags_custom_require_from_debugger_requires_option() {
+        // A custom `DebuggerRequires` entry is read live via
+        // `cx.options_or_default`, so `require 'my_custom_debug'` is flagged.
+        test::<Debugger>()
+            .with_options(&Options {
+                debugger_requires: vec!["my_custom_debug".to_string()],
+                ..Options::default()
+            })
+            .expect_offense(indoc! {r#"
+                require 'my_custom_debug'
+                ^^^^^^^^^^^^^^^^^^^^^^^^^ Remove debugger entry point `require 'my_custom_debug'`.
+            "#});
+    }
 
     #[test]
     fn flags_debugger_calls_and_requires() {

@@ -7,7 +7,7 @@
 //! upstream: rubocop
 //! upstream_cop: Style/RedundantFetchBlock
 //! upstream_version_checked: 1.86.2
-//! status: partial
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Ports the full RuboCop behavior including:
@@ -21,8 +21,8 @@
 //!       cannot be basic literals)
 //!
 //!   Option `SafeForConstants` (default false) is exported via CopOptions and
-//!   read from default at dispatch time. Option override wiring through Cx is
-//!   deferred to murphy-9cr.9 (same shape as Lint/EmptyWhen).
+//!   read live at dispatch time via `cx.options_or_default`, so a configured
+//!   `SafeForConstants: true` flags constant default values.
 //!
 //!   The cop is marked unsafe in RuboCop because it cannot guarantee the receiver
 //!   does not have a custom `fetch` implementation. Murphy follows the same default.
@@ -54,9 +54,8 @@ use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 #[derive(Default)]
 pub struct RedundantFetchBlock;
 
-/// Cop options for [`RedundantFetchBlock`].
-/// v1: read from `Default` at dispatch time (`murphy-9cr.9` will wire live
-/// overrides through `Cx`).
+/// Cop options for [`RedundantFetchBlock`]. Read live at dispatch time via
+/// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
     #[option(
@@ -113,7 +112,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         }
 
     // Determine if body is acceptable.
-    let opts = Options::default();
+    let opts = cx.options_or_default::<Options>();
     let body_node = body.get();
     let default_value_src = match body_node {
         // Empty block {} → default is nil.
@@ -230,7 +229,7 @@ fn is_rails_cache(node: NodeId, cx: &Cx<'_>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::RedundantFetchBlock;
+    use super::{Options, RedundantFetchBlock};
     use murphy_plugin_api::test_support::{indoc, test};
 
     // ----- Offense cases -----
@@ -410,6 +409,20 @@ mod tests {
     fn accepts_const_body_without_safe_for_constants() {
         // Constant body requires SafeForConstants: true — default is false.
         test::<RedundantFetchBlock>().expect_no_offenses("hash.fetch(:key) { VALUE }\n");
+    }
+
+    #[test]
+    fn flags_const_body_when_safe_for_constants_enabled() {
+        // `SafeForConstants: true` is read live via `cx.options_or_default`, so a
+        // constant default value is flagged.
+        test::<RedundantFetchBlock>()
+            .with_options(&Options {
+                safe_for_constants: true,
+            })
+            .expect_offense(indoc! {r#"
+                hash.fetch(:key) { VALUE }
+                     ^^^^^^^^^^^^^^^^^^^^^ Use `fetch(:key, VALUE)` instead of `fetch(:key) { VALUE }`.
+            "#});
     }
 
     #[test]
