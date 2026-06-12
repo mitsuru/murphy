@@ -101,14 +101,25 @@ fn check_alignment(items: &[NodeId], cx: &Cx<'_>) {
     };
     let base_column = display_column(first, cx);
 
-    let mut prev_line = u32::MAX; // sentinel: -1 in RuboCop
+    let mut prev_node: Option<NodeId> = None;
     let mut first_seen = false;
     for &current in items {
-        let cur_line = line_number(current, cx);
-        // `current.loc.line > prev_line && begins_its_line?(...)`. The very
-        // first item establishes the base and is never itself flagged
+        // RuboCop: `current.loc.line > prev_line`. Because items are in source
+        // order, `current` is on a later line than its predecessor iff a `\n`
+        // lies between their start offsets — a single O(span) scan rather than
+        // counting newlines from BOF for every item (which is O(N) per item /
+        // O(N²) over the block).
+        let on_new_line = match prev_node {
+            None => true,
+            Some(prev) => {
+                let prev_start = cx.range(prev).start as usize;
+                let cur_start = cx.range(current).start as usize;
+                cx.source()[prev_start..cur_start].contains('\n')
+            }
+        };
+        // The very first item establishes the base and is never itself flagged
         // (column_delta would be zero anyway).
-        let on_new_line = !first_seen || cur_line > prev_line;
+        let on_new_line = !first_seen || on_new_line;
         if on_new_line && begins_its_line(current, cx) {
             let column = display_column(current, cx);
             if column != base_column {
@@ -116,7 +127,7 @@ fn check_alignment(items: &[NodeId], cx: &Cx<'_>) {
             }
             first_seen = true;
         }
-        prev_line = cur_line;
+        prev_node = Some(current);
     }
 }
 
@@ -129,14 +140,6 @@ fn display_column(node: NodeId, cx: &Cx<'_>) -> usize {
     let src = cx.source();
     let line_start = src[..start].rfind('\n').map_or(0, |pos| pos + 1);
     src[line_start..start].chars().count()
-}
-
-/// 1-based source line of the node's start, matching `loc.line` ordering.
-/// Only relative ordering matters here (`cur_line > prev_line`), so this
-/// counts newlines before the node's start.
-fn line_number(node: NodeId, cx: &Cx<'_>) -> u32 {
-    let start = cx.range(node).start as usize;
-    cx.source()[..start].bytes().filter(|&b| b == b'\n').count() as u32
 }
 
 /// RuboCop `begins_its_line?(range)`: the node is the first non-whitespace on

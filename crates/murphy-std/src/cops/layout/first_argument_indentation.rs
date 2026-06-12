@@ -289,24 +289,25 @@ fn begins_its_line(cx: &Cx<'_>, offset: u32) -> bool {
     true
 }
 
-/// Indent (column of first non-whitespace char) of the nearest non-blank,
+/// Indent (count of leading spaces/tabs) of the nearest non-blank,
 /// non-comment-only code line strictly above `line_number` (1-based).
+///
+/// Iterates the prefix lines forward and keeps the last qualifying one — the
+/// nearest code line above the target is the last non-blank/non-comment line
+/// in lines `1..line_number`. `lines().take(..)` is lazy, so only the prefix
+/// is scanned and no `Vec` is allocated (the old `split('\n').collect()`
+/// materialised every line on every call).
 fn previous_code_line_indent(cx: &Cx<'_>, line_number: usize) -> usize {
     let src = cx.source();
-    let lines: Vec<&str> = src.split('\n').collect();
-    let mut n = line_number; // 1-based; we step to n-1 first.
-    loop {
-        if n <= 1 {
-            return 0;
-        }
-        n -= 1;
-        let line = lines.get(n - 1).copied().unwrap_or("");
+    let mut indent = 0;
+    for line in src.lines().take(line_number.saturating_sub(1)) {
         let trimmed = line.trim_start();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        return line.chars().take_while(|c| c.is_whitespace()).count();
+        indent = line.chars().take_while(|&c| c == ' ' || c == '\t').count();
     }
+    indent
 }
 
 /// Rewrite the leading whitespace of `offset`'s line so `offset` lands at
