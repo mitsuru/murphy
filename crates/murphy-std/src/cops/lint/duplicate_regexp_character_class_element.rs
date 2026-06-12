@@ -203,26 +203,33 @@ fn scan_char_class(class: &[u8], class_offset: u32, cx: &Cx<'_>) {
     let mut seen: HashSet<&[u8]> = HashSet::new();
     let mut i = usize::from(class.first() == Some(&b'^'));
     let len = class.len();
+    // True when the element just consumed was a range (`a-b`). A `-` directly
+    // following a completed range is a literal element, not a range operator
+    // (e.g. `[0-9-0-9]` is `0-9`, literal `-`, `0-9`).
+    let mut prev_was_range = false;
 
     while i < len {
         let member_start = i;
         // Consume one member (escape, POSIX class, or single char).
         i = member_end(class, i);
-        let member = &class[member_start..i];
 
         // A range `member - member` merges into a single element. `-` is the
         // range operator only when it's between two members (not at class
-        // start/end) and is not itself escaped.
-        if i < len && class[i] == b'-' && i + 1 < len {
+        // start/end), is not itself escaped, and the preceding element was not
+        // itself a range (so the `-` is not a dangling literal).
+        if !prev_was_range && i < len && class[i] == b'-' && i + 1 < len {
             let after_dash = i + 1;
             let range_member_end = member_end(class, after_dash);
             i = range_member_end;
             let element = &class[member_start..i];
             check_member(element, member_start, class_offset, &mut seen, cx);
+            prev_was_range = true;
             continue;
         }
 
+        let member = &class[member_start..i];
         check_member(member, member_start, class_offset, &mut seen, cx);
+        prev_was_range = false;
     }
 }
 
@@ -395,6 +402,17 @@ mod tests {
     fn literal_dash_at_end_is_not_a_range() {
         // `[a-]` — trailing `-` is a literal, `[a-a-]` would dup `a`.
         test::<Cop>().expect_no_offenses("r = /[a-]/\n");
+    }
+
+    #[test]
+    fn dash_after_completed_range_is_literal() {
+        // `[0-9-0-9]` parses as `0-9`, literal `-`, `0-9` — the trailing `0-9`
+        // is a duplicate of the first range. The `-` between the ranges is a
+        // literal element, not a range operator.
+        test::<Cop>().expect_offense(indoc! {r#"
+            r = /[0-9-0-9]/
+                      ^^^ Duplicate element inside regexp character class
+        "#});
     }
 
     #[test]
