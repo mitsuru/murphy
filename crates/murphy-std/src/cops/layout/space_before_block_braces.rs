@@ -224,7 +224,10 @@ fn lambda_literal_brace(node: NodeId, close: Range, cx: &Cx<'_>) -> Option<(Rang
     {
         match tok.kind {
             SourceTokenKind::LeftParen => paren_depth += 1,
-            SourceTokenKind::RightParen => paren_depth -= 1,
+            // Guard the decrement so a stray `)` (malformed input) cannot drive
+            // the depth negative and make a legitimate body `{` invisible to
+            // the `paren_depth == 0` check below.
+            SourceTokenKind::RightParen if paren_depth > 0 => paren_depth -= 1,
             _ => {
                 let s = tok.range.start as usize;
                 if paren_depth == 0 && s < source.len() && source[s] == b'{' {
