@@ -89,6 +89,38 @@ fn run_with_pack(source: &str) -> (i32, Vec<serde_json::Value>) {
     (code, parsed)
 }
 
+/// Like [`run_with_pack`], but writes the spec at `rel_path` (relative to the
+/// project root) and lints that path, so the pack's bundled-default `Exclude`
+/// globs (e.g. `RSpec/DescribeClass` for `spec/requests/**`) are exercised
+/// end-to-end through the real `.so`'s `MURPHY_PLUGIN_DEFAULT_CONFIG`.
+fn run_with_pack_at(rel_path: &str, source: &str) -> Vec<serde_json::Value> {
+    let pack = rspec_pack_path()
+        .canonicalize()
+        .expect("murphy-rspec cdylib should exist (Cargo dep graph)");
+
+    let dir = tempdir().expect("tempdir");
+    let rb = dir.path().join(rel_path);
+    fs::create_dir_all(rb.parent().expect("rel_path has a parent")).expect("mkdir -p");
+    fs::write(&rb, source).expect("write rb");
+
+    let yml = format!(
+        "plugins:\n  - name: murphy-rspec\n    path: {:?}\n",
+        pack.display().to_string()
+    );
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write yml");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(rel_path)
+        .assert();
+    let output = assert.get_output().clone();
+    serde_json::from_slice(&output.stdout).expect("stdout must be JSON")
+}
+
 fn offenses_named<'a>(offenses: &'a [serde_json::Value], cop: &str) -> Vec<&'a serde_json::Value> {
     offenses.iter().filter(|o| o["cop_name"] == cop).collect()
 }
@@ -191,6 +223,39 @@ fn does_not_flag_describe_with_variable_first_arg() {
     assert!(
         offenses_named(&offs, "RSpec/DescribeClass").is_empty(),
         "variable first-arg must not be flagged; got {offs:?}"
+    );
+}
+
+#[test]
+fn bundled_default_excludes_describe_class_in_request_specs() {
+    // rubocop-rspec's bundled default Excludes `RSpec/DescribeClass` from
+    // `spec/requests/**` (and features/routing/system/views). Murphy mirrors
+    // that via the pack's `config/default.yml`, merged below user config by
+    // `apply_pack_default_layers`. A non-constant `describe` string here must
+    // NOT be flagged. (murphy-duih — 275 mastodon FPs.)
+    let offs = run_with_pack_at(
+        "spec/requests/widget_spec.rb",
+        "RSpec.describe \"bad describe\" do\nend\n",
+    );
+    assert!(
+        offenses_named(&offs, "RSpec/DescribeClass").is_empty(),
+        "spec/requests must be excluded by the pack default; got {offs:?}"
+    );
+}
+
+#[test]
+fn bundled_default_still_flags_describe_class_in_model_specs() {
+    // Over-exclusion guard: `spec/models/**` is NOT in the default Exclude,
+    // so the same non-constant `describe` string IS flagged. Proves the pack
+    // default scopes the cop rather than disabling it wholesale.
+    let offs = run_with_pack_at(
+        "spec/models/widget_spec.rb",
+        "RSpec.describe \"bad describe\" do\nend\n",
+    );
+    assert_eq!(
+        offenses_named(&offs, "RSpec/DescribeClass").len(),
+        1,
+        "spec/models must still be flagged; got {offs:?}"
     );
 }
 

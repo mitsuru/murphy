@@ -1,0 +1,20 @@
+# Murphy rspec pack bundled defaults — mirrors rubocop-rspec's
+# `config/default.yml` for the subset of per-cop file scoping that cannot be
+# expressed through `#[cop]` / `#[option]` metadata.
+#
+# Only `RSpec/DescribeClass: Exclude` is carried here: rubocop-rspec excludes
+# the non-class spec directories (features/requests/routing/system/views) from
+# this cop, since those specs describe behaviour with a string subject rather
+# than a constant. Without this layer Murphy fires `RSpec/DescribeClass` across
+# `spec/requests`, `spec/system`, etc. (275 false positives on mastodon).
+#
+# The cop's other defaults (Enabled, Severity, IgnoredMetadata) are already
+# encoded in the cop's Rust metadata / hand-rolled options, so they are not
+# duplicated here.
+RSpec/DescribeClass:
+  Exclude:
+    - "**/spec/features/**/*"
+    - "**/spec/requests/**/*"
+    - "**/spec/routing/**/*"
+    - "**/spec/system/**/*"
+    - "**/spec/views/**/*"
