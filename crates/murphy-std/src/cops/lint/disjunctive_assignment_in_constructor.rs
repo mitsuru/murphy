@@ -8,8 +8,9 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/DisjunctiveAssignmentInConstructor
 //! upstream_version_checked: 1.87.0
-//! status: verified
-//! gap_issues: []
+//! status: partial
+//! gap_issues:
+//!   - murphy-ss0f
 //! notes: >
 //!   Ported from RuboCop Lint/DisjunctiveAssignmentInConstructor. Dispatches
 //!   on `def` only (`def self.initialize` / defs is not checked, matching
@@ -23,8 +24,9 @@
 //!   (parser `:begin`); an explicit `begin … end` body is `:kwbegin` and is
 //!   skipped. Murphy lowers both to `NodeKind::Begin`, so a constructor whose
 //!   body is an explicit `begin … end` block is descended into here and its
-//!   leading `@x ||= …` is flagged where RuboCop would not. This shape is
-//!   contrived and not exercised by RuboCop's specs.
+//!   leading `@x ||= …` is flagged where RuboCop would not (a false positive).
+//!   This shape is contrived and not exercised by RuboCop's specs; tracked in
+//!   murphy-ss0f.
 //! ```
 //!
 //! ## Matched shapes
