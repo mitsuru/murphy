@@ -18,7 +18,13 @@
 //!   like RuboCop's `check_body_lines`. Only an instance-variable LHS
 //!   (`@x ||= …`) is flagged — local/class/global-variable and constant
 //!   targets are skipped. The offense range and autocorrect target the `||=`
-//!   operator only, replacing it with `=`.
+//!   operator only, replacing it with `=`. Known divergence: RuboCop's
+//!   `check_body` only descends into an *implicit* multi-statement body
+//!   (parser `:begin`); an explicit `begin … end` body is `:kwbegin` and is
+//!   skipped. Murphy lowers both to `NodeKind::Begin`, so a constructor whose
+//!   body is an explicit `begin … end` block is descended into here and its
+//!   leading `@x ||= …` is flagged where RuboCop would not. This shape is
+//!   contrived and not exercised by RuboCop's specs.
 //! ```
 //!
 //! ## Matched shapes

@@ -41,7 +41,7 @@
 //! An `elsif` condition that duplicates an earlier branch's condition is dead
 //! code: the earlier branch always wins, so the duplicate branch can never run.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop};
 
 #[derive(Default)]
 pub struct DuplicateElsifCondition;
@@ -58,11 +58,14 @@ const MSG: &str = "Duplicate `elsif` condition detected.";
 impl DuplicateElsifCondition {
     #[on_node(kind = "if")]
     fn check_if(&self, node: NodeId, cx: &Cx<'_>) {
-        // Process only from the head of the chain. Murphy represents each
-        // `elsif` as a nested `If` in the else branch, so this handler is
-        // invoked for every link; starting the walk only at the head
-        // reports each duplicate condition exactly once.
-        if cx.is_elsif(node) {
+        // RuboCop's `on_if` walks the chain via `while node.if? || node.elsif?`,
+        // so it only ever processes `if` / `elsif` links — never `unless` or a
+        // ternary. Murphy lowers `unless` (then/else swapped) and each `elsif`
+        // to a `NodeKind::If`, and this handler fires on every such node.
+        // Start the walk only at a true `if` head: this skips `elsif` links
+        // (the head's walk already covers them, so each duplicate is reported
+        // once) and skips `unless` / ternary heads that RuboCop never enters.
+        if !cx.is_if(node) {
             return;
         }
 
@@ -76,12 +79,16 @@ impl DuplicateElsifCondition {
             previous.push(key);
 
             // Descend into the else branch; continue only while it is an
-            // `If` node (an `elsif`, in source terms). A non-`If` else
-            // branch (a plain `else` body or no else) ends the chain.
+            // `if` / `elsif` link (RuboCop's `break unless node&.if_type?`
+            // combined with the `if? || elsif?` loop guard). An `unless`
+            // nested in the else is `if_type?` for RuboCop but neither
+            // `if?` nor `elsif?`, so it ends the chain — matching that here
+            // prevents a false positive on `unless` conditions that merely
+            // reuse text from an earlier branch.
             let Some(else_branch) = cx.else_branch(current).get() else {
                 break;
             };
-            if !matches!(*cx.kind(else_branch), NodeKind::If { .. }) {
+            if !(cx.is_if(else_branch) || cx.is_elsif(else_branch)) {
                 break;
             }
             current = else_branch;
@@ -175,5 +182,37 @@ mod tests {
     fn ignores_distinct_multibyte_conditions() {
         test::<DuplicateElsifCondition>()
             .expect_no_offenses("if x == '名前'\nelsif x == '住所'\nend\n");
+    }
+
+    #[test]
+    fn ignores_unless_in_else_reusing_condition_text() {
+        // RuboCop's chain walk (`while node.if? || node.elsif?`) never enters
+        // an `unless`, so the inner `unless x == 1` is not compared against the
+        // outer `if x == 1`. Murphy lowers `unless` to a nested `If`, so the
+        // walk must `break` at it to avoid a false positive.
+        test::<DuplicateElsifCondition>().expect_no_offenses(indoc! {r#"
+            if x == 1
+            else
+              unless x == 1
+                foo
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn ignores_unless_head_with_nested_if_reusing_condition_text() {
+        // An `unless` head is neither `if?` nor `elsif?`, so RuboCop's loop
+        // body never runs and the nested `if x == 1` is never seeded against
+        // the head's condition. The cop must skip `unless` heads entirely.
+        test::<DuplicateElsifCondition>().expect_no_offenses(indoc! {r#"
+            unless x == 1
+              a
+            else
+              if x == 1
+                b
+              end
+            end
+        "#});
     }
 }
