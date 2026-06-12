@@ -30,6 +30,11 @@
 //!     node.first_line` — the anchor dot must sit on the chain expression's
 //!     first line. `obj\n.foo\n.bar` (receiver alone on line 1, first dot on
 //!     line 2) therefore has no semantic base and is skipped.
+//!   - `first_call_alignment_node`: `return if method_on_receiver_last_line?(
+//!     node, base_receiver, :begin)` — a chain whose base receiver is a
+//!     parenthesized / `begin...end` expression (`(a || b).foo\n.bar`) has no
+//!     semantic base. Murphy over-skips any `Begin` base receiver (safe
+//!     under-fire).
 //!
 //!   Gaps (documented, not covered):
 //!   - `indented` and `indented_relative_to_receiver` styles.
@@ -42,7 +47,8 @@
 //!     multi-line block-chain anchors (`find_multiline_block_chain_node`),
 //!     `get_dot_right_above`, and the receiver-last-line `begin`/`array`
 //!     special cases.
-//!   - Grouped-expression / `begin`-receiver contexts (`not_for_this_cop?`).
+//!   - Other grouped-expression contexts handled by `not_for_this_cop?`
+//!     beyond the `Begin` base-receiver skip above.
 //!   - Autocorrect (RuboCop realigns via `AlignmentCorrector`).
 //! ```
 //!
@@ -51,7 +57,7 @@
 //! `send`/`csend` nodes whose leading-dot selector begins its own line and is
 //! misaligned with the first dotted call in the chain (anchored on line 1).
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, Range, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
 /// Stateless unit struct (ADR 0035).
 #[derive(Default)]
@@ -173,12 +179,20 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     // `first_call_has_a_dot` — the bottom-most call in the chain carrying a
-    // dot is the alignment anchor.
-    let Some(anchor) = first_dotted_call_in_chain(node, cx) else {
+    // dot is the alignment anchor; `base` is the chain's base receiver.
+    let Some((anchor, base)) = first_dotted_call_in_chain(node, cx) else {
         return;
     };
     // `first_call_alignment_node`: the node aligns to a *different* call.
     if anchor == node {
+        return;
+    }
+    // `first_call_alignment_node`: `return if method_on_receiver_last_line?(
+    // node, base_receiver, :begin)` — when the chain's base receiver is a
+    // parenthesized / `begin...end` expression, RuboCop declines the semantic
+    // base. We over-skip (any `Begin` base receiver) which is a safe
+    // under-fire; RuboCop is the documented exception to "don't match Begin".
+    if matches!(cx.kind(base), NodeKind::Begin(_)) {
         return;
     }
     let anchor_dot = cx.loc(anchor).dot();
@@ -221,7 +235,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
 /// Walk down the receiver chain to the base receiver, then up to the first
 /// call node that carries a dot operator — RuboCop's `first_call_has_a_dot`.
-fn first_dotted_call_in_chain(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+/// Returns `(anchor, base_receiver)`.
+fn first_dotted_call_in_chain(node: NodeId, cx: &Cx<'_>) -> Option<(NodeId, NodeId)> {
     // `find_base_receiver`: descend receivers to the bottom.
     let mut base = node;
     while let Some(recv) = cx.call_receiver(base).get() {
@@ -231,7 +246,7 @@ fn first_dotted_call_in_chain(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     let mut current = cx.parent(base).get()?;
     loop {
         if cx.loc(current).dot() != Range::ZERO {
-            return Some(current);
+            return Some((current, base));
         }
         current = cx.parent(current).get()?;
     }
@@ -293,6 +308,17 @@ mod tests {
         test::<MultilineMethodCallIndentation>().expect_no_offenses(indoc! {"
             obj
               .foo
+              .bar
+        "});
+    }
+
+    #[test]
+    fn skips_begin_base_receiver() {
+        // `method_on_receiver_last_line?(node, base_receiver, :begin)` — the
+        // chain's base receiver is a parenthesized expression, so there is no
+        // semantic base and the misaligned `.bar` must NOT be flagged.
+        test::<MultilineMethodCallIndentation>().expect_no_offenses(indoc! {"
+            (a || b).foo
               .bar
         "});
     }
