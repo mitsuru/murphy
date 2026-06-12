@@ -84,32 +84,32 @@ pub fn assert_cop_parity_metadata_for_crate(manifest_dir: impl AsRef<Path>) {
 /// Validate the parity metadata of a single source file, pushing a
 /// human-readable message per problem onto `failures`.
 ///
-/// A file that registers one or more `#[cop(name = "...")]` cops must carry a
-/// matching parity block per cop. A file that registers no cop but still carries
-/// parity block(s) — an ABI-blocker placeholder such as `Style/RedundantParentheses`
-/// — has each block validated as an *orphan*, so a `status: blocked` placeholder
-/// stays visible to validation instead of being silently skipped.
+/// Every registered `#[cop(name = "...")]` cop must carry a matching parity
+/// block. Any parity block that matches no registered cop — whether it is the
+/// only block in an `#[cop]`-less ABI-blocker placeholder (`Style/RedundantParentheses`)
+/// or a stray block sitting alongside real cops — is validated as an *orphan*,
+/// so a `status: blocked` placeholder stays visible to validation instead of
+/// being silently skipped.
 fn collect_parity_failures(source: &str, file: &str, failures: &mut Vec<String>) {
     let cop_names = cop_names_in_source(source);
     let parity_blocks = parity_blocks_in_source(source);
 
-    if cop_names.is_empty() {
-        for block in &parity_blocks {
-            validate_orphan_parity_block(block, file, failures);
+    for name in &cop_names {
+        match parity_blocks
+            .iter()
+            .find(|block| block_matches_cop(block, name))
+        {
+            Some(block) => validate_parity_block(block, name, file, failures),
+            None => failures.push(format!("{file}: missing murphy-parity block for {name}")),
         }
-        return;
     }
 
-    for name in cop_names {
-        let Some(block) = parity_blocks
-            .iter()
-            .find(|block| block_matches_cop(block, &name))
-        else {
-            failures.push(format!("{file}: missing murphy-parity block for {name}"));
-            continue;
-        };
-
-        validate_parity_block(block, &name, file, failures);
+    // Any block that no registered cop claims — including the sole block of an
+    // `#[cop]`-less placeholder — is validated as an orphan.
+    for block in &parity_blocks {
+        if !cop_names.iter().any(|name| block_matches_cop(block, name)) {
+            validate_orphan_parity_block(block, file, failures);
+        }
     }
 }
 
@@ -1120,6 +1120,34 @@ mod tests {
             failures,
             ["x.rs: blocked murphy-parity block for Style/Foo must list gap_issues"],
             "`blocked` must be a known status that still requires gap_issues"
+        );
+    }
+
+    #[test]
+    fn stray_block_alongside_registered_cop_is_validated_as_orphan() {
+        // A parity block matching no registered cop, in a file that DOES
+        // register a cop, must still be validated — not silently skipped.
+        let source = "\
+#[cop(name = \"Style/Foo\")]
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/Foo
+//! upstream_version_checked: 1.86.2
+//! status: verified
+//! gap_issues: []
+//! ```
+//! ```murphy-parity
+//! upstream: rubocop
+//! upstream_cop: Style/Bar
+//! status: blocked
+//! ```
+";
+        let mut failures = Vec::new();
+        collect_parity_failures(source, "x.rs", &mut failures);
+        assert_eq!(
+            failures,
+            ["x.rs: blocked murphy-parity block for Style/Bar must list gap_issues"],
+            "the stray Style/Bar block must be validated as an orphan"
         );
     }
 
