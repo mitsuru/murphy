@@ -82,6 +82,59 @@ pub fn emit_edit_with_preceding_space(cond_range: Range, replacement: &str, cx: 
     }
 }
 
+/// Returns `true` when the byte at `offset` sits at a column that holds a
+/// non-whitespace character on the immediately preceding or following source
+/// line. Mirrors RuboCop's `AllowForAlignment` / `PrecedingFollowingAlignment`
+/// vertical-alignment heuristic: extra spacing is treated as intentional
+/// alignment when something lines up directly above or below.
+///
+/// Shared by `Layout/SpaceAroundOperators` (operator column) and
+/// `Layout/SpaceBeforeFirstArg` (first-argument column).
+pub fn is_alignment_at_column(src: &[u8], offset: usize) -> bool {
+    let line_start = src[..offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let col = offset - line_start;
+
+    let non_ws_at_col = |line: &[u8]| -> bool {
+        col < line.len() && !matches!(line[col], b' ' | b'\t' | b'\n' | b'\r')
+    };
+
+    // Check previous line.
+    if line_start > 0 {
+        let prev_end = line_start - 1;
+        let prev_start = src[..prev_end]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if non_ws_at_col(&src[prev_start..prev_end]) {
+            return true;
+        }
+    }
+
+    // Check next line.
+    let rest_start = src[offset..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| offset + i + 1)
+        .unwrap_or(src.len());
+    if rest_start < src.len() {
+        let next_end = src[rest_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| rest_start + i)
+            .unwrap_or(src.len());
+        if non_ws_at_col(&src[rest_start..next_end]) {
+            return true;
+        }
+    }
+
+    false
+}
+
 // Note: is_parenthesized is tested indirectly via the cops that use it:
 // - `cops::style::parentheses_around_condition::tests::flags_if_with_paren_condition`
 //   verifies `is_parenthesized` returns true for `(x > 10)`.
