@@ -17,7 +17,10 @@
 //!   (`{ true: 1 }`), the key is rewritten with a hash rocket
 //!   (`{ true => 1 }`) since `{ true: 1 }` would otherwise parse the bare
 //!   boolean as a label again. The colon-key offense range excludes the
-//!   trailing `:` to match RuboCop (Murphy's sym range includes it).
+//!   trailing `:` to match RuboCop (Murphy's sym range includes it). The
+//!   replacement is the bare boolean keyword (the symbol's value), so quoted
+//!   forms (`:"true"`, `:'false'`) also correct to `true`/`false` rather than
+//!   to the string `"true"` that naive colon-stripping would produce.
 //! ```
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
 
@@ -53,7 +56,11 @@ impl BooleanSymbol {
             return;
         }
 
-        let src = cx.raw_source(cx.range(node));
+        // The replacement is always the bare boolean keyword (`name` is the
+        // symbol's value, `true`/`false`). Using `name` rather than stripping
+        // `:` from the raw source keeps quoted forms (`:"true"`, `:'false'`)
+        // correct — those parse to the same `sym` node, and naive colon
+        // stripping would yield the *string* `"true"` instead of a boolean.
         if is_colon_hash_key(node, cx) {
             // `{ true: 1 }`: Murphy's sym range includes the trailing `:`, but
             // RuboCop highlights only the word (the `:` is the pair operator),
@@ -66,8 +73,8 @@ impl BooleanSymbol {
             cx.emit_edit(cx.range(node), &format!("{name} =>"));
         } else {
             cx.emit_offense(cx.range(node), message, None);
-            // `:true` → `true`: strip the leading `:`.
-            cx.emit_edit(cx.range(node), src.trim_start_matches(':'));
+            // `:true` → `true` (and `:"true"` → `true`).
+            cx.emit_edit(cx.range(node), name);
         }
     }
 }
@@ -179,6 +186,30 @@ mod tests {
                         ^^^^^^ Symbol with a boolean name - you probably meant to use `false`.
             "#},
             "[true, false]\n",
+        );
+    }
+
+    #[test]
+    fn flags_double_quoted_boolean_symbol() {
+        // `:"true"` parses to the same `(sym :true)` node; the correction is
+        // the bare boolean `true`, NOT the string `"true"`.
+        test::<BooleanSymbol>().expect_correction(
+            indoc! {r#"
+                :"true"
+                ^^^^^^^ Symbol with a boolean name - you probably meant to use `true`.
+            "#},
+            "true\n",
+        );
+    }
+
+    #[test]
+    fn flags_single_quoted_boolean_symbol() {
+        test::<BooleanSymbol>().expect_correction(
+            indoc! {r#"
+                :'false'
+                ^^^^^^^^ Symbol with a boolean name - you probably meant to use `false`.
+            "#},
+            "false\n",
         );
     }
 
