@@ -4,12 +4,13 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/EmptyFile
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-9cr.9
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Mirrors RuboCop's empty-source check and AllowComments:true default. The
-//!   AllowComments:false override is read through cx.options_or_default.
+//!   Mirrors RuboCop's empty-source check verbatim (v1.87.0:
+//!   `offending? = empty_file? || (!AllowComments && contains_only_comments?)`)
+//!   and the AllowComments:true default. The AllowComments override is read live
+//!   via cx.options_or_default. No autocorrect (RuboCop has none).
 
 use murphy_plugin_api::{CopOptions, Cx, Range, cop};
 

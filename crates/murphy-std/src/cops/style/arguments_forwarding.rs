@@ -10,18 +10,20 @@
 //! safe: true
 //! supports_autocorrect: true
 //! status: partial
-//! gap_issues: []
+//! gap_issues:
+//!   - murphy-jrcs
 //! notes: >
 //!   Implements the forward-all `...` core path (Ruby 2.7+): flags defs
 //!   whose restarg/kwrestarg/blockarg all have redundant names and are
 //!   forwarded unchanged to all call sites, replacing with `...`.
-//!   Known v1 limitations: (1) Anonymous forwarding (`*`, `**`, `&`) for
-//!   Ruby 3.1-3.2+ (UseAnonymousForwarding) is not implemented — Murphy
+//!   Remaining gaps (murphy-jrcs): (1) Anonymous forwarding (`*`, `**`, `&`)
+//!   for Ruby 3.1-3.2+ (UseAnonymousForwarding) is not implemented — Murphy
 //!   has no cx.target_ruby_version() API to gate version-dependent
 //!   behaviour. (2) AllowOnlyRestArgument: false (flagging *args-only
 //!   patterns as ...) is not implemented. (3) The Redundant*ArgumentNames
-//!   config options are hardcoded to their RuboCop defaults and cannot be
-//!   overridden until option-live-override support lands (murphy-9cr.9).
+//!   config options are hardcoded to their RuboCop defaults — the cop does
+//!   not yet read them via cx.options_or_default (the option-wiring infra
+//!   exists; this is a cop-side gap, not a config-layer one).
 //!   Disable with `[cops.rules."Style/ArgumentsForwarding"] enabled = false`
 //!   if these limitations affect your codebase.
 //! ```

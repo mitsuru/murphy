@@ -7,22 +7,21 @@
 //! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues:
-//!   - murphy-9cr.9
 //!   - murphy-g2lu
+//!   - murphy-4k23
 //! notes: >
 //!   Detection mirrors RuboCop's on_if: flags an `if`/`elsif`/`unless` whose
 //!   body (`if_branch`) is empty, skipping the single-line `if x then end`
 //!   form (RuboCop's `same_line?(loc.begin, loc.end)` guard) and, by default,
 //!   comment-only branches (AllowComments). `elsif` is a nested `If` node, so
 //!   the per-node handler fires once per branch (matching RuboCop's per-node
-//!   on_if). Offense highlight is clamped to the node's first line (Murphy
-//!   convention) vs RuboCop's keyword..else range; start position matches.
-//!   `AllowComments` defaults to `true` (matching RuboCop) and is read live via
-//!   `cx.options_or_default`, so a configured `AllowComments: false` flags a
-//!   comment-only branch at dispatch time; murphy-9cr.9 only adds core-side
-//!   schema validation of the option key. The
-//!   `flip_orphaned_else` autocorrect is NOT ported (genuinely structural —
-//!   condition flip + branch removal + line math); detection only.
+//!   on_if). `AllowComments` defaults to `true` (matching RuboCop) and is read
+//!   live via `cx.options_or_default`, so a configured `AllowComments: false`
+//!   flags a comment-only branch at dispatch time. Remaining gaps: the
+//!   `flip_orphaned_else` autocorrect is NOT ported (murphy-g2lu — genuinely
+//!   structural: condition flip + branch removal + line math; detection only),
+//!   and the offense highlight is clamped to the node's first line (Murphy
+//!   convention) vs RuboCop's keyword..else range (murphy-4k23; start matches).
 //! ```
 //!
 //! ## Deferred: the `flip_orphaned_else` autocorrect

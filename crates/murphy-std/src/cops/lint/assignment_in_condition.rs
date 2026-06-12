@@ -9,16 +9,17 @@
 //! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's Lint/AssignmentInCondition cop: assignments in
-//!   if/while/until conditions are flagged. The `AllowSafeAssignment`
-//!   option is exported in the schema but runtime reads come from
-//!   `Default` (v1 limitation shared with all option-bearing cops).
+//!   if/while/until conditions are flagged. The `AllowSafeAssignment` option
+//!   (default true) is read live via `cx.options_or_default`, so a configured
+//!   override takes effect at dispatch time.
 //! ```
 //!
-//! ## Known v1 limitation: option overrides not wired through `Cx`
+//! ## `AllowSafeAssignment`
 //!
-//! `allow_safe_assignment` is exported via `#[derive(CopOptions)]` so the
-//! host validates `murphy.toml` entries, but runtime reads still come from
-//! `Options::default()`. `murphy-9cr.9` will route overrides through `Cx`.
+//! `allow_safe_assignment` is exported via `#[derive(CopOptions)]` and read at
+//! dispatch time via [`Cx::options_or_default`], so a parenthesised safe
+//! assignment (`if (x = foo)`) is allowed when the option is true (RuboCop's
+//! default) and flagged when set to false.
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
