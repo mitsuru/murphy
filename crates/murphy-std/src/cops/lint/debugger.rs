@@ -90,7 +90,7 @@ pub struct Debugger;
 /// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(
+    #[option(name = "DebuggerMethods", 
         default = [
             // bare entrypoints
             "debugger",
@@ -132,7 +132,7 @@ pub struct Options {
         description = "Method calls that should be flagged as debugger entry points."
     )]
     pub debugger_methods: Vec<String>,
-    #[option(
+    #[option(name = "DebuggerRequires", 
         default = [
             "byebug",
             "capybara/dsl",

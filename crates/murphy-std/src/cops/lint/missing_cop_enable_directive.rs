@@ -9,7 +9,7 @@
 //!   - murphy-3bod
 //! notes: >
 //!   Mirrors RuboCop's common own-line disable/enable range checks and
-//!   MaxRangeSize option. Registry-backed exemptions for cops disabled in
+//!   MaximumRangeSize option. Registry-backed exemptions for cops disabled in
 //!   config, department expansion, and rubocop:push/pop stack handling are not
 //!   available in the current v1 comment directive surface; those cases are
 //!   conservative v1 limitations.
@@ -22,7 +22,7 @@ pub struct MissingCopEnableDirective;
 
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(default = 2147483647, description = "Maximum disabled range size in lines.")]
+    #[option(name = "MaximumRangeSize", default = 2147483647, description = "Maximum disabled range size in lines.")]
     pub max_range_size: i64,
 }
 

@@ -76,22 +76,22 @@ pub struct UnusedMethodArgument;
 /// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(
+    #[option(name = "IgnoreNotImplementedMethods", 
         default = true,
         description = "When true, skip the cop on methods that raise a NotImplementedException."
     )]
     pub ignore_not_implemented_methods: bool,
-    #[option(
+    #[option(name = "NotImplementedExceptions", 
         default = ["NotImplementedError"],
         description = "Exception classes whose `raise`/`fail` calls in a method body bypass the cop."
     )]
     pub not_implemented_exceptions: Vec<String>,
-    #[option(
+    #[option(name = "IgnoreEmptyMethods", 
         default = true,
         description = "When true, skip the cop on methods with an empty body (no statements)."
     )]
     pub ignore_empty_methods: bool,
-    #[option(
+    #[option(name = "AllowUnusedKeywordArguments", 
         default = false,
         description = "When true, unused keyword arguments (kwarg/kwoptarg) are not flagged."
     )]

@@ -78,7 +78,7 @@ pub struct NumericPredicateOptions {
     )]
     pub enforced_style: NumericPredicateStyle,
 
-    #[option(
+    #[option(name = "AllowedMethods", 
         default = [],
         description = "Method names that are always allowed (not flagged)."
     )]

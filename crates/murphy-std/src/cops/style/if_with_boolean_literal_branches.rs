@@ -58,7 +58,7 @@ pub struct IfWithBooleanLiteralBranches;
 
 #[derive(CopOptions)]
 pub struct IfWithBooleanLiteralBranchesOptions {
-    #[option(
+    #[option(name = "AllowedMethods", 
         default = ["infinite?", "nonzero?"],
         description = "Method names that are always allowed (not flagged)."
     )]

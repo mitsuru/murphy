@@ -33,7 +33,7 @@ pub enum EnforcedStyle {
 
 #[derive(CopOptions)]
 pub struct ConditionalAssignmentOptions {
-    #[option(
+    #[option(name = "EnforcedStyle", 
         default = "assign_to_condition",
         description = "Enforced style for conditional assignment."
     )]

@@ -20,7 +20,7 @@ pub struct Copyright;
 
 #[derive(CopOptions)]
 pub struct CopyrightOptions {
-    #[option(default = "", description = "Substring to search for in comments (e.g. 'Copyright'). Regex not yet supported.")]
+    #[option(name = "Notice", default = "", description = "Substring to search for in comments (e.g. 'Copyright'). Regex not yet supported.")]
     pub notice: String,
 }
 

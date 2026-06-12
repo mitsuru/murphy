@@ -76,17 +76,17 @@ pub struct ExampleLength;
 /// option access goes through `cx.options_or_default`.
 #[derive(CopOptions)]
 pub struct ExampleLengthOptions {
-    #[option(
+    #[option(name = "Max", 
         default = 5,
         description = "Maximum number of lines in an example body."
     )]
     pub max: i64,
-    #[option(
+    #[option(name = "CountComments", 
         default = false,
         description = "Whether to count comment lines toward the example length."
     )]
     pub count_comments: bool,
-    #[option(
+    #[option(name = "CountAsOne", 
         default = [],
         description = "Constructs to fold into one line: array, hash, heredoc, method_call."
     )]

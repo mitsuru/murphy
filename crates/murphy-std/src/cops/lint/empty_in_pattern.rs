@@ -22,7 +22,7 @@ pub struct EmptyInPattern;
 
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(default = true, description = "When true, don't flag an empty in branch whose body region contains a comment.")]
+    #[option(name = "AllowComments", default = true, description = "When true, don't flag an empty in branch whose body region contains a comment.")]
     pub allow_comments: bool,
 }
 

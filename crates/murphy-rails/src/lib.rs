@@ -41,6 +41,16 @@ pub mod cops;
 // cop の登録は各 cop ファイル (inline stub / cops::rails::* 両方) の submit_cop!(T) が担う。
 register_cops!(mode = dynamic);
 
+#[cfg(test)]
+mod option_key_guard {
+    /// Every cop option's config key must be RuboCop-style PascalCase, or
+    /// `.murphy.yml` config silently no-ops. See `murphy-pj12`.
+    #[test]
+    fn all_option_keys_are_pascal_case() {
+        murphy_plugin_api::test_support::assert_pack_option_keys_pascal_case(&crate::PACK_COPS);
+    }
+}
+
 /// ## RuboCop parity
 ///
 /// ```murphy-parity

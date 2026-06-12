@@ -19,7 +19,7 @@ pub struct InheritException;
 
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(
+    #[option(name = "EnforcedStyle", 
         default = "standard_error",
         description = "Preferred base class: `standard_error` or `runtime_error`."
     )]

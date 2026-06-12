@@ -63,7 +63,7 @@ pub struct MultipleExpectations;
 /// Cop options for [`MultipleExpectations`].
 #[derive(CopOptions)]
 pub struct MultipleExpectationsOptions {
-    #[option(
+    #[option(name = "Max", 
         default = 1,
         description = "Maximum number of expect(...) calls per example."
     )]

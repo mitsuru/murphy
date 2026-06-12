@@ -41,8 +41,8 @@ use std::{fs, vec::Vec};
 use murphy_ast::Ast;
 
 use crate::{
-    Cop, CopOptions, Cx, CxRaw, FnTable, NodeCop, NodeId, Range, RawEdit, RawOffense, RawSlice,
-    Severity,
+    Cop, CopOptions, Cx, CxRaw, FnTable, NodeCop, NodeId, OptionSpec, PluginCopV1, Range, RawEdit,
+    RawOffense, RawSlice, Severity,
 };
 
 /// Re-export of [`indoc::indoc!`] so plugin packs writing
@@ -79,6 +79,127 @@ pub fn assert_cop_parity_metadata_for_crate(manifest_dir: impl AsRef<Path>) {
         "missing parity metadata:\n{}",
         failures.join("\n")
     );
+}
+
+/// Assert that every cop option's config key in `cops` is RuboCop-style
+/// PascalCase (`^[A-Z][A-Za-z0-9]*$`, e.g. `Max`, `EnforcedStyle`,
+/// `MaximumRangeSize`, `CountAsOne`).
+///
+/// A `#[derive(CopOptions)]` field declared without `#[option(name = "...")]`
+/// falls back to its snake_case Rust identifier (`max`, `enforced_style`),
+/// which never matches the PascalCase key users write in `.murphy.yml`, so the
+/// option is silently ignored. Each pack passes its `PACK_COPS` slice; this
+/// guard fails the build the moment a snake_case key sneaks in. See
+/// `murphy-pj12`.
+#[track_caller]
+pub fn assert_pack_option_keys_pascal_case(cops: &[PluginCopV1]) {
+    fn is_pascal_case(key: &str) -> bool {
+        let mut chars = key.chars();
+        // The first char is verified ASCII-uppercase (a subset of
+        // alphanumeric), so reuse the same iterator for the remaining chars
+        // rather than re-scanning the key from the start.
+        chars.next().is_some_and(|c| c.is_ascii_uppercase())
+            && chars.all(|c| c.is_ascii_alphanumeric())
+    }
+
+    let mut offenders = Vec::new();
+    for cop in cops {
+        let cop_name = std::str::from_utf8(unsafe { cop.name.as_bytes() }).unwrap_or("<bad utf8>");
+        if cop.options_ptr.is_null() {
+            continue;
+        }
+        // Safety: `options_ptr`/`options_len` describe the cop's `OptionSpec`
+        // table, a `'static` slice emitted by the `#[derive(CopOptions)]` macro.
+        let specs: &[OptionSpec] =
+            unsafe { std::slice::from_raw_parts(cop.options_ptr, cop.options_len) };
+        for spec in specs {
+            let key = std::str::from_utf8(unsafe { spec.name.as_bytes() }).unwrap_or("<bad utf8>");
+            if !is_pascal_case(key) {
+                offenders.push(format!("  {cop_name}: `{key}`"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "option keys must be RuboCop-style PascalCase (add `#[option(name = \"...\")]`):\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[cfg(test)]
+mod option_key_pascal_case_guard_tests {
+    use super::assert_pack_option_keys_pascal_case;
+    use crate::{CxRaw, NodeId, NodeKindTag, OptionSpec, PluginCopV1, RawSlice, SEVERITY_UNSET};
+
+    unsafe extern "C" fn noop_dispatch(_node: NodeId, _cx: *const CxRaw) -> i32 {
+        0
+    }
+
+    static KINDS: &[NodeKindTag] = &[NodeKindTag(1)];
+    static PASCAL_OPTS: &[OptionSpec] = &[opt("Max"), opt("EnforcedStyle")];
+    static SNAKE_OPTS: &[OptionSpec] = &[opt("max"), opt("enforced_style")];
+
+    const fn opt(name: &'static str) -> OptionSpec {
+        OptionSpec {
+            name: RawSlice::from_str(name),
+            ty: RawSlice::from_str("bool"),
+            default_json: RawSlice::EMPTY,
+            description: RawSlice::EMPTY,
+            enum_values_json: RawSlice::EMPTY,
+            replacement: RawSlice::EMPTY,
+            reason: RawSlice::EMPTY,
+        }
+    }
+
+    /// Minimal cop carrying only the fields the guard reads (`name`,
+    /// `options_ptr`, `options_len`); the rest are inert placeholders. An
+    /// empty `options` slice yields a null `options_ptr` to exercise the
+    /// "cop has no options" skip path.
+    fn cop(name: &'static str, options: &'static [OptionSpec]) -> PluginCopV1 {
+        PluginCopV1 {
+            size: std::mem::size_of::<PluginCopV1>(),
+            name: RawSlice::from_str(name),
+            description: RawSlice::EMPTY,
+            default_severity: SEVERITY_UNSET,
+            default_enabled: 255,
+            options_ptr: if options.is_empty() {
+                std::ptr::null()
+            } else {
+                options.as_ptr()
+            },
+            options_len: options.len(),
+            kinds_ptr: KINDS.as_ptr(),
+            kinds_len: KINDS.len(),
+            dispatch: noop_dispatch,
+            send_methods_ptr: std::ptr::null(),
+            send_methods_len: 0,
+            safe: 255,
+            safe_autocorrect: 255,
+            minimum_target_ruby_version: 0,
+        }
+    }
+
+    #[test]
+    fn passes_on_pascal_case_keys() {
+        assert_pack_option_keys_pascal_case(&[cop("Style/Foo", PASCAL_OPTS)]);
+    }
+
+    #[test]
+    fn passes_on_empty_pack() {
+        assert_pack_option_keys_pascal_case(&[]);
+    }
+
+    #[test]
+    fn skips_cop_with_no_options() {
+        // Null `options_ptr` must be skipped, not dereferenced.
+        assert_pack_option_keys_pascal_case(&[cop("Style/Bar", &[])]);
+    }
+
+    #[test]
+    #[should_panic(expected = "PascalCase")]
+    fn panics_on_snake_case_keys() {
+        assert_pack_option_keys_pascal_case(&[cop("Style/Baz", SNAKE_OPTS)]);
+    }
 }
 
 /// Validate the parity metadata of a single source file, pushing a

@@ -45,7 +45,7 @@ pub struct EmptyWhen;
 /// [`Cx::options_or_default`].
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(
+    #[option(name = "AllowComments", 
         default = true,
         description = "When true, don't flag a when branch whose body region contains only a comment."
     )]

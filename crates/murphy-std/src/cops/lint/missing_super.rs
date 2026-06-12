@@ -34,7 +34,7 @@ pub struct MissingSuper;
 
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(default = [], description = "Parent classes allowed without super.")]
+    #[option(name = "AllowedParentClasses", default = [], description = "Parent classes allowed without super.")]
     pub allowed_parent_classes: Vec<String>,
 }
 

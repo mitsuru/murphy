@@ -56,25 +56,25 @@ const MSG: &str = "Pass `&:%<method>s` as an argument to `%<block_method>s` inst
 /// Cop options for `Style/SymbolProc`.
 #[derive(CopOptions)]
 pub struct Options {
-    #[option(
+    #[option(name = "AllowMethodsWithArguments", 
         default = false,
         description = "When true, allows blocks on methods that have arguments."
     )]
     pub allow_methods_with_arguments: bool,
 
-    #[option(
+    #[option(name = "AllowComments", 
         default = false,
         description = "When true, allows blocks that contain comments."
     )]
     pub allow_comments: bool,
 
-    #[option(
+    #[option(name = "AllowedMethods", 
         default = ["define_method"],
         description = "Method names that are always allowed (not flagged)."
     )]
     pub allowed_methods: Vec<String>,
 
-    #[option(
+    #[option(name = "AllowedPatterns", 
         default = [],
         description = "Regex patterns for dispatch method names that are always allowed (not flagged)."
     )]

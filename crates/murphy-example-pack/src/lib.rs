@@ -18,6 +18,16 @@ pub mod todo_format;
 murphy_plugin_api::register_cops!(mode = dynamic);
 
 #[cfg(test)]
+mod option_key_guard {
+    /// Every cop option's config key must be RuboCop-style PascalCase, or
+    /// `.murphy.yml` config silently no-ops. See `murphy-pj12`.
+    #[test]
+    fn all_option_keys_are_pascal_case() {
+        murphy_plugin_api::test_support::assert_pack_option_keys_pascal_case(&crate::PACK_COPS);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     /// Dummy smoke test: ensures `cargo test --workspace` materialises
     /// the cdylib build artifact (the e2e test in
