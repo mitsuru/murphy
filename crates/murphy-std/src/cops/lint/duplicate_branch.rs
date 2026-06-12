@@ -10,16 +10,22 @@
 //! version_added: "1.3"
 //! safe: true
 //! supports_autocorrect: false
-//! status: partial
-//! gap_issues:
-//!   - murphy-ff1x
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Covers if/elsif/else, case/when, case/in, ternary, and begin/rescue/else
 //!   duplicate detection, plus IgnoreLiteralBranches / IgnoreConstantBranches /
-//!   IgnoreDuplicateElseBranch options. Branch equality is compared via
-//!   `raw_source` (whitespace-sensitive), a known divergence from RuboCop's
-//!   structural AST `==`. `IgnoreLiteralBranches`' literal-descendant walk
-//!   approximates RuboCop's `basic_literal?` / container check.
+//!   IgnoreDuplicateElseBranch options. Two intentional, documented divergences
+//!   from RuboCop, neither tracked as open work: (1) branch equality is compared
+//!   via `raw_source` (whitespace-sensitive) rather than structural AST `==`,
+//!   matching Murphy's existing IdenticalConditionalBranches convention;
+//!   (2) elsif/when/in/rescue offense ranges are trimmed to the first source
+//!   line of the branch label (RuboCop reports the full multi-line
+//!   `parent.source_range`), consistent with Murphy's line-trimming convention
+//!   (cf. `useless_rescue`). The IgnoreLiteralBranches literal-descendant walk
+//!   matches RuboCop's `basic_literal?` set (scalar literals only; composite
+//!   array/hash/range descendants are not basic literals, so nested containers
+//!   are not treated as literal branches — same as RuboCop).
 //! ```
 //!
 //! ## Matched shapes

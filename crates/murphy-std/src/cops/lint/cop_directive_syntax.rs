@@ -10,17 +10,19 @@
 //! version_added: "1.72"
 //! safe: true
 //! supports_autocorrect: false
-//! status: partial
-//! gap_issues:
-//!   - murphy-x57c
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Hand-rolled port of RuboCop's `DirectiveComment` regex stack (no `regex`
 //!   dependency in murphy-std). Covers the four offense messages (missing mode,
 //!   invalid mode, missing cop name, malformed cop names) plus the no-offense
-//!   cases (bare department, `all`, valid trailing `-- comment`, double-comment
-//!   and quoted non-directive). Only `rubocop:` directives are validated, mirroring
-//!   RuboCop exactly — Murphy's own `murphy:` directives are intentionally not
-//!   policed by this cop.
+//!   cases (bare department, `all`, valid trailing `-- comment`, tab-separated
+//!   mode, double-comment and quoted non-directive). Mode extraction follows
+//!   Ruby's `split(' ')` whitespace-run semantics; the trailing-comment check
+//!   reproduces RuboCop's `post_match.lstrip.start_with?('--')` (so `Foo--bad`
+//!   is accepted). Only `rubocop:` directives are validated, mirroring RuboCop
+//!   exactly — Murphy's own `murphy:` directives are deliberately out of scope
+//!   (RuboCop's cop is `rubocop:`-only), not a tracked gap.
 //! ```
 //!
 //! ## Matched shapes

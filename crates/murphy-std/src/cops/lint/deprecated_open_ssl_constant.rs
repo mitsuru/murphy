@@ -17,7 +17,10 @@
 //!   Full port: `OpenSSL::Cipher::AES.new(128, :GCM)` → `OpenSSL::Cipher.new('aes-128-gcm')`,
 //!   `OpenSSL::Digest::SHA256.new` → `OpenSSL::Digest.new('SHA256')`,
 //!   `OpenSSL::Digest::SHA256.digest('foo')` → `OpenSSL::Digest.digest('SHA256', 'foo')`.
-//!   Mirrors RuboCop's argument-safety guard (skip variable/call/const args),
+//!   The argument-safety guard is a positive Int/Sym/Str allow-list rather than
+//!   RuboCop's negative variable/call/const skip — a deliberate, slightly
+//!   stricter choice that additionally skips Dstr/array/hash args (which RuboCop
+//!   would attempt to rewrite into malformed code). Also mirrors the
 //!   `digest_const?` receiver guard, `OpenSSL::Cipher::Cipher` passthrough, the
 //!   NO_ARG_ALGORITHM (BF/DES/IDEA/RC4) special case, and the 3-char cipher-name
 //!   chunking + CBC default-mode reconstruction.

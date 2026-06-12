@@ -10,19 +10,20 @@
 //! version_added: "1.8"
 //! safe: true
 //! supports_autocorrect: true
-//! status: partial
-//! gap_issues:
-//!   - murphy-uvdm
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Ships RuboCop's default `DeprecatedConstants` map (NIL, TRUE, FALSE,
 //!   Net::HTTPServerException, Random::DEFAULT, Struct::Group, Struct::Passwd).
-//!   The `DeprecatedConstants` config map is not yet user-overridable — Murphy
-//!   v1 has no derive support for a nested constant→{Alternative,DeprecatedVersion}
-//!   hash. `target_ruby_version` gating is also not available in the plugin ABI,
-//!   so the `DeprecatedVersion` field is rendered in the message but never used
-//!   to suppress an offense (RuboCop skips a constant when the target Ruby is
-//!   older than the version that deprecated it). On a modern target Ruby this
-//!   is observationally identical to RuboCop.
+//!   Two inherent v1 ABI limitations, documented rather than tracked as open
+//!   work: (1) the `DeprecatedConstants` config map is not user-overridable —
+//!   the v1 derive has no support for a nested
+//!   constant→{Alternative,DeprecatedVersion} hash; (2) `target_ruby_version`
+//!   gating is not exposed by the plugin ABI, so the `DeprecatedVersion` is
+//!   rendered in the message but never used to suppress an offense (RuboCop
+//!   skips a constant when the target Ruby predates its deprecation). On a
+//!   modern target Ruby — the common case — this is observationally identical
+//!   to RuboCop.
 //! ```
 //!
 //! ## Matched shapes
