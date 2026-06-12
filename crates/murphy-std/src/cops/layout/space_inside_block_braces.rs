@@ -306,8 +306,13 @@ fn space_inside_left_brace(
                 start: left_brace.range.end,
                 end: pipe.range.start,
             };
-            cx.emit_offense(range, "Space between { and | detected.", None);
-            cx.emit_edit(range, "");
+            // Only correct a horizontal gap: if the `{` and `|` are on
+            // different lines (multiline block), deleting the range would
+            // collapse the newline and join the lines, which is destructive.
+            if !cx.raw_source(range).bytes().any(|b| b == b'\n') {
+                cx.emit_offense(range, "Space between { and | detected.", None);
+                cx.emit_edit(range, "");
+            }
         }
         // else: correct.
     } else {
@@ -551,6 +556,24 @@ mod tests {
                 "#},
                 "foo {|x| bar(x) }\n",
             );
+    }
+
+    #[test]
+    fn no_space_before_params_does_not_collapse_multiline_pipe() {
+        // The `|` is on a new line — deleting the gap would join the lines.
+        // Must not emit a destructive correction.
+        let opts = SpaceInsideBlockBracesOptions {
+            enforced_style: BlockBraceStyle::Space,
+            empty_style: EmptyBlockBraceStyle::NoSpace,
+            space_before_block_parameters: false,
+        };
+        test::<SpaceInsideBlockBraces>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                foo {
+                  |x| bar(x)
+                }
+            "#});
     }
 
     #[test]

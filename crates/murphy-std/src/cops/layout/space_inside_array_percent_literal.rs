@@ -64,22 +64,25 @@ impl SpaceInsideArrayPercentLiteral {
 /// Byte range of the literal's contents — between the opener (`%w[`, `%i(`,
 /// etc.) and the closing delimiter. Returns `None` if the shape is degenerate.
 fn contents_range(node_range: Range, src: &str) -> Option<Range> {
-    // Opener is `%` + type char + one delimiter char, e.g. `%w[`.
-    // The delimiter character may be multibyte-safe ASCII (`[`, `(`, `{`, `<`,
-    // `|`, `/`, etc.); take the third char's byte length.
+    // Opener is `%` + type char + one delimiter char, e.g. `%w[`. The delimiter
+    // is usually 1-byte ASCII (`[`, `(`, `{`, `<`, `|`, `/`, …) but Ruby permits
+    // multi-byte delimiters, so measure it with `len_utf8()` and clamp every
+    // computed index to the byte length to stay on UTF-8 boundaries (no panic
+    // on slicing).
     let mut chars = src.char_indices();
     chars.next()?; // `%`
     chars.next()?; // type char (`w`/`i`/`W`/`I`)
-    let (delim_idx, _) = chars.next()?; // opening delimiter
-    let opener_len = delim_idx + 1; // bytes up to and including the delimiter
+    let (delim_idx, delim_char) = chars.next()?; // opening delimiter
+    let delim_len = delim_char.len_utf8();
     let total_len = src.len();
-    if total_len < opener_len + 1 {
+    let opener_len = (delim_idx + delim_len).min(total_len);
+    // Need room for the opener and a matching closing delimiter of equal width.
+    if total_len < opener_len + delim_len {
         return None;
     }
-    // Closing delimiter is the final byte (ASCII for all percent delimiters).
     Some(Range {
         start: node_range.start + opener_len as u32,
-        end: node_range.end - 1,
+        end: node_range.end - delim_len as u32,
     })
 }
 
