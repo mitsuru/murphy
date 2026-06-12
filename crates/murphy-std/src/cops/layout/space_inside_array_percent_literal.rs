@@ -12,9 +12,11 @@
 //! notes: >
 //!   Mirrors RuboCop's MULTIPLE_SPACES_BETWEEN_ITEMS_REGEX
 //!   `(?:[\S&&[^\\]](?:\\ )*)( {2,})(?=\S)`: collapse a run of 2+ spaces that
-//!   sits between two non-space characters (the left one not being a bare
+//!   sits between two non-whitespace characters (the left one not being a bare
 //!   backslash, allowing escaped spaces `\ ` before the run) down to a single
-//!   space. Only `%i/%I/%w/%W` literals (which map to Murphy `Array` nodes)
+//!   space. Both anchors are `\S`, so the indentation between elements of a
+//!   multi-line `%w(...)` — a run preceded/followed by a newline — is left
+//!   alone. Only `%i/%I/%w/%W` literals (which map to Murphy `Array` nodes)
 //!   are checked; the leading/trailing padding of the contents is left to
 //!   other cops, matching RuboCop which only collapses interior runs.
 //! ```
@@ -108,9 +110,15 @@ fn multiple_space_runs(contents: &str) -> Vec<(usize, usize)> {
         }
         let run_end = i;
 
-        // The run must sit between two non-space characters: a leading char
-        // (the regex's `[\S&&[^\\]]…` anchor) and a trailing one (`(?=\S)`).
-        if run_start == 0 || run_end >= bytes.len() {
+        // The run must sit between two non-whitespace characters: a leading
+        // char (the regex's `[\S&&[^\\]]…` anchor) and a trailing one
+        // (`(?=\S)`). Both anchors are `\S`, so a newline/tab on either side —
+        // e.g. the indentation between elements of a multi-line `%w(...)` —
+        // does NOT anchor the run and must be left alone.
+        if run_start == 0 || is_ruby_space(bytes[run_start - 1]) {
+            continue;
+        }
+        if run_end >= bytes.len() || is_ruby_space(bytes[run_end]) {
             continue;
         }
 
@@ -131,6 +139,13 @@ fn multiple_space_runs(contents: &str) -> Vec<(usize, usize)> {
         }
     }
     runs
+}
+
+/// Ruby's `\s` character class: `[ \t\r\n\f\v]` (ASCII-only, as RuboCop's
+/// regex is not in Unicode mode). Used to test the run's anchors against
+/// RuboCop's `\S`, so newline/tab between elements does not count as an anchor.
+fn is_ruby_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0C | 0x0B)
 }
 
 /// Count the consecutive `\` bytes immediately before `pos`.
@@ -241,6 +256,43 @@ mod tests {
                     ^^ Use only a single space inside array percent literal.
             "#},
             "%w[a b]\n",
+        );
+    }
+
+    #[test]
+    fn accepts_multiline_word_array() {
+        // Elements separated by `\n` + indentation are NOT flagged: RuboCop's
+        // anchors `[\S&&[^\\]]` / `(?=\S)` both require a non-whitespace
+        // character, and the `\n` before each indent run breaks the leading
+        // anchor. Matches RuboCop 1.87.0 (0 offenses).
+        test::<SpaceInsideArrayPercentLiteral>().expect_no_offenses(indoc! {r#"
+            FILTERS = %w(
+              lowercase
+              asciifolding
+              cjk_width
+            )
+        "#});
+    }
+
+    #[test]
+    fn flags_interior_double_space_in_multiline() {
+        // A genuine 2-space run between two elements on the same physical line
+        // is still flagged inside a multi-line literal; the newline-anchored
+        // indentation on the other lines is not.
+        test::<SpaceInsideArrayPercentLiteral>().expect_correction(
+            indoc! {r#"
+                FILTERS = %w(
+                  same  line
+                      ^^ Use only a single space inside array percent literal.
+                  next
+                )
+            "#},
+            indoc! {r#"
+                FILTERS = %w(
+                  same line
+                  next
+                )
+            "#},
         );
     }
 }
