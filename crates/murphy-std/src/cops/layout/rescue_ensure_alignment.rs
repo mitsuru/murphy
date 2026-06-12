@@ -38,7 +38,7 @@
 //! keyword start) with `new_column` spaces, but only when that span is
 //! entirely whitespace (RuboCop's `whitespace.source.strip.empty?` guard).
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, SourceToken, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -380,19 +380,52 @@ fn first_line_end(source: &str, range: Range) -> u32 {
         .min(range.end)
 }
 
-/// Scan for the `ensure` keyword token within the node's range.
+/// Scan for *this* `Ensure` node's `ensure` keyword.
+///
+/// The `Ensure` node carries the whole enclosing begin/def block range, so a
+/// naive forward scan from the node start would pick up the `ensure` keyword of
+/// a *nested* `begin … ensure … end` inside the protected body. The keyword
+/// that belongs to this node is the one *immediately preceding* its `ensure_`
+/// clause, so we take the last `ensure` token before the clause start. (Any
+/// nested ensure lies strictly inside the protected body, hence before the
+/// outer clause but separated from it by the nested `end`; the *closest*
+/// preceding `ensure` to the clause is therefore the outer one.)
 fn ensure_keyword_range(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
     let node_range = cx.range(node);
+    let NodeKind::Ensure { body, ensure_ } = *cx.kind(node) else {
+        return None;
+    };
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
-    let idx = toks.partition_point(|t| t.range.start < node_range.start);
+
+    let is_ensure = |t: &SourceToken| {
+        t.kind == SourceTokenKind::Other
+            && &source[t.range.start as usize..t.range.end as usize] == b"ensure"
+    };
+
+    if let Some(clause) = ensure_.get() {
+        // The clause is present: the keyword is the last `ensure` token before
+        // it. Lower bound is the protected body start (or node start) so we do
+        // not scan into an unrelated earlier construct.
+        let lower = body.get().map_or(node_range.start, |b| cx.range(b).start);
+        let clause_start = cx.range(clause).start;
+        let lo = toks.partition_point(|t| t.range.start < lower);
+        let hi = toks.partition_point(|t| t.range.end <= clause_start);
+        return toks[lo..hi]
+            .iter()
+            .rev()
+            .find(|t| is_ensure(t))
+            .map(|t| t.range);
+    }
+
+    // Empty ensure clause (`begin … ensure end`): no clause to anchor to.
+    // Fall back to the first `ensure` after the protected body.
+    let scan_start = body.get().map_or(node_range.start, |b| cx.range(b).end);
+    let idx = toks.partition_point(|t| t.range.start < scan_start);
     toks[idx..]
         .iter()
         .take_while(|t| t.range.end <= node_range.end)
-        .find(|t| {
-            t.kind == SourceTokenKind::Other
-                && &source[t.range.start as usize..t.range.end as usize] == b"ensure"
-        })
+        .find(|t| is_ensure(t))
         .map(|t| t.range)
 }
 
@@ -599,6 +632,44 @@ mod tests {
             private def foo
               bar
             rescue
+              baz
+            end
+        "});
+    }
+
+    #[test]
+    fn nested_ensure_does_not_confuse_outer_ensure_keyword() {
+        // An outer `ensure` whose protected body contains an inner
+        // `begin … ensure … end` must resolve to the *outer* `ensure` keyword,
+        // not the nested one. Both are correctly aligned here, so the cop must
+        // emit no offense — a naive first-token scan would mis-locate the outer
+        // keyword and could fire.
+        test::<RescueEnsureAlignment>().expect_no_offenses(indoc! {"
+            begin
+              begin
+                foo
+              ensure
+                bar
+              end
+            ensure
+              baz
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_outer_ensure_when_only_outer_misaligned() {
+        // The inner `ensure` is correctly aligned to the inner `begin`; only
+        // the outer `ensure` is misaligned and must be the one flagged.
+        test::<RescueEnsureAlignment>().expect_offense(indoc! {"
+            begin
+              begin
+                foo
+              ensure
+                bar
+              end
+              ensure
+              ^^^^^^ `ensure` at 7, 2 is not aligned with `begin` at 1, 0.
               baz
             end
         "});

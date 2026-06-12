@@ -15,8 +15,12 @@
 //!   interior comment, and is safe to join) is flagged, and autocorrected by
 //!   collapsing to one line. The "whole expression" is grown through `send`
 //!   parents, convertible blocks, and binary operators, matching RuboCop's
-//!   `on_send` walk. `safe_to_split?`, `index_access_call_chained?`, and the
-//!   `InspectBlocks` config (default false) are ported.
+//!   `on_send` walk. All assignment kinds are hooked (lvasgn/ivasgn/cvasgn/
+//!   gvasgn/casgn/op_asgn/or_asgn/and_asgn/masgn), mirroring RuboCop's
+//!   `CheckAssignment` mixin; a multiline-assignment RHS defers to the
+//!   assignment node so the offense fires once on `lhs = rhs`.
+//!   `safe_to_split?`, `index_access_call_chained?`, and the `InspectBlocks`
+//!   config (default false) are ported.
 //!
 //!   Gaps vs RuboCop (documented, not silently dropped):
 //!     * `Layout/LineLength: Max` is read from cross-cop config by RuboCop;
@@ -83,8 +87,51 @@ impl RedundantLineBreak {
         check(node, cx);
     }
 
+    // RuboCop's `CheckAssignment` mixin inspects every assignment kind, not
+    // just local-variable assignment, so the RHS of `@x = foo(\n  a\n)` etc.
+    // is collapsed identically to `x = ...`.
     #[on_node(kind = "lvasgn")]
     fn check_lvasgn(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
+
+    #[on_node(kind = "ivasgn")]
+    fn check_ivasgn(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
+
+    #[on_node(kind = "cvasgn")]
+    fn check_cvasgn(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
+
+    #[on_node(kind = "gvasgn")]
+    fn check_gvasgn(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
+
+    #[on_node(kind = "casgn")]
+    fn check_casgn(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
+
+    #[on_node(kind = "op_asgn")]
+    fn check_op_asgn(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
+
+    #[on_node(kind = "or_asgn")]
+    fn check_or_asgn(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
+
+    #[on_node(kind = "and_asgn")]
+    fn check_and_asgn(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
+
+    #[on_node(kind = "masgn")]
+    fn check_masgn(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
 }
@@ -163,6 +210,16 @@ fn is_canonical_entry(node: NodeId, grown: NodeId, cx: &Cx<'_>) -> bool {
     }
     // A block's call grows to the block; the call is the base, not the block.
     if cx.is_any_block_type(node) {
+        return false;
+    }
+    // If `grown` is the direct RHS value of a multiline assignment, the
+    // assignment node (visited by its own hook) is the canonical entry —
+    // mirroring RuboCop's `ignore_node` of the assignment's descendants. Defer
+    // so the offense fires once, on the whole `lhs = rhs`.
+    if let Some(parent) = cx.parent(grown).get()
+        && cx.is_assignment(parent)
+        && cx.is_multiline(parent)
+    {
         return false;
     }
     true
@@ -483,6 +540,19 @@ mod tests {
                   .baz
             "},
             "foo(1, 2).bar.baz\n",
+        );
+    }
+
+    #[test]
+    fn corrects_ivar_assignment_rhs() {
+        // RuboCop's CheckAssignment inspects ivar assignment too.
+        test::<RedundantLineBreak>().expect_correction(
+            indoc! {"
+                @x = foo(1,
+                ^^^^^^^^^^^ Redundant line break detected.
+                  2)
+            "},
+            "@x = foo(1, 2)\n",
         );
     }
 
