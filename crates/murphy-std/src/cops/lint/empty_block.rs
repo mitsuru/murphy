@@ -7,19 +7,17 @@
 //! upstream_cop: Lint/EmptyBlock
 //! upstream_version_checked: master
 //! status: partial
-//! gap_issues:
-//!   - murphy-9cr.9
+//! gap_issues: []
 //! notes: >
 //!   Message text aligned with RuboCop MSG ("Empty block detected.").
 //!   AllowEmptyLambdas (default true) skips empty `-> {}`, `lambda {}`,
 //!   `proc {}`, and `Proc.new {}` blocks, mirroring RuboCop's
 //!   `lambda_or_proc?`. AllowComments (default true) skips a block whose
-//!   source range contains a comment. Both option overrides are ABI-blocked
-//!   (options not wired through Cx until murphy-9cr.9), so the cop reads
-//!   `Options::default()` at dispatch time — same shape as Lint/EmptyWhen.
+//!   source range contains a comment. Both options are read live via
+//!   `cx.options_or_default`, so user overrides are honored at dispatch time.
 //!   RuboCop's `allow_comment?` "line-comment disables the cop" branch is a
-//!   documented gap: Murphy treats any comment in the block range as allowing
-//!   the empty block regardless of directive content.
+//!   documented divergence: Murphy treats any comment in the block range as
+//!   allowing the empty block regardless of directive content.
 //! ```
 //!
 //! Only `block` nodes are checked: numbered (`_1`) and `it` blocks reference
@@ -30,8 +28,7 @@ use murphy_plugin_api::{cop, CopOptions, Cx, NodeId};
 #[derive(Default)]
 pub struct EmptyBlock;
 
-/// Cop options for [`EmptyBlock`]. v1: read from `Default` at dispatch time
-/// (`murphy-9cr.9` will wire live overrides through `Cx`).
+/// Cop options for [`EmptyBlock`], decoded live via `cx.options_or_default`.
 #[derive(CopOptions)]
 pub struct Options {
     #[option(
@@ -59,7 +56,7 @@ impl EmptyBlock {
         if cx.block_body(node).get().is_some() {
             return;
         }
-        let opts = Options::default();
+        let opts = cx.options_or_default::<Options>();
         if opts.allow_empty_lambdas && is_lambda_or_proc(node, cx) {
             return;
         }
@@ -99,7 +96,7 @@ murphy_plugin_api::submit_cop!(EmptyBlock);
 
 #[cfg(test)]
 mod tests {
-    use super::EmptyBlock;
+    use super::{EmptyBlock, Options};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -170,6 +167,36 @@ mod tests {
     #[test]
     fn empty_block_with_multibyte_body_is_not_empty() {
         test::<EmptyBlock>().expect_no_offenses("items.each { |i| 名前 }\n");
+    }
+
+    #[test]
+    fn allow_empty_lambdas_false_flags_empty_lambda() {
+        // Override disables the lambda/proc allowance — the empty lambda fires.
+        test::<EmptyBlock>()
+            .with_options(&Options {
+                allow_empty_lambdas: false,
+                allow_comments: true,
+            })
+            .expect_offense(indoc! {r#"
+                -> {}
+                ^^^^^ Empty block detected.
+            "#});
+    }
+
+    #[test]
+    fn allow_comments_true_is_the_default_and_skips_comment_only_block() {
+        // Explicitly setting the default still skips the comment-only block,
+        // confirming the option is read live (not hardcoded to one value).
+        test::<EmptyBlock>()
+            .with_options(&Options {
+                allow_empty_lambdas: true,
+                allow_comments: true,
+            })
+            .expect_no_offenses(indoc! {r#"
+                items.each do
+                  # noop
+                end
+            "#});
     }
 
     #[test]

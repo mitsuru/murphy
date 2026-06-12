@@ -44,7 +44,7 @@ impl DuplicateSetElement {
         let Some((elements, class_name)) = set_construction(node, cx) else {
             return;
         };
-        check_elements(elements, &class_name, cx);
+        check_elements(elements, class_name, cx);
     }
 
     #[on_node(kind = "csend")]
@@ -52,13 +52,14 @@ impl DuplicateSetElement {
         let Some((elements, class_name)) = set_construction(node, cx) else {
             return;
         };
-        check_elements(elements, &class_name, cx);
+        check_elements(elements, class_name, cx);
     }
 }
 
 /// Resolve a node to `(set_elements, class_name)` if it is one of the three
-/// recognized `Set` / `SortedSet` constructions, else `None`.
-fn set_construction<'a>(node: NodeId, cx: &Cx<'a>) -> Option<(&'a [NodeId], String)> {
+/// recognized `Set` / `SortedSet` constructions, else `None`. The class name
+/// is one of the two static `Set`/`SortedSet` strings, so no allocation.
+fn set_construction<'a>(node: NodeId, cx: &Cx<'a>) -> Option<(&'a [NodeId], &'static str)> {
     let method = cx.method_name(node)?;
     match method {
         // `Set[a, b, a]` / `SortedSet[a, b, a]` — receiver is the const,
@@ -88,7 +89,7 @@ fn set_construction<'a>(node: NodeId, cx: &Cx<'a>) -> Option<(&'a [NodeId], Stri
             let NodeKind::Array(list) = *cx.kind(receiver) else {
                 return None;
             };
-            Some((cx.list(list), "Set".to_string()))
+            Some((cx.list(list), "Set"))
         }
         _ => None,
     }
@@ -96,13 +97,10 @@ fn set_construction<'a>(node: NodeId, cx: &Cx<'a>) -> Option<(&'a [NodeId], Stri
 
 /// The `const_name` for the receiver of `Set[…]` / `Set.new(…)`, or `None`
 /// if the receiver is not a `Set`/`SortedSet` constant.
-fn set_class_name(receiver: NodeId, cx: &Cx<'_>) -> Option<String> {
-    for name in ["Set", "SortedSet"] {
-        if cx.is_global_const(receiver, name) {
-            return Some(name.to_string());
-        }
-    }
-    None
+fn set_class_name(receiver: NodeId, cx: &Cx<'_>) -> Option<&'static str> {
+    ["Set", "SortedSet"]
+        .into_iter()
+        .find(|&name| cx.is_global_const(receiver, name))
 }
 
 fn check_elements(elements: &[NodeId], class_name: &str, cx: &Cx<'_>) {
@@ -117,7 +115,7 @@ fn check_elements(elements: &[NodeId], class_name: &str, cx: &Cx<'_>) {
         {
             continue;
         }
-        let src = cx.raw_source(cx.range(element));
+        let src = cx.raw_source(cx.range(element)).trim();
         if seen.insert(src) {
             continue;
         }

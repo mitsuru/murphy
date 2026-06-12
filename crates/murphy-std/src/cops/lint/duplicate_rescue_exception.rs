@@ -49,7 +49,7 @@ impl DuplicateRescueException {
                 continue;
             };
             for &exception in cx.list(exceptions) {
-                let src = cx.raw_source(cx.range(exception));
+                let src = cx.raw_source(cx.range(exception)).trim();
                 if !seen.insert(src) {
                     cx.emit_offense(
                         cx.range(exception),
