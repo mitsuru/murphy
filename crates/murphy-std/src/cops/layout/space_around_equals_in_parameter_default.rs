@@ -12,16 +12,29 @@
 //! status: partial
 //! gap_issues:
 //!   - murphy-8zw3
+//!   - murphy-ilrx
 //! notes: >
 //!   Dispatches on `Optarg` (`def f(a = 1)`). `Kwoptarg` (`def f(k: 1)`) uses a
 //!   `:` not an `=`, so RuboCop's cop never matches it — Murphy follows suit and
 //!   does not dispatch there. The `=` token is located between the parameter
 //!   name and its default value; spacing is checked on both sides. Offense range
 //!   spans from the end of the parameter name to the start of the default value,
-//!   matching RuboCop's `range_between(arg.end_pos, value.begin_pos)`. Gap
-//!   (murphy-8zw3): RuboCop's `correct_style_detected` / `opposite_style_detected`
-//!   style-tracking machinery (used for mixed-style detection across a file) is
-//!   not ported; Murphy emits offense + autocorrect per occurrence only.
+//!   matching RuboCop's `range_between(arg.end_pos, value.begin_pos)`.
+//!
+//!   murphy-8zw3 (no observable gap — architecturally non-portable): RuboCop's
+//!   `ConfigurableEnforcedStyle` `correct_style_detected` /
+//!   `opposite_style_detected` calls feed two RuboCop-only subsystems —
+//!   `--auto-gen-config` TODO-file generation and cross-run/cross-file style
+//!   ambiguity tracking — neither of which exists in Murphy. They do NOT change
+//!   the offenses or autocorrections RuboCop reports for any given file:
+//!   `incorrect_style_detected` always adds the offense, and the autocorrect
+//!   always runs. A mixed-style file (`def a(x=1, y = 2); end` under the default
+//!   `space` style) reports exactly one offense in both RuboCop and Murphy (the
+//!   `x=1`), so there is no input that distinguishes the two and thus no
+//!   TDD-drivable behavior to port. Wiring this would require a cross-cop /
+//!   cross-investigation style-tracking subsystem in murphy-core (an ABI-level
+//!   change), not a cop-body change; it is intentionally not attempted here and
+//!   would not alter parity on emitted offenses.
 //! ```
 //!
 //! ## Options

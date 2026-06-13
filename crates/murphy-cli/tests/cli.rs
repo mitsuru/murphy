@@ -225,7 +225,9 @@ fn lint_file_with_disable_then_enable_comment_only_reattaches() {
     let path = dir.path().join("with_enable.rb");
     fs::write(
         &path,
-        "# frozen_string_literal: true\n# murphy:disable Lint/Debugger\ndebugger\n# murphy:enable\ndebugger\n",
+        // Blank line after the magic comment keeps Layout/EmptyLineAfterMagicComment
+        // quiet so this test isolates disable/enable directive reattachment.
+        "# frozen_string_literal: true\n\n# murphy:disable Lint/Debugger\ndebugger\n# murphy:enable\ndebugger\n",
     )
     .expect("write with_enable.rb");
 
@@ -254,7 +256,9 @@ fn lint_file_with_todo_comment_skips_current_line_only() {
     let path = dir.path().join("with_todo.rb");
     fs::write(
         &path,
-        "# frozen_string_literal: true\ndebugger # murphy:todo Lint/Debugger\ndebugger\n",
+        // Blank line after the magic comment keeps Layout/EmptyLineAfterMagicComment
+        // quiet so this test isolates the per-line todo suppression.
+        "# frozen_string_literal: true\n\ndebugger # murphy:todo Lint/Debugger\ndebugger\n",
     )
     .expect("write with_todo.rb");
 
@@ -283,7 +287,9 @@ fn lint_file_with_todo_without_cop_suppresses_all_offenses_on_line() {
     let path = dir.path().join("with_todo_all.rb");
     fs::write(
         &path,
-        "# frozen_string_literal: true\ndebugger # murphy:todo\ndebugger\n",
+        // Blank line after the magic comment keeps Layout/EmptyLineAfterMagicComment
+        // quiet so this test isolates bare-todo (cop-less) suppression.
+        "# frozen_string_literal: true\n\ndebugger # murphy:todo\ndebugger\n",
     )
     .expect("write with_todo_all.rb");
 

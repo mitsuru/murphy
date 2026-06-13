@@ -9,6 +9,7 @@
 //! status: partial
 //! gap_issues:
 //!   - murphy-je5n
+//!   - murphy-ilrx
 //! notes: >
 //!   Token-stream port of RuboCop's `SpaceAfterPunctuation` mixin specialized
 //!   for commas. Fires only when a `,` is immediately followed (zero gap, same
@@ -17,10 +18,23 @@
 //!   distinct kind (`RightParen`), so `]` and `|` are matched by source byte.
 //!   The `}` rcurly case follows `Layout/SpaceInsideHashLiteralBraces`'s default
 //!   (`space`), under which a space *is* required before `}` — so `{ a,}` flags
-//!   by default, exactly matching RuboCop's default config. The cross-cop
-//!   `no_space` exemption for `}` is not wired (no cross-cop config access,
-//!   tracked as murphy-je5n); this is the only intentional gap and matches
-//!   RuboCop only under default config.
+//!   by default, exactly matching RuboCop's default config.
+//!
+//!   murphy-je5n (ABI blocker, not a cop-level fix): RuboCop's
+//!   `SpaceAfterComma#space_required_before?` reads a *sibling* cop's runtime
+//!   config — `config_to_allow_offenses` / `cop_config` for
+//!   `Layout/SpaceInsideHashLiteralBraces` — and exempts a comma directly before
+//!   `}` when that cop is set to `EnforcedStyle: no_space`. Murphy's plugin ABI
+//!   gives a cop body only its OWN resolved config (`cx.options_json`, populated
+//!   by `config.cop_options_json(self_name)` in dispatch); there is no surface
+//!   to read another cop's config. Wiring this requires either a new `CxRaw`
+//!   sibling-config field (an ABI change — `CxRaw` field offsets are pinned by
+//!   `offset_of!` assertions) or the host baking the sibling style into this
+//!   cop's `options_json` (a murphy-core config-contract change). Both are
+//!   outside the murphy-std single-surface boundary and need sign-off, so this
+//!   remains documented and unported. Current behavior matches RuboCop under
+//!   the default (`space`) config; only a non-default `no_space` sibling config
+//!   diverges.
 //! ```
 
 use murphy_plugin_api::{Cx, NoOptions, Range, SourceToken, SourceTokenKind, cop};

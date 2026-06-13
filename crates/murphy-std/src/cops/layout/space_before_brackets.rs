@@ -25,6 +25,13 @@
 //!   with the gap intact and are handled. Spaced index *assignment* with
 //!   a bare-local receiver (`x [0] = 1`) is a Prism syntax error and
 //!   cannot be linted at all.
+//!
+//!   This is an accepted parser-level divergence, not a fixable cop gap:
+//!   detecting the collapsed `collection([index])` method-call shape and
+//!   re-flagging it would false-positive on legitimate command calls with an
+//!   array argument (`do_something [item]`, `expect(x).to eq []`), which are
+//!   no-offense in both RuboCop and Murphy (and are pinned by tests below).
+//!   No cop-level bypass exists, so this stays a documented divergence.
 //! ```
 //!
 //! opening `[` of an index access (`@x [i]` → `@x[i]`). Mirrors RuboCop's

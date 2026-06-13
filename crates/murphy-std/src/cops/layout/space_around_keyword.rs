@@ -12,22 +12,33 @@
 //!   - murphy-qeef
 //! notes: >
 //!   AST-gated like RuboCop: dispatches on `While`/`Until` (keyword form),
-//!   prefix `If`/`Unless`, `Case`, `Block` (`do`/`end`), `Return`, `Break`,
-//!   `Next`, `Yield`, `Super`/`Zsuper`, and the keyword forms of `And`/`Or`.
-//!   The keyword token is located within the node range; spacing is checked
-//!   with RuboCop's character classes (`space_before_missing?` /
-//!   `space_after_missing?`), including the `accept (`/`[` opening-delimiter
-//!   exceptions (`break defined? next not rescue super yield` for `(`;
-//!   `super yield` for `[`), the `super` namespace-operator `::` exception, and
-//!   the safe-navigation `&.` exception. Gaps (murphy-qeef): modifier forms
-//!   (`x if y`, `x while y`) where the keyword sits mid-expression; the ternary
-//!   `then` and other `if`-internal locations (`else`/`begin`/`end`/`then`);
-//!   `rescue`/`ensure`/`begin`/`kwbegin`/`for`/`when`/`in`-pattern keywords;
-//!   `defined?`, pre/postexe (`BEGIN`/`END`), and pattern-matching operators;
-//!   and the `preceded_by_operator?` before-space exception. Those keyword
-//!   locations require parser loc fields (`.keyword`/`.begin`/`.end`/`.else`)
-//!   that Murphy's `NodeLoc` (only `expression` + `name`) does not expose.
-//!   Because `preceded_by_operator?` is not ported, the before-space check may
+//!   prefix `If`/`Unless`, `Case`, `When`, `Defined`, `Block` (`do`/`end`),
+//!   `Return`, `Break`, `Next`, `Yield`, `Super`/`Zsuper`, and the keyword
+//!   forms of `And`/`Or`. The keyword token is located via
+//!   `cx.loc(node).keyword()` (the token at the node's expression start);
+//!   spacing is checked with RuboCop's character classes
+//!   (`space_before_missing?` / `space_after_missing?`), including the
+//!   `accept (`/`[` opening-delimiter exceptions
+//!   (`break defined? next not rescue super yield` for `(`; `super yield`
+//!   for `[`), the `super` namespace-operator `::` exception, and the
+//!   safe-navigation `&.` exception.
+//!
+//!   CLOSED (murphy-qeef): the `when` keyword (`on_when`) and `defined?`
+//!   keyword (`on_defined?`) are now handled — both sit at the node's
+//!   expression start, so `cx.loc(node).keyword()` locates them without any
+//!   new loc surface.
+//!
+//!   REMAINING GAPS (murphy-qeef): modifier forms (`x if y`, `x while y`)
+//!   where the keyword sits mid-expression (not `keyword_bearing`, so
+//!   `keyword()` returns `Range::ZERO`); the ternary `then` and other
+//!   `if`-internal locations (`else`/`begin`/`end`/`then`);
+//!   `rescue`/`ensure`/`begin`/`kwbegin`/`for`/`in`-pattern keywords;
+//!   pre/postexe (`BEGIN`/`END`), and pattern-matching operators; and the
+//!   `preceded_by_operator?` before-space exception. Those keyword locations
+//!   require parser loc fields (`.keyword`/`.begin`/`.end`/`.else`) that
+//!   Murphy's `NodeLoc` (only `expression` + `name`) does not expose, or
+//!   AST-ancestor walks the single-surface ABI does not support. Because
+//!   `preceded_by_operator?` is not ported, the before-space check may
 //!   false-positive (and autocorrect) on a keyword nested directly in an
 //!   operator expression (e.g. `-yield`) where RuboCop suppresses it; this is
 //!   rare and tracked under the same gap issue.
@@ -122,6 +133,22 @@ impl SpaceAroundKeyword {
     #[on_node(kind = "zsuper")]
     fn check_zsuper(&self, node: NodeId, cx: &Cx<'_>) {
         check_leading_keyword(cx, node, &["super"]);
+    }
+
+    #[on_node(kind = "defined")]
+    fn check_defined(&self, node: NodeId, cx: &Cx<'_>) {
+        // RuboCop's `on_defined?` checks the `defined?` keyword. It is in
+        // `ACCEPT_LEFT_PAREN`, so `defined?(x)` does not flag a missing
+        // after-space. The keyword is at the node's expression start.
+        check_leading_keyword(cx, node, &["defined?"]);
+    }
+
+    #[on_node(kind = "when")]
+    fn check_when(&self, node: NodeId, cx: &Cx<'_>) {
+        // RuboCop's `on_when` checks the `when` keyword (at the node's
+        // expression start). `when` is not in `ACCEPT_LEFT_PAREN`, so
+        // `when(1)` flags a missing after-space, matching RuboCop.
+        check_leading_keyword(cx, node, &["when"]);
     }
 
     #[on_node(kind = "block")]
@@ -454,7 +481,7 @@ mod tests {
         "#});
     }
 
-    // ---------- case ----------
+    // ---------- case / when ----------
 
     #[test]
     fn accepts_well_spaced_case() {
@@ -464,6 +491,62 @@ mod tests {
               2
             end
         "#});
+    }
+
+    #[test]
+    fn flags_missing_space_after_when() {
+        // `when` is not in ACCEPT_LEFT_PAREN, so `when(1)` flags.
+        test::<SpaceAroundKeyword>()
+            .expect_offense(indoc! {r#"
+                case x
+                when(1)
+                ^^^^ Space after keyword `when` is missing.
+                  2
+                end
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    case x
+                    when(1)
+                    ^^^^ Space after keyword `when` is missing.
+                      2
+                    end
+                "#},
+                "case x\nwhen (1)\n  2\nend\n",
+            );
+    }
+
+    // ---------- defined? ----------
+
+    #[test]
+    fn accepts_defined_with_paren() {
+        // `defined?` is in ACCEPT_LEFT_PAREN — `defined?(x)` is fine.
+        test::<SpaceAroundKeyword>().expect_no_offenses("defined?(x)\n");
+    }
+
+    #[test]
+    fn accepts_defined_with_space() {
+        test::<SpaceAroundKeyword>().expect_no_offenses("defined? x\n");
+    }
+
+    #[test]
+    fn flags_missing_space_after_defined() {
+        // `defined?:foo` — the char after the `defined?` keyword is `:`, which
+        // is not in the accept set and not `(`, so the after-space is missing.
+        // Proves the `on_defined?` handler actually fires (the keyword token
+        // text is exactly `defined?`, including the `?`).
+        test::<SpaceAroundKeyword>()
+            .expect_offense(indoc! {r#"
+                x = defined?:foo
+                    ^^^^^^^^ Space after keyword `defined?` is missing.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    x = defined?:foo
+                        ^^^^^^^^ Space after keyword `defined?` is missing.
+                "#},
+                "x = defined? :foo\n",
+            );
     }
 
     #[test]
