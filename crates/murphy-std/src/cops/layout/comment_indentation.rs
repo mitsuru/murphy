@@ -194,16 +194,23 @@ fn autocorrect_preceding_comments(
 
 /// RuboCop's `should_correct?(preceding, reference)`: the preceding comment is
 /// exactly one line above the reference and at the same column.
+///
+/// `above` precedes `below` in source order, so line adjacency is decided by
+/// counting newlines in the gap between their start offsets (exactly one `\n`
+/// iff consecutive). This avoids recomputing absolute line numbers from the
+/// start of the file for each comment, which would be `O(N^2)` over a run.
 fn should_correct(cx: &Cx<'_>, above: Comment, below: Comment) -> bool {
     if !own_line_comment(cx, above) {
         return false;
     }
     let source = cx.source();
-    let above_line = line_of(source, above.range.start);
-    let below_line = line_of(source, below.range.start);
     let above_col = column_of(source, above.range.start);
     let below_col = column_of(source, below.range.start);
-    above_line + 1 == below_line && above_col == below_col
+    if above_col != below_col {
+        return false;
+    }
+    let gap = &source[above.range.start as usize..below.range.start as usize];
+    gap.bytes().filter(|&b| b == b'\n').count() == 1
 }
 
 /// RuboCop's `correctly_aligned_with_preceding_comment?`.
@@ -233,6 +240,10 @@ fn correctly_aligned_with_preceding_comment(
 /// RuboCop's `own_line_comment?`: the comment's line matches `/\A\s*#/` — i.e.
 /// only whitespace precedes the comment on its line. Block (`=begin`/`=end`)
 /// comments are not `#` comments and are excluded.
+///
+/// Ruby's regex `\s` is `[ \t\r\n\f\v]`, which includes the vertical tab
+/// (`\v`, `0x0B`) — Rust's `u8::is_ascii_whitespace` does not — so `\x0b` is
+/// matched explicitly for parity.
 fn own_line_comment(cx: &Cx<'_>, comment: Comment) -> bool {
     if comment.kind != CommentKind::Inline {
         return false;
@@ -241,7 +252,7 @@ fn own_line_comment(cx: &Cx<'_>, comment: Comment) -> bool {
     let line_start = line_start_offset(source, comment.range.start) as usize;
     source[line_start..comment.range.start as usize]
         .bytes()
-        .all(|b| b.is_ascii_whitespace())
+        .all(|b| b.is_ascii_whitespace() || b == b'\x0b')
 }
 
 /// RuboCop's `line_after_comment`: the next non-blank source line strictly after
@@ -305,15 +316,6 @@ fn two_alternatives(line: &str) -> bool {
 fn column_of(source: &str, offset: u32) -> usize {
     let line_start = line_start_offset(source, offset) as usize;
     source[line_start..offset as usize].chars().count()
-}
-
-/// 1-based source line number of byte `offset`.
-fn line_of(source: &str, offset: u32) -> usize {
-    source.as_bytes()[..offset as usize]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
-        + 1
 }
 
 /// Byte offset of the first byte on the line containing `offset`.

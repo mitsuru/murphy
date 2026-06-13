@@ -234,14 +234,19 @@ fn indent_level(line: &str) -> usize {
     line.bytes().take_while(|&b| b == b' ').count()
 }
 
-/// The full source line (no trailing newline) containing byte `offset`.
+/// The full source line (no trailing `\n`/`\r`) containing byte `offset`.
 fn source_line(source: &str, offset: u32) -> &str {
     let bytes = source.as_bytes();
     let start = line_start_offset(source, offset) as usize;
-    let end = bytes[start..]
+    let mut end = bytes[start..]
         .iter()
         .position(|&b| b == b'\n')
         .map_or(source.len(), |i| start + i);
+    // Drop a trailing carriage return so CRLF line endings do not leak `\r`
+    // into the indent metric or the offense range.
+    if end > start && bytes[end - 1] == b'\r' {
+        end -= 1;
+    }
     &source[start..end]
 }
 
