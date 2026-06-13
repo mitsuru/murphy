@@ -45,7 +45,7 @@
 //! ```
 
 use crate::cops::util::{check_empty_lines_around_body_blank_run, physical_lines};
-use murphy_plugin_api::{Cx, NoOptions, NodeId, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 #[derive(Default)]
 pub struct EmptyLinesAroundMethodBody;
@@ -187,13 +187,21 @@ fn check_endless(node: NodeId, cx: &Cx<'_>) {
 
 /// The `=` operator range of an endless method (`def foo = body`), located by
 /// scanning for the first `=` token between the method signature and the body.
-/// The scan starts after the method name and is bounded by the body's start so
-/// a `=` inside a default-argument value (`def foo(a = 1) = body`) is not
-/// mistaken for the endless-assignment operator — the parameter-list `)` closes
-/// before the endless `=`, and the scan keys on the first `=` token that sits
-/// at paren-depth 0 after the signature. Returns `None` when no such token is
-/// found (a non-endless or malformed def).
+/// The scan starts at the `def` keyword (Murphy's `def` name loc is not
+/// populated, so `name.end` is 0) and is bounded by the body's start, keying on
+/// the first `=` token at paren-depth 0. A default value inside a *parenthesized*
+/// parameter list (`def foo(a = 1) = body`) sits at depth > 0 and is skipped.
+///
+/// A *parenless* default (`def foo a = 1`) has its `=` at depth 0 and would be
+/// mistaken for the endless operator, so we bail early: a method with parenless
+/// parameters is never endless (Ruby parses `name = expr` after a parenless
+/// parameter as a default-argument optarg — `def foo x = x` is even a "circular
+/// argument reference" error). Returns `None` when no endless `=` is found (a
+/// non-endless or malformed def).
 fn endless_assignment_loc(node: NodeId, body: NodeId, cx: &Cx<'_>) -> Option<Range> {
+    if has_parenless_params(node, cx) {
+        return None;
+    }
     let name_end = cx.loc(node).name.end;
     let scan_start = name_end.max(cx.range(node).start);
     let body_start = cx.range(body).start;
@@ -215,6 +223,33 @@ fn endless_assignment_loc(node: NodeId, body: NodeId, cx: &Cx<'_>) -> Option<Ran
         }
     }
     None
+}
+
+/// True when the def has *parenless* parameters (`def foo a = 1`, `def foo a`).
+/// Such a method is never endless, so its depth-0 default `=` must not be read
+/// as the endless operator. Parenthesized parameter lists return `false` (their
+/// default `=` is at depth > 0 and the scan handles it); a def with no
+/// parameters also returns `false`.
+///
+/// Murphy's `def` name loc and the `Args` node's range are both unreliable here
+/// (name loc is 0; the empty/whole-signature `Args` node spans the entire def),
+/// so we key on the first parameter node: a parenthesized list has a `(`
+/// immediately before its first parameter, a parenless one is preceded by the
+/// method name.
+fn has_parenless_params(node: NodeId, cx: &Cx<'_>) -> bool {
+    let Some(args) = cx.def_arguments(node).get() else {
+        return false;
+    };
+    let NodeKind::Args(list) = cx.kind(args) else {
+        return false;
+    };
+    let Some(&first) = cx.list(*list).first() else {
+        return false; // no parameters
+    };
+    !matches!(
+        cx.token_before(cx.range(first).start).map(|t| t.kind),
+        Some(SourceTokenKind::LeftParen)
+    )
 }
 
 /// The 1-based physical line where the method signature ends — RuboCop's
@@ -313,6 +348,37 @@ mod tests {
         let offenses =
             run_cop::<EmptyLinesAroundMethodBody>("def foo = if cond\n\n  value\nend\n");
         assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// Parity pin (Codex #387): a method with *parenless* default arguments
+    /// (`def foo a = 1`) is a regular method, not endless — Ruby parses the
+    /// parenless `a = 1` as a default-argument optarg. The endless-`=` scan must
+    /// not mistake that depth-0 `=` for the endless operator; otherwise the
+    /// normal body-boundary check is skipped and a blank line before `end` goes
+    /// unreported. RuboCop 1.87 flags it as a method-body-end offense.
+    #[test]
+    fn flags_blank_before_end_in_parenless_optarg_method() {
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>("def foo a = 1\n  body\n\nend\n");
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at method body end."
+        );
+    }
+
+    /// Discriminator (Codex #387): the parenless-params exclusion must NOT
+    /// over-narrow. A genuinely endless method with *parenthesized* optargs
+    /// (`def foo(a = 1) = body`) is still endless — the default `=` is at paren
+    /// depth > 0 and the endless `=` follows the `)`. A blank line after the
+    /// endless `=` is a method-body-beginning offense, as RuboCop 1.87 reports.
+    #[test]
+    fn flags_blank_after_eq_in_paren_optarg_endless_method() {
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>("def foo(a = 1) =\n\n  body\n");
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at method body beginning."
+        );
     }
 
     #[test]

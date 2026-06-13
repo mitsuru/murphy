@@ -38,8 +38,10 @@
 //!   walks up the **leftmost** position through parenthesized `Begin` / `Or` /
 //!   `And` wrappers (mirroring RuboCop's `rhs = rhs.child_nodes.first while
 //!   rhs.type?(:begin, :or, :and)` unwrap) and accepts the parent when it is one
-//!   of the nine assignment kinds whose value is the chain, or a `Send`/`Csend`
-//!   whose last argument is the chain (setter / command call). A `case`/`case_match`
+//!   of the nine assignment kinds whose value is the chain, or a plain `Send`
+//!   whose last argument is the chain (setter / command call — `CheckAssignment`
+//!   has no `on_csend`, so safe-navigation calls fall back to keyword). A
+//!   `case`/`case_match`
 //!   in argument position anchors on its parent directly (`on_case`'s
 //!   `node.argument?` branch). Because only one handler fires per construct, no
 //!   `ignore_node` deduplication is needed. Verified against RuboCop 1.86.2 across
@@ -266,8 +268,10 @@ fn line_break_before_keyword(expr_start: u32, kw_start: u32, cx: &Cx<'_>) -> boo
 ///   before checking the assignment / command parent. The walk-up reconstructs
 ///   this bottom-up: it threads through call-chain links and leftmost
 ///   paren-`Begin` / `Or` / `And` wrappers, accepting an assignment whose value
-///   (last child) is the chain, or a `Send`/`Csend` whose last argument is the
-///   chain (`extract_rhs == node.last_argument`).
+///   (last child) is the chain, or a plain `Send` whose last argument is the
+///   chain (`extract_rhs == node.last_argument`). `Csend` is a transparent
+///   receiver link only — `CheckAssignment` has no `on_csend`, so a
+///   safe-navigation command call never anchors `end`.
 fn asgn_outer_node(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     // RuboCop routes a construct through assignment (`variable`) alignment only
     // along the path matching its node type:
@@ -309,12 +313,18 @@ fn asgn_outer_node(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
             return (cx.children(parent).last() == Some(&current)).then_some(parent);
         }
 
-        // Send/Csend: a command call whose LAST ARGUMENT is `current`
-        // (`extract_rhs` → `last_argument`) is the outer node. When `current` is
-        // the RECEIVER instead, the send is a transparent call-chain link
-        // (`first_part_of_call_chain`'s `node = node.receiver`) — keep walking up.
+        // Send/Csend call-chain link. RuboCop's `CheckAssignment` defines only
+        // `on_send` (no `on_csend`), so a command call routes its LAST ARGUMENT
+        // (`extract_rhs` → `last_argument`) through assignment alignment only for
+        // a plain `Send` — a safe-navigation `obj&.foo(if … end)` is never a
+        // command-call entry and falls back to keyword alignment. The RECEIVER
+        // position is transparent for BOTH `send` and `csend`
+        // (`first_part_of_call_chain` walks `node.receiver` for any
+        // `call_type?`), so keep walking up there.
         if matches!(*cx.kind(parent), NodeKind::Send { .. } | NodeKind::Csend { .. }) {
-            if cx.call_arguments(parent).last() == Some(&current) {
+            if matches!(*cx.kind(parent), NodeKind::Send { .. })
+                && cx.call_arguments(parent).last() == Some(&current)
+            {
                 return Some(parent);
             }
             if cx.call_receiver(parent).get() == Some(current) {
@@ -685,6 +695,36 @@ mod tests {
         assert_eq!(
             run[0].message,
             "`end` at 3, 4 is not aligned with `foo bar, if` at 1, 0."
+        );
+    }
+
+    /// Parity pin (Codex #387): `obj&.foo(if c ... end)` safe-navigation command
+    /// call under `variable`. RuboCop's `CheckAssignment` defines no `on_csend`,
+    /// so the conditional is NOT routed through command-call alignment — it falls
+    /// back to keyword. With `end` under the `if` keyword (col 9) this is accepted;
+    /// the plain-`send` form (`foo bar, if`, see `variable_command_last_arg`)
+    /// WOULD anchor on the call. Verified against RuboCop 1.87 (no offense).
+    #[test]
+    fn variable_csend_command_last_arg_falls_back_to_keyword() {
+        let src = "obj&.foo(if c\n           1\n         end)\n";
+        let run = run_cop_with_options::<Cop>(src, &variable());
+        assert!(run.is_empty(), "got {run:?}");
+    }
+
+    /// Companion to [`variable_csend_command_last_arg_falls_back_to_keyword`]: a
+    /// `csend` in *receiver* position is still a transparent call-chain link
+    /// (`first_part_of_call_chain` walks `node.receiver` for any `call_type?`), so
+    /// `x = if … end&.to_s` still anchors `end` on the assignment variable. Pins
+    /// that the `Send`-only gate narrows the LAST-ARG branch without breaking
+    /// receiver transparency. Verified against RuboCop 1.87.
+    #[test]
+    fn variable_csend_receiver_chain_anchors_on_variable() {
+        let src = "x = if c\n  1\n    end&.to_s\n";
+        let run = run_cop_with_options::<Cop>(src, &variable());
+        assert_eq!(run.len(), 1, "got {run:?}");
+        assert_eq!(
+            run[0].message,
+            "`end` at 3, 4 is not aligned with `x = if` at 1, 0."
         );
     }
 
