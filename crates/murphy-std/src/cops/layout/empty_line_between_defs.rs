@@ -246,33 +246,42 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
     }
 
     if count > expected {
-        // Remove `count - expected` whole blank lines that follow `prev`'s last
-        // line. Each blank line spans from its line start to the next line start
-        // (including any spaces/tabs it contains), so removing whole lines never
-        // merges trailing whitespace onto an adjacent line.
+        // Remove `count - expected` *blank* physical lines that lie between the
+        // two definitions. Each removed line is deleted whole (line start to
+        // next line start, including any spaces/tabs), so trailing whitespace is
+        // never merged onto an adjacent line. Non-blank lines (e.g. comments
+        // between the defs) are skipped, so only surplus blank lines are
+        // removed — a contiguous range removal would otherwise eat an
+        // intervening comment line.
         let difference = count - expected;
-        // The first blank line starts just after the newline that terminates
-        // `prev`'s last line.
+        // Blank lines start just after the newline that terminates `prev`'s
+        // last line; stop at `cur`'s line.
         let mut pos = newline_pos + 1;
+        let cur_start = cx.range(cur).start as usize;
         let mut removed = 0usize;
-        while removed < difference && pos < src.len() {
+        while removed < difference && pos < cur_start {
             let line_end = src[pos..]
                 .iter()
                 .position(|&b| b == b'\n')
                 .map_or(src.len(), |i| pos + i);
-            // Advance past the line terminator (if any) to the next line start.
-            pos = if line_end < src.len() {
+            let next_line_start = if line_end < src.len() {
                 line_end + 1
             } else {
                 line_end
             };
-            removed += 1;
+            let is_blank = src[pos..line_end].iter().all(|b| b.is_ascii_whitespace());
+            if is_blank {
+                cx.emit_edit(
+                    Range {
+                        start: pos as u32,
+                        end: next_line_start as u32,
+                    },
+                    "",
+                );
+                removed += 1;
+            }
+            pos = next_line_start;
         }
-        let range = Range {
-            start: (newline_pos + 1) as u32,
-            end: pos as u32,
-        };
-        cx.emit_edit(range, "");
     } else {
         // Insert `expected - count` newlines after `newline_pos`.
         let difference = expected - count;
@@ -292,12 +301,16 @@ mod tests {
     use murphy_plugin_api::test_support::{indoc, run_cop_with_edits, test};
 
     fn apply(source: &str, edits: &[murphy_plugin_api::test_support::CapturedEdit]) -> String {
-        assert_eq!(edits.len(), 1, "expected exactly one edit");
-        let edit = &edits[0];
-        let mut out = String::with_capacity(source.len() + edit.replacement.len());
-        out.push_str(&source[..edit.range.start as usize]);
-        out.push_str(&edit.replacement);
-        out.push_str(&source[edit.range.end as usize..]);
+        // Apply edits right-to-left so earlier offsets stay valid.
+        let mut sorted: Vec<_> = edits.iter().collect();
+        sorted.sort_by_key(|e| std::cmp::Reverse(e.range.start));
+        let mut out = source.to_string();
+        for edit in sorted {
+            out.replace_range(
+                edit.range.start as usize..edit.range.end as usize,
+                &edit.replacement,
+            );
+        }
         out
     }
 
@@ -432,5 +445,18 @@ mod tests {
             !corrected.contains("  \n") && !corrected.contains("end  "),
             "corrected output has stray trailing whitespace: {corrected:?}"
         );
+    }
+
+    #[test]
+    fn corrects_too_many_blank_lines_preserves_comment() {
+        // A comment sits between the defs alongside surplus blank lines. The
+        // autocorrect must remove only the surplus blank line and keep the
+        // comment line intact.
+        let src = "def a\nend\n# c\n\n\ndef b\nend\n";
+        let run = run_cop_with_edits::<EmptyLineBetweenDefs>(src);
+        assert_eq!(run.offenses.len(), 1, "got {:?}", run.offenses);
+        let corrected = apply(src, &run.edits);
+        assert_eq!(corrected, "def a\nend\n# c\n\ndef b\nend\n");
+        assert!(corrected.contains("# c"), "comment must be preserved");
     }
 }
