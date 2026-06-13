@@ -81,7 +81,10 @@ impl EmptyLineAfterMagicComment {
             .position(|&b| b == b'\n')
             .map_or(src.len(), |i| next_line_start + i);
         let next_line = &src[next_line_start..next_line_end];
-        if next_line.iter().all(|b| b.is_ascii_whitespace()) {
+        if next_line
+            .iter()
+            .all(|&b| crate::cops::util::is_ruby_blank_byte(b))
+        {
             return;
         }
 

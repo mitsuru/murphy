@@ -200,7 +200,7 @@ fn next_line_empty(node: NodeId, cx: &Cx<'_>) -> bool {
         .map_or(src.len(), |i| next_line_start + i);
     src[next_line_start..next_line_end]
         .iter()
-        .all(|b| b.is_ascii_whitespace())
+        .all(|&b| crate::cops::util::is_ruby_blank_byte(b))
 }
 
 /// RuboCop `autocorrect`: insert `\n` after the guard clause's whole line.

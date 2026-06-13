@@ -221,7 +221,7 @@ fn blank_lines_count_between(prev: NodeId, cur: NodeId, cx: &Cx<'_>) -> usize {
         }
         if region[line_start..line_end]
             .iter()
-            .all(|b| b.is_ascii_whitespace())
+            .all(|&b| crate::cops::util::is_ruby_blank_byte(b))
         {
             count += 1;
         }
@@ -238,12 +238,18 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
     let Some(rel) = src[end_pos..].iter().position(|&b| b == b'\n') else {
         return;
     };
-    let mut newline_pos = end_pos + rel;
+    let newline_pos = end_pos + rel;
     let begin_pos = cx.range(cur).start as usize;
-    // Same-line one-liners: anchor just before `cur` instead.
-    if newline_pos > begin_pos {
-        newline_pos = begin_pos.saturating_sub(1);
-    }
+    // The blank-line region begins just after the newline that terminates
+    // `prev`'s last line. For same-line one-liners (`def a; end; def b; end`)
+    // the first newline lies *after* `cur` starts, so anchor at `cur`'s start
+    // instead. This is the line below which blank lines are removed / above
+    // which they are inserted.
+    let region_start = if newline_pos > begin_pos {
+        begin_pos
+    } else {
+        newline_pos + 1
+    };
 
     if count > expected {
         // Remove `count - expected` *blank* physical lines that lie between the
@@ -254,10 +260,9 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
         // removed — a contiguous range removal would otherwise eat an
         // intervening comment line.
         let difference = count - expected;
-        // Blank lines start just after the newline that terminates `prev`'s
-        // last line; stop at `cur`'s line.
-        let mut pos = newline_pos + 1;
-        let cur_start = cx.range(cur).start as usize;
+        // Blank lines start at `region_start`; stop at `cur`'s line.
+        let mut pos = region_start;
+        let cur_start = begin_pos;
         let mut removed = 0usize;
         while removed < difference && pos < cur_start {
             let line_end = src[pos..]
@@ -269,7 +274,9 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
             } else {
                 line_end
             };
-            let is_blank = src[pos..line_end].iter().all(|b| b.is_ascii_whitespace());
+            let is_blank = src[pos..line_end]
+                .iter()
+                .all(|&b| crate::cops::util::is_ruby_blank_byte(b));
             if is_blank {
                 cx.emit_edit(
                     Range {
@@ -283,11 +290,11 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
             pos = next_line_start;
         }
     } else {
-        // Insert `expected - count` newlines after `newline_pos`.
+        // Insert `expected - count` newlines at the blank-line region start.
         let difference = expected - count;
         let anchor = Range {
-            start: (newline_pos + 1) as u32,
-            end: (newline_pos + 1) as u32,
+            start: region_start as u32,
+            end: region_start as u32,
         };
         cx.emit_edit(anchor, &"\n".repeat(difference));
     }
