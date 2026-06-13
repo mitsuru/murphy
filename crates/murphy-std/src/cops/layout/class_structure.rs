@@ -13,7 +13,11 @@
 //!   Ports RuboCop's `on_class` (aliased `on_sclass`) detection: walks the class
 //!   body elements in source order, classifies each into a category, looks up
 //!   the category's index in `ExpectedOrder`, and flags any node whose index is
-//!   smaller than a previously-seen node's (i.e. it appears too early).
+//!   smaller than the *running* `previous` index. RuboCop assigns `previous =
+//!   index` unconditionally after every node (`class_structure.rb:201`), so
+//!   after a regression resets the running index, a later node at a
+//!   higher-but-valid index is not re-flagged. This is a stateful single pass,
+//!   faithful to upstream by design (NOT max-index tracking).
 //!
 //!   Classification mirrors RuboCop's `classify` / `find_send_node_category` /
 //!   `humanize_node`:
@@ -556,6 +560,32 @@ mod tests {
         assert_eq!(
             offenses[0].message,
             "`public_methods` is supposed to appear before `private_methods`."
+        );
+    }
+
+    /// Parity pin (roborev #386): RuboCop's `on_class` assigns `previous =
+    /// index` UNCONDITIONALLY after every node (`class_structure.rb:201`), so
+    /// only inversions against the *running* index are flagged. After a
+    /// regression resets `previous` to a smaller index, a later node at a
+    /// higher-but-still-valid index is NOT flagged. Here:
+    ///   `def a` (private_methods=6) → previous=6
+    ///   `CONST` (constants=1) → 1<6 → OFFENSE, previous=1
+    ///   `def b` (public_methods=4) → 4<1 false → previous=4 (no offense)
+    /// Exactly one offense — matching RuboCop. A "max-tracking" variant would
+    /// emit a second offense and diverge from upstream, breaking parity.
+    #[test]
+    fn unconditional_previous_assignment_matches_rubocop() {
+        let src =
+            "class Foo\n  private\n  def a; end\n  CONST = 1\n  public\n  def b; end\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "`constants` is supposed to appear before `private_methods`."
+        );
+        assert!(
+            !offenses.iter().any(|o| o.message.contains("public_methods")),
+            "must not flag public_methods: {offenses:?}"
         );
     }
 
