@@ -24,6 +24,16 @@ pub fn first_line_range(node: NodeId, cx: &Cx<'_>) -> Range {
     }
 }
 
+/// Returns `true` if `byte` is whitespace under Ruby's `\s` / `String#strip`
+/// semantics. Unlike Rust's [`u8::is_ascii_whitespace`] (which matches the five
+/// bytes `[ \t\n\r\x0C]`), this also matches the vertical tab `\v` (`0x0B`), so
+/// blank-line detection in layout cops mirrors RuboCop's `line.strip.empty?` /
+/// `blank?` checks faithfully.
+#[inline]
+pub fn is_ruby_blank_byte(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C)
+}
+
 /// Returns `true` if `node` is a parenthesized expression `(...)`.
 ///
 /// After the translator change, prism's `ParenthesesNode` lowers to
