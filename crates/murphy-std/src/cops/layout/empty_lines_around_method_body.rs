@@ -8,7 +8,7 @@
 //! upstream_cop: Layout/EmptyLinesAroundMethodBody
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-p8b2]
+//! gap_issues: [murphy-a2x8]
 //! notes: >
 //!   Ports RuboCop's `EmptyLinesAroundBody` mixin (`KIND = 'method'`,
 //!   `on_def`/`on_defs`). This cop has no `EnforcedStyle` — it always enforces
@@ -19,22 +19,33 @@
 //!   no arguments the arguments node has no source range, and RuboCop falls
 //!   back to `node.source_range.first_line` (the `def` line).
 //!
-//!   Gaps vs. upstream (tracked in murphy-p8b2):
-//!   - Endless methods (`def foo =\n\n value`) use a separate
-//!     `offending_endless_method?` path keyed off `node.loc.assignment`. Murphy
-//!     has no assignment-operator loc on `NodeLoc`, so the endless-method path
-//!     is not ported. Single-line endless methods never trip the body checks
-//!     (they are `single_line?`), so the practical gap is only multi-line
-//!     endless defs with a blank line after `=`.
+//!   Endless methods (`def foo =\n\n value`) use RuboCop's separate
+//!   `offending_endless_method?` / `register_offense_for_endless_method` path
+//!   keyed off `node.loc.assignment` (the `=` token). Murphy has no
+//!   assignment-operator loc on `NodeLoc` for a `def`, so the `=` is recovered
+//!   with a paren-depth-0 token scan between the signature and the body
+//!   (`endless_assignment_loc`); a `=` inside a default-argument value is not
+//!   matched. An offense fires when the body begins more than one line below
+//!   `=` AND the line directly after `=` is blank, with the message "Extra
+//!   empty line detected at method body beginning." The correction removes the
+//!   full run of blank lines after `=` (one idempotent edit), reaching the same
+//!   fixpoint RuboCop reaches by re-running its single-line removal. Verified
+//!   against RuboCop 1.86.2 (TargetRubyVersion 3.0).
 //!
 //!   ABI note: `NodeLoc` exposes only `expression`/`name` ranges, so the
 //!   adjusted first line is derived from the arguments node's `expression`
 //!   range (zero-width ⇒ no args ⇒ def line), matching RuboCop's
 //!   `arguments.source_range&.last_line`.
+//!
+//!   Remaining gap (tracked in murphy-a2x8): parenless multi-line argument
+//!   lists do not contribute their last line to the `adjusted_first_line`
+//!   computation (only the parameter-list closing `)` line is used), so a blank
+//!   line after a parenless multi-line signature anchors on the method-name
+//!   line rather than the signature's true last line.
 //! ```
 
-use crate::cops::util::check_empty_lines_around_body_blank_run;
-use murphy_plugin_api::{Cx, NoOptions, NodeId, SourceTokenKind, cop};
+use crate::cops::util::{check_empty_lines_around_body_blank_run, physical_lines};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, Range, SourceTokenKind, cop};
 
 #[derive(Default)]
 pub struct EmptyLinesAroundMethodBody;
@@ -61,6 +72,14 @@ impl EmptyLinesAroundMethodBody {
 fn check(node: NodeId, cx: &Cx<'_>) {
     let range = cx.range(node);
 
+    // `if node.endless? … else …`. An endless method (`def foo = body`) has no
+    // `end` keyword. RuboCop routes it through `offending_endless_method?` /
+    // `register_offense_for_endless_method` rather than the body-boundary check.
+    if cx.loc(node).end_keyword() == Range::ZERO {
+        check_endless(node, cx);
+        return;
+    }
+
     // `adjusted_first_line = node.arguments.source_range&.last_line`.
     //
     // ABI note: Murphy's empty `Args` node carries the *whole def* range
@@ -70,11 +89,118 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // closing `)` token (when the def is parenthesized) or fall back to the
     // method-name line. This matches `arguments.source_range&.last_line` for
     // the common shapes; parenless multi-line argument lists are a documented
-    // gap (murphy-a12x).
+    // gap (murphy-a2x8).
     let first_line = adjusted_first_line(node, cx);
 
     let last_line = line_1based(range.end.saturating_sub(1).max(range.start), cx);
     check_empty_lines_around_body_blank_run(cx, "method", first_line, last_line);
+}
+
+/// RuboCop's endless-method path:
+///
+/// ```ruby
+/// if node.endless?
+///   return unless offending_endless_method?(node)
+///   register_offense_for_endless_method(node)
+/// end
+///
+/// def offending_endless_method?(node)
+///   node.body.first_line > node.loc.assignment.line + 1 &&
+///     processed_source.lines[node.loc.assignment.line].empty?
+/// end
+/// ```
+///
+/// `node.loc.assignment` is the `=` token between the signature and the body.
+/// Murphy has no assignment-operator loc on `NodeLoc` for a `def`, so the `=`
+/// is located by a token scan between the method name (or parameter-list close)
+/// and the body's start. An offense is registered when the body begins more
+/// than one line below `=` AND the line directly after `=` is blank. The
+/// correction removes that blank line; mirroring this cop's body-boundary
+/// correction, the full run of consecutive blank lines is removed so a single
+/// pass reaches a clean fixpoint.
+fn check_endless(node: NodeId, cx: &Cx<'_>) {
+    let Some(body) = cx.def_body(node).get() else {
+        return;
+    };
+    let Some(assignment) = endless_assignment_loc(node, body, cx) else {
+        return;
+    };
+
+    let assignment_line = line_1based(assignment.start, cx);
+    let body_first_line = line_1based(cx.range(body).start, cx);
+
+    // `node.body.first_line > node.loc.assignment.line + 1`
+    if body_first_line <= assignment_line + 1 {
+        return;
+    }
+
+    // `processed_source.lines[node.loc.assignment.line].empty?` — RuboCop's
+    // 0-based `lines[assignment.line]` is the line directly after the 1-based
+    // assignment line.
+    let lines = physical_lines(cx.source());
+    let after_idx = assignment_line; // 0-based index of the line after `=`
+    let Some(&after_line) = lines.get(after_idx) else {
+        return;
+    };
+    if !after_line.blank {
+        return;
+    }
+
+    cx.emit_offense(
+        Range {
+            start: after_line.start,
+            end: after_line.end,
+        },
+        "Extra empty line detected at method body beginning.",
+        None,
+    );
+
+    // Remove the full run of consecutive blank lines after `=` (one idempotent
+    // edit). RuboCop removes a single line per pass and re-runs to fixpoint;
+    // removing the whole run reaches the same end state in one pass.
+    let mut hi = after_idx;
+    while hi + 1 < lines.len() && lines[hi + 1].blank {
+        hi += 1;
+    }
+    cx.emit_edit(
+        Range {
+            start: after_line.start,
+            end: lines[hi].end,
+        },
+        "",
+    );
+}
+
+/// The `=` operator range of an endless method (`def foo = body`), located by
+/// scanning for the first `=` token between the method signature and the body.
+/// The scan starts after the method name and is bounded by the body's start so
+/// a `=` inside a default-argument value (`def foo(a = 1) = body`) is not
+/// mistaken for the endless-assignment operator — the parameter-list `)` closes
+/// before the endless `=`, and the scan keys on the first `=` token that sits
+/// at paren-depth 0 after the signature. Returns `None` when no such token is
+/// found (a non-endless or malformed def).
+fn endless_assignment_loc(node: NodeId, body: NodeId, cx: &Cx<'_>) -> Option<Range> {
+    let name_end = cx.loc(node).name.end;
+    let scan_start = name_end.max(cx.range(node).start);
+    let body_start = cx.range(body).start;
+
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < scan_start);
+    let mut depth = 0i32;
+    for tok in toks[idx..]
+        .iter()
+        .take_while(|t| t.range.start < body_start)
+    {
+        match tok.kind {
+            SourceTokenKind::LeftParen => depth += 1,
+            SourceTokenKind::RightParen if depth > 0 => depth -= 1,
+            SourceTokenKind::Other if depth == 0 && cx.raw_source(tok.range) == "=" => {
+                return Some(tok.range);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The 1-based physical line where the method signature ends — RuboCop's
@@ -258,6 +384,78 @@ mod tests {
         assert_eq!(
             offenses[0].message,
             "Extra empty line detected at method body beginning."
+        );
+    }
+
+    // ---- endless methods (`offending_endless_method?`) ----
+
+    /// A multi-line endless method with a blank line directly after `=` is an
+    /// offense. RuboCop 1.86.2 (TargetRubyVersion 3.0): 1 offense at the body
+    /// beginning, autocorrect removes the blank line.
+    #[test]
+    fn flags_blank_after_endless_assignment() {
+        let src = "def foo =\n\n  value\n";
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at method body beginning."
+        );
+    }
+
+    #[test]
+    fn corrects_blank_after_endless_assignment() {
+        let src = "def foo =\n\n  value\n";
+        let run = run_cop_with_edits::<EmptyLinesAroundMethodBody>(src);
+        assert_eq!(apply(src, &run.edits), "def foo =\n  value\n");
+    }
+
+    /// Endless method with parameters and a blank after `=`.
+    #[test]
+    fn flags_blank_after_endless_assignment_with_params() {
+        let src = "def foo(a) =\n\n  a\n";
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+    }
+
+    /// `defs` (singleton) endless method with a blank after `=`.
+    #[test]
+    fn flags_blank_after_endless_singleton_assignment() {
+        let src = "def self.foo =\n\n  value\n";
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+    }
+
+    /// An endless method with a default-argument `=` (`def foo(a = 1) =`): the
+    /// endless-assignment `=` must be located past the default-arg `=` (which is
+    /// at paren depth 1), so the blank after the real `=` is flagged exactly
+    /// once. Verified against RuboCop 1.86.2 (TargetRubyVersion 3.0).
+    #[test]
+    fn flags_blank_after_endless_assignment_with_default_arg() {
+        let src = "def foo(a = 1) =\n\n  value\n";
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at method body beginning."
+        );
+    }
+
+    /// No blank after `=` — multi-line endless method is clean.
+    #[test]
+    fn accepts_endless_assignment_no_blank() {
+        test::<EmptyLinesAroundMethodBody>().expect_no_offenses("def foo =\n  value\n");
+    }
+
+    /// Two blank lines after `=` are collapsed in one offense's correction.
+    #[test]
+    fn corrects_multiple_blanks_after_endless_assignment() {
+        let src = "def foo =\n\n\n  value\n";
+        let run = run_cop_with_edits::<EmptyLinesAroundMethodBody>(src);
+        let fixed = apply(src, &run.edits);
+        assert!(
+            run_cop::<EmptyLinesAroundMethodBody>(&fixed).is_empty(),
+            "not idempotent: {fixed:?}"
         );
     }
 }
