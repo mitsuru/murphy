@@ -62,12 +62,14 @@ pub struct ArrayAlignmentOptions {
         description = "How to align elements following the first line of a multi-line array."
     )]
     pub enforced_style: ArrayAlignmentStyle,
+    // `Option<i64>` (not `i64`) so the bundled default `IndentationWidth: ~`
+    // (which merges to JSON `null`) decodes to `None` instead of erroring the
+    // whole option struct and silently discarding the user's `EnforcedStyle`.
     #[option(
         name = "IndentationWidth",
-        default = 0,
-        description = "Indentation width for `with_fixed_indentation` (0 = use the default of 2)."
+        description = "Indentation width for `with_fixed_indentation` (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -154,13 +156,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 }
 
-/// Configured indentation width for `with_fixed_indentation` (0 → default 2).
+/// Configured indentation width for `with_fixed_indentation` (null/non-positive
+/// → default 2).
 fn indentation_width(opts: &ArrayAlignmentOptions) -> usize {
-    if opts.indentation_width > 0 {
-        opts.indentation_width as usize
-    } else {
-        2
-    }
+    opts.indentation_width.filter(|&w| w > 0).map_or(2, |w| w as usize)
 }
 
 /// RuboCop's `target_method_lineno`: the array's `[` line when bracketed,
@@ -176,11 +175,20 @@ fn anchor_line_offset(node: NodeId, cx: &Cx<'_>) -> u32 {
     }
 }
 
-/// True when the array literal's source begins with `[` (a `[`-delimited array,
-/// not a bracketless `return 1, 2` / `%w[…]` percent literal whose first byte
-/// is `%`).
+/// RuboCop's `ArrayNode#bracketed?` (`square_brackets? || percent_literal?`):
+/// true when the array has an opening delimiter — `[`, or any percent literal
+/// (`%w[…]`, `%i(…)`, …). For an array, `loc.begin` is always either `[` or
+/// starts with `%`, so `bracketed?` is exactly "has a begin delimiter". A
+/// bracketless array (`return 1, 2`) begins at its first element, so
+/// `node.start < first_element.start` is the faithful test — and it correctly
+/// rejects a bracketless array whose first element is itself a percent literal
+/// (`return %w[a], 2`), unlike a `starts_with('%')` source check. Murphy does
+/// not populate a begin-delimiter loc for array nodes, hence the positional test.
 fn is_bracketed(node: NodeId, cx: &Cx<'_>) -> bool {
-    cx.raw_source(cx.range(node)).starts_with('[')
+    match cx.array_elements(node).first() {
+        Some(&first) => cx.range(node).start < cx.range(first).start,
+        None => true,
+    }
 }
 
 /// Column of the first non-whitespace char on the line containing `offset`.
@@ -213,13 +221,58 @@ fn offending_range(element: NodeId, cx: &Cx<'_>) -> Range {
 #[cfg(test)]
 mod tests {
     use super::{ArrayAlignment, ArrayAlignmentOptions, ArrayAlignmentStyle};
+    use murphy_plugin_api::CopOptions;
     use murphy_plugin_api::test_support::{indoc, test};
 
     fn fixed() -> ArrayAlignmentOptions {
         ArrayAlignmentOptions {
             enforced_style: ArrayAlignmentStyle::WithFixedIndentation,
-            indentation_width: 0,
+            indentation_width: None,
         }
+    }
+
+    /// Regression (Codex #384): bundled default `IndentationWidth: ~` → JSON
+    /// `null`. It must decode (as `Option<i64>`) rather than erroring the struct
+    /// and discarding the user's `EnforcedStyle`.
+    #[test]
+    fn null_indentation_width_preserves_other_keys() {
+        let opts = <ArrayAlignmentOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"with_fixed_indentation","IndentationWidth":null}"#,
+        )
+        .expect("null IndentationWidth must decode, not discard the struct");
+        assert!(opts.enforced_style == ArrayAlignmentStyle::WithFixedIndentation);
+    }
+
+    /// Parity pin (Codex #384): RuboCop's `ArrayNode#bracketed?`
+    /// (`square_brackets? || percent_literal?`) treats `%w[…]`/`%i[…]` as
+    /// bracketed, so `with_fixed_indentation` anchors to the percent array's own
+    /// line (here indent 2 + one level = 4), not the enclosing `foo(` line.
+    #[test]
+    fn fixed_treats_percent_array_as_bracketed() {
+        test::<ArrayAlignment>()
+            .with_options(&fixed())
+            .expect_no_offenses(indoc! {"
+                foo(
+                  %w[one
+                    two]
+                )
+            "});
+    }
+
+    /// Companion: a *bracketless* array (`return 1, 2`) has no opening delimiter,
+    /// so `node.start == first_element.start` and it anchors to the parent line
+    /// (the `return` line, indent 2 + one level = 4). Pins the false direction of
+    /// the `is_bracketed` rewrite.
+    #[test]
+    fn fixed_bracketless_array_anchors_to_parent_line() {
+        test::<ArrayAlignment>()
+            .with_options(&fixed())
+            .expect_no_offenses(indoc! {"
+                def f
+                  return 1,
+                    2
+                end
+            "});
     }
 
     // with_first_element (default) ----------------------------------------

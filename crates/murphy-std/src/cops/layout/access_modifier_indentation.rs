@@ -63,12 +63,14 @@ pub struct AccessModifierIndentationOptions {
         description = "Whether to `indent` access modifiers one level in, or `outdent` them to the body keyword."
     )]
     pub enforced_style: AccessModifierIndentationStyle,
+    // `Option<i64>` (not `i64`) so the bundled default `IndentationWidth: ~`
+    // (which merges to JSON `null`) decodes to `None` instead of erroring the
+    // whole option struct and silently discarding the user's `EnforcedStyle`.
     #[option(
         name = "IndentationWidth",
-        default = 0,
-        description = "Indentation width for the `indent` style (0 = use the default of 2)."
+        description = "Indentation width for the `indent` style (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -187,13 +189,10 @@ fn terminator_range(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
 fn expected_indent_offset(opts: &AccessModifierIndentationOptions) -> usize {
     match opts.enforced_style {
         AccessModifierIndentationStyle::Outdent => 0,
-        AccessModifierIndentationStyle::Indent => {
-            if opts.indentation_width > 0 {
-                opts.indentation_width as usize
-            } else {
-                2
-            }
-        }
+        AccessModifierIndentationStyle::Indent => opts
+            .indentation_width
+            .filter(|&w| w > 0)
+            .map_or(2, |w| w as usize),
     }
 }
 
@@ -219,13 +218,28 @@ fn line_of(offset: u32, src: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{AccessModifierIndentation, AccessModifierIndentationOptions, AccessModifierIndentationStyle};
+    use murphy_plugin_api::CopOptions;
     use murphy_plugin_api::test_support::{indoc, test};
 
     fn outdent() -> AccessModifierIndentationOptions {
         AccessModifierIndentationOptions {
             enforced_style: AccessModifierIndentationStyle::Outdent,
-            indentation_width: 0,
+            indentation_width: None,
         }
+    }
+
+    /// Regression (Codex #384): the bundled default `IndentationWidth: ~` merges
+    /// to JSON `null`. It must decode to the unset state instead of erroring the
+    /// whole option struct — otherwise `cx.options_or_default` discards the
+    /// user's `EnforcedStyle: outdent` and silently runs with the `indent`
+    /// default.
+    #[test]
+    fn null_indentation_width_preserves_other_keys() {
+        let opts = <AccessModifierIndentationOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"outdent","IndentationWidth":null}"#,
+        )
+        .expect("null IndentationWidth must decode, not discard the struct");
+        assert!(opts.enforced_style == AccessModifierIndentationStyle::Outdent);
     }
 
     // indent (default) ----------------------------------------------------

@@ -73,12 +73,14 @@ pub struct ArgumentAlignmentOptions {
         description = "How to align arguments following the first line of a multi-line method call."
     )]
     pub enforced_style: ArgumentAlignmentStyle,
+    // `Option<i64>` (not `i64`) so the bundled default `IndentationWidth: ~`
+    // (which merges to JSON `null`) decodes to `None` instead of erroring the
+    // whole option struct and silently discarding the user's `EnforcedStyle`.
     #[option(
         name = "IndentationWidth",
-        default = 0,
-        description = "Indentation width for `with_fixed_indentation` (0 = use the default of 2)."
+        description = "Indentation width for `with_fixed_indentation` (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -168,8 +170,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 }
 
-/// RuboCop's `multiple_arguments?`: two or more arguments, or a single braceless
-/// hash first argument with two or more pairs.
+/// RuboCop's `multiple_arguments?`: two or more arguments, or a single hash
+/// first argument with two or more pairs. The hash may be braced or braceless —
+/// RuboCop checks `first_argument.hash_type?` here; the braceless distinction is
+/// applied later in `flattened_arguments`.
 fn multiple_arguments(args: &[NodeId], cx: &Cx<'_>) -> bool {
     if args.len() >= 2 {
         return true;
@@ -177,7 +181,7 @@ fn multiple_arguments(args: &[NodeId], cx: &Cx<'_>) -> bool {
     let Some(&first) = args.first() else {
         return false;
     };
-    is_braceless_hash(first, cx) && cx.hash_pairs(first).len() >= 2
+    matches!(cx.kind(first), NodeKind::Hash(_)) && cx.hash_pairs(first).len() >= 2
 }
 
 /// RuboCop's `flattened_arguments`. Returns the items checked for alignment.
@@ -218,13 +222,10 @@ fn is_braceless_hash(node: NodeId, cx: &Cx<'_>) -> bool {
     !cx.raw_source(cx.range(node)).starts_with('{')
 }
 
-/// Configured indentation width for `with_fixed_indentation` (0 → default 2).
+/// Configured indentation width for `with_fixed_indentation` (null/non-positive
+/// → default 2).
 fn indentation_width(opts: &ArgumentAlignmentOptions) -> usize {
-    if opts.indentation_width > 0 {
-        opts.indentation_width as usize
-    } else {
-        2
-    }
+    opts.indentation_width.filter(|&w| w > 0).map_or(2, |w| w as usize)
 }
 
 /// RuboCop's `target_method_lineno`: the selector line, or the opening `(` line
@@ -271,13 +272,44 @@ fn offending_range(item: NodeId, cx: &Cx<'_>) -> Range {
 #[cfg(test)]
 mod tests {
     use super::{ArgumentAlignment, ArgumentAlignmentOptions, ArgumentAlignmentStyle};
-    use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::CopOptions;
+    use murphy_plugin_api::test_support::{indoc, run_cop_with_options, test};
 
     fn fixed() -> ArgumentAlignmentOptions {
         ArgumentAlignmentOptions {
             enforced_style: ArgumentAlignmentStyle::WithFixedIndentation,
-            indentation_width: 0,
+            indentation_width: None,
         }
+    }
+
+    /// Regression (Codex #384): bundled default `IndentationWidth: ~` → JSON
+    /// `null`. It must decode (as `Option<i64>`) rather than erroring the struct
+    /// and discarding the user's `EnforcedStyle`.
+    #[test]
+    fn null_indentation_width_preserves_other_keys() {
+        let opts = <ArgumentAlignmentOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"with_fixed_indentation","IndentationWidth":null}"#,
+        )
+        .expect("null IndentationWidth must decode, not discard the struct");
+        assert!(opts.enforced_style == ArgumentAlignmentStyle::WithFixedIndentation);
+    }
+
+    /// Parity pin (Codex #384): RuboCop's `multiple_arguments?` is satisfied by a
+    /// single hash first argument with >=2 pairs regardless of braces, so a lone
+    /// braced hash under `with_fixed_indentation` is still checked against the
+    /// call's fixed indent. Here the `{` sits at column 4 but the fixed base is
+    /// column 2 (`foo(` indent 0 + one level), so it is flagged.
+    #[test]
+    fn fixed_checks_single_braced_hash_argument() {
+        let offenses = run_cop_with_options::<ArgumentAlignment>(
+            "foo(\n    { a: 1,\n      b: 2 }\n)\n",
+            &fixed(),
+        );
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert!(
+            offenses[0].message.contains("one level of indentation"),
+            "got {offenses:?}"
+        );
     }
 
     // with_first_argument (default) ---------------------------------------
