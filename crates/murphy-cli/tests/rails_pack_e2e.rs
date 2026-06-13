@@ -133,7 +133,7 @@ fn lint_on_rails_fixture_exits_clean_with_pack_loaded() {
     let rb = dir.path().join("app.rb");
     fs::write(
         &rb,
-        "# frozen_string_literal: true\nclass UsersController < ApplicationController\n  \
+        "# frozen_string_literal: true\n\n# Handles user requests.\nclass UsersController < ApplicationController\n  \
          before_action :authenticate\n  \
          def index\n    render :index\n  end\nend\n",
     )
@@ -172,7 +172,7 @@ fn rails_rule_section_does_not_error_lint_setup() {
     // trip `Lint/EmptyClass`, and the body is otherwise inert.
     fs::write(
         &rb,
-        "# frozen_string_literal: true\nclass Foo\n  def bar; end\nend\n",
+        "# frozen_string_literal: true\n\n# A demo class.\nclass Foo\n  def bar; end\nend\n",
     )
     .expect("write rb");
 
@@ -365,7 +365,7 @@ fn rails_pack_exempts_lambda_symbol_proc_through_full_lint_pipeline() {
     // A lambda whose sole parameter is the receiver of a single method call —
     // the canonical SymbolProc shape, and exactly Mastodon's
     // `normalizes :x, with: ->(v) { v.strip }` form.
-    let fixture = "# frozen_string_literal: true\nFOO = ->(v) { v.strip }\n";
+    let fixture = "# frozen_string_literal: true\n\nFOO = ->(v) { v.strip }\n";
 
     // ── pack-loaded arm: lambda exemption active, NO SymbolProc offense ──
     let with_pack = tempdir().expect("tempdir");

@@ -735,4 +735,3 @@ fn blank_run_range(lines: &[PhysicalLine], idx: usize, dir: BlankRunDirection) -
         end: lines[hi].end,
     }
 }
-
