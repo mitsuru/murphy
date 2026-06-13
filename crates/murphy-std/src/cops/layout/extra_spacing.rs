@@ -211,11 +211,13 @@ fn aligned_comment_lines(cx: &Cx<'_>) -> HashSet<usize> {
 /// stays out of them.
 fn ignored_ranges(cx: &Cx<'_>) -> Vec<Range> {
     let mut ranges = Vec::new();
-    // Fast-path: a multiline hash needs both a `{` (brace-delimited literal)
-    // and a `\n`. When either is absent the full-tree descendants walk (a
-    // per-file Vec allocation) cannot find one, so skip it entirely.
+    // Fast-path: a multiline hash needs a `\n`. When the source is a single
+    // line there is no multiline hash, so skip the full-tree descendants walk
+    // (a per-file Vec allocation) entirely. NB: do NOT also gate on `{` — a
+    // braceless multiline hash (`foo(\n  a: 1,\n  bb: 2\n)`) is still a
+    // `NodeKind::Hash` whose pair gaps `Layout/HashAlignment` owns.
     let src = cx.source().as_bytes();
-    if !src.contains(&b'{') || !src.contains(&b'\n') {
+    if !src.contains(&b'\n') {
         return ranges;
     }
     for &node in cx.descendants(cx.root()).iter() {
@@ -435,6 +437,18 @@ mod tests {
               a   => 1,
               bb  => 2,
             }
+        "#});
+    }
+
+    #[test]
+    fn ignores_braceless_multiline_hash_key_value_gap() {
+        // A braceless multiline kwargs hash has no `{`, but its pair gaps are
+        // still owned by Layout/HashAlignment. The fast-path must not skip it.
+        test::<ExtraSpacing>().expect_no_offenses(indoc! {r#"
+            foo(
+              a:   1,
+              bb:  2,
+            )
         "#});
     }
 }
