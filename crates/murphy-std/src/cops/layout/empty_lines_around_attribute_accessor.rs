@@ -219,7 +219,11 @@ fn next_line_is_blank(source: &[u8], line_start: usize) -> bool {
         .map_or(source.len(), |pos| line_start + pos);
     source[line_start..line_end]
         .iter()
-        .all(|b| b.is_ascii_whitespace())
+        // Ruby's `blank?` (`/\A[[:space:]]*\z/`) treats POSIX space as blank:
+        // space, `\t`, `\n`, vertical tab `\x0B`, form feed `\x0C`, `\r`.
+        // Rust's `is_ascii_whitespace` omits the vertical tab, so match the
+        // POSIX set explicitly for parity.
+        .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\x0B' | b'\x0C' | b'\r'))
 }
 
 /// If the line starting at `line_start` is a `rubocop:`/`murphy:` *enable*
@@ -230,6 +234,12 @@ fn enable_directive_next_line(cx: &Cx<'_>, line_start: usize) -> Option<usize> {
         .iter()
         .position(|&b| b == b'\n')
         .map_or(source.len(), |pos| line_start + pos);
+    // Fast-path: a directive is a comment, so the line must contain `#`.
+    // This skips the `comment_directives()` parse+alloc for the common case
+    // (the line after an accessor is almost never a comment).
+    if !source[line_start..line_end].contains(&b'#') {
+        return None;
+    }
     let on_line = |r: Range| {
         (r.start as usize) >= line_start && (r.start as usize) < line_end
     };
