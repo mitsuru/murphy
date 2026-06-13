@@ -189,10 +189,11 @@ fn terminator_range(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
 fn expected_indent_offset(opts: &AccessModifierIndentationOptions) -> usize {
     match opts.enforced_style {
         AccessModifierIndentationStyle::Outdent => 0,
-        AccessModifierIndentationStyle::Indent => opts
-            .indentation_width
-            .filter(|&w| w > 0)
-            .map_or(2, |w| w as usize),
+        // Only an unset (`None`) override falls back to 2; an explicit `0` is
+        // honoured (Ruby treats `0` as truthy). Negatives clamp to 0.
+        AccessModifierIndentationStyle::Indent => {
+            opts.indentation_width.map_or(2, |w| w.max(0) as usize)
+        }
     }
 }
 
@@ -379,6 +380,29 @@ mod tests {
 
                   private
                   ^^^^^^^ Outdent access modifiers like `private`.
+
+                  def b; end
+                end
+            "});
+    }
+
+    /// Parity pin (Codex #387/#384): an explicit `IndentationWidth: 0` under the
+    /// `indent` style makes the expected offset 0 (Ruby treats `0` as truthy), so
+    /// a modifier aligned with the body `end` (offset 0) is accepted; `0` must not
+    /// fall back to width 2.
+    #[test]
+    fn indent_honors_zero_indentation_width() {
+        let opts = AccessModifierIndentationOptions {
+            enforced_style: AccessModifierIndentationStyle::Indent,
+            indentation_width: Some(0),
+        };
+        test::<AccessModifierIndentation>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {"
+                class Foo
+                  def a; end
+
+                private
 
                   def b; end
                 end

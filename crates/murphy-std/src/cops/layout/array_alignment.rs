@@ -156,10 +156,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 }
 
-/// Configured indentation width for `with_fixed_indentation` (null/non-positive
-/// → default 2).
+/// Configured indentation width for `with_fixed_indentation`. Only an unset
+/// (`None`) override falls back to 2; an explicit `0` is honoured (Ruby treats
+/// `0` as truthy in `cop_config['IndentationWidth'] || …`). Negatives clamp to 0.
 fn indentation_width(opts: &ArrayAlignmentOptions) -> usize {
-    opts.indentation_width.filter(|&w| w > 0).map_or(2, |w| w as usize)
+    opts.indentation_width.map_or(2, |w| w.max(0) as usize)
 }
 
 /// RuboCop's `target_method_lineno`: the array's `[` line when bracketed,
@@ -358,6 +359,24 @@ mod tests {
                 array = [1, 2, 3,
                          4, 5, 6]
                          ^ Use one level of indentation for elements following the first line of a multi-line array.
+            "});
+    }
+
+    /// Parity pin (Codex #387/#384): an explicit `IndentationWidth: 0` is
+    /// honoured (Ruby treats `0` as truthy), so `with_fixed_indentation` anchors
+    /// elements at the array's indentation + 0. `4, 5, 6` at column 0 is accepted;
+    /// `0` must not fall back to width 2.
+    #[test]
+    fn fixed_honors_zero_indentation_width() {
+        let opts = ArrayAlignmentOptions {
+            enforced_style: ArrayAlignmentStyle::WithFixedIndentation,
+            indentation_width: Some(0),
+        };
+        test::<ArrayAlignment>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {"
+                array = [1, 2, 3,
+                4, 5, 6]
             "});
     }
 }

@@ -222,10 +222,11 @@ fn is_braceless_hash(node: NodeId, cx: &Cx<'_>) -> bool {
     !cx.raw_source(cx.range(node)).starts_with('{')
 }
 
-/// Configured indentation width for `with_fixed_indentation` (null/non-positive
-/// → default 2).
+/// Configured indentation width for `with_fixed_indentation`. Only an unset
+/// (`None`) override falls back to 2; an explicit `0` is honoured (Ruby treats
+/// `0` as truthy in `cop_config['IndentationWidth'] || …`). Negatives clamp to 0.
 fn indentation_width(opts: &ArgumentAlignmentOptions) -> usize {
-    opts.indentation_width.filter(|&w| w > 0).map_or(2, |w| w as usize)
+    opts.indentation_width.map_or(2, |w| w.max(0) as usize)
 }
 
 /// RuboCop's `target_method_lineno`: the selector line, or the opening `(` line
@@ -469,6 +470,24 @@ mod tests {
                   a: 1,
                     b: 2
                     ^^^^ Use one level of indentation for arguments following the first line of a multi-line method call.
+            "});
+    }
+
+    /// Parity pin (Codex #387/#384): an explicit `IndentationWidth: 0` is
+    /// honoured, so `with_fixed_indentation` anchors arguments at the method-name
+    /// line indent + 0. `:baz` at column 0 is accepted; `0` must not fall back to
+    /// width 2.
+    #[test]
+    fn fixed_honors_zero_indentation_width() {
+        let opts = ArgumentAlignmentOptions {
+            enforced_style: ArgumentAlignmentStyle::WithFixedIndentation,
+            indentation_width: Some(0),
+        };
+        test::<ArgumentAlignment>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {"
+                foo :bar,
+                :baz
             "});
     }
 }
