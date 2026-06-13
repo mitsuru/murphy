@@ -246,11 +246,31 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
     }
 
     if count > expected {
-        // Remove `count - expected` newlines starting at `newline_pos`.
+        // Remove `count - expected` whole blank lines that follow `prev`'s last
+        // line. Each blank line spans from its line start to the next line start
+        // (including any spaces/tabs it contains), so removing whole lines never
+        // merges trailing whitespace onto an adjacent line.
         let difference = count - expected;
+        // The first blank line starts just after the newline that terminates
+        // `prev`'s last line.
+        let mut pos = newline_pos + 1;
+        let mut removed = 0usize;
+        while removed < difference && pos < src.len() {
+            let line_end = src[pos..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(src.len(), |i| pos + i);
+            // Advance past the line terminator (if any) to the next line start.
+            pos = if line_end < src.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
+            removed += 1;
+        }
         let range = Range {
-            start: newline_pos as u32,
-            end: (newline_pos + difference) as u32,
+            start: (newline_pos + 1) as u32,
+            end: pos as u32,
         };
         cx.emit_edit(range, "");
     } else {
@@ -395,5 +415,22 @@ mod tests {
         let run = run_cop_with_edits::<EmptyLineBetweenDefs>(src);
         assert_eq!(run.offenses.len(), 1);
         assert_eq!(apply(src, &run.edits), "def a\nend\n\ndef b\nend\n");
+    }
+
+    #[test]
+    fn corrects_too_many_blank_lines_with_whitespace() {
+        // The excess blank line contains spaces. Removal must drop the whole
+        // line (whitespace + newline), not merge the spaces onto an adjacent
+        // line and leave trailing whitespace behind.
+        let src = "def a\nend\n  \n\ndef b\nend\n";
+        let run = run_cop_with_edits::<EmptyLineBetweenDefs>(src);
+        assert_eq!(run.offenses.len(), 1);
+        let corrected = apply(src, &run.edits);
+        assert_eq!(corrected, "def a\nend\n\ndef b\nend\n");
+        // Sanity: no line carries stray trailing whitespace.
+        assert!(
+            !corrected.contains("  \n") && !corrected.contains("end  "),
+            "corrected output has stray trailing whitespace: {corrected:?}"
+        );
     }
 }
