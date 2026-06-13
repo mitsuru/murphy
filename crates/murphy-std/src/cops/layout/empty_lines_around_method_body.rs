@@ -72,10 +72,12 @@ impl EmptyLinesAroundMethodBody {
 fn check(node: NodeId, cx: &Cx<'_>) {
     let range = cx.range(node);
 
-    // `if node.endless? … else …`. An endless method (`def foo = body`) has no
-    // `end` keyword. RuboCop routes it through `offending_endless_method?` /
-    // `register_offense_for_endless_method` rather than the body-boundary check.
-    if cx.loc(node).end_keyword() == Range::ZERO {
+    // `if node.endless? … else …`. RuboCop keys on `node.endless?`
+    // (`loc.assignment` present), NOT on the absence of a trailing `end`: an
+    // endless method whose RHS is itself an `if`/`case` (`def foo = if c … end`)
+    // ends in an `end` keyword, so `end_keyword()` is non-zero even though the
+    // method is endless. Detect the endless `=` operator directly instead.
+    if is_endless(node, cx) {
         check_endless(node, cx);
         return;
     }
@@ -94,6 +96,18 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     let last_line = line_1based(range.end.saturating_sub(1).max(range.start), cx);
     check_empty_lines_around_body_blank_run(cx, "method", first_line, last_line);
+}
+
+/// RuboCop's `node.endless?` (`loc.assignment` present). Keyed on the endless
+/// `=` operator, not the absence of a trailing `end`: `def foo = if c … end`
+/// has an `end` (the conditional's) yet is endless. Reuses `endless_assignment_loc`,
+/// whose scan is bounded to the gap between the signature and the body so a
+/// default-argument `=` or the body's own `=` is never mistaken for it.
+fn is_endless(node: NodeId, cx: &Cx<'_>) -> bool {
+    let Some(body) = cx.def_body(node).get() else {
+        return false;
+    };
+    endless_assignment_loc(node, body, cx).is_some()
 }
 
 /// RuboCop's endless-method path:
@@ -286,6 +300,19 @@ mod tests {
     #[test]
     fn accepts_endless_method() {
         test::<EmptyLinesAroundMethodBody>().expect_no_offenses("def foo = 42\n");
+    }
+
+    /// Parity pin (Codex #387): an endless method whose RHS is itself an
+    /// `if`/`case` expression ending in `end` must be detected as endless by the
+    /// assignment operator, not by the absence of a trailing `end` (the body's
+    /// own `end` makes `end_keyword()` non-zero). Here the body (`if`) starts on
+    /// the assignment line, so RuboCop's `offending_endless_method?` is false and
+    /// the blank line is NOT a method-body-beginning offense.
+    #[test]
+    fn accepts_blank_after_endless_def_with_conditional_body() {
+        let offenses =
+            run_cop::<EmptyLinesAroundMethodBody>("def foo = if cond\n\n  value\nend\n");
+        assert!(offenses.is_empty(), "got {offenses:?}");
     }
 
     #[test]

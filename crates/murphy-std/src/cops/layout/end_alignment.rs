@@ -248,30 +248,58 @@ fn line_break_before_keyword(expr_start: u32, kw_start: u32, cx: &Cx<'_>) -> boo
 
 /// The assignment / command-call node the construct is the right-hand side of —
 /// RuboCop's `outer_node` for `check_asgn_alignment`. `None` when the construct
-/// is not in assignment-RHS position.
+/// is not assignment-aligned (then `variable` falls back to the keyword).
 ///
 /// Replicates `CheckAssignment`'s routing without cross-handler `ignore_node`
-/// state. From the construct, walk up the **leftmost** position through
-/// parenthesized `Begin` / `Or` / `And` wrappers (mirroring RuboCop's
-/// `rhs = rhs.child_nodes.first while rhs.type?(:begin, :or, :and)` unwrap), and
-/// accept the parent when it is:
+/// state, dispatching on the construct's node type to match RuboCop's handlers:
 ///
-/// - one of the nine assignment kinds whose value (last child) is the chain, or
-/// - a `Send`/`Csend` whose last argument is the chain (setter / command call,
-///   RuboCop's `extract_rhs(node) == node.last_argument`).
-///
-/// Additionally, a `case`/`case_match` in argument position anchors on its
-/// parent directly (`on_case`'s `node.argument?` branch).
+/// - `class` / `module`: never assignment-aligned — `on_class`/`on_module` call
+///   `check_other_alignment`, and they are not `conditional?` so
+///   `check_assignment` skips them.
+/// - `sclass`: aligned only when its DIRECT parent is an assignment
+///   (`on_sclass`).
+/// - `case` / `case_match` in argument position: anchors on its parent directly
+///   (`on_case`'s `node.argument?`).
+/// - `if` / `while` / `until` / `case` / `case_match` (the `conditional?`
+///   types): routed by `check_assignment`, which runs `first_part_of_call_chain`
+///   (`send → receiver`, `block → send_node`) and unwraps `begin`/`or`/`and`
+///   before checking the assignment / command parent. The walk-up reconstructs
+///   this bottom-up: it threads through call-chain links and leftmost
+///   paren-`Begin` / `Or` / `And` wrappers, accepting an assignment whose value
+///   (last child) is the chain, or a `Send`/`Csend` whose last argument is the
+///   chain (`extract_rhs == node.last_argument`).
 fn asgn_outer_node(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    // `on_case` / `on_case_match`: `check_asgn_alignment(node.parent, node)` when
-    // the case is an argument (the parent is the outer node directly).
-    if matches!(*cx.kind(node), NodeKind::Case { .. } | NodeKind::CaseMatch { .. })
-        && cx.is_argument(node)
-    {
-        return cx.parent(node).get();
+    // RuboCop routes a construct through assignment (`variable`) alignment only
+    // along the path matching its node type:
+    match *cx.kind(node) {
+        // `on_class` / `on_module` call `check_other_alignment` unconditionally,
+        // and `class`/`module` are not `conditional?`, so `check_assignment`
+        // skips them too — they are never assignment-aligned.
+        NodeKind::Class { .. } | NodeKind::Module { .. } => return None,
+        // `on_sclass`: aligned to the assignment only when its DIRECT parent is
+        // an assignment (no call-chain / operator unwrap).
+        NodeKind::Sclass { .. } => {
+            let parent = cx.parent(node).get()?;
+            return cx.is_assignment(parent).then_some(parent);
+        }
+        // `on_case` / `on_case_match`: a `case` in argument position anchors on
+        // its parent directly (`node.argument?`).
+        NodeKind::Case { .. } | NodeKind::CaseMatch { .. } if cx.is_argument(node) => {
+            return cx.parent(node).get();
+        }
+        // `if`/`while`/`until`/`case`/`case_match` are `conditional?`, so
+        // `check_assignment` routes them after `first_part_of_call_chain` and the
+        // `begin`/`or`/`and` unwrap. The walk-up below reconstructs that bottom-up.
+        NodeKind::If { .. }
+        | NodeKind::While { .. }
+        | NodeKind::Until { .. }
+        | NodeKind::Case { .. }
+        | NodeKind::CaseMatch { .. } => {}
+        _ => return None,
     }
 
-    // Walk up the leftmost-child chain through paren-`Begin` / `Or` / `And`.
+    // Walk up through call-chain links (`first_part_of_call_chain`) and leftmost
+    // paren-`Begin` / `Or` / `And` wrappers until the assignment / command call.
     let mut current = node;
     loop {
         let parent = cx.parent(current).get()?;
@@ -281,9 +309,26 @@ fn asgn_outer_node(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
             return (cx.children(parent).last() == Some(&current)).then_some(parent);
         }
 
-        // Send/Csend whose last argument is `current` (setter or command call).
+        // Send/Csend: a command call whose LAST ARGUMENT is `current`
+        // (`extract_rhs` → `last_argument`) is the outer node. When `current` is
+        // the RECEIVER instead, the send is a transparent call-chain link
+        // (`first_part_of_call_chain`'s `node = node.receiver`) — keep walking up.
         if matches!(*cx.kind(parent), NodeKind::Send { .. } | NodeKind::Csend { .. }) {
-            return (cx.call_arguments(parent).last() == Some(&current)).then_some(parent);
+            if cx.call_arguments(parent).last() == Some(&current) {
+                return Some(parent);
+            }
+            if cx.call_receiver(parent).get() == Some(current) {
+                current = parent;
+                continue;
+            }
+            return None;
+        }
+
+        // Block: a transparent call-chain link when `current` is the block's call
+        // (`first_part_of_call_chain`'s `node = node.send_node`).
+        if cx.is_any_block_type(parent) && cx.block_call(parent).get() == Some(current) {
+            current = parent;
+            continue;
         }
 
         // Transparent wrappers: continue up only when `current` is the leftmost
@@ -677,6 +722,44 @@ mod tests {
     fn variable_line_break_before_keyword_falls_back() {
         let src = "x =\n  if c\n    foo\n  end\n";
         assert!(run_cop_with_options::<Cop>(src, &variable()).is_empty());
+    }
+
+    /// Parity pin (Codex #387): `x = if c ... end.to_s` — the conditional is the
+    /// receiver of a trailing call chain. RuboCop's `check_assignment` runs
+    /// `first_part_of_call_chain` (`send → receiver`) before the `conditional?`
+    /// check, so the `end` still anchors on the assignment variable, not the `if`
+    /// keyword. Here `end` under the `if` keyword (col 4) is flagged.
+    #[test]
+    fn variable_if_with_trailing_call_chain() {
+        let src = "x = if c\n  foo\n    end.to_s\n";
+        let run = run_cop_with_options::<Cop>(src, &variable());
+        assert_eq!(run.len(), 1, "got {run:?}");
+        assert_eq!(
+            run[0].message,
+            "`end` at 3, 4 is not aligned with `x = if` at 1, 0."
+        );
+    }
+
+    /// Parity pin (Codex #387): `x = class Foo ... end` — a `class` is always
+    /// keyword-aligned, never routed through the assignment, even as an
+    /// assignment RHS (RuboCop's `on_class` calls `check_other_alignment`
+    /// unconditionally; `class` is not `conditional?`). The `end` under the
+    /// `class` keyword (col 4) is accepted.
+    #[test]
+    fn variable_class_as_rhs_aligns_with_keyword() {
+        let src = "x = class Foo\n  y\n    end\n";
+        let run = run_cop_with_options::<Cop>(src, &variable());
+        assert!(run.is_empty(), "got {run:?}");
+    }
+
+    /// Companion to the `class` pin: `module` is likewise always keyword-aligned
+    /// when it is an assignment RHS. The `end` under the `module` keyword (col 4)
+    /// is accepted.
+    #[test]
+    fn variable_module_as_rhs_aligns_with_keyword() {
+        let src = "x = module Foo\n  y\n    end\n";
+        let run = run_cop_with_options::<Cop>(src, &variable());
+        assert!(run.is_empty(), "got {run:?}");
     }
 
     // ---- EnforcedStyleAlignWith: start_of_line ----

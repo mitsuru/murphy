@@ -120,17 +120,17 @@ impl ClosingParenthesisIndentation {
 /// RuboCop's `configured_indentation_width`:
 /// `cop_config['IndentationWidth'] || config.for_cop('Layout/IndentationWidth')['Width'] || 2`.
 ///
-/// The first term — this cop's own `IndentationWidth` override — is honoured.
-/// The cross-cop `Layout/IndentationWidth.Width` fallback is the un-wired GAP
-/// (murphy-bgd8); when this cop's override is unset, we go straight to the
-/// final default `2`. A non-positive override is ignored (treated as unset),
-/// matching RuboCop's truthy `||` semantics for a `0`/negative width being
-/// nonsensical.
+/// The first term — this cop's own `IndentationWidth` override — is honoured,
+/// including an explicit `0` (Ruby's `cop_config['IndentationWidth'] || …` is
+/// truthy for `0`, so `0` selects width 0, not the fallback). Only an unset
+/// override (`None`) inherits the default. The cross-cop
+/// `Layout/IndentationWidth.Width` fallback is the un-wired GAP (murphy-bgd8);
+/// when this cop's override is unset, we go straight to the final default `2`.
+/// A negative override is clamped to `0`.
 fn configured_indentation_width(cx: &Cx<'_>) -> usize {
     cx.options_or_default::<ClosingParenthesisIndentationOptions>()
         .indentation_width
-        .filter(|&w| w > 0)
-        .map_or(DEFAULT_INDENTATION_WIDTH, |w| w as usize)
+        .map_or(DEFAULT_INDENTATION_WIDTH, |w| w.max(0) as usize)
 }
 
 /// `on_send` / `on_csend`: only parenthesized calls have argument-list parens
@@ -552,5 +552,17 @@ mod tests {
         let run = run_cop::<Cop>(src);
         assert_eq!(run.len(), 1, "got {run:?}");
         assert_eq!(run[0].message, "Indent `)` to column 2 (not 4)");
+    }
+
+    /// Parity pin (Codex #387): an explicit `IndentationWidth: 0` is honoured
+    /// (Ruby's `cop_config['IndentationWidth'] || …` is truthy for `0`), so the
+    /// line-break branch expects `)` at `first_arg_indent - 0 = 4`. With `)`
+    /// already at column 4 there is no offense — `0` must NOT be treated as
+    /// "unset" (which would fall back to width 2 and wrongly flag column 2).
+    #[test]
+    fn honors_zero_indentation_width() {
+        let src = "some_method(\n    a\n    )\n";
+        let run = run_cop_with_options::<Cop>(src, &width(0));
+        assert!(run.is_empty(), "got {run:?}");
     }
 }
