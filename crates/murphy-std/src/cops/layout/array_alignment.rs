@@ -13,8 +13,13 @@
 //!   Ports `on_array` plus the `Alignment#check_alignment` /
 //!   `each_bad_alignment` spine. Fires on every array node with two or more
 //!   children whose parent is not a `masgn` (RuboCop's
-//!   `return if node.parent&.masgn_type?`). Each element that *begins its own
-//!   line* must sit at the base column; misaligned ones are flagged.
+//!   `return if node.parent&.masgn_type?`). Also skips the *bracketless* arrays
+//!   prism synthesizes under `return`/`break`/`next` (`return 1, 2`): the parser
+//!   gem RuboCop targets emits those values as direct children with no `array`
+//!   node, so RuboCop's `on_array` never visits them — but a *bracketed*
+//!   `return [1, 2]` is a real literal and is still checked. Each element that
+//!   *begins its own line* must sit at the base column; misaligned ones are
+//!   flagged.
 //!
 //!   - with_first_element (default): base column = the first element's display
 //!     column.
@@ -36,8 +41,9 @@
 //!
 //! ## Matched shapes
 //!
-//! `array` nodes with `children.size >= 2` and a non-`masgn` parent where a
-//! later element begins its own line at a column other than the base column.
+//! `array` nodes with `children.size >= 2` and a non-`masgn` parent (and not a
+//! bracketless array synthesized under `return`/`break`/`next`) where a later
+//! element begins its own line at a column other than the base column.
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
@@ -119,11 +125,26 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     if elements.len() < 2 {
         return;
     }
-    // RuboCop: `return if node.parent&.masgn_type?`.
-    if let Some(parent) = cx.parent(node).get()
-        && matches!(cx.kind(parent), NodeKind::Masgn { .. })
-    {
-        return;
+    if let Some(parent) = cx.parent(node).get() {
+        match cx.kind(parent) {
+            // RuboCop: `return if node.parent&.masgn_type?`. All `masgn` parents
+            // are exempt — the RHS `array` is a synthetic implicit array,
+            // bracketed or not (`a, b = [1, 2]` is exempt too).
+            NodeKind::Masgn { .. } => return,
+            // prism wraps a multi-value `return`/`break`/`next` argument list in
+            // a synthetic *bracketless* `array` node, but the parser gem (which
+            // RuboCop targets) emits the values as direct children with no
+            // `array` node, so RuboCop's `on_array` never visits them. A
+            // *bracketed* array under these keywords (`return [1, 2]`) is a real
+            // literal RuboCop does align, so gate on `!is_bracketed`. Verified
+            // against parser 3.3 and RuboCop 1.87.
+            NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Next(_)
+                if !is_bracketed(node, cx) =>
+            {
+                return;
+            }
+            _ => {}
+        }
     }
 
     let src = cx.source();
@@ -177,19 +198,23 @@ fn anchor_line_offset(node: NodeId, cx: &Cx<'_>) -> u32 {
 }
 
 /// RuboCop's `ArrayNode#bracketed?` (`square_brackets? || percent_literal?`):
-/// true when the array has an opening delimiter — `[`, or any percent literal
-/// (`%w[…]`, `%i(…)`, …). For an array, `loc.begin` is always either `[` or
-/// starts with `%`, so `bracketed?` is exactly "has a begin delimiter". A
-/// bracketless array (`return 1, 2`) begins at its first element, so
-/// `node.start < first_element.start` is the faithful test — and it correctly
-/// rejects a bracketless array whose first element is itself a percent literal
-/// (`return %w[a], 2`), unlike a `starts_with('%')` source check. Murphy does
-/// not populate a begin-delimiter loc for array nodes, hence the positional test.
+/// true when the array has an opening delimiter — `[` or any percent literal
+/// (`%w[…]`, `%i(…)`, …). Murphy does not populate a begin-delimiter loc, so we
+/// inspect the first byte of the array's range: a real literal begins with `[`
+/// or `%`. A bracketless implicit array (`x = 1, 2`) begins at its first
+/// element's byte, and prism's synthetic array under `return`/`break`/`next`
+/// begins at the *keyword* byte — neither is `[`/`%`, so both read as not
+/// bracketed.
+///
+/// A positional `node.start < first_element.start` test is **not** reliable
+/// here: prism pads the synthetic `return 1, 2` array's start back to the
+/// `return` keyword, so it spuriously precedes its first element and would read
+/// as bracketed. The byte check matches RuboCop's `loc.begin` semantics exactly.
 fn is_bracketed(node: NodeId, cx: &Cx<'_>) -> bool {
-    match cx.array_elements(node).first() {
-        Some(&first) => cx.range(node).start < cx.range(first).start,
-        None => true,
-    }
+    matches!(
+        cx.source().as_bytes().get(cx.range(node).start as usize),
+        Some(b'[' | b'%')
+    )
 }
 
 /// Column of the first non-whitespace char on the line containing `offset`.
@@ -260,17 +285,19 @@ mod tests {
             "});
     }
 
-    /// Companion: a *bracketless* array (`return 1, 2`) has no opening delimiter,
-    /// so `node.start == first_element.start` and it anchors to the parent line
-    /// (the `return` line, indent 2 + one level = 4). Pins the false direction of
-    /// the `is_bracketed` rewrite.
+    /// Companion: a *bracketless* implicit array (`x = 1, 2`) has no opening
+    /// delimiter, so `node.start == first_element.start` and it anchors to the
+    /// parent line (the `x =` line, indent 2 + one level = 4). Pins the false
+    /// direction of the `is_bracketed` rewrite. Uses `lvasgn` rather than
+    /// `return`, because bracketless arrays under `return`/`break`/`next` are now
+    /// skipped entirely (they don't exist in RuboCop's AST).
     #[test]
     fn fixed_bracketless_array_anchors_to_parent_line() {
         test::<ArrayAlignment>()
             .with_options(&fixed())
             .expect_no_offenses(indoc! {"
                 def f
-                  return 1,
+                  x = 1,
                     2
                 end
             "});
@@ -336,6 +363,72 @@ mod tests {
         test::<ArrayAlignment>().expect_no_offenses(indoc! {"
             a, b = 1,
               2
+        "});
+    }
+
+    /// Parity pin (Codex #384): a multi-value `return` has no array literal in
+    /// RuboCop's AST (parser gem: `(return (int 1) (int 2))`), so `on_array`
+    /// never fires. prism synthesizes a bracketless `(return (array …))`, which
+    /// the cop must skip — otherwise `2` is compared against the column of `1`.
+    /// Verified: RuboCop 1.87 reports no offense here.
+    #[test]
+    fn accepts_multi_value_return() {
+        test::<ArrayAlignment>().expect_no_offenses(indoc! {"
+            def f
+              return 1,
+                2
+            end
+        "});
+    }
+
+    /// Companion to [`accepts_multi_value_return`] for `break`: same synthetic
+    /// bracketless array under a `break` parent, skipped.
+    #[test]
+    fn accepts_multi_value_break() {
+        test::<ArrayAlignment>().expect_no_offenses(indoc! {"
+            [].each do |x|
+              break 1,
+                2
+            end
+        "});
+    }
+
+    /// Companion to [`accepts_multi_value_return`] for `next`.
+    #[test]
+    fn accepts_multi_value_next() {
+        test::<ArrayAlignment>().expect_no_offenses(indoc! {"
+            [].each do |x|
+              next 1,
+                2
+            end
+        "});
+    }
+
+    /// Discriminator (Codex #384): a *bracketed* array under `return`
+    /// (`return [1, 2]`) is a real literal — RuboCop's `on_array` *does* fire
+    /// (parent is `return`, not `masgn`). The `!is_bracketed` guard must keep
+    /// checking it. Verified: RuboCop 1.87 reports one offense here.
+    #[test]
+    fn flags_bracketed_array_under_return() {
+        test::<ArrayAlignment>().expect_offense(indoc! {"
+            def f
+              return [1,
+                2]
+                ^ Align the elements of an array literal if they span more than one line.
+            end
+        "});
+    }
+
+    /// Narrow-exemption pin (Codex #384): an `lvasgn` implicit array
+    /// (`x = 1, 2`) is *not* exempt — only `masgn` is. RuboCop's `on_array`
+    /// fires (parent `lvasgn`), so a misaligned continuation is flagged.
+    /// Verified: RuboCop 1.87 reports one offense here.
+    #[test]
+    fn flags_misaligned_lvasgn_implicit_array() {
+        test::<ArrayAlignment>().expect_offense(indoc! {"
+            x = 1,
+              2
+              ^ Align the elements of an array literal if they span more than one line.
         "});
     }
 
