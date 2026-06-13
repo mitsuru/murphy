@@ -8,7 +8,7 @@
 //! upstream_cop: Layout/CaseIndentation
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues: [murphy-vagp]
 //! notes: >
 //!   Direct port of RuboCop's `on_case` / `on_case_match`. A separate offense
 //!   is registered for each misaligned `when`/`in` keyword. The check is:
@@ -34,6 +34,12 @@
 //!   columns are recovered via the token API (`cx.loc(node).keyword()` /
 //!   `cx.loc(node).end_keyword()`), which is RuboCop-faithful for these nodes.
 //!
+//!   `IndentationWidth` is modelled as `Option<i64>`: the bundled default
+//!   `IndentationWidth: ~` merges to JSON `null`, which a plain `i64` field
+//!   would reject — erroring the whole option struct and silently discarding
+//!   the user's `EnforcedStyle`/`IndentOneStep`. `None` resolves to the
+//!   fallback width 2.
+//!
 //!   Gaps (documented, not bypassed):
 //!     * `IndentOneStep: true` reads `IndentationWidth`. The per-cop
 //!       `IndentationWidth` override is honoured; RuboCop's fallback to the
@@ -42,6 +48,12 @@
 //!     * `correct_style_detected` / `opposite_style_detected` style-tracking
 //!       (RuboCop's `ConfigurableEnforcedStyle` learning) is not modelled;
 //!       Murphy is stateless per-file and only reports offenses.
+//!     * (murphy-vagp) `end_and_last_conditional_same_line?` — consulted only
+//!       under `EnforcedStyle: end` — approximates the same-line skip using
+//!       node ranges (the else/last-conditional node start lines) rather than
+//!       the `else`/`then` keyword lines RuboCop reads (`NodeLoc` exposes
+//!       neither). Diverges only when `end` shares a line with an else or last
+//!       conditional; the common `end`-on-its-own-line case is correct.
 //! ```
 
 use crate::cops::util::nth_line_start;
@@ -67,12 +79,15 @@ pub struct CaseIndentationOptions {
     )]
     pub indent_one_step: bool,
 
+    // `Option<i64>` (not `i64`) so the bundled default `IndentationWidth: ~`
+    // (which merges to JSON `null`) decodes to `None` instead of erroring the
+    // whole option struct and silently discarding the user's other keys. `None`
+    // resolves to the fallback width 2 in `indentation_width`.
     #[option(
         name = "IndentationWidth",
-        default = 2,
-        description = "Number of spaces for one indentation level (falls back to RuboCop's default of 2)."
+        description = "Number of spaces for one indentation level (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -221,9 +236,12 @@ fn base_column(case_node: NodeId, style: CaseIndentationStyle, cx: &Cx<'_>) -> O
 }
 
 /// `indentation_width` — `IndentationWidth` when `IndentOneStep`, else `0`.
+/// An unset (`null` / `~`) `IndentationWidth` falls back to RuboCop's default
+/// of 2 (the sibling `Layout/IndentationWidth: Width` is unreadable across the
+/// single-surface ABI).
 fn indentation_width(opts: &CaseIndentationOptions) -> usize {
     if opts.indent_one_step {
-        opts.indentation_width.max(0) as usize
+        opts.indentation_width.unwrap_or(2).max(0) as usize
     } else {
         0
     }
@@ -287,6 +305,7 @@ mod tests {
         run_cop, run_cop_with_edits, run_cop_with_options, run_cop_with_options_and_edits, test,
         CapturedEdit,
     };
+    use murphy_plugin_api::CopOptions;
 
     fn apply(source: &str, edits: &[CapturedEdit]) -> String {
         let mut sorted: Vec<&CapturedEdit> = edits.iter().collect();
@@ -381,7 +400,7 @@ mod tests {
         CaseIndentationOptions {
             enforced_style: CaseIndentationStyle::End,
             indent_one_step: false,
-            indentation_width: 2,
+            indentation_width: Some(2),
         }
     }
 
@@ -416,7 +435,7 @@ mod tests {
         CaseIndentationOptions {
             enforced_style: CaseIndentationStyle::Case,
             indent_one_step: true,
-            indentation_width: 2,
+            indentation_width: Some(2),
         }
     }
 
@@ -435,5 +454,22 @@ mod tests {
         let offenses = run_cop_with_options::<CaseIndentation>(src, &one_step_opts());
         assert_eq!(offenses.len(), 1, "got {offenses:?}");
         assert_eq!(offenses[0].message, "Indent `when` one step more than `case`.");
+    }
+
+    /// Regression (Codex #386): the bundled default `IndentationWidth: ~` merges
+    /// to JSON `null`. With `IndentationWidth` modelled as `Option<i64>`, a null
+    /// decodes to `None` (not an error), so the user's other keys survive. A
+    /// plain `i64` would reject null, error the whole struct, and silently fall
+    /// back to defaults — discarding `EnforcedStyle`/`IndentOneStep`.
+    #[test]
+    fn null_indentation_width_preserves_other_keys() {
+        let json = br#"{"EnforcedStyle":"end","IndentOneStep":true,"IndentationWidth":null}"#;
+        let opts = <CaseIndentationOptions as CopOptions>::from_config_json(json)
+            .expect("null IndentationWidth must decode, not error");
+        assert!(opts.enforced_style == CaseIndentationStyle::End);
+        assert!(opts.indent_one_step);
+        assert_eq!(opts.indentation_width, None);
+        // `None` resolves to the fallback width 2 in `indentation_width`.
+        assert_eq!(super::indentation_width(&opts), 2);
     }
 }

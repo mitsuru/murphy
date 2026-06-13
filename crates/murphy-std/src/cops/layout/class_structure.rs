@@ -259,9 +259,12 @@ fn classify(node: NodeId, cx: &Cx<'_>, opts: &ClassStructureOptions) -> Option<S
         return classify(call, cx, opts);
     }
     match *cx.kind(node) {
-        NodeKind::Send { .. } | NodeKind::Csend { .. } => {
-            Some(find_send_node_category(node, cx, opts))
-        }
+        // RuboCop's `classify` matches `when :send` only — `csend`
+        // (safe-navigation) is NOT a macro send, so it falls through to the raw
+        // type name (`csend`/`send`), which is not in ExpectedOrder → ignored.
+        // A class body element like `plugins&.include M` must not be treated as
+        // a `module_inclusion` macro.
+        NodeKind::Send { .. } => Some(find_send_node_category(node, cx, opts)),
         _ => {
             let name = humanize_node(node, cx);
             Some(find_category(&name, opts).unwrap_or(name))
@@ -443,7 +446,8 @@ fn as_visibility(name: Option<&str>) -> Option<&'static str> {
 
 fn node_type_name(node: NodeId, cx: &Cx<'_>) -> &'static str {
     match *cx.kind(node) {
-        NodeKind::Send { .. } | NodeKind::Csend { .. } => "send",
+        NodeKind::Send { .. } => "send",
+        NodeKind::Csend { .. } => "csend",
         NodeKind::Def { .. } => "def",
         NodeKind::Defs { .. } => "defs",
         NodeKind::Casgn { .. } => "casgn",
@@ -608,6 +612,18 @@ mod tests {
         let src = "class << self\n  def pub; end\n  CONST = 1\nend\n";
         let offenses = run_cop::<ClassStructure>(src);
         assert_eq!(offenses.len(), 1, "got {offenses:?}");
+    }
+
+    /// Parity pin (Codex #386): RuboCop's `classify` matches `when :send` only,
+    /// NOT `csend`. A safe-navigation call like `plugins&.include M` in a class
+    /// body must NOT be treated as a `module_inclusion` macro — it falls through
+    /// to the raw type name (not in ExpectedOrder) and is ignored. A constant
+    /// before it must therefore not be flagged.
+    #[test]
+    fn safe_navigation_call_is_not_a_class_macro() {
+        let src = "class Foo\n  CONST = 1\n  plugins&.include M\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert!(offenses.is_empty(), "got {offenses:?}");
     }
 
     #[test]
