@@ -97,14 +97,18 @@
 //! describe a scenario rather than a class). The cop reports and lets
 //! the user fix by hand.
 //!
-//! ## Known v1 limitation
+//! ## File scoping
 //!
-//! RuboCop only runs RSpec cops on `*_spec.rb` files (and excludes
-//! `spec/features|requests|routing|system|views/` from this cop
-//! specifically). Murphy has no per-cop file-pattern gating yet, so
-//! this cop fires on bare `describe "foo"` outside spec files too.
-//! Users on non-spec codebases can disable the cop via
-//! `[cops.rules."RSpec/DescribeClass"] enabled = false`.
+//! rubocop-rspec excludes `spec/features|requests|routing|system|views/`
+//! from this cop specifically (those specs describe behaviour with a
+//! string subject rather than a constant). Murphy mirrors that default
+//! via the pack's bundled `config/default.yml`
+//! (`RSpec/DescribeClass: Exclude:`), which the host layers below user
+//! config through `MurphyConfig::apply_pack_default_layers`.
+//! Unlike upstream, Murphy does not yet gate RSpec cops to `*_spec.rb`
+//! files in general, so on a non-spec codebase a bare `describe "foo"`
+//! outside any spec directory is still flagged; such users can disable
+//! the cop via `RSpec/DescribeClass: { Enabled: false }`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

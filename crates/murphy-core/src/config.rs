@@ -192,6 +192,28 @@ fn parse_default_cop_rule(map: yaml_rust2::yaml::Hash) -> DefaultCopRule {
     rule
 }
 
+/// Merge a later pack layer's [`DefaultCopRule`] over an existing base entry.
+/// Later layer wins per field; absent fields (`None` / empty `Vec`) keep the
+/// base value, so a pack that only sets `Exclude` does not wipe a base
+/// `Include` for the same cop.
+fn merge_default_cop_rule(base: &mut DefaultCopRule, layer: DefaultCopRule) {
+    if layer.enabled.is_some() {
+        base.enabled = layer.enabled;
+    }
+    if layer.severity.is_some() {
+        base.severity = layer.severity;
+    }
+    if !layer.include.is_empty() {
+        base.include = layer.include;
+    }
+    if !layer.exclude.is_empty() {
+        base.exclude = layer.exclude;
+    }
+    for (key, value) in layer.options {
+        base.options.insert(key, value);
+    }
+}
+
 fn default_include() -> Vec<String> {
     vec!["**/*.rb".to_string()]
 }
@@ -459,16 +481,33 @@ impl MurphyConfig {
         self.cops.rules.get(name).and_then(|rule| rule.enabled) == Some(true)
     }
 
-    /// Merge pack-bundled `default.yml` layers (later overrides earlier) for the
-    /// `ActiveSupportExtensionsEnabled` flag. The resolution order is
-    /// `std(false) < pack layers < user`: the user's explicit value — set
-    /// directly OR inherited via `inherit_from` — still wins over pack layers.
+    /// Merge pack-bundled `default.yml` layers (later overrides earlier) below
+    /// user config. The resolution order is `std < pack layers < user`: the
+    /// user's explicit value — set directly OR inherited via `inherit_from` —
+    /// still wins.
     ///
-    /// This intentionally resolves ONLY the `ActiveSupportExtensionsEnabled`
-    /// flag; Include/Exclude and cop-rule pack defaults flow through
-    /// [`MurphyConfig::load_with_defaults`], so the name's "layers" is scoped to
-    /// that flag by design.
+    /// Two things are layered:
+    ///
+    /// 1. **Per-cop defaults** (`Enabled`/`Severity`/`Include`/`Exclude`/
+    ///    options) merge into `base_defaults.cop_rules` so a pack's file-scope
+    ///    defaults — e.g. rubocop-rspec's `RSpec/DescribeClass: Exclude:` for
+    ///    `spec/{features,requests,routing,system,views}` — take effect once the
+    ///    pack is loaded. `cop_applies_to_file` then resolves them below user
+    ///    config. This is **not** gated by the `ActiveSupportExtensionsEnabled`
+    ///    early-return below: per-cop file scoping must apply regardless of
+    ///    whether the user pinned that flag.
+    /// 2. The `AllCops.ActiveSupportExtensionsEnabled` flag, which the user can
+    ///    override (the early-return below).
     pub fn apply_pack_default_layers(&mut self, pack_yamls: &[&str]) {
+        // (1) Per-cop pack defaults — always applied (later layer wins per-field).
+        for yaml in pack_yamls {
+            for (name, pack_rule) in DefaultCopsData::from_yaml(yaml).cop_rules {
+                let entry = self.base_defaults.cop_rules.entry(name).or_default();
+                merge_default_cop_rule(entry, pack_rule);
+            }
+        }
+
+        // (2) ActiveSupportExtensionsEnabled flag — user wins.
         if self.user_set_active_support_extensions_enabled {
             return; // user wins; pack layers are only defaults
         }
@@ -1811,6 +1850,82 @@ Style/StringLiterals:
             !cfg.active_support_extensions_enabled,
             "later layer overrides earlier"
         );
+    }
+
+    #[test]
+    fn pack_layer_merges_per_cop_exclude_into_base_defaults() {
+        // A pack's per-cop Exclude (e.g. rubocop-rspec's RSpec/DescribeClass)
+        // must flow into base_defaults so cop_applies_to_file honours it.
+        let mut cfg = MurphyConfig::from_yaml_str("").unwrap();
+        cfg.apply_pack_default_layers(&[
+            "RSpec/DescribeClass:\n  Exclude:\n    - '**/spec/requests/**/*'\n",
+        ]);
+        assert!(
+            !cfg.cop_applies_to_file(
+                "RSpec/DescribeClass",
+                Path::new("spec/requests/foo_spec.rb")
+            ),
+            "pack Exclude must gate the cop in spec/requests"
+        );
+        assert!(
+            cfg.cop_applies_to_file("RSpec/DescribeClass", Path::new("spec/models/foo_spec.rb")),
+            "pack Exclude must not over-exclude spec/models"
+        );
+    }
+
+    #[test]
+    fn user_cop_exclude_beats_pack_layer() {
+        // User config sets a different Exclude; the user's field wins.
+        let mut cfg = MurphyConfig::from_yaml_str(
+            "RSpec/DescribeClass:\n  Exclude:\n    - '**/spec/models/**/*'\n",
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&[
+            "RSpec/DescribeClass:\n  Exclude:\n    - '**/spec/requests/**/*'\n",
+        ]);
+        assert!(
+            cfg.cop_applies_to_file(
+                "RSpec/DescribeClass",
+                Path::new("spec/requests/foo_spec.rb")
+            ),
+            "user Exclude wins: requests not excluded"
+        );
+        assert!(
+            !cfg.cop_applies_to_file("RSpec/DescribeClass", Path::new("spec/models/foo_spec.rb")),
+            "user Exclude wins: models excluded"
+        );
+    }
+
+    #[test]
+    fn per_cop_merge_runs_even_when_user_pinned_active_support() {
+        // The per-cop merge must NOT be gated by the ActiveSupport early-return.
+        let mut cfg =
+            MurphyConfig::from_yaml_str("AllCops:\n  ActiveSupportExtensionsEnabled: true\n")
+                .unwrap();
+        cfg.apply_pack_default_layers(&[
+            "RSpec/DescribeClass:\n  Exclude:\n    - '**/spec/requests/**/*'\n",
+        ]);
+        assert!(
+            !cfg.cop_applies_to_file(
+                "RSpec/DescribeClass",
+                Path::new("spec/requests/foo_spec.rb")
+            ),
+            "per-cop merge applies regardless of ASE pin"
+        );
+    }
+
+    #[test]
+    fn per_cop_merge_is_idempotent() {
+        let mut cfg = MurphyConfig::from_yaml_str("").unwrap();
+        let layer = "RSpec/DescribeClass:\n  Exclude:\n    - '**/spec/requests/**/*'\n";
+        cfg.apply_pack_default_layers(&[layer]);
+        cfg.apply_pack_default_layers(&[layer]);
+        let rule = cfg
+            .base_defaults
+            .cop_rules
+            .get("RSpec/DescribeClass")
+            .expect("rule merged");
+        assert_eq!(rule.exclude, vec!["**/spec/requests/**/*".to_string()]);
     }
 
     #[test]

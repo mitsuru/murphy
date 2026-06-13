@@ -15,6 +15,24 @@
 
 pub mod cops;
 
+/// rubocop-rspec-derived per-cop defaults embedded in the `.so` as a resource.
+///
+/// Carries the file-scope defaults that cannot be expressed through
+/// `#[cop]` / `#[option]` metadata — currently `RSpec/DescribeClass: Exclude`
+/// for the non-class spec directories. The host merges this below user config
+/// via `MurphyConfig::apply_pack_default_layers` in `murphy-core`.
+pub const BUNDLED_DEFAULTS_YAML: &str = include_str!("../config/default.yml");
+
+/// Pure data symbol the host reads after dlopen (not a behavior callback).
+///
+/// The `RawSlice` points at this `.so`'s `'static` rodata, valid only while
+/// the `libloading::Library` is held. The host copies the bytes to an owned
+/// value while the `Library` is alive (see
+/// `murphy_core::plugin_loader::load_plugin_pack`).
+#[unsafe(no_mangle)]
+pub static MURPHY_PLUGIN_DEFAULT_CONFIG: murphy_plugin_api::RawSlice =
+    murphy_plugin_api::RawSlice::from_str(BUNDLED_DEFAULTS_YAML);
+
 // cop の登録は各 cop ファイルの submit_cop!(T) が担う。
 murphy_plugin_api::register_cops!(mode = dynamic);
 
