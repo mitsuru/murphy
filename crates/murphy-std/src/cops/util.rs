@@ -262,7 +262,7 @@ pub fn line_is_blank(cx: &Cx<'_>, line: u32) -> bool {
         .iter()
         .position(|&b| b == b'\n')
         .map_or(bytes.len(), |pos| start + pos);
-    bytes[start..end].iter().all(|b| b.is_ascii_whitespace())
+    bytes[start..end].iter().all(|&b| is_ruby_blank_byte(b))
 }
 
 /// Port of RuboCop's `FirstElementLineBreak#check_children_line_break`.
