@@ -20,8 +20,11 @@
 //!   ("Extra empty line detected after/before the `<keyword>`.").
 //!
 //!   RuboCop skips a keyword whose line equals the def/kwbegin line, and skips
-//!   when the body and `end` share a line (single-line bodies). Both guards are
-//!   ported.
+//!   every keyword when the construct's last body line and its `end` share a
+//!   line (`last_body_and_end_on_same_line?`). Both guards are ported: the
+//!   former compares keyword line to the construct's start line; the latter
+//!   compares the construct's `end_keyword()` line to the last rescue/else
+//!   keyword line (rescue) or the structure's last line (ensure).
 //!
 //!   ABI note: `NodeLoc` has no `keyword`/`else`/`end` sub-ranges, so keyword
 //!   line numbers are recovered from the `Rescue`/`Resbody`/`Ensure` node
@@ -52,35 +55,35 @@ impl EmptyLinesAroundExceptionHandlingKeywords {
     #[on_node(kind = "def")]
     fn check_def(&self, node: NodeId, cx: &Cx<'_>) {
         if let Some(body) = cx.def_body(node).get() {
-            check_body(body, cx.range(node).start, cx);
+            check_body(node, body, cx);
         }
     }
 
     #[on_node(kind = "defs")]
     fn check_defs(&self, node: NodeId, cx: &Cx<'_>) {
         if let Some(body) = cx.def_body(node).get() {
-            check_body(body, cx.range(node).start, cx);
+            check_body(node, body, cx);
         }
     }
 
     #[on_node(kind = "block")]
     fn check_block(&self, node: NodeId, cx: &Cx<'_>) {
         if let Some(body) = block_body(node, cx) {
-            check_body(body, cx.range(node).start, cx);
+            check_body(node, body, cx);
         }
     }
 
     #[on_node(kind = "numblock")]
     fn check_numblock(&self, node: NodeId, cx: &Cx<'_>) {
         if let Some(body) = block_body(node, cx) {
-            check_body(body, cx.range(node).start, cx);
+            check_body(node, body, cx);
         }
     }
 
     #[on_node(kind = "itblock")]
     fn check_itblock(&self, node: NodeId, cx: &Cx<'_>) {
         if let Some(body) = block_body(node, cx) {
-            check_body(body, cx.range(node).start, cx);
+            check_body(node, body, cx);
         }
     }
 
@@ -97,7 +100,7 @@ impl EmptyLinesAroundExceptionHandlingKeywords {
         }
         // `check_body(node.children.first, node.loc.line)`
         if let Some(&first) = kwbegin_children(node, cx).first() {
-            check_body(first, cx.range(node).start, cx);
+            check_body(node, first, cx);
         }
     }
 }
@@ -134,22 +137,32 @@ fn block_body(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     }
 }
 
-/// Port of RuboCop's `check_body`. `def_or_kwbegin_start` is the byte offset of
-/// the enclosing construct (its `loc.line` source). Walks the body's
+/// Port of RuboCop's `check_body`. `construct` is the enclosing `def`/block/
+/// `begin..end` node (its `loc.line` is the source line guard, and its `end`
+/// keyword bounds `last_body_and_end_on_same_line?`). Walks the body's
 /// exception-handling structure to collect keyword line numbers, then checks
 /// the line above and below each.
-fn check_body(body: NodeId, def_or_kwbegin_start: u32, cx: &Cx<'_>) {
-    let def_line = line_1based(def_or_kwbegin_start, cx);
+fn check_body(construct: NodeId, body: NodeId, cx: &Cx<'_>) {
+    let def_line = line_1based(cx.range(construct).start, cx);
     let lines = crate::cops::util::physical_lines(cx.source());
 
-    // `last_body_and_end_on_same_line?(body)` — skip every keyword when the
-    // construct's body ends on the same physical line as its `end`. We
-    // approximate `body.parent.loc.end.line` with the keyword's own
-    // single-line check below; the precise guard here is whether the
-    // exception structure spans more than one line at all.
     let Some(structure) = exception_structure(body, cx) else {
         return;
     };
+
+    // `next if … last_body_and_end_on_same_line?(body)` — when the
+    // construct's body ends on the same physical line as its `end`, RuboCop
+    // skips every keyword. This covers single-line-tail bodies such as
+    // `begin\n …\nrescue\n bar end`. We compute the construct's `end` keyword
+    // line (no `loc.end` on `NodeLoc`, so we read the `end_keyword()` range)
+    // and the structure's last body line.
+    let end_kw = cx.loc(construct).end_keyword();
+    if end_kw != Range::ZERO {
+        let end_line = line_1based(end_kw.start, cx);
+        if last_body_line(structure, cx) == Some(end_line) {
+            return;
+        }
+    }
 
     for kw in keyword_lines(structure, cx) {
         // `next if line == line_of_def_or_kwbegin`
@@ -186,6 +199,38 @@ fn check_body(body: NodeId, def_or_kwbegin_start: u32, cx: &Cx<'_>) {
             );
             cx.emit_edit(blank_run_up(&lines, above_idx), "");
         }
+    }
+}
+
+/// RuboCop's `last_body_and_end_on_same_line?` reads `last_body_line` as the
+/// keyword line of the last rescue branch (or the `else` keyword line when an
+/// `else` is present) for a `rescue` structure, and the node's `last_line` for
+/// an `ensure`. Returns `None` when the line cannot be determined.
+fn last_body_line(structure: NodeId, cx: &Cx<'_>) -> Option<usize> {
+    match *cx.kind(structure) {
+        NodeKind::Rescue {
+            resbodies, else_, ..
+        } => {
+            if let Some(else_body) = else_.get() {
+                // The `else` keyword sits before the else body.
+                keyword_token_before("else", cx.range(else_body).start, cx)
+            } else {
+                cx.list(resbodies)
+                    .last()
+                    .map(|&rb| line_1based(cx.range(rb).start, cx))
+            }
+        }
+        // For `ensure`, RuboCop uses `body.loc.last_line` of the parser-gem
+        // ensure node, whose range ends at the ensure body's last statement
+        // (not the construct's `end`). Murphy's `Ensure` node range spans the
+        // whole construct, so use the ensure body's last line directly (or the
+        // protected body's last line when the ensure clause is empty).
+        NodeKind::Ensure { body, ensure_ } => {
+            let content = ensure_.get().or_else(|| body.get())?;
+            let r = cx.range(content);
+            Some(line_1based(r.end.saturating_sub(1).max(r.start), cx))
+        }
+        _ => None,
     }
 }
 
@@ -494,6 +539,28 @@ mod tests {
         let run = run_cop_with_edits::<Cop>(src);
         let fixed = apply(src, &run.edits);
         assert!(run_cop::<Cop>(&fixed).is_empty(), "not idempotent: {fixed:?}");
+    }
+
+    /// `last_body_and_end_on_same_line?` guard: when the last rescue keyword is
+    /// on the same line as `end`, RuboCop skips all keyword checks, even with a
+    /// blank line before `rescue`. Source: `begin\n  foo\n\nrescue => y; end`.
+    #[test]
+    fn skips_when_last_rescue_keyword_and_end_on_same_line() {
+        let src = "begin\n  foo\n\nrescue => y; end\n";
+        test::<Cop>().expect_no_offenses(src);
+    }
+
+    /// Control: when the last rescue keyword is NOT on the `end` line, the
+    /// blank before `rescue` IS flagged (the guard does not fire).
+    #[test]
+    fn flags_blank_before_rescue_when_end_on_own_line() {
+        let src = "begin\n  foo\n\nrescue\n  bar\nend\n";
+        let offenses = run_cop::<Cop>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected before the `rescue`."
+        );
     }
 
     #[test]
