@@ -8,7 +8,7 @@
 //! upstream_cop: Layout/EmptyLinesAroundMethodBody
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-a12x]
+//! gap_issues: [murphy-p8b2]
 //! notes: >
 //!   Ports RuboCop's `EmptyLinesAroundBody` mixin (`KIND = 'method'`,
 //!   `on_def`/`on_defs`). This cop has no `EnforcedStyle` — it always enforces
@@ -19,7 +19,7 @@
 //!   no arguments the arguments node has no source range, and RuboCop falls
 //!   back to `node.source_range.first_line` (the `def` line).
 //!
-//!   Gaps vs. upstream (tracked in murphy-a12x):
+//!   Gaps vs. upstream (tracked in murphy-p8b2):
 //!   - Endless methods (`def foo =\n\n value`) use a separate
 //!     `offending_endless_method?` path keyed off `node.loc.assignment`. Murphy
 //!     has no assignment-operator loc on `NodeLoc`, so the endless-method path

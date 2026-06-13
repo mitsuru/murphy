@@ -8,7 +8,7 @@
 //! upstream_cop: Layout/EmptyLinesAroundModuleBody
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-3i19]
+//! gap_issues: [murphy-vf72]
 //! notes: >
 //!   Ports RuboCop's `EmptyLinesAroundBody` mixin (`KIND = 'module'`,
 //!   `on_module`) for the default `EnforcedStyle: no_empty_lines`. The
@@ -18,7 +18,7 @@
 //!   matching RuboCop. Autocorrect removes the full run of consecutive blank
 //!   lines at each boundary (deduped when both boundaries hit the same run).
 //!
-//!   Gaps vs. upstream (tracked in murphy-3i19):
+//!   Gaps vs. upstream (tracked in murphy-vf72):
 //!   - `EnforcedStyle: empty_lines` (insert missing blank lines) is not
 //!     implemented — only `no_empty_lines` is honored.
 //!   - `empty_lines_except_namespace` and `empty_lines_special` styles are not

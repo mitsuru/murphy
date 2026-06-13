@@ -342,42 +342,40 @@ pub fn check_empty_lines_around_body_no_empty_lines(
     // boundaries do not emit overlapping edits when they target the same run.
     let mut emitted_edit: Option<Range> = None;
 
-    if let Some(&line) = lines.get(begin_idx) {
-        if line.blank {
-            let range = blank_run_range(&lines, begin_idx, BlankRunDirection::Down);
-            cx.emit_offense(
-                Range {
-                    start: line.start,
-                    end: line.end,
-                },
-                &format!("Extra empty line detected at {kind} body beginning."),
-                None,
-            );
-            cx.emit_edit(range, "");
-            emitted_edit = Some(range);
-        }
+    if let Some(&line) = lines.get(begin_idx)
+        && line.blank
+    {
+        let range = blank_run_range(&lines, begin_idx, BlankRunDirection::Down);
+        cx.emit_offense(
+            Range {
+                start: line.start,
+                end: line.end,
+            },
+            &format!("Extra empty line detected at {kind} body beginning."),
+            None,
+        );
+        cx.emit_edit(range, "");
+        emitted_edit = Some(range);
     }
 
-    if let Some(end_idx) = end_idx {
-        if let Some(&line) = lines.get(end_idx) {
-            if line.blank {
-                let range = blank_run_range(&lines, end_idx, BlankRunDirection::Up);
-                cx.emit_offense(
-                    Range {
-                        start: line.start,
-                        end: line.end,
-                    },
-                    &format!("Extra empty line detected at {kind} body end."),
-                    None,
-                );
-                // Skip a duplicate/overlapping edit when the end boundary's
-                // blank run is the same run already removed at the beginning.
-                let overlaps = emitted_edit
-                    .is_some_and(|e| range.start < e.end && e.start < range.end);
-                if !overlaps {
-                    cx.emit_edit(range, "");
-                }
-            }
+    if let Some(end_idx) = end_idx
+        && let Some(&line) = lines.get(end_idx)
+        && line.blank
+    {
+        let range = blank_run_range(&lines, end_idx, BlankRunDirection::Up);
+        cx.emit_offense(
+            Range {
+                start: line.start,
+                end: line.end,
+            },
+            &format!("Extra empty line detected at {kind} body end."),
+            None,
+        );
+        // Skip a duplicate/overlapping edit when the end boundary's
+        // blank run is the same run already removed at the beginning.
+        let overlaps = emitted_edit.is_some_and(|e| range.start < e.end && e.start < range.end);
+        if !overlaps {
+            cx.emit_edit(range, "");
         }
     }
 }

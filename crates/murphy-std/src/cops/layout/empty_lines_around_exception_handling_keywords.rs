@@ -9,7 +9,7 @@
 //! upstream_cop: Layout/EmptyLinesAroundExceptionHandlingKeywords
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-e2wr]
+//! gap_issues: [murphy-1g6c]
 //! notes: >
 //!   Ports RuboCop's same-named cop. It has no `EnforcedStyle` — the style is
 //!   hardcoded `no_empty_lines`. Handlers fire on `def`/`defs`/`block`/
@@ -29,7 +29,7 @@
 //!   the relevant sibling sub-nodes. This avoids a global `else` scan (which
 //!   would wrongly catch `if`/`case` `else`).
 //!
-//!   Gap (tracked in murphy-e2wr): only the top-level rescue/ensure of each
+//!   Gap (tracked in murphy-1g6c): only the top-level rescue/ensure of each
 //!   construct is walked; deeply nested constructs are visited through their
 //!   own `def`/`block`/`kwbegin` handler, matching RuboCop. Inline `rescue`
 //!   modifiers (`x rescue y`) have no keyword body and are not flagged
@@ -158,34 +158,33 @@ fn check_body(body: NodeId, def_or_kwbegin_start: u32, cx: &Cx<'_>) {
         }
         // below the keyword: `processed_source.lines[line]` (0-based index
         // `line` == the line after the 1-based keyword line).
-        if let Some(l) = lines.get(kw.line) {
-            if l.blank {
-                cx.emit_offense(
-                    Range {
-                        start: l.start,
-                        end: l.end,
-                    },
-                    &format!("Extra empty line detected after the `{}`.", kw.keyword),
-                    None,
-                );
-                cx.emit_edit(blank_run_down(&lines, kw.line), "");
-            }
+        if let Some(l) = lines.get(kw.line)
+            && l.blank
+        {
+            cx.emit_offense(
+                Range {
+                    start: l.start,
+                    end: l.end,
+                },
+                &format!("Extra empty line detected after the `{}`.", kw.keyword),
+                None,
+            );
+            cx.emit_edit(blank_run_down(&lines, kw.line), "");
         }
         // above the keyword: `lines[line - 2]`.
-        if let Some(above_idx) = kw.line.checked_sub(2) {
-            if let Some(l) = lines.get(above_idx) {
-                if l.blank {
-                    cx.emit_offense(
-                        Range {
-                            start: l.start,
-                            end: l.end,
-                        },
-                        &format!("Extra empty line detected before the `{}`.", kw.keyword),
-                        None,
-                    );
-                    cx.emit_edit(blank_run_up(&lines, above_idx), "");
-                }
-            }
+        if let Some(above_idx) = kw.line.checked_sub(2)
+            && let Some(l) = lines.get(above_idx)
+            && l.blank
+        {
+            cx.emit_offense(
+                Range {
+                    start: l.start,
+                    end: l.end,
+                },
+                &format!("Extra empty line detected before the `{}`.", kw.keyword),
+                None,
+            );
+            cx.emit_edit(blank_run_up(&lines, above_idx), "");
         }
     }
 }
@@ -243,10 +242,10 @@ fn keyword_lines(structure: NodeId, cx: &Cx<'_>) -> Vec<KeywordLine> {
                 });
             }
             // Recurse into the protected body, which may be a Rescue.
-            if let Some(b) = body.get() {
-                if matches!(*cx.kind(b), NodeKind::Rescue { .. }) {
-                    out.extend(rescue_keyword_lines(b, cx));
-                }
+            if let Some(b) = body.get()
+                && matches!(*cx.kind(b), NodeKind::Rescue { .. })
+            {
+                out.extend(rescue_keyword_lines(b, cx));
             }
         }
         NodeKind::Rescue { .. } => out.extend(rescue_keyword_lines(structure, cx)),
