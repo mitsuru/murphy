@@ -46,7 +46,11 @@ pub struct EmptyLinesAfterModuleInclusion;
     name = "Layout/EmptyLinesAfterModuleInclusion",
     description = "Keeps track of empty lines after module inclusion methods.",
     default_severity = "warning",
-    default_enabled = true,
+    // RuboCop ships this cop `Enabled: pending` (opt-in until a future major);
+    // Murphy's bundled default.yml keeps `pending`, but the boolean-only parser
+    // falls through to this metadata fallback, so keep it disabled to avoid
+    // running a pending cop by default on registries without BUNDLED_DEFAULTS.
+    default_enabled = false,
     options = NoOptions
 )]
 impl EmptyLinesAfterModuleInclusion {
