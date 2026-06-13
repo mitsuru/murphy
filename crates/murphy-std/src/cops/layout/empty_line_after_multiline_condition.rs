@@ -290,6 +290,25 @@ mod tests {
         let inserted_at = edit.range.start as usize;
         assert_eq!(&src[..inserted_at], "if multiline &&\n  condition\n");
     }
+
+    /// Autocorrect must be idempotent (CLAUDE.md): applying the inserted blank
+    /// line and re-running yields no further offenses. Exercised end-to-end
+    /// here because the cop is disabled by default and so never reaches the
+    /// CLI `--fix` fixpoint runs.
+    #[test]
+    fn corrects_multiline_if_is_idempotent() {
+        let src = "if multiline &&\n  condition\n  do_something\nend\n";
+        let result = run_cop_with_edits::<EmptyLineAfterMultilineCondition>(src);
+        assert_eq!(result.offenses.len(), 1);
+        let edit = &result.edits[0];
+        // Apply the single insertion edit.
+        let at = edit.range.start as usize;
+        let corrected = format!("{}{}{}", &src[..at], edit.replacement, &src[at..]);
+        assert_eq!(corrected, "if multiline &&\n  condition\n\n  do_something\nend\n");
+        // Re-run on the corrected source: no offense, fixpoint reached.
+        let again = run_cop::<EmptyLineAfterMultilineCondition>(&corrected);
+        assert!(again.is_empty(), "not idempotent, got {again:?}");
+    }
 }
 
 murphy_plugin_api::submit_cop!(EmptyLineAfterMultilineCondition);
