@@ -177,6 +177,84 @@ pub fn line_of(offset: u32, cx: &Cx<'_>) -> u32 {
     src[..upper].iter().filter(|&&b| b == b'\n').count() as u32
 }
 
+/// Byte offset of the start of 0-based source line `line` (the line that
+/// follows `line` newlines from the start of the file), or `None` when the
+/// file has fewer lines. Counterpart of [`line_of`].
+pub fn nth_line_start(cx: &Cx<'_>, line: u32) -> Option<u32> {
+    if line == 0 {
+        return Some(0);
+    }
+    let bytes = cx.source().as_bytes();
+    let mut seen = 0u32;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            seen += 1;
+            if seen == line {
+                return Some(i as u32 + 1);
+            }
+        }
+    }
+    None
+}
+
+/// The byte range of the whole source line that begins at `line_start`,
+/// including its terminating `\n` (or up to EOF for the final line). Used by
+/// the `Layout/EmptyLines*` family to remove a blank line wholesale.
+pub fn whole_line_range_with_newline(line_start: u32, cx: &Cx<'_>) -> Range {
+    let bytes = cx.source().as_bytes();
+    let start = (line_start as usize).min(bytes.len());
+    let end = bytes[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(bytes.len(), |pos| start + pos + 1);
+    Range {
+        start: start as u32,
+        end: end as u32,
+    }
+}
+
+/// `true` when 0-based source `line` is a comment line — optional leading
+/// whitespace followed by `#`. Mirrors RuboCop's `comment_line?`
+/// (`/\A\s*#/`).
+pub fn line_is_comment(cx: &Cx<'_>, line: u32) -> bool {
+    let Some(start) = nth_line_start(cx, line) else {
+        return false;
+    };
+    let bytes = cx.source().as_bytes();
+    let start = start as usize;
+    if start >= bytes.len() {
+        return false;
+    }
+    let end = bytes[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(bytes.len(), |pos| start + pos);
+    let mut i = start;
+    while i < end && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    i < end && bytes[i] == b'#'
+}
+
+/// `true` when 0-based source `line` is empty or contains only whitespace.
+/// Lines beyond the end of the file are treated as empty (mirrors RuboCop's
+/// `processed_source[line].nil? || .blank?`).
+pub fn line_is_blank(cx: &Cx<'_>, line: u32) -> bool {
+    let Some(start) = nth_line_start(cx, line) else {
+        return true;
+    };
+    let bytes = cx.source().as_bytes();
+    let start = start as usize;
+    if start >= bytes.len() {
+        return true;
+    }
+    let end = bytes[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(bytes.len(), |pos| start + pos);
+    bytes[start..end].iter().all(|b| b.is_ascii_whitespace())
+}
+
 /// Port of RuboCop's `FirstElementLineBreak#check_children_line_break`.
 ///
 /// `open_offset` is the byte offset of the collection's opening delimiter
