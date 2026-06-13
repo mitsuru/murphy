@@ -60,12 +60,14 @@ pub struct ParameterAlignmentOptions {
         description = "How to align parameters following the first line of a method definition."
     )]
     pub enforced_style: ParameterAlignmentStyle,
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null)
+    // decodes to `None` instead of erroring the option struct and discarding the
+    // user's other keys; `None` falls back to width 2.
     #[option(
         name = "IndentationWidth",
-        default = 0,
-        description = "Indentation width for `with_fixed_indentation` (0 = use the default of 2)."
+        description = "Indentation width for `with_fixed_indentation` (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -160,13 +162,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 }
 
-/// Configured indentation width for `with_fixed_indentation` (0 → default 2).
+/// Configured indentation width for `with_fixed_indentation` (null/non-positive
+/// → default 2).
 fn indentation_width(opts: &ParameterAlignmentOptions) -> usize {
-    if opts.indentation_width > 0 {
-        opts.indentation_width as usize
-    } else {
-        2
-    }
+    opts.indentation_width.filter(|&w| w > 0).map_or(2, |w| w as usize)
 }
 
 /// The `def` keyword's start offset (used as the indentation anchor).
@@ -196,13 +195,31 @@ fn offending_range(param: NodeId, cx: &Cx<'_>) -> Range {
 #[cfg(test)]
 mod tests {
     use super::{ParameterAlignment, ParameterAlignmentOptions, ParameterAlignmentStyle};
+    use murphy_plugin_api::CopOptions;
     use murphy_plugin_api::test_support::{indoc, test};
 
     fn fixed() -> ParameterAlignmentOptions {
         ParameterAlignmentOptions {
             enforced_style: ParameterAlignmentStyle::WithFixedIndentation,
-            indentation_width: 0,
+            indentation_width: None,
         }
+    }
+
+    /// Regression (sweep #384 follow-up): the bundled default
+    /// `IndentationWidth: ~` merges to JSON `null`. With an `Option<i64>` field
+    /// it must decode rather than error the whole struct and silently discard the
+    /// user's `EnforcedStyle`.
+    #[test]
+    fn null_indentation_width_preserves_other_keys() {
+        let opts = <ParameterAlignmentOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"with_fixed_indentation","IndentationWidth":null}"#,
+        )
+        .expect("null IndentationWidth must decode, not discard the struct");
+        let reference = <ParameterAlignmentOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"with_fixed_indentation","IndentationWidth":4}"#,
+        )
+        .unwrap();
+        assert!(opts.enforced_style == reference.enforced_style);
     }
 
     // with_first_parameter (default) --------------------------------------

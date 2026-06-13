@@ -69,12 +69,14 @@ pub struct CommentIndentationOptions {
     )]
     pub allow_for_alignment: bool,
 
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null)
+    // decodes to `None` instead of erroring the option struct and discarding the
+    // user's other keys; `None` falls back to width 2.
     #[option(
         name = "IndentationWidth",
-        default = 2,
-        description = "Number of spaces for one indentation level (falls back to RuboCop's default of 2)."
+        description = "Number of spaces for one indentation level (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[cop(
@@ -88,7 +90,7 @@ impl CommentIndentation {
     #[on_new_investigation]
     fn investigate(&self, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<CommentIndentationOptions>();
-        let width = opts.indentation_width.max(0) as usize;
+        let width = opts.indentation_width.unwrap_or(2).max(0) as usize;
         let comments = cx.comments();
 
         for (ix, comment) in comments.iter().enumerate() {
@@ -332,11 +334,25 @@ murphy_plugin_api::submit_cop!(CommentIndentation);
 mod tests {
     use super::{CommentIndentation, CommentIndentationOptions};
     use murphy_plugin_api::test_support::{indoc, run_cop_with_options, test};
+    use murphy_plugin_api::CopOptions;
+
+    /// Regression (sweep #384 follow-up): the bundled default
+    /// `IndentationWidth: ~` merges to JSON `null`. With an `Option<i64>` field
+    /// it must decode rather than error the whole struct and silently discard the
+    /// user's `AllowForAlignment` key.
+    #[test]
+    fn null_indentation_width_preserves_other_keys() {
+        let opts = <CommentIndentationOptions as CopOptions>::from_config_json(
+            br#"{"AllowForAlignment":true,"IndentationWidth":null}"#,
+        )
+        .expect("null IndentationWidth must decode, not discard the struct");
+        assert!(opts.allow_for_alignment);
+    }
 
     fn allow_alignment() -> CommentIndentationOptions {
         CommentIndentationOptions {
             allow_for_alignment: true,
-            indentation_width: 2,
+            indentation_width: Some(2),
         }
     }
 

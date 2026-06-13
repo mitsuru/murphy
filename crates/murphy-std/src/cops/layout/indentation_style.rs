@@ -42,12 +42,14 @@ pub struct IndentationStyleOptions {
         description = "Whether indentation must use spaces only or tabs only."
     )]
     pub enforced_style: IndentationStyleKind,
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null)
+    // decodes to `None` instead of erroring the option struct and discarding the
+    // user's other keys; `None` falls back to width 2.
     #[option(
         name = "IndentationWidth",
-        default = 2,
-        description = "Number of spaces that replace each tab (and vice versa) during autocorrection."
+        description = "Number of spaces that replace each tab during autocorrection (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -214,7 +216,7 @@ fn in_string_literal(ranges: &[Range], offense: Range) -> bool {
 /// - `tabs`: replace each `IndentationWidth`-wide run of spaces with one tab,
 ///   leaving leftover spaces (a partial run) and any tabs untouched.
 fn emit_autocorrect(cx: &Cx<'_>, range: Range, opts: &IndentationStyleOptions) {
-    let width = opts.indentation_width.max(1) as usize;
+    let width = opts.indentation_width.unwrap_or(2).max(1) as usize;
     let original = cx.raw_source(range);
     let replacement: String = match opts.enforced_style {
         IndentationStyleKind::Spaces => {
@@ -260,12 +262,30 @@ fn spaces_to_tabs(s: &str, width: usize) -> String {
 mod tests {
     use super::{IndentationStyle, IndentationStyleKind, IndentationStyleOptions};
     use murphy_plugin_api::test_support::test;
+    use murphy_plugin_api::CopOptions;
 
     fn tabs_style() -> IndentationStyleOptions {
         IndentationStyleOptions {
             enforced_style: IndentationStyleKind::Tabs,
-            indentation_width: 2,
+            indentation_width: Some(2),
         }
+    }
+
+    /// Regression (sweep #384 follow-up): the bundled default
+    /// `IndentationWidth: ~` merges to JSON `null`. With an `Option<i64>` field
+    /// it must decode rather than error the whole struct and silently discard the
+    /// user's `EnforcedStyle`.
+    #[test]
+    fn null_indentation_width_preserves_other_keys() {
+        let opts = <IndentationStyleOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"tabs","IndentationWidth":null}"#,
+        )
+        .expect("null IndentationWidth must decode, not discard the struct");
+        let reference = <IndentationStyleOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"tabs","IndentationWidth":4}"#,
+        )
+        .unwrap();
+        assert!(opts.enforced_style == reference.enforced_style);
     }
 
     // ── EnforcedStyle: spaces (default) ───────────────────────────────────────

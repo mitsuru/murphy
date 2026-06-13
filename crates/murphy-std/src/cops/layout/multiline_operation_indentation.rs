@@ -48,12 +48,14 @@ pub struct MultilineOperationIndentationOptions {
         description = "Whether multiline operands are aligned with the first operand or indented."
     )]
     pub enforced_style: OperationIndentStyle,
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null)
+    // decodes to `None` instead of erroring the option struct and discarding the
+    // user's other keys; `None` falls back to width 2.
     #[option(
         name = "IndentationWidth",
-        default = 2,
-        description = "Indentation width in spaces (RuboCop falls back to Layout/IndentationWidth)."
+        description = "Indentation width in spaces (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +101,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     let opts = cx.options_or_default::<MultilineOperationIndentationOptions>();
-    let width = opts.indentation_width.max(0) as usize;
+    let width = opts.indentation_width.unwrap_or(2).max(0) as usize;
     let style = opts.enforced_style;
     let source = cx.source();
 
@@ -438,11 +440,29 @@ mod tests {
         MultilineOperationIndentation, MultilineOperationIndentationOptions, OperationIndentStyle,
     };
     use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::CopOptions;
+
+    /// Regression (sweep #384 follow-up): the bundled default
+    /// `IndentationWidth: ~` merges to JSON `null`. With an `Option<i64>` field
+    /// it must decode rather than error the whole struct and silently discard the
+    /// user's `EnforcedStyle`.
+    #[test]
+    fn null_indentation_width_preserves_other_keys() {
+        let opts = <MultilineOperationIndentationOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"indented","IndentationWidth":null}"#,
+        )
+        .expect("null IndentationWidth must decode, not discard the struct");
+        let reference = <MultilineOperationIndentationOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"indented","IndentationWidth":4}"#,
+        )
+        .unwrap();
+        assert!(opts.enforced_style == reference.enforced_style);
+    }
 
     fn indented() -> MultilineOperationIndentationOptions {
         MultilineOperationIndentationOptions {
             enforced_style: OperationIndentStyle::Indented,
-            indentation_width: 2,
+            indentation_width: Some(2),
         }
     }
 

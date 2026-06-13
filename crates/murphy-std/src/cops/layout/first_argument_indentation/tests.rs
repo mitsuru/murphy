@@ -1,10 +1,11 @@
 use super::{ArgIndentStyle, FirstArgumentIndentation, FirstArgumentIndentationOptions};
 use murphy_plugin_api::test_support::{indoc, test};
+use murphy_plugin_api::CopOptions;
 
 fn opts(style: ArgIndentStyle) -> FirstArgumentIndentationOptions {
     FirstArgumentIndentationOptions {
         enforced_style: style,
-        indentation_width: 2,
+        indentation_width: Some(2),
     }
 }
 
@@ -187,4 +188,20 @@ fn special_inner_aligns_without_outer_parens() {
                             bar: 3)
             "#},
         );
+}
+
+/// Regression (sweep #384 follow-up): the bundled default `IndentationWidth: ~`
+/// merges to JSON `null`. With an `Option<i64>` field it must decode rather than
+/// error the whole struct and silently discard the user's `EnforcedStyle`.
+#[test]
+fn null_indentation_width_preserves_other_keys() {
+    let opts = <FirstArgumentIndentationOptions as CopOptions>::from_config_json(
+        br#"{"EnforcedStyle":"consistent","IndentationWidth":null}"#,
+    )
+    .expect("null IndentationWidth must decode, not discard the struct");
+    let reference = <FirstArgumentIndentationOptions as CopOptions>::from_config_json(
+        br#"{"EnforcedStyle":"consistent","IndentationWidth":4}"#,
+    )
+    .unwrap();
+    assert!(opts.enforced_style == reference.enforced_style);
 }
