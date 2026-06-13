@@ -72,7 +72,7 @@ impl EmptyComment {
                     continue;
                 }
                 for offense_comment in &chunk {
-                    emit(cx, comments, *offense_comment);
+                    emit(cx, *offense_comment);
                 }
             }
         } else {
@@ -80,7 +80,7 @@ impl EmptyComment {
             for comment in comments {
                 let text = comment_text(cx, *comment);
                 if empty_comment_only(&text, opts.allow_border_comment) {
-                    emit(cx, comments, *comment);
+                    emit(cx, *comment);
                 }
             }
         }
@@ -88,13 +88,13 @@ impl EmptyComment {
 }
 
 /// RuboCop's `add_offense(comment) { autocorrect }` body.
-fn emit(cx: &Cx<'_>, comments: &[Comment], comment: Comment) {
+fn emit(cx: &Cx<'_>, comment: Comment) {
     cx.emit_offense(comment.range, "Source code comment is empty.", None);
 
     // RuboCop's `autocorrect`: if there is a previous token on the same line,
     // remove the comment plus its surrounding spaces (no newlines); otherwise
     // remove the whole line including its trailing newline.
-    let range = if previous_token_same_line(cx, comments, comment) {
+    let range = if previous_token_same_line(cx, comment) {
         cx.range_with_surrounding_space(
             comment.range,
             SpaceRangeOptions {
@@ -143,53 +143,63 @@ fn empty_comment_only(text: &str, allow_border: bool) -> bool {
 }
 
 /// RuboCop's `concat_consecutive_comments`: group comments where
-/// `prev.line + 1 == cur.line && prev.column == cur.column`.
+/// `prev.line + 1 == cur.line && prev.column == cur.column`. Comments are in
+/// source order, so a single forward scan of the source bytes tracks each
+/// comment's `(line, column)` in O(N) total rather than recomputing absolute
+/// positions per comment.
 fn concat_consecutive_comments(cx: &Cx<'_>, comments: &[Comment]) -> Vec<Vec<Comment>> {
+    let src = cx.source().as_bytes();
     let mut chunks: Vec<Vec<Comment>> = Vec::new();
+    let mut offset = 0usize;
+    let mut line = 1usize;
+    let mut line_start = 0usize;
+    let mut prev_pos: Option<(usize, usize)> = None;
+
     for &comment in comments {
-        let (line, column) = line_and_column(cx, comment.range.start);
-        if let Some(last_chunk) = chunks.last_mut() {
-            let prev = *last_chunk.last().expect("chunk is never empty");
-            let (prev_line, prev_column) = line_and_column(cx, prev.range.start);
-            if prev_line + 1 == line && prev_column == column {
-                last_chunk.push(comment);
-                continue;
+        let target = comment.range.start as usize;
+        while offset < target {
+            if src[offset] == b'\n' {
+                line += 1;
+                line_start = offset + 1;
             }
+            offset += 1;
         }
-        chunks.push(vec![comment]);
+        let column = target - line_start;
+
+        let consecutive = prev_pos
+            .is_some_and(|(prev_line, prev_column)| prev_line + 1 == line && prev_column == column);
+        if consecutive {
+            chunks
+                .last_mut()
+                .expect("a consecutive comment always follows an existing chunk")
+                .push(comment);
+        } else {
+            chunks.push(vec![comment]);
+        }
+        prev_pos = Some((line, column));
     }
     chunks
 }
 
 /// RuboCop's `previous_token(node) && same_line?(node, previous_token)` — is
 /// there a token (comment or code) on the same source line, before this
-/// comment? A non-whitespace byte before the comment on its line is the signal.
-fn previous_token_same_line(cx: &Cx<'_>, comments: &[Comment], comment: Comment) -> bool {
+/// comment? A non-whitespace byte before the comment on its line is the signal:
+/// it captures both earlier comments (RuboCop scans the token stream, which
+/// includes comment tokens) and any code byte that precedes a trailing comment.
+fn previous_token_same_line(cx: &Cx<'_>, comment: Comment) -> bool {
     let src = cx.source().as_bytes();
     let start = comment.range.start as usize;
     let line_start = src[..start]
         .iter()
         .rposition(|&b| b == b'\n')
         .map_or(0, |pos| pos + 1);
-    // Any earlier comment on the same line counts (RuboCop scans the token
-    // stream, which includes comment tokens), as does any code byte.
-    let _ = comments;
-    src[line_start..start].iter().any(|&b| !b.is_ascii_whitespace())
+    src[line_start..start].iter().any(|&b| !is_ruby_space(b))
 }
 
-/// 1-based line and 0-based column of `offset` (RuboCop's `loc.line` /
-/// `loc.column`). Column is a byte offset from the line start; comment
-/// indentation is ASCII so this matches RuboCop's display column.
-fn line_and_column(cx: &Cx<'_>, offset: u32) -> (usize, usize) {
-    let src = cx.source().as_bytes();
-    let off = offset as usize;
-    let line_start = src[..off]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map_or(0, |pos| pos + 1);
-    let line = src[..off].iter().filter(|&&b| b == b'\n').count() + 1;
-    let column = src[line_start..off].iter().filter(|b| b.is_ascii()).count();
-    (line, column)
+/// Ruby's `\s` byte class: `[ \t\n\r\f\v]`. Rust's `u8::is_ascii_whitespace`
+/// omits the vertical tab `\v` (0x0B), so it is not a faithful substitute.
+fn is_ruby_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0C | 0x0B)
 }
 
 murphy_plugin_api::submit_cop!(EmptyComment);

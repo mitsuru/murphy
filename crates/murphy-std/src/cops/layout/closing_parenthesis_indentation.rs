@@ -119,7 +119,7 @@ fn check(node: NodeId, elements: &[NodeId], left_paren: Range, right_paren: Rang
     let correct_column = if elements.is_empty() {
         // `check_for_no_elements`.
         let candidates = [
-            line_indentation(cx, line_of(cx, left_paren.start)),
+            line_indent_at(cx, left_paren.start),
             left_col,
             column_of(cx, cx.range(node).start),
         ];
@@ -158,17 +158,21 @@ fn check(node: NodeId, elements: &[NodeId], left_paren: Range, right_paren: Rang
 /// RuboCop's `expected_column(left_paren, elements)`.
 fn expected_column(cx: &Cx<'_>, left_paren: Range, elements: &[NodeId]) -> usize {
     let first = elements[0];
-    let first_line = line_of(cx, cx.range(first).start);
-    let left_line = line_of(cx, left_paren.start);
+    let first_start = cx.range(first).start;
 
-    if first_line > left_line {
-        // `line_break_after_left_paren?` — first element on a later line.
-        let source_indent = line_indentation(cx, first_line);
-        source_indent.saturating_sub(INDENTATION_WIDTH)
+    // `line_break_after_left_paren?` — the first element starts on a later
+    // line than `(`. Checked by a newline in the bytes between them, avoiding
+    // a from-file-start line-number computation.
+    let line_break_after_left_paren = cx.source().as_bytes()
+        [left_paren.start as usize..first_start as usize]
+        .contains(&b'\n');
+
+    if line_break_after_left_paren {
+        line_indent_at(cx, first_start).saturating_sub(INDENTATION_WIDTH)
     } else if all_elements_aligned(cx, elements) {
         column_of(cx, left_paren.start)
     } else {
-        line_indentation(cx, first_line)
+        line_indent_at(cx, first_start)
     }
 }
 
@@ -176,19 +180,20 @@ fn expected_column(cx: &Cx<'_>, left_paren: Range, elements: &[NodeId]) -> usize
 /// When the first element is a hash, its *child* columns are compared instead
 /// (a brace-less hash spreads its pairs, and the parens align with the pairs).
 fn all_elements_aligned(cx: &Cx<'_>, elements: &[NodeId]) -> bool {
-    let mut columns = Vec::new();
     if matches!(cx.kind(elements[0]), NodeKind::Hash(_)) {
-        for child in cx.children(elements[0]) {
-            columns.push(column_of(cx, cx.range(child).start));
-        }
+        let children = cx.children(elements[0]);
+        let Some((&first, rest)) = children.split_first() else {
+            return true;
+        };
+        let first_col = column_of(cx, cx.range(first).start);
+        rest.iter()
+            .all(|&child| column_of(cx, cx.range(child).start) == first_col)
     } else {
-        for &e in elements {
-            columns.push(column_of(cx, cx.range(e).start));
-        }
+        let first_col = column_of(cx, cx.range(elements[0]).start);
+        elements[1..]
+            .iter()
+            .all(|&e| column_of(cx, cx.range(e).start) == first_col)
     }
-    columns.sort_unstable();
-    columns.dedup();
-    columns.len() == 1
 }
 
 /// The parameter nodes of a `def`/`defs` (the `Args` node's children).
@@ -255,18 +260,20 @@ fn column_of(cx: &Cx<'_>, offset: u32) -> usize {
     off - line_start
 }
 
-/// 1-based source line of byte `offset`.
-fn line_of(cx: &Cx<'_>, offset: u32) -> usize {
-    cx.source()[..offset as usize].matches('\n').count() + 1
-}
-
-/// RuboCop's `processed_source.line_indentation(line)` — count of leading
-/// space/tab characters on the given 1-based line.
-fn line_indentation(cx: &Cx<'_>, line: usize) -> usize {
-    let Some(text) = cx.source().lines().nth(line - 1) else {
-        return 0;
-    };
-    text.bytes().take_while(|&b| b == b' ' || b == b'\t').count()
+/// RuboCop's `processed_source.line_indentation(line)` for the line containing
+/// `offset` — the count of leading space/tab characters on that line. Computed
+/// directly from the line start, avoiding a from-file-start line-number scan.
+fn line_indent_at(cx: &Cx<'_>, offset: u32) -> usize {
+    let src = cx.source().as_bytes();
+    let off = offset as usize;
+    let line_start = src[..off]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |pos| pos + 1);
+    src[line_start..]
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count()
 }
 
 murphy_plugin_api::submit_cop!(ClosingParenthesisIndentation);
