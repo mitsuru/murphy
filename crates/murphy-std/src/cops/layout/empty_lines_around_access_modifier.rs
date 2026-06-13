@@ -25,7 +25,10 @@
 //!   single-surface ABI gives a cop only its own options, so this cop
 //!   assumes `Layout/EmptyLinesAroundBlockBody`'s default `no_empty_lines`.
 //!   Diverges only when that cop is configured to `empty_lines` AND the
-//!   modifier sits inside a `do…end`/`{}` block.
+//!   modifier sits inside a `do…end`/`{}` block. Closing this gap requires a
+//!   cross-cop config-read facility on the `Cx` surface, which is an ABI
+//!   change outside cop-port scope (tracked in murphy-ilrx / murphy-y3h2); the
+//!   cop is already as faithful as the current single-surface ABI permits.
 //! ```
 //!
 //! ## Algorithm
