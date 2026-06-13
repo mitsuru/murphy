@@ -225,18 +225,24 @@ fn is_canonical_entry(node: NodeId, grown: NodeId, cx: &Cx<'_>) -> bool {
     true
 }
 
-/// Grow `node` to the "whole expression": through `send`/`csend` parents,
-/// convertible blocks, and binary operators (`and`/`or`).
+/// Grow `node` to the "whole expression": follow the expression *chain* only —
+/// up through a parent `send`/`csend` when `node` is its receiver, up through a
+/// parent `and`/`or` when `node` is its left operand, and through a convertible
+/// block. Growing from an argument (or right operand) is wrong: it would pull a
+/// call's argument up to the call itself, so each argument would independently
+/// grow to the same parent and emit a duplicate offense.
 fn whole_expression(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
     loop {
         let Some(parent) = cx.parent(node).get() else {
             return node;
         };
-        let grow = matches!(
-            *cx.kind(parent),
-            NodeKind::Send { .. } | NodeKind::Csend { .. }
-        ) || convertible_block(node, parent, cx)
-            || matches!(*cx.kind(parent), NodeKind::And { .. } | NodeKind::Or { .. });
+        let grow = match *cx.kind(parent) {
+            NodeKind::Send { .. } | NodeKind::Csend { .. } => {
+                cx.call_receiver(parent).get() == Some(node)
+            }
+            NodeKind::And { lhs, .. } | NodeKind::Or { lhs, .. } => lhs == node,
+            _ => convertible_block(node, parent, cx),
+        };
         if grow {
             node = parent;
         } else {
@@ -375,33 +381,34 @@ fn configured_to_not_be_inspected(node: NodeId, cx: &Cx<'_>, inspect_blocks: boo
 /// Collapse a multiline source snippet to a single line: join interior line
 /// breaks (with or without a trailing backslash) and surrounding whitespace,
 /// including the space within method chaining (`\n  .foo` / `\n  &.foo`).
+///
+/// Iterates over `char`s (not bytes) so multi-byte UTF-8 passes through intact.
 fn to_single_line(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
-    let bytes = source.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\n' || (b == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'\n') {
-            // Skip the backslash if present.
-            if b == b'\\' {
-                i += 1;
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\n' || (c == '\\' && chars.peek() == Some(&'\n')) {
+            // Skip the backslash-continued newline if present.
+            if c == '\\' {
+                chars.next(); // the '\n'
             }
-            // Skip the newline.
-            i += 1;
             // Skip following whitespace.
-            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-                i += 1;
+            while matches!(chars.peek(), Some(' ') | Some('\t')) {
+                chars.next();
             }
-            // Method chaining: if the next chars are `.` or `&.`, do not
-            // insert a space (`foo\n  .bar` → `foo.bar`).
-            let is_chain = bytes.get(i) == Some(&b'.')
-                || (bytes.get(i) == Some(&b'&') && bytes.get(i + 1) == Some(&b'.'));
+            // Method chaining: if the next chars are `.` or `&.`, do not insert
+            // a space (`foo\n  .bar` → `foo.bar`).
+            let mut lookahead = chars.clone();
+            let is_chain = match lookahead.next() {
+                Some('.') => true,
+                Some('&') => lookahead.next() == Some('.'),
+                _ => false,
+            };
             if !is_chain {
                 out.push(' ');
             }
         } else {
-            out.push(b as char);
-            i += 1;
+            out.push(c);
         }
     }
     out
@@ -540,6 +547,19 @@ mod tests {
                   .baz
             "},
             "foo(1, 2).bar.baz\n",
+        );
+    }
+
+    #[test]
+    fn corrects_multibyte_utf8_chars_intact() {
+        // Multi-byte UTF-8 in string args must survive the single-line join.
+        test::<RedundantLineBreak>().expect_correction(
+            indoc! {r#"
+                foo("日本語",
+                ^^^^^^^^^^^^^ Redundant line break detected.
+                  "café")
+            "#},
+            "foo(\"日本語\", \"café\")\n",
         );
     }
 

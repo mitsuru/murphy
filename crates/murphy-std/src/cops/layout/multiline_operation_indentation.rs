@@ -389,19 +389,19 @@ fn within_node(inner: Range, outer: Range) -> bool {
 /// RuboCop's `begins_its_line?`: `offset` is the first non-whitespace on its
 /// line.
 fn begins_its_line(source: &str, offset: u32) -> bool {
-    let line_start = line_start_of(source, offset);
-    source[line_start as usize..offset as usize]
-        .bytes()
-        .all(|b| b == b' ' || b == b'\t')
+    let line_start = line_start_of(source, offset) as usize;
+    source.as_bytes()[line_start..offset as usize]
+        .iter()
+        .all(|&b| b == b' ' || b == b'\t')
 }
 
 /// RuboCop's `indentation(node)`: the column of the first non-whitespace on the
 /// node's line (i.e. the line's indentation).
 fn indentation(node_start: u32, source: &str) -> usize {
     let line_start = line_start_of(source, node_start) as usize;
-    source[line_start..]
-        .bytes()
-        .take_while(|&b| b == b' ' || b == b'\t')
+    source.as_bytes()[line_start..]
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
         .count()
 }
 

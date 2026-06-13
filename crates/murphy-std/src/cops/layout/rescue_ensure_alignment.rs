@@ -281,10 +281,7 @@ fn method_name_end(range: Range, cx: &Cx<'_>) -> Option<u32> {
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < range.start);
-    let line_toks: Vec<_> = toks[idx..]
-        .iter()
-        .take_while(|t| t.range.start < range.end && t.kind != SourceTokenKind::Newline)
-        .collect();
+    let line_toks = first_line_tokens(&toks[idx..], range.end);
     // First token is `def`. The name is everything up to the first `(` or the
     // 2nd whitespace-separated identifier group.
     // Walk: skip `def`; the name spans `self` `.` `NAME` or just `NAME`.
@@ -297,7 +294,7 @@ fn method_name_end(range: Range, cx: &Cx<'_>) -> Option<u32> {
     }
     let mut end = None;
     while i < line_toks.len() {
-        let tok = line_toks[i];
+        let tok = &line_toks[i];
         if tok.kind == SourceTokenKind::LeftParen {
             break;
         }
@@ -315,16 +312,24 @@ fn method_name_end(range: Range, cx: &Cx<'_>) -> Option<u32> {
     end
 }
 
+/// The prefix of `toks` covering one physical line: tokens whose start is
+/// before `line_end_bound` and that are not a `Newline`. Returned as a slice —
+/// no intermediate `Vec`.
+fn first_line_tokens(toks: &[SourceToken], line_end_bound: u32) -> &[SourceToken] {
+    let len = toks
+        .iter()
+        .position(|t| t.range.start >= line_end_bound || t.kind == SourceTokenKind::Newline)
+        .unwrap_or(toks.len());
+    &toks[..len]
+}
+
 /// End offset of `class NAME` / `module NAME` / `class << NAME` — through the
 /// constant/identifier name.
 fn class_header_end(range: Range, cx: &Cx<'_>) -> u32 {
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < range.start);
-    let line_toks: Vec<_> = toks[idx..]
-        .iter()
-        .take_while(|t| t.range.start < range.end && t.kind != SourceTokenKind::Newline)
-        .collect();
+    let line_toks = first_line_tokens(&toks[idx..], range.end);
     // Skip the `class`/`module` keyword, then take the name token(s)
     // (`<<` + identifier for sclass, or the constant path).
     let mut end = range.start;
@@ -333,7 +338,7 @@ fn class_header_end(range: Range, cx: &Cx<'_>) -> u32 {
         i += 1; // skip class/module keyword
     }
     while i < line_toks.len() {
-        let tok = line_toks[i];
+        let tok = &line_toks[i];
         let text = &source[tok.range.start as usize..tok.range.end as usize];
         // Stop at superclass `<` (but not `<<` for sclass).
         if text == b"<" {
@@ -431,10 +436,10 @@ fn ensure_keyword_range(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
 
 /// True if only whitespace precedes `offset` on its line.
 fn is_line_leading(source: &str, offset: u32) -> bool {
-    let line_start = line_start_of(source, offset);
-    source[line_start as usize..offset as usize]
-        .bytes()
-        .all(|b| b == b' ' || b == b'\t')
+    let line_start = line_start_of(source, offset) as usize;
+    source.as_bytes()[line_start..offset as usize]
+        .iter()
+        .all(|&b| b == b' ' || b == b'\t')
 }
 
 fn line_start_of(source: &str, offset: u32) -> u32 {
