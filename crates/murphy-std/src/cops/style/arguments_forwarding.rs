@@ -31,10 +31,20 @@
 //!
 //!   REMAINING GAP (murphy-484s): Anonymous forwarding (`*`, `**`, `&`) for
 //!   Ruby 3.2+ (`UseAnonymousForwarding`) is not implemented — RuboCop gates
-//!   it on `target_ruby_version >= 3.2`, but Murphy's single-surface plugin
-//!   ABI exposes `target_rails_version()` and not `target_ruby_version()`
-//!   (CxRaw has no Ruby-version field). Adding it would cross the ABI
-//!   boundary, so it stays a documented blocker.
+//!   it on `target_ruby_version >= 3.2`. Murphy's single-surface plugin ABI
+//!   exposes `target_rails_version()` (and `Cx::rails_version_at_least`) but
+//!   NOT a per-dispatch `target_ruby_version()`: `CxRaw` carries no Ruby
+//!   target-version field, and the only Ruby-version surface is the
+//!   *registry-level* `PluginCopV1::minimum_target_ruby_version` gate
+//!   (RuboCop's cop-wide `minimum_target_ruby_version`). That gate cannot
+//!   express this requirement — it would disable the *entire* cop below 3.2,
+//!   but the forward-all `...` path is valid from Ruby 2.7, so only the
+//!   `UseAnonymousForwarding` sub-feature should be 3.2-gated. Closing this
+//!   requires a NEW per-dispatch Ruby-version Cx accessor: a cross-crate ABI
+//!   change (plugin-api `CxRaw` tail-append + `AllCopsContext` + core
+//!   dispatcher + test_support). No ADR/design sanctions that surface today,
+//!   so per the single-surface boundary this stays an escalated, documented
+//!   blocker rather than a drive-by ABI extension.
 //! ```
 //!
 //! ## Matched shapes
