@@ -211,6 +211,13 @@ fn aligned_comment_lines(cx: &Cx<'_>) -> HashSet<usize> {
 /// stays out of them.
 fn ignored_ranges(cx: &Cx<'_>) -> Vec<Range> {
     let mut ranges = Vec::new();
+    // Fast-path: a multiline hash needs both a `{` (brace-delimited literal)
+    // and a `\n`. When either is absent the full-tree descendants walk (a
+    // per-file Vec allocation) cannot find one, so skip it entirely.
+    let src = cx.source().as_bytes();
+    if !src.contains(&b'{') || !src.contains(&b'\n') {
+        return ranges;
+    }
     for &node in cx.descendants(cx.root()).iter() {
         if !matches!(*cx.kind(node), NodeKind::Hash(_)) {
             continue;

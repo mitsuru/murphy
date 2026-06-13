@@ -8,8 +8,7 @@
 //! upstream_cop: Layout/IndentationWidth
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-onl7
+//! gap_issues: []
 //! notes: >
 //!   Detection-only port of RuboCop's core check: for each block-introducing
 //!   keyword (`def`/`defs`, `class`/`module`, `if`, `while`/`until`,
