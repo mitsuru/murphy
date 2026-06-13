@@ -387,14 +387,17 @@ fn is_constant_definition(node: NodeId, cx: &Cx<'_>) -> bool {
 /// `empty_line_required?` — `{any_def class module (send nil? {:private :protected :public})}`.
 ///
 /// The NodePattern `(send nil? {:private :protected :public})` has fixed arity:
-/// a receiver-less send named by one of those symbols with NO arguments. So a
+/// a receiver-less *send* named by one of those symbols with NO arguments. So a
 /// method-targeted modifier like `private :foo` (arity 3) does NOT match — only
-/// the bare zero-arg form does. The `call_arguments().is_empty()` guard mirrors
-/// this.
+/// the bare zero-arg form does. A block call like `private do ... end` is a
+/// `block` node (not `send`), so it must not match either even though
+/// `method_name` delegates through the block. The `NodeKind::Send` /
+/// `call_arguments().is_empty()` guards mirror the pattern.
 fn is_empty_line_required(node: NodeId, cx: &Cx<'_>) -> bool {
     cx.is_any_def_type(node)
         || is_constant_definition(node, cx)
-        || (cx.call_receiver(node).get().is_none()
+        || (matches!(*cx.kind(node), NodeKind::Send { .. })
+            && cx.call_receiver(node).get().is_none()
             && cx.call_arguments(node).is_empty()
             && matches!(
                 cx.method_name(node),
@@ -771,6 +774,22 @@ mod tests {
             offenses[0].message,
             "Empty line missing before first def definition"
         );
+    }
+
+    /// Parity pin (Codex #386, discussion_r3407542493): RuboCop's special-style
+    /// `empty_line_required?` matches `(send nil? {:private :protected :public})`
+    /// — a zero-arg *send*. A block call `private do ... end` is a `block` node,
+    /// not a send, so it must NOT be treated as a bare access modifier that
+    /// forces a blank line after the module opener. The blank line before the
+    /// final `end` satisfies the always-required ending, isolating the beginning
+    /// behaviour under test.
+    #[test]
+    fn special_block_modifier_is_not_a_bare_access_modifier() {
+        let offenses = run_cop_with_options::<EmptyLinesAroundModuleBody>(
+            "module Foo\n  private do\n  end\n\nend\n",
+            &opts(ModuleBodyStyle::EmptyLinesSpecial),
+        );
+        assert!(offenses.is_empty(), "got {offenses:?}");
     }
 
     #[test]

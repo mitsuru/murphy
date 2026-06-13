@@ -366,10 +366,14 @@ fn marked_as_private_constant(node: NodeId, const_name: &str, cx: &Cx<'_>) -> bo
     if cx.method_name(node) != Some("private_constant") {
         return false;
     }
-    cx.call_arguments(node).iter().any(|&arg| {
-        matches!(*cx.kind(arg), NodeKind::Sym(s) if cx.symbol_str(s) == const_name)
-            || (matches!(*cx.kind(arg), NodeKind::Str(_))
-                && cx.raw_source(cx.range(arg)).trim_matches(['\'', '"']) == const_name)
+    // RuboCop matches `({sym str} $_)` and compares the node's *decoded* value,
+    // so an escaped form like `private_constant "CON\x53T"` (whose AST value is
+    // already `CONST`) must compare equal. Use `string_str` (the unescaped
+    // contents), not the raw quoted source.
+    cx.call_arguments(node).iter().any(|&arg| match *cx.kind(arg) {
+        NodeKind::Sym(s) => cx.symbol_str(s) == const_name,
+        NodeKind::Str(s) => cx.string_str(s) == const_name,
+        _ => false,
     })
 }
 
@@ -734,6 +738,19 @@ mod tests {
     fn def_named_private_is_not_a_visibility_boundary() {
         let src =
             "class Foo\n  def private; end\n  def normal; end\n  protected def prot; end\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// Parity pin (Codex #386, discussion_r3407542494): RuboCop compares the
+    /// *decoded* value of a `private_constant` string argument, so an escaped
+    /// form like `private_constant "CON\x53T"` still marks `CONST` private and
+    /// excludes it from the order check. Compare the decoded `cx.string_str`
+    /// value, not the raw quoted source (which keeps the `\x53` escape verbatim).
+    #[test]
+    fn private_constant_with_escaped_string_is_ignored() {
+        let src =
+            "class Foo\n  def pub; end\n  CONST = 1\n  private_constant \"CON\\x53T\"\nend\n";
         let offenses = run_cop::<ClassStructure>(src);
         assert!(offenses.is_empty(), "got {offenses:?}");
     }
