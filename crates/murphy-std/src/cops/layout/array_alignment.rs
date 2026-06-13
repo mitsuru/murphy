@@ -199,22 +199,34 @@ fn anchor_line_offset(node: NodeId, cx: &Cx<'_>) -> u32 {
 
 /// RuboCop's `ArrayNode#bracketed?` (`square_brackets? || percent_literal?`):
 /// true when the array has an opening delimiter — `[` or any percent literal
-/// (`%w[…]`, `%i(…)`, …). Murphy does not populate a begin-delimiter loc, so we
-/// inspect the first byte of the array's range: a real literal begins with `[`
-/// or `%`. A bracketless implicit array (`x = 1, 2`) begins at its first
-/// element's byte, and prism's synthetic array under `return`/`break`/`next`
-/// begins at the *keyword* byte — neither is `[`/`%`, so both read as not
-/// bracketed.
+/// (`%w[…]`, `%i(…)`, …). Murphy does not populate a begin-delimiter loc, so this
+/// reconstructs `loc.begin` from two conditions that must BOTH hold:
 ///
-/// A positional `node.start < first_element.start` test is **not** reliable
-/// here: prism pads the synthetic `return 1, 2` array's start back to the
-/// `return` keyword, so it spuriously precedes its first element and would read
-/// as bracketed. The byte check matches RuboCop's `loc.begin` semantics exactly.
+/// 1. The array's first byte is `[` or `%` (it could carry a delimiter), and
+/// 2. that byte lies strictly before the first element (so the delimiter belongs
+///    to the array itself, not to a leading element).
+///
+/// Neither condition alone is correct:
+/// - A positional `node.start < first.start` test alone fails for prism's
+///   synthetic `return 1, 2` array, whose start is padded back to the `return`
+///   keyword and so spuriously precedes the first element.
+/// - A byte-only test fails for an implicit (braceless) array whose first
+///   element is itself bracketed (`x = [1], 2`, `return %w[a], 2`): the array
+///   begins exactly at that element's `[`/`%`, which is the element's delimiter,
+///   not the (non-existent) array's. RuboCop's `bracketed?` is false there.
+///
+/// Together they match RuboCop's `loc.begin` semantics for every shape.
 fn is_bracketed(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(
+    if !matches!(
         cx.source().as_bytes().get(cx.range(node).start as usize),
         Some(b'[' | b'%')
-    )
+    ) {
+        return false;
+    }
+    match cx.array_elements(node).first() {
+        Some(&first) => cx.range(node).start < cx.range(first).start,
+        None => true,
+    }
 }
 
 /// Column of the first non-whitespace char on the line containing `offset`.
@@ -282,6 +294,24 @@ mod tests {
                   %w[one
                     two]
                 )
+            "});
+    }
+
+    /// Parity pin (Codex #384): an implicit (braceless) array whose first element
+    /// is itself bracketed (`x = [1], 2`) is NOT bracketed — the leading `[`
+    /// belongs to the element, not the outer array (RuboCop's `bracketed?` is
+    /// false). With `with_fixed_indentation` it must anchor to the parent line
+    /// (`x =`, indent 0 + one level = 2), so the over-indented `2` at column 4 is
+    /// flagged. A byte-only `is_bracketed` would wrongly anchor to the `[1]` line.
+    #[test]
+    fn fixed_implicit_array_with_bracketed_first_element_anchors_to_parent() {
+        test::<ArrayAlignment>()
+            .with_options(&fixed())
+            .expect_offense(indoc! {"
+                x =
+                  [1],
+                    2
+                    ^ Use one level of indentation for elements following the first line of a multi-line array.
             "});
     }
 

@@ -215,11 +215,25 @@ fn flattened_arguments(args: &[NodeId], fixed: bool, cx: &Cx<'_>) -> Vec<NodeId>
 
 /// True when `node` is a hash literal written without surrounding braces
 /// (RuboCop's `hash_type? && !braces?`).
+///
+/// `braces?` is structural (`loc.begin` present), so we reconstruct it from two
+/// conditions: a braced hash's `{` lies strictly before its first pair. Checking
+/// only the leading byte (`starts_with('{')`) misreads a braceless hash whose
+/// first key is itself a hash literal (`{ a: 1 } => 2, b: 3`) — its source begins
+/// with the inner hash's `{`, yet RuboCop still flattens the outer pairs.
 fn is_braceless_hash(node: NodeId, cx: &Cx<'_>) -> bool {
     if !matches!(cx.kind(node), NodeKind::Hash(_)) {
         return false;
     }
-    !cx.raw_source(cx.range(node)).starts_with('{')
+    match cx.hash_pairs(node).first() {
+        // Braced when the `{` precedes the first pair; otherwise braceless.
+        Some(&first) => {
+            !(cx.range(node).start < cx.range(first).start
+                && cx.source().as_bytes().get(cx.range(node).start as usize) == Some(&b'{'))
+        }
+        // `{}` — braced, and no pairs to flatten anyway.
+        None => false,
+    }
 }
 
 /// Configured indentation width for `with_fixed_indentation`. Only an unset
@@ -311,6 +325,20 @@ mod tests {
             offenses[0].message.contains("one level of indentation"),
             "got {offenses:?}"
         );
+    }
+
+    /// Parity pin (Codex #384): a braceless hash argument whose first key is
+    /// itself a hash literal (`{ a: 1 } => 2, b: 3`) is still braceless — RuboCop
+    /// flattens its pairs and aligns them, flagging the misaligned `b: 3`. A
+    /// leading-byte `starts_with('{')` check would misread it as braced and miss
+    /// the offense. Verified against RuboCop 1.87.
+    #[test]
+    fn flags_braceless_hash_with_hash_first_key() {
+        test::<ArgumentAlignment>().expect_offense(indoc! {"
+            foo({ a: 1 } => 2,
+              b: 3)
+              ^^^^ Align the arguments of a method call if they span more than one line.
+        "});
     }
 
     // with_first_argument (default) ---------------------------------------
