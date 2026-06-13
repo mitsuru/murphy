@@ -636,6 +636,41 @@ mod tests {
         );
     }
 
+    /// Parity check (roborev/CodeRabbit #386): a block-form visibility macro
+    /// (`private` then `attr_reader :x`) must classify the inner macro with the
+    /// block visibility prefix. With a `attribute_macros` category and both
+    /// `public_attribute_macros` and `private_attribute_macros` in
+    /// `ExpectedOrder`, `attr_reader :x` under a bare `private` resolves to
+    /// `private_attribute_macros` via `node_visibility_block`'s left-sibling
+    /// scan. Here a public macro appears AFTER the private one → out of order.
+    #[test]
+    fn block_visibility_prefix_on_attribute_macro() {
+        let opts = ClassStructureOptions {
+            expected_order: vec![
+                "public_attribute_macros".to_string(),
+                "private_attribute_macros".to_string(),
+            ],
+            categories: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(
+                    "attribute_macros".to_string(),
+                    vec!["attr_reader".to_string()],
+                );
+                m
+            },
+        };
+        // private attr_reader (private_attribute_macros, idx 1) then a public
+        // attr_reader (public_attribute_macros, idx 0) → out of order.
+        let src =
+            "class Foo\n  private\n  attr_reader :x\n  public\n  attr_reader :y\nend\n";
+        let offenses = run_cop_with_options::<ClassStructure>(src, &opts);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "`public_attribute_macros` is supposed to appear before `private_attribute_macros`."
+        );
+    }
+
     // --- option decoding error surface ---
 
     #[test]
