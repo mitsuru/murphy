@@ -740,6 +740,24 @@ mod tests {
         );
     }
 
+    /// Parity pin (Codex #387): `x = if c ... end.tap { }` — the conditional is
+    /// the receiver of a *block* call. RuboCop's `first_part_of_call_chain`
+    /// unwraps `block → send_node` then `send → receiver`, so the walk-up must
+    /// pass transparently through the block before reaching the assignment. The
+    /// `end` therefore anchors on the assignment variable (`x = if` at col 0),
+    /// not the `if` keyword (col 4); without the block-transparency branch this
+    /// would fall back to the keyword anchor and the offense would vanish.
+    #[test]
+    fn variable_if_with_trailing_block_chain() {
+        let src = "x = if c\n  foo\n    end.tap { |v| v }\n";
+        let run = run_cop_with_options::<Cop>(src, &variable());
+        assert_eq!(run.len(), 1, "got {run:?}");
+        assert_eq!(
+            run[0].message,
+            "`end` at 3, 4 is not aligned with `x = if` at 1, 0."
+        );
+    }
+
     /// Parity pin (Codex #387): `x = class Foo ... end` — a `class` is always
     /// keyword-aligned, never routed through the assignment, even as an
     /// assignment RHS (RuboCop's `on_class` calls `check_other_alignment`
