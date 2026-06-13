@@ -199,6 +199,15 @@ mod tests {
     }
 
     #[test]
+    fn accepts_multiline_condition_starting_on_keyword_line() {
+        // `single_line_condition?` is `loc.keyword.line == condition.line`, so a
+        // multiline condition whose first line coincides with the keyword line
+        // is NOT flagged (the condition starts on the keyword's line).
+        let src = "while x &&\n      y\n  foo\nend\n";
+        assert!(run_cop::<ConditionPosition>(src).is_empty());
+    }
+
+    #[test]
     fn accepts_ternary() {
         assert!(run_cop::<ConditionPosition>("x ? a : b\n").is_empty());
     }

@@ -9,7 +9,7 @@
 //! upstream_cop: Layout/ClosingParenthesisIndentation
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-of8j]
+//! gap_issues: [murphy-bgd8]
 //! notes: >
 //!   Port of RuboCop's `ClosingParenthesisIndentation`. Handles `send`/`csend`
 //!   (call argument lists), `def`/`defs` (parameter lists), and `begin`
@@ -27,7 +27,7 @@
 //!   `Align ) with (.` when the target equals the `(` column, else
 //!   `Indent ) to column N (not M)`.
 //!
-//!   GAP (murphy-of8j): `configured_indentation_width` is hardcoded to 2.
+//!   GAP (murphy-bgd8): `configured_indentation_width` is hardcoded to 2.
 //!   RuboCop reads `Layout/IndentationWidth`'s width (and this cop's own
 //!   `IndentationWidth` override). Murphy's single-surface ABI does not expose
 //!   another cop's resolved config to a plugin, so the cross-cop lookup and the
