@@ -160,6 +160,9 @@ fn allowed_method(node: NodeId, cx: &Cx<'_>) -> bool {
     // cover this; handle the common modifier-if/unless shape via the
     // condition node's underlying call.
     let target = modifier_body(node, cx).unwrap_or(node);
+    // Unwrap any (arbitrarily nested) parentheses, e.g. `(include Bar) if c`,
+    // whose body node is a `Begin`. `unwrap_parenthesized` loops internally.
+    let target = crate::cops::util::unwrap_parenthesized(target, cx);
     if !matches!(*cx.kind(target), murphy_plugin_api::NodeKind::Send { .. }) {
         return false;
     }
@@ -285,6 +288,15 @@ mod tests {
         test::<EmptyLinesAfterModuleInclusion>().expect_no_offenses(
             "class Foo\n  include Bar\n  # rubocop:enable Style/Foo\nend\n",
         );
+    }
+
+    /// Regression (Gemini PR #377): a parenthesized next inclusion is a
+    /// `Begin` node; `allowed_method` must unwrap it so grouped inclusions
+    /// stay exempt and no false-positive offense fires.
+    #[test]
+    fn accepts_grouped_with_parenthesized_next_inclusion() {
+        test::<EmptyLinesAfterModuleInclusion>()
+            .expect_no_offenses("class Foo\n  include Bar\n  (include Baz)\nend\n");
     }
 }
 

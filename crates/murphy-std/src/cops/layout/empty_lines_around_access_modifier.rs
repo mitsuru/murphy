@@ -246,9 +246,18 @@ fn next_line_empty(ctx: &Context, cx: &Cx<'_>) -> bool {
     body_end(ctx) || line_is_blank(cx, ctx.send_last_line + 1)
 }
 
-/// `next_line_empty_and_exists?(last_send_line)`
+/// `next_line_empty_and_exists?(last_send_line)` — the line after the
+/// modifier physically exists and is blank.
+///
+/// This intentionally does NOT route through [`next_line_empty`], whose
+/// `body_end?` special case reports "empty" for the modifier's own last body
+/// line. Using it here would let `only_before` autocorrect delete the line
+/// holding the `end` keyword for a modifier at body end, corrupting the
+/// source. RuboCop's check is likewise guarded — its companion
+/// `next_empty_line_range` only removes a real trailing blank line.
 fn next_line_empty_and_exists(ctx: &Context, cx: &Cx<'_>) -> bool {
-    next_line_empty(ctx, cx) && (ctx.send_last_line + 1) as usize != total_lines(cx)
+    let next_line = ctx.send_last_line + 1;
+    (next_line as usize) < total_lines(cx) && line_is_blank(cx, next_line)
 }
 
 /// `class_def?(line)` — the modifier is the first line of the class/module body.
@@ -554,6 +563,36 @@ mod tests {
         );
         assert_eq!(offenses.len(), 1, "expected 1 offense, got {offenses:?}");
         assert_eq!(offenses[0].message, "Remove a blank line after `private`.");
+    }
+
+    /// Regression (Gemini PR #377): a non-special modifier at body end with a
+    /// missing before-blank must not delete the `end` line during the
+    /// `only_before` after-correction. `module_function` is non-special so the
+    /// `'end'`-line exemption does not apply, exercising the body-end path.
+    #[test]
+    fn only_before_does_not_corrupt_end_at_body_end() {
+        let src = "class Foo\n  def bar; end\n  module_function\nend\n";
+        let result = murphy_plugin_api::test_support::run_cop_with_options_and_edits::<
+            EmptyLinesAroundAccessModifier,
+        >(src, &only_before_opts());
+        // The before-blank is missing, so one offense fires.
+        assert_eq!(result.offenses.len(), 1, "got {:?}", result.offenses);
+        // No edit may touch the `end` line: every removal/insertion must stay
+        // above it. The `end` keyword starts at the final line.
+        let end_line_start = src.rfind("end\n").expect("has end") as u32;
+        for edit in &result.edits {
+            assert!(
+                edit.range.end <= end_line_start || edit.replacement == "\n",
+                "edit {edit:?} must not delete the `end` line"
+            );
+            // Specifically, no deletion (`""`) may overlap the `end` line.
+            if edit.replacement.is_empty() {
+                assert!(
+                    edit.range.end <= end_line_start,
+                    "deletion {edit:?} overlaps the `end` line"
+                );
+            }
+        }
     }
 }
 
