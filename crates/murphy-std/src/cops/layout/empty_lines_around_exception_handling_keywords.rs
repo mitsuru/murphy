@@ -272,14 +272,17 @@ fn keyword_lines(structure: NodeId, cx: &Cx<'_>) -> Vec<KeywordLine> {
         NodeKind::Ensure { body, ensure_ } => {
             // `ensure` keyword sits between the protected body and the ensure
             // body. Find the `ensure` token after the protected body's end.
+            // Final fallback: when both bodies are empty (`def foo; ensure;
+            // end`), scan from the structure's start so the keyword is still
+            // located.
             let ensure_line = ensure_
                 .get()
                 .and_then(|e| keyword_token_before("ensure", cx.range(e).start, cx))
                 .or_else(|| {
-                    body.get().and_then(|b| {
-                        keyword_token_after("ensure", cx.range(b).end, cx)
-                    })
-                });
+                    body.get()
+                        .and_then(|b| keyword_token_after("ensure", cx.range(b).end, cx))
+                })
+                .or_else(|| keyword_token_after("ensure", cx.range(structure).start, cx));
             if let Some(line) = ensure_line {
                 out.push(KeywordLine {
                     line,
@@ -465,6 +468,25 @@ mod tests {
         assert_eq!(
             offenses[0].message,
             "Extra empty line detected after the `ensure`."
+        );
+    }
+
+    /// Regression: both the protected body and the ensure body are empty, so
+    /// `body.get()`/`ensure_.get()` are `None`. The `ensure` keyword must still
+    /// be located (via the structure-start fallback) and its surrounding blank
+    /// lines flagged.
+    #[test]
+    fn finds_ensure_keyword_with_empty_bodies() {
+        let src = "def foo\n\nensure\n\nend\n";
+        let offenses = run_cop::<Cop>(src);
+        let msgs: Vec<&str> = offenses.iter().map(|o| o.message.as_str()).collect();
+        assert!(
+            msgs.contains(&"Extra empty line detected before the `ensure`."),
+            "missing before-ensure offense: {msgs:?}"
+        );
+        assert!(
+            msgs.contains(&"Extra empty line detected after the `ensure`."),
+            "missing after-ensure offense: {msgs:?}"
         );
     }
 

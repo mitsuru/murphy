@@ -103,10 +103,13 @@ fn adjusted_first_line(node: NodeId, cx: &Cx<'_>) -> usize {
     {
         match tok.kind {
             SourceTokenKind::LeftParen => depth += 1,
-            SourceTokenKind::RightParen => {
+            SourceTokenKind::RightParen if depth > 0 => {
                 depth -= 1;
                 if depth == 0 {
-                    // Closing paren of the (outermost) parameter list.
+                    // Closing paren of the (outermost) parameter list. The
+                    // `depth > 0` guard prevents an unmatched `)` (invalid /
+                    // incomplete syntax) from driving depth negative and then
+                    // triggering a false early return on the next `(`.
                     close_line = Some(line_1based(tok.range.start, cx));
                     break;
                 }
