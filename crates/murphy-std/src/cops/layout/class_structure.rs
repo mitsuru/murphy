@@ -401,16 +401,19 @@ fn node_visibility_inline(node: NodeId, cx: &Cx<'_>) -> Option<&'static str> {
         return Some(v);
     }
     // inline-on-method-name: a right sibling `private :foo` naming this method.
+    // RuboCop's `visibility_inline_on_method_name?` is
+    // `(send nil? VISIBILITY_SCOPES (sym %method_name))` — a *send* with exactly
+    // one symbol argument. A multi-target call like `private :foo, :bar` does NOT
+    // match upstream, so it must not reclassify `foo`.
     let method = cx.method_name(node)?;
     let mut sibling = cx.right_sibling(node);
     let mut last: Option<&'static str> = None;
     while let Some(s) = sibling.get() {
-        if cx.call_receiver(s).get().is_none()
+        if matches!(*cx.kind(s), NodeKind::Send { .. })
+            && cx.call_receiver(s).get().is_none()
             && let Some(v) = as_visibility(cx.method_name(s))
-            && cx
-                .call_arguments(s)
-                .iter()
-                .any(|&a| matches!(*cx.kind(a), NodeKind::Sym(sym) if cx.symbol_str(sym) == method))
+            && let [arg] = cx.call_arguments(s)
+            && matches!(*cx.kind(*arg), NodeKind::Sym(sym) if cx.symbol_str(sym) == method)
         {
             // `right_siblings.reverse.find` → the *last* matching sibling.
             last = Some(v);
@@ -421,10 +424,16 @@ fn node_visibility_inline(node: NodeId, cx: &Cx<'_>) -> Option<&'static str> {
 }
 
 /// Block form: the nearest preceding bare `private`/`protected`/`public`.
+///
+/// RuboCop's `visibility_block?` is `(send nil? VISIBILITY_SCOPES)` — a bare
+/// *send* with no receiver and no arguments. A method literally named `private`
+/// (`def private; end`) is a `def` node, not a send, so it must not act as a
+/// visibility boundary for the methods that follow it.
 fn node_visibility_block(node: NodeId, cx: &Cx<'_>) -> Option<&'static str> {
     let mut sibling = cx.left_sibling(node);
     while let Some(s) = sibling.get() {
-        if cx.call_receiver(s).get().is_none()
+        if matches!(*cx.kind(s), NodeKind::Send { .. })
+            && cx.call_receiver(s).get().is_none()
             && cx.call_arguments(s).is_empty()
             && let Some(v) = as_visibility(cx.method_name(s))
         {
@@ -685,6 +694,48 @@ mod tests {
             offenses[0].message,
             "`public_attribute_macros` is supposed to appear before `private_attribute_macros`."
         );
+    }
+
+    /// Parity pin (Codex #386, discussion_r3407448923): RuboCop's
+    /// `visibility_inline_on_method_name?` is
+    /// `(send nil? VISIBILITY_SCOPES (sym %method_name))` — it matches only a
+    /// *single* symbol argument. A multi-target call like `private :foo, :bar`
+    /// does NOT mark `foo` private upstream, so `foo` stays `public_methods` and
+    /// the following public method must not be flagged out of order.
+    #[test]
+    fn multi_target_inline_visibility_does_not_reclassify() {
+        let src = "class Foo\n  def foo; end\n  private :foo, :bar\n  def baz; end\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// Companion to the multi-target pin: a *single*-symbol `private :foo`
+    /// (matching `(send nil? VISIBILITY_SCOPES (sym %1))`) DOES mark `foo`
+    /// private, so a public method after it is out of order. Guards against the
+    /// single-arg path being lost when tightening the multi-arg case.
+    #[test]
+    fn single_target_inline_visibility_reclassifies() {
+        let src = "class Foo\n  def foo; end\n  private :foo\n  def baz; end\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "`public_methods` is supposed to appear before `private_methods`."
+        );
+    }
+
+    /// Parity pin (Codex #386, discussion_r3407448924): RuboCop's
+    /// `visibility_block?` is `(send nil? VISIBILITY_SCOPES)` — a bare *send*. A
+    /// method literally named `private` (`def private; end`) is a `def` node, not
+    /// a send, so it must NOT act as a visibility boundary for the methods that
+    /// follow it. Here `def normal` stays `public_methods`, so the later
+    /// `protected def prot` is in order and must not be flagged.
+    #[test]
+    fn def_named_private_is_not_a_visibility_boundary() {
+        let src =
+            "class Foo\n  def private; end\n  def normal; end\n  protected def prot; end\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert!(offenses.is_empty(), "got {offenses:?}");
     }
 
     // --- option decoding error surface ---
