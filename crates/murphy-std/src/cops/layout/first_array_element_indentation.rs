@@ -248,11 +248,12 @@ fn check_first(
     let actual = column_of(cx, first_start);
     let (base_col, base_type) =
         indent_base(left_bracket_start, left_paren_start, cx, options.enforced_style);
-    let expected = base_col + options.indentation_width.unwrap_or(2).max(0) as usize;
+    let width = options.indentation_width.unwrap_or(2).max(0) as usize;
+    let expected = base_col + width;
     if expected == actual {
         return;
     }
-    let msg = message(base_type, options.indentation_width.unwrap_or(2).max(0) as usize);
+    let msg = message(base_type, width);
     cx.emit_offense(cx.range(first), &msg, None);
     reindent_line(first_start, expected, cx);
 }
