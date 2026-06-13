@@ -162,10 +162,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 }
 
-/// Configured indentation width for `with_fixed_indentation` (null/non-positive
-/// → default 2).
+/// Configured indentation width for `with_fixed_indentation`. Only an unset
+/// (`None`) override falls back to 2; an explicit `0` is honoured (Ruby treats
+/// `0` as truthy in `cop_config['IndentationWidth'] || …`). Negatives clamp to 0.
 fn indentation_width(opts: &ParameterAlignmentOptions) -> usize {
-    opts.indentation_width.filter(|&w| w > 0).map_or(2, |w| w as usize)
+    opts.indentation_width.map_or(2, |w| w.max(0) as usize)
 }
 
 /// The `def` keyword's start offset (used as the indentation anchor).
@@ -339,6 +340,26 @@ mod tests {
               123
             end
         "});
+    }
+
+    /// Parity pin (Codex #387/#384): an explicit `IndentationWidth: 0` is
+    /// honoured (Ruby treats `0` as truthy), so `with_fixed_indentation` anchors
+    /// parameters at the def-line indent + 0. `baz` at column 0 is accepted; `0`
+    /// must not fall back to width 2.
+    #[test]
+    fn fixed_honors_zero_indentation_width() {
+        let opts = ParameterAlignmentOptions {
+            enforced_style: ParameterAlignmentStyle::WithFixedIndentation,
+            indentation_width: Some(0),
+        };
+        test::<ParameterAlignment>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {"
+                def foo(bar,
+                baz)
+                  123
+                end
+            "});
     }
 }
 
