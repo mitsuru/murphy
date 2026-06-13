@@ -208,12 +208,25 @@ fn def_parameters(node: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
 ///
 /// Murphy does not record a usable `loc.name` / args sub-range on `def` nodes
 /// (both span the whole definition), so `LocRef::begin()` cannot be used. The
-/// param-list `(` is the first `LeftParen` token inside the def's range; its
+/// param-list `(` is the first `LeftParen` token after the method name; its
 /// match is found by paren-depth counting. `None` when the def has no
 /// parenthesized parameter list (`def foo` / `def foo a, b`).
+///
+/// For a singleton method with a parenthesized receiver (`def (obj).foo(a)`),
+/// the receiver's `(obj)` parens precede the param list, so the scan starts
+/// after the receiver's source range — otherwise the receiver parens would be
+/// mistaken for the parameter list.
 fn def_param_parens(node: NodeId, cx: &Cx<'_>) -> Option<(Range, Range)> {
     let range = cx.range(node);
-    let toks = cx.tokens_in(range);
+    // Skip past a parenthesized receiver (`def (obj).foo …`).
+    let scan_start = match cx.def_receiver(node).get() {
+        Some(recv) => cx.range(recv).end,
+        None => range.start,
+    };
+    let toks = cx.tokens_in(Range {
+        start: scan_start,
+        end: range.end,
+    });
     let open_idx = toks
         .iter()
         .position(|t| t.kind == SourceTokenKind::LeftParen)?;
@@ -373,6 +386,17 @@ mod tests {
     #[test]
     fn accepts_def_empty_param_list() {
         assert!(run_cop::<Cop>("def some_method()\nend\n").is_empty());
+    }
+
+    #[test]
+    fn flags_defs_with_parenthesized_receiver() {
+        // `def (obj).foo(...)`: the receiver `(obj)` parens precede the param
+        // list, so the scan must skip them and check the param-list `)`.
+        let src = "def (obj).foo(\n  a\n  )\nend\n";
+        let run = run_cop_with_edits::<Cop>(src);
+        assert_eq!(run.offenses.len(), 1);
+        assert_eq!(run.offenses[0].message, "Indent `)` to column 0 (not 2)");
+        assert_eq!(apply(src, &run.edits), "def (obj).foo(\n  a\n)\nend\n");
     }
 
     // ---- grouped expression (begin node) ----
