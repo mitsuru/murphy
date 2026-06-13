@@ -151,7 +151,7 @@ fn check_call_args(
         }
         let lbrace_start = cx.range(arg).start;
         // The `{` must be on the same line as the `(`.
-        if line_of(cx, lparen.start) == line_of(cx, lbrace_start) {
+        if same_line(cx, lparen.start, lbrace_start) {
             check(arg, Some(lparen.start), cx, options);
         }
     }
@@ -201,7 +201,7 @@ fn check(
         let first_start = cx.range(first).start;
         // RuboCop returns from `check` entirely when the first key shares the
         // `{` line — the right brace is then NOT checked.
-        if line_of(cx, left_brace_start) == line_of(cx, first_start) {
+        if same_line(cx, left_brace_start, first_start) {
             return;
         }
         check_first(first, left_brace_start, left_paren_start, cx, options);
@@ -229,7 +229,7 @@ fn covered_by_parent_call(node: NodeId, cx: &Cx<'_>) -> bool {
     if lparen == Range::ZERO {
         return false;
     }
-    line_of(cx, lparen.start) == line_of(cx, cx.range(node).start)
+    same_line(cx, lparen.start, cx.range(node).start)
 }
 
 /// Check the first key's column against the expected indentation.
@@ -353,10 +353,15 @@ fn first_non_ws_column(cx: &Cx<'_>, offset: u32) -> usize {
         .unwrap_or(0)
 }
 
-/// 1-based line number of `offset`.
-fn line_of(cx: &Cx<'_>, offset: u32) -> usize {
-    let src = cx.source();
-    src[..offset as usize].bytes().filter(|&b| b == b'\n').count() + 1
+/// True when byte offsets `a` and `b` sit on the same source line. Checks the
+/// source bytes between them for a `\n` (O(distance)), avoiding a BOF line-
+/// number scan for each offset (which is O(N) per call → O(N^2) overall).
+/// `a` and `b` may be given in either order.
+fn same_line(cx: &Cx<'_>, a: u32, b: u32) -> bool {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let src = cx.source().as_bytes();
+    let hi = (hi as usize).min(src.len());
+    !src[lo as usize..hi].contains(&b'\n')
 }
 
 /// True when only whitespace precedes `offset` on its line.

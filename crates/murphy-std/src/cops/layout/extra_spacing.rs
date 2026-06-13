@@ -90,10 +90,10 @@ impl ExtraSpacing {
             return;
         }
 
-        // Lines (1-based) on which a comment shares a column with an adjacent
-        // comment — RuboCop's `@aligned_comments`. Used to exempt aligned
-        // trailing comments under `AllowForAlignment`.
-        let aligned_comment_lines = aligned_comment_lines(cx);
+        // Comment start offsets on which a comment shares a column with an
+        // adjacent comment — RuboCop's `@aligned_comments`. Used to exempt
+        // aligned trailing comments under `AllowForAlignment`.
+        let aligned_comment_offsets = aligned_comment_offsets(cx);
 
         // Byte ranges of multiline-hash key->value gaps, owned by
         // `Layout/HashAlignment` (RuboCop's `ignored_ranges`).
@@ -153,7 +153,7 @@ impl ExtraSpacing {
 
             // RuboCop `extra_space_range`:
             // `return if allow_for_alignment? && aligned_tok?(token2)`.
-            if opts.allow_for_alignment && aligned_tok(src, token2, &aligned_comment_lines) {
+            if opts.allow_for_alignment && aligned_tok(src, token2, &aligned_comment_offsets) {
                 continue;
             }
 
@@ -178,18 +178,23 @@ impl ExtraSpacing {
 fn aligned_tok(
     src: &[u8],
     token: SourceToken,
-    aligned_comment_lines: &HashSet<usize>,
+    aligned_comment_offsets: &HashSet<u32>,
 ) -> bool {
     if token.kind == SourceTokenKind::Comment {
-        aligned_comment_lines.contains(&line_of(src, token.range.start as usize))
+        // Keyed on the comment's start offset (each comment has a unique start)
+        // rather than its 1-based line, which would require a BOF scan per
+        // token to compute.
+        aligned_comment_offsets.contains(&token.range.start)
     } else {
         crate::cops::util::is_alignment_at_column(src, token.range.start as usize)
     }
 }
 
-/// RuboCop's `aligned_locations(comments)`: the set of source lines (1-based)
-/// holding a comment that shares a column with an immediately adjacent comment.
-fn aligned_comment_lines(cx: &Cx<'_>) -> HashSet<usize> {
+/// RuboCop's `aligned_locations(comments)`: the set of comment START OFFSETS
+/// for comments that share a column with an immediately adjacent comment.
+/// Offsets (not 1-based line numbers) avoid a BOF line-number scan per token
+/// during the hot token loop.
+fn aligned_comment_offsets(cx: &Cx<'_>) -> HashSet<u32> {
     let src = cx.source().as_bytes();
     let comments = cx.comments();
     let mut aligned = HashSet::new();
@@ -199,8 +204,8 @@ fn aligned_comment_lines(cx: &Cx<'_>) -> HashSet<usize> {
         let col1 = column_of(src, c1.range.start as usize);
         let col2 = column_of(src, c2.range.start as usize);
         if col1 == col2 {
-            aligned.insert(line_of(src, c1.range.start as usize));
-            aligned.insert(line_of(src, c2.range.start as usize));
+            aligned.insert(c1.range.start);
+            aligned.insert(c2.range.start);
         }
     }
     aligned
@@ -252,9 +257,12 @@ fn is_single_line_hash(node: NodeId, cx: &Cx<'_>) -> bool {
     let (Some(&first), Some(&last)) = (pairs.first(), pairs.last()) else {
         return true;
     };
-    let src = cx.source().as_bytes();
-    line_of(src, cx.range(first).start as usize)
-        == line_of(src, cx.range(last).end.saturating_sub(1) as usize)
+    let start = cx.range(first).start;
+    let end = cx.range(last).end.saturating_sub(1);
+    // Same line iff no `\n` between the first pair's start and the last pair's
+    // last byte. Byte-based (not str slicing) so an `end - 1` offset landing
+    // inside a multi-byte char cannot panic.
+    !span_has_newline(cx.source().as_bytes(), start, end + 1)
 }
 
 /// True if any `\n` falls in `src[start..end)`.
@@ -265,15 +273,6 @@ fn span_has_newline(src: &[u8], start: u32, end: u32) -> bool {
         return false;
     }
     src[start..end].contains(&b'\n')
-}
-
-/// 1-based source line number containing byte `offset`.
-fn line_of(src: &[u8], offset: usize) -> usize {
-    src[..offset.min(src.len())]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
-        + 1
 }
 
 /// 0-based column (char count) of `offset` within its source line.

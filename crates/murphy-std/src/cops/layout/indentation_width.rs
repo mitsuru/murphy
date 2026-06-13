@@ -241,7 +241,7 @@ fn check_indentation(
 
     // ── skip_check? ─────────────────────────────────────────────────────
     // `same_line?(body_node, base_loc)`: body shares the keyword's line.
-    if line_of(cx, body_start) == line_of(cx, base.start) {
+    if same_line(cx, body_start, base.start) {
         return;
     }
     // `starts_with_access_modifier?`.
@@ -322,7 +322,9 @@ fn single_line_condition(node: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     }
     let cond_range = cx.range(cond);
-    line_of(cx, cond_range.start) == line_of(cx, cond_range.end.saturating_sub(1))
+    // `cond_range.end - 1` may land inside a multi-byte char; `same_line`
+    // scans raw bytes, so no UTF-8 boundary panic.
+    same_line(cx, cond_range.start, cond_range.end.saturating_sub(1))
 }
 
 /// True when `node` is the value (RHS) of an assignment — RuboCop's
@@ -360,10 +362,15 @@ fn column_of(cx: &Cx<'_>, offset: u32) -> usize {
     src[line_start..off].chars().count()
 }
 
-/// 1-based line number of `offset`.
-fn line_of(cx: &Cx<'_>, offset: u32) -> usize {
-    let src = cx.source();
-    src[..offset as usize].bytes().filter(|&b| b == b'\n').count() + 1
+/// True when byte offsets `a` and `b` sit on the same source line. Scans the
+/// bytes between them for a `\n` (O(distance)), avoiding a BOF line-number scan
+/// per offset (O(N) each → O(N^2) overall). Raw-byte based, so an offset
+/// landing inside a multi-byte char cannot panic. `a`/`b` order-independent.
+fn same_line(cx: &Cx<'_>, a: u32, b: u32) -> bool {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let src = cx.source().as_bytes();
+    let hi = (hi as usize).min(src.len());
+    !src[lo as usize..hi].contains(&b'\n')
 }
 
 /// True when only whitespace precedes `offset` on its line.
