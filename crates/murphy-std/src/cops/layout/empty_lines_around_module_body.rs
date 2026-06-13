@@ -385,10 +385,17 @@ fn is_constant_definition(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// `empty_line_required?` — `{any_def class module (send nil? {:private :protected :public})}`.
+///
+/// The NodePattern `(send nil? {:private :protected :public})` has fixed arity:
+/// a receiver-less send named by one of those symbols with NO arguments. So a
+/// method-targeted modifier like `private :foo` (arity 3) does NOT match — only
+/// the bare zero-arg form does. The `call_arguments().is_empty()` guard mirrors
+/// this.
 fn is_empty_line_required(node: NodeId, cx: &Cx<'_>) -> bool {
     cx.is_any_def_type(node)
         || is_constant_definition(node, cx)
         || (cx.call_receiver(node).get().is_none()
+            && cx.call_arguments(node).is_empty()
             && matches!(
                 cx.method_name(node),
                 Some("private" | "protected" | "public")
@@ -799,6 +806,29 @@ mod tests {
             &opts(ModuleBodyStyle::EmptyLinesSpecial),
         );
         assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// Regression (roborev #386): RuboCop's `empty_line_required?` matcher
+    /// `(send nil? {:private :protected :public})` has fixed arity and matches
+    /// ONLY the bare zero-arg modifier — `private :foo` (a method-targeted
+    /// visibility call) does NOT match. So with `private :foo` as the first
+    /// child, the beginning takes the `no_empty_lines` path (no blank required);
+    /// a blank present at the beginning is therefore flagged as extra, and no
+    /// "Empty line missing at beginning" false positive fires.
+    #[test]
+    fn special_method_targeted_modifier_is_not_required_first_child() {
+        // `private :foo` first, with a blank at the beginning → the beginning
+        // is `no_empty_lines`, so the blank is flagged as EXTRA (not missing).
+        let offenses = run_cop_with_options::<EmptyLinesAroundModuleBody>(
+            "module Foo\n\n  private :foo\n\nend\n",
+            &opts(ModuleBodyStyle::EmptyLinesSpecial),
+        );
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert!(
+            offenses[0].message.contains("Extra empty line")
+                && offenses[0].message.contains("beginning"),
+            "expected an extra-line-at-beginning offense, got {offenses:?}"
+        );
     }
 
     fn test_with_opts(src: &str, style: ModuleBodyStyle) {

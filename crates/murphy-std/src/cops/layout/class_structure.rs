@@ -550,6 +550,20 @@ mod tests {
         assert!(offenses.is_empty(), "got {offenses:?}");
     }
 
+    /// Parity pin (roborev #386): RuboCop's `marked_as_private_constant?` uses
+    /// `node.method?(:private_constant)`, and `Node#method?` checks the method
+    /// NAME ONLY (`method_name == name`), ignoring the receiver. So even an
+    /// explicit-receiver `obj.private_constant :CONST` marks `CONST` private and
+    /// excludes it from the order check — exactly as upstream. Requiring a nil
+    /// receiver would make Murphy stricter than RuboCop and break parity.
+    #[test]
+    fn private_constant_with_explicit_receiver_still_ignores_constant() {
+        let src =
+            "class Foo\n  def pub; end\n  CONST = 1\n  obj.private_constant :CONST\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
     #[test]
     fn inline_private_def_classified_as_private() {
         // `private def priv` after a public method is in order; the reverse is not.
