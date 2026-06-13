@@ -64,7 +64,7 @@ pub struct ClosingParenthesisIndentationOptions {
     /// [`DEFAULT_INDENTATION_WIDTH`].
     #[option(
         name = "IndentationWidth",
-        description = "Number of spaces for indentation; overrides Layout/IndentationWidth's Width. Use null to inherit."
+        description = "Number of spaces for indentation. Use null to fall back to this cop's default (2); the cross-cop fallback to Layout/IndentationWidth's Width is not wired (GAP murphy-bgd8)."
     )]
     pub indentation_width: Option<i64>,
 }
