@@ -775,6 +775,32 @@ mod tests {
         assert!(offenses.is_empty(), "got {offenses:?}");
     }
 
+    /// Parity pin (roborev #386): the deferred-empty-line check uses RuboCop's
+    /// `previous_line_ignoring_comments`, which skips ONLY comment lines (not
+    /// blanks) and returns the first non-comment line scanning upward. When a
+    /// blank line sits directly above the def's leading comment, that blank IS
+    /// the returned line, so `processed_source[line].empty?` is true and NO
+    /// offense fires — the blank-before-comment is accepted.
+    ///
+    /// Source (1-based):
+    ///   1 module Foo
+    ///   2   x = 1
+    ///   3   (blank)        <- returned by previous_line_ignoring_comments(5)
+    ///   4   # comment
+    ///   5   def a; end
+    ///   6   (blank)
+    ///   7 end
+    /// `def a` at line 5 → scan 3.downto(0): line 3 (0-based) is the comment →
+    /// skip → line 2 (0-based, the blank) → return 2 → blank → no offense.
+    #[test]
+    fn special_accepts_blank_before_leading_comment_of_def() {
+        let offenses = run_cop_with_options::<EmptyLinesAroundModuleBody>(
+            "module Foo\n  x = 1\n\n  # comment for method\n  def a; end\n\nend\n",
+            &opts(ModuleBodyStyle::EmptyLinesSpecial),
+        );
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
     fn test_with_opts(src: &str, style: ModuleBodyStyle) {
         let offenses = run_cop_with_options::<EmptyLinesAroundModuleBody>(src, &opts(style));
         assert!(offenses.is_empty(), "expected no offenses, got {offenses:?}");
