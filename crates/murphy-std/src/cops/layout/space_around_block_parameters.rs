@@ -11,18 +11,29 @@
 //! gap_issues:
 //!   - murphy-uynf
 //! notes: >
-//!   Dispatches on `Block` and checks pipe spacing for `|...|`-delimited block
-//!   parameters. Pipes are located by their adjacency to the first/last arg
-//!   node (`token_before(first.start)` / `token_after(last.end)`), so the cop
-//!   works regardless of what the `Args`-list range covers. Both
-//!   `EnforcedStyleInsidePipes` styles are supported: `no_space` (default) and
-//!   `space`. The between-arg "Extra space before block parameter detected."
-//!   check runs in both styles, matching RuboCop's unconditional
-//!   `check_each_arg`. Multiline gaps are skipped (deferred to
-//!   `Layout/MultilineBlockLayout`). Gaps (murphy-uynf): lambda paren-delimited
-//!   params (`->(x, y)`), trailing comma (`|x,|`), mlhs destructuring
-//!   (`|(a, b)|`), and block-local variables (`|x; y|`) are not checked — the
-//!   pipe-adjacency lookup bails gracefully on those shapes.
+//!   Dispatches on `Block` and checks parameter-delimiter spacing. Delimiters
+//!   are located by adjacency to the first/last arg node
+//!   (`token_before(first.start)` / `token_after(last.end)`), since Murphy's
+//!   `Args` node carries no `loc.begin`/`loc.end` (the RuboCop pipe/paren loc).
+//!   Both block forms are covered: pipe-delimited blocks (`{ |x| }`, `do |x|
+//!   end`, `lambda { |x| }`) and — newly (murphy-uynf) — stabby-lambda
+//!   paren-delimited params (`->(x, y)`), accepted as delimiters only when
+//!   `cx.is_lambda_literal` is true so the outer parens of `foo(x) { |a| }` are
+//!   never mistaken for parameter delimiters. Both `EnforcedStyleInsidePipes`
+//!   styles (`no_space` default, `space`) apply uniformly to pipes and lambda
+//!   parens. The between-arg "Extra space before block parameter detected."
+//!   check runs in both styles (RuboCop's unconditional `check_each_arg`) and
+//!   now expands its left-whitespace scan across newlines, so a parameter on a
+//!   continuation line (`|x,\n  y|`) is left to `Layout/MultilineBlockLayout`
+//!   instead of being flagged. Trailing-comma (`|x,|`, `|x, |`) and the OUTER
+//!   spacing of an mlhs destructure (`|(a, b)|`) match RuboCop byte-for-byte.
+//!   Remaining gaps (murphy-uynf) are AST-shape limitations, not cop logic:
+//!   block-local variables (`|x; y|` — the local `y` is dropped from Murphy's
+//!   AST, so the closing-delimiter lookup bails) and the INNER spacing of an
+//!   mlhs destructure (`|( a , b )|` — the destructure is a single opaque
+//!   `Unknown` node with no recursable children, so RuboCop's `check_arg`
+//!   recursion over `mlhs_type?` cannot be ported). Both would require exposing
+//!   `Shadowarg`/`MultiTarget` child nodes in the AST + an `Args` delimiter loc.
 //! ```
 //!
 //! ## Options
@@ -86,18 +97,37 @@ impl SpaceAroundBlockParameters {
         let first = arg_ids[0];
         let last = *arg_ids.last().unwrap();
 
-        // Locate the opening/closing pipes by adjacency to the first/last arg.
-        // Bails (no offense) on lambda paren params, trailing commas, etc.
+        // RuboCop locates the parameter delimiters via `arguments.loc.begin` /
+        // `arguments.loc.end`. For an ordinary block (`{ |x| }`, `do |x| end`,
+        // `lambda { |x| }`) those are the pipes; for a stabby lambda
+        // (`->(x) { }`) they are the surrounding parens. Murphy has no Args
+        // delimiter loc, so we locate them by adjacency to the first/last arg
+        // and accept the parens spelling only when the block is a stabby lambda
+        // literal — `lambda { |x| }` keeps the pipe spelling and `foo(x) { |a| }`
+        // is unaffected because `first`/`last` are the block params, not the
+        // outer-call parens. Bails (no offense) on shapes Murphy cannot model
+        // (block-locals `|x; y|`, where the dropped local breaks pipe lookup).
+        let paren_delimited = cx.is_lambda_literal(node);
         let Some(open) = cx.token_before(cx.range(first).start) else {
             return;
         };
-        if !is_pipe(cx, open) {
+        let open_ok = if paren_delimited {
+            open.kind == SourceTokenKind::LeftParen
+        } else {
+            is_pipe(cx, open)
+        };
+        if !open_ok {
             return;
         }
         let Some(close) = cx.token_after(cx.range(last).end) else {
             return;
         };
-        if !is_pipe(cx, close) {
+        let close_ok = if paren_delimited {
+            close.kind == SourceTokenKind::RightParen
+        } else {
+            is_pipe(cx, close)
+        };
+        if !close_ok {
             return;
         }
 
@@ -233,7 +263,12 @@ fn check_each_arg_extra_space(cx: &Cx<'_>, arg: NodeId) {
     let arg_start = cx.range(arg).start;
     let src = cx.source().as_bytes();
     let mut expanded = arg_start as usize;
-    while expanded > 0 && matches!(src[expanded - 1], b' ' | b'\t') {
+    // Expand over ALL whitespace including newlines, mirroring
+    // `range_with_surrounding_space(side: :left)`. When the expanded run spans a
+    // line break (an arg on a continuation line, `|x,\n  y|`), `check_no_space`
+    // skips it (`range.source.include?("\n")`), so continuation-line
+    // indentation is left to `Layout/MultilineBlockLayout` — not flagged here.
+    while expanded > 0 && matches!(src[expanded - 1], b' ' | b'\t' | b'\n' | b'\r') {
         expanded -= 1;
     }
     // `expr.begin_pos - 1` — the run excludes the single space directly before
@@ -320,10 +355,130 @@ mod tests {
         test::<SpaceAroundBlockParameters>().expect_no_offenses("{}.each { puts 1 }\n");
     }
 
+    // ---------- stabby-lambda paren-delimited params (murphy-uynf) ----------
+
     #[test]
-    fn ignores_lambda_paren_params() {
-        // `->(x,  y)` uses parens, not pipes — documented gap, no offense.
-        test::<SpaceAroundBlockParameters>().expect_no_offenses("->(x,  y) { puts x }\n");
+    fn accepts_canonical_lambda_paren_params() {
+        // `->(x, y)` is canonical under the default no_space style.
+        test::<SpaceAroundBlockParameters>().expect_no_offenses("->(x, y) { puts x }\n");
+    }
+
+    #[test]
+    fn flags_space_before_first_lambda_param() {
+        test::<SpaceAroundBlockParameters>().expect_offense(indoc! {r#"
+            ->( x, y) { puts x }
+               ^ Space before first block parameter detected.
+        "#});
+    }
+
+    #[test]
+    fn flags_space_after_last_lambda_param() {
+        test::<SpaceAroundBlockParameters>().expect_offense(indoc! {r#"
+            ->(x, y ) { puts x }
+                   ^ Space after last block parameter detected.
+        "#});
+    }
+
+    #[test]
+    fn flags_extra_space_between_lambda_params() {
+        // `check_each_arg` runs for lambdas too — the extra space before `y`.
+        test::<SpaceAroundBlockParameters>().expect_offense(indoc! {r#"
+            ->(x,  y) { puts x }
+                 ^ Extra space before block parameter detected.
+        "#});
+    }
+
+    #[test]
+    fn corrects_lambda_paren_no_space_style() {
+        test::<SpaceAroundBlockParameters>().expect_correction(
+            indoc! {r#"
+                ->( x, y ) { puts x }
+                   ^ Space before first block parameter detected.
+                        ^ Space after last block parameter detected.
+            "#},
+            "->(x, y) { puts x }\n",
+        );
+    }
+
+    #[test]
+    fn lambda_method_form_uses_pipes_not_parens() {
+        // `lambda { |x| }` is a method-call block, not a stabby literal — it
+        // uses pipes, so the surrounding parens of a sibling call must not be
+        // treated as parameter delimiters.
+        test::<SpaceAroundBlockParameters>().expect_no_offenses("lambda { |x, y| puts x }\n");
+    }
+
+    #[test]
+    fn outer_call_parens_not_treated_as_param_delimiters() {
+        // `foo(x) { |a| }` — the `(x)` parens belong to `foo`, not the block
+        // params; the block uses pipes and must be unaffected.
+        test::<SpaceAroundBlockParameters>().expect_no_offenses("foo(x) { |a, b| a }\n");
+    }
+
+    // ---------- edge shapes that match RuboCop by bailing (murphy-uynf) ------
+
+    #[test]
+    fn accepts_trailing_comma_tight() {
+        // `|x,|` — a trailing comma directly before `|` is accepted, matching
+        // RuboCop (`last_end_pos_inside_pipes` scans past the comma).
+        test::<SpaceAroundBlockParameters>().expect_no_offenses("{}.each { |x,| puts x }\n");
+    }
+
+    #[test]
+    fn flags_space_after_trailing_comma() {
+        // `|x, |` — the single space between the trailing comma and `|` is the
+        // "Space after last" offense, on the space (not the comma or pipe).
+        test::<SpaceAroundBlockParameters>().expect_offense(indoc! {r#"
+            {}.each { |x, | puts x }
+                         ^ Space after last block parameter detected.
+        "#});
+    }
+
+    #[test]
+    fn corrects_space_after_trailing_comma() {
+        // `|x, |` → `|x,|`: the corrective edit removes only the space,
+        // preserving the trailing comma and reaching fixpoint.
+        test::<SpaceAroundBlockParameters>().expect_correction(
+            indoc! {r#"
+                {}.each { |x, | puts x }
+                             ^ Space after last block parameter detected.
+            "#},
+            "{}.each { |x,| puts x }\n",
+        );
+    }
+
+    #[test]
+    fn accepts_mlhs_destructure_tight() {
+        // `|(a, b)|` — the destructure is one `Unknown` arg covering `(a, b)`;
+        // the outer pipe spacing is canonical, so no offense.
+        test::<SpaceAroundBlockParameters>().expect_no_offenses("{}.each { |(a, b)| puts a }\n");
+    }
+
+    #[test]
+    fn flags_space_before_mlhs_destructure() {
+        // `| (a, b)|` — outer "Space before first" still fires; the destructure
+        // is treated as a single arg whose start is the `(`.
+        test::<SpaceAroundBlockParameters>().expect_offense(indoc! {r#"
+            {}.each { | (a, b)| puts a }
+                       ^ Space before first block parameter detected.
+        "#});
+    }
+
+    #[test]
+    fn ignores_block_local_variables() {
+        // `|x; y|` — block-local `y` is dropped from Murphy's AST (no
+        // `Shadowarg` node), so the closing-pipe lookup bails. RuboCop would
+        // check inner spacing of the locals; Murphy cannot model them. This is
+        // an AST-shape limitation (tracked in the parity note), and the
+        // no-offense result matches RuboCop on canonically spaced input.
+        test::<SpaceAroundBlockParameters>().expect_no_offenses("{}.each { |x; y| puts x }\n");
+    }
+
+    #[test]
+    fn ignores_multiline_pipes() {
+        // Line breaks inside the pipes are deferred to
+        // `Layout/MultilineBlockLayout`; `check_no_space` skips `\n` runs.
+        test::<SpaceAroundBlockParameters>().expect_no_offenses("{}.each { |x,\n  y| puts x }\n");
     }
 
     // ---------- space style ----------
@@ -387,6 +542,24 @@ mod tests {
                 {}.each { | x,  y | puts x }
                               ^ Extra space before block parameter detected.
             "#});
+    }
+
+    #[test]
+    fn space_style_flags_and_corrects_lambda_parens() {
+        // The `space` style applies to lambda parens the same way it applies to
+        // pipes: `->(x, y)` wants `->( x, y )`.
+        test::<SpaceAroundBlockParameters>()
+            .with_options(&SpaceAroundBlockParametersOptions {
+                enforced_style_inside_pipes: InsidePipesStyle::Space,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    ->(x, y) { puts x }
+                       ^ Space before first block parameter missing.
+                          ^ Space after last block parameter missing.
+                "#},
+                "->( x, y ) { puts x }\n",
+            );
     }
 
     #[test]

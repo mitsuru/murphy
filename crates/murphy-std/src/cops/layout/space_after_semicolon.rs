@@ -10,6 +10,7 @@
 //! status: partial
 //! gap_issues:
 //!   - murphy-rwi3
+//!   - murphy-ilrx
 //! notes: >
 //!   Mirrors RuboCop's `SpaceAfterPunctuation` mixin for the semicolon token:
 //!   an offense fires when `;` is immediately followed (same line, adjacent
@@ -19,11 +20,22 @@
 //!   string-interpolation-end `}` of `#{...}`. A regular hash/block `}` is NOT
 //!   in `allowed_type?`, so `;}` IS flagged — matching RuboCop's default
 //!   (`SpaceInsideBlockBraces: space`). A run of semicolons (`;;`) is accepted
-//!   between the pair, mirroring `semicolon_sequence?`. Gap (murphy-rwi3):
-//!   RuboCop additionally suppresses the regular-`}` offense when
-//!   `Layout/SpaceInsideBlockBraces` is configured `EnforcedStyle: no_space`;
-//!   Murphy does not wire that cross-cop config, so it always flags `;}` (the
-//!   RuboCop-default behaviour, but non-default configs are not honoured).
+//!   between the pair, mirroring `semicolon_sequence?`.
+//!
+//!   murphy-rwi3 (ABI blocker, not a cop-level fix): RuboCop additionally
+//!   suppresses the regular-`}` offense when `Layout/SpaceInsideBlockBraces` is
+//!   configured `EnforcedStyle: no_space`, by reading that *sibling* cop's
+//!   `cop_config` at runtime. Murphy's plugin ABI exposes only the running
+//!   cop's OWN resolved config (`cx.options_json`, set from
+//!   `config.cop_options_json(self_name)` in dispatch) — there is no surface to
+//!   read another cop's config. Honouring it requires a new `CxRaw`
+//!   sibling-config field (an ABI change — `CxRaw` offsets are pinned by
+//!   `offset_of!` assertions) or host-side baking of the sibling style into
+//!   this cop's `options_json` (a murphy-core config-contract change). Both lie
+//!   outside the murphy-std single-surface boundary and need sign-off, so this
+//!   stays documented and unported. Murphy always flags `;}`, matching
+//!   RuboCop's default (`SpaceInsideBlockBraces: space`); only a non-default
+//!   `no_space` sibling config diverges.
 //! ```
 //!
 //! ## Matched shape
