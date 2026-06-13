@@ -250,3 +250,127 @@ pub fn check_children_line_break(
 //   verifies `is_parenthesized` returns true for `(!x.even?)`.
 // - `cops::style::parentheses_around_condition::tests::no_offense_begin_end_condition`
 //   verifies `is_parenthesized` returns false for `begin...end`.
+
+// --- Layout/EmptyLinesAround*Body shared helpers (no_empty_lines style) ---
+
+/// Returns the 0-based byte range of the physical line that contains
+/// `offset`, *excluding* the trailing `\n` (and a `\r` before it). Returns
+/// the whole-line span `[line_start, content_end)`.
+fn line_span_at(source: &[u8], offset: usize) -> (usize, usize) {
+    let line_start = source[..offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |pos| pos + 1);
+    let mut content_end = source[offset..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(source.len(), |pos| offset + pos);
+    if content_end > line_start && source[content_end - 1] == b'\r' {
+        content_end -= 1;
+    }
+    (line_start, content_end)
+}
+
+/// Returns the start offset of the line *following* the line that contains
+/// `offset`, or `None` if `offset` is on the last line of the source.
+fn next_line_start(source: &[u8], offset: usize) -> Option<usize> {
+    source[offset..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|pos| offset + pos + 1)
+        .filter(|&start| start < source.len())
+}
+
+/// Returns the start offset of the line *preceding* the line that contains
+/// `offset`, or `None` if `offset` is on the first line of the source.
+fn prev_line_start(source: &[u8], offset: usize) -> Option<usize> {
+    let line_start = source[..offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |pos| pos + 1);
+    if line_start == 0 {
+        return None;
+    }
+    // The byte before `line_start - 1` is the `\n` that ends the previous line.
+    Some(
+        source[..line_start - 1]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |pos| pos + 1),
+    )
+}
+
+/// Implements RuboCop's `EmptyLinesAroundBody` mixin for the default
+/// `no_empty_lines` `EnforcedStyle`: flags (and removes) a blank line at the
+/// beginning and/or end of a multi-line body.
+///
+/// - `header_anchor`: a byte offset somewhere on the construct's *header*
+///   line (RuboCop's `adjusted_first_line`). For a class with a superclass
+///   this is the superclass's last line; for a block it is the send node's
+///   last line; otherwise it is the node's own start.
+/// - `kind`: the `KIND` string used in the message (`class` / `block` /
+///   `begin`).
+///
+/// RuboCop's `&:empty?` predicate treats a line as blank only when it is
+/// *literally* empty after stripping the newline — a whitespace-only line is
+/// NOT blank. This matches that exactly (no `.trim()`).
+pub fn check_empty_lines_around_body_no_empty_lines(
+    node: NodeId,
+    header_anchor: u32,
+    kind: &str,
+    cx: &Cx<'_>,
+) {
+    // `return if node.single_line?`
+    if cx.is_single_line(node) {
+        return;
+    }
+
+    let source = cx.source().as_bytes();
+    let node_range = cx.range(node);
+    let header_anchor = header_anchor as usize;
+
+    // Beginning candidate: the line immediately after the header line
+    // (RuboCop's `processed_source.lines[first_line]`).
+    let begin_candidate = next_line_start(source, header_anchor);
+
+    // Ending candidate: the line immediately before the `end` line
+    // (RuboCop's `processed_source.lines[last_line - 2]`). The `end` line is
+    // the line containing the last byte of the node.
+    let end_byte = (node_range.end as usize).saturating_sub(1);
+    let end_candidate = prev_line_start(source, end_byte);
+
+    // Track which line we've already emitted an edit for, so a construct
+    // whose single inner line is both the beginning and ending candidate
+    // (e.g. `class Foo\n\nend`) does not produce overlapping edits.
+    let mut removed_line_start: Option<usize> = None;
+
+    let mut handle = |line_start: usize, location: &str| {
+        let (start, content_end) = line_span_at(source, line_start);
+        // `&:empty?` — literally empty (no whitespace-only allowance).
+        if start != content_end {
+            return;
+        }
+        let line_end = if content_end < source.len() {
+            content_end + 1
+        } else {
+            content_end
+        };
+        let range = Range {
+            start: start as u32,
+            end: line_end as u32,
+        };
+        let message = format!("Extra empty line detected at {kind} body {location}.");
+        cx.emit_offense(range, &message, None);
+        if removed_line_start != Some(start) {
+            cx.emit_edit(range, "");
+            removed_line_start = Some(start);
+        }
+    };
+
+    if let Some(begin_line) = begin_candidate {
+        handle(begin_line, "beginning");
+    }
+    if let Some(end_line) = end_candidate {
+        handle(end_line, "end");
+    }
+}
