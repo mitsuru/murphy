@@ -2,11 +2,12 @@ use super::{
     ArrayElementStyle, FirstArrayElementIndentation, FirstArrayElementIndentationOptions,
 };
 use murphy_plugin_api::test_support::{indoc, test};
+use murphy_plugin_api::CopOptions;
 
 fn opts(style: ArrayElementStyle) -> FirstArrayElementIndentationOptions {
     FirstArrayElementIndentationOptions {
         enforced_style: style,
-        indentation_width: 2,
+        indentation_width: Some(2),
     }
 }
 
@@ -180,4 +181,20 @@ fn checks_right_bracket_of_empty_multiline_array() {
             x = [
                 ]
         "#});
+}
+
+/// Regression (sweep #384 follow-up): the bundled default `IndentationWidth: ~`
+/// merges to JSON `null`. With an `Option<i64>` field it must decode rather than
+/// error the whole struct and silently discard the user's `EnforcedStyle`.
+#[test]
+fn null_indentation_width_preserves_other_keys() {
+    let opts = <FirstArrayElementIndentationOptions as CopOptions>::from_config_json(
+        br#"{"EnforcedStyle":"consistent","IndentationWidth":null}"#,
+    )
+    .expect("null IndentationWidth must decode, not discard the struct");
+    let reference = <FirstArrayElementIndentationOptions as CopOptions>::from_config_json(
+        br#"{"EnforcedStyle":"consistent","IndentationWidth":4}"#,
+    )
+    .unwrap();
+    assert!(opts.enforced_style == reference.enforced_style);
 }

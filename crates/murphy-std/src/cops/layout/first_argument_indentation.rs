@@ -56,12 +56,14 @@ pub struct FirstArgumentIndentationOptions {
         description = "How the first argument is indented relative to its base."
     )]
     pub enforced_style: ArgIndentStyle,
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null)
+    // decodes to `None` instead of erroring the option struct and discarding the
+    // user's other keys; `None` falls back to width 2.
     #[option(
         name = "IndentationWidth",
-        default = 2,
-        description = "Indentation width in spaces (RuboCop falls back to Layout/IndentationWidth)."
+        description = "Indentation width in spaces (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +122,7 @@ fn check(node: NodeId, cx: &Cx<'_>, options: &FirstArgumentIndentationOptions) {
         return;
     }
 
-    let width = options.indentation_width.max(0) as usize;
+    let width = options.indentation_width.unwrap_or(2).max(0) as usize;
     let base = base_indentation(node, first_arg, cx, options.enforced_style);
     let expected = base + width;
     let actual = column_of(cx, first_arg_start);

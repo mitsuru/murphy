@@ -62,12 +62,14 @@ pub struct LineEndStringConcatenationIndentationOptions {
         description = "Whether concatenation parts are aligned with the first part or indented one level."
     )]
     pub enforced_style: ConcatenationStyle,
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null)
+    // decodes to `None` instead of erroring the option struct and discarding the
+    // user's other keys; `None` falls back to width 2.
     #[option(
         name = "IndentationWidth",
-        default = 0,
-        description = "Indentation width for the indented style (0 = use the default of 2)."
+        description = "Indentation width for the indented style (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -212,11 +214,7 @@ fn base_column(child: NodeId, cx: &Cx<'_>, src: &str) -> usize {
 
 /// Configured indentation width (0 → default 2).
 fn indentation_width(opts: &LineEndStringConcatenationIndentationOptions) -> usize {
-    if opts.indentation_width > 0 {
-        opts.indentation_width as usize
-    } else {
-        2
-    }
+    opts.indentation_width.filter(|&w| w > 0).map_or(2, |w| w as usize)
 }
 
 /// Visible column (0-based, char count) of a byte offset within its line.
@@ -246,11 +244,29 @@ mod tests {
         LineEndStringConcatenationIndentationOptions,
     };
     use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::CopOptions;
+
+    /// Regression (sweep #384 follow-up): the bundled default
+    /// `IndentationWidth: ~` merges to JSON `null`. With an `Option<i64>` field
+    /// it must decode rather than error the whole struct and silently discard the
+    /// user's `EnforcedStyle`.
+    #[test]
+    fn null_indentation_width_preserves_other_keys() {
+        let opts = <LineEndStringConcatenationIndentationOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"indented","IndentationWidth":null}"#,
+        )
+        .expect("null IndentationWidth must decode, not discard the struct");
+        let reference = <LineEndStringConcatenationIndentationOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"indented","IndentationWidth":4}"#,
+        )
+        .unwrap();
+        assert!(opts.enforced_style == reference.enforced_style);
+    }
 
     fn indented() -> LineEndStringConcatenationIndentationOptions {
         LineEndStringConcatenationIndentationOptions {
             enforced_style: ConcatenationStyle::Indented,
-            indentation_width: 0,
+            indentation_width: None,
         }
     }
 

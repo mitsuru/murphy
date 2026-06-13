@@ -63,12 +63,14 @@ pub struct FirstHashElementIndentationOptions {
         description = "How the first hash key is indented relative to its base."
     )]
     pub enforced_style: HashElementStyle,
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null)
+    // decodes to `None` instead of erroring the option struct and discarding the
+    // user's other keys; `None` falls back to width 2.
     #[option(
         name = "IndentationWidth",
-        default = 2,
-        description = "Indentation width in spaces (RuboCop falls back to Layout/IndentationWidth)."
+        description = "Indentation width in spaces (null/unset falls back to RuboCop's default of 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -244,11 +246,11 @@ fn check_first(
     let actual = column_of(cx, first_start);
     let (base_col, base_type) =
         indent_base(left_brace_start, left_paren_start, cx, options.enforced_style);
-    let expected = base_col + options.indentation_width.max(0) as usize;
+    let expected = base_col + options.indentation_width.unwrap_or(2).max(0) as usize;
     if expected == actual {
         return;
     }
-    let msg = message(base_type, options.indentation_width.max(0) as usize);
+    let msg = message(base_type, options.indentation_width.unwrap_or(2).max(0) as usize);
     cx.emit_offense(cx.range(first), &msg, None);
     reindent_line(first_start, expected, cx);
 }
