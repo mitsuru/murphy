@@ -128,12 +128,19 @@ impl EmptyLinesAroundAttributeAccessor {
             Some(after) => after,
             None => next_line_start,
         };
+        // Match the file's existing line terminator so a CRLF source does not
+        // get a stray LF (which would itself trip Layout/EndOfLine).
+        let newline = if source[..insert_at].ends_with(b"\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
         cx.emit_edit(
             Range {
                 start: insert_at as u32,
                 end: insert_at as u32,
             },
-            "\n",
+            newline,
         );
     }
 }

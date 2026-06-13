@@ -40,7 +40,10 @@ pub struct SingleLineBlockChain;
     name = "Layout/SingleLineBlockChain",
     description = "Put method call on a separate line if chained to a single line block.",
     default_severity = "warning",
-    default_enabled = true
+    // RuboCop ships this cop disabled by default (config/default.yml `Enabled:
+    // false`); keep the metadata fallback consistent so every config path —
+    // including registries built without BUNDLED_DEFAULTS_YAML — agrees.
+    default_enabled = false
 )]
 impl SingleLineBlockChain {
     #[on_node(kind = "send")]
@@ -109,12 +112,24 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         end: selector_range.end,
     };
     cx.emit_offense(offense_range, MSG, None);
+
+    // Break before the chained call. Carry over the leading indentation of the
+    // line the dot sits on, so a nested chain (`def x\n  foo { bar }.baz\nend`)
+    // keeps its continuation aligned instead of collapsing to column 0.
+    let line_start = source[..dot_range.start as usize]
+        .rfind('\n')
+        .map_or(0, |pos| pos + 1);
+    let indent_end = line_start
+        + source[line_start..]
+            .find(|c: char| c != ' ' && c != '\t')
+            .unwrap_or(source.len() - line_start);
+    let replacement = format!("\n{}", &source[line_start..indent_end]);
     cx.emit_edit(
         Range {
             start: dot_range.start,
             end: dot_range.start,
         },
-        "\n",
+        &replacement,
     );
 }
 
@@ -192,7 +207,18 @@ fn column_of(source: &str, offset: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::SingleLineBlockChain;
-    use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::test_support::{indoc, run_cop_with_edits, test};
+
+    #[test]
+    fn correction_keeps_line_indentation() {
+        // A nested chain's continuation must carry the line's leading indent
+        // rather than collapsing to column 0 (regression).
+        let src = "def x\n  foo { |i| i }.bar\nend\n";
+        let run = run_cop_with_edits::<SingleLineBlockChain>(src);
+        assert_eq!(run.offenses.len(), 1);
+        assert_eq!(run.edits.len(), 1);
+        assert_eq!(run.edits[0].replacement, "\n  ");
+    }
 
     #[test]
     fn flags_method_chained_on_single_line_brace_block() {

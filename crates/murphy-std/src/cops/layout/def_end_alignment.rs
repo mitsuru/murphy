@@ -119,6 +119,14 @@ fn check(def: NodeId, cx: &Cx<'_>) {
             .rev()
             .take_while(|&&b| b != b'\n')
             .count() as u32;
+    // Only rewrite when nothing but whitespace precedes `end` on its line.
+    // For a non-own-line `end` (e.g. `def foo\n  work; end`) replacing
+    // `[line_start, end)` would delete the leading code, so emit the offense
+    // without an autocorrect in that case.
+    let prefix = &cx.source()[end_line_start as usize..end_kw.start as usize];
+    if !prefix.bytes().all(|b| b == b' ' || b == b'\t') {
+        return;
+    }
     cx.emit_edit(
         Range {
             start: end_line_start,
@@ -217,6 +225,20 @@ mod tests {
     #[test]
     fn accepts_aligned_end_default() {
         assert!(run_cop::<DefEndAlignment>("def test\nend\n").is_empty());
+    }
+
+    #[test]
+    fn misaligned_end_sharing_its_line_is_not_autocorrected() {
+        // `end` is not the first token on its line; rewriting `[line_start,
+        // end)` would delete `work; `. The offense must still fire, but with
+        // no autocorrect edit (regression: previously corrupted the body).
+        let src = "def foo\n  work; end\n";
+        let run = run_cop_with_edits::<DefEndAlignment>(src);
+        assert_eq!(run.offenses.len(), 1);
+        assert!(
+            run.edits.is_empty(),
+            "must not autocorrect an `end` that shares its line with code"
+        );
     }
 
     #[test]

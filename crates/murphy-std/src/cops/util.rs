@@ -413,9 +413,16 @@ pub fn block_opener(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
         NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => send,
         _ => return None,
     };
-    // Search from the call's selector end (falling back to its start) so a `{`
-    // inside the receiver/arguments cannot be mistaken for the block opener.
-    let search_from = cx.node(call).loc.name.end.max(cx.range(call).start);
+    // Start the scan after the call's last argument so a `{` inside the
+    // arguments (e.g. `foo({ a: 1 }) { ... }`) is not mistaken for the block
+    // opener. Falling back to the selector end covers the no-argument case.
+    // (`cx.range(call).end` is unusable here: a call node's range spans its
+    // attached block, so it would skip past the opener entirely.)
+    let search_from = cx
+        .call_arguments(call)
+        .last()
+        .map(|&arg| cx.range(arg).end)
+        .unwrap_or_else(|| cx.node(call).loc.name.end);
     let node_end = cx.range(node).end;
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
@@ -608,7 +615,15 @@ pub fn physical_lines(source: &str) -> Vec<PhysicalLine> {
             Some(i) => (start + i, start + i + 1),
             None => (bytes.len(), bytes.len()),
         };
-        let blank = content_end == start; // empty after chomp
+        // Normalize a CRLF terminator: `"\r\n"` leaves `content_end` one byte
+        // past `start`, so strip a trailing `\r` before the blank test —
+        // otherwise a visually empty CRLF line is mis-classified as non-blank.
+        let content_end = if content_end > start && bytes[content_end - 1] == b'\r' {
+            content_end - 1
+        } else {
+            content_end
+        };
+        let blank = content_end == start; // empty after chomp / CRLF-normalized
         lines.push(PhysicalLine {
             start: start as u32,
             end: next_start as u32,

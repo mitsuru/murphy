@@ -95,6 +95,15 @@ mod tests {
     }
 
     #[test]
+    fn detects_crlf_blank_line_at_module_body_beginning() {
+        // A `"\r\n"` blank line must be classified as blank just like `"\n"`
+        // (regression: physical_lines left the `\r` in the line content).
+        let run = run_cop::<EmptyLinesAroundModuleBody>("module Foo\r\n\r\n  x = 1\r\nend\r\n");
+        assert_eq!(run.len(), 1);
+        assert!(run[0].message.contains("beginning"));
+    }
+
+    #[test]
     fn accepts_comment_after_opener() {
         // A comment line is not blank, so it is acceptable.
         test::<EmptyLinesAroundModuleBody>()

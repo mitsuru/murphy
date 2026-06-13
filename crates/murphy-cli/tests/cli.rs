@@ -287,7 +287,9 @@ fn lint_file_with_todo_without_cop_suppresses_all_offenses_on_line() {
     let path = dir.path().join("with_todo_all.rb");
     fs::write(
         &path,
-        "# frozen_string_literal: true\ndebugger # murphy:todo\ndebugger\n",
+        // Blank line after the magic comment keeps Layout/EmptyLineAfterMagicComment
+        // quiet so this test isolates bare-todo (cop-less) suppression.
+        "# frozen_string_literal: true\n\ndebugger # murphy:todo\ndebugger\n",
     )
     .expect("write with_todo_all.rb");
 
