@@ -229,13 +229,17 @@ fn endless_assignment_loc(node: NodeId, body: NodeId, cx: &Cx<'_>) -> Option<Ran
 }
 
 /// Byte offset just past the parameter list's closing `)`, or `None` when the
-/// signature is not parenthesized. Mirrors `adjusted_first_line`'s paren scan:
-/// from the `def` keyword, the first balanced `)` (bounded by the body start so
-/// parentheses inside the body are never mistaken for the parameter list).
+/// signature is not parenthesized. The parameter list is the **last** top-level
+/// `(…)` group before the body: a singleton receiver contributes an earlier
+/// group (`def (obj).foo=(x)` has `(obj)` then the parameter `(x)`), so returning
+/// the first close would land on the receiver's `)` — before the method name —
+/// and re-expose the selector `=`. Bounded by the body start so parentheses
+/// inside the body are never mistaken for the parameter list.
 fn param_list_close_end(node: NodeId, body_start: u32, cx: &Cx<'_>) -> Option<u32> {
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < cx.range(node).start);
     let mut depth = 0i32;
+    let mut last_close = None;
     for tok in toks[idx..]
         .iter()
         .take_while(|t| t.range.start < body_start)
@@ -245,13 +249,13 @@ fn param_list_close_end(node: NodeId, body_start: u32, cx: &Cx<'_>) -> Option<u3
             SourceTokenKind::RightParen if depth > 0 => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(tok.range.end);
+                    last_close = Some(tok.range.end);
                 }
             }
             _ => {}
         }
     }
-    None
+    last_close
 }
 
 /// True when the def has *parenless* parameters (`def foo a = 1`, `def foo a`).
@@ -419,6 +423,23 @@ mod tests {
     #[test]
     fn flags_blank_before_end_in_setter_method() {
         let offenses = run_cop::<EmptyLinesAroundMethodBody>("def foo=(x)\n  body\n\nend\n");
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at method body end."
+        );
+    }
+
+    /// Parity pin (Codex #387): a singleton setter with a *parenthesized
+    /// receiver* (`def (obj).foo=(x)`) is still a regular method. `param_list_close_end`
+    /// must skip the receiver `(obj)` and anchor past the parameter `(x)` (the
+    /// last top-level paren group) — anchoring on the receiver's `)` would resume
+    /// the scan before `foo=`. The blank line before `end` is reported, matching
+    /// RuboCop 1.87.
+    #[test]
+    fn flags_blank_before_end_in_singleton_setter_with_paren_receiver() {
+        let offenses =
+            run_cop::<EmptyLinesAroundMethodBody>("def (obj).foo=(x)\n  body\n\nend\n");
         assert_eq!(offenses.len(), 1, "got {offenses:?}");
         assert_eq!(
             offenses[0].message,
