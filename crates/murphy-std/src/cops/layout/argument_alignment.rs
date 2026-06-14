@@ -292,14 +292,12 @@ fn anchor_line_offset(node: NodeId, cx: &Cx<'_>) -> u32 {
     if selector != Range::ZERO {
         return selector.start;
     }
-    let begin = cx.loc(node).begin();
-    if begin != Range::ZERO {
-        return begin.start;
-    }
-    // Selectorless call `obj.(…)` (desugars to a `:call` send with no textual
-    // selector and no `loc.begin`): RuboCop anchors to the call paren `(` line
+    // Selectorless call `obj.(…)` / `(expr).(…)` (desugars to a `:call` send with
+    // no textual selector): RuboCop anchors to the call paren `(` line
     // (`node.loc.begin.line`). The `(` follows the `.`, so locate it after the
-    // receiver rather than falling back to the receiver's own line.
+    // receiver. This must take precedence over `loc.begin`, which is unreliable
+    // here — for a grouped receiver `(factory).(…)` it points at the receiver's
+    // own grouping `(`, not the call paren.
     if let Some(recv) = cx.call_receiver(node).get() {
         let toks = cx.sorted_tokens();
         let idx = toks.partition_point(|t| t.range.start < cx.range(recv).end);
@@ -310,6 +308,10 @@ fn anchor_line_offset(node: NodeId, cx: &Cx<'_>) -> u32 {
         {
             return paren.range.start;
         }
+    }
+    let begin = cx.loc(node).begin();
+    if begin != Range::ZERO {
+        return begin.start;
     }
     cx.range(node).start
 }
