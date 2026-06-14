@@ -335,8 +335,10 @@ fn asgn_outer_node(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
         }
 
         // Block: a transparent call-chain link when `current` is the block's call
-        // (`first_part_of_call_chain`'s `node = node.send_node`).
-        if cx.is_any_block_type(parent) && cx.block_call(parent).get() == Some(current) {
+        // (`first_part_of_call_chain`'s `node = node.send_node`). Covers `Block`,
+        // `Numblock` (`{ _1 }`) and `Itblock` (`{ it }`) — `cx.block_call`
+        // resolves only `Block`, so numbered/`it` blocks need their `send` too.
+        if block_chain_call(parent, cx) == Some(current) {
             current = parent;
             continue;
         }
@@ -356,6 +358,18 @@ fn asgn_outer_node(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
             return None;
         }
         current = parent;
+    }
+}
+
+/// The call/send node a block wraps, for any block flavour. `cx.block_call`
+/// resolves only `Block`; numbered-parameter (`{ _1 }`) and `it` (`{ it }`)
+/// blocks keep their call in the `send` field, which RuboCop's
+/// `first_part_of_call_chain` (`node = node.send_node`) walks through too.
+fn block_chain_call(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    match *cx.kind(node) {
+        NodeKind::Block { call, .. } => Some(call),
+        NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => Some(send),
+        _ => None,
     }
 }
 
@@ -790,6 +804,23 @@ mod tests {
     #[test]
     fn variable_if_with_trailing_block_chain() {
         let src = "x = if c\n  foo\n    end.tap { |v| v }\n";
+        let run = run_cop_with_options::<Cop>(src, &variable());
+        assert_eq!(run.len(), 1, "got {run:?}");
+        assert_eq!(
+            run[0].message,
+            "`end` at 3, 4 is not aligned with `x = if` at 1, 0."
+        );
+    }
+
+    /// Parity pin (Codex #387): a trailing *numbered-parameter* block
+    /// (`x = if c ... end.then { _1 }`) wraps the call in a `Numblock`, whose
+    /// call lives in `send` (not the `Block`-only `cx.block_call`). RuboCop's
+    /// `first_part_of_call_chain` unwraps every block flavour via `send_node`, so
+    /// the `end` still anchors on the assignment variable. Without the
+    /// `Numblock`/`Itblock` arm the walk-up stops and the offense vanishes.
+    #[test]
+    fn variable_if_with_trailing_numblock_chain() {
+        let src = "x = if c\n  foo\n    end.then { _1 }\n";
         let run = run_cop_with_options::<Cop>(src, &variable());
         assert_eq!(run.len(), 1, "got {run:?}");
         assert_eq!(

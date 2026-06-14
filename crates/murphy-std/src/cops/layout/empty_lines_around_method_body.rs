@@ -186,25 +186,28 @@ fn check_endless(node: NodeId, cx: &Cx<'_>) {
 }
 
 /// The `=` operator range of an endless method (`def foo = body`), located by
-/// scanning for the first `=` token between the method signature and the body.
-/// The scan starts at the `def` keyword (Murphy's `def` name loc is not
-/// populated, so `name.end` is 0) and is bounded by the body's start, keying on
-/// the first `=` token at paren-depth 0. A default value inside a *parenthesized*
-/// parameter list (`def foo(a = 1) = body`) sits at depth > 0 and is skipped.
+/// scanning for the first `=` token between the method signature and the body
+/// (bounded by the body's start, keyed on a depth-0 `=`).
 ///
-/// A *parenless* default (`def foo a = 1`) has its `=` at depth 0 and would be
-/// mistaken for the endless operator, so we bail early: a method with parenless
+/// The scan starts **after the parameter list's closing `)`** when the signature
+/// is parenthesized — Murphy's `def` name loc is 0, so a scan from the `def`
+/// keyword would also see a parenthesized default `=` (`def foo(a = 1) = …`) and,
+/// worse, an assignment-method selector `=` (`def foo=(x)`), both at depth 0
+/// before the `(`. Anchoring past the `)` skips them. For a non-parenthesized
+/// signature the scan starts at the `def` keyword.
+///
+/// A *parenless* default (`def foo a = 1`, `def foo= x`) has its `=` at depth 0
+/// with no `)` to anchor past, so we bail early: a method with parenless
 /// parameters is never endless (Ruby parses `name = expr` after a parenless
 /// parameter as a default-argument optarg — `def foo x = x` is even a "circular
-/// argument reference" error). Returns `None` when no endless `=` is found (a
-/// non-endless or malformed def).
+/// argument reference" error). Returns `None` when no endless `=` is found.
 fn endless_assignment_loc(node: NodeId, body: NodeId, cx: &Cx<'_>) -> Option<Range> {
     if has_parenless_params(node, cx) {
         return None;
     }
-    let name_end = cx.loc(node).name.end;
-    let scan_start = name_end.max(cx.range(node).start);
     let body_start = cx.range(body).start;
+    let scan_start =
+        param_list_close_end(node, body_start, cx).unwrap_or_else(|| cx.range(node).start);
 
     let toks = cx.sorted_tokens();
     let idx = toks.partition_point(|t| t.range.start < scan_start);
@@ -218,6 +221,32 @@ fn endless_assignment_loc(node: NodeId, body: NodeId, cx: &Cx<'_>) -> Option<Ran
             SourceTokenKind::RightParen if depth > 0 => depth -= 1,
             SourceTokenKind::Other if depth == 0 && cx.raw_source(tok.range) == "=" => {
                 return Some(tok.range);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Byte offset just past the parameter list's closing `)`, or `None` when the
+/// signature is not parenthesized. Mirrors `adjusted_first_line`'s paren scan:
+/// from the `def` keyword, the first balanced `)` (bounded by the body start so
+/// parentheses inside the body are never mistaken for the parameter list).
+fn param_list_close_end(node: NodeId, body_start: u32, cx: &Cx<'_>) -> Option<u32> {
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < cx.range(node).start);
+    let mut depth = 0i32;
+    for tok in toks[idx..]
+        .iter()
+        .take_while(|t| t.range.start < body_start)
+    {
+        match tok.kind {
+            SourceTokenKind::LeftParen => depth += 1,
+            SourceTokenKind::RightParen if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(tok.range.end);
+                }
             }
             _ => {}
         }
@@ -378,6 +407,22 @@ mod tests {
         assert_eq!(
             offenses[0].message,
             "Extra empty line detected at method body beginning."
+        );
+    }
+
+    /// Parity pin (Codex #387): an assignment method (`def foo=(x)`) is a regular
+    /// method, not endless — but its selector `=` sits at paren depth 0 before the
+    /// `(` (and the def name loc is 0), so a scan from the `def` keyword mistakes
+    /// it for the endless operator. Anchoring the scan past the parameter list's
+    /// `)` skips the selector, so the normal body-boundary check runs and the
+    /// blank line before `end` is reported, as RuboCop 1.87 does.
+    #[test]
+    fn flags_blank_before_end_in_setter_method() {
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>("def foo=(x)\n  body\n\nend\n");
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at method body end."
         );
     }
 
