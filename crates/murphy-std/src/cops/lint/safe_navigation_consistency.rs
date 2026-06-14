@@ -26,7 +26,7 @@ use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
 const USE_DOT_MSG: &str = "Use `.` instead of unnecessary `&.`.";
 const USE_SAFE_NAVIGATION_MSG: &str = "Use `&.` for consistency with safe navigation.";
 
-const NIL_SAFE_METHODS: &[&str] = &["nil?", "blank?", "present?", "try", "presence"];
+const NIL_SAFE_METHODS: &[&str] = &["nil?", "blank?", "present?", "try", "try!", "presence"];
 
 #[derive(Default)]
 pub struct SafeNavigationConsistency;
@@ -188,5 +188,14 @@ mod tests {
     fn accepts_multi_level_safe_nav_with_distinct_immediate_receiver() {
         test::<SafeNavigationConsistency>()
             .expect_no_offenses("@resource.local? || @resource&.account&.suspended?\n");
+    }
+
+    /// `try!` is nil-safe in ActiveSupport (like its sibling `try`), so a
+    /// safe-navigation `try!` operand is skipped rather than flagged. Without
+    /// `try!` in `NIL_SAFE_METHODS`, `foo.bar && foo&.try!` would wrongly emit
+    /// "Use `.` instead of unnecessary `&.`".
+    #[test]
+    fn accepts_safe_navigation_try_bang() {
+        test::<SafeNavigationConsistency>().expect_no_offenses("foo.bar && foo&.try!\n");
     }
 }
