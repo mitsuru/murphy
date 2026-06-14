@@ -230,7 +230,8 @@ fn dedup_preserving_order(items: impl IntoIterator<Item = String>) -> Vec<String
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for item in items {
-        if seen.insert(item.clone()) {
+        if !seen.contains(&item) {
+            seen.insert(item.clone());
             out.push(item);
         }
     }
@@ -587,18 +588,11 @@ impl MurphyConfig {
         // (2) Pack AllCops.Exclude joins the default base layer (deduped), then
         // `files.exclude` is recomputed. Must run before the ASE early-return so
         // pack discovery excludes apply even when the user pinned ASE.
+        let mut all_excludes = std::mem::take(&mut self.base_defaults.allcops_exclude);
         for yaml in pack_yamls {
-            let pack_exclude = DefaultCopsData::from_yaml(yaml).allcops_exclude;
-            if !pack_exclude.is_empty() {
-                self.base_defaults.allcops_exclude = dedup_preserving_order(
-                    self.base_defaults
-                        .allcops_exclude
-                        .iter()
-                        .cloned()
-                        .chain(pack_exclude),
-                );
-            }
+            all_excludes.extend(DefaultCopsData::from_yaml(yaml).allcops_exclude);
         }
+        self.base_defaults.allcops_exclude = dedup_preserving_order(all_excludes);
         self.finalize_files_exclude();
 
         // (3) ActiveSupportExtensionsEnabled flag — user wins.
@@ -832,7 +826,13 @@ fn parse_yaml_str(text: &str) -> Result<ParsedYaml, ConfigError> {
                 if let Yaml::Hash(modes) = value
                     && let Some(merge) = modes.get(&Yaml::String("merge".to_string()))
                 {
-                    parsed.exclude_merge = yaml_string_list(merge).iter().any(|k| k == "Exclude");
+                    parsed.exclude_merge = match merge {
+                        Yaml::Array(arr) => arr
+                            .iter()
+                            .any(|v| matches!(v, Yaml::String(s) if s == "Exclude")),
+                        Yaml::String(s) => s == "Exclude",
+                        _ => false,
+                    };
                 }
             }
             _ => {
