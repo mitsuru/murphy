@@ -31,11 +31,15 @@
 //!   delimiter's (0-based) column + 1.
 //!
 //!   Autocorrect replaces the offense range with `"\n" + source.lstrip`,
-//!   moving the closing delimiter onto its own line. The edit is suppressed
-//!   when the block body's last argument is a heredoc (RuboCop inserts after
-//!   the heredoc terminator instead) — that heredoc rearrangement is a
-//!   documented v1 gap; the offense is still reported, detect-only, in that
-//!   case.
+//!   moving the closing delimiter onto its own line. When the block body's last
+//!   argument is a heredoc, replacing in place would drop the delimiter between
+//!   the opener line and the heredoc body and corrupt the literal, so RuboCop
+//!   instead removes the offense range and inserts the replacement after the
+//!   heredoc terminator (`heredoc.loc.heredoc_end`). Murphy ports that
+//!   rearrangement (murphy-in6p): the heredoc terminator end is the last
+//!   heredoc argument's `HeredocEnd` token (FIFO-paired by opener index), with
+//!   the prism token's trailing newline trimmed to match the parser gem's
+//!   label-only `heredoc_end`.
 //! ```
 //!
 //! ## Matched shapes
@@ -110,15 +114,36 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let message = format!("{MSG_PREFIX}{line}, {} should be on its own line.", col + 1);
     cx.emit_offense(end_loc, &message, None);
 
-    // Autocorrect: replace the offense range with a newline + the left-stripped
-    // tail (which moves the closing delimiter to its own line). Suppressed when
-    // the body's last argument is a heredoc — RuboCop rearranges around the
-    // heredoc terminator there (documented gap).
-    if body_ends_with_heredoc_argument(node, cx) {
-        return;
-    }
+    // Autocorrect: move the closing delimiter onto its own line.
+    //
+    // ```ruby
+    // replacement = "\n#{offense_range.source.lstrip}"
+    // if (heredoc = last_heredoc_argument(node.body))
+    //   corrector.remove(offense_range)
+    //   corrector.insert_after(heredoc.loc.heredoc_end, replacement)
+    // else
+    //   corrector.replace(offense_range, replacement)
+    // end
+    // ```
+    //
+    // When the body's last argument is a heredoc, replacing the offense range in
+    // place would drop the `end` between the opener line and the heredoc body,
+    // corrupting the literal. RuboCop instead deletes the offense range and
+    // re-inserts the `\nend` after the heredoc terminator (`heredoc_end`), so the
+    // delimiter lands below the closing label (murphy-in6p).
     let replacement = format!("\n{}", offense_src.trim_start());
-    cx.emit_edit(offense_range, &replacement);
+    if let Some(heredoc_end) = last_heredoc_argument_end(node, cx) {
+        cx.emit_edit(offense_range, "");
+        cx.emit_edit(
+            Range {
+                start: heredoc_end,
+                end: heredoc_end,
+            },
+            &replacement,
+        );
+    } else {
+        cx.emit_edit(offense_range, &replacement);
+    }
 }
 
 /// The closing delimiter token (`end` / `}`) of a block — the token ending
@@ -168,28 +193,86 @@ fn begins_its_line(offset: u32, cx: &Cx<'_>) -> bool {
     src[line_start..offset].bytes().all(|b| b == b' ' || b == b'\t')
 }
 
-/// `last_heredoc_argument(node.body)` — whether the block body is a call whose
-/// last (recursively, through the leading receiver) argument is a heredoc
-/// string. Used to gate the autocorrect (RuboCop rearranges around the heredoc
-/// terminator; Murphy ships detect-only for that shape).
-fn body_ends_with_heredoc_argument(node: NodeId, cx: &Cx<'_>) -> bool {
-    let Some(mut current) = cx.block_body(node).get() else {
-        return false;
-    };
+/// RuboCop's `last_heredoc_argument(node.body)` followed by
+/// `heredoc.loc.heredoc_end.end_pos`: the byte offset just past the terminator
+/// label of the block body's last heredoc argument, or `None` when the body is
+/// not a call whose last (recursively, through the leading receiver) argument is
+/// a heredoc string.
+///
+/// ```ruby
+/// def last_heredoc_argument(node)
+///   return unless node.respond_to?(:arguments)
+///   node.arguments.reverse_each do |arg|
+///     return arg if arg.respond_to?(:heredoc?) && arg.heredoc?
+///   end
+///   last_heredoc_argument(node.children.first)
+/// end
+/// ```
+///
+/// The insertion point is the *end* of `heredoc.loc.heredoc_end` (the terminator
+/// label, no trailing newline), which equals the `HeredocEnd` token's end.
+fn last_heredoc_argument_end(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
+    let mut current = cx.block_body(node).get()?;
     // Walk the receiver chain like RuboCop's recursion on `node.children.first`.
     loop {
         if !matches!(cx.kind(current), NodeKind::Send { .. } | NodeKind::Csend { .. }) {
-            return false;
+            return None;
         }
-        let args = cx.call_arguments(current);
-        if args.iter().rev().any(|&arg| is_heredoc_string(arg, cx)) {
-            return true;
+        // `node.arguments.reverse_each` — the first (rightmost) heredoc argument.
+        if let Some(&heredoc) = cx
+            .call_arguments(current)
+            .iter()
+            .rev()
+            .find(|&&arg| is_heredoc_string(arg, cx))
+        {
+            return heredoc_end_token_end(heredoc, cx);
         }
         match cx.call_receiver(current).get() {
             Some(recv) => current = recv,
-            None => return false,
+            None => return None,
         }
     }
+}
+
+/// The end byte offset of `heredoc`'s terminator label — RuboCop's
+/// `heredoc.loc.heredoc_end.end_pos`, which covers the indentation + label but
+/// **not** the trailing newline.
+///
+/// The terminator is paired by FIFO index: the k-th `HeredocStart` in source
+/// order is closed by the k-th `HeredocEnd`. The node's own opener is the first
+/// `HeredocStart` inside its range. prism's `HeredocEnd` token spans the label
+/// *and* its trailing newline, so the newline (and a preceding `\r`) is trimmed
+/// to land the insertion point right after the label, matching the parser gem.
+fn heredoc_end_token_end(heredoc: NodeId, cx: &Cx<'_>) -> Option<u32> {
+    let range = cx.range(heredoc);
+    let toks = cx.sorted_tokens();
+    // This node's opener: the first `HeredocStart` within the node's range.
+    let opener = toks
+        .iter()
+        .find(|t| {
+            t.kind == SourceTokenKind::HeredocStart
+                && t.range.start >= range.start
+                && t.range.end <= range.end
+        })?
+        .range;
+    // Index of this opener among all openers in source order.
+    let index = toks
+        .iter()
+        .filter(|t| t.kind == SourceTokenKind::HeredocStart)
+        .take_while(|t| t.range.start < opener.start)
+        .count();
+    let term = toks
+        .iter()
+        .filter(|t| t.kind == SourceTokenKind::HeredocEnd)
+        .nth(index)?
+        .range;
+    // Trim the trailing newline (and a preceding `\r`) the prism token includes.
+    let bytes = cx.source().as_bytes();
+    let mut end = term.end as usize;
+    while end > term.start as usize && matches!(bytes.get(end - 1), Some(b'\n' | b'\r')) {
+        end -= 1;
+    }
+    Some(end as u32)
 }
 
 /// Whether `node` is a heredoc string literal (a `Str`/`Dstr` whose opener is a
@@ -377,12 +460,28 @@ mod tests {
         assert!(run_cop::<Cop>(&fixed).is_empty(), "not idempotent: {fixed:?}");
     }
 
+    /// murphy-in6p: the body's last argument is a heredoc. RuboCop removes the
+    /// offense range (` end`) and inserts the replacement (`\nend`) after the
+    /// heredoc terminator, so the `end` lands below the closing label rather than
+    /// inside the heredoc body (which would corrupt the literal).
     #[test]
-    fn detect_only_when_body_ends_with_heredoc() {
-        // The body's last argument is a heredoc — offense reported, no edit.
+    fn corrects_when_body_ends_with_heredoc() {
         let src = "test do\n  foo(<<~TEXT) end\n    hi\n  TEXT\n";
         let run = run_cop_with_edits::<Cop>(src);
         assert_eq!(run.offenses.len(), 1, "got {:?}", run.offenses);
-        assert!(run.edits.is_empty(), "expected no edit, got {:?}", run.edits);
+        assert_eq!(
+            apply(src, &run.edits),
+            "test do\n  foo(<<~TEXT)\n    hi\n  TEXT\nend\n"
+        );
+    }
+
+
+    /// murphy-in6p idempotency: re-running on the corrected source is clean.
+    #[test]
+    fn heredoc_correction_is_idempotent() {
+        let src = "test do\n  foo(<<~TEXT) end\n    hi\n  TEXT\n";
+        let run = run_cop_with_edits::<Cop>(src);
+        let fixed = apply(src, &run.edits);
+        assert!(run_cop::<Cop>(&fixed).is_empty(), "not idempotent: {fixed:?}");
     }
 }
