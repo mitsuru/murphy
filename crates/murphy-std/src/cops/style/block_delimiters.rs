@@ -393,39 +393,34 @@ fn is_in_non_parenthesized_arg(block: NodeId, cx: &Cx<'_>) -> bool {
     for ancestor in cx.ancestors(block) {
         match *cx.kind(ancestor) {
             NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => {
-                // The ancestor call itself must have arguments and be non-parenthesised.
                 let arg_list = cx.list(args);
-                if arg_list.is_empty() {
-                    // No args on this call: continue ascending.
+                // Is the block within one of this call's arguments (vs being the
+                // call's receiver)? Compare by range containment.
+                let block_in_args = arg_list.iter().any(|&arg_id| {
+                    let arg_range = cx.range(arg_id);
+                    arg_range.start <= block_range.start && block_range.end <= arg_range.end
+                });
+                if !block_in_args {
+                    // The block is this call's receiver — a chained call such as
+                    // `change { }.from(x)`. Keep ascending: a higher
+                    // unparenthesised call may take the whole chain as an
+                    // argument (RuboCop's `get_blocks` recurses into the arg).
                     continue;
                 }
-                if cx.is_parenthesized(ancestor) {
-                    // Parenthesised call: braces/do-end binding is unambiguous.
+                // The block IS an argument of this call. Braces and do/end bind
+                // differently only when the call is unparenthesised and is not
+                // an assignment or single-block-arg operator method; otherwise
+                // the binding is unambiguous and the normal rules apply.
+                if cx.is_parenthesized(ancestor) || cx.is_assignment_method(ancestor) {
                     return false;
                 }
-                if cx.is_assignment_method(ancestor) {
-                    return false;
-                }
-                // Check single_argument_operator_method: operator method with one arg
-                // that is a block kind — this one is allowed.
                 if cx.is_operator_method(ancestor)
                     && arg_list.len() == 1
                     && is_block_kind(arg_list[0], cx)
                 {
                     return false;
                 }
-                // The block must be reachable as an argument (not as the receiver).
-                // Since we walked up from the block and hit this Send, the block is
-                // in the argument subtree iff the block's range is within any arg's range.
-                let block_in_args = arg_list.iter().any(|&arg_id| {
-                    let arg_range = cx.range(arg_id);
-                    arg_range.start <= block_range.start && block_range.end <= arg_range.end
-                });
-                if block_in_args {
-                    return true;
-                }
-                // Block is the receiver of this Send (chained call), not an arg.
-                return false;
+                return true;
             }
             // Don't cross into a block body: if we reach another block-like node
             // while ascending, the block is nested and the outer block's body
@@ -626,6 +621,19 @@ mod tests {
         test::<BlockDelimiters>().expect_offense(indoc! {r#"
             foo(bar do |x| x end)
                     ^^ Prefer `{...}` over `do...end` for single-line blocks.
+        "#});
+    }
+
+    #[test]
+    fn skips_chained_block_within_non_parenthesized_call_args() {
+        // `expect { subject }.to change { ... }.from(x)` — the `change { }`
+        // block is the receiver of a `.from` chain that, as a whole, is the
+        // unparenthesised argument to `.to`. Converting to `do...end` would
+        // rebind it to `.to`, so braces must be kept (RuboCop allows either).
+        test::<BlockDelimiters>().expect_no_offenses(indoc! {r#"
+            expect { subject }.to change {
+              redis.zrange(key, 0, -1)
+            }.from([1]).to([2])
         "#});
     }
 
