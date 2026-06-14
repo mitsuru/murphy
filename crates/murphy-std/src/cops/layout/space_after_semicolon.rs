@@ -71,6 +71,10 @@ impl SpaceAfterSemicolon {
     #[on_new_investigation]
     fn investigate(&self, cx: &Cx<'_>) {
         let toks = cx.sorted_tokens();
+        // A `;` that is the entire content of a string/symbol literal is an
+        // `Other` `b";"` token but not a separator; skip those (see
+        // `string_literal_content_ranges`).
+        let literal_ranges = crate::cops::util::string_literal_content_ranges(cx);
         for pair in toks.windows(2) {
             let token1 = pair[0];
             let token2 = pair[1];
@@ -78,6 +82,10 @@ impl SpaceAfterSemicolon {
             // token1 must be a `;` (a `SourceTokenKind::Other` whose source
             // text is exactly `;`).
             if !is_semicolon(cx, token1) {
+                continue;
+            }
+
+            if crate::cops::util::offset_within_any(token1.range.start, &literal_ranges) {
                 continue;
             }
 
@@ -165,6 +173,15 @@ mod tests {
     #[test]
     fn accepts_semicolon_followed_by_space() {
         test::<SpaceAfterSemicolon>().expect_no_offenses("x = 1; y = 2\n");
+    }
+
+    #[test]
+    fn ignores_semicolon_that_is_string_literal_content() {
+        // `';'` / `';'` inside `join` are literal text, not statement
+        // separators — the lexer emits no `tSEMI` there.
+        test::<SpaceAfterSemicolon>().expect_no_offenses("x = ';'\n");
+        test::<SpaceAfterSemicolon>().expect_no_offenses("y = [1].join(';')\n");
+        test::<SpaceAfterSemicolon>().expect_no_offenses("z = \"a=#{b};#{c}\"\n");
     }
 
     #[test]

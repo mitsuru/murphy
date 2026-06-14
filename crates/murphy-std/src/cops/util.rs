@@ -2,6 +2,28 @@
 
 use murphy_plugin_api::{CommentDirectiveKind, Cx, NodeId, NodeKind, Range, SourceTokenKind};
 
+/// Byte ranges of string/symbol literal *content* nodes (`Str`, `Sym`).
+///
+/// A structural-looking token — most notably a lone `;` — whose position falls
+/// inside one of these ranges is literal text, not Ruby syntax. RuboCop's lexer
+/// never emits a `tSEMI` (or other structural token) inside a string, so cops
+/// that scan the token stream for `;` must skip these. Interpolation code
+/// (`#{ ... }`) lives in non-`Str` child nodes, so a genuine separator inside
+/// `#{}` is correctly *not* covered (a `(dstr (str ";") (begin …))` keeps the
+/// literal `;` in the `Str` part and the interpolated code in the `begin`).
+pub fn string_literal_content_ranges(cx: &Cx<'_>) -> Vec<Range> {
+    cx.descendants(cx.root())
+        .into_iter()
+        .filter(|&id| matches!(*cx.kind(id), NodeKind::Str(_) | NodeKind::Sym(_)))
+        .map(|id| cx.range(id))
+        .collect()
+}
+
+/// True when `offset` lies within any half-open range in `ranges`.
+pub fn offset_within_any(offset: u32, ranges: &[Range]) -> bool {
+    ranges.iter().any(|r| offset >= r.start && offset < r.end)
+}
+
 /// The portion of `node`'s source range up to (but excluding) the first
 /// newline — i.e. the node's first physical line. Used to clamp whole-node
 /// offenses that RuboCop renders across multiple lines: Murphy's
