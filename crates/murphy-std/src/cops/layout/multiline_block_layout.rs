@@ -7,7 +7,7 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Layout/MultilineBlockLayout
-//! upstream_version_checked: 1.86.2
+//! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues: []
 //! notes: >
@@ -21,6 +21,16 @@
 //!      the arguments are flagged.
 //!   2. Body placement (`MSG`): if the body begins on the same line as the
 //!      block opener (`do`/`{`), the body is flagged.
+//!
+//!   The `single_line?` short-circuit uses `util::block_is_single_line`,
+//!   matching RuboCop's `BlockNode#single_line?` (`loc.begin.line ==
+//!   loc.end.line`) rather than the whole-expression range — so a one-line
+//!   `{ … }` at the tail of a multi-line receiver chain is correctly
+//!   single-line (murphy-un83). The body-placement check resolves the body's
+//!   first line via `body_first_offset`, which descends through `Begin` /
+//!   `Rescue` / `Ensure` wrappers to the first contained statement, mirroring
+//!   RuboCop's `node.body.first_line`; Murphy's wrapper range can otherwise
+//!   begin at the `do` (e.g. `do…rescue…end`).
 //!
 //!   `line_break_necessary_in_args?` reconstructs the single-line length of
 //!   the block opener plus its arguments (`needed_length_for_args` /

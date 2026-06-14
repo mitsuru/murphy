@@ -6,7 +6,7 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Layout/BlockEndNewline
-//! upstream_version_checked: 1.86.2
+//! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues: [murphy-in6p]
 //! notes: >
@@ -14,6 +14,12 @@
 //!   block is skipped (`return if node.single_line?`). The `end`/`}` is also
 //!   accepted when it already begins its own line
 //!   (`begins_its_line?(node.loc.end)`).
+//!
+//!   The `single_line?` skip uses `util::block_is_single_line`, matching
+//!   RuboCop's `BlockNode#single_line?` (`loc.begin.line == loc.end.line`)
+//!   rather than the whole-expression range — so a one-line `{ … }` at the
+//!   tail of a multi-line receiver chain is correctly single-line and its `}`
+//!   need not be on its own line (murphy-un83).
 //!
 //!   The offense range RuboCop builds is `node.children.compact.last
 //!   .source_range.end.join(node.loc.end)` — from the end of the block's last
