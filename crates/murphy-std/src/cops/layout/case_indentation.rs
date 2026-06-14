@@ -37,14 +37,14 @@
 //!   `IndentationWidth` is modelled as `Option<i64>`: the bundled default
 //!   `IndentationWidth: ~` merges to JSON `null`, which a plain `i64` field
 //!   would reject — erroring the whole option struct and silently discarding
-//!   the user's `EnforcedStyle`/`IndentOneStep`. `None` resolves to the
-//!   fallback width 2.
+//!   the user's `EnforcedStyle`/`IndentOneStep`. Under `IndentOneStep: true`
+//!   the width matches RuboCop's resolution: this cop's own `IndentationWidth`
+//!   override is honoured, and when unset the width falls back to the run-wide
+//!   resolved `Layout/IndentationWidth: Width` via `cx.indentation_width()`
+//!   (default 2) — murphy-kke2. (When `IndentOneStep` is false the width is
+//!   inert.)
 //!
 //!   Gaps (documented, not bypassed):
-//!     * `IndentOneStep: true` reads `IndentationWidth`. The per-cop
-//!       `IndentationWidth` override is honoured; RuboCop's fallback to the
-//!       sibling `Layout/IndentationWidth: Width` is unreadable across the
-//!       single-surface ABI, so the per-cop value (default 2) is used.
 //!     * `correct_style_detected` / `opposite_style_detected` style-tracking
 //!       (RuboCop's `ConfigurableEnforcedStyle` learning) is not modelled;
 //!       Murphy is stateless per-file and only reports offenses.
@@ -161,7 +161,7 @@ fn check_when(
     let Some(base) = base_column(case_node, opts.enforced_style, cx) else {
         return;
     };
-    let width = indentation_width(opts);
+    let width = indentation_width(opts, cx.indentation_width());
 
     if when_column == base + width {
         return;
@@ -212,7 +212,7 @@ fn incorrect_style(
     let Some(base_col) = base_column(case_node, opts.enforced_style, cx) else {
         return;
     };
-    let target = base_col + indentation_width(opts);
+    let target = base_col + indentation_width(opts, cx.indentation_width());
     cx.emit_edit(whitespace, &" ".repeat(target));
 }
 
@@ -236,12 +236,13 @@ fn base_column(case_node: NodeId, style: CaseIndentationStyle, cx: &Cx<'_>) -> O
 }
 
 /// `indentation_width` — `IndentationWidth` when `IndentOneStep`, else `0`.
-/// An unset (`null` / `~`) `IndentationWidth` falls back to RuboCop's default
-/// of 2 (the sibling `Layout/IndentationWidth: Width` is unreadable across the
-/// single-surface ABI).
-fn indentation_width(opts: &CaseIndentationOptions) -> usize {
+/// An unset (`null` / `~`) `IndentationWidth` falls back to `fallback_width`,
+/// the run-wide resolved `Layout/IndentationWidth.Width` (`cx.indentation_width()`,
+/// default 2) — murphy-kke2. Taken as a parameter (not `cx`) so the helper stays
+/// pure and unit-testable.
+fn indentation_width(opts: &CaseIndentationOptions, fallback_width: i64) -> usize {
     if opts.indent_one_step {
-        opts.indentation_width.unwrap_or(2).max(0) as usize
+        opts.indentation_width.unwrap_or(fallback_width).max(0) as usize
     } else {
         0
     }
@@ -469,7 +470,25 @@ mod tests {
         assert!(opts.enforced_style == CaseIndentationStyle::End);
         assert!(opts.indent_one_step);
         assert_eq!(opts.indentation_width, None);
-        // `None` resolves to the fallback width 2 in `indentation_width`.
-        assert_eq!(super::indentation_width(&opts), 2);
+        // `None` resolves to the passed fallback width in `indentation_width`.
+        assert_eq!(super::indentation_width(&opts, 2), 2);
+    }
+
+    /// Cross-cop fallback (murphy-kke2): with `IndentOneStep: true` and this
+    /// cop's own `IndentationWidth` unset, the step width comes from the
+    /// run-wide resolved `Layout/IndentationWidth.Width`. At width 4 a `when`
+    /// indented 4 from `case` is accepted; under the old hardcoded 2 it was
+    /// flagged.
+    #[test]
+    fn falls_back_to_layout_indentation_width_for_one_step() {
+        let opts = CaseIndentationOptions {
+            enforced_style: CaseIndentationStyle::Case,
+            indent_one_step: true,
+            indentation_width: None,
+        };
+        test::<CaseIndentation>()
+            .with_options(&opts)
+            .with_indentation_width(4)
+            .expect_no_offenses("case n\n    when 0\n      x\nend\n");
     }
 }

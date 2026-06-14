@@ -31,11 +31,12 @@
 //!   upstream. The edit is only emitted when the RHS is the first
 //!   non-whitespace on its line; idempotent.
 //!
+//!   `IndentationWidth` matches RuboCop's resolution: this cop's own
+//!   `IndentationWidth` override is honoured, and when unset the width falls
+//!   back to the run-wide resolved `Layout/IndentationWidth: Width` via
+//!   `cx.indentation_width()` (default 2) — murphy-kke2.
+//!
 //!   Gaps vs upstream:
-//!   - `IndentationWidth` defaults to the literal 2. RuboCop resolves it from
-//!     `Layout/IndentationWidth: Width` when this cop's own `IndentationWidth`
-//!     is `~`; that foreign-config read is not available, so the option is a
-//!     local default-2 i64 (same gap as `Layout/CommentIndentation`).
 //!   - Column is counted by Unicode scalar (`chars().count()`), not RuboCop's
 //!     `display_column` (which counts East-Asian wide glyphs as width 2). Wide
 //!     characters before the assignment are an edge gap.
@@ -57,12 +58,14 @@ pub struct AssignmentIndentation;
 /// Options for [`AssignmentIndentation`].
 #[derive(CopOptions)]
 pub struct AssignmentIndentationOptions {
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null) and
+    // an unset key both decode to `None`, which falls back to the run-wide
+    // resolved `Layout/IndentationWidth.Width` via `cx.indentation_width()`.
     #[option(
         name = "IndentationWidth",
-        default = 2,
-        description = "Number of spaces for one indentation level (falls back to RuboCop's default of 2)."
+        description = "Number of spaces for one indentation level (null/unset falls back to Layout/IndentationWidth's Width, default 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[cop(
@@ -160,7 +163,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let base = column_of(cx, cx.range(leftmost).start);
 
     let opts = cx.options_or_default::<AssignmentIndentationOptions>();
-    let expected = base + opts.indentation_width.max(0) as usize;
+    let expected = base
+        + opts
+            .indentation_width
+            .unwrap_or(cx.indentation_width())
+            .max(0) as usize;
 
     // `check_alignment([rhs], expected)`: the RHS's first-line column must equal
     // `expected`.
@@ -363,6 +370,17 @@ mod tests {
     #[test]
     fn accepts_properly_indented_rhs() {
         test::<Cop>().expect_no_offenses("a =\n  if b ; end\n");
+    }
+
+    /// Cross-cop fallback (murphy-kke2): with this cop's own `IndentationWidth`
+    /// unset, the RHS indent comes from the run-wide resolved
+    /// `Layout/IndentationWidth.Width`. At width 4 an RHS indented 4 is accepted;
+    /// under the old hardcoded 2 it was flagged as over-indented.
+    #[test]
+    fn falls_back_to_layout_indentation_width() {
+        test::<Cop>()
+            .with_indentation_width(4)
+            .expect_no_offenses("a =\n    if b ; end\n");
     }
 
     #[test]
