@@ -34,10 +34,11 @@
 //!   `all_forwarding_offenses_correctable?`): below target 3.4 a forwarding
 //!   send nested inside a block is not anonymized.
 //!
-//!   Documented gap: RuboCop's `explicit_block_name?` consults
-//!   `Naming/BlockForwarding`'s `EnforcedStyle`; murphy cannot read another
-//!   cop's config here and treats it as the default (`anonymous`), so block
-//!   `&` is always offered. This matches RuboCop under default config.
+//!   RuboCop's `explicit_block_name?` consults `Naming/BlockForwarding`'s
+//!   `EnforcedStyle`. Murphy threads the resolved style run-wide via
+//!   `Cx::block_forwarding_explicit()`; when `explicit`, a named block argument
+//!   is kept and never anonymized to `&` (matching RuboCop). Default
+//!   (`anonymous`) still offers `&`.
 //! ```
 //!
 //! ## Autocorrect
@@ -936,6 +937,12 @@ fn forwardable_kwrestarg(id: Option<NodeId>, redundant: &[String], cx: &Cx<'_>) 
 
 fn forwardable_blockarg(id: Option<NodeId>, redundant: &[String], cx: &Cx<'_>) -> Option<NodeId> {
     let id = id?;
+    // RuboCop's `explicit_block_name?`: when `Naming/BlockForwarding` is
+    // configured `EnforcedStyle: explicit`, a named block argument is kept and
+    // never anonymized to `&`, so it is not a forwarding candidate.
+    if cx.block_forwarding_explicit() {
+        return None;
+    }
     let NodeKind::Blockarg(sym) = *cx.kind(id) else {
         return None;
     };
@@ -1126,6 +1133,21 @@ mod tests {
                 end
             "#},
         );
+    }
+
+    #[test]
+    fn explicit_block_forwarding_suppresses_block_anonymization() {
+        // With `Naming/BlockForwarding: EnforcedStyle: explicit` (RuboCop's
+        // `explicit_block_name?`), a named block argument is kept — never
+        // anonymized to `&`. Mastodon configures this, so `&block` forwarding
+        // must not be flagged.
+        test::<ArgumentsForwarding>()
+            .with_block_forwarding_explicit(true)
+            .expect_no_offenses(indoc! {r#"
+                def foo(&block)
+                  bar(&block)
+                end
+            "#});
     }
 
     #[test]

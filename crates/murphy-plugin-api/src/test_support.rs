@@ -321,6 +321,14 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Set the run-wide `Naming/BlockForwarding.EnforcedStyle == "explicit"`
+    /// flag — what `Cx::block_forwarding_explicit()` returns. Use this to
+    /// exercise `Style/ArgumentsForwarding`'s explicit-block-name parity.
+    pub fn with_block_forwarding_explicit(mut self, explicit: bool) -> Self {
+        self.context.block_forwarding_explicit = explicit;
+        self
+    }
+
     /// Assert the cop emits exactly the offenses described by the caret
     /// annotations in `annotated`. See the module docs for the
     /// annotation grammar.
@@ -952,6 +960,7 @@ fn cx_raw_for(
         target_ruby_version: crate::RubyVersion::to_wire(ctx.target_ruby_version),
         config_disabled_cops: std::ptr::null(),
         config_disabled_cops_len: 0,
+        block_forwarding_explicit: ctx.block_forwarding_explicit,
     }
 }
 

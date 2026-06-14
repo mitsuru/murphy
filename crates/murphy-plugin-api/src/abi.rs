@@ -251,6 +251,17 @@ pub struct CxRaw {
     /// (a pointer+len do not fit the trailing padding).
     pub config_disabled_cops: *const RawSlice,
     pub config_disabled_cops_len: usize,
+    /// Resolved `Naming/BlockForwarding.EnforcedStyle == "explicit"`. NOT an
+    /// `AllCops.*` key — it is the run-wide cross-cop signal RuboCop's
+    /// `Style/ArgumentsForwarding#explicit_block_name?` reads from
+    /// `config.for_cop('Naming/BlockForwarding')['EnforcedStyle']`, threaded
+    /// here (like `indentation_width`) so the cop need not perform its own
+    /// cross-cop config lookup. Default `false` (RuboCop's `anonymous`). When
+    /// `true`, a named block argument is kept explicit and is never anonymized
+    /// to `&`. Tail-appended under ABI v4 lockstep; per project policy the
+    /// numeric ABI is not bumped for tail-appended CxRaw fields. Read via
+    /// `Cx::block_forwarding_explicit()`.
+    pub block_forwarding_explicit: bool,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -356,6 +367,12 @@ pub struct AllCopsContext {
     /// cross-cop config lookup. An explicit `Width: 0` is preserved here (the
     /// host resolves the default, so this is always a concrete width).
     pub indentation_width: i64,
+    /// Resolved `Naming/BlockForwarding.EnforcedStyle == "explicit"` (default
+    /// `false`). NOT an `AllCops.*` key — the run-wide cross-cop signal
+    /// `Style/ArgumentsForwarding` reads to decide whether a named block
+    /// argument may be anonymized to `&`. Threaded into `CxRaw` (murphy-bgd8
+    /// pattern); read via `Cx::block_forwarding_explicit()`.
+    pub block_forwarding_explicit: bool,
 }
 
 impl AllCopsContext {
@@ -380,6 +397,7 @@ impl Default for AllCopsContext {
             target_ruby_version: None,
             active_support_extensions_enabled: false,
             indentation_width: Self::DEFAULT_INDENTATION_WIDTH,
+            block_forwarding_explicit: false,
         }
     }
 }
@@ -548,7 +566,8 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, target_ruby_version), 246);
         assert_eq!(offset_of!(CxRaw, config_disabled_cops), 248);
         assert_eq!(offset_of!(CxRaw, config_disabled_cops_len), 256);
-        assert_eq!(size_of::<CxRaw>(), 264);
+        assert_eq!(offset_of!(CxRaw, block_forwarding_explicit), 264);
+        assert_eq!(size_of::<CxRaw>(), 272);
     }
 
     #[test]

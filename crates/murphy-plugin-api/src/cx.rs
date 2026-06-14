@@ -540,6 +540,16 @@ impl<'a> Cx<'a> {
         self.raw.indentation_width as i64
     }
 
+    /// The run-wide resolved `Naming/BlockForwarding.EnforcedStyle == "explicit"`.
+    ///
+    /// RuboCop's `Style/ArgumentsForwarding#explicit_block_name?` reads
+    /// `config.for_cop('Naming/BlockForwarding')['EnforcedStyle']`; when it is
+    /// `explicit` a named block argument is kept (never anonymized to `&`).
+    /// Default `false` (RuboCop's `anonymous`).
+    pub fn block_forwarding_explicit(&self) -> bool {
+        self.raw.block_forwarding_explicit
+    }
+
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
     pub fn alloc_node_slice(&self, elements: &[NodeId]) -> &'a [NodeId] {
         if elements.is_empty() {
@@ -3170,6 +3180,7 @@ mod tests {
             target_ruby_version: 0,
             config_disabled_cops: std::ptr::null(),
             config_disabled_cops_len: 0,
+            block_forwarding_explicit: false,
         }
     }
 

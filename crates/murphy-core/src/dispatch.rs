@@ -230,6 +230,7 @@ fn build_cx_raw(
         target_ruby_version: RubyVersion::to_wire(ctx.target_ruby_version),
         config_disabled_cops: config_disabled_cops.as_ptr(),
         config_disabled_cops_len: config_disabled_cops.len(),
+        block_forwarding_explicit: ctx.block_forwarding_explicit,
     }
 }
 

@@ -671,7 +671,26 @@ impl MurphyConfig {
             target_ruby_version: Some(self.target_ruby_version),
             active_support_extensions_enabled: self.active_support_extensions_enabled,
             indentation_width: self.resolved_indentation_width(),
+            block_forwarding_explicit: self.resolved_block_forwarding_explicit(),
         }
+    }
+
+    /// RuboCop's `config.for_cop('Naming/BlockForwarding')['EnforcedStyle']`
+    /// resolved for this config: `true` when the user's (or bundled default's)
+    /// `EnforcedStyle` is `explicit`, else `false` (RuboCop's `anonymous`
+    /// default). Read unconditionally — `Style/ArgumentsForwarding` consults it
+    /// whether or not `Naming/BlockForwarding` is enabled.
+    fn resolved_block_forwarding_explicit(&self) -> bool {
+        const COP: &str = "Naming/BlockForwarding";
+        let style = |opts: Option<&BTreeMap<String, serde_json::Value>>| {
+            opts.and_then(|o| o.get("EnforcedStyle"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        style(self.cops.rules.get(COP).map(|r| &r.options))
+            .or_else(|| style(self.base_defaults.cop_rules.get(COP).map(|r| &r.options)))
+            .as_deref()
+            == Some("explicit")
     }
 
     /// RuboCop's `config.for_cop('Layout/IndentationWidth')['Width']` resolved
