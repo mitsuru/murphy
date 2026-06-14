@@ -232,7 +232,7 @@ fn check_def_node(node: NodeId, cx: &Cx<'_>) {
         .iter()
         .all(|c| matches!(c.class, ForwardClass::All | ForwardClass::AllAnonymous))
     {
-        fixer.add_forward_all_offenses(node, &classifications, &fa, target);
+        fixer.add_forward_all_offenses(node, &classifications, &fa, opts.use_anonymous_forwarding, target);
     } else if target >= RUBY_3_2 {
         fixer.add_post_ruby_32_offenses(node, &classifications, &fa, &opts, target);
     }
@@ -398,10 +398,17 @@ fn no_post_splat_args(forward_rest: Option<NodeId>, call_args: &[NodeId], cx: &C
     let Some(idx) = call_args.iter().position(|&a| a == splat) else {
         return true;
     };
-    match call_args.get(idx + 1) {
-        None => true,
-        Some(&after) => matches!(*cx.kind(after), NodeKind::Hash(_) | NodeKind::BlockPass(_)),
-    }
+    // Every argument after the forwarded splat must be part of the forwarded
+    // tail: a `&`/`&block` block pass, or the `**kwrest` forward (represented as
+    // a hash whose sole child is a kwsplat). An explicit-keyword hash such as
+    // `{k: 1}` carries a real post-splat argument and disqualifies forward-all.
+    call_args[idx + 1..].iter().all(|&after| match *cx.kind(after) {
+        NodeKind::BlockPass(_) => true,
+        NodeKind::Hash(list) => {
+            matches!(cx.list(list), [only] if matches!(*cx.kind(*only), NodeKind::Kwsplat(_)))
+        }
+        _ => false,
+    })
 }
 
 fn ruby_32_only_anonymous(
@@ -471,22 +478,40 @@ impl<'a, 'cx> Fixer<'a, 'cx> {
         def: NodeId,
         classifications: &[SendClass],
         fa: &ForwardableArgs,
+        use_anonymous_forwarding: bool,
         target: RubyVersion,
     ) {
-        let mut registered_block = false;
-        for c in classifications {
-            if c.forward_rest.is_none()
-                && c.forward_kwrest.is_none()
-                && c.class != ForwardClass::AllAnonymous
-            {
-                // Forwards only a block: anonymize `&` instead of `...`.
-                if allow_anon_in_block(c.forward_block, c.send, target, self.cx) {
-                    self.register_block_offense(true, def, fa.block, target);
-                    self.register_block_offense(true, c.send, c.forward_block, target);
-                }
-                registered_block = true;
-                break;
+        let any_block_only = classifications.iter().any(Self::is_block_only);
+        let any_forward_all = classifications.iter().any(|c| !Self::is_block_only(c));
+
+        // A def cannot be rewritten to both `...` and an anonymous `&` at once.
+        // When sites mix block-only forwarding with rest/kwrest forwarding there
+        // is no single valid rewrite, so skip rather than emit invalid Ruby.
+        if any_block_only && any_forward_all {
+            return;
+        }
+
+        if any_block_only {
+            // Anonymous block `&` is an anonymous-forwarding feature; honor the
+            // opt-out. Register the def's `&` once, then every block-only send.
+            if !use_anonymous_forwarding {
+                return;
             }
+            let mut def_registered = false;
+            for c in classifications {
+                if !allow_anon_in_block(c.forward_block, c.send, target, self.cx) {
+                    continue;
+                }
+                if !def_registered {
+                    self.register_block_offense(true, def, fa.block, target);
+                    def_registered = true;
+                }
+                self.register_block_offense(true, c.send, c.forward_block, target);
+            }
+            return;
+        }
+
+        for c in classifications {
             let first = c
                 .forward_rest
                 .or(c.forward_kwrest)
@@ -496,13 +521,17 @@ impl<'a, 'cx> Fixer<'a, 'cx> {
             }
         }
 
-        if registered_block {
-            return;
-        }
-
         if let Some(first) = fa.rest.or(fa.kwrest) {
             self.register_forward_all(def, def, first);
         }
+    }
+
+    /// A site that forwards only a block (`bar(&block)`): no rest/kwrest, and
+    /// not already fully anonymous. Such sites anonymize to `&` rather than `...`.
+    fn is_block_only(c: &SendClass) -> bool {
+        c.forward_rest.is_none()
+            && c.forward_kwrest.is_none()
+            && c.class != ForwardClass::AllAnonymous
     }
 
     fn add_post_ruby_32_offenses(
@@ -741,7 +770,14 @@ fn def_name_end(def_node: NodeId, cx: &Cx<'_>) -> Option<u32> {
     let node_range = cx.range(def_node);
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
-    let idx = toks.partition_point(|t| t.range.start < node_range.start);
+    // For a singleton `def recv.name`, start the search after the receiver so a
+    // receiver whose source equals the method name (e.g. `def foo.foo`) is not
+    // mistaken for the method-name token.
+    let search_start = cx
+        .def_receiver(def_node)
+        .get()
+        .map_or(node_range.start, |recv| cx.range(recv).end);
+    let idx = toks.partition_point(|t| t.range.start < search_start);
     toks[idx..]
         .iter()
         .take_while(|t| t.range.start < node_range.end)
@@ -1080,6 +1116,91 @@ mod tests {
             indoc! {r#"
                 def foo(&)
                   bar(&)
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn flags_every_block_only_site_not_just_the_first() {
+        // Multiple block-only sites must all be anonymized; the loop must not
+        // stop after the first (which left a stale `&block` referencing an
+        // anonymized def — invalid Ruby).
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def foo(&block)
+                        ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                  bar(&block)
+                      ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                  baz(&block)
+                      ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                end
+            "#},
+            indoc! {r#"
+                def foo(&)
+                  bar(&)
+                  baz(&)
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn skips_mixed_block_only_and_forward_all_sites() {
+        // A def cannot be both `...` and anonymous `&`; a mix of a block-only
+        // site and a full-forward site has no single valid rewrite, so skip.
+        test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
+            def foo(*args, **kwargs, &block)
+              bar(*args, **kwargs, &block)
+              baz(&block)
+            end
+        "#});
+    }
+
+    #[test]
+    fn block_only_honors_use_anonymous_forwarding_false() {
+        // `UseAnonymousForwarding: false` disables `&block` -> `&` too, not only
+        // the 3.2+ `*`/`**` anonymization.
+        test::<ArgumentsForwarding>()
+            .with_options(&ArgumentsForwardingOptions {
+                use_anonymous_forwarding: false,
+                ..Default::default()
+            })
+            .expect_no_offenses(indoc! {r#"
+                def foo(&block)
+                  bar(&block)
+                end
+            "#});
+    }
+
+    #[test]
+    fn rejects_explicit_kwargs_after_forwarded_splat() {
+        // `bar(*args, k: 1, &block)` carries a real post-splat keyword, so it is
+        // not forward-all and must not collapse to `bar(...)` (dropping `k: 1`).
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 1)
+            .expect_no_offenses(indoc! {r#"
+                def foo(*args, &block)
+                  bar(*args, k: 1, &block)
+                end
+            "#});
+    }
+
+    #[test]
+    fn preserves_singleton_receiver_equal_to_method_name() {
+        // `def bar.bar` — the receiver source equals the method name; the
+        // method-name search must skip the receiver so the rewrite keeps it.
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def bar.bar(*args, &block)
+                            ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                  baz(*args, &block)
+                      ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                end
+            "#},
+            indoc! {r#"
+                def bar.bar(...)
+                  baz(...)
                 end
             "#},
         );
