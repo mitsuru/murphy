@@ -289,6 +289,14 @@ fn has_parenless_params(node: NodeId, cx: &Cx<'_>) -> bool {
 /// `adjusted_first_line`. Uses the parameter-list closing `)` line when the
 /// def has parenthesized parameters; otherwise the method-name line (which is
 /// the `def` line for the common single-line `def foo` / `def foo arg` shapes).
+///
+/// The parameter-list close is located via [`param_list_close_end`], which
+/// anchors its scan at `cx.range(node).start` and takes the *last* top-level
+/// `)` before the body. Anchoring at the def's own start is load-bearing: a
+/// `def`'s name loc is `{0,0}` in Murphy's ABI, so a scan keyed off
+/// `name_range.end` would begin at byte 0 of the file and — for a method with a
+/// preceding sibling (both wrapped in a top-level `begin`) — walk into the
+/// earlier sibling's body and latch onto an inner call's `)` (murphy-1kiw).
 fn adjusted_first_line(node: NodeId, cx: &Cx<'_>) -> usize {
     let name_range = cx.loc(node).name;
     let name_line = line_1based(name_range.end.max(cx.range(node).start), cx);
@@ -301,32 +309,12 @@ fn adjusted_first_line(node: NodeId, cx: &Cx<'_>) -> usize {
         .map(|b| cx.range(b).start)
         .unwrap_or(cx.range(node).end);
 
-    let toks = cx.sorted_tokens();
-    let idx = toks.partition_point(|t| t.range.start < name_range.end);
-    let mut depth = 0i32;
-    let mut close_line: Option<usize> = None;
-    for tok in toks[idx..]
-        .iter()
-        .take_while(|t| t.range.start < body_start)
-    {
-        match tok.kind {
-            SourceTokenKind::LeftParen => depth += 1,
-            SourceTokenKind::RightParen if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    // Closing paren of the (outermost) parameter list. The
-                    // `depth > 0` guard prevents an unmatched `)` (invalid /
-                    // incomplete syntax) from driving depth negative and then
-                    // triggering a false early return on the next `(`.
-                    close_line = Some(line_1based(tok.range.start, cx));
-                    break;
-                }
-            }
-            _ => {}
-        }
+    // `close_end` is the offset just past the `)`; `-1` lands on the `)` itself
+    // (a single byte) so the line maps to the closing-paren line.
+    match param_list_close_end(node, body_start, cx) {
+        Some(close_end) => line_1based(close_end.saturating_sub(1), cx),
+        None => name_line,
     }
-
-    close_line.unwrap_or(name_line)
 }
 
 /// 1-based physical line of `offset`.
@@ -544,6 +532,41 @@ mod tests {
             offenses[0].message,
             "Extra empty line detected at method body beginning."
         );
+    }
+
+    /// Regression (murphy-1kiw): a blank line in the *middle* of a method body
+    /// must not be reported as "method body beginning". A `def`'s name loc is
+    /// `{0,0}` in Murphy's ABI, so `adjusted_first_line`'s paren scan anchored
+    /// at `name_range.end` started at byte 0 of the file. With a sibling
+    /// top-level method present, prism wraps both defs in a `begin`; processing
+    /// the *second* def, the byte-0-anchored scan walked into the *first* def's
+    /// body and picked up the `)` of an inner call (`bar(baz)`), anchoring the
+    /// "beginning" at an unrelated mid-body blank line.
+    #[test]
+    fn accepts_blank_mid_body_with_sibling_method() {
+        let src = "def a\n  x = bar(baz)\n\n  if w\n    q\n  end\nend\n\ndef b\n  c\nend\n";
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>(src);
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// Discriminator (murphy-1kiw): the byte-0-anchor fix must NOT over-suppress.
+    /// A genuine blank line at the *beginning* of the second method's body is
+    /// still an offense, even though the first method contains a paren call that
+    /// the old buggy scan would have latched onto. Without the fix the scan
+    /// mis-anchors and this real offense is mislocated/lost.
+    #[test]
+    fn flags_real_beginning_blank_in_sibling_method() {
+        // `def b`'s body-beginning blank is the lone `\n` at byte 32 (line 6);
+        // `def a`'s `bar(baz)` `)` sits at byte 19 — the offset the old buggy
+        // scan would have latched onto.
+        let src = "def a\n  x = bar(baz)\nend\n\ndef b\n\n  c\nend\n";
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at method body beginning."
+        );
+        assert_eq!(offenses[0].range.start, 32, "got {offenses:?}");
     }
 
     // ---- endless methods (`offending_endless_method?`) ----
