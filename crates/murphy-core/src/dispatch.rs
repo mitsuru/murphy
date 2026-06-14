@@ -227,6 +227,7 @@ fn build_cx_raw(
         target_rails_version: RubyVersion::to_wire(ctx.target_rails_version),
         active_support_extensions_enabled: ctx.active_support_extensions_enabled,
         indentation_width: ctx.indentation_width_wire(),
+        target_ruby_version: RubyVersion::to_wire(ctx.target_ruby_version),
         config_disabled_cops: config_disabled_cops.as_ptr(),
         config_disabled_cops_len: config_disabled_cops.len(),
     }
@@ -480,6 +481,56 @@ mod tests {
         assert_eq!(
             TARGET_RAILS_VERSION_SEEN.load(Ordering::SeqCst),
             RubyVersion::to_wire(Some(RubyVersion::new(5, 2)))
+        );
+    }
+
+    // Separate per-test atomic (see ACTIVE_SUPPORT_SEEN note on parallelism).
+    static TARGET_RUBY_VERSION_SEEN: std::sync::atomic::AtomicU16 =
+        std::sync::atomic::AtomicU16::new(0);
+    unsafe extern "C" fn target_ruby_version_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let cx = unsafe { &*cx };
+        TARGET_RUBY_VERSION_SEEN.store(cx.target_ruby_version, Ordering::SeqCst);
+        0
+    }
+    static TARGET_RUBY_VERSION_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/TargetRubyVersion"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: target_ruby_version_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_target_ruby_version_to_cx_raw() {
+        TARGET_RUBY_VERSION_SEEN.store(0, Ordering::SeqCst);
+        let ast = ast_nil_and_int();
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_context(
+            &ast,
+            &[&TARGET_RUBY_VERSION_COP],
+            &mut sink,
+            AllCopsContext {
+                target_ruby_version: Some(RubyVersion::new(3, 2)),
+                ..AllCopsContext::default()
+            },
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert_eq!(
+            TARGET_RUBY_VERSION_SEEN.load(Ordering::SeqCst),
+            RubyVersion::to_wire(Some(RubyVersion::new(3, 2)))
         );
     }
 
