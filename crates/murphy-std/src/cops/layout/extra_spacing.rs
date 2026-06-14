@@ -330,6 +330,40 @@ mod tests {
     }
 
     #[test]
+    fn allows_alignment_across_a_blank_line() {
+        // The `{` of `subject` aligns with the `{` of `let(...)`, even though a
+        // blank line separates them — RuboCop skips blank lines when looking
+        // for the alignment partner.
+        test::<ExtraSpacing>().expect_no_offenses(indoc! {"
+            subject              { foo }
+
+            let(:target_account) { bar }
+        "});
+    }
+
+    #[test]
+    fn allows_alignment_across_comment_lines() {
+        // Aligned constant assignments separated by a comment block.
+        test::<ExtraSpacing>().expect_no_offenses(indoc! {"
+            PER_ACCOUNT_BUDGET = 5
+
+            # a comment between the two aligned assignments
+            PER_THREAD_BUDGET  = 5
+        "});
+    }
+
+    #[test]
+    fn still_flags_extra_spacing_with_non_aligned_neighbour() {
+        // The neighbouring content line has only whitespace at the `=` column,
+        // so there is no alignment partner: the extra space is flagged.
+        test::<ExtraSpacing>().expect_offense(indoc! {r#"
+            foo  = 1
+               ^ Unnecessary spacing detected.
+            bar = 2
+        "#});
+    }
+
+    #[test]
     fn accepts_no_space() {
         test::<ExtraSpacing>().expect_no_offenses("set_app(\"RuboCop\")\n");
     }
