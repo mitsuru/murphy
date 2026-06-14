@@ -205,3 +205,25 @@ fn null_indentation_width_preserves_other_keys() {
     .unwrap();
     assert!(opts.enforced_style == reference.enforced_style);
 }
+
+// ── cross-cop fallback to Layout/IndentationWidth.Width (murphy-kke2) ────────
+
+/// With this cop's own `IndentationWidth` unset, the width comes from the
+/// run-wide resolved `Layout/IndentationWidth.Width`. At width 4 the first
+/// argument indented 4 (base column 0) is accepted; under the old hardcoded 2
+/// it was flagged as over-indented.
+#[test]
+fn falls_back_to_layout_indentation_width() {
+    let opts = FirstArgumentIndentationOptions {
+        enforced_style: ArgIndentStyle::Consistent,
+        indentation_width: None,
+    };
+    test::<FirstArgumentIndentation>()
+        .with_options(&opts)
+        .with_indentation_width(4)
+        .expect_no_offenses(indoc! {r#"
+            foo(
+                bar
+            )
+        "#});
+}

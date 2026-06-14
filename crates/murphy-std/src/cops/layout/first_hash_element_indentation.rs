@@ -246,7 +246,10 @@ fn check_first(
     let actual = column_of(cx, first_start);
     let (base_col, base_type) =
         indent_base(left_brace_start, left_paren_start, cx, options.enforced_style);
-    let width = options.indentation_width.unwrap_or(2).max(0) as usize;
+    let width = options
+        .indentation_width
+        .unwrap_or(cx.indentation_width())
+        .max(0) as usize;
     let expected = base_col + width;
     if expected == actual {
         return;

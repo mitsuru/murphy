@@ -19,7 +19,9 @@
 //!   (`a + b`) and not a setter (`x.y = z`), and the first argument starts on
 //!   a later line than the call and begins its own line. Autocorrects by
 //!   rewriting the first argument's line leading whitespace to the expected
-//!   column. IndentationWidth defaults to 2.
+//!   column. When this cop's own `IndentationWidth` is unset, the width comes
+//!   from the run-wide resolved `Layout/IndentationWidth.Width` (default 2) via
+//!   `cx.indentation_width()` (murphy-kke2).
 //!
 //!   Single-surface ABI blockers (intentionally NOT bypassed):
 //!     * `on_super`: RuboCop aliases `on_super` to `on_send`, but Murphy's
@@ -33,8 +35,10 @@
 //!       enabled). Murphy cannot read a sibling cop's config, so this cop
 //!       always runs (the common case — `with_fixed_indentation` is not the
 //!       ArgumentAlignment default).
-//!     * `Layout/IndentationWidth` `Width` is RuboCop's fallback when this
-//!       cop's own `IndentationWidth` is unset. Murphy falls back to 2.
+//!   The cross-cop `Layout/IndentationWidth` `Width` fallback IS now wired:
+//!   when this cop's own `IndentationWidth` is unset, the width comes from the
+//!   run-wide resolved `Layout/IndentationWidth.Width` via
+//!   `cx.indentation_width()` (murphy-kke2).
 //!   The "correct the entire receiver chain" autocorrect refinement
 //!   (`should_correct_entire_chain?`) only changes *which* node the
 //!   AlignmentCorrector rewrites in deeply chained calls; the per-line
@@ -122,7 +126,10 @@ fn check(node: NodeId, cx: &Cx<'_>, options: &FirstArgumentIndentationOptions) {
         return;
     }
 
-    let width = options.indentation_width.unwrap_or(2).max(0) as usize;
+    let width = options
+        .indentation_width
+        .unwrap_or(cx.indentation_width())
+        .max(0) as usize;
     let base = base_indentation(node, first_arg, cx, options.enforced_style);
     let expected = base + width;
     let actual = column_of(cx, first_arg_start);

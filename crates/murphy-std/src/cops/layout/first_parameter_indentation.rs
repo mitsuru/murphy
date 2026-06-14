@@ -23,15 +23,14 @@
 //!   When the actual column differs (RuboCop's non-zero `@column_delta`), an
 //!   offense is emitted at the first parameter and an autocorrect rewrites the
 //!   first parameter line's leading whitespace to the expected column.
+//!   `configured_indentation_width` matches RuboCop: this cop's own
+//!   `IndentationWidth` override is honoured, and when unset the width falls
+//!   back to the run-wide resolved `Layout/IndentationWidth.Width` via
+//!   `cx.indentation_width()` (default 2) — murphy-kke2.
 //!   Known gaps versus RuboCop:
-//!   (1) `configured_indentation_width` is fixed at the RuboCop default of 2;
-//!       Murphy does not yet thread `Layout/IndentationWidth`'s `Width` into
-//!       cop options (same limitation as the `Style/TrailingBodyOn*` cops). The
-//!       cop options carry no `IndentationWidth` key, so this is a missing
-//!       cross-cop config wiring, not an ABI boundary bypass.
-//!   (2) The ambiguous/correct-style bookkeeping (`ambiguous_style_detected`,
-//!       `SupportedStyles` auto-detection) is not modelled; only the active
-//!       `EnforcedStyle` is enforced.
+//!   - The ambiguous/correct-style bookkeeping (`ambiguous_style_detected`,
+//!     `SupportedStyles` auto-detection) is not modelled; only the active
+//!     `EnforcedStyle` is enforced.
 //! ```
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, Range, cop};
@@ -58,6 +57,14 @@ pub struct FirstParameterIndentationOptions {
         description = "Where the first parameter should be indented relative to."
     )]
     pub enforced_style: FirstParameterIndentationStyle,
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null) and
+    // an unset key both decode to `None`, which falls back to the run-wide
+    // resolved `Layout/IndentationWidth.Width` via `cx.indentation_width()`.
+    #[option(
+        name = "IndentationWidth",
+        description = "Indentation width in spaces (null/unset falls back to Layout/IndentationWidth's Width, default 2)."
+    )]
+    pub indentation_width: Option<i64>,
 }
 
 #[cop(
@@ -78,9 +85,6 @@ impl FirstParameterIndentation {
         check(node, cx);
     }
 }
-
-/// RuboCop default for `Layout/IndentationWidth`'s `Width`.
-const INDENTATION_WIDTH: usize = 2;
 
 fn check(node: NodeId, cx: &Cx<'_>) {
     // `return if node.arguments.empty?` and `return if loc.begin.nil?`.
@@ -110,6 +114,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let actual_column = column_of(src, first_start);
 
     let opts = cx.options_or_default::<FirstParameterIndentationOptions>();
+    // `configured_indentation_width`: this cop's own `IndentationWidth` override,
+    // else the run-wide resolved `Layout/IndentationWidth.Width` (murphy-kke2).
+    let indentation_width = opts
+        .indentation_width
+        .unwrap_or(cx.indentation_width())
+        .max(0) as usize;
     let base_column = match opts.enforced_style {
         // `brace_alignment_style` → `left_brace.column`.
         FirstParameterIndentationStyle::AlignParentheses => column_of(src, left_paren.start as usize),
@@ -122,7 +132,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     // `expected_column = indent_base_column + configured_indentation_width + offset`
     // (offset is always 0 for `on_def`).
-    let expected_column = base_column + INDENTATION_WIDTH;
+    let expected_column = base_column + indentation_width;
 
     // `@column_delta = expected_column - actual_column`; offense iff non-zero.
     if expected_column == actual_column {
@@ -136,7 +146,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         }
     };
     let msg = format!(
-        "Use {INDENTATION_WIDTH} spaces for indentation in method args, relative to {base_description}."
+        "Use {indentation_width} spaces for indentation in method args, relative to {base_description}."
     );
     cx.emit_offense(cx.range(first_param), &msg, None);
 
@@ -246,6 +256,23 @@ mod tests {
         "#});
     }
 
+    /// Cross-cop fallback (murphy-kke2): this cop now reads the run-wide
+    /// resolved `Layout/IndentationWidth.Width` (and its own `IndentationWidth`
+    /// override). At width 4 the first parameter indented 4 (base column 0) is
+    /// accepted; under the old hardcoded 2 it was flagged.
+    #[test]
+    fn falls_back_to_layout_indentation_width() {
+        test::<FirstParameterIndentation>()
+            .with_indentation_width(4)
+            .expect_no_offenses(indoc! {r#"
+                def some_method(
+                    first_param,
+                second_param)
+                  123
+                end
+            "#});
+    }
+
     #[test]
     fn accepts_first_param_on_paren_line() {
         test::<FirstParameterIndentation>().expect_no_offenses(indoc! {r#"
@@ -279,6 +306,7 @@ mod tests {
     fn flags_with_align_parentheses_style() {
         let opts = FirstParameterIndentationOptions {
             enforced_style: FirstParameterIndentationStyle::AlignParentheses,
+            indentation_width: None,
         };
         // `(` is at column 15, so expected column is 15 + 2 = 17.
         test::<FirstParameterIndentation>().with_options(&opts).expect_correction(
@@ -298,6 +326,7 @@ mod tests {
     fn accepts_correct_align_parentheses() {
         let opts = FirstParameterIndentationOptions {
             enforced_style: FirstParameterIndentationStyle::AlignParentheses,
+            indentation_width: None,
         };
         test::<FirstParameterIndentation>()
             .with_options(&opts)

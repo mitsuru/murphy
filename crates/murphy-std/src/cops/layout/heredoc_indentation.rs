@@ -20,11 +20,11 @@
 //!   (TYPE_MSG), and the autocorrect converts the opener sigil to `<<~`
 //!   (`adjust_minus`) — the production fixpoint loop then re-indents on a
 //!   later pass. Empty/whitespace-only bodies are skipped.
+//!   `IndentationWidth` matches RuboCop's resolution: this cop's own
+//!   `IndentationWidth` override is honoured, and when unset the width falls
+//!   back to the run-wide resolved `Layout/IndentationWidth: Width` via
+//!   `cx.indentation_width()` (default 2) — murphy-kke2.
 //!   Gaps (documented, not bypassed):
-//!     - `IndentationWidth` defaults to 2 (Murphy cannot read the sibling
-//!       `Layout/IndentationWidth: Width` value across the single-surface
-//!       ABI, so the RuboCop default of 2 is applied when the option is
-//!       unset).
 //!     - `line_too_long?` is treated as always-false. RuboCop short-circuits
 //!       it whenever `Layout/LineLength: AllowHeredoc` is true (the default),
 //!       so this matches default behaviour; the `AllowHeredoc: false` edge is
@@ -41,12 +41,14 @@ pub struct HeredocIndentation;
 
 #[derive(CopOptions)]
 pub struct HeredocIndentationOptions {
+    // `Option<i64>` so the bundled default `IndentationWidth: ~` (JSON null) and
+    // an unset key both decode to `None`, which falls back to the run-wide
+    // resolved `Layout/IndentationWidth.Width` via `cx.indentation_width()`.
     #[option(
         name = "IndentationWidth",
-        default = 2,
-        description = "Number of spaces required for heredoc body indentation."
+        description = "Number of spaces for heredoc body indentation (null/unset falls back to Layout/IndentationWidth's Width, default 2)."
     )]
-    pub indentation_width: i64,
+    pub indentation_width: Option<i64>,
 }
 
 #[cop(
@@ -60,7 +62,10 @@ impl HeredocIndentation {
     #[on_new_investigation]
     fn check_file(&self, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<HeredocIndentationOptions>();
-        let width = opts.indentation_width.max(0) as usize;
+        let width = opts
+            .indentation_width
+            .unwrap_or(cx.indentation_width())
+            .max(0) as usize;
         let source = cx.source();
         let bytes = source.as_bytes();
 
@@ -378,6 +383,17 @@ mod tests {
     #[test]
     fn accepts_correctly_indented_squiggly_heredoc() {
         test::<HeredocIndentation>().expect_no_offenses("x = <<~RUBY\n  hello\nRUBY\n");
+    }
+
+    /// Cross-cop fallback (murphy-kke2): with this cop's own `IndentationWidth`
+    /// unset, the heredoc body indent comes from the run-wide resolved
+    /// `Layout/IndentationWidth.Width`. At width 4 a squiggly body indented 4 is
+    /// accepted; under the old hardcoded 2 it was flagged.
+    #[test]
+    fn falls_back_to_layout_indentation_width() {
+        test::<HeredocIndentation>()
+            .with_indentation_width(4)
+            .expect_no_offenses("x = <<~RUBY\n    hello\nRUBY\n");
     }
 
     #[test]

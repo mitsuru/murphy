@@ -25,9 +25,10 @@
 //!   port would emit wrong offenses.
 //!
 //!   Gaps vs RuboCop (documented, not silently dropped):
-//!     * `IndentationWidth` falls back to `Layout/IndentationWidth: Width` in
-//!       RuboCop; Murphy uses this cop's own `IndentationWidth` option
-//!       (default 2) and does not read the cross-cop value.
+//!     * `IndentationWidth` now matches RuboCop's cross-cop fallback: this
+//!       cop's own `IndentationWidth` option takes precedence, and when unset
+//!       it falls back to the run-wide resolved `Layout/IndentationWidth: Width`
+//!       via `cx.indentation_width()` (default 2) (murphy-kke2).
 //!     * The `def_modifier?` / `postfix_conditional?` tails of `should_align?`
 //!       / `correct_indentation` are not ported.
 //!     * Autocorrect is not emitted (RuboCop shifts the operand via
@@ -101,7 +102,10 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     let opts = cx.options_or_default::<MultilineOperationIndentationOptions>();
-    let width = opts.indentation_width.unwrap_or(2).max(0) as usize;
+    let width = opts
+        .indentation_width
+        .unwrap_or(cx.indentation_width())
+        .max(0) as usize;
     let style = opts.enforced_style;
     let source = cx.source();
 
@@ -571,6 +575,20 @@ mod tests {
             .expect_no_offenses(indoc! {"
                 a = b +
                   c
+            "});
+    }
+
+    /// Cross-cop fallback (murphy-kke2): with this cop's own `IndentationWidth`
+    /// unset, the bare-operation indent comes from the run-wide resolved
+    /// `Layout/IndentationWidth.Width`. At width 4 the operand indented 4 is
+    /// accepted; under the old hardcoded 2 it was flagged ("Use 2 (not 4)").
+    #[test]
+    fn falls_back_to_layout_indentation_width() {
+        test::<MultilineOperationIndentation>()
+            .with_indentation_width(4)
+            .expect_no_offenses(indoc! {"
+                a ||
+                    b
             "});
     }
 }

@@ -19,18 +19,18 @@
 //!   (RuboCop's `same_line?` guard), checks both the first element and a
 //!   right bracket that begins its own line, and autocorrects by rewriting
 //!   the offending line's leading whitespace to the expected column.
-//!   IndentationWidth defaults to 2.
+//!   When this cop's own `IndentationWidth` is unset, the width falls back to
+//!   the run-wide resolved `Layout/IndentationWidth.Width` via
+//!   `cx.indentation_width()` (murphy-kke2), matching RuboCop's cross-cop
+//!   fallback (default 2).
 //!
 //!   Single-surface ABI blockers (intentionally NOT bypassed): RuboCop reads
-//!   two pieces of *other cops'* configuration that Murphy's per-cop
+//!   one piece of *another cop's* configuration that Murphy's per-cop
 //!   `CopOptions` surface does not expose:
 //!     * `Layout/ArrayAlignment` `EnforcedStyle: with_fixed_indentation`
 //!       disables this cop for the non-`consistent` styles. Murphy cannot see
 //!       a sibling cop's config, so this cop always runs (the common case,
 //!       since `with_fixed_indentation` is not the ArrayAlignment default).
-//!     * `Layout/IndentationWidth` `Width` is RuboCop's fallback when this
-//!       cop's own `IndentationWidth` is unset. Murphy falls back to the
-//!       literal default of 2.
 //!   The ambiguous-style detection RuboCop performs (`detected_styles`) only
 //!   feeds style-inference diagnostics and never changes which offenses fire,
 //!   so it is intentionally omitted.
@@ -248,7 +248,10 @@ fn check_first(
     let actual = column_of(cx, first_start);
     let (base_col, base_type) =
         indent_base(left_bracket_start, left_paren_start, cx, options.enforced_style);
-    let width = options.indentation_width.unwrap_or(2).max(0) as usize;
+    let width = options
+        .indentation_width
+        .unwrap_or(cx.indentation_width())
+        .max(0) as usize;
     let expected = base_col + width;
     if expected == actual {
         return;
