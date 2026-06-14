@@ -223,6 +223,15 @@ pub struct CxRaw {
     /// itself leaves `size_of::<CxRaw>()` unchanged. Per project policy the
     /// numeric ABI is not bumped for tail-appended CxRaw fields.
     pub active_support_extensions_enabled: bool,
+    /// Resolved `Layout/IndentationWidth.Width` (default 2). NOT an `AllCops.*`
+    /// key — it is the run-wide indentation width several `Layout` cops share
+    /// (RuboCop's `config.for_cop('Layout/IndentationWidth')['Width']`), threaded
+    /// here so a cop needing it does not require its own cross-cop config lookup
+    /// (murphy-bgd8). An explicit `Width: 0` is honoured (carried as `0`, not the
+    /// default 2). Tail-appended into existing padding under ABI v4 lockstep, so
+    /// this field leaves `size_of::<CxRaw>()` unchanged. Read via
+    /// `Cx::indentation_width()`.
+    pub indentation_width: u16,
     /// Cop names disabled by config (`Enabled: false` in `.murphy.yml`), the
     /// seed for `Cx::extra_enabled_directives()` — RuboCop's
     /// `registry.disabled(config)`. Run-wide; the same slice is shared by every
@@ -262,6 +271,9 @@ pub struct CxRaw {
 /// padding under ABI v4 lockstep for murphy-pfcb (size unchanged).
 /// `CxRaw::config_disabled_cops` (+`_len`) was tail-appended under ABI v4
 /// lockstep for murphy-k19j; unlike the prior field it grows `size_of::<CxRaw>()`.
+/// `CxRaw::indentation_width` was tail-appended into existing padding (between
+/// `active_support_extensions_enabled` and `config_disabled_cops`) under ABI v4
+/// lockstep for murphy-bgd8 (size unchanged).
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -303,20 +315,54 @@ impl RubyVersion {
     }
 }
 
-/// Host-resolved `AllCops.*` context scalars threaded into every cop's
-/// `CxRaw` for one run. Bundles the growing set of run-wide AllCops knobs
-/// (`TargetRailsVersion`, `ActiveSupportExtensionsEnabled`, …) so dispatch
-/// and test-support signatures don't grow one positional parameter per knob.
+/// Host-resolved run-wide context scalars threaded into every cop's `CxRaw`
+/// for one run. Bundles the growing set of run-wide knobs
+/// (`TargetRailsVersion`, `ActiveSupportExtensionsEnabled`, the shared
+/// indentation width, …) so dispatch and test-support signatures don't grow
+/// one positional parameter per knob. Most members mirror an `AllCops.*` key;
+/// `indentation_width` is the exception (see its doc).
 ///
 /// This is a plain host-side convenience struct — **not** `#[repr(C)]` and
 /// **not** part of the plugin wire ABI. `build_cx_raw` unpacks it into the
 /// individual `CxRaw` fields; do not add it to the `CxRaw` offset assertions.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct AllCopsContext {
     /// `AllCops.TargetRailsVersion` (`None` = unset).
     pub target_rails_version: Option<RubyVersion>,
     /// `AllCops.ActiveSupportExtensionsEnabled` (default `false`).
     pub active_support_extensions_enabled: bool,
+    /// Resolved `Layout/IndentationWidth.Width`, default
+    /// [`AllCopsContext::DEFAULT_INDENTATION_WIDTH`]. NOT an `AllCops.*` key —
+    /// it is the shared run-wide indentation width threaded into every cop's
+    /// `CxRaw` (murphy-bgd8) so a cop needing it does not require its own
+    /// cross-cop config lookup. An explicit `Width: 0` is preserved here (the
+    /// host resolves the default, so this is always a concrete width).
+    pub indentation_width: i64,
+}
+
+impl AllCopsContext {
+    /// RuboCop's `Layout/IndentationWidth` default `Width` (2). Keeps
+    /// `AllCopsContext::default()` and the host's config resolution agreed on
+    /// the same fallback when no width is configured.
+    pub const DEFAULT_INDENTATION_WIDTH: i64 = 2;
+
+    /// The resolved indentation width packed for the `CxRaw::indentation_width`
+    /// wire field. Clamps into `u16`: widths are non-negative, and a value
+    /// beyond `u16::MAX` is absurd config that saturates rather than wrapping.
+    /// Read back via `Cx::indentation_width()`.
+    pub fn indentation_width_wire(&self) -> u16 {
+        self.indentation_width.clamp(0, u16::MAX as i64) as u16
+    }
+}
+
+impl Default for AllCopsContext {
+    fn default() -> Self {
+        Self {
+            target_rails_version: None,
+            active_support_extensions_enabled: false,
+            indentation_width: Self::DEFAULT_INDENTATION_WIDTH,
+        }
+    }
 }
 
 /// The dispatch entry for one cop: invoked once per matching node.
@@ -475,6 +521,9 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, file_path), 224);
         assert_eq!(offset_of!(CxRaw, target_rails_version), 240);
         assert_eq!(offset_of!(CxRaw, active_support_extensions_enabled), 242);
+        // murphy-bgd8: tail-appended into the padding between
+        // active_support_extensions_enabled (242) and config_disabled_cops (248).
+        assert_eq!(offset_of!(CxRaw, indentation_width), 244);
         assert_eq!(offset_of!(CxRaw, config_disabled_cops), 248);
         assert_eq!(offset_of!(CxRaw, config_disabled_cops_len), 256);
         assert_eq!(size_of::<CxRaw>(), 264);

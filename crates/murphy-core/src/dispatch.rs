@@ -226,6 +226,7 @@ fn build_cx_raw(
         },
         target_rails_version: RubyVersion::to_wire(ctx.target_rails_version),
         active_support_extensions_enabled: ctx.active_support_extensions_enabled,
+        indentation_width: ctx.indentation_width_wire(),
         config_disabled_cops: config_disabled_cops.as_ptr(),
         config_disabled_cops_len: config_disabled_cops.len(),
     }
@@ -545,6 +546,57 @@ mod tests {
         );
 
         assert!(!ACTIVE_SUPPORT_SEEN.load(Ordering::SeqCst));
+    }
+
+    // Separate per-test atomic: a shared static would race the other
+    // context-threading tests under `cargo test`'s parallel lib runs.
+    static INDENTATION_WIDTH_SEEN: std::sync::atomic::AtomicU16 =
+        std::sync::atomic::AtomicU16::new(0);
+    unsafe extern "C" fn indentation_width_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let cx = unsafe { &*cx };
+        INDENTATION_WIDTH_SEEN.store(cx.indentation_width, Ordering::SeqCst);
+        0
+    }
+    static INDENTATION_WIDTH_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/IndentationWidth"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: indentation_width_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_indentation_width_to_cx_raw() {
+        // The resolved `Layout/IndentationWidth.Width` threaded through the
+        // context reaches the cop's `CxRaw`.
+        INDENTATION_WIDTH_SEEN.store(0, Ordering::SeqCst);
+        let ast = ast_nil_and_int();
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_context(
+            &ast,
+            &[&INDENTATION_WIDTH_COP],
+            &mut sink,
+            // this test only exercises indentation_width threading
+            AllCopsContext {
+                indentation_width: 4,
+                ..AllCopsContext::default()
+            },
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert_eq!(INDENTATION_WIDTH_SEEN.load(Ordering::SeqCst), 4);
     }
 
     // (1) DispatchIndex correctly buckets the arena's nodes by tag.

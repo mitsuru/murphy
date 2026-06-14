@@ -518,6 +518,16 @@ impl<'a> Cx<'a> {
         self.raw.active_support_extensions_enabled
     }
 
+    /// The run-wide resolved `Layout/IndentationWidth.Width` (default 2).
+    ///
+    /// This is RuboCop's `config.for_cop('Layout/IndentationWidth')['Width']` —
+    /// the shared indentation width several `Layout` cops fall back to when their
+    /// own `IndentationWidth` override is unset. Always a concrete width (the
+    /// host applies the default); an explicit `Width: 0` is honoured as `0`.
+    pub fn indentation_width(&self) -> i64 {
+        self.raw.indentation_width as i64
+    }
+
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
     pub fn alloc_node_slice(&self, elements: &[NodeId]) -> &'a [NodeId] {
         if elements.is_empty() {
@@ -3144,6 +3154,7 @@ mod tests {
             },
             target_rails_version: 0,
             active_support_extensions_enabled: false,
+            indentation_width: 2,
             config_disabled_cops: std::ptr::null(),
             config_disabled_cops_len: 0,
         }
