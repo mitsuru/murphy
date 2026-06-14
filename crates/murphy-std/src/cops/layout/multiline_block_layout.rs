@@ -42,7 +42,7 @@
 //! Multi-line `block`/`numblock`/`itblock` nodes whose arguments are not on
 //! the opener line, or whose body shares the opener line.
 
-use crate::cops::util::{block_opener, gap_has_newline};
+use crate::cops::util::{block_is_single_line, block_opener, gap_has_newline};
 use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
 
 const MSG: &str = "Block body expression is on the same line as the block start.";
@@ -82,8 +82,10 @@ impl MultilineBlockLayout {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // RuboCop: `return if node.single_line?`.
-    if cx.is_single_line(node) {
+    // RuboCop: `return if node.single_line?`. `BlockNode#single_line?` compares
+    // the opener/closing delimiter lines, not the whole expression — a one-line
+    // `{ … }` at a multi-line chain tail is single-line (murphy-un83).
+    if block_is_single_line(node, cx) {
         return;
     }
 
@@ -109,9 +111,40 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
     // RuboCop: `return unless ... same_line?(node.loc.begin, node.body)`. The
     // body shares the opener's line iff no newline lies between them.
+    // RuboCop: `return unless same_line?(node.loc.begin, node.body)` — the body
+    // shares the opener's line iff no newline lies between the opener and the
+    // body's first *statement*. `body_first_offset` descends through `Begin` /
+    // `Rescue` / `Ensure` wrappers, whose range can begin at the block opener
+    // (`do`/`{`) when the body carries a rescue/ensure clause; RuboCop's
+    // `node.body.first_line` is the first contained statement's line (murphy-un83).
     let src = cx.source().as_bytes();
-    if !gap_has_newline(src, opener.start, cx.range(body).start) {
-        cx.emit_offense(first_line_range(cx.range(body), cx), MSG, None);
+    let body_start = body_first_offset(body, cx);
+    if !gap_has_newline(src, opener.start, body_start) {
+        let range = Range {
+            start: body_start,
+            end: cx.range(body).end,
+        };
+        cx.emit_offense(first_line_range(range, cx), MSG, None);
+    }
+}
+
+/// RuboCop's `node.body.first_line`: the start offset of the first *statement*
+/// in the block body. Murphy's body-wrapper nodes (`Begin`, `Rescue`,
+/// `Ensure`) can carry a range that begins at the block opener (`do`/`{`) when
+/// the body has a rescue/ensure clause, so descending to the first contained
+/// statement is required to recover the true first-body offset.
+fn body_first_offset(body: NodeId, cx: &Cx<'_>) -> u32 {
+    let mut cur = body;
+    loop {
+        let next = match *cx.kind(cur) {
+            NodeKind::Begin(list) => cx.list(list).first().copied(),
+            NodeKind::Rescue { body, .. } | NodeKind::Ensure { body, .. } => body.get(),
+            _ => None,
+        };
+        match next {
+            Some(n) => cur = n,
+            None => return cx.range(cur).start,
+        }
     }
 }
 
@@ -355,6 +388,74 @@ mod tests {
               foo
               bar
             }
+        "});
+    }
+
+    // Regression (murphy-un83): a one-line `{ … }` block at the tail of a
+    // multi-line method chain. RuboCop's `BlockNode#single_line?` (opener line
+    // == closing-delimiter line) is true, so the cop short-circuits. Murphy's
+    // old full-range single-line check read the chain as multi-line and flagged
+    // the body. Verified no offense against RuboCop 1.87.
+    #[test]
+    fn accepts_single_line_brace_at_multiline_chain_tail() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            def f
+              params
+                .permit(:a)
+                .transform_keys { |k| k.to_s }
+            end
+        "});
+    }
+
+    // Regression (murphy-un83): a single-line stabby lambda used as an argument
+    // *inside* a multi-line block. The lambda's `block_opener` must resolve to
+    // its own `{` — not the enclosing block's `do`. A `Lambda` marker call has a
+    // `{0,0}` name loc, so the opener scan must be floored at the block's own
+    // start; otherwise `block_is_single_line` reads the lambda as multi-line and
+    // its argument is wrongly flagged. RuboCop 1.87 reports no offense.
+    #[test]
+    fn accepts_single_line_lambda_arg_inside_block() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            root date_detection: false do
+              field(:id, type: 'long')
+              field(:props, type: 'keyword', value: ->(account) { account.searchable_props })
+            end
+        "});
+    }
+
+    // Regression (murphy-un83): a `do…rescue…end` block. Murphy's body-wrapper
+    // range begins at the `do`, so the naive `same_line?` check mistook the
+    // body for being on the opener line. Descending to the first statement
+    // (line after `do`) recovers RuboCop's `node.body.first_line`. RuboCop 1.87
+    // reports no offense.
+    #[test]
+    fn accepts_do_rescue_block_body_on_next_line() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            define_method provider do
+              a = provider
+
+              if cond
+                d
+              end
+            rescue Foo
+              handle
+            end
+        "});
+    }
+
+    // Regression (murphy-un83): a well-formed `do |row|` block whose body
+    // contains a `next` guard and a multi-line method call. RuboCop 1.87 reports
+    // no offense; the body begins on the line after `do`.
+    #[test]
+    fn accepts_do_block_with_next_and_multiline_call() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            list.filter_map do |row|
+              domain = row.strip
+              next if cond
+
+              build(domain,
+                    extra: 1)
+            end
         "});
     }
 

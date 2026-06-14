@@ -37,7 +37,7 @@
 //! Multi-line `block`/`numblock`/`itblock` nodes whose closing `end`/`}` shares
 //! a line with the body or arguments.
 
-use crate::cops::util::block_opener;
+use crate::cops::util::{block_is_single_line, block_opener};
 use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 const MSG_PREFIX: &str = "Expression at ";
@@ -70,8 +70,10 @@ impl BlockEndNewline {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // `return if node.single_line?`.
-    if cx.is_single_line(node) {
+    // `return if node.single_line?`. `BlockNode#single_line?` compares the
+    // opener/closing delimiter lines, not the whole expression — a one-line
+    // `{ … }` at a multi-line chain tail is single-line (murphy-un83).
+    if block_is_single_line(node, cx) {
         return;
     }
 
@@ -250,6 +252,29 @@ mod tests {
     fn accepts_semicolon_before_inline_end() {
         // `foo; end` on one line — the `;`-skip branch suppresses the offense.
         test::<Cop>().expect_no_offenses("test do\n  foo; end\n");
+    }
+
+    // Regression (murphy-un83): a one-line `{ … }` block at the tail of a
+    // multi-line method chain. RuboCop's `BlockNode#single_line?` (opener line
+    // == closing `}` line) is true, so the `}` need not be on its own line.
+    // Murphy's old full-range single-line check read the chain as multi-line
+    // and flagged the `}`. Verified no offense against RuboCop 1.87.
+    #[test]
+    fn accepts_single_line_brace_at_multiline_chain_tail() {
+        test::<Cop>().expect_no_offenses("params\n  .permit(:a)\n  .transform_keys { |k| k.to_s }\n");
+    }
+
+    // Regression (murphy-un83): a single-line stabby lambda used as an argument
+    // *inside* a multi-line block. Its `}` is on the lambda's own line, which
+    // equals its `{` line, so the block is single-line and the `}` need not be
+    // on its own line. The opener scan must resolve the lambda's `{` (not the
+    // enclosing block's `do`) — see `block_opener`'s node-start floor. RuboCop
+    // 1.87 reports no offense.
+    #[test]
+    fn accepts_single_line_lambda_arg_inside_block() {
+        test::<Cop>().expect_no_offenses(
+            "root false do\n  field(:id)\n  field(:props, value: ->(a) { a.searchable })\nend\n",
+        );
     }
 
     #[test]
