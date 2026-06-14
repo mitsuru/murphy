@@ -418,11 +418,19 @@ pub fn block_opener(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
     // opener. Falling back to the selector end covers the no-argument case.
     // (`cx.range(call).end` is unusable here: a call node's range spans its
     // attached block, so it would skip past the opener entirely.)
+    //
+    // Floor the start at the block's own range start: a stabby-lambda block
+    // (`->(x) { … }`) has a `Lambda` marker call whose name loc is `{0,0}`, so
+    // the bare fallback would scan from byte 0 and latch onto an *enclosing*
+    // block's `do`/`{` (murphy-un83). The opener always lies within the block,
+    // so the node start is a safe lower bound that never crosses into a
+    // sibling/parent block.
     let search_from = cx
         .call_arguments(call)
         .last()
         .map(|&arg| cx.range(arg).end)
-        .unwrap_or_else(|| cx.node(call).loc.name.end);
+        .unwrap_or(cx.node(call).loc.name.end)
+        .max(cx.range(node).start);
     let node_end = cx.range(node).end;
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
@@ -436,6 +444,25 @@ pub fn block_opener(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
                     && &source[t.range.start as usize..t.range.end as usize] == b"do")
         })
         .map(|t| t.range)
+}
+
+/// RuboCop's `BlockNode#single_line?` — `loc.begin.line == loc.end.line`.
+///
+/// `Cx::is_single_line` measures the node's *whole* expression range, which for
+/// a block whose receiver is a multi-line method chain
+/// (`a\n  .b\n  .c { |x| x }`) spans the entire chain and reads as multi-line.
+/// RuboCop overrides `single_line?` for blocks to compare only the opener
+/// (`do`/`{`) line with the closing delimiter (`end`/`}`) line, so a one-line
+/// `{ … }` at a multi-line chain tail is correctly single-line. Falls back to
+/// `Cx::is_single_line` when the opener cannot be located.
+pub fn block_is_single_line(node: NodeId, cx: &Cx<'_>) -> bool {
+    let Some(opener) = block_opener(node, cx) else {
+        return cx.is_single_line(node);
+    };
+    // The closing delimiter ends at the block's expression end; `end - 1` lands
+    // inside it (on its line). "Same line as the opener" ⇔ no intervening newline.
+    let close = cx.range(node).end.saturating_sub(1).max(opener.start);
+    !gap_has_newline(cx.source().as_bytes(), opener.start, close)
 }
 
 // Note: is_parenthesized is tested indirectly via the cops that use it:

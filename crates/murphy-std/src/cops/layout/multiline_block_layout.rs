@@ -7,7 +7,7 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Layout/MultilineBlockLayout
-//! upstream_version_checked: 1.86.2
+//! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues: []
 //! notes: >
@@ -21,6 +21,16 @@
 //!      the arguments are flagged.
 //!   2. Body placement (`MSG`): if the body begins on the same line as the
 //!      block opener (`do`/`{`), the body is flagged.
+//!
+//!   The `single_line?` short-circuit uses `util::block_is_single_line`,
+//!   matching RuboCop's `BlockNode#single_line?` (`loc.begin.line ==
+//!   loc.end.line`) rather than the whole-expression range — so a one-line
+//!   `{ … }` at the tail of a multi-line receiver chain is correctly
+//!   single-line (murphy-un83). The body-placement check resolves the body's
+//!   first line via `body_first_offset`, which descends through `Begin` /
+//!   `Rescue` / `Ensure` wrappers to the first contained statement, mirroring
+//!   RuboCop's `node.body.first_line`; Murphy's wrapper range can otherwise
+//!   begin at the `do` (e.g. `do…rescue…end`).
 //!
 //!   `line_break_necessary_in_args?` reconstructs the single-line length of
 //!   the block opener plus its arguments (`needed_length_for_args` /
@@ -42,7 +52,7 @@
 //! Multi-line `block`/`numblock`/`itblock` nodes whose arguments are not on
 //! the opener line, or whose body shares the opener line.
 
-use crate::cops::util::{block_opener, gap_has_newline};
+use crate::cops::util::{block_is_single_line, block_opener, gap_has_newline};
 use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
 
 const MSG: &str = "Block body expression is on the same line as the block start.";
@@ -82,8 +92,10 @@ impl MultilineBlockLayout {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // RuboCop: `return if node.single_line?`.
-    if cx.is_single_line(node) {
+    // RuboCop: `return if node.single_line?`. `BlockNode#single_line?` compares
+    // the opener/closing delimiter lines, not the whole expression — a one-line
+    // `{ … }` at a multi-line chain tail is single-line (murphy-un83).
+    if block_is_single_line(node, cx) {
         return;
     }
 
@@ -109,9 +121,53 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
     // RuboCop: `return unless ... same_line?(node.loc.begin, node.body)`. The
     // body shares the opener's line iff no newline lies between them.
+    // RuboCop: `return unless same_line?(node.loc.begin, node.body)` — the body
+    // shares the opener's line iff no newline lies between the opener and the
+    // body's first *statement*. `body_first_offset` descends through `Begin` /
+    // `Rescue` / `Ensure` wrappers, whose range can begin at the block opener
+    // (`do`/`{`) when the body carries a rescue/ensure clause; RuboCop's
+    // `node.body.first_line` is the first contained statement's line (murphy-un83).
     let src = cx.source().as_bytes();
-    if !gap_has_newline(src, opener.start, cx.range(body).start) {
-        cx.emit_offense(first_line_range(cx.range(body), cx), MSG, None);
+    let body_start = body_first_offset(body, opener.start, cx);
+    if !gap_has_newline(src, opener.start, body_start) {
+        let range = Range {
+            start: body_start,
+            end: cx.range(body).end,
+        };
+        cx.emit_offense(first_line_range(range, cx), MSG, None);
+    }
+}
+
+/// RuboCop's `node.body.first_line`: the start offset of the first *statement*
+/// in the block body. Murphy's *implicit* body-wrapper nodes (`Begin`, `Rescue`,
+/// `Ensure`) can carry a range that begins at the block opener (`do`/`{`) when
+/// the body has a rescue/ensure clause, so descending to the first contained
+/// statement is required to recover the true first-body offset.
+///
+/// Only descend through a wrapper whose range begins at the opener. An *explicit*
+/// `begin … end` body (kwbegin) starts at its own `begin` keyword, and RuboCop's
+/// `node.body.first_line` is that keyword's line — so for `foo do begin\n … end`
+/// the body-on-opener-line offense must still fire. Unwrapping it unconditionally
+/// would move `body_start` to the first inner statement (on the next line) and
+/// suppress the offense (murphy-un83).
+fn body_first_offset(body: NodeId, opener_start: u32, cx: &Cx<'_>) -> u32 {
+    let mut cur = body;
+    loop {
+        // A wrapper that starts after the opener is a visible body expression
+        // (e.g. an explicit `begin`/parenthesized group) whose own first line is
+        // what RuboCop compares against — stop and report it.
+        if cx.range(cur).start > opener_start {
+            return cx.range(cur).start;
+        }
+        let next = match *cx.kind(cur) {
+            NodeKind::Begin(list) => cx.list(list).first().copied(),
+            NodeKind::Rescue { body, .. } | NodeKind::Ensure { body, .. } => body.get(),
+            _ => None,
+        };
+        match next {
+            Some(n) => cur = n,
+            None => return cx.range(cur).start,
+        }
     }
 }
 
@@ -355,6 +411,106 @@ mod tests {
               foo
               bar
             }
+        "});
+    }
+
+    // Regression (murphy-un83): a one-line `{ … }` block at the tail of a
+    // multi-line method chain. RuboCop's `BlockNode#single_line?` (opener line
+    // == closing-delimiter line) is true, so the cop short-circuits. Murphy's
+    // old full-range single-line check read the chain as multi-line and flagged
+    // the body. Verified no offense against RuboCop 1.87.
+    #[test]
+    fn accepts_single_line_brace_at_multiline_chain_tail() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            def f
+              params
+                .permit(:a)
+                .transform_keys { |k| k.to_s }
+            end
+        "});
+    }
+
+    // Regression (murphy-un83): a single-line stabby lambda used as an argument
+    // *inside* a multi-line block. The lambda's `block_opener` must resolve to
+    // its own `{` — not the enclosing block's `do`. A `Lambda` marker call has a
+    // `{0,0}` name loc, so the opener scan must be floored at the block's own
+    // start; otherwise `block_is_single_line` reads the lambda as multi-line and
+    // its argument is wrongly flagged. RuboCop 1.87 reports no offense.
+    #[test]
+    fn accepts_single_line_lambda_arg_inside_block() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            root date_detection: false do
+              field(:id, type: 'long')
+              field(:props, type: 'keyword', value: ->(account) { account.searchable_props })
+            end
+        "});
+    }
+
+    // Regression (murphy-un83): a `do…rescue…end` block. Murphy's body-wrapper
+    // range begins at the `do`, so the naive `same_line?` check mistook the
+    // body for being on the opener line. Descending to the first statement
+    // (line after `do`) recovers RuboCop's `node.body.first_line`. RuboCop 1.87
+    // reports no offense.
+    #[test]
+    fn accepts_do_rescue_block_body_on_next_line() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            define_method provider do
+              a = provider
+
+              if cond
+                d
+              end
+            rescue Foo
+              handle
+            end
+        "});
+    }
+
+    // Regression (murphy-un83): an *explicit* `begin … end` body opening on the
+    // block-start line. Unlike the implicit wrappers above, a kwbegin starts at
+    // its own `begin` keyword, so RuboCop's `node.body.first_line` is that
+    // keyword's line — on the opener line here — and the body-on-opener-line
+    // offense still fires. The descent must stop at the visible `begin`, not
+    // dive to the first inner statement on the next line.
+    #[test]
+    fn flags_explicit_begin_body_on_block_start_line() {
+        test::<MultilineBlockLayout>().expect_offense(indoc! {"
+            blah do begin
+                    ^^^^^ Block body expression is on the same line as the block start.
+              foo
+              bar
+            end
+            end
+        "});
+    }
+
+    // Discriminator for the explicit-`begin` gate: when the `begin` keyword is on
+    // the line *after* `do`, the body is well-formed and no offense fires.
+    #[test]
+    fn accepts_explicit_begin_body_on_next_line() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            blah do
+              begin
+                foo
+                bar
+              end
+            end
+        "});
+    }
+
+    // Regression (murphy-un83): a well-formed `do |row|` block whose body
+    // contains a `next` guard and a multi-line method call. RuboCop 1.87 reports
+    // no offense; the body begins on the line after `do`.
+    #[test]
+    fn accepts_do_block_with_next_and_multiline_call() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            list.filter_map do |row|
+              domain = row.strip
+              next if cond
+
+              build(domain,
+                    extra: 1)
+            end
         "});
     }
 
