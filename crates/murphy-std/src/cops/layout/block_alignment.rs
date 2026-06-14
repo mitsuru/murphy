@@ -8,7 +8,7 @@
 //! upstream_cop: Layout/BlockAlignment
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-o3b2]
+//! gap_issues: [murphy-vafs]
 //! notes: >
 //!   Ports `on_block` (aliased to `on_numblock`/`on_itblock`). Three styles via
 //!   `EnforcedStyleAlignWith` (`SupportedStylesAlignWith: [either,
@@ -35,15 +35,22 @@
 //!   alternative is only shown in `either` when the two columns differ).
 //!   Autocorrect re-indents the `end`/`}` line to the target column.
 //!
+//!   Autocorrect re-indents the `end`/`}` line to the target column. For
+//!   `start_of_block` the column comes from `start_for_block_node`; for
+//!   `either`/`start_of_line` it comes from `start_for_line_node` — the topmost
+//!   ancestor sharing the block-align target's first line (RuboCop's
+//!   `each_ancestor` reverse find, then `find_lhs_node`). The two differ when
+//!   the block is an argument to a call on the same line (`puts(foo do … end)`
+//!   re-indents `end` to `puts`'s column, not `foo`'s) — murphy-o3b2. The
+//!   *message* always anchors on `start_for_block_node`, which already matched
+//!   upstream including the deep `a.b do … end.c do … end` chain (the outer
+//!   block has no same-line ancestor to climb to, so the line node equals the
+//!   block node and no message permutation differs).
+//!
 //!   Gaps vs upstream:
-//!   - The ancestor walk implements the common shapes (assignment chains,
-//!     `_ << block`, a single trailing `block.method`, `splat`/`and`/`or`).
-//!     RuboCop's deep multi-block method chains (`a.b do … end.c do … end`)
-//!     resolve `start_for_line_node` through `each_ancestor` line scanning;
-//!     Murphy resolves the same topmost-on-line node but does not reproduce
-//!     every chain-of-blocks alt-message permutation. Tracked as a refinement.
 //!   - Column is counted by Unicode scalar (`chars().count()`), not RuboCop's
-//!     `display_column`.
+//!     `display_column` (East-Asian wide glyph = width 2). Shared edge gap with
+//!     the other Layout column cops.
 //! ```
 //!
 //! ## Matched shapes
@@ -152,11 +159,19 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let message = format_message(&current, error_slc, &start_slc, &do_slc, style);
     cx.emit_offense(end_loc, &message, None);
 
-    // Autocorrect: re-indent the `end`/`}` line to the target column.
+    // Autocorrect: re-indent the `end`/`}` line to the target column. RuboCop's
+    // `autocorrect` picks the column from `start_for_block_node` only for
+    // `start_of_block`; for `either`/`start_of_line` it uses
+    // `start_for_line_node` — the topmost ancestor sharing the block-align
+    // target's first line. The two differ when the block is an argument to a
+    // call on the same line (`puts(foo do … end)` re-indents `end` to `puts`'s
+    // column, not `foo`'s). The *message* keeps anchoring on
+    // `start_for_block_node`.
     let target_col = if style == AlignWith::StartOfBlock {
         do_slc.column
     } else {
-        start_col
+        let line_node = start_for_line_node(node, cx);
+        column_of(cx, cx.range(line_node).start)
     };
     if let Some(line_start) = line_start_if_leads(end_loc.start, cx) {
         let indent = " ".repeat(target_col);
@@ -259,6 +274,44 @@ fn fmt_slc(slc: &SrcLineCol) -> String {
 fn start_for_block_node(block: NodeId, cx: &Cx<'_>) -> NodeId {
     let target = block_end_align_target(block, cx);
     find_lhs_node(target, cx)
+}
+
+/// `start_for_line_node`: the start-of-line autocorrect anchor.
+///
+/// ```ruby
+/// def start_for_line_node(block_node)
+///   start_node = start_for_block_node(block_node)
+///   start_node = start_node.each_ancestor.to_a.reverse.find do |node|
+///     same_line?(start_node, node)
+///   end || start_node
+///   find_lhs_node(start_node)
+/// end
+/// ```
+///
+/// Climb from `start_for_block_node` through ancestors that share its first
+/// line and take the topmost such ancestor (source ranges nest, so any ancestor
+/// on the start node's first line implies every intermediate ancestor is too —
+/// a simple parent walk while first lines match yields the same node). Then
+/// descend the assignment LHS again. Used only by the autocorrect column for the
+/// `either`/`start_of_line` styles; the message keeps `start_for_block_node`.
+fn start_for_line_node(block: NodeId, cx: &Cx<'_>) -> NodeId {
+    let start_node = start_for_block_node(block, cx);
+    let bytes = cx.source().as_bytes();
+    let start_first = cx.range(start_node).start;
+    let mut topmost = start_node;
+    let mut current = start_node;
+    while let Some(parent) = cx.parent(current).get() {
+        // `same_line?(start_node, parent)`: the parent's first line equals the
+        // start node's first line iff no newline lies in `[parent.start,
+        // start_node.start)` (the parent always begins at or before the node).
+        let (lo, hi) = (cx.range(parent).start.min(start_first), start_first);
+        if bytes[lo as usize..hi as usize].contains(&b'\n') {
+            break;
+        }
+        topmost = parent;
+        current = parent;
+    }
+    find_lhs_node(topmost, cx)
 }
 
 /// `block_end_align_target`: walk `[block, *ancestors]` pairwise and return the
@@ -536,5 +589,49 @@ mod tests {
             offenses[0].message,
             "`end` at 2, 2 is not aligned with `x << test do` at 1, 0."
         );
+    }
+
+    /// murphy-o3b2: a block passed as an argument whose enclosing call shares the
+    /// block's first line. RuboCop's `start_for_block_node` (the message anchor)
+    /// is the block (`foo do` at 1, 5), but `autocorrect` uses
+    /// `start_for_line_node` — it climbs to the topmost ancestor on the block's
+    /// first line (`puts`, col 0) and re-indents `end` there. The message must
+    /// still anchor on the block, and the alt is the do-line.
+    #[test]
+    fn corrects_block_argument_to_enclosing_line_node() {
+        let src = "puts(foo do\n  x\n   end)\n";
+        let run = run_cop_with_edits::<Cop>(src);
+        assert_eq!(run.offenses.len(), 1, "got {:?}", run.offenses);
+        assert_eq!(
+            run.offenses[0].message,
+            "`end` at 3, 3 is not aligned with `foo do` at 1, 5 or `puts(foo do` at 1, 0."
+        );
+        // `start_for_line_node` climbs to `puts` (col 0), not the block (col 5).
+        assert_eq!(apply(src, &run.edits), "puts(foo do\n  x\nend)\n");
+    }
+
+    /// murphy-o3b2 idempotency: re-running on the corrected source is clean.
+    #[test]
+    fn block_argument_correction_is_idempotent() {
+        let src = "puts(foo do\n  x\n   end)\n";
+        let run = run_cop_with_edits::<Cop>(src);
+        let fixed = apply(src, &run.edits);
+        assert!(run_cop::<Cop>(&fixed).is_empty(), "not idempotent: {fixed:?}");
+    }
+
+    /// murphy-o3b2 no-regression: a deep `a.b do … end.c do … end` chain. The
+    /// outer block has no same-line ancestor to climb to, so `start_for_line_node`
+    /// == `start_for_block_node` and both message and correction already matched
+    /// RuboCop before the line-node fix.
+    #[test]
+    fn corrects_chained_block_outer_end() {
+        let src = "a.b do\n  x\nend.c do\n  y\n  end\n";
+        let run = run_cop_with_edits::<Cop>(src);
+        assert_eq!(run.offenses.len(), 1, "got {:?}", run.offenses);
+        assert_eq!(
+            run.offenses[0].message,
+            "`end` at 5, 2 is not aligned with `a.b do` at 1, 0 or `end.c do` at 3, 0."
+        );
+        assert_eq!(apply(src, &run.edits), "a.b do\n  x\nend.c do\n  y\nend\n");
     }
 }

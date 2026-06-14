@@ -7,8 +7,8 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/EmptyLinesAroundMethodBody
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues: [murphy-a2x8]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Ports RuboCop's `EmptyLinesAroundBody` mixin (`KIND = 'method'`,
 //!   `on_def`/`on_defs`). This cop has no `EnforcedStyle` — it always enforces
@@ -32,16 +32,16 @@
 //!   fixpoint RuboCop reaches by re-running its single-line removal. Verified
 //!   against RuboCop 1.86.2 (TargetRubyVersion 3.0).
 //!
-//!   ABI note: `NodeLoc` exposes only `expression`/`name` ranges, so the
-//!   adjusted first line is derived from the arguments node's `expression`
-//!   range (zero-width ⇒ no args ⇒ def line), matching RuboCop's
-//!   `arguments.source_range&.last_line`.
-//!
-//!   Remaining gap (tracked in murphy-a2x8): parenless multi-line argument
-//!   lists do not contribute their last line to the `adjusted_first_line`
-//!   computation (only the parameter-list closing `)` line is used), so a blank
-//!   line after a parenless multi-line signature anchors on the method-name
-//!   line rather than the signature's true last line.
+//!   ABI note: Murphy's empty `Args` node carries the whole-def range rather
+//!   than a parameter-list sub-range, so it cannot stand in for RuboCop's
+//!   `arguments.source_range`. The signature's last line is instead the maximum
+//!   of the last *argument node's* last line and the parameter-list closing `)`
+//!   line (when parenthesized) — covering both the parenthesized trailing-comma
+//!   shape (`)` on its own line, below the last arg) and the parenless
+//!   multi-line shape (no `)`, so the last argument governs — murphy-a2x8). When
+//!   the def has no parameters the args node is absent and RuboCop's
+//!   `arguments.source_range&.last_line` is nil, so the fallback is the
+//!   def/method-name line.
 //! ```
 
 use crate::cops::util::{check_empty_lines_around_body_blank_run, physical_lines};
@@ -85,13 +85,12 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // `adjusted_first_line = node.arguments.source_range&.last_line`.
     //
     // ABI note: Murphy's empty `Args` node carries the *whole def* range
-    // rather than a parameter-list sub-range, so the args node's
-    // `expression` cannot stand in for RuboCop's `arguments.source_range`.
-    // Instead we derive the signature's last line from the parameter-list's
-    // closing `)` token (when the def is parenthesized) or fall back to the
-    // method-name line. This matches `arguments.source_range&.last_line` for
-    // the common shapes; parenless multi-line argument lists are a documented
-    // gap (murphy-a2x8).
+    // rather than a parameter-list sub-range, so the args node's `expression`
+    // cannot stand in for RuboCop's `arguments.source_range`. Instead the
+    // signature's last line is the maximum of the last argument node's last line
+    // and the parameter-list closing `)` line (when parenthesized) — covering
+    // both the parenthesized and the parenless multi-line shapes (murphy-a2x8),
+    // and falling back to the method-name line when the def has no parameters.
     let first_line = adjusted_first_line(node, cx);
 
     let last_line = line_1based(range.end.saturating_sub(1).max(range.start), cx);
@@ -286,20 +285,36 @@ fn has_parenless_params(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// The 1-based physical line where the method signature ends — RuboCop's
-/// `adjusted_first_line`. Uses the parameter-list closing `)` line when the
-/// def has parenthesized parameters; otherwise the method-name line (which is
-/// the `def` line for the common single-line `def foo` / `def foo arg` shapes).
+/// `adjusted_first_line = node.arguments.source_range&.last_line`.
 ///
-/// The parameter-list close is located via [`param_list_close_end`], which
-/// anchors its scan at `cx.range(node).start` and takes the *last* top-level
-/// `)` before the body. Anchoring at the def's own start is load-bearing: a
-/// `def`'s name loc is `{0,0}` in Murphy's ABI, so a scan keyed off
-/// `name_range.end` would begin at byte 0 of the file and — for a method with a
-/// preceding sibling (both wrapped in a top-level `begin`) — walk into the
-/// earlier sibling's body and latch onto an inner call's `)` (murphy-1kiw).
+/// RuboCop's `arguments.source_range` spans the whole parameter list, so its
+/// `last_line` is:
+///   - the closing `)` line for a parenthesized list (the `)` is the range's
+///     last token, even when a trailing comma puts it below the last argument);
+///   - the *last argument's* last line for a parenless list (no `)` to anchor
+///     on) — murphy-a2x8;
+///   - absent when there are no parameters, in which case RuboCop falls back to
+///     `node.source_range.first_line` (the `def`/method-name line).
+///
+/// Murphy's empty `Args` node carries the whole-def range, so it cannot stand in
+/// for `arguments.source_range`. Instead the last line is the maximum of the
+/// last *argument node's* last line and the parameter-list closing `)` line
+/// (when parenthesized). Taking the max covers both the parenthesized trailing-
+/// comma shape (`)` on its own line, below the last arg) and the parenless
+/// shape (no `)`, so the last arg governs).
+///
+/// [`param_list_close_end`] anchors its scan at `cx.range(node).start` and takes
+/// the *last* top-level `)` before the body. Anchoring at the def's own start is
+/// load-bearing: a `def`'s name loc is `{0,0}` in Murphy's ABI, so a scan keyed
+/// off `name_range.end` would begin at byte 0 of the file and — for a method
+/// with a preceding sibling (both wrapped in a top-level `begin`) — walk into
+/// the earlier sibling's body and latch onto an inner call's `)` (murphy-1kiw).
 fn adjusted_first_line(node: NodeId, cx: &Cx<'_>) -> usize {
     let name_range = cx.loc(node).name;
     let name_line = line_1based(name_range.end.max(cx.range(node).start), cx);
+
+    // `node.arguments` — present only when the def declares parameters.
+    let last_arg_line = last_argument_last_line(node, cx);
 
     // Bound the paren scan by the body's start so parentheses inside the body
     // are never mistaken for the parameter list.
@@ -311,10 +326,33 @@ fn adjusted_first_line(node: NodeId, cx: &Cx<'_>) -> usize {
 
     // `close_end` is the offset just past the `)`; `-1` lands on the `)` itself
     // (a single byte) so the line maps to the closing-paren line.
-    match param_list_close_end(node, body_start, cx) {
-        Some(close_end) => line_1based(close_end.saturating_sub(1), cx),
-        None => name_line,
+    let close_line = param_list_close_end(node, body_start, cx)
+        .map(|close_end| line_1based(close_end.saturating_sub(1), cx));
+
+    match (last_arg_line, close_line) {
+        // Parenless or parenthesized with the last arg below the `)` line never
+        // happens, so the max of the two is the parameter list's last line.
+        (Some(arg_line), Some(close)) => arg_line.max(close),
+        (Some(arg_line), None) => arg_line,
+        // No arguments — RuboCop's `source_range&.last_line` is nil; fall back to
+        // the def/method-name line. (`close_line` is `None` here too.)
+        (None, _) => name_line,
     }
+}
+
+/// The 1-based last physical line of the def's *last* declared parameter node,
+/// or `None` when the def has no parameters. Used to recover RuboCop's
+/// `arguments.source_range.last_line` for parenless multi-line signatures, where
+/// no closing `)` anchors the line.
+fn last_argument_last_line(node: NodeId, cx: &Cx<'_>) -> Option<usize> {
+    let args = cx.def_arguments(node).get()?;
+    let NodeKind::Args(list) = cx.kind(args) else {
+        return None;
+    };
+    let &last = cx.list(*list).last()?;
+    // `source_range.last_line` is the line of the argument's final byte.
+    let end = cx.range(last).end;
+    Some(line_1based(end.saturating_sub(1).max(cx.range(last).start), cx))
 }
 
 /// 1-based physical line of `offset`.
@@ -481,6 +519,30 @@ mod tests {
     #[test]
     fn accepts_no_body_blank_with_multiline_signature() {
         let src = "def foo(a,\n        b)\n  x = 1\nend\n";
+        test::<EmptyLinesAroundMethodBody>().expect_no_offenses(src);
+    }
+
+    /// murphy-a2x8: a *parenless* multi-line signature. RuboCop's
+    /// `adjusted_first_line` is `node.arguments.source_range.last_line` — the last
+    /// argument's line (`b`, line 2), not the `def` line. A blank line after the
+    /// last argument is a method-body-beginning offense.
+    #[test]
+    fn flags_empty_line_after_parenless_multiline_signature() {
+        let src = "def foo a,\n        b\n\n  x = 1\nend\n";
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at method body beginning."
+        );
+    }
+
+    /// murphy-a2x8: a blank line *inside* a parenless multi-line signature
+    /// (between two arguments, before the last) is not a body boundary, so the
+    /// cop must not fire there.
+    #[test]
+    fn accepts_blank_inside_parenless_multiline_signature() {
+        let src = "def foo a,\n\n        b\n  x = 1\nend\n";
         test::<EmptyLinesAroundMethodBody>().expect_no_offenses(src);
     }
 
