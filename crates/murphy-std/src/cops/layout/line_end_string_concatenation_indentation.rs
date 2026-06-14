@@ -212,9 +212,11 @@ fn base_column(child: NodeId, cx: &Cx<'_>, src: &str) -> usize {
     src[line_start..i].chars().count()
 }
 
-/// Configured indentation width (0 → default 2).
+/// Configured indentation width. Only an unset (`None`) override falls back to
+/// 2; an explicit `0` is honoured (Ruby treats `0` as truthy in
+/// `cop_config['IndentationWidth'] || …`). Negatives clamp to 0.
 fn indentation_width(opts: &LineEndStringConcatenationIndentationOptions) -> usize {
-    opts.indentation_width.filter(|&w| w > 0).map_or(2, |w| w as usize)
+    opts.indentation_width.map_or(2, |w| w.max(0) as usize)
 }
 
 /// Visible column (0-based, char count) of a byte offset within its line.
@@ -357,6 +359,24 @@ mod tests {
     fn ignores_interpolated_string() {
         // `"a#{b}c"` is a dstr with a non-str child → not a backslash concat.
         test::<LineEndStringConcatenationIndentation>().expect_no_offenses("x = \"a#{b}c\"\n");
+    }
+
+    /// Parity pin (Codex #387/#384): an explicit `IndentationWidth: 0` is
+    /// honoured (Ruby treats `0` as truthy), so the `indented` style expects the
+    /// continuation at `base_column + 0`. `'y'` at column 0 is accepted; `0` must
+    /// not fall back to width 2.
+    #[test]
+    fn indented_honors_zero_indentation_width() {
+        let opts = LineEndStringConcatenationIndentationOptions {
+            enforced_style: ConcatenationStyle::Indented,
+            indentation_width: Some(0),
+        };
+        test::<LineEndStringConcatenationIndentation>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {"
+                result = 'x' \\
+                'y'
+            "});
     }
 }
 
