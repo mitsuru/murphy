@@ -5,7 +5,7 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Lint/SafeNavigationChain
-//! upstream_version_checked: master
+//! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues: []
 //! notes: >
@@ -14,6 +14,13 @@
 //!   navigation chain. It skips nil-safe predicate/coercion methods. RuboCop's
 //!   broader operator/index assignment, block-wrapper, logical-condition, and
 //!   ternary autocorrection shapes are documented v1 gaps.
+//!
+//!   `NIL_SAFE_METHODS` approximates RuboCop's `nil_methods` (the `NilMethods`
+//!   mixin: `nil.methods` in an ActiveSupport-loaded runtime, plus the cop's
+//!   `AllowedMethods`). It includes ActiveSupport's nil-safe `blank?` /
+//!   `present?` / `presence` / `try` / `try!`; `presence_in` is *not* nil-safe
+//!   and is correctly still flagged (murphy-wcdv). The list is hardcoded — a
+//!   user-configured `AllowedMethods` is a documented gap.
 //! ```
 
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
@@ -24,7 +31,9 @@ const NIL_SAFE_METHODS: &[&str] = &[
     "nil?",
     "blank?",
     "present?",
+    "presence",
     "try",
+    "try!",
     "to_a",
     "to_c",
     "to_d",
@@ -137,5 +146,32 @@ mod tests {
     #[test]
     fn accepts_nil_predicate_after_safe_navigation() {
         test::<SafeNavigationChain>().expect_no_offenses("x&.foo.nil?\n");
+    }
+
+    /// Regression (murphy-wcdv): ActiveSupport's nil-safe `presence` / `try!`
+    /// after a safe-navigation call must not be flagged — RuboCop 1.87 allows
+    /// them via `nil_methods`. All 6 Mastodon false positives were `.presence`.
+    #[test]
+    fn accepts_presence_after_safe_navigation() {
+        test::<SafeNavigationChain>().expect_no_offenses("x&.foo.presence\n");
+    }
+
+    #[test]
+    fn accepts_try_bang_after_safe_navigation() {
+        test::<SafeNavigationChain>().expect_no_offenses("x&.foo.try!(:z)\n");
+    }
+
+    /// Discriminator (murphy-wcdv): `presence_in` is *not* nil-safe, so it must
+    /// still be flagged — adding `presence` must not over-broaden to its
+    /// look-alikes. RuboCop 1.87 flags this.
+    #[test]
+    fn flags_presence_in_after_safe_navigation() {
+        test::<SafeNavigationChain>().expect_correction(
+            indoc! {r#"
+                x&.foo.presence_in([1])
+                      ^^^^^^^^^^^^^^^^^ Do not chain ordinary method call after safe navigation operator.
+            "#},
+            "x&.foo&.presence_in([1])\n",
+        );
     }
 }
