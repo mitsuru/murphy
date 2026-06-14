@@ -8,8 +8,8 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/EmptyLinesAroundExceptionHandlingKeywords
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues: [murphy-1g6c]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Ports RuboCop's same-named cop. It has no `EnforcedStyle` — the style is
 //!   hardcoded `no_empty_lines`. Handlers fire on `def`/`defs`/`block`/
@@ -24,7 +24,11 @@
 //!   line (`last_body_and_end_on_same_line?`). Both guards are ported: the
 //!   former compares keyword line to the construct's start line; the latter
 //!   compares the construct's `end_keyword()` line to the last rescue/else
-//!   keyword line (rescue) or the structure's last line (ensure).
+//!   keyword line (rescue) or the ensure node's last line (ensure). For an
+//!   *empty* ensure clause the ensure node's last line is the `ensure` keyword
+//!   line, not the protected body's last line — matching the parser-gem
+//!   `body.loc.last_line` and RuboCop 1.86.2 behaviour on
+//!   `begin\n  x\n\nensure end` (no offenses).
 //!
 //!   ABI note: `NodeLoc` has no `keyword`/`else`/`end` sub-ranges, so keyword
 //!   line numbers are recovered from the `Rescue`/`Resbody`/`Ensure` node
@@ -32,11 +36,14 @@
 //!   the relevant sibling sub-nodes. This avoids a global `else` scan (which
 //!   would wrongly catch `if`/`case` `else`).
 //!
-//!   Gap (tracked in murphy-1g6c): only the top-level rescue/ensure of each
-//!   construct is walked; deeply nested constructs are visited through their
-//!   own `def`/`block`/`kwbegin` handler, matching RuboCop. Inline `rescue`
-//!   modifiers (`x rescue y`) have no keyword body and are not flagged
-//!   (RuboCop also ignores them).
+//!   Scope (parity-equivalent, not a gap): only the top-level rescue/ensure of
+//!   each construct is walked; deeply nested constructs are visited through
+//!   their own `def`/`block`/`kwbegin` handler, matching RuboCop. Inline
+//!   `rescue` modifiers (`x rescue y`) have no keyword body and are not flagged
+//!   (RuboCop also ignores them). Parenless multi-line argument lists and
+//!   keyword-named labels (`ensure:`/`:else`) in argument position are handled
+//!   correctly — the token scans locate the nearest real keyword and never
+//!   match a symbol/label token (regression-tested).
 //! ```
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
@@ -221,14 +228,32 @@ fn last_body_line(structure: NodeId, cx: &Cx<'_>) -> Option<usize> {
             }
         }
         // For `ensure`, RuboCop uses `body.loc.last_line` of the parser-gem
-        // ensure node, whose range ends at the ensure body's last statement
-        // (not the construct's `end`). Murphy's `Ensure` node range spans the
-        // whole construct, so use the ensure body's last line directly (or the
-        // protected body's last line when the ensure clause is empty).
+        // ensure node. That node's source spans the protected body through the
+        // ensure clause but stops *before* the construct's `end` keyword, so its
+        // last line is:
+        //   - the ensure clause's last line when the clause is non-empty, else
+        //   - the `ensure` keyword's own line (an empty ensure clause adds no
+        //     further lines).
+        // It is NOT the protected body's last line — when the ensure clause is
+        // empty, falling back to the protected body under-reports the last line
+        // (e.g. `begin\n  x\n\nensure end`: protected body ends line 2 but the
+        // ensure node ends line 4, on the `end` line, so RuboCop skips all
+        // keyword checks). Verified against RuboCop 1.86.2.
         NodeKind::Ensure { body, ensure_ } => {
-            let content = ensure_.get().or_else(|| body.get())?;
-            let r = cx.range(content);
-            Some(line_1based(r.end.saturating_sub(1).max(r.start), cx))
+            if let Some(content) = ensure_.get() {
+                let r = cx.range(content);
+                Some(line_1based(r.end.saturating_sub(1).max(r.start), cx))
+            } else {
+                // Empty ensure clause: the node's last line is the `ensure`
+                // keyword line. Locate the keyword after the protected body
+                // (or from the structure start when the protected body is also
+                // empty, e.g. `def foo; ensure; end`).
+                let from = body
+                    .get()
+                    .map(|b| cx.range(b).end)
+                    .unwrap_or_else(|| cx.range(structure).start);
+                keyword_token_after("ensure", from, cx)
+            }
         }
         _ => None,
     }
@@ -590,5 +615,61 @@ mod tests {
         let src = "def foo\n  x\n\nrescue A\n  y\n\nrescue B\n  z\nend\n";
         let offenses = run_cop::<Cop>(src);
         assert_eq!(offenses.len(), 2, "got {offenses:?}");
+    }
+
+    /// `last_body_and_end_on_same_line?` for an **empty ensure clause** whose
+    /// `ensure` keyword shares a line with `end`. RuboCop reads the parser-gem
+    /// ensure node's `last_line`, which — with an empty ensure clause — is the
+    /// `ensure` keyword line, not the protected body's last line. When that
+    /// equals the `end` line, all keyword checks are skipped, so the blank line
+    /// before `ensure` is NOT flagged. Verified against RuboCop 1.86.2:
+    /// `begin\n  x\n\nensure end\n` -> no offenses.
+    #[test]
+    fn skips_empty_ensure_clause_on_end_line() {
+        let src = "begin\n  x\n\nensure end\n";
+        test::<Cop>().expect_no_offenses(src);
+    }
+
+    /// Control: an empty ensure clause whose `ensure` keyword is on its own line
+    /// (not the `end` line) is NOT skipped — the blank before `ensure` fires.
+    /// Verified against RuboCop 1.86.2:
+    /// `def foo\n  x\n\nensure\nend\n` -> 1 offense before `ensure`.
+    #[test]
+    fn flags_empty_ensure_clause_off_end_line() {
+        let src = "def foo\n  x\n\nensure\nend\n";
+        let offenses = run_cop::<Cop>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected before the `ensure`."
+        );
+    }
+
+    /// A parenless multi-line argument list in the protected body does not throw
+    /// off the `rescue` keyword line detection: the blank before `rescue` fires
+    /// exactly once. RuboCop 1.86.2 agrees.
+    #[test]
+    fn flags_before_rescue_with_parenless_multiline_args() {
+        let src = "def foo\n  bar a,\n      b\n\nrescue\n  c\nend\n";
+        let offenses = run_cop::<Cop>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected before the `rescue`."
+        );
+    }
+
+    /// A keyword-named label (`ensure:`) inside a parenless multi-line arg list
+    /// must not be mistaken for the `ensure` keyword: the blank before the real
+    /// `ensure` fires exactly once. RuboCop 1.86.2 agrees.
+    #[test]
+    fn ignores_keyword_label_in_args() {
+        let src = "def foo\n  bar ensure: 1,\n      x: 2\n\nensure\n  y\nend\n";
+        let offenses = run_cop::<Cop>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected before the `ensure`."
+        );
     }
 }
