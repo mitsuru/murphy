@@ -5,11 +5,14 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Style/FileOpen
-//! upstream_version_checked: 1.86.2
+//! upstream_version_checked: 1.87.0
 //! status: verified
 //! gap_issues: []
 //! notes: >
-//!   Full parity with RuboCop.
+//!   Mirrors RuboCop's `offensive_usage?`: only `File.open` whose value is
+//!   discarded, assigned to a local variable, or used as the receiver of a
+//!   chained call is flagged. A returned or argument-passed open file is left
+//!   to the caller.
 //! ```
 
 use murphy_plugin_api::{Cx, NodeId, NodeKind, cop};
@@ -46,12 +49,44 @@ impl FileOpen {
         if has_block(node, cx) {
             return;
         }
-        // Flag all blockless File.open calls. We flag even when the
-        // result is chained (`File.open('f').read`) because the inner
-        // `open` is the only call this cop dispatches on, and the outer
-        // `.read` won't re-trigger it.
+        // RuboCop's `offensive_usage?`: only flag when the descriptor is at
+        // risk — discarded, assigned to a local, or the receiver of a chained
+        // call. A returned or argument-passed `File.open` is the caller's to
+        // manage, so it is left alone.
+        if !offensive_usage(node, cx) {
+            return;
+        }
         cx.emit_offense(cx.range(node), MSG, None);
     }
+}
+
+/// RuboCop's `offensive_usage?`: flag when `File.open`'s value is discarded, or
+/// when its immediate parent assigns it to a local variable, or when it is the
+/// receiver of a chained call.
+fn offensive_usage(node: NodeId, cx: &Cx<'_>) -> bool {
+    if !value_used(node, cx) {
+        return true;
+    }
+    let Some(parent_id) = cx.parent(node).get() else {
+        return false;
+    };
+    matches!(*cx.kind(parent_id), NodeKind::Lvasgn { .. })
+        || cx.call_receiver(parent_id).get() == Some(node)
+}
+
+/// Approximates rubocop-ast's `Node#value_used?`. A program's top-level
+/// statement value, and any non-final statement of a `begin` sequence, are
+/// discarded; every other position (assignment, argument, return, implicit
+/// method/block return, …) uses the value.
+fn value_used(node: NodeId, cx: &Cx<'_>) -> bool {
+    let Some(parent_id) = cx.parent(node).get() else {
+        return false;
+    };
+    if let NodeKind::Begin(list) = *cx.kind(parent_id) {
+        let children = cx.list(list);
+        return children.last() == Some(&node) && value_used(parent_id, cx);
+    }
+    true
 }
 
 fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
@@ -117,6 +152,44 @@ mod tests {
     #[test]
     fn accepts_file_read() {
         test::<FileOpen>().expect_no_offenses("File.read('file')\n");
+    }
+
+    #[test]
+    fn flags_standalone_file_open_whose_value_is_discarded() {
+        // First statement in a sequence: value discarded -> flagged.
+        test::<FileOpen>().expect_offense(indoc! {"
+            File.open('file')
+            ^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+            do_more
+        "});
+    }
+
+    #[test]
+    fn accepts_file_open_as_method_return_value() {
+        // Implicit return of an open file: the caller manages the descriptor.
+        test::<FileOpen>().expect_no_offenses("def io\n  File.open('file')\nend\n");
+    }
+
+    #[test]
+    fn accepts_file_open_explicitly_returned() {
+        test::<FileOpen>().expect_no_offenses("def io\n  return File.open('file')\nend\n");
+    }
+
+    #[test]
+    fn accepts_file_open_passed_as_argument() {
+        test::<FileOpen>().expect_no_offenses("process(File.open('file'))\n");
+    }
+
+    #[test]
+    fn accepts_file_open_as_keyword_argument_value() {
+        // Mastodon's `attach(file: File.open('…'))` shape.
+        test::<FileOpen>().expect_no_offenses("attach(file: File.open('file'))\n");
+    }
+
+    #[test]
+    fn accepts_file_open_as_block_return_value() {
+        // `let(:f) { File.open('…') }` — the block's value is the open file.
+        test::<FileOpen>().expect_no_offenses("let(:f) { File.open('file') }\n");
     }
 }
 murphy_plugin_api::submit_cop!(FileOpen);
