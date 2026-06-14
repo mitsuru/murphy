@@ -115,7 +115,7 @@ impl ClosingParenthesisIndentation {
 fn configured_indentation_width(cx: &Cx<'_>) -> usize {
     cx.options_or_default::<ClosingParenthesisIndentationOptions>()
         .indentation_width
-        .unwrap_or_else(|| cx.indentation_width())
+        .unwrap_or(cx.indentation_width())
         .max(0) as usize
 }
 
