@@ -38,10 +38,12 @@
 //!   of the last *argument node's* last line and the parameter-list closing `)`
 //!   line (when parenthesized) — covering both the parenthesized trailing-comma
 //!   shape (`)` on its own line, below the last arg) and the parenless
-//!   multi-line shape (no `)`, so the last argument governs — murphy-a2x8). When
-//!   the def has no parameters the args node is absent and RuboCop's
-//!   `arguments.source_range&.last_line` is nil, so the fallback is the
-//!   def/method-name line.
+//!   multi-line shape (no `)`, so the last argument governs — murphy-a2x8).
+//!   Empty parentheses (`def foo()` / `def foo(\n)`) carry no argument nodes but
+//!   the parser gem's empty `args` loc still spans `()`, so the `)` line governs
+//!   (verified against the gem). Only when the def has *no parentheses and no
+//!   parameters* (`def foo`) is RuboCop's `arguments.source_range&.last_line`
+//!   nil, so the fallback is the def/method-name line.
 //! ```
 
 use crate::cops::util::{check_empty_lines_around_body_blank_run, physical_lines};
@@ -334,9 +336,16 @@ fn adjusted_first_line(node: NodeId, cx: &Cx<'_>) -> usize {
         // happens, so the max of the two is the parameter list's last line.
         (Some(arg_line), Some(close)) => arg_line.max(close),
         (Some(arg_line), None) => arg_line,
-        // No arguments — RuboCop's `source_range&.last_line` is nil; fall back to
-        // the def/method-name line. (`close_line` is `None` here too.)
-        (None, _) => name_line,
+        // Empty parentheses (`def foo()` / `def foo(\n)`): the parser gem's empty
+        // `args` node still has a `Collection` loc whose `expression` spans `()`,
+        // so `source_range.last_line` is the closing `)` line — verified against
+        // the parser gem. The line directly after that `)` is the body
+        // beginning.
+        (None, Some(close)) => close,
+        // No parentheses, no arguments (`def foo`): the parser gem's `args` loc
+        // `expression` is nil, so RuboCop's `source_range&.last_line` is nil and
+        // it falls back to `node.source_range.first_line` (the method-name line).
+        (None, None) => name_line,
     }
 }
 
@@ -544,6 +553,23 @@ mod tests {
     fn accepts_blank_inside_parenless_multiline_signature() {
         let src = "def foo a,\n\n        b\n  x = 1\nend\n";
         test::<EmptyLinesAroundMethodBody>().expect_no_offenses(src);
+    }
+
+    /// murphy-a2x8 (Gemini #395): empty parentheses spanning their own line
+    /// (`def foo(\n)`). The parser gem's empty `args` node still carries a loc
+    /// whose `expression` spans `()`, so `adjusted_first_line` is the closing
+    /// `)` line (verified against the gem: range `()`, `last_line` = `)` line),
+    /// NOT the `def` line. A blank line directly after the `)` is a body
+    /// beginning offense.
+    #[test]
+    fn flags_empty_line_after_empty_parens_on_own_line() {
+        let src = "def foo(\n)\n\n  x = 1\nend\n";
+        let offenses = run_cop::<EmptyLinesAroundMethodBody>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at method body beginning."
+        );
     }
 
     #[test]
