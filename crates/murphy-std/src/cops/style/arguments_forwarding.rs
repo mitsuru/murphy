@@ -282,7 +282,7 @@ fn classify_send(
         return None;
     }
 
-    let class = if ruby_32_only_anonymous(def, send, def_args, &call_args, target, cx) {
+    let class = if ruby_32_only_anonymous(def, send, def_args, call_args, target, cx) {
         ForwardClass::AllAnonymous
     } else if can_forward_all(
         fa,
@@ -294,7 +294,7 @@ fn classify_send(
         block_name,
         referenced,
         def_args,
-        &call_args,
+        call_args,
         target,
         allow_only_rest,
         cx,
@@ -559,12 +559,12 @@ impl<'a, 'cx> Fixer<'a, 'cx> {
             end,
         };
         self.cx.emit_offense(range, FORWARDING_MSG, None);
-        if node_has_arg_parens(paren_node, self.cx) {
-            self.cx.emit_edit(range, "...");
-        } else if let Some(callee_end) = node_callee_end(paren_node, self.cx) {
-            self.cx
-                .emit_edit(Range { start: callee_end, end: range.end }, "(...)");
-        }
+        // Add parens around the existing argument list if missing (a no-op when
+        // already parenthesized), then replace only the forwardable slice with
+        // `...`. Splitting the edits preserves leading non-forwarded args, e.g.
+        // `bar a, *args, &block` -> `bar(a, ...)` rather than `bar(...)`.
+        self.add_parens_if_missing(paren_node);
+        self.cx.emit_edit(range, "...");
     }
 
     fn register_args_offense(&mut self, paren_node: NodeId, arg: Option<NodeId>) {
@@ -677,7 +677,8 @@ fn send_in_any_block(send: NodeId, cx: &Cx<'_>) -> bool {
 /// `forward_all_first_argument`: the last bare `*` (forwarded_restarg) in the call.
 fn forward_all_first_argument(send: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     get_call_args(send, cx)
-        .into_iter()
+        .iter()
+        .copied()
         .rev()
         .find(|&a| matches!(*cx.kind(a), NodeKind::Splat(inner) if inner.get().is_none()))
 }
@@ -697,14 +698,14 @@ fn first_argument_start(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
 }
 
 /// The argument list of a def/defs (its `Args` children) or a call.
-fn arg_list_of<'cx>(node: NodeId, cx: &Cx<'cx>) -> Vec<NodeId> {
+fn arg_list_of<'cx>(node: NodeId, cx: &Cx<'cx>) -> &'cx [NodeId] {
     match *cx.kind(node) {
         NodeKind::Def { .. } | NodeKind::Defs { .. } => match cx.def_arguments(node).get() {
             Some(args_id) => match *cx.kind(args_id) {
-                NodeKind::Args(list) => cx.list(list).to_vec(),
-                _ => vec![],
+                NodeKind::Args(list) => cx.list(list),
+                _ => &[],
             },
-            None => vec![],
+            None => &[],
         },
         _ => get_call_args(node, cx),
     }
@@ -807,11 +808,11 @@ fn hash_child_count(kwsplat: NodeId, cx: &Cx<'_>) -> usize {
     }
 }
 
-fn get_call_args(call_id: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
+fn get_call_args<'cx>(call_id: NodeId, cx: &Cx<'cx>) -> &'cx [NodeId] {
     match *cx.kind(call_id) {
-        NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => cx.list(args).to_vec(),
-        NodeKind::Super(list) | NodeKind::Yield(list) => cx.list(list).to_vec(),
-        _ => vec![],
+        NodeKind::Send { .. } | NodeKind::Csend { .. } => cx.call_arguments(call_id),
+        NodeKind::Super(list) | NodeKind::Yield(list) => cx.list(list),
+        _ => &[],
     }
 }
 
@@ -856,6 +857,9 @@ fn collect_referenced_lvars<'a>(body_id: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
             _ => {}
         }
     }
+    // Names are only consumed via membership checks, so order is irrelevant;
+    // sort before `dedup` so non-consecutive duplicates collapse too.
+    out.sort_unstable();
     out.dedup();
     out
 }
@@ -1006,6 +1010,27 @@ mod tests {
                 def foo(a, *args, &block)
                            ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
                   bar(a, *args, &block)
+                         ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                end
+            "#},
+            indoc! {r#"
+                def foo(a, ...)
+                  bar(a, ...)
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn flags_leading_required_arg_before_splat_without_parens() {
+        // No-paren forward-all must wrap the existing argument list in parens
+        // and replace only the forwardable slice, keeping the leading `a`:
+        // `bar a, *args, &block` -> `bar(a, ...)`, never `bar(...)`.
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def foo a, *args, &block
+                           ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                  bar a, *args, &block
                          ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
                 end
             "#},

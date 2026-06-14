@@ -3220,6 +3220,37 @@ mod tests {
     }
 
     #[test]
+    fn target_ruby_version_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.target_ruby_version = crate::RubyVersion::to_wire(Some(crate::RubyVersion::new(3, 2)));
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(
+            cx.target_ruby_version(),
+            Some(crate::RubyVersion::new(3, 2))
+        );
+    }
+
+    #[test]
+    fn missing_target_ruby_version_decodes_to_none() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        // `cx_raw_for` leaves `target_ruby_version` at the wire sentinel 0.
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(cx.target_ruby_version(), None);
+    }
+
+    #[test]
     fn active_support_extensions_enabled_decodes_from_raw_context() {
         let ast = murphy_translate::translate("nil\n", "t.rb");
         let fns = FnTable {
