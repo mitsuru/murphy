@@ -14,9 +14,8 @@
 //!   with a TODO comment in RuboCop's source; same behavior here.
 //!   AllowedNumbers is supported (Vec<String>, compared as digit-only strings
 //!   against the raw integer part).
-//!   AllowedPatterns (regex) is not supported — derive only covers Vec<String>;
-//!   users relying on AllowedPatterns in .rubocop.yml will not get the same
-//!   exemption in Murphy.
+//!   AllowedPatterns is supported: a literal whose source matches any
+//!   configured regex is exempt (matched via `cx.matches_any_pattern`).
 //!   Strict mode is supported: in non-strict mode, a short leading group is
 //!   allowed (e.g. `10_000`); in strict mode every group must be exactly 3.
 //!   MinDigits defaults to 5 (matching RuboCop default).
@@ -73,6 +72,13 @@ pub struct NumericLiteralsOptions {
         description = "Specific numbers (as strings) that are exempt from this cop."
     )]
     pub allowed_numbers: Vec<String>,
+
+    #[option(
+        name = "AllowedPatterns",
+        default = [],
+        description = "Regular expressions; a literal whose source matches any is exempt."
+    )]
+    pub allowed_patterns: Vec<String>,
 }
 
 #[cop(
@@ -159,6 +165,12 @@ impl NumericLiterals {
                 .collect();
             n_stripped == stripped_int
         }) {
+            return;
+        }
+
+        // AllowedPatterns: exempt the literal when its source matches any
+        // configured regex (RuboCop matches against `node.source`).
+        if !opts.allowed_patterns.is_empty() && cx.matches_any_pattern(src, &opts.allowed_patterns) {
             return;
         }
 
@@ -446,8 +458,40 @@ mod tests {
                 min_digits: 5,
                 strict: false,
                 allowed_numbers: vec!["10000".to_string()],
+                allowed_patterns: vec![],
             })
             .expect_no_offenses("x = 10000\n");
+    }
+
+    #[test]
+    fn accepts_allowed_pattern() {
+        // Mastodon exempts migration timestamps like `2017_09_24_022025` via
+        // AllowedPatterns `\d{4}_\d{2}_\d{2}_\d{6}`. Without it the `022025`
+        // run (6 consecutive digits) would be flagged.
+        test::<NumericLiterals>()
+            .with_options(&NumericLiteralsOptions {
+                min_digits: 5,
+                strict: false,
+                allowed_numbers: vec![],
+                allowed_patterns: vec![r"\d{4}_\d{2}_\d{2}_\d{6}".to_string()],
+            })
+            .expect_no_offenses("x = 2017_09_24_022025\n");
+    }
+
+    #[test]
+    fn non_matching_allowed_pattern_still_flags() {
+        // A configured pattern that does not match must not exempt the literal.
+        test::<NumericLiterals>()
+            .with_options(&NumericLiteralsOptions {
+                min_digits: 5,
+                strict: false,
+                allowed_numbers: vec![],
+                allowed_patterns: vec![r"\Aunrelated\z".to_string()],
+            })
+            .expect_offense(indoc! {"
+                x = 1000000
+                    ^^^^^^^ Use underscores(_) as thousands separator and separate every 3 digits with them.
+            "});
     }
 
     #[test]
@@ -468,6 +512,7 @@ mod tests {
                 min_digits: 5,
                 strict: true,
                 allowed_numbers: vec![],
+                allowed_patterns: vec![],
             })
             .expect_no_offenses("x = 10_000
 ");
@@ -483,6 +528,7 @@ mod tests {
                 min_digits: 5,
                 strict: true,
                 allowed_numbers: vec![],
+                allowed_patterns: vec![],
             })
             .expect_offense(indoc! {"
                 x = 1_000_00
@@ -497,6 +543,7 @@ mod tests {
                 min_digits: 5,
                 strict: false,
                 allowed_numbers: vec![],
+                allowed_patterns: vec![],
             })
             .expect_no_offenses("x = 10_000\n");
     }
