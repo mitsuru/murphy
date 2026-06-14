@@ -5,16 +5,20 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Lint/SafeNavigationConsistency
-//! upstream_version_checked: master
+//! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues: []
 //! notes: >
 //!   Initial v1 port covers simple two-operand `&&` and `||` conditions where
-//!   both operands are dot/safe-navigation calls on the same base receiver. It
-//!   autocorrects only explicit `.`/`&.` operator ranges. RuboCop's recursive
-//!   operand collection, grouped conditions, operator calls, assignment calls,
-//!   configured AllowedMethods, and full nil-method handling are documented v1
-//!   gaps.
+//!   both operands are dot/safe-navigation calls on the same receiver. Operands
+//!   are matched by their *immediate* receiver source, mirroring RuboCop's
+//!   `receiver_name_as_key` (`method.receiver.source`): a multi-level chain like
+//!   `@resource&.account&.suspended?` keys on `@resource&.account`, so it is not
+//!   grouped with `@resource.local?` (which keys on `@resource`) and no offense
+//!   fires (murphy-wcdv). It autocorrects only explicit `.`/`&.` operator
+//!   ranges. RuboCop's recursive operand collection, grouped conditions,
+//!   operator calls, assignment calls, configured AllowedMethods, and full
+//!   nil-method handling are documented v1 gaps.
 //! ```
 
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
@@ -60,7 +64,11 @@ enum LogicalOp {
 
 struct CallInfo<'a> {
     safe_navigation: bool,
-    base_receiver: &'a str,
+    /// Source of this call's *immediate* receiver — RuboCop groups operands by
+    /// `method.receiver.source` (`receiver_name_as_key`), so the comparison must
+    /// use the outermost call's direct receiver, not a recursively-resolved base
+    /// (murphy-wcdv).
+    receiver_source: &'a str,
     operator: Range,
 }
 
@@ -71,7 +79,7 @@ fn check_pair(lhs: NodeId, rhs: NodeId, op: LogicalOp, cx: &Cx<'_>) {
     let Some(rhs_call) = call_info(rhs, cx) else {
         return;
     };
-    if lhs_call.base_receiver != rhs_call.base_receiver {
+    if lhs_call.receiver_source != rhs_call.receiver_source {
         return;
     }
 
@@ -108,20 +116,13 @@ fn call_info<'a>(node: NodeId, cx: &Cx<'a>) -> Option<CallInfo<'a>> {
     let receiver = cx.call_receiver(node).get()?;
     Some(CallInfo {
         safe_navigation: matches!(cx.kind(node), NodeKind::Csend { .. }),
-        base_receiver: base_receiver_source(receiver, cx),
+        // RuboCop's `method.receiver.source`: the outermost call's *immediate*
+        // receiver, verbatim. `@resource&.account&.suspended?` keys on
+        // `@resource&.account`, not `@resource`, so it is not grouped with
+        // `@resource.local?` (murphy-wcdv).
+        receiver_source: cx.raw_source(cx.range(receiver)),
         operator,
     })
-}
-
-fn base_receiver_source<'a>(node: NodeId, cx: &Cx<'a>) -> &'a str {
-    match cx.kind(node) {
-        NodeKind::Send { receiver, .. } => receiver
-            .get()
-            .map(|receiver| base_receiver_source(receiver, cx))
-            .unwrap_or_else(|| cx.raw_source(cx.range(node))),
-        NodeKind::Csend { receiver, .. } => base_receiver_source(*receiver, cx),
-        _ => cx.raw_source(cx.range(node)),
-    }
 }
 
 fn is_nil_safe_method(method: &str) -> bool {
@@ -176,5 +177,16 @@ mod tests {
     #[test]
     fn accepts_different_receivers() {
         test::<SafeNavigationConsistency>().expect_no_offenses("foo&.bar || other.baz\n");
+    }
+
+    /// Regression (murphy-wcdv): the right operand's outermost call
+    /// (`suspended?`) has receiver `@resource&.account`, not `@resource`, so it
+    /// is a different group from `@resource.local?` and no offense fires.
+    /// Previously the receiver was resolved recursively to `@resource`, wrongly
+    /// matching the left operand. RuboCop 1.87 reports no offense.
+    #[test]
+    fn accepts_multi_level_safe_nav_with_distinct_immediate_receiver() {
+        test::<SafeNavigationConsistency>()
+            .expect_no_offenses("@resource.local? || @resource&.account&.suspended?\n");
     }
 }
