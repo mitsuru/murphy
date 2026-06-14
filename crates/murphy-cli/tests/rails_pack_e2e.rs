@@ -346,6 +346,82 @@ fn applying_rails_pack_layer_flips_active_support_extensions_enabled() {
 }
 
 #[test]
+fn rails_pack_excludes_db_schema_from_discovery() {
+    // End-to-end payoff for murphy-ynoq: loading the rails pack folds its
+    // bundled `AllCops.Exclude` (notably `db/*schema.rb`) into the default base
+    // layer, so file discovery skips the auto-generated `db/schema.rb` exactly
+    // as RuboCop (with rubocop-rails + `inherit_mode: merge: [Exclude]`) does.
+    //
+    // Runs the REAL pipeline: embedded rails default.yml → loader symbol read →
+    // `pack_default_configs` → `apply_pack_default_layers` (Exclude base-layer
+    // union) → `discover_with_config`. The user also sets its own Exclude with
+    // `inherit_mode: merge: [Exclude]`, so the pack default must *union* with
+    // the user list rather than be replaced by it.
+    use murphy_core::{CopRegistry, MurphyConfig, discover_with_config};
+
+    let rails = rails_pack_path()
+        .canonicalize()
+        .expect("murphy-rails artifact should exist");
+
+    let dir = tempdir().expect("tempdir");
+    let yml = format!(
+        "plugins:\n  - name: murphy-rails\n    path: {:?}\nAllCops:\n  Exclude:\n    - my_custom_ignore.rb\ninherit_mode:\n  merge:\n    - Exclude\n",
+        rails.display().to_string(),
+    );
+    fs::write(dir.path().join(".murphy.yml"), yml).expect("write yml");
+
+    // Fixtures: db/schema.rb must be excluded; db/migrate/* and app/models/*
+    // must remain; the user's custom ignore must also be excluded (union).
+    fs::create_dir_all(dir.path().join("db/migrate")).unwrap();
+    fs::create_dir_all(dir.path().join("app/models")).unwrap();
+    fs::write(dir.path().join("db/schema.rb"), "x = \"a\"\n").unwrap();
+    fs::write(dir.path().join("db/migrate/001_create.rb"), "x = \"a\"\n").unwrap();
+    fs::write(dir.path().join("app/models/foo.rb"), "x = \"a\"\n").unwrap();
+    fs::write(dir.path().join("my_custom_ignore.rb"), "x = \"a\"\n").unwrap();
+
+    let mut config =
+        MurphyConfig::load_with_defaults(dir.path(), murphy_std::BUNDLED_DEFAULTS_YAML)
+            .expect("config loads with std defaults");
+    let registry = CopRegistry::discover_with_config(dir.path(), &config, &[])
+        .expect("registry discovers the rails pack");
+    config.apply_pack_default_layers(&registry.pack_default_configs());
+
+    assert!(
+        config.files.exclude.iter().any(|e| e == "db/*schema.rb"),
+        "rails pack Exclude must join the base layer: {:?}",
+        config.files.exclude
+    );
+
+    let discovered: Vec<String> = discover_with_config(dir.path(), &config)
+        .expect("discovery succeeds")
+        .iter()
+        .map(|p| {
+            p.strip_prefix(dir.path())
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+
+    assert!(
+        !discovered.iter().any(|p| p == "db/schema.rb"),
+        "db/schema.rb must be excluded by the rails pack default: {discovered:?}"
+    );
+    assert!(
+        !discovered.iter().any(|p| p == "my_custom_ignore.rb"),
+        "user Exclude must still apply alongside the pack default: {discovered:?}"
+    );
+    assert!(
+        discovered.iter().any(|p| p == "db/migrate/001_create.rb"),
+        "db/migrate/* must NOT be excluded: {discovered:?}"
+    );
+    assert!(
+        discovered.iter().any(|p| p == "app/models/foo.rb"),
+        "app/models/* must NOT be excluded: {discovered:?}"
+    );
+}
+
+#[test]
 fn rails_pack_exempts_lambda_symbol_proc_through_full_lint_pipeline() {
     // End-to-end payoff: a `->(x) { x.method }` lambda is a `Style/SymbolProc`
     // candidate, but RuboCop (with rubocop-rails) exempts lambda/proc blocks
