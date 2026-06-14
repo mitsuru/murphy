@@ -12,15 +12,23 @@
 //!   option wiring via cx.options_or_default, message text parity, and
 //!   EnforcedStyle/single_quotes/double_quotes config key alignment.
 //!   ConsistentQuotesInMultiline defaults to false; deferred (non-default feature).
-//!   dstr (interpolated strings) are never subscribed so they are never flagged.
+//!   The `Dstr` node is never subscribed. Its literal `Str` segments (which ARE
+//!   `Str` nodes) are skipped in `check_str` when the parent is a heredoc or a
+//!   percent-literal `Dstr` (delimiter is not `"`/`'`, so an embedded quote is
+//!   content) — or a `Dsym`/`Regexp`/`Xstr`. This mirrors RuboCop's
+//!   `StringHelp#on_str` `loc?(:begin)` guard. For a `"`/`'`-delimited `Dstr`,
+//!   segments must escape embedded quotes, so adjacent concatenation
+//!   (`"a" "b"`, `"a" "#{b}"`) is correctly flagged per RuboCop.
 //! ```
 //!
 //! string literals. Mirrors RuboCop's same-named cop.
 //!
-//! Subscribes to `NodeKind::Str` (plain literal). Interpolated strings
-//! (`NodeKind::Dstr`, `"a#{b}"`) are intentionally not subscribed: they
-//! cannot be expressed with single quotes at all, so they are never a
-//! `Style/StringLiterals` offense.
+//! Subscribes to `NodeKind::Str` (plain literal). The `NodeKind::Dstr` node
+//! itself (`"a#{b}"`) is not subscribed — it cannot be a single-quoted string.
+//! `check_str` additionally skips `Str` content segments of a heredoc or
+//! percent-literal `Dstr` (and of `Dsym`/`Regexp`/`Xstr`), because those bodies
+//! can hold an unescaped quote that is literal content (e.g. HTML attribute
+//! quotes in a heredoc) rather than a string delimiter.
 //!
 //! ## Option (`EnforcedStyle`)
 //!
@@ -64,7 +72,7 @@
 //! violation stands) but skips the edit so the user can hand-fix without
 //! risk of a wrong autocorrect.
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, Range, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -104,6 +112,35 @@ pub struct StringLiteralsOptions {
 impl StringLiterals {
     #[on_node(kind = "str")]
     fn check_str(&self, node: NodeId, cx: &Cx<'_>) {
+        // Only standalone string literals (those with their own quote
+        // delimiters) are subject to the quote-style check — RuboCop's
+        // `StringHelp#on_str` guards on `node.loc?(:begin)`. A `Str` that is a
+        // content segment of a heredoc or a percent-literal (`%Q[…]`, `%(…)`, …)
+        // has no quote delimiter of its own: its raw source can carry an
+        // *unescaped* `"`/`'` that is literal content (e.g. HTML attribute
+        // quotes in a heredoc body between two `#{…}` interpolations), which
+        // `parse_quote_form` would misread as a delimiter. Skip those.
+        //
+        // For a `"`/`'`-delimited `Dstr` — whether an interpolated string
+        // (`"a#{b}c"`) or adjacent string concatenation (`"a" "b"`, `"a" "#{b}"`)
+        // — segments must escape any embedded quote, so `parse_quote_form` is
+        // reliable: bare interpolation segments return `None`, while each
+        // independently-quoted concatenated literal is correctly flagged (as
+        // RuboCop does). So those are left to fall through.
+        if let Some(parent) = cx.parent(node).get() {
+            match *cx.kind(parent) {
+                NodeKind::Dstr(_) => {
+                    let parent_raw = cx.raw_source(cx.range(parent)).as_bytes();
+                    let delim = parent_raw.first().copied();
+                    if delim != Some(b'"') && delim != Some(b'\'') {
+                        return;
+                    }
+                }
+                NodeKind::Dsym(_) | NodeKind::Regexp { .. } | NodeKind::Xstr(_) => return,
+                _ => {}
+            }
+        }
+
         let opts = cx.options_or_default::<StringLiteralsOptions>();
         let prefer_single = opts.enforced_style == EnforcedStyle::SingleQuotes;
 
@@ -437,6 +474,72 @@ mod tests {
                 enforced_style: EnforcedStyle::DoubleQuotes,
             })
             .expect_no_offenses("x = \"hello #{name}\"\n");
+    }
+
+    #[test]
+    fn heredoc_interpolation_segments_not_flagged() {
+        // Literal `"` between `#{…}` interpolations in a heredoc body is HTML
+        // content, not a string-literal delimiter; the `str` segment must not be
+        // treated as a double-quoted literal.
+        use murphy_plugin_api::test_support::{indoc, test};
+        test::<StringLiterals>().expect_no_offenses(indoc! {r##"
+            def html
+              <<~HTML
+                <a href="#{url}" title="#{name}">link</a>
+              HTML
+            end
+        "##});
+    }
+
+    #[test]
+    fn interpolation_string_segments_not_flagged() {
+        // Segments of an ordinary interpolated string have no quote delimiter
+        // of their own and must never be flagged.
+        use murphy_plugin_api::test_support::test;
+        test::<StringLiterals>().expect_no_offenses("x = \"a#{b}c\"\n");
+    }
+
+    #[test]
+    fn adjacent_string_concatenation_flagged() {
+        // `"foo" "bar"` parses as a `dstr` of two independently-quoted `str`
+        // children; each is a real double-quoted literal and is flagged
+        // (matching RuboCop, which sees a `begin` loc on each).
+        use murphy_plugin_api::test_support::{indoc, test};
+        test::<StringLiterals>().expect_correction(
+            indoc! {r#"
+                x = "foo" "bar"
+                    ^^^^^ Prefer single-quoted strings when you don't need string interpolation or special symbols.
+                          ^^^^^ Prefer single-quoted strings when you don't need string interpolation or special symbols.
+            "#},
+            "x = 'foo' 'bar'\n",
+        );
+    }
+
+    #[test]
+    fn dsym_interpolation_segment_not_flagged() {
+        // `:"a#{b}"` — the `str` segment inside an interpolated dynamic symbol
+        // is not a string literal.
+        use murphy_plugin_api::test_support::test;
+        test::<StringLiterals>().expect_no_offenses("x = :\"sym#{b}\"\n");
+    }
+
+    #[test]
+    fn mixed_adjacent_concatenation_flags_quoted_literal() {
+        // `"foo" "#{bar}"` — the leading `"foo"` is an independently-quoted
+        // literal (flagged), even though its sibling is an interpolation.
+        use murphy_plugin_api::test_support::{indoc, test};
+        test::<StringLiterals>().expect_offense(indoc! {r##"
+            x = "foo" "#{bar}"
+                ^^^^^ Prefer single-quoted strings when you don't need string interpolation or special symbols.
+        "##});
+    }
+
+    #[test]
+    fn percent_q_interpolation_segment_with_quote_not_flagged() {
+        // `%Q[…"x"…#{y}]` — the literal `"` inside a percent-literal body is
+        // content, not a delimiter; the segment must not be flagged.
+        use murphy_plugin_api::test_support::test;
+        test::<StringLiterals>().expect_no_offenses("x = %Q[a \"b\" #{c}]\n");
     }
 }
 murphy_plugin_api::submit_cop!(StringLiterals);
