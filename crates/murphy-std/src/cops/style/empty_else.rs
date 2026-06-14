@@ -222,9 +222,23 @@ fn is_inside_child(node: NodeId, range: Range, cx: &Cx<'_>) -> bool {
                 }
             }
         }
-        NodeKind::Case { subject, else_, .. } => {
+        NodeKind::Case {
+            subject,
+            whens,
+            else_,
+        } => {
             if let Some(id) = subject.get() {
                 let r = cx.range(id);
+                if range.start >= r.start && range.end <= r.end {
+                    return true;
+                }
+            }
+            // A `when` branch body may itself contain an `if`/`case` with its
+            // own `else`; that token belongs to the nested node, not this
+            // `case`. Without this check, a `case` that has no `else` of its
+            // own would be flagged on a nested branch's `else`.
+            for &when_id in cx.list(whens) {
+                let r = cx.range(when_id);
                 if range.start >= r.start && range.end <= r.end {
                     return true;
                 }
@@ -328,6 +342,24 @@ mod tests {
               1
             else
               2
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_nested_if_else_inside_case_when() {
+        // The `case` has no `else` of its own; the `else` belongs to the `if`
+        // nested in a `when` branch (and it has content), so nothing is flagged.
+        test::<EmptyElse>().expect_no_offenses(indoc! {"
+            case y
+            when 1
+              if y
+                10
+              else
+                20
+              end
+            when 2
+              30
             end
         "});
     }
