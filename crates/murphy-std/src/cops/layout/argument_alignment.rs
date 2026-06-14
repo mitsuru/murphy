@@ -440,6 +440,21 @@ mod tests {
         assert_eq!(offenses.len(), 1, "got {offenses:?}");
     }
 
+    /// Discriminator (Codex murphy-4e8t): a selectorless call with a *grouped*
+    /// receiver (`(factory).(…)`). `loc.begin` points at the receiver's grouping
+    /// `(`, so the anchor must locate the call paren AFTER the receiver rather
+    /// than trust `loc.begin`. Fixed style anchors to the `.(` line (indent 2 +
+    /// one level = 4); args at col 4 are accepted. Verified vs RuboCop 1.87 (no
+    /// offense).
+    #[test]
+    fn accepts_selectorless_call_grouped_receiver_fixed() {
+        let offenses = run_cop_with_options::<ArgumentAlignment>(
+            "(factory)\n  .(\n    a,\n    b\n  )\n",
+            &fixed(),
+        );
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
     /// Regression (Codex #384): bundled default `IndentationWidth: ~` → JSON
     /// `null`. It must decode (as `Option<i64>`) rather than erroring the struct
     /// and discarding the user's `EnforcedStyle`.
