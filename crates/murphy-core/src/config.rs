@@ -575,13 +575,33 @@ impl MurphyConfig {
             .any(|rule| !rule.include.is_empty() || !rule.exclude.is_empty())
     }
 
-    /// The run-wide `AllCops.*` context scalars resolved from this config,
-    /// bundled for threading into dispatch (and thus every cop's `CxRaw`).
+    /// The run-wide context scalars resolved from this config, bundled for
+    /// threading into dispatch (and thus every cop's `CxRaw`).
     pub fn allcops_context(&self) -> AllCopsContext {
         AllCopsContext {
             target_rails_version: self.target_rails_version,
             active_support_extensions_enabled: self.active_support_extensions_enabled,
+            indentation_width: self.resolved_indentation_width(),
         }
+    }
+
+    /// RuboCop's `config.for_cop('Layout/IndentationWidth')['Width']` resolved
+    /// for this config: the user's `Layout/IndentationWidth.Width` if set, else
+    /// the bundled default, else [`AllCopsContext::DEFAULT_INDENTATION_WIDTH`].
+    ///
+    /// Read unconditionally — RuboCop consults the cop's config whether or not
+    /// `Layout/IndentationWidth` is enabled. An explicit `Width: 0` is preserved
+    /// (user wins over the bundled default, and `0` is a valid width, not
+    /// "unset").
+    fn resolved_indentation_width(&self) -> i64 {
+        const COP: &str = "Layout/IndentationWidth";
+        let width = |opts: Option<&BTreeMap<String, serde_json::Value>>| {
+            opts.and_then(|o| o.get("Width"))
+                .and_then(serde_json::Value::as_i64)
+        };
+        width(self.cops.rules.get(COP).map(|r| &r.options))
+            .or_else(|| width(self.base_defaults.cop_rules.get(COP).map(|r| &r.options)))
+            .unwrap_or(AllCopsContext::DEFAULT_INDENTATION_WIDTH)
     }
 
     /// Cop names the resolved config disables (`Enabled: false`), for seeding
@@ -1171,6 +1191,27 @@ mod tests {
             .allcops_context();
         assert_eq!(default_ctx.target_rails_version, None);
         assert!(!default_ctx.active_support_extensions_enabled);
+    }
+
+    #[test]
+    fn allcops_context_resolves_indentation_width() {
+        // Configured `Layout/IndentationWidth.Width` flows into the context as
+        // the shared resolved indentation width (murphy-bgd8).
+        let cfg = MurphyConfig::from_yaml_str("Layout/IndentationWidth:\n  Width: 4\n")
+            .expect("config parses");
+        assert_eq!(cfg.allcops_context().indentation_width, 4);
+
+        // An explicit `Width: 0` is honoured, not coerced to the default 2.
+        let cfg = MurphyConfig::from_yaml_str("Layout/IndentationWidth:\n  Width: 0\n")
+            .expect("config parses");
+        assert_eq!(cfg.allcops_context().indentation_width, 0);
+
+        // No configuration -> RuboCop's default Width of 2.
+        let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
+        assert_eq!(
+            cfg.allcops_context().indentation_width,
+            AllCopsContext::DEFAULT_INDENTATION_WIDTH
+        );
     }
 
     #[test]

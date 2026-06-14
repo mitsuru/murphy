@@ -305,6 +305,14 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Set the run-wide resolved `Layout/IndentationWidth.Width` for this cop
+    /// test — what `Cx::indentation_width()` returns (murphy-bgd8). Use this to
+    /// exercise a cop's cross-cop fallback to the shared indentation width.
+    pub fn with_indentation_width(mut self, width: i64) -> Self {
+        self.context.indentation_width = width;
+        self
+    }
+
     /// Assert the cop emits exactly the offenses described by the caret
     /// annotations in `annotated`. See the module docs for the
     /// annotation grammar.
@@ -932,6 +940,7 @@ fn cx_raw_for(
         },
         target_rails_version: crate::RubyVersion::to_wire(ctx.target_rails_version),
         active_support_extensions_enabled: ctx.active_support_extensions_enabled,
+        indentation_width: ctx.indentation_width_wire(),
         config_disabled_cops: std::ptr::null(),
         config_disabled_cops_len: 0,
     }

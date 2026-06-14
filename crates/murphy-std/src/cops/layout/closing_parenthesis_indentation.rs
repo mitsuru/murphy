@@ -8,8 +8,8 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/ClosingParenthesisIndentation
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues: [murphy-bgd8]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Port of RuboCop's `ClosingParenthesisIndentation`. Handles `send`/`csend`
 //!   (call argument lists), `def`/`defs` (parameter lists), and `begin`
@@ -30,27 +30,14 @@
 //!   `configured_indentation_width` resolves as RuboCop's
 //!   `cop_config['IndentationWidth'] || config.for_cop('Layout/IndentationWidth')['Width'] || 2`.
 //!   This cop's **own** `IndentationWidth` override is honoured (in-boundary cop
-//!   option); when unset it falls through to the final default `2`.
-//!
-//!   GAP (murphy-bgd8): the middle term — the cross-cop fallback to
-//!   `Layout/IndentationWidth`'s `Width` — is **not** wired. Murphy's
-//!   single-surface plugin ABI threads only run-wide `AllCops.*` scalars into a
-//!   cop's `CxRaw` (via `AllCopsContext`); it does not expose another cop's
-//!   resolved config table to a plugin. Adding `Layout/IndentationWidth.Width`
-//!   would require a new run-wide scalar on the wire `CxRaw` (with its offset
-//!   assertions) plus host-side resolution in `Config::allcops_context`. That
-//!   wire-ABI change is deferred — the boundary is never bypassed. The divergence
-//!   is observable only when a user sets `Layout/IndentationWidth: { Width: N }`
-//!   with `N != 2` AND leaves this cop's own `IndentationWidth` unset; in that
-//!   narrow case Murphy uses 2 where RuboCop would use `N`. Setting this cop's
-//!   own `IndentationWidth: N` is the documented workaround.
+//!   option, including an explicit `0`); when unset it falls back to the
+//!   run-wide resolved `Layout/IndentationWidth.Width` via `cx.indentation_width()`
+//!   (the host resolves this in `Config::allcops_context` and threads it through
+//!   the `CxRaw::indentation_width` wire field — murphy-bgd8), and finally to the
+//!   default `2`.
 //! ```
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
-
-/// Fallback indentation width when neither this cop's `IndentationWidth` nor
-/// (the un-wired) `Layout/IndentationWidth.Width` is set. See the GAP note above.
-const DEFAULT_INDENTATION_WIDTH: usize = 2;
 
 /// Stateless unit struct (ADR 0035 const-metadata cop pattern).
 #[derive(Default)]
@@ -59,12 +46,11 @@ pub struct ClosingParenthesisIndentation;
 #[derive(CopOptions)]
 pub struct ClosingParenthesisIndentationOptions {
     /// `IndentationWidth: ~` — an optional per-cop override of the indentation
-    /// width. When unset (`None`), RuboCop falls back to
-    /// `Layout/IndentationWidth.Width` (not wired — see GAP note) and finally to
-    /// [`DEFAULT_INDENTATION_WIDTH`].
+    /// width. When unset (`None`), the width falls back to the run-wide resolved
+    /// `Layout/IndentationWidth.Width` via [`Cx::indentation_width`] (default 2).
     #[option(
         name = "IndentationWidth",
-        description = "Number of spaces for indentation. Use null to fall back to this cop's default (2); the cross-cop fallback to Layout/IndentationWidth's Width is not wired (GAP murphy-bgd8)."
+        description = "Number of spaces for indentation. Use null to fall back to Layout/IndentationWidth's Width (default 2)."
     )]
     pub indentation_width: Option<i64>,
 }
@@ -123,14 +109,14 @@ impl ClosingParenthesisIndentation {
 /// The first term — this cop's own `IndentationWidth` override — is honoured,
 /// including an explicit `0` (Ruby's `cop_config['IndentationWidth'] || …` is
 /// truthy for `0`, so `0` selects width 0, not the fallback). Only an unset
-/// override (`None`) inherits the default. The cross-cop
-/// `Layout/IndentationWidth.Width` fallback is the un-wired GAP (murphy-bgd8);
-/// when this cop's override is unset, we go straight to the final default `2`.
-/// A negative override is clamped to `0`.
+/// override (`None`) inherits the fallback: the run-wide resolved
+/// `Layout/IndentationWidth.Width` via [`Cx::indentation_width`] (murphy-bgd8),
+/// which itself defaults to `2`. A negative width is clamped to `0`.
 fn configured_indentation_width(cx: &Cx<'_>) -> usize {
     cx.options_or_default::<ClosingParenthesisIndentationOptions>()
         .indentation_width
-        .map_or(DEFAULT_INDENTATION_WIDTH, |w| w.max(0) as usize)
+        .unwrap_or_else(|| cx.indentation_width())
+        .max(0) as usize
 }
 
 /// `on_send` / `on_csend`: only parenthesized calls have argument-list parens
@@ -343,7 +329,8 @@ murphy_plugin_api::submit_cop!(ClosingParenthesisIndentation);
 mod tests {
     use super::{ClosingParenthesisIndentation as Cop, ClosingParenthesisIndentationOptions};
     use murphy_plugin_api::test_support::{
-        run_cop, run_cop_with_edits, run_cop_with_options, run_cop_with_options_and_edits,
+        indoc, run_cop, run_cop_with_edits, run_cop_with_options, run_cop_with_options_and_edits,
+        test,
     };
 
     fn width(w: i64) -> ClosingParenthesisIndentationOptions {
@@ -564,5 +551,46 @@ mod tests {
         let src = "some_method(\n    a\n    )\n";
         let run = run_cop_with_options::<Cop>(src, &width(0));
         assert!(run.is_empty(), "got {run:?}");
+    }
+
+    // ---- cross-cop fallback to Layout/IndentationWidth.Width (murphy-bgd8) ----
+
+    /// With this cop's own `IndentationWidth` unset, the width falls back to the
+    /// run-wide resolved `Layout/IndentationWidth.Width`. At width 4 and the
+    /// first arg indented 4, the line-break branch expects `)` at column
+    /// `4 - 4 = 0`. Verified against RuboCop 1.86.2.
+    #[test]
+    fn falls_back_to_layout_indentation_width() {
+        test::<Cop>().with_indentation_width(4).expect_offense(indoc! {"
+            some_method(
+                a
+                )
+                ^ Indent `)` to column 0 (not 4)
+        "});
+    }
+
+    /// Same width-4 fallback, but `)` already at the expected column 0 is
+    /// accepted.
+    #[test]
+    fn accepts_paren_at_cross_cop_expected_column() {
+        test::<Cop>()
+            .with_indentation_width(4)
+            .expect_no_offenses("some_method(\n    a\n)\n");
+    }
+
+    /// This cop's own `IndentationWidth` override wins over the cross-cop
+    /// `Layout/IndentationWidth.Width`: own `2` beats run-wide `4`, so the
+    /// line-break branch expects `)` at `4 - 2 = 2`.
+    #[test]
+    fn own_override_wins_over_cross_cop_width() {
+        test::<Cop>()
+            .with_options(&width(2))
+            .with_indentation_width(4)
+            .expect_offense(indoc! {"
+                some_method(
+                    a
+                    )
+                    ^ Indent `)` to column 2 (not 4)
+            "});
     }
 }
