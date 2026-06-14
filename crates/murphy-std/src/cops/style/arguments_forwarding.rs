@@ -493,15 +493,22 @@ impl<'a, 'cx> Fixer<'a, 'cx> {
 
         if any_block_only {
             // Anonymous block `&` is an anonymous-forwarding feature; honor the
-            // opt-out. Register the def's `&` once, then every block-only send.
+            // opt-out.
             if !use_anonymous_forwarding {
+                return;
+            }
+            // If any block-only site cannot be anonymized (nested under a block
+            // on targets < 3.4), anonymizing the def while leaving that site as
+            // `&block` would reference a block the def no longer names. Suppress
+            // the whole correction rather than emit invalid Ruby.
+            if !classifications
+                .iter()
+                .all(|c| allow_anon_in_block(c.forward_block, c.send, target, self.cx))
+            {
                 return;
             }
             let mut def_registered = false;
             for c in classifications {
-                if !allow_anon_in_block(c.forward_block, c.send, target, self.cx) {
-                    continue;
-                }
                 if !def_registered {
                     self.register_block_offense(true, def, fa.block, target);
                     def_registered = true;
@@ -1153,6 +1160,19 @@ mod tests {
             def foo(*args, **kwargs, &block)
               bar(*args, **kwargs, &block)
               baz(&block)
+            end
+        "#});
+    }
+
+    #[test]
+    fn suppresses_block_only_when_a_nested_site_is_disallowed() {
+        // At 3.1 the nested `b(&block)` cannot be anonymized; anonymizing the
+        // def and the outer site while leaving it as `&block` would reference a
+        // block the def no longer names, so the whole correction is suppressed.
+        test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
+            def foo(&block)
+              a(&block)
+              x { b(&block) }
             end
         "#});
     }
