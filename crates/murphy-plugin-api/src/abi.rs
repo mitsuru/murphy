@@ -232,6 +232,16 @@ pub struct CxRaw {
     /// this field leaves `size_of::<CxRaw>()` unchanged. Read via
     /// `Cx::indentation_width()`.
     pub indentation_width: u16,
+    /// Resolved `AllCops.TargetRubyVersion` for per-cop Ruby feature gates,
+    /// wire-encoded as `RubyVersion::to_wire` (`major*100+minor`, `0` = unset).
+    /// Unlike `target_rails_version`, the host always threads a concrete value
+    /// here (murphy's default is Ruby 3.1); `0` only occurs in raw-ABI test
+    /// harnesses that build `CxRaw` by hand, where a reader should fall back to
+    /// its own documented default. Tail-appended into existing padding (between
+    /// `indentation_width` and `config_disabled_cops`) under ABI v4 lockstep for
+    /// murphy-484s, so this field leaves `size_of::<CxRaw>()` unchanged. Read via
+    /// `Cx::target_ruby_version()`.
+    pub target_ruby_version: u16,
     /// Cop names disabled by config (`Enabled: false` in `.murphy.yml`), the
     /// seed for `Cx::extra_enabled_directives()` — RuboCop's
     /// `registry.disabled(config)`. Run-wide; the same slice is shared by every
@@ -274,6 +284,9 @@ pub struct CxRaw {
 /// `CxRaw::indentation_width` was tail-appended into existing padding (between
 /// `active_support_extensions_enabled` and `config_disabled_cops`) under ABI v4
 /// lockstep for murphy-bgd8 (size unchanged).
+/// `CxRaw::target_ruby_version` was tail-appended into existing padding (between
+/// `indentation_width` and `config_disabled_cops`) under ABI v4 lockstep for
+/// murphy-484s (size unchanged).
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -329,6 +342,11 @@ impl RubyVersion {
 pub struct AllCopsContext {
     /// `AllCops.TargetRailsVersion` (`None` = unset).
     pub target_rails_version: Option<RubyVersion>,
+    /// Resolved `AllCops.TargetRubyVersion`. `None` here means "the host did not
+    /// resolve a version" — in production the core config always supplies a
+    /// concrete value (murphy's default is Ruby 3.1), so `None` is seen only by
+    /// test harnesses; consumers should fall back to their own default floor.
+    pub target_ruby_version: Option<RubyVersion>,
     /// `AllCops.ActiveSupportExtensionsEnabled` (default `false`).
     pub active_support_extensions_enabled: bool,
     /// Resolved `Layout/IndentationWidth.Width`, default
@@ -359,6 +377,7 @@ impl Default for AllCopsContext {
     fn default() -> Self {
         Self {
             target_rails_version: None,
+            target_ruby_version: None,
             active_support_extensions_enabled: false,
             indentation_width: Self::DEFAULT_INDENTATION_WIDTH,
         }
@@ -524,6 +543,9 @@ mod tests {
         // murphy-bgd8: tail-appended into the padding between
         // active_support_extensions_enabled (242) and config_disabled_cops (248).
         assert_eq!(offset_of!(CxRaw, indentation_width), 244);
+        // murphy-484s: tail-appended into the remaining 2-byte padding between
+        // indentation_width (244) and config_disabled_cops (248); size unchanged.
+        assert_eq!(offset_of!(CxRaw, target_ruby_version), 246);
         assert_eq!(offset_of!(CxRaw, config_disabled_cops), 248);
         assert_eq!(offset_of!(CxRaw, config_disabled_cops_len), 256);
         assert_eq!(size_of::<CxRaw>(), 264);

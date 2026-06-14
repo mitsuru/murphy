@@ -299,6 +299,14 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Set `AllCops.TargetRubyVersion` for this cop test. Without this, the
+    /// default context leaves the Ruby target unset (`None`), so a cop under
+    /// test resolves its own default floor (murphy's is Ruby 3.1).
+    pub fn with_target_ruby_version(mut self, major: u16, minor: u16) -> Self {
+        self.context.target_ruby_version = Some(crate::RubyVersion::new(major, minor));
+        self
+    }
+
     /// Set `AllCops.ActiveSupportExtensionsEnabled` for this cop test.
     pub fn with_active_support_extensions_enabled(mut self, enabled: bool) -> Self {
         self.context.active_support_extensions_enabled = enabled;
@@ -941,6 +949,7 @@ fn cx_raw_for(
         target_rails_version: crate::RubyVersion::to_wire(ctx.target_rails_version),
         active_support_extensions_enabled: ctx.active_support_extensions_enabled,
         indentation_width: ctx.indentation_width_wire(),
+        target_ruby_version: crate::RubyVersion::to_wire(ctx.target_ruby_version),
         config_disabled_cops: std::ptr::null(),
         config_disabled_cops_len: 0,
     }

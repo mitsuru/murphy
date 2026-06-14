@@ -92,6 +92,7 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable) -> CxRaw {
         target_rails_version: 0,
         active_support_extensions_enabled: false,
         indentation_width: 2,
+        target_ruby_version: 0,
         config_disabled_cops: std::ptr::null(),
         config_disabled_cops_len: 0,
     }
@@ -155,6 +156,7 @@ fn cx_raw_for_with_options_json<'a>(
         target_rails_version: 0,
         active_support_extensions_enabled: false,
         indentation_width: 2,
+        target_ruby_version: 0,
         config_disabled_cops: std::ptr::null(),
         config_disabled_cops_len: 0,
     }

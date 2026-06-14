@@ -1,95 +1,76 @@
-//! `Style/ArgumentsForwarding` — use shorthand `...` forwarding syntax.
+//! `Style/ArgumentsForwarding` — use shorthand `...` / anonymous `*`/`**`/`&`
+//! forwarding syntax.
 //!
 //! ## RuboCop parity
 //!
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Style/ArgumentsForwarding
-//! upstream_version_checked: 1.81.6
+//! upstream_version_checked: 1.87.0
 //! version_added: "0.0"
 //! safe: true
 //! supports_autocorrect: true
 //! status: partial
-//! gap_issues:
-//!   - murphy-484s
+//! gap_issues: []
 //! notes: >
-//!   Implements the forward-all `...` core path (Ruby 2.7+): flags defs
-//!   whose restarg/kwrestarg/blockarg all have redundant names and are
-//!   forwarded unchanged to all call sites, replacing with `...`.
+//!   Faithful port of RuboCop's version-gated decision tree (murphy-484s):
 //!
-//!   murphy-jrcs closed two of the three original gaps: (2)
-//!   `AllowOnlyRestArgument` is now an option (default `true`) that mirrors
-//!   RuboCop's `offensive_block_forwarding?` — when a def declares no
-//!   `&block` and `AllowOnlyRestArgument` is true, forward-all is NOT
-//!   flagged (because `...` also forwards a block, changing behaviour); set
-//!   it to false to flag `*args`/`**kwargs`-only patterns. (3) The three
-//!   `Redundant*ArgumentNames` lists (`RedundantRestArgumentNames`,
-//!   `RedundantKeywordRestArgumentNames`, `RedundantBlockArgumentNames`) are
-//!   now read via `cx.options_or_default`; the empty (anonymous) name and
-//!   any name in the configured list count as redundant, matching RuboCop's
-//!   `redundant_named_arg` (`[keyword+name …] << keyword`).
+//!   - Forward-all `...` (Ruby 2.7+): a def whose restarg/kwrestarg/blockarg
+//!     all have redundant names and are forwarded unchanged to call sites is
+//!     replaced with `...`.
+//!   - Anonymous block `&` (Ruby 3.1+): a def forwarding only a redundant
+//!     `&block` becomes `&` at both def and call.
+//!   - Anonymous `*`/`**`/`&` (Ruby 3.2+, gated on `UseAnonymousForwarding`):
+//!     partial-forward shapes (`*args` without `**kwargs`, kwrest-only, etc.)
+//!     are anonymized per-argument instead of collapsed to `...`.
 //!
-//!   REMAINING GAP (murphy-484s): Anonymous forwarding (`*`, `**`, `&`) for
-//!   Ruby 3.2+ (`UseAnonymousForwarding`) is not implemented — RuboCop gates
-//!   it on `target_ruby_version >= 3.2`. Murphy's single-surface plugin ABI
-//!   exposes `target_rails_version()` (and `Cx::rails_version_at_least`) but
-//!   NOT a per-dispatch `target_ruby_version()`: `CxRaw` carries no Ruby
-//!   target-version field, and the only Ruby-version surface is the
-//!   *registry-level* `PluginCopV1::minimum_target_ruby_version` gate
-//!   (RuboCop's cop-wide `minimum_target_ruby_version`). That gate cannot
-//!   express this requirement — it would disable the *entire* cop below 3.2,
-//!   but the forward-all `...` path is valid from Ruby 2.7, so only the
-//!   `UseAnonymousForwarding` sub-feature should be 3.2-gated. Closing this
-//!   requires a NEW per-dispatch Ruby-version Cx accessor: a cross-crate ABI
-//!   change (plugin-api `CxRaw` tail-append + `AllCopsContext` + core
-//!   dispatcher + test_support). No ADR/design sanctions that surface today,
-//!   so per the single-surface boundary this stays an escalated, documented
-//!   blocker rather than a drive-by ABI extension.
-//! ```
+//!   The per-dispatch Ruby target arrives via the `Cx::target_ruby_version()`
+//!   ABI surface added in murphy-484s; murphy's default floor is Ruby 3.1, so
+//!   the 3.2+ anonymous `*`/`**` offenses only fire once a project's
+//!   `TargetRubyVersion` (or, later, detected `.ruby-version`) is ≥ 3.2.
 //!
-//! ## Matched shapes
+//!   The Ruby 3.3.0 anonymous-forwarding-in-block syntax-error workaround is
+//!   ported (`allow_anonymous_forwarding_in_block?` /
+//!   `all_forwarding_offenses_correctable?`): below target 3.4 a forwarding
+//!   send nested inside a block is not anonymized.
 //!
-//! Flags `def`/`defs` methods whose restarg, kwrestarg, and/or blockarg all
-//! have redundant names and are forwarded unchanged to every descendant
-//! `Send`/`Csend`/`Super`/`Yield` call in the body that uses them.
-//!
-//! ```ruby
-//! # offense
-//! def foo(*args, **kwargs, &block)
-//!   bar(*args, **kwargs, &block)
-//! end
-//!
-//! # good
-//! def foo(...)
-//!   bar(...)
-//! end
-//!
-//! # no offense — args referenced outside forwarding
-//! def foo(*args, &block)
-//!   args.do_something
-//!   bar(*args, &block)
-//! end
+//!   Documented gap: RuboCop's `explicit_block_name?` consults
+//!   `Naming/BlockForwarding`'s `EnforcedStyle`; murphy cannot read another
+//!   cop's config here and treats it as the default (`anonymous`), so block
+//!   `&` is always offered. This matches RuboCop under default config.
 //! ```
 //!
 //! ## Autocorrect
 //!
-//! Replaces the forwardable portion of the def's argument list with `...`
-//! and replaces the matching splat/kwsplat/block-pass sequence in each
-//! call site with `...`. Parentheses are added when missing.
+//! `...` replaces the forwardable span at def and call; anonymous offenses
+//! replace the individual `*args`/`**kwargs`/`&block` node with `*`/`**`/`&`.
+//! Parentheses are added (consuming the gap after the method name) when the
+//! def/call lacks them.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, RubyVersion, SourceTokenKind, cop};
 
 const FORWARDING_MSG: &str = "Use shorthand syntax `...` for arguments forwarding.";
+const ARGS_MSG: &str = "Use anonymous positional arguments forwarding (`*`).";
+const KWARGS_MSG: &str = "Use anonymous keyword arguments forwarding (`**`).";
+const BLOCK_MSG: &str = "Use anonymous block arguments forwarding (`&`).";
+
+/// murphy's default Ruby target floor (mirrors `config.rs`
+/// `default_target_ruby_version`). Used when the host did not thread a concrete
+/// version (raw-ABI test harnesses); production always supplies a value.
+const DEFAULT_TARGET_RUBY: RubyVersion = RubyVersion::new(3, 1);
+const RUBY_3_0: RubyVersion = RubyVersion::new(3, 0);
+const RUBY_3_2: RubyVersion = RubyVersion::new(3, 2);
+const RUBY_3_4: RubyVersion = RubyVersion::new(3, 4);
 
 /// Cop options for [`ArgumentsForwarding`]. Read live at dispatch time via
 /// [`Cx::options_or_default`]. Mirrors RuboCop's config keys and defaults.
 #[derive(CopOptions)]
 pub struct ArgumentsForwardingOptions {
     /// `AllowOnlyRestArgument` — when `true` (default), a def that forwards
-    /// only a rest and/or kwrest argument (no `&block`) is NOT flagged, because
-    /// `...` would also forward a block and change behaviour. When `false`,
-    /// these patterns are flagged. Mirrors RuboCop's `offensive_block_forwarding?`
-    /// (`@block_arg ? forwarded_block_arg : !allow_only_rest_arguments`).
+    /// only a rest and/or kwrest argument (no `&block`) is NOT flagged for
+    /// forward-all, because `...` would also forward a block and change
+    /// behaviour. Mirrors RuboCop's `allow_offense_for_no_block?`. Only
+    /// relevant for Ruby < 3.2 (at 3.2+ such shapes get anonymous `*`/`**`).
     #[option(
         name = "AllowOnlyRestArgument",
         default = true,
@@ -97,12 +78,22 @@ pub struct ArgumentsForwardingOptions {
     )]
     pub allow_only_rest_argument: bool,
 
+    /// `UseAnonymousForwarding` — when `true` (default), partial-forward shapes
+    /// are anonymized to `*`/`**`/`&` on Ruby 3.2+. When `false`, only the
+    /// version-independent forward-all `...` (and 3.1+ block `&`) paths fire.
+    #[option(
+        name = "UseAnonymousForwarding",
+        default = true,
+        description = "Use anonymous `*`/`**`/`&` forwarding on Ruby 3.2+."
+    )]
+    pub use_anonymous_forwarding: bool,
+
     /// `RedundantRestArgumentNames` — rest-arg names treated as anonymous-equivalent
-    /// (`*args`, `*arguments`), so they may be replaced with `...`.
+    /// (`*args`, `*arguments`), so they may be replaced with `...`/`*`.
     #[option(
         name = "RedundantRestArgumentNames",
         default = ["args", "arguments"],
-        description = "Rest-argument names considered redundant (forwardable as `...`)."
+        description = "Rest-argument names considered redundant (forwardable)."
     )]
     pub redundant_rest_argument_names: Vec<String>,
 
@@ -111,7 +102,7 @@ pub struct ArgumentsForwardingOptions {
     #[option(
         name = "RedundantKeywordRestArgumentNames",
         default = ["kwargs", "options", "opts"],
-        description = "Keyword-rest-argument names considered redundant (forwardable as `...`)."
+        description = "Keyword-rest-argument names considered redundant (forwardable)."
     )]
     pub redundant_keyword_rest_argument_names: Vec<String>,
 
@@ -120,7 +111,7 @@ pub struct ArgumentsForwardingOptions {
     #[option(
         name = "RedundantBlockArgumentNames",
         default = ["blk", "block", "proc"],
-        description = "Block-argument names considered redundant (forwardable as `...`)."
+        description = "Block-argument names considered redundant (forwardable)."
     )]
     pub redundant_block_argument_names: Vec<String>,
 }
@@ -147,415 +138,773 @@ impl ArgumentsForwarding {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// RuboCop's send classification (`SendNodeClassifier#classification`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ForwardClass {
+    /// `:all` — every forwardable arg forwarded; can collapse to `...`.
     All,
-    Partial,
+    /// `:all_anonymous` — def and send are already fully anonymous (`*, **, &`).
+    AllAnonymous,
+    /// `:rest_or_kwrest` — only partially forwardable; anonymize per-arg (3.2+).
+    RestOrKwrest,
 }
 
-struct ForwardSite {
-    classification: ForwardClass,
-    call_id: NodeId,
-    call_range: Range,
-    #[allow(dead_code)]
-    def_fwd_node: Option<NodeId>,
-    first_call_arg: NodeId,
-    last_call_arg: NodeId,
+/// Redundant-named forwardable args extracted from the def (RuboCop's
+/// `forwardable_args`: `[restarg, kwrestarg, blockarg]`, each `Some` only when
+/// present AND its name is redundant).
+struct ForwardableArgs {
+    rest: Option<NodeId>,
+    kwrest: Option<NodeId>,
+    block: Option<NodeId>,
+}
+
+/// One classified call/super/yield site (`[send_node, classification,
+/// forward_rest, forward_kwrest, forward_block]`).
+struct SendClass {
+    send: NodeId,
+    class: ForwardClass,
+    /// The `(splat (lvar rest))` node in the call, when the rest is forwarded.
+    forward_rest: Option<NodeId>,
+    /// The `(kwsplat (lvar kwrest))` node inside the call's hash, when forwarded.
+    forward_kwrest: Option<NodeId>,
+    /// The `(block_pass …)` node in the call, when the block is forwarded.
+    forward_block: Option<NodeId>,
 }
 
 fn check_def_node(node: NodeId, cx: &Cx<'_>) {
+    // `def foo(...)` itself has a ForwardArgs, not restarg/kwrestarg — nothing
+    // to do, and this guards against re-flagging.
     if cx.is_argument_forwarding(node) {
-        return;
-    }
-
-    let opts = cx.options_or_default::<ArgumentsForwardingOptions>();
-
-    let Some(args_id) = cx.def_arguments(node).get() else {
-        return;
-    };
-    let NodeKind::Args(args_list) = *cx.kind(args_id) else {
-        return;
-    };
-    let args = cx.list(args_list).to_vec();
-
-    // Extra kwarg/kwoptarg disqualify forward-all.
-    let has_extra_kwargs = args
-        .iter()
-        .any(|&id| matches!(*cx.kind(id), NodeKind::Kwarg { .. } | NodeKind::Kwoptarg { .. }));
-    if has_extra_kwargs {
-        return;
-    }
-
-    let restarg_id = find_arg_kind(&args, cx, |k| matches!(k, NodeKind::Restarg(_)));
-    let kwrestarg_id = find_arg_kind(&args, cx, |k| matches!(k, NodeKind::Kwrestarg(_)));
-    let blockarg_id = find_arg_kind(&args, cx, |k| matches!(k, NodeKind::Blockarg(_)));
-
-    let fwd_restarg =
-        forwardable_restarg(restarg_id, &opts.redundant_rest_argument_names, cx);
-    let fwd_kwrestarg = forwardable_kwrestarg(
-        kwrestarg_id,
-        &opts.redundant_keyword_rest_argument_names,
-        cx,
-    );
-    let fwd_blockarg =
-        forwardable_blockarg(blockarg_id, &opts.redundant_block_argument_names, cx);
-
-    if fwd_restarg.is_none() && fwd_kwrestarg.is_none() && fwd_blockarg.is_none() {
-        return;
-    }
-
-    // If a restarg, kwrestarg, or blockarg EXISTS but has a meaningful name
-    // (not in the redundant list), forward-all `...` cannot be used because
-    // `...` would forward that argument too but anonymously.
-    if restarg_id.is_some() && fwd_restarg.is_none() {
-        return;
-    }
-    if kwrestarg_id.is_some() && fwd_kwrestarg.is_none() {
-        return;
-    }
-    if blockarg_id.is_some() && fwd_blockarg.is_none() {
-        return;
-    }
-
-    // RuboCop's `offensive_block_forwarding?`: when the def declares a `&block`
-    // it must be forwarded (enforced above); when it does NOT declare a block,
-    // forward-all is only offensive when `AllowOnlyRestArgument` is false —
-    // because `...` also forwards a block, which would change behaviour. So a
-    // def forwarding only rest and/or kwrest (no block) is skipped by default.
-    if fwd_blockarg.is_none() && opts.allow_only_rest_argument {
         return;
     }
 
     let Some(body_id) = cx.def_body(node).get() else {
         return;
     };
-
-    let non_forward_refs = collect_non_forwarding_lvar_refs(body_id, cx);
-
-    let rest_name = fwd_restarg.and_then(|id| restarg_name(id, cx));
-    let kwrest_name = fwd_kwrestarg.and_then(|id| kwrestarg_name(id, cx));
-    let block_name = fwd_blockarg.and_then(|id| blockarg_name(id, cx));
-
-    if rest_name.is_some_and(|n| !n.is_empty() && non_forward_refs.contains(&n)) {
+    let Some(args_id) = cx.def_arguments(node).get() else {
         return;
-    }
-    if kwrest_name.is_some_and(|n| !n.is_empty() && non_forward_refs.contains(&n)) {
+    };
+    let NodeKind::Args(args_list) = *cx.kind(args_id) else {
         return;
-    }
-    if block_name.is_some_and(|n| !n.is_empty() && non_forward_refs.contains(&n)) {
+    };
+    let def_args = cx.list(args_list);
+    if def_args.is_empty() {
         return;
     }
 
-    let call_nodes = collect_call_nodes(body_id, cx);
-    if call_nodes.is_empty() {
+    let opts = cx.options_or_default::<ArgumentsForwardingOptions>();
+    let target = cx.target_ruby_version().unwrap_or(DEFAULT_TARGET_RUBY);
+
+    let restarg = find_arg_kind(def_args, cx, |k| matches!(k, NodeKind::Restarg(_)));
+    let kwrestarg = find_arg_kind(def_args, cx, |k| matches!(k, NodeKind::Kwrestarg(_)));
+    let blockarg = find_arg_kind(def_args, cx, |k| matches!(k, NodeKind::Blockarg(_)));
+
+    let fa = ForwardableArgs {
+        rest: forwardable_restarg(restarg, &opts.redundant_rest_argument_names, cx),
+        kwrest: forwardable_kwrestarg(kwrestarg, &opts.redundant_keyword_rest_argument_names, cx),
+        block: forwardable_blockarg(blockarg, &opts.redundant_block_argument_names, cx),
+    };
+
+    let referenced = collect_referenced_lvars(body_id, cx);
+
+    let classifications: Vec<SendClass> = collect_call_nodes(body_id, cx)
+        .into_iter()
+        .filter_map(|send| {
+            classify_send(
+                node,
+                send,
+                &referenced,
+                &fa,
+                def_args,
+                target,
+                opts.allow_only_rest_argument,
+                cx,
+            )
+        })
+        .collect();
+
+    if classifications.is_empty() {
         return;
     }
 
-    let mut forward_sites: Vec<ForwardSite> = Vec::new();
+    let mut fixer = Fixer::new(cx);
+    if classifications
+        .iter()
+        .all(|c| matches!(c.class, ForwardClass::All | ForwardClass::AllAnonymous))
+    {
+        fixer.add_forward_all_offenses(node, &classifications, &fa, opts.use_anonymous_forwarding, target);
+    } else if target >= RUBY_3_2 {
+        fixer.add_post_ruby_32_offenses(node, &classifications, &fa, &opts, target);
+    }
+}
 
-    for &call_id in &call_nodes {
-        let site = classify_call_site(
-            call_id,
-            rest_name,
-            kwrest_name,
-            block_name,
-            fwd_restarg,
-            fwd_kwrestarg,
-            fwd_blockarg,
+// ── Classification (RuboCop's SendNodeClassifier) ───────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn classify_send(
+    def: NodeId,
+    send: NodeId,
+    referenced: &[&str],
+    fa: &ForwardableArgs,
+    def_args: &[NodeId],
+    target: RubyVersion,
+    allow_only_rest: bool,
+    cx: &Cx<'_>,
+) -> Option<SendClass> {
+    let rest_name = fa.rest.and_then(|id| restarg_name(id, cx));
+    let kwrest_name = fa.kwrest.and_then(|id| kwrestarg_name(id, cx));
+    let block_name = fa.block.and_then(|id| blockarg_name(id, cx));
+
+    let call_args = get_call_args(send, cx);
+
+    let forward_rest = match rest_name {
+        Some(rn) if !referenced.contains(&rn) => call_args
+            .iter()
+            .copied()
+            .find(|&a| is_forwarded_rest(a, rn, cx)),
+        _ => None,
+    };
+    let forward_kwrest = match kwrest_name {
+        Some(kn) if !referenced.contains(&kn) => {
+            call_args.iter().copied().find_map(|a| forwarded_kwrest(a, kn, cx))
+        }
+        _ => None,
+    };
+    let forward_block = match block_name {
+        Some(bn) if !referenced.contains(&bn) => call_args
+            .iter()
+            .copied()
+            .find(|&a| is_forwarded_block(a, bn, cx)),
+        _ => None,
+    };
+
+    if forward_rest.is_none() && forward_kwrest.is_none() && forward_block.is_none() {
+        return None;
+    }
+
+    let class = if ruby_32_only_anonymous(def, send, def_args, call_args, target, cx) {
+        ForwardClass::AllAnonymous
+    } else if can_forward_all(
+        fa,
+        forward_rest,
+        forward_kwrest,
+        forward_block,
+        rest_name,
+        kwrest_name,
+        block_name,
+        referenced,
+        def_args,
+        call_args,
+        target,
+        allow_only_rest,
+        cx,
+    ) {
+        ForwardClass::All
+    } else {
+        ForwardClass::RestOrKwrest
+    };
+
+    Some(SendClass {
+        send,
+        class,
+        forward_rest,
+        forward_kwrest,
+        forward_block,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn can_forward_all(
+    fa: &ForwardableArgs,
+    forward_rest: Option<NodeId>,
+    forward_kwrest: Option<NodeId>,
+    forward_block: Option<NodeId>,
+    rest_name: Option<&str>,
+    kwrest_name: Option<&str>,
+    block_name: Option<&str>,
+    referenced: &[&str],
+    def_args: &[NodeId],
+    call_args: &[NodeId],
+    target: RubyVersion,
+    allow_only_rest: bool,
+    cx: &Cx<'_>,
+) -> bool {
+    // any_arg_referenced?
+    if [rest_name, kwrest_name, block_name]
+        .into_iter()
+        .flatten()
+        .any(|n| referenced.contains(&n))
+    {
+        return false;
+    }
+    // ruby_30_or_lower_optarg?
+    if target <= RUBY_3_0 && def_args.iter().any(|&a| matches!(*cx.kind(a), NodeKind::Optarg { .. }))
+    {
+        return false;
+    }
+    // ruby_32_or_higher_missing_rest_or_kwest?
+    if target >= RUBY_3_2 && !(forward_rest.is_some() && forward_kwrest.is_some()) {
+        return false;
+    }
+    // offensive_block_forwarding?
+    let offensive_block = if fa.block.is_some() {
+        forward_block.is_some()
+    } else {
+        !allow_only_rest
+    };
+    if !offensive_block {
+        return false;
+    }
+    // additional_kwargs_or_forwarded_kwargs?
+    let additional_kwargs = def_args
+        .iter()
+        .any(|&a| matches!(*cx.kind(a), NodeKind::Kwarg(_) | NodeKind::Kwoptarg { .. }));
+    let forward_additional_kwargs = forward_kwrest.is_some_and(|kw| hash_child_count(kw, cx) != 1);
+    if additional_kwargs || forward_additional_kwargs {
+        return false;
+    }
+    // no_additional_args? || (target >= 3.0 && no_post_splat_args?)
+    no_additional_args(fa, forward_rest, forward_kwrest, rest_name, kwrest_name, def_args, call_args)
+        || (target >= RUBY_3_0 && no_post_splat_args(forward_rest, call_args, cx))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn no_additional_args(
+    fa: &ForwardableArgs,
+    forward_rest: Option<NodeId>,
+    forward_kwrest: Option<NodeId>,
+    rest_name: Option<&str>,
+    kwrest_name: Option<&str>,
+    def_args: &[NodeId],
+    call_args: &[NodeId],
+) -> bool {
+    let forwardable_count = [fa.rest, fa.kwrest, fa.block]
+        .into_iter()
+        .flatten()
+        .count();
+    // missing_rest_arg_or_kwrest_arg?
+    let missing = (rest_name.is_some() && forward_rest.is_none())
+        || (kwrest_name.is_some() && forward_kwrest.is_none());
+    if missing {
+        return false;
+    }
+    def_args.len() == forwardable_count && call_args.len() == forwardable_count
+}
+
+fn no_post_splat_args(forward_rest: Option<NodeId>, call_args: &[NodeId], cx: &Cx<'_>) -> bool {
+    let Some(splat) = forward_rest else {
+        return true;
+    };
+    let Some(idx) = call_args.iter().position(|&a| a == splat) else {
+        return true;
+    };
+    // Every argument after the forwarded splat must be part of the forwarded
+    // tail: a `&`/`&block` block pass, or the `**kwrest` forward (represented as
+    // a hash whose sole child is a kwsplat). An explicit-keyword hash such as
+    // `{k: 1}` carries a real post-splat argument and disqualifies forward-all.
+    call_args[idx + 1..].iter().all(|&after| match *cx.kind(after) {
+        NodeKind::BlockPass(_) => true,
+        NodeKind::Hash(list) => {
+            matches!(cx.list(list), [only] if matches!(*cx.kind(*only), NodeKind::Kwsplat(_)))
+        }
+        _ => false,
+    })
+}
+
+fn ruby_32_only_anonymous(
+    _def: NodeId,
+    send: NodeId,
+    def_args: &[NodeId],
+    call_args: &[NodeId],
+    _target: RubyVersion,
+    cx: &Cx<'_>,
+) -> bool {
+    // A block arg and an anonymous block arg are never passed together.
+    if send_in_any_block(send, cx) {
+        return false;
+    }
+    def_all_anonymous_args(def_args, cx) && send_all_anonymous_args(call_args, cx)
+}
+
+/// `(args ... (restarg) (kwrestarg) (blockarg nil?))` — the def ends with bare
+/// anonymous `*`, `**`, `&`.
+fn def_all_anonymous_args(def_args: &[NodeId], cx: &Cx<'_>) -> bool {
+    let [.., r, k, b] = def_args else {
+        return false;
+    };
+    matches!(*cx.kind(*r), NodeKind::Restarg(s) if cx.symbol_str(s).is_empty())
+        && matches!(*cx.kind(*k), NodeKind::Kwrestarg(s) if cx.symbol_str(s).is_empty())
+        && matches!(*cx.kind(*b), NodeKind::Blockarg(s) if cx.symbol_str(s).is_empty())
+}
+
+/// `... (forwarded_restarg) (hash (forwarded_kwrestarg)) (block_pass nil?)` —
+/// the send ends with bare `*`, `**` (inside a single-element hash), `&`.
+fn send_all_anonymous_args(call_args: &[NodeId], cx: &Cx<'_>) -> bool {
+    let [.., r, k, b] = call_args else {
+        return false;
+    };
+    let rest_ok = matches!(*cx.kind(*r), NodeKind::Splat(inner) if inner.get().is_none());
+    let kwrest_ok = match *cx.kind(*k) {
+        NodeKind::Hash(list) => matches!(
+            cx.list(list),
+            [only] if matches!(*cx.kind(*only), NodeKind::Kwsplat(inner) if inner.get().is_none())
+        ),
+        _ => false,
+    };
+    let block_ok = matches!(*cx.kind(*b), NodeKind::BlockPass(inner) if inner.get().is_none());
+    rest_ok && kwrest_ok && block_ok
+}
+
+// ── Offense emission (RuboCop's add_*_offenses) ─────────────────────────────
+
+/// Holds the dispatch `Cx` and tracks which nodes have already had parentheses
+/// inserted, so the same def/call gets one `(` … `)` pair across multiple
+/// per-argument anonymous offenses.
+struct Fixer<'a, 'cx> {
+    cx: &'a Cx<'cx>,
+    parens_added: Vec<NodeId>,
+}
+
+impl<'a, 'cx> Fixer<'a, 'cx> {
+    fn new(cx: &'a Cx<'cx>) -> Self {
+        Self {
             cx,
-        );
+            parens_added: Vec::new(),
+        }
+    }
 
-        match site {
-            None => {}
-            Some(s) if s.classification == ForwardClass::Partial => {
+    fn add_forward_all_offenses(
+        &mut self,
+        def: NodeId,
+        classifications: &[SendClass],
+        fa: &ForwardableArgs,
+        use_anonymous_forwarding: bool,
+        target: RubyVersion,
+    ) {
+        let any_block_only = classifications.iter().any(Self::is_block_only);
+        let any_forward_all = classifications.iter().any(|c| !Self::is_block_only(c));
+
+        // A def cannot be rewritten to both `...` and an anonymous `&` at once.
+        // When sites mix block-only forwarding with rest/kwrest forwarding there
+        // is no single valid rewrite, so skip rather than emit invalid Ruby.
+        if any_block_only && any_forward_all {
+            return;
+        }
+
+        if any_block_only {
+            // Anonymous block `&` is an anonymous-forwarding feature; honor the
+            // opt-out.
+            if !use_anonymous_forwarding {
                 return;
             }
-            Some(s) => {
-                forward_sites.push(s);
+            // If any block-only site cannot be anonymized (nested under a block
+            // on targets < 3.4), anonymizing the def while leaving that site as
+            // `&block` would reference a block the def no longer names. Suppress
+            // the whole correction rather than emit invalid Ruby.
+            if !classifications
+                .iter()
+                .all(|c| allow_anon_in_block(c.forward_block, c.send, target, self.cx))
+            {
+                return;
+            }
+            let mut def_registered = false;
+            for c in classifications {
+                if !def_registered {
+                    self.register_block_offense(true, def, fa.block, target);
+                    def_registered = true;
+                }
+                self.register_block_offense(true, c.send, c.forward_block, target);
+            }
+            return;
+        }
+
+        for c in classifications {
+            let first = c
+                .forward_rest
+                .or(c.forward_kwrest)
+                .or_else(|| forward_all_first_argument(c.send, self.cx));
+            if let Some(first) = first {
+                self.register_forward_all(c.send, c.send, first);
+            }
+        }
+
+        if let Some(first) = fa.rest.or(fa.kwrest) {
+            self.register_forward_all(def, def, first);
+        }
+    }
+
+    /// A site that forwards only a block (`bar(&block)`): no rest/kwrest, and
+    /// not already fully anonymous. Such sites anonymize to `&` rather than `...`.
+    fn is_block_only(c: &SendClass) -> bool {
+        c.forward_rest.is_none()
+            && c.forward_kwrest.is_none()
+            && c.class != ForwardClass::AllAnonymous
+    }
+
+    fn add_post_ruby_32_offenses(
+        &mut self,
+        def: NodeId,
+        classifications: &[SendClass],
+        fa: &ForwardableArgs,
+        opts: &ArgumentsForwardingOptions,
+        target: RubyVersion,
+    ) {
+        if !opts.use_anonymous_forwarding {
+            return;
+        }
+        if !all_forwarding_offenses_correctable(classifications, target, self.cx) {
+            return;
+        }
+
+        let (mut def_rest, mut def_kwrest, mut def_block) = (false, false, false);
+        for c in classifications {
+            if allow_anon_in_block(c.forward_rest, c.send, target, self.cx) {
+                if !def_rest {
+                    self.register_args_offense(def, fa.rest);
+                    def_rest = true;
+                }
+                self.register_args_offense(c.send, c.forward_rest);
+            }
+            if allow_anon_in_block(c.forward_kwrest, c.send, target, self.cx) {
+                let add_parens = c.forward_rest.is_none();
+                if !def_kwrest {
+                    self.register_kwargs_offense(add_parens, def, fa.kwrest);
+                    def_kwrest = true;
+                }
+                self.register_kwargs_offense(add_parens, c.send, c.forward_kwrest);
+            }
+            if allow_anon_in_block(c.forward_block, c.send, target, self.cx) {
+                let add_parens = c.forward_rest.is_none();
+                if !def_block {
+                    self.register_block_offense(add_parens, def, fa.block, target);
+                    def_block = true;
+                }
+                self.register_block_offense(add_parens, c.send, c.forward_block, target);
             }
         }
     }
 
-    if forward_sites.is_empty() {
-        return;
+    /// `register_forward_all_offense`: offense over `first .. last-arg-of(node)`,
+    /// replaced with `...` (adding parens to `paren_node` if missing).
+    fn register_forward_all(&mut self, node: NodeId, paren_node: NodeId, first: NodeId) {
+        let Some(end) = last_argument_end(node, self.cx) else {
+            return;
+        };
+        let range = Range {
+            start: self.cx.range(first).start,
+            end,
+        };
+        self.cx.emit_offense(range, FORWARDING_MSG, None);
+        // Add parens around the existing argument list if missing (a no-op when
+        // already parenthesized), then replace only the forwardable slice with
+        // `...`. Splitting the edits preserves leading non-forwarded args, e.g.
+        // `bar a, *args, &block` -> `bar(a, ...)` rather than `bar(...)`.
+        self.add_parens_if_missing(paren_node);
+        self.cx.emit_edit(range, "...");
     }
 
-    let def_fwd_range = find_def_forward_range(fwd_restarg, fwd_kwrestarg, fwd_blockarg, cx);
+    fn register_args_offense(&mut self, paren_node: NodeId, arg: Option<NodeId>) {
+        let Some(arg) = arg else { return };
+        self.cx.emit_offense(self.cx.range(arg), ARGS_MSG, None);
+        self.add_parens_if_missing(paren_node);
+        self.cx.emit_edit(self.cx.range(arg), "*");
+    }
 
-    cx.emit_offense(def_fwd_range, FORWARDING_MSG, None);
-    emit_def_autocorrect(def_fwd_range, node, cx);
+    fn register_kwargs_offense(&mut self, add_parens: bool, paren_node: NodeId, arg: Option<NodeId>) {
+        let Some(arg) = arg else { return };
+        self.cx.emit_offense(self.cx.range(arg), KWARGS_MSG, None);
+        if add_parens {
+            self.add_parens_if_missing(paren_node);
+        }
+        self.cx.emit_edit(self.cx.range(arg), "**");
+    }
 
-    for site in &forward_sites {
-        cx.emit_offense(site.call_range, FORWARDING_MSG, None);
-        emit_call_autocorrect(site, cx);
+    /// `register_forward_block_arg_offense`: skip below 3.1, when absent, when
+    /// already `&`, or under `Naming/BlockForwarding: explicit` (a documented
+    /// gap — treated as default `anonymous`).
+    fn register_block_offense(
+        &mut self,
+        add_parens: bool,
+        paren_node: NodeId,
+        arg: Option<NodeId>,
+        target: RubyVersion,
+    ) {
+        let Some(arg) = arg else { return };
+        if target <= RUBY_3_0 {
+            return;
+        }
+        if self.cx.raw_source(self.cx.range(arg)) == "&" {
+            return;
+        }
+        self.cx.emit_offense(self.cx.range(arg), BLOCK_MSG, None);
+        if add_parens {
+            self.add_parens_if_missing(paren_node);
+        }
+        self.cx.emit_edit(self.cx.range(arg), "&");
+    }
+
+    /// `add_parens_if_missing`: insert `(` (consuming the gap after the method
+    /// name) and `)` after the last argument, once per node. Skips `foo[...]`.
+    fn add_parens_if_missing(&mut self, node: NodeId) {
+        if self.parens_added.contains(&node) {
+            return;
+        }
+        if node_has_arg_parens(node, self.cx) {
+            return;
+        }
+        if self.cx.method_name(node) == Some("[]") {
+            return;
+        }
+        let (Some(callee_end), Some(last_end)) =
+            (node_callee_end(node, self.cx), last_argument_end(node, self.cx))
+        else {
+            return;
+        };
+        self.parens_added.push(node);
+        // Replace the whitespace between the method name and the first argument
+        // with `(`, matching RuboCop's `def foo *a` -> `def foo(*a)`.
+        let first_start = first_argument_start(node, self.cx).unwrap_or(callee_end);
+        self.cx
+            .emit_edit(Range { start: callee_end, end: first_start }, "(");
+        self.cx.emit_edit(Range { start: last_end, end: last_end }, ")");
     }
 }
 
-fn find_def_forward_range(
-    fwd_restarg: Option<NodeId>,
-    fwd_kwrestarg: Option<NodeId>,
-    fwd_blockarg: Option<NodeId>,
+fn all_forwarding_offenses_correctable(
+    classifications: &[SendClass],
+    target: RubyVersion,
     cx: &Cx<'_>,
-) -> Range {
-    let first = fwd_restarg.or(fwd_kwrestarg).or(fwd_blockarg);
-    let last = fwd_blockarg.or(fwd_kwrestarg).or(fwd_restarg);
-    Range {
-        start: first.map_or(0, |id| cx.range(id).start),
-        end: last.map_or(0, |id| cx.range(id).end),
+) -> bool {
+    if target >= RUBY_3_4 {
+        return true;
+    }
+    !classifications
+        .iter()
+        .any(|c| send_in_any_block(c.send, cx))
+}
+
+/// `allow_anonymous_forwarding_in_block?`: anonymous forwarding of `node` is
+/// allowed unless the send is inside a block on a target below 3.4 (Ruby 3.3.0
+/// syntax-error workaround).
+fn allow_anon_in_block(
+    node: Option<NodeId>,
+    send: NodeId,
+    target: RubyVersion,
+    cx: &Cx<'_>,
+) -> bool {
+    if node.is_none() {
+        return false;
+    }
+    if target >= RUBY_3_4 {
+        return true;
+    }
+    !send_in_any_block(send, cx)
+}
+
+fn send_in_any_block(send: NodeId, cx: &Cx<'_>) -> bool {
+    cx.ancestors(send).any(|a| {
+        matches!(
+            *cx.kind(a),
+            NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. }
+        )
+    })
+}
+
+/// `forward_all_first_argument`: the last bare `*` (forwarded_restarg) in the call.
+fn forward_all_first_argument(send: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    get_call_args(send, cx)
+        .iter()
+        .copied()
+        .rev()
+        .find(|&a| matches!(*cx.kind(a), NodeKind::Splat(inner) if inner.get().is_none()))
+}
+
+// ── Range / parens helpers ──────────────────────────────────────────────────
+
+fn last_argument_end(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
+    arg_list_of(node, cx)
+        .last()
+        .map(|&last| cx.range(last).end)
+}
+
+fn first_argument_start(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
+    arg_list_of(node, cx)
+        .first()
+        .map(|&first| cx.range(first).start)
+}
+
+/// The argument list of a def/defs (its `Args` children) or a call.
+fn arg_list_of<'cx>(node: NodeId, cx: &Cx<'cx>) -> &'cx [NodeId] {
+    match *cx.kind(node) {
+        NodeKind::Def { .. } | NodeKind::Defs { .. } => match cx.def_arguments(node).get() {
+            Some(args_id) => match *cx.kind(args_id) {
+                NodeKind::Args(list) => cx.list(list),
+                _ => &[],
+            },
+            None => &[],
+        },
+        _ => get_call_args(node, cx),
     }
 }
 
-/// Check if a def/defs node's argument list has explicit parentheses.
-///
-/// `cx.loc(def_node).begin()` does not work for def nodes because the `def`
-/// keyword token comes before the `(` and `LocRef::begin()` only checks the
-/// single token immediately after `search_from`. Instead, find the method name
-/// token and check whether the immediately next token is `(`.
-fn def_has_parens(def_node: NodeId, cx: &Cx<'_>) -> bool {
+/// `true` when the def/call already has an argument-list `(`.
+fn node_has_arg_parens(node: NodeId, cx: &Cx<'_>) -> bool {
+    match *cx.kind(node) {
+        NodeKind::Def { .. } | NodeKind::Defs { .. } => def_has_parens(node, cx),
+        _ => cx.loc(node).begin() != Range::ZERO,
+    }
+}
+
+/// Byte offset just after the method name / keyword — where a `(` is inserted.
+fn node_callee_end(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
+    match *cx.kind(node) {
+        NodeKind::Def { .. } | NodeKind::Defs { .. } => def_name_end(node, cx),
+        NodeKind::Send { .. } | NodeKind::Csend { .. } => Some(cx.loc(node).name.end),
+        // `super`/`yield` keywords are exactly 5 bytes at the node start.
+        NodeKind::Super(_) | NodeKind::Yield(_) => Some(cx.range(node).start + 5),
+        _ => None,
+    }
+}
+
+/// Byte offset just after a def's method-name token (handles `def self.foo`,
+/// operator names, etc.).
+fn def_name_end(def_node: NodeId, cx: &Cx<'_>) -> Option<u32> {
     let sym = match *cx.kind(def_node) {
         NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => name,
-        _ => return false,
+        _ => return None,
     };
     let name_str = cx.symbol_str(sym);
     let node_range = cx.range(def_node);
     let source = cx.source().as_bytes();
     let toks = cx.sorted_tokens();
-
-    // Find the method name token within this def.
-    let idx = toks.partition_point(|t| t.range.start < node_range.start);
-    let name_tok = toks[idx..]
+    // For a singleton `def recv.name`, start the search after the receiver so a
+    // receiver whose source equals the method name (e.g. `def foo.foo`) is not
+    // mistaken for the method-name token.
+    let search_start = cx
+        .def_receiver(def_node)
+        .get()
+        .map_or(node_range.start, |recv| cx.range(recv).end);
+    let idx = toks.partition_point(|t| t.range.start < search_start);
+    toks[idx..]
         .iter()
         .take_while(|t| t.range.start < node_range.end)
         .find(|t| {
             t.kind == SourceTokenKind::Other
-                && &source[t.range.start as usize..t.range.end as usize]
-                    == name_str.as_bytes()
-        });
+                && &source[t.range.start as usize..t.range.end as usize] == name_str.as_bytes()
+        })
+        .map(|t| t.range.end)
+}
 
-    let Some(name_tok) = name_tok else {
+fn def_has_parens(def_node: NodeId, cx: &Cx<'_>) -> bool {
+    let Some(name_end) = def_name_end(def_node, cx) else {
         return false;
     };
-
-    // The token immediately after the name must be `(`.
-    let after_idx = toks.partition_point(|t| t.range.start < name_tok.range.end);
+    let toks = cx.sorted_tokens();
+    let after_idx = toks.partition_point(|t| t.range.start < name_end);
     toks.get(after_idx)
         .is_some_and(|t| t.kind == SourceTokenKind::LeftParen)
 }
 
-fn emit_def_autocorrect(def_fwd_range: Range, def_node: NodeId, cx: &Cx<'_>) {
-    if def_has_parens(def_node, cx) {
-        cx.emit_edit(def_fwd_range, "...");
-    } else {
-        cx.emit_edit(def_fwd_range, "(...)");
-    }
+// ── Small node helpers ──────────────────────────────────────────────────────
+
+fn is_forwarded_rest(arg: NodeId, rest_name: &str, cx: &Cx<'_>) -> bool {
+    let NodeKind::Splat(inner) = *cx.kind(arg) else {
+        return false;
+    };
+    inner
+        .get()
+        .is_some_and(|id| matches!(*cx.kind(id), NodeKind::Lvar(s) if cx.symbol_str(s) == rest_name))
 }
 
-fn emit_call_autocorrect(site: &ForwardSite, cx: &Cx<'_>) {
-    let replacement_range = Range {
-        start: cx.range(site.first_call_arg).start,
-        end: cx.range(site.last_call_arg).end,
-    };
-    let has_parens = cx.loc(site.call_id).begin() != Range::ZERO;
-    if has_parens {
-        cx.emit_edit(replacement_range, "...");
-    } else {
-        let source = cx.source().as_bytes();
-        let name_end = cx.loc(site.call_id).name.end as usize;
-        let is_bracket = source.get(name_end) == Some(&b'[');
-        if is_bracket {
-            cx.emit_edit(replacement_range, "...");
-        } else {
-            cx.emit_edit(replacement_range, "(...)");
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn classify_call_site(
-    call_id: NodeId,
-    rest_name: Option<&str>,
-    kwrest_name: Option<&str>,
-    block_name: Option<&str>,
-    fwd_restarg: Option<NodeId>,
-    fwd_kwrestarg: Option<NodeId>,
-    fwd_blockarg: Option<NodeId>,
-    cx: &Cx<'_>,
-) -> Option<ForwardSite> {
-    let call_args = get_call_args(call_id, cx);
-
-    let mut found_rest: Option<NodeId> = None;
-    let mut found_kwrest_hash: Option<NodeId> = None;
-    let mut found_block: Option<NodeId> = None;
-
-    for &arg_id in &call_args {
-        match *cx.kind(arg_id) {
-            NodeKind::Splat(inner) => {
-                if let Some(lvar_id) = inner.get()
-                    && matches!(*cx.kind(lvar_id), NodeKind::Lvar(_))
-                {
-                    let name = lvar_name(lvar_id, cx);
-                    if rest_name == Some(name) {
-                        found_rest = Some(arg_id);
-                    }
-                }
-            }
-            NodeKind::Hash(list) => {
-                let hash_children = cx.list(list);
-                if hash_children.len() == 1 {
-                    let child = hash_children[0];
-                    if let NodeKind::Kwsplat(inner) = *cx.kind(child)
-                        && let Some(lvar_id) = inner.get()
-                        && matches!(*cx.kind(lvar_id), NodeKind::Lvar(_))
-                    {
-                        let name = lvar_name(lvar_id, cx);
-                        if kwrest_name == Some(name) {
-                            found_kwrest_hash = Some(arg_id);
-                        }
-                    }
-                }
-            }
-            NodeKind::BlockPass(inner) => {
-                if let Some(lvar_id) = inner.get()
-                    && matches!(*cx.kind(lvar_id), NodeKind::Lvar(_))
-                {
-                    let name = lvar_name(lvar_id, cx);
-                    if block_name == Some(name) {
-                        found_block = Some(arg_id);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let needs_rest = fwd_restarg.is_some() && rest_name.is_some_and(|n| !n.is_empty());
-    let needs_kwrest = fwd_kwrestarg.is_some() && kwrest_name.is_some_and(|n| !n.is_empty());
-    let needs_block = fwd_blockarg.is_some() && block_name.is_some_and(|n| !n.is_empty());
-
-    let has_rest = found_rest.is_some();
-    let has_kwrest = found_kwrest_hash.is_some();
-    let has_block = found_block.is_some();
-
-    if !has_rest && !has_kwrest && !has_block {
+/// Find a `(kwsplat (lvar kwrest_name))` inside a call's hash argument; returns
+/// the kwsplat node (RuboCop's captured `$(kwsplat (lvar %1))`).
+fn forwarded_kwrest(arg: NodeId, kwrest_name: &str, cx: &Cx<'_>) -> Option<NodeId> {
+    let NodeKind::Hash(list) = *cx.kind(arg) else {
         return None;
-    }
-
-    if (needs_rest && !has_rest) || (needs_kwrest && !has_kwrest) || (needs_block && !has_block) {
-        return Some(ForwardSite {
-            classification: ForwardClass::Partial,
-            call_id,
-            call_range: Range::ZERO,
-            def_fwd_node: None,
-            first_call_arg: call_id,
-            last_call_arg: call_id,
-        });
-    }
-
-    let mut forwarded: Vec<NodeId> = Vec::new();
-    if let Some(id) = found_rest {
-        forwarded.push(id);
-    }
-    if let Some(id) = found_kwrest_hash {
-        forwarded.push(id);
-    }
-    if let Some(id) = found_block {
-        forwarded.push(id);
-    }
-
-    if forwarded.is_empty() {
-        return None;
-    }
-
-    let first_call_arg = forwarded[0];
-    let last_call_arg = *forwarded.last().unwrap();
-
-    let call_range = Range {
-        start: cx.range(first_call_arg).start,
-        end: cx.range(last_call_arg).end,
     };
-
-    Some(ForwardSite {
-        classification: ForwardClass::All,
-        call_id,
-        call_range,
-        def_fwd_node: fwd_restarg.or(fwd_kwrestarg).or(fwd_blockarg),
-        first_call_arg,
-        last_call_arg,
+    cx.list(list).iter().copied().find(|&c| {
+        matches!(*cx.kind(c), NodeKind::Kwsplat(inner)
+            if inner.get().is_some_and(|id| matches!(*cx.kind(id), NodeKind::Lvar(s) if cx.symbol_str(s) == kwrest_name)))
     })
 }
 
-fn get_call_args(call_id: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
+/// `(block_pass {(lvar block_name) nil?})` — a block pass of the named lvar, or
+/// a bare `&` (nil inner, which matches for any block name).
+fn is_forwarded_block(arg: NodeId, block_name: &str, cx: &Cx<'_>) -> bool {
+    let NodeKind::BlockPass(inner) = *cx.kind(arg) else {
+        return false;
+    };
+    match inner.get() {
+        None => true,
+        Some(id) => matches!(*cx.kind(id), NodeKind::Lvar(s) if cx.symbol_str(s) == block_name),
+    }
+}
+
+/// Number of children in the hash that owns a forwarded kwsplat node.
+fn hash_child_count(kwsplat: NodeId, cx: &Cx<'_>) -> usize {
+    match cx.parent(kwsplat).get() {
+        Some(parent) => match *cx.kind(parent) {
+            NodeKind::Hash(list) => cx.list(list).len(),
+            _ => 1,
+        },
+        None => 1,
+    }
+}
+
+fn get_call_args<'cx>(call_id: NodeId, cx: &Cx<'cx>) -> &'cx [NodeId] {
     match *cx.kind(call_id) {
-        NodeKind::Send { args, .. } | NodeKind::Csend { args, .. } => cx.list(args).to_vec(),
-        NodeKind::Super(list) => cx.list(list).to_vec(),
-        NodeKind::Yield(list) => cx.list(list).to_vec(),
-        _ => vec![],
+        NodeKind::Send { .. } | NodeKind::Csend { .. } => cx.call_arguments(call_id),
+        NodeKind::Super(list) | NodeKind::Yield(list) => cx.list(list),
+        _ => &[],
     }
 }
 
 fn is_call_node(id: NodeId, cx: &Cx<'_>) -> bool {
     matches!(
         *cx.kind(id),
-        NodeKind::Send { .. }
-            | NodeKind::Csend { .. }
-            | NodeKind::Super(_)
-            | NodeKind::Yield(_)
+        NodeKind::Send { .. } | NodeKind::Csend { .. } | NodeKind::Super(_) | NodeKind::Yield(_)
     )
 }
 
 fn collect_call_nodes(body_id: NodeId, cx: &Cx<'_>) -> Vec<NodeId> {
-    // Include body_id itself (when the body is a single call expression).
     let mut result: Vec<NodeId> = Vec::new();
     if is_call_node(body_id, cx) {
         result.push(body_id);
     }
-    let mut descendants: Vec<NodeId> = cx
-        .descendants(body_id)
-        .into_iter()
-        .filter(|&id| is_call_node(id, cx))
-        .collect();
-    result.append(&mut descendants);
+    result.extend(
+        cx.descendants(body_id)
+            .into_iter()
+            .filter(|&id| is_call_node(id, cx)),
+    );
     result
 }
 
-fn collect_non_forwarding_lvar_refs<'a>(body_id: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
-    let mut result = Vec::new();
-    collect_non_forwarding_recursive(body_id, false, cx, &mut result);
-    result.dedup();
-    result
-}
-
-fn collect_non_forwarding_recursive<'a>(
-    id: NodeId,
-    in_fwd_ctx: bool,
-    cx: &Cx<'a>,
-    out: &mut Vec<&'a str>,
-) {
-    match *cx.kind(id) {
-        NodeKind::Splat(_) | NodeKind::Kwsplat(_) | NodeKind::BlockPass(_) => {
-            for &child in &cx.children(id) {
-                collect_non_forwarding_recursive(child, true, cx, out);
+/// RuboCop's `non_splat_or_block_pass_lvar_references`: names of every `lvar`
+/// (unless its parent is splat/kwsplat/block_pass) and every `lvasgn` in the body.
+fn collect_referenced_lvars<'a>(body_id: NodeId, cx: &Cx<'a>) -> Vec<&'a str> {
+    let mut out: Vec<&str> = Vec::new();
+    for id in cx.descendants(body_id) {
+        match *cx.kind(id) {
+            NodeKind::Lvar(sym) => {
+                let skip = cx.parent(id).get().is_some_and(|p| {
+                    matches!(
+                        *cx.kind(p),
+                        NodeKind::Splat(_) | NodeKind::Kwsplat(_) | NodeKind::BlockPass(_)
+                    )
+                });
+                if !skip {
+                    out.push(cx.symbol_str(sym));
+                }
             }
-        }
-        NodeKind::Lvar(sym) => {
-            if !in_fwd_ctx {
-                out.push(cx.symbol_str(sym));
-            }
-        }
-        NodeKind::Lvasgn { name: sym, .. } => {
-            if !in_fwd_ctx {
-                out.push(cx.symbol_str(sym));
-            }
-            for &child in &cx.children(id) {
-                collect_non_forwarding_recursive(child, in_fwd_ctx, cx, out);
-            }
-        }
-        _ => {
-            for &child in &cx.children(id) {
-                collect_non_forwarding_recursive(child, in_fwd_ctx, cx, out);
-            }
+            NodeKind::Lvasgn { name, .. } => out.push(cx.symbol_str(name)),
+            _ => {}
         }
     }
+    // Names are only consumed via membership checks, so order is irrelevant;
+    // sort before `dedup` so non-consecutive duplicates collapse too.
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 fn find_arg_kind(args: &[NodeId], cx: &Cx<'_>, pred: impl Fn(&NodeKind) -> bool) -> Option<NodeId> {
@@ -563,85 +912,65 @@ fn find_arg_kind(args: &[NodeId], cx: &Cx<'_>, pred: impl Fn(&NodeKind) -> bool)
 }
 
 /// True when `name` is anonymous (empty — the bare `*`/`**`/`&`) or appears in
-/// the configured redundant-name list. Mirrors RuboCop's `redundant_named_arg`,
-/// whose candidate list is `[keyword+name for name in config] << keyword`, so
-/// the bare keyword (anonymous forwarding) always counts as redundant.
+/// the configured redundant-name list. Mirrors RuboCop's `redundant_named_arg`
+/// (`[keyword+name …] << keyword`), so the bare keyword always counts.
 fn is_redundant_name(name: &str, redundant_names: &[String]) -> bool {
     name.is_empty() || redundant_names.iter().any(|n| n == name)
 }
 
-fn forwardable_restarg(
-    id: Option<NodeId>,
-    redundant_names: &[String],
-    cx: &Cx<'_>,
-) -> Option<NodeId> {
+fn forwardable_restarg(id: Option<NodeId>, redundant: &[String], cx: &Cx<'_>) -> Option<NodeId> {
     let id = id?;
     let NodeKind::Restarg(sym) = *cx.kind(id) else {
         return None;
     };
-    is_redundant_name(cx.symbol_str(sym), redundant_names).then_some(id)
+    is_redundant_name(cx.symbol_str(sym), redundant).then_some(id)
 }
 
-fn forwardable_kwrestarg(
-    id: Option<NodeId>,
-    redundant_names: &[String],
-    cx: &Cx<'_>,
-) -> Option<NodeId> {
+fn forwardable_kwrestarg(id: Option<NodeId>, redundant: &[String], cx: &Cx<'_>) -> Option<NodeId> {
     let id = id?;
     let NodeKind::Kwrestarg(sym) = *cx.kind(id) else {
         return None;
     };
-    is_redundant_name(cx.symbol_str(sym), redundant_names).then_some(id)
+    is_redundant_name(cx.symbol_str(sym), redundant).then_some(id)
 }
 
-fn forwardable_blockarg(
-    id: Option<NodeId>,
-    redundant_names: &[String],
-    cx: &Cx<'_>,
-) -> Option<NodeId> {
+fn forwardable_blockarg(id: Option<NodeId>, redundant: &[String], cx: &Cx<'_>) -> Option<NodeId> {
     let id = id?;
     let NodeKind::Blockarg(sym) = *cx.kind(id) else {
         return None;
     };
-    is_redundant_name(cx.symbol_str(sym), redundant_names).then_some(id)
+    is_redundant_name(cx.symbol_str(sym), redundant).then_some(id)
 }
 
 fn restarg_name<'a>(id: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
-    if let NodeKind::Restarg(sym) = *cx.kind(id) {
-        Some(cx.symbol_str(sym))
-    } else {
-        None
+    match *cx.kind(id) {
+        NodeKind::Restarg(sym) => Some(cx.symbol_str(sym)),
+        _ => None,
     }
 }
 
 fn kwrestarg_name<'a>(id: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
-    if let NodeKind::Kwrestarg(sym) = *cx.kind(id) {
-        Some(cx.symbol_str(sym))
-    } else {
-        None
+    match *cx.kind(id) {
+        NodeKind::Kwrestarg(sym) => Some(cx.symbol_str(sym)),
+        _ => None,
     }
 }
 
 fn blockarg_name<'a>(id: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
-    if let NodeKind::Blockarg(sym) = *cx.kind(id) {
-        Some(cx.symbol_str(sym))
-    } else {
-        None
+    match *cx.kind(id) {
+        NodeKind::Blockarg(sym) => Some(cx.symbol_str(sym)),
+        _ => None,
     }
 }
 
-fn lvar_name<'a>(id: NodeId, cx: &Cx<'a>) -> &'a str {
-    if let NodeKind::Lvar(sym) = *cx.kind(id) {
-        cx.symbol_str(sym)
-    } else {
-        ""
-    }
-}
+murphy_plugin_api::submit_cop!(ArgumentsForwarding);
 
 #[cfg(test)]
 mod tests {
     use super::{ArgumentsForwarding, ArgumentsForwardingOptions};
     use murphy_plugin_api::test_support::{indoc, test};
+
+    // ── Forward-all `...` (Ruby 2.7+, murphy default target 3.1) ────────────
 
     #[test]
     fn flags_restarg_and_block_arg() {
@@ -680,47 +1009,6 @@ mod tests {
     }
 
     #[test]
-    fn flags_with_extra_non_forwarding_call() {
-        test::<ArgumentsForwarding>().expect_correction(
-            indoc! {r#"
-                def foo(*args, **kwargs, &block)
-                        ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
-                  bar(*args, **kwargs, &block)
-                      ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
-                  baz(1, 2, 3)
-                end
-            "#},
-            indoc! {r#"
-                def foo(...)
-                  bar(...)
-                  baz(1, 2, 3)
-                end
-            "#},
-        );
-    }
-
-    #[test]
-    fn flags_with_two_forwarding_calls() {
-        test::<ArgumentsForwarding>().expect_correction(
-            indoc! {r#"
-                def foo(*args, **kwargs, &block)
-                        ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
-                  bar(*args, **kwargs, &block)
-                      ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
-                  baz(*args, **kwargs, &block)
-                      ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
-                end
-            "#},
-            indoc! {r#"
-                def foo(...)
-                  bar(...)
-                  baz(...)
-                end
-            "#},
-        );
-    }
-
-    #[test]
     fn flags_with_redundant_opts_name() {
         test::<ArgumentsForwarding>().expect_correction(
             indoc! {r#"
@@ -739,7 +1027,8 @@ mod tests {
     }
 
     #[test]
-    fn flags_with_redundant_blk_name() {
+    fn flags_with_redundant_blk_name_as_dots() {
+        // `*args` + redundant `&blk` is forward-all `...` at 3.1.
         test::<ArgumentsForwarding>().expect_correction(
             indoc! {r#"
                 def foo(*args, &blk)
@@ -755,6 +1044,448 @@ mod tests {
             "#},
         );
     }
+
+    #[test]
+    fn flags_leading_required_arg_before_splat() {
+        // `arguments_range` starts at the splat, leaving the leading `a` intact.
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def foo(a, *args, &block)
+                           ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                  bar(a, *args, &block)
+                         ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                end
+            "#},
+            indoc! {r#"
+                def foo(a, ...)
+                  bar(a, ...)
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn flags_leading_required_arg_before_splat_without_parens() {
+        // No-paren forward-all must wrap the existing argument list in parens
+        // and replace only the forwardable slice, keeping the leading `a`:
+        // `bar a, *args, &block` -> `bar(a, ...)`, never `bar(...)`.
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def foo a, *args, &block
+                           ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                  bar a, *args, &block
+                         ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                end
+            "#},
+            indoc! {r#"
+                def foo(a, ...)
+                  bar(a, ...)
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn flags_partial_forward_sites_as_dots_at_3_1() {
+        // At 3.1 even a call forwarding a subset (`baz(*args, &block)`) collapses
+        // to `...`; RuboCop accepts the resulting over-forwarding.
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def foo(*args, **kwargs, &block)
+                        ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                  bar(*args, **kwargs, &block)
+                      ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                  baz(*args, &block)
+                      ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                end
+            "#},
+            indoc! {r#"
+                def foo(...)
+                  bar(...)
+                  baz(...)
+                end
+            "#},
+        );
+    }
+
+    // ── Anonymous block `&` (Ruby 3.1+) ─────────────────────────────────────
+
+    #[test]
+    fn flags_block_only_as_anonymous() {
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def foo(&block)
+                        ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                  bar(&block)
+                      ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                end
+            "#},
+            indoc! {r#"
+                def foo(&)
+                  bar(&)
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn flags_every_block_only_site_not_just_the_first() {
+        // Multiple block-only sites must all be anonymized; the loop must not
+        // stop after the first (which left a stale `&block` referencing an
+        // anonymized def — invalid Ruby).
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def foo(&block)
+                        ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                  bar(&block)
+                      ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                  baz(&block)
+                      ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                end
+            "#},
+            indoc! {r#"
+                def foo(&)
+                  bar(&)
+                  baz(&)
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn skips_mixed_block_only_and_forward_all_sites() {
+        // A def cannot be both `...` and anonymous `&`; a mix of a block-only
+        // site and a full-forward site has no single valid rewrite, so skip.
+        test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
+            def foo(*args, **kwargs, &block)
+              bar(*args, **kwargs, &block)
+              baz(&block)
+            end
+        "#});
+    }
+
+    #[test]
+    fn suppresses_block_only_when_a_nested_site_is_disallowed() {
+        // At 3.1 the nested `b(&block)` cannot be anonymized; anonymizing the
+        // def and the outer site while leaving it as `&block` would reference a
+        // block the def no longer names, so the whole correction is suppressed.
+        test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
+            def foo(&block)
+              a(&block)
+              x { b(&block) }
+            end
+        "#});
+    }
+
+    #[test]
+    fn block_only_honors_use_anonymous_forwarding_false() {
+        // `UseAnonymousForwarding: false` disables `&block` -> `&` too, not only
+        // the 3.2+ `*`/`**` anonymization.
+        test::<ArgumentsForwarding>()
+            .with_options(&ArgumentsForwardingOptions {
+                use_anonymous_forwarding: false,
+                ..Default::default()
+            })
+            .expect_no_offenses(indoc! {r#"
+                def foo(&block)
+                  bar(&block)
+                end
+            "#});
+    }
+
+    #[test]
+    fn rejects_explicit_kwargs_after_forwarded_splat() {
+        // `bar(*args, k: 1, &block)` carries a real post-splat keyword, so it is
+        // not forward-all and must not collapse to `bar(...)` (dropping `k: 1`).
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 1)
+            .expect_no_offenses(indoc! {r#"
+                def foo(*args, &block)
+                  bar(*args, k: 1, &block)
+                end
+            "#});
+    }
+
+    #[test]
+    fn preserves_singleton_receiver_equal_to_method_name() {
+        // `def bar.bar` — the receiver source equals the method name; the
+        // method-name search must skip the receiver so the rewrite keeps it.
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def bar.bar(*args, &block)
+                            ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                  baz(*args, &block)
+                      ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                end
+            "#},
+            indoc! {r#"
+                def bar.bar(...)
+                  baz(...)
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn flags_block_when_rest_name_is_meaningful() {
+        // `*meaningful` is left alone; only the redundant block is anonymized.
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def foo(*meaningful, &block)
+                                     ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                  bar(*meaningful, &block)
+                                   ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                end
+            "#},
+            indoc! {r#"
+                def foo(*meaningful, &)
+                  bar(*meaningful, &)
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn flags_block_when_kwrest_name_is_meaningful() {
+        test::<ArgumentsForwarding>().expect_correction(
+            indoc! {r#"
+                def foo(**my_special_kwargs, &block)
+                                             ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                  bar(**my_special_kwargs, &block)
+                                           ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                end
+            "#},
+            indoc! {r#"
+                def foo(**my_special_kwargs, &)
+                  bar(**my_special_kwargs, &)
+                end
+            "#},
+        );
+    }
+
+    // ── Anonymous `*`/`**`/`&` (Ruby 3.2+) ──────────────────────────────────
+
+    #[test]
+    fn anon_rest_and_block_at_3_2() {
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 2)
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args, &block)
+                            ^^^^^ Use anonymous positional arguments forwarding (`*`).
+                                   ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                      bar(*args, &block)
+                          ^^^^^ Use anonymous positional arguments forwarding (`*`).
+                                 ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(*, &)
+                      bar(*, &)
+                    end
+                "#},
+            );
+    }
+
+    #[test]
+    fn keeps_dots_when_rest_and_kwrest_at_3_2() {
+        // Forwarding BOTH rest and kwrest (plus block) stays `...` even at 3.2.
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 2)
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args, **kwargs, &block)
+                            ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                      bar(*args, **kwargs, &block)
+                          ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(...)
+                      bar(...)
+                    end
+                "#},
+            );
+    }
+
+    #[test]
+    fn anon_kwrest_only_at_3_2() {
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 2)
+            .expect_correction(
+                indoc! {r#"
+                    def foo(**kwargs)
+                            ^^^^^^^^ Use anonymous keyword arguments forwarding (`**`).
+                      bar(**kwargs)
+                          ^^^^^^^^ Use anonymous keyword arguments forwarding (`**`).
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(**)
+                      bar(**)
+                    end
+                "#},
+            );
+    }
+
+    #[test]
+    fn anon_rest_only_at_3_2() {
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 2)
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args)
+                            ^^^^^ Use anonymous positional arguments forwarding (`*`).
+                      bar(*args)
+                          ^^^^^ Use anonymous positional arguments forwarding (`*`).
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(*)
+                      bar(*)
+                    end
+                "#},
+            );
+    }
+
+    #[test]
+    fn anon_rest_and_kwrest_without_block_at_3_2() {
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 2)
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args, **kwargs)
+                            ^^^^^ Use anonymous positional arguments forwarding (`*`).
+                                   ^^^^^^^^ Use anonymous keyword arguments forwarding (`**`).
+                      bar(*args, **kwargs)
+                          ^^^^^ Use anonymous positional arguments forwarding (`*`).
+                                 ^^^^^^^^ Use anonymous keyword arguments forwarding (`**`).
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(*, **)
+                      bar(*, **)
+                    end
+                "#},
+            );
+    }
+
+    #[test]
+    fn collapses_already_anonymous_to_dots_at_3_2() {
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 2)
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*, **, &)
+                            ^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                      bar(*, **, &)
+                          ^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(...)
+                      bar(...)
+                    end
+                "#},
+            );
+    }
+
+    #[test]
+    fn use_anonymous_forwarding_false_suppresses_at_3_2() {
+        // With anonymous forwarding disabled, a partial-forward shape that is
+        // not forward-all-eligible produces no offense at 3.2.
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 2)
+            .with_options(&ArgumentsForwardingOptions {
+                use_anonymous_forwarding: false,
+                ..Default::default()
+            })
+            .expect_no_offenses(indoc! {r#"
+                def foo(*args, &block)
+                  bar(*args, &block)
+                end
+            "#});
+    }
+
+    // ── Block-in-block gate (Ruby 3.3.0 syntax-error workaround) ─────────────
+
+    #[test]
+    fn accepts_block_forwarding_inside_block_below_3_4() {
+        // At 3.1 anonymous forwarding inside a block is suppressed.
+        test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
+            def foo(&block)
+              thing { bar(&block) }
+            end
+        "#});
+    }
+
+    #[test]
+    fn suppresses_block_forwarding_inside_block_at_3_2() {
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 2)
+            .expect_no_offenses(indoc! {r#"
+                def foo(&block)
+                  thing { bar(&block) }
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_block_forwarding_inside_block_at_3_4() {
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 4)
+            .expect_correction(
+                indoc! {r#"
+                    def foo(&block)
+                            ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                      thing { bar(&block) }
+                                  ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(&)
+                      thing { bar(&) }
+                    end
+                "#},
+            );
+    }
+
+    // ── Ruby ≤ 3.0 (anonymous block forwarding unavailable) ─────────────────
+
+    #[test]
+    fn accepts_block_only_below_3_1() {
+        // Anonymous block forwarding `&` is Ruby 3.1+; at 3.0 there is no offense.
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 0)
+            .expect_no_offenses(indoc! {r#"
+                def foo(&block)
+                  bar(&block)
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_rest_and_block_as_dots_below_3_1() {
+        // Forward-all `...` is valid from Ruby 2.7.
+        test::<ArgumentsForwarding>()
+            .with_target_ruby_version(3, 0)
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args, &block)
+                            ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                      bar(*args, &block)
+                          ^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(...)
+                      bar(...)
+                    end
+                "#},
+            );
+    }
+
+    // ── Acceptances (version-stable at murphy's default 3.1) ────────────────
 
     #[test]
     fn accepts_already_forwarding() {
@@ -794,10 +1525,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_meaningful_rest_name() {
+    fn accepts_meaningful_block_name() {
         test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
-            def foo(*meaningful_args, &block)
-              bar(*meaningful_args, &block)
+            def foo(*args, &my_callback)
+              bar(*args, &my_callback)
             end
         "#});
     }
@@ -808,17 +1539,6 @@ mod tests {
             def foo(*args, &block)
               bar(*args, &block)
               baz(*args)
-            end
-        "#});
-    }
-
-    #[test]
-    fn accepts_not_always_forwarding_all_three() {
-        test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
-            def foo(*args, **kwargs, &block)
-              bar(*args, **kwargs, &block)
-              bar(*args, &block)
-              bar(**kwargs, &block)
             end
         "#});
     }
@@ -842,19 +1562,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_meaningful_kwrest_name() {
+    fn accepts_args_forwarded_to_separate_receiver_methods() {
         test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
-            def foo(**my_special_kwargs, &block)
-              bar(**my_special_kwargs, &block)
-            end
-        "#});
-    }
-
-    #[test]
-    fn accepts_meaningful_block_name() {
-        test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
-            def foo(*args, &my_callback)
-              bar(*args, &my_callback)
+            def foo(*args, **kwargs, &block)
+              bar(first(*args), second(**kwargs), third(&block))
             end
         "#});
     }
@@ -878,10 +1589,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_args_forwarded_to_separate_receiver_methods() {
+    fn accepts_only_rest_and_kwrest_without_block_by_default() {
         test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
-            def foo(*args, **kwargs, &block)
-              bar(first(*args), second(**kwargs), third(&block))
+            def foo(*args, **kwargs)
+              bar(*args, **kwargs)
             end
         "#});
     }
@@ -892,24 +1603,13 @@ mod tests {
     fn options_defaults_match_rubocop() {
         let d = ArgumentsForwardingOptions::default();
         assert!(d.allow_only_rest_argument);
+        assert!(d.use_anonymous_forwarding);
         assert_eq!(d.redundant_rest_argument_names, ["args", "arguments"]);
         assert_eq!(
             d.redundant_keyword_rest_argument_names,
             ["kwargs", "options", "opts"]
         );
         assert_eq!(d.redundant_block_argument_names, ["blk", "block", "proc"]);
-    }
-
-    #[test]
-    fn accepts_only_rest_and_kwrest_without_block_by_default() {
-        // RuboCop's `offensive_block_forwarding?`: with no `&block` declared and
-        // `AllowOnlyRestArgument: true` (default), forward-all is NOT offensive,
-        // because `...` would also forward a block and change behaviour.
-        test::<ArgumentsForwarding>().expect_no_offenses(indoc! {r#"
-            def foo(*args, **kwargs)
-              bar(*args, **kwargs)
-            end
-        "#});
     }
 
     #[test]
@@ -925,29 +1625,6 @@ mod tests {
                             ^^^^^ Use shorthand syntax `...` for arguments forwarding.
                       bar(*args)
                           ^^^^^ Use shorthand syntax `...` for arguments forwarding.
-                    end
-                "#},
-                indoc! {r#"
-                    def foo(...)
-                      bar(...)
-                    end
-                "#},
-            );
-    }
-
-    #[test]
-    fn flags_only_kwrest_arg_when_allow_only_rest_argument_false() {
-        test::<ArgumentsForwarding>()
-            .with_options(&ArgumentsForwardingOptions {
-                allow_only_rest_argument: false,
-                ..Default::default()
-            })
-            .expect_correction(
-                indoc! {r#"
-                    def foo(**kwargs)
-                            ^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
-                      bar(**kwargs)
-                          ^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
                     end
                 "#},
                 indoc! {r#"
@@ -1007,19 +1684,27 @@ mod tests {
     }
 
     #[test]
-    fn accepts_default_rest_name_when_not_in_custom_list() {
-        // With a custom `RedundantRestArgumentNames` that omits `args`, the
-        // default `*args` name is now meaningful and forward-all is rejected.
+    fn flags_block_when_rest_name_not_in_custom_list() {
+        // With `args` no longer redundant, only the block is anonymized at 3.1.
         test::<ArgumentsForwarding>()
             .with_options(&ArgumentsForwardingOptions {
                 redundant_rest_argument_names: vec!["sploosh".to_string()],
                 ..Default::default()
             })
-            .expect_no_offenses(indoc! {r#"
-                def foo(*args, &block)
-                  bar(*args, &block)
-                end
-            "#});
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args, &block)
+                                   ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                      bar(*args, &block)
+                                 ^^^^^^ Use anonymous block arguments forwarding (`&`).
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(*args, &)
+                      bar(*args, &)
+                    end
+                "#},
+            );
     }
 
     #[test]
@@ -1045,5 +1730,3 @@ mod tests {
             );
     }
 }
-
-murphy_plugin_api::submit_cop!(ArgumentsForwarding);

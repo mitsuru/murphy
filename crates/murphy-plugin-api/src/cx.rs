@@ -513,6 +513,18 @@ impl<'a> Cx<'a> {
             .is_none_or(|target| target >= RubyVersion::new(major, minor))
     }
 
+    /// Resolved `AllCops.TargetRubyVersion`, if the host threaded one.
+    ///
+    /// In production the core dispatcher always supplies a concrete version
+    /// (murphy's default is Ruby 3.1), so `None` is observed only by raw-ABI
+    /// test harnesses. Unlike [`Cx::rails_version_at_least`], there is no
+    /// `is_none_or` helper here on purpose: Ruby gating has a real default floor
+    /// (3.1) rather than "assume newest", so a cop should resolve `None` to its
+    /// own documented default, e.g. `target_ruby_version().unwrap_or(_3_1)`.
+    pub fn target_ruby_version(&self) -> Option<RubyVersion> {
+        RubyVersion::from_wire(self.raw.target_ruby_version)
+    }
+
     /// Configured `AllCops.ActiveSupportExtensionsEnabled` (default false).
     pub fn active_support_extensions_enabled(&self) -> bool {
         self.raw.active_support_extensions_enabled
@@ -3155,6 +3167,7 @@ mod tests {
             target_rails_version: 0,
             active_support_extensions_enabled: false,
             indentation_width: 2,
+            target_ruby_version: 0,
             config_disabled_cops: std::ptr::null(),
             config_disabled_cops_len: 0,
         }
@@ -3204,6 +3217,37 @@ mod tests {
 
         assert_eq!(cx.target_rails_version(), None);
         assert!(cx.rails_version_at_least(6, 0));
+    }
+
+    #[test]
+    fn target_ruby_version_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+        raw.target_ruby_version = crate::RubyVersion::to_wire(Some(crate::RubyVersion::new(3, 2)));
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(
+            cx.target_ruby_version(),
+            Some(crate::RubyVersion::new(3, 2))
+        );
+    }
+
+    #[test]
+    fn missing_target_ruby_version_decodes_to_none() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        // `cx_raw_for` leaves `target_ruby_version` at the wire sentinel 0.
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        assert_eq!(cx.target_ruby_version(), None);
     }
 
     #[test]

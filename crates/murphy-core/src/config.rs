@@ -668,6 +668,7 @@ impl MurphyConfig {
     pub fn allcops_context(&self) -> AllCopsContext {
         AllCopsContext {
             target_rails_version: self.target_rails_version,
+            target_ruby_version: Some(self.target_ruby_version),
             active_support_extensions_enabled: self.active_support_extensions_enabled,
             indentation_width: self.resolved_indentation_width(),
         }
@@ -1289,6 +1290,8 @@ mod tests {
             ctx.active_support_extensions_enabled,
             cfg.active_support_extensions_enabled
         );
+        // The Ruby target is always threaded as a concrete value.
+        assert_eq!(ctx.target_ruby_version, Some(cfg.target_ruby_version));
 
         // Defaults flow through untouched.
         let default_ctx = MurphyConfig::from_yaml_str("")
@@ -1296,6 +1299,11 @@ mod tests {
             .allcops_context();
         assert_eq!(default_ctx.target_rails_version, None);
         assert!(!default_ctx.active_support_extensions_enabled);
+        // Ruby target defaults to murphy's 3.1 floor (never None from config).
+        assert_eq!(
+            default_ctx.target_ruby_version,
+            Some(RubyVersion::new(3, 1))
+        );
     }
 
     #[test]
