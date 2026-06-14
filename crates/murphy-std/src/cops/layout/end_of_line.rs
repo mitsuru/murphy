@@ -301,6 +301,7 @@ mod tests {
 
     // ----- EnforcedStyle: native (default) --------------------------
 
+    #[cfg(not(windows))]
     #[test]
     fn native_default_accepts_lf_on_non_windows() {
         // On the (non-Windows) CI/build host, `native` resolves to `lf`, so
@@ -308,6 +309,7 @@ mod tests {
         test::<EndOfLine>().expect_no_offenses("puts 'hello'\nputs 'world'\n");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn native_default_flags_crlf_on_non_windows() {
         // `native` → `lf` on non-Windows, so a CRLF line is flagged with
