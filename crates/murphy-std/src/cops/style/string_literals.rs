@@ -129,11 +129,19 @@ impl StringLiterals {
         // also parses as a `Dstr`, but each child carries its OWN quote
         // delimiter and stays flagged, matching RuboCop (which sees a `begin`
         // loc on each). `dstr_segment_is_own_literal` distinguishes the two.
+        //
+        // Percent word/symbol arrays (`%w[…]`, `%W["foo"#{x}]`, …) are a further
+        // exception: the quotes inside them are literal element content, never a
+        // string delimiter — RuboCop gives those `Str` nodes no `:begin` loc.
         if let Some(parent) = cx.parent(node).get() {
             match *cx.kind(parent) {
+                // A non-interpolated element of a `%w`/`%W`/`%i`/`%I` array is a
+                // `Str` sitting directly in the array; its quotes are content.
+                NodeKind::Array(_) if is_percent_word_array(parent, cx) => return,
                 // A `Dstr` segment that is NOT its own quoted literal (a bare
-                // content segment) is skipped; an independently-quoted child
-                // (concatenation) falls through to the quote-style check.
+                // content segment, or an interpolated percent word-array
+                // element) is skipped; an independently-quoted concatenation
+                // child falls through to the quote-style check.
                 NodeKind::Dstr(list)
                     if !dstr_segment_is_own_literal(node, parent, cx.list(list), cx) =>
                 {
@@ -246,6 +254,18 @@ fn dstr_segment_is_own_literal(
     children: &[NodeId],
     cx: &Cx<'_>,
 ) -> bool {
+    // An interpolated element of a percent word/symbol array (`%W["foo"#{x}]`)
+    // is a `Dstr` whose parent is the array. The element has no opening
+    // delimiter of its own, so its first child `Str` shares the `Dstr`'s start
+    // (defeating the positional check below) even though its quotes are literal
+    // word content — never an independent string literal.
+    if cx
+        .parent(parent)
+        .get()
+        .is_some_and(|grandparent| is_percent_word_array(grandparent, cx))
+    {
+        return false;
+    }
     let Some(idx) = children.iter().position(|&c| c == node) else {
         return false;
     };
@@ -256,6 +276,19 @@ fn dstr_segment_is_own_literal(
             NodeKind::Str(_) | NodeKind::Dstr(_)
         ),
     }
+}
+
+/// Is `node` an `Array` written as a percent word/symbol literal
+/// (`%w[…]`, `%W[…]`, `%i[…]`, `%I[…]`)? Quote characters inside such an array
+/// are literal element content, not string delimiters, so its `Str` elements
+/// (and the `Str` segments of its interpolated `Dstr` elements) carry no
+/// `:begin` location in RuboCop and are never subject to the quote-style check.
+fn is_percent_word_array(node: NodeId, cx: &Cx<'_>) -> bool {
+    if !matches!(*cx.kind(node), NodeKind::Array(_)) {
+        return false;
+    }
+    let src = cx.raw_source(cx.range(node)).as_bytes();
+    src.first() == Some(&b'%') && matches!(src.get(1), Some(b'w' | b'W' | b'i' | b'I'))
 }
 
 /// Conservative quote-swap predicate. Returns the body unchanged when
@@ -612,6 +645,41 @@ mod tests {
             "#},
             "x = %Q[foo] 'bar'\n",
         );
+    }
+
+    #[test]
+    fn concatenation_after_interpolation_only_part_flags_trailing_literal() {
+        // `"#{a}" "bar"` parses as a `dstr` whose first child is the
+        // interpolation-only `dstr` (`"#{a}"`) and whose second child is the
+        // independently-quoted `"bar"`. The trailing literal carries its own
+        // delimiter (its previous sibling is a `Dstr`, not a bare interpolation
+        // node) and must still be flagged.
+        use murphy_plugin_api::test_support::{indoc, test};
+        test::<StringLiterals>().expect_correction(
+            indoc! {r##"
+                x = "#{a}" "bar"
+                           ^^^^^ Prefer single-quoted strings when you don't need string interpolation or special symbols.
+            "##},
+            "x = \"#{a}\" 'bar'\n",
+        );
+    }
+
+    #[test]
+    fn percent_w_array_quoted_element_not_flagged() {
+        // `%w[plain "foo"]` — the `"` around `foo` is literal word content, not
+        // a string delimiter; the `Str` element must not be flagged/corrected.
+        use murphy_plugin_api::test_support::test;
+        test::<StringLiterals>().expect_no_offenses("x = %w[plain \"foo\"]\n");
+    }
+
+    #[test]
+    fn percent_w_array_interpolated_quoted_segment_not_flagged() {
+        // `%W["foo"#{bar}]` — the interpolated element is a `dstr` with no
+        // delimiter of its own; its leading `"foo"` segment is literal word
+        // content (the segment shares the dstr's start), not an independent
+        // double-quoted literal, so it must not be flagged.
+        use murphy_plugin_api::test_support::test;
+        test::<StringLiterals>().expect_no_offenses("x = %W[\"foo\"#{bar}]\n");
     }
 
     #[test]
