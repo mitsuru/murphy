@@ -128,7 +128,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // (`do`/`{`) when the body carries a rescue/ensure clause; RuboCop's
     // `node.body.first_line` is the first contained statement's line (murphy-un83).
     let src = cx.source().as_bytes();
-    let body_start = body_first_offset(body, cx);
+    let body_start = body_first_offset(body, opener.start, cx);
     if !gap_has_newline(src, opener.start, body_start) {
         let range = Range {
             start: body_start,
@@ -139,13 +139,26 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 }
 
 /// RuboCop's `node.body.first_line`: the start offset of the first *statement*
-/// in the block body. Murphy's body-wrapper nodes (`Begin`, `Rescue`,
+/// in the block body. Murphy's *implicit* body-wrapper nodes (`Begin`, `Rescue`,
 /// `Ensure`) can carry a range that begins at the block opener (`do`/`{`) when
 /// the body has a rescue/ensure clause, so descending to the first contained
 /// statement is required to recover the true first-body offset.
-fn body_first_offset(body: NodeId, cx: &Cx<'_>) -> u32 {
+///
+/// Only descend through a wrapper whose range begins at the opener. An *explicit*
+/// `begin … end` body (kwbegin) starts at its own `begin` keyword, and RuboCop's
+/// `node.body.first_line` is that keyword's line — so for `foo do begin\n … end`
+/// the body-on-opener-line offense must still fire. Unwrapping it unconditionally
+/// would move `body_start` to the first inner statement (on the next line) and
+/// suppress the offense (murphy-un83).
+fn body_first_offset(body: NodeId, opener_start: u32, cx: &Cx<'_>) -> u32 {
     let mut cur = body;
     loop {
+        // A wrapper that starts after the opener is a visible body expression
+        // (e.g. an explicit `begin`/parenthesized group) whose own first line is
+        // what RuboCop compares against — stop and report it.
+        if cx.range(cur).start > opener_start {
+            return cx.range(cur).start;
+        }
         let next = match *cx.kind(cur) {
             NodeKind::Begin(list) => cx.list(list).first().copied(),
             NodeKind::Rescue { body, .. } | NodeKind::Ensure { body, .. } => body.get(),
@@ -449,6 +462,38 @@ mod tests {
               end
             rescue Foo
               handle
+            end
+        "});
+    }
+
+    // Regression (murphy-un83): an *explicit* `begin … end` body opening on the
+    // block-start line. Unlike the implicit wrappers above, a kwbegin starts at
+    // its own `begin` keyword, so RuboCop's `node.body.first_line` is that
+    // keyword's line — on the opener line here — and the body-on-opener-line
+    // offense still fires. The descent must stop at the visible `begin`, not
+    // dive to the first inner statement on the next line.
+    #[test]
+    fn flags_explicit_begin_body_on_block_start_line() {
+        test::<MultilineBlockLayout>().expect_offense(indoc! {"
+            blah do begin
+                    ^^^^^ Block body expression is on the same line as the block start.
+              foo
+              bar
+            end
+            end
+        "});
+    }
+
+    // Discriminator for the explicit-`begin` gate: when the `begin` keyword is on
+    // the line *after* `do`, the body is well-formed and no offense fires.
+    #[test]
+    fn accepts_explicit_begin_body_on_next_line() {
+        test::<MultilineBlockLayout>().expect_no_offenses(indoc! {"
+            blah do
+              begin
+                foo
+                bar
+              end
             end
         "});
     }

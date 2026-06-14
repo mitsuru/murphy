@@ -429,7 +429,7 @@ pub fn block_opener(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
         .call_arguments(call)
         .last()
         .map(|&arg| cx.range(arg).end)
-        .unwrap_or_else(|| cx.node(call).loc.name.end)
+        .unwrap_or(cx.node(call).loc.name.end)
         .max(cx.range(node).start);
     let node_end = cx.range(node).end;
     let source = cx.source().as_bytes();
