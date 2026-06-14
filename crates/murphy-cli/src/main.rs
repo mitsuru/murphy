@@ -1138,9 +1138,13 @@ fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
             discover_with_config(root, &config).map_err(|e| AppError::setup(e.to_string()))?
         } else {
             // For non-cwd roots, load the root-local .murphy.yml.
-            let local_config =
+            let mut local_config =
                 MurphyConfig::load_with_defaults(root, murphy_std::BUNDLED_DEFAULTS_YAML)
                     .map_err(|e| AppError::setup(e.to_string()))?;
+            // Layer the loaded packs' bundled `AllCops` defaults (notably
+            // `AllCops.Exclude`, e.g. rails' `db/*schema.rb`) into the root-local
+            // config so discovery under a non-cwd root honours pack excludes too.
+            local_config.apply_pack_default_layers(&registry.pack_default_configs());
             discover_with_config(root, &local_config).map_err(|e| AppError::setup(e.to_string()))?
         };
         for p in discovered {

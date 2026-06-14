@@ -2,3 +2,15 @@
 # ActiveSupport extension awareness for cops that consult it.
 AllCops:
   ActiveSupportExtensionsEnabled: true
+  # Mirrors rubocop-rails-2.x config/default.yml AllCops.Exclude. These join
+  # Murphy's default base exclude layer when the rails pack is loaded, so
+  # auto-generated / non-source files (notably db/schema.rb) are not linted.
+  # A project's own AllCops.Exclude replaces this unless it sets
+  # `inherit_mode: merge: [Exclude]` (RuboCop-compatible union).
+  Exclude:
+    - '**/app/assets/**/*'
+    - bin/*
+    - db/*schema.rb
+    - log/**/*
+    - public/**/*
+    - storage/**/*

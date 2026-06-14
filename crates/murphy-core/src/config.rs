@@ -22,6 +22,15 @@ pub struct MurphyConfig {
     /// Defaults parsed from the pack's bundled `default.yml` (e.g. rubocop's).
     /// Populated by `with_defaults`; empty when loaded via `from_yaml_str` / `load`.
     pub base_defaults: DefaultCopsData,
+    /// The user's raw `AllCops.Exclude` (`None` when unset). Retained separately
+    /// from `files.exclude` (the finalized discovery list) so the base-layer
+    /// union can be recomputed each time pack defaults are layered in. See
+    /// [`MurphyConfig::finalize_files_exclude`].
+    pub(crate) user_exclude: Option<Vec<String>>,
+    /// True when `inherit_mode: merge: [Exclude]` was set; the user's
+    /// `AllCops.Exclude` then unions with the default base layer rather than
+    /// replacing it.
+    pub(crate) exclude_merge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,6 +223,20 @@ fn merge_default_cop_rule(base: &mut DefaultCopRule, layer: DefaultCopRule) {
     }
 }
 
+/// Collect strings into a `Vec`, dropping later duplicates and keeping the first
+/// occurrence's position. Used to union exclude-pattern layers (defaults first,
+/// then user) without repeating a pattern that appears in more than one layer.
+fn dedup_preserving_order(items: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if seen.insert(item.clone()) {
+            out.push(item);
+        }
+    }
+    out
+}
+
 fn default_include() -> Vec<String> {
     vec!["**/*.rb".to_string()]
 }
@@ -243,6 +266,11 @@ struct ParsedYaml {
     plugins: Vec<PluginConfig>,
     /// Paths from `inherit_from:` — consumed by `load_resolving_inherit`.
     inherit_from: Vec<String>,
+    /// True when `inherit_mode: merge: [Exclude]` is set. Governs whether the
+    /// user's `AllCops.Exclude` *unions* with the default base layer (std core ∪
+    /// pack defaults) rather than *replacing* it. Mirrors RuboCop's `inherit_mode`
+    /// behaviour for the `AllCops.Exclude` key.
+    exclude_merge: bool,
 }
 
 impl ParsedYaml {
@@ -279,6 +307,10 @@ impl ParsedYaml {
                 all
             },
             inherit_from: vec![],
+            // OR semantics: if any file in the inherit chain enables Exclude
+            // merge, the merge applies. The root (`self`) is highest priority,
+            // but a `true` from either layer is meaningful, so OR is correct.
+            exclude_merge: self.exclude_merge || base.exclude_merge,
         }
     }
 
@@ -303,7 +335,11 @@ impl ParsedYaml {
                 .is_some(),
             files: FilesConfig {
                 include: self.include.unwrap_or_else(default_include),
-                exclude: self.exclude.unwrap_or_default(),
+                // Provisional: the finalized discovery list is recomputed by
+                // `finalize_files_exclude` (called from `with_defaults` /
+                // `apply_pack_default_layers`) once the default base layer is
+                // known. Raw user input is retained in `user_exclude`.
+                exclude: self.exclude.clone().unwrap_or_default(),
             },
             cops: CopsConfig {
                 path: self.cops_path.unwrap_or_else(default_cops_path),
@@ -311,6 +347,8 @@ impl ParsedYaml {
             },
             plugins: self.plugins,
             base_defaults: DefaultCopsData::default(),
+            user_exclude: self.exclude,
+            exclude_merge: self.exclude_merge,
         };
         (cfg, saw_include, saw_exclude)
     }
@@ -357,6 +395,8 @@ impl Default for MurphyConfig {
             },
             plugins: Vec::new(),
             base_defaults: DefaultCopsData::default(),
+            user_exclude: None,
+            exclude_merge: false,
         }
     }
 }
@@ -402,16 +442,16 @@ impl MurphyConfig {
     /// The host (murphy-cli) calls this with `murphy_std::BUNDLED_DEFAULTS_YAML`
     /// so cop defaults are data-driven rather than hardcoded.
     pub fn with_defaults(user_yaml: &str, defaults_yaml: &str) -> Result<Self, ConfigError> {
-        let (mut cfg, saw_include, saw_exclude) = Self::from_yaml_str_raw(user_yaml)?;
+        let (mut cfg, saw_include, _saw_exclude) = Self::from_yaml_str_raw(user_yaml)?;
         let defaults = DefaultCopsData::from_yaml(defaults_yaml);
 
         if !saw_include && !defaults.allcops_include.is_empty() {
             cfg.files.include = defaults.allcops_include.clone();
         }
-        if !saw_exclude && !defaults.allcops_exclude.is_empty() {
-            cfg.files.exclude = defaults.allcops_exclude.clone();
-        }
         cfg.base_defaults = defaults;
+        // Compute `files.exclude` from the default base layer (std core here;
+        // pack layers join later via `apply_pack_default_layers`). Idempotent.
+        cfg.finalize_files_exclude();
         Ok(cfg)
     }
 
@@ -434,16 +474,47 @@ impl MurphyConfig {
         } else {
             ParsedYaml::default()
         };
-        let (mut cfg, saw_include, saw_exclude) = parsed.into_murphy_config();
+        let (mut cfg, saw_include, _saw_exclude) = parsed.into_murphy_config();
         let defaults = DefaultCopsData::from_yaml(defaults_yaml);
         if !saw_include && !defaults.allcops_include.is_empty() {
             cfg.files.include = defaults.allcops_include.clone();
         }
-        if !saw_exclude && !defaults.allcops_exclude.is_empty() {
-            cfg.files.exclude = defaults.allcops_exclude.clone();
-        }
         cfg.base_defaults = defaults;
+        // See `with_defaults`: recompute `files.exclude` from the base layer.
+        cfg.finalize_files_exclude();
         Ok(cfg)
+    }
+
+    /// Recompute `files.exclude` — the finalized discovery exclude list — from
+    /// the user's raw `AllCops.Exclude` and the default base layer
+    /// (`base_defaults.allcops_exclude`, which is std core ∪ any layered pack
+    /// defaults).
+    ///
+    /// Mirrors RuboCop's resolution of `AllCops.Exclude` (verified empirically
+    /// against rubocop-rails on Mastodon):
+    ///
+    /// | user `Exclude` | `inherit_mode: merge: [Exclude]` | `files.exclude`            |
+    /// |----------------|----------------------------------|----------------------------|
+    /// | unset          | n/a                              | default base layer         |
+    /// | set            | no                               | user list (replaces base)  |
+    /// | set            | yes                              | base ∪ user (deduped)      |
+    ///
+    /// Idempotent: derives solely from `user_exclude`, `exclude_merge`, and
+    /// `base_defaults.allcops_exclude`, so re-running after pack layers join the
+    /// base produces the union including those packs.
+    ///
+    /// Limitation: a project cannot *un-exclude* a default base entry without
+    /// `inherit_mode` (matching RuboCop). Per-file inherit_mode and unioning
+    /// `AllCops.Exclude` across `inherit_from` files are not modelled.
+    fn finalize_files_exclude(&mut self) {
+        let base = &self.base_defaults.allcops_exclude;
+        self.files.exclude = match &self.user_exclude {
+            None => dedup_preserving_order(base.iter().cloned()),
+            Some(user) if self.exclude_merge => {
+                dedup_preserving_order(base.iter().chain(user.iter()).cloned())
+            }
+            Some(user) => user.clone(),
+        };
     }
 
     pub fn cop_enabled(&self, name: &str) -> bool {
@@ -496,7 +567,13 @@ impl MurphyConfig {
     ///    config. This is **not** gated by the `ActiveSupportExtensionsEnabled`
     ///    early-return below: per-cop file scoping must apply regardless of
     ///    whether the user pinned that flag.
-    /// 2. The `AllCops.ActiveSupportExtensionsEnabled` flag, which the user can
+    /// 2. **`AllCops.Exclude`** patterns merge into `base_defaults.allcops_exclude`
+    ///    (deduped) so a pack's file-discovery excludes — e.g. rubocop-rails'
+    ///    `db/*schema.rb`, `bin/*`, `log/**/*` — join the default base layer.
+    ///    `finalize_files_exclude` then recomputes `files.exclude` (see its docs
+    ///    for how the user's own `Exclude` interacts). Like (1), this runs
+    ///    regardless of the `ActiveSupportExtensionsEnabled` early-return.
+    /// 3. The `AllCops.ActiveSupportExtensionsEnabled` flag, which the user can
     ///    override (the early-return below).
     pub fn apply_pack_default_layers(&mut self, pack_yamls: &[&str]) {
         // (1) Per-cop pack defaults — always applied (later layer wins per-field).
@@ -507,7 +584,24 @@ impl MurphyConfig {
             }
         }
 
-        // (2) ActiveSupportExtensionsEnabled flag — user wins.
+        // (2) Pack AllCops.Exclude joins the default base layer (deduped), then
+        // `files.exclude` is recomputed. Must run before the ASE early-return so
+        // pack discovery excludes apply even when the user pinned ASE.
+        for yaml in pack_yamls {
+            let pack_exclude = DefaultCopsData::from_yaml(yaml).allcops_exclude;
+            if !pack_exclude.is_empty() {
+                self.base_defaults.allcops_exclude = dedup_preserving_order(
+                    self.base_defaults
+                        .allcops_exclude
+                        .iter()
+                        .cloned()
+                        .chain(pack_exclude),
+                );
+            }
+        }
+        self.finalize_files_exclude();
+
+        // (3) ActiveSupportExtensionsEnabled flag — user wins.
         if self.user_set_active_support_extensions_enabled {
             return; // user wins; pack layers are only defaults
         }
@@ -729,6 +823,17 @@ fn parse_yaml_str(text: &str) -> Result<ParsedYaml, ConfigError> {
             "plugins" => {
                 parsed.plugins =
                     parse_plugins(value).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+            }
+            "inherit_mode" => {
+                // Only `merge:` containing `Exclude` is honoured (thin subset of
+                // RuboCop's inherit_mode). It flips `AllCops.Exclude` from
+                // replace-the-default to union-with-the-default. Other keys
+                // (`override`, per-cop inherit_mode) are not modelled.
+                if let Yaml::Hash(modes) = value
+                    && let Some(merge) = modes.get(&Yaml::String("merge".to_string()))
+                {
+                    parsed.exclude_merge = yaml_string_list(merge).iter().any(|k| k == "Exclude");
+                }
             }
             _ => {
                 if let Yaml::Hash(cop_map) = value {
@@ -1991,5 +2096,135 @@ Style/StringLiterals:
             !cfg.active_support_extensions_enabled,
             "inherited user false wins over pack layer"
         );
+    }
+
+    // --- AllCops.Exclude base-layer union model (murphy-ynoq) ---
+    //
+    // RuboCop (verified on Mastodon w/ rubocop-rails) treats the default
+    // `AllCops.Exclude` as `std_core ∪ plugin_default`, an UNCONDITIONAL base
+    // layer. The user's explicit `Exclude` then either replaces it (default) or
+    // unions with it when `inherit_mode: merge: [Exclude]` is set.
+
+    const STD_EXCLUDE_YAML: &str = "AllCops:\n  Exclude:\n    - 'vendor/**/*'\n    - 'tmp/**/*'\n";
+    const PACK_EXCLUDE_YAML: &str = "AllCops:\n  Exclude:\n    - 'db/*schema.rb'\n    - 'bin/*'\n";
+
+    #[test]
+    fn pack_exclude_joins_base_layer_when_no_user_exclude() {
+        // Row 1: no user Exclude -> discovery excludes = std core UNION pack.
+        let mut cfg = MurphyConfig::with_defaults("", STD_EXCLUDE_YAML).unwrap();
+        cfg.apply_pack_default_layers(&[PACK_EXCLUDE_YAML]);
+        assert!(
+            cfg.files.exclude.contains(&"vendor/**/*".to_string()),
+            "std core exclude present: {:?}",
+            cfg.files.exclude
+        );
+        assert!(
+            cfg.files.exclude.contains(&"db/*schema.rb".to_string()),
+            "pack exclude present: {:?}",
+            cfg.files.exclude
+        );
+        assert!(cfg.files.exclude.contains(&"bin/*".to_string()));
+    }
+
+    #[test]
+    fn user_exclude_without_inherit_mode_replaces_defaults() {
+        // Row 3: user Exclude, no inherit_mode merge -> user list replaces all
+        // defaults (matches RuboCop without `inherit_mode: merge: [Exclude]`).
+        let mut cfg = MurphyConfig::with_defaults(
+            "AllCops:\n  Exclude:\n    - Vagrantfile\n",
+            STD_EXCLUDE_YAML,
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&[PACK_EXCLUDE_YAML]);
+        assert_eq!(cfg.files.exclude, vec!["Vagrantfile".to_string()]);
+    }
+
+    #[test]
+    fn user_exclude_with_inherit_mode_merge_unions_defaults() {
+        // Row 4: user Exclude + `inherit_mode: merge: [Exclude]` -> defaults
+        // (std core ∪ pack) UNION user.
+        let mut cfg = MurphyConfig::with_defaults(
+            "AllCops:\n  Exclude:\n    - Vagrantfile\ninherit_mode:\n  merge:\n    - Exclude\n",
+            STD_EXCLUDE_YAML,
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&[PACK_EXCLUDE_YAML]);
+        assert!(
+            cfg.files.exclude.contains(&"Vagrantfile".to_string()),
+            "user exclude present: {:?}",
+            cfg.files.exclude
+        );
+        assert!(
+            cfg.files.exclude.contains(&"vendor/**/*".to_string()),
+            "std core present: {:?}",
+            cfg.files.exclude
+        );
+        assert!(
+            cfg.files.exclude.contains(&"db/*schema.rb".to_string()),
+            "pack present: {:?}",
+            cfg.files.exclude
+        );
+    }
+
+    #[test]
+    fn exclude_union_dedups_repeated_patterns() {
+        // A pattern present in both std defaults and user (with merge) appears once.
+        let mut cfg = MurphyConfig::with_defaults(
+            "AllCops:\n  Exclude:\n    - 'vendor/**/*'\ninherit_mode:\n  merge:\n    - Exclude\n",
+            STD_EXCLUDE_YAML,
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&[]);
+        let count = cfg
+            .files
+            .exclude
+            .iter()
+            .filter(|e| e.as_str() == "vendor/**/*")
+            .count();
+        assert_eq!(count, 1, "deduped: {:?}", cfg.files.exclude);
+    }
+
+    #[test]
+    fn pack_exclude_union_is_idempotent() {
+        let mut cfg = MurphyConfig::with_defaults("", STD_EXCLUDE_YAML).unwrap();
+        cfg.apply_pack_default_layers(&[PACK_EXCLUDE_YAML]);
+        let first = cfg.files.exclude.clone();
+        cfg.apply_pack_default_layers(&[PACK_EXCLUDE_YAML]);
+        assert_eq!(cfg.files.exclude, first, "idempotent across repeated calls");
+    }
+
+    #[test]
+    fn pack_exclude_folds_even_when_user_pinned_active_support() {
+        // The exclude base-layer fold must run BEFORE the ASE early-return, so a
+        // project that pins `ActiveSupportExtensionsEnabled` still gets pack
+        // discovery excludes. Mirrors `per_cop_merge_runs_even_when_user_pinned_*`
+        // for the AllCops.Exclude path.
+        let mut cfg = MurphyConfig::with_defaults(
+            "AllCops:\n  ActiveSupportExtensionsEnabled: true\n",
+            STD_EXCLUDE_YAML,
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&[PACK_EXCLUDE_YAML]);
+        assert!(
+            cfg.files.exclude.contains(&"db/*schema.rb".to_string()),
+            "pack exclude folds despite the ASE early-return: {:?}",
+            cfg.files.exclude
+        );
+    }
+
+    #[test]
+    fn parses_inherit_mode_merge_exclude() {
+        // The inherit_mode flag must round-trip into the union decision even when
+        // it arrives via an inherited file (root wins / OR semantics).
+        let mut cfg = MurphyConfig::with_defaults(
+            "AllCops:\n  Exclude:\n    - Vagrantfile\ninherit_mode:\n  merge:\n    - Exclude\n",
+            STD_EXCLUDE_YAML,
+        )
+        .unwrap();
+        // Before any pack layer, the std base already unions with the user list.
+        assert!(cfg.files.exclude.contains(&"vendor/**/*".to_string()));
+        assert!(cfg.files.exclude.contains(&"Vagrantfile".to_string()));
+        cfg.apply_pack_default_layers(&[]);
+        assert!(cfg.files.exclude.contains(&"vendor/**/*".to_string()));
     }
 }
