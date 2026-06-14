@@ -10,8 +10,9 @@
 //! notes: >
 //!   Pattern-matching scope (MatchAs capture, ArrayPattern, HashPattern) and
 //!   self.it in parameterless blocks (Ruby 3.3+) are now handled (murphy-tpet).
-//!   Remaining v1 limitations: `self.x ||= 42` parses to Unknown (no Send
-//!   visible), `op_asgn`/`or_asgn` self LHS. These are translator-level gaps.
+//!   `self.x += 1` (op_asgn) exposes a `Send` LHS and is correctly left alone
+//!   (the `self.` is required). Remaining v1 limitation: `self.x ||= 42` /
+//!   `&&=` parse to Unknown (no Send visible), a translator-level gap.
 //! ```
 //!
 //! receiver is not needed for disambiguation. Mirrors RuboCop's
@@ -231,6 +232,21 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // `self.` would change the meaning to `foo = bar` (local
     // assignment), not an attr-writer call.
     if method_name.ends_with('=') {
+        return;
+    }
+
+    // Op-assign target (`self.foo += bar`, `self.foo -= 1`): the Send is the
+    // assignment target. Removing `self.` would read/write a local variable,
+    // so `self.` is required (RuboCop's `on_op_asgn` allows the self LHS).
+    if cx.parent(node).get().is_some_and(|parent_id| {
+        matches!(
+            *cx.kind(parent_id),
+            NodeKind::OpAsgn { target, .. }
+                | NodeKind::OrAsgn { target, .. }
+                | NodeKind::AndAsgn { target, .. }
+            if target == node
+        )
+    }) {
         return;
     }
 
@@ -586,6 +602,14 @@ mod tests {
     #[test]
     fn accepts_self_when_method_matches_or_asgn_lvar() {
         test::<RedundantSelf>().expect_no_offenses("foo ||= self.foo\n");
+    }
+
+    #[test]
+    fn accepts_self_as_op_assignment_target() {
+        // `self.foo += bar` desugars to `self.foo = self.foo + bar`; without
+        // `self.` the LHS introduces a local variable, so `self.` is required.
+        test::<RedundantSelf>().expect_no_offenses("self.ignored_columns += %w(a b)\n");
+        test::<RedundantSelf>().expect_no_offenses("self.count -= 1\n");
     }
 
     #[test]
