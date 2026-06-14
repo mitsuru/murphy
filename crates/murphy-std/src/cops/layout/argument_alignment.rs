@@ -16,6 +16,13 @@
 //!   first argument with two or more pairs), excluding `[]=` calls. Each
 //!   flattened item that *begins its own line* must sit at the base column.
 //!
+//!   `index` nodes are also checked: an index op-assignment target
+//!   (`a[i, j] += x`) lowers to `NodeKind::Index`, not a `Send`, but RuboCop
+//!   visits the synthetic `:[]` send, so the index arguments are aligned too.
+//!   The anchor is the `[` line (the receiver's end byte, since `[` is adjacent
+//!   to the receiver). `a[i, j] = x` is a `:[]=` send (excluded above); plain
+//!   `a[i, j]` reads are `:[]` sends already covered by `on_send`.
+//!
 //!   Argument flattening matches RuboCop verbatim:
 //!     - with_first_argument (default): if the first argument is a braceless
 //!       hash, the items are its pairs; otherwise the items are all arguments.
@@ -47,10 +54,13 @@
 //!
 //! ## Matched shapes
 //!
-//! `send`/`csend` nodes with multiple arguments (other than `[]=`) where a later
-//! flattened item begins its own line at a column other than the base column.
+//! `send`/`csend` nodes with multiple arguments (other than `[]=`), and `index`
+//! op-assignment targets (`a[i, j] += x`), where a later flattened item begins
+//! its own line at a column other than the base column.
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{
+    CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop,
+};
 
 const ALIGN_PARAMS_MSG: &str =
     "Align the arguments of a method call if they span more than one line.";
@@ -110,6 +120,16 @@ impl ArgumentAlignment {
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
+
+    // `a[i, j] += x` lowers the index target to a `NodeKind::Index` (an op-asgn
+    // read), not a `Send`/`Csend`. RuboCop visits the synthetic `:[]` send and
+    // applies the cop, so check the index arguments here too. (`a[i, j] = x` is a
+    // `Send` with method `:[]=`, skipped in `check`; `a[i, j]` reads are plain
+    // `:[]` sends already covered above.)
+    #[on_node(kind = "index")]
+    fn check_index(&self, node: NodeId, cx: &Cx<'_>) {
+        check_index_target(node, cx);
+    }
 }
 
 /// Visible column (0-based, char count) of a byte offset within its line.
@@ -136,7 +156,30 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     if cx.method_name(node) == Some("[]=") {
         return;
     }
+    // RuboCop's `target_method_lineno`: the selector / `(` line of the call.
+    check_aligned(args, anchor_line_offset(node, cx), cx);
+}
 
+/// Alignment check for an index op-asgn read (`a[i, j] += x`). The `NodeKind::Index`
+/// node carries the receiver and the index arguments; RuboCop's `:[]` send anchors
+/// on the `[` (its `loc.begin`). The `[` is adjacent to the receiver — a space
+/// there parses as a method call with an array argument instead — so the
+/// receiver's end byte lies on the `[` line, which is the alignment anchor.
+fn check_index_target(node: NodeId, cx: &Cx<'_>) {
+    let NodeKind::Index { receiver, args } = *cx.kind(node) else {
+        return;
+    };
+    let args = cx.list(args);
+    if !multiple_arguments(args, cx) {
+        return;
+    }
+    check_aligned(args, cx.range(receiver).end, cx);
+}
+
+/// Shared alignment body for a call-like node. `anchor` is a byte offset on the
+/// line the arguments anchor to under `with_fixed_indentation` (the selector /
+/// `(` / `[` line).
+fn check_aligned(args: &[NodeId], anchor: u32, cx: &Cx<'_>) {
     let opts = cx.options_or_default::<ArgumentAlignmentOptions>();
     let fixed = opts.enforced_style == ArgumentAlignmentStyle::WithFixedIndentation;
     let src = cx.source();
@@ -145,9 +188,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let items = flattened_arguments(args, fixed, cx);
 
     // Base column: first item's display column (with_first_argument), or the
-    // method-name line's indentation + width (with_fixed_indentation / no item).
+    // anchor line's indentation + width (with_fixed_indentation / no item).
     let base_column = if fixed || items.is_empty() {
-        let anchor = anchor_line_offset(node, cx);
         first_non_ws_column(anchor, src) + indentation_width(&opts)
     } else {
         display_column(cx.range(items[0]).start, src)
@@ -254,6 +296,21 @@ fn anchor_line_offset(node: NodeId, cx: &Cx<'_>) -> u32 {
     if begin != Range::ZERO {
         return begin.start;
     }
+    // Selectorless call `obj.(…)` (desugars to a `:call` send with no textual
+    // selector and no `loc.begin`): RuboCop anchors to the call paren `(` line
+    // (`node.loc.begin.line`). The `(` follows the `.`, so locate it after the
+    // receiver rather than falling back to the receiver's own line.
+    if let Some(recv) = cx.call_receiver(node).get() {
+        let toks = cx.sorted_tokens();
+        let idx = toks.partition_point(|t| t.range.start < cx.range(recv).end);
+        if let Some(paren) = toks[idx..]
+            .iter()
+            .take_while(|t| t.range.start < cx.range(node).end)
+            .find(|t| t.kind == SourceTokenKind::LeftParen)
+        {
+            return paren.range.start;
+        }
+    }
     cx.range(node).start
 }
 
@@ -295,6 +352,92 @@ mod tests {
             enforced_style: ArgumentAlignmentStyle::WithFixedIndentation,
             indentation_width: None,
         }
+    }
+
+    fn first_arg() -> ArgumentAlignmentOptions {
+        ArgumentAlignmentOptions {
+            enforced_style: ArgumentAlignmentStyle::WithFirstArgument,
+            indentation_width: None,
+        }
+    }
+
+    // Index op-assignment targets (murphy-4e8t) -------------------------------
+
+    /// `a[i, j] += x` lowers to a `NodeKind::Index`, which RuboCop checks via the
+    /// synthetic `:[]` send. Default style: base = first arg `foo` (col 4), so the
+    /// misaligned `bar` (col 2) is flagged. Verified against RuboCop 1.87 (3:3).
+    #[test]
+    fn flags_index_op_assign_default() {
+        let offenses =
+            run_cop_with_options::<ArgumentAlignment>("a[\n    foo,\n  bar\n] += 1\n", &first_arg());
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert!(
+            offenses[0].message.contains("Align the arguments"),
+            "got {offenses:?}"
+        );
+    }
+
+    /// Fixed style anchors on the `[` line (indent 0 + one level = 2), so `foo`
+    /// (col 4) is flagged and `bar` (col 2) is accepted. Verified vs RuboCop 1.87 (2:5).
+    #[test]
+    fn flags_index_op_assign_fixed() {
+        let offenses =
+            run_cop_with_options::<ArgumentAlignment>("a[\n    foo,\n  bar\n] += 1\n", &fixed());
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert!(
+            offenses[0].message.contains("one level of indentation"),
+            "got {offenses:?}"
+        );
+    }
+
+    /// Anchor discriminator: a chained, multi-line receiver (`a.b`) puts the `[`
+    /// on the `.b[` line (indent 2), so fixed base = 2 + 2 = 4 and both index args
+    /// (col 2) are flagged. Anchoring to the receiver-start line (indent 0) would
+    /// wrongly accept them. Verified vs RuboCop 1.87 (3:3, 4:3).
+    #[test]
+    fn flags_index_op_assign_multiline_receiver_fixed() {
+        let offenses =
+            run_cop_with_options::<ArgumentAlignment>("a\n  .b[\n  1,\n  2\n] += x\n", &fixed());
+        assert_eq!(offenses.len(), 2, "got {offenses:?}");
+    }
+
+    #[test]
+    fn accepts_aligned_index_op_assign() {
+        let offenses =
+            run_cop_with_options::<ArgumentAlignment>("a[\n  foo,\n  bar\n] += 1\n", &first_arg());
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// A single index argument is not `multiple_arguments?`, so it is never flagged.
+    #[test]
+    fn accepts_single_arg_index_op_assign() {
+        let offenses =
+            run_cop_with_options::<ArgumentAlignment>("a[\n  foo\n] += 1\n", &first_arg());
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    // Selectorless `.()` calls (murphy-4e8t) ---------------------------------
+
+    /// `obj.(…)` desugars to a `:call` send with no textual selector and no
+    /// `loc.begin`. Fixed style must anchor to the `(` line (indent 2 + one level
+    /// = 4); the args at col 4 are accepted. Anchoring to the receiver `obj` line
+    /// (indent 0) would wrongly flag both. Verified vs RuboCop 1.87 (no offense).
+    #[test]
+    fn accepts_selectorless_call_fixed_anchored_to_paren() {
+        let offenses = run_cop_with_options::<ArgumentAlignment>(
+            "obj\n  .(\n    a,\n    b\n  )\n",
+            &fixed(),
+        );
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// `obj.(…)` is still checked under default style: base = first arg `a`
+    /// (col 2), so the misaligned `b` (col 4) is flagged. Verified vs RuboCop 1.87 (3:5).
+    #[test]
+    fn flags_selectorless_call_default() {
+        let offenses =
+            run_cop_with_options::<ArgumentAlignment>("obj.(\n  a,\n    b)\n", &first_arg());
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
     }
 
     /// Regression (Codex #384): bundled default `IndentationWidth: ~` → JSON
