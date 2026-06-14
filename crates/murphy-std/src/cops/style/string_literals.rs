@@ -13,22 +13,25 @@
 //!   EnforcedStyle/single_quotes/double_quotes config key alignment.
 //!   ConsistentQuotesInMultiline defaults to false; deferred (non-default feature).
 //!   The `Dstr` node is never subscribed. Its literal `Str` segments (which ARE
-//!   `Str` nodes) are skipped in `check_str` when the parent is a heredoc or a
-//!   percent-literal `Dstr` (delimiter is not `"`/`'`, so an embedded quote is
-//!   content) — or a `Dsym`/`Regexp`/`Xstr`. This mirrors RuboCop's
-//!   `StringHelp#on_str` `loc?(:begin)` guard. For a `"`/`'`-delimited `Dstr`,
-//!   segments must escape embedded quotes, so adjacent concatenation
-//!   (`"a" "b"`, `"a" "#{b}"`) is correctly flagged per RuboCop.
+//!   `Str` nodes) are skipped in `check_str` unless the segment carries its own
+//!   opening quote delimiter, reconstructing RuboCop's `StringHelp#on_str`
+//!   `loc?(:begin)` guard positionally (`dstr_segment_is_own_literal`): a bare
+//!   content segment of an interpolated / heredoc / percent-literal `Dstr` is
+//!   skipped, while each independently-quoted child of an adjacent
+//!   concatenation (`"a" "b"`, `%Q[a] "b"`, `"a" "#{b}"`) is flagged per
+//!   RuboCop.
 //! ```
 //!
 //! string literals. Mirrors RuboCop's same-named cop.
 //!
 //! Subscribes to `NodeKind::Str` (plain literal). The `NodeKind::Dstr` node
 //! itself (`"a#{b}"`) is not subscribed — it cannot be a single-quoted string.
-//! `check_str` additionally skips `Str` content segments of a heredoc or
-//! percent-literal `Dstr` (and of `Dsym`/`Regexp`/`Xstr`), because those bodies
-//! can hold an unescaped quote that is literal content (e.g. HTML attribute
-//! quotes in a heredoc) rather than a string delimiter.
+//! `check_str` additionally skips a `Str` that is a bare content segment of an
+//! interpolated / heredoc / percent-literal `Dstr` (and of `Dsym`/`Regexp`/
+//! `Xstr`), because those bodies can hold an unescaped quote that is literal
+//! content (e.g. HTML attribute quotes in a heredoc, or `'foo'` in
+//! `"'foo'#{bar}"`) rather than a string delimiter. Only segments carrying
+//! their own quote delimiter — adjacent concatenation — are flagged.
 //!
 //! ## Option (`EnforcedStyle`)
 //!
@@ -115,26 +118,26 @@ impl StringLiterals {
         // Only standalone string literals (those with their own quote
         // delimiters) are subject to the quote-style check — RuboCop's
         // `StringHelp#on_str` guards on `node.loc?(:begin)`. A `Str` that is a
-        // content segment of a heredoc or a percent-literal (`%Q[…]`, `%(…)`, …)
-        // has no quote delimiter of its own: its raw source can carry an
-        // *unescaped* `"`/`'` that is literal content (e.g. HTML attribute
-        // quotes in a heredoc body between two `#{…}` interpolations), which
+        // bare content segment of an interpolated string, a heredoc, or a
+        // percent-literal (`%Q[…]`, `%(…)`, …) has no quote delimiter of its
+        // own: its raw source can carry an *unescaped* `"`/`'` that is literal
+        // content — HTML attribute quotes between two `#{…}` interpolations, or
+        // a quote-like run such as `'foo'` in `"'foo'#{bar}"` — which
         // `parse_quote_form` would misread as a delimiter. Skip those.
         //
-        // For a `"`/`'`-delimited `Dstr` — whether an interpolated string
-        // (`"a#{b}c"`) or adjacent string concatenation (`"a" "b"`, `"a" "#{b}"`)
-        // — segments must escape any embedded quote, so `parse_quote_form` is
-        // reliable: bare interpolation segments return `None`, while each
-        // independently-quoted concatenated literal is correctly flagged (as
-        // RuboCop does). So those are left to fall through.
+        // Adjacent string concatenation (`"a" "b"`, `%Q[a] "b"`, `"a" "#{b}"`)
+        // also parses as a `Dstr`, but each child carries its OWN quote
+        // delimiter and stays flagged, matching RuboCop (which sees a `begin`
+        // loc on each). `dstr_segment_is_own_literal` distinguishes the two.
         if let Some(parent) = cx.parent(node).get() {
             match *cx.kind(parent) {
-                NodeKind::Dstr(_) => {
-                    let parent_raw = cx.raw_source(cx.range(parent)).as_bytes();
-                    let delim = parent_raw.first().copied();
-                    if delim != Some(b'"') && delim != Some(b'\'') {
-                        return;
-                    }
+                // A `Dstr` segment that is NOT its own quoted literal (a bare
+                // content segment) is skipped; an independently-quoted child
+                // (concatenation) falls through to the quote-style check.
+                NodeKind::Dstr(list)
+                    if !dstr_segment_is_own_literal(node, parent, cx.list(list), cx) =>
+                {
+                    return;
                 }
                 NodeKind::Dsym(_) | NodeKind::Regexp { .. } | NodeKind::Xstr(_) => return,
                 _ => {}
@@ -214,6 +217,44 @@ pub(crate) fn parse_quote_form(src: &str) -> Option<(QuoteStyle, &str)> {
         (b'\'', b'\'') => Some((QuoteStyle::Single, &src[1..src.len() - 1])),
         (b'"', b'"') => Some((QuoteStyle::Double, &src[1..src.len() - 1])),
         _ => None,
+    }
+}
+
+/// Does this `Str` child of a `Dstr` carry its OWN opening quote delimiter
+/// (RuboCop's `node.loc?(:begin)`), making it an independently-quoted literal
+/// that the quote-style check applies to — as opposed to a bare content
+/// segment of an interpolated / heredoc / percent-literal string?
+///
+/// Murphy's `NodeLoc` stores no `begin` delimiter range, so the predicate is
+/// reconstructed positionally:
+///
+/// * The **first** child is an independent literal only when it begins exactly
+///   where the `Dstr` begins — i.e. it owns the `Dstr`'s opening delimiter. A
+///   content segment instead starts *after* the opening delimiter: `"a#{b}"`
+///   → `a` starts one byte past the `"`; `%Q[a#{b}]` → past `%Q[`; a heredoc
+///   segment sits on a later line entirely. This is what keeps a quote-like
+///   leading segment such as `'foo'` in `"'foo'#{bar}"` from being mistaken
+///   for an independent single-quoted literal.
+/// * A **later** child is an independent literal when its previous sibling is
+///   itself a string literal (`Str`/`Dstr`) — adjacent concatenation, e.g.
+///   `%Q[foo] "bar"` or `"a" "b"` (even with no separating space). A bare
+///   content segment instead follows an interpolation node (a `Begin` for
+///   `#{…}`, or a variable node for `#@ivar` / `#$gvar`).
+fn dstr_segment_is_own_literal(
+    node: NodeId,
+    parent: NodeId,
+    children: &[NodeId],
+    cx: &Cx<'_>,
+) -> bool {
+    let Some(idx) = children.iter().position(|&c| c == node) else {
+        return false;
+    };
+    match idx {
+        0 => cx.range(node).start == cx.range(parent).start,
+        _ => matches!(
+            *cx.kind(children[idx - 1]),
+            NodeKind::Str(_) | NodeKind::Dstr(_)
+        ),
     }
 }
 
@@ -540,6 +581,51 @@ mod tests {
         // content, not a delimiter; the segment must not be flagged.
         use murphy_plugin_api::test_support::test;
         test::<StringLiterals>().expect_no_offenses("x = %Q[a \"b\" #{c}]\n");
+    }
+
+    #[test]
+    fn concatenation_with_interpolated_part_flags_leading_literal() {
+        // `"foo" "bar #{baz}"` — the leading `"foo"` is an independently-quoted
+        // literal and is flagged/corrected; the interpolated sibling's content
+        // segment (`bar `) carries no delimiter of its own and is left intact.
+        use murphy_plugin_api::test_support::{indoc, test};
+        test::<StringLiterals>().expect_correction(
+            indoc! {r#"
+                x = "foo" "bar #{baz}"
+                    ^^^^^ Prefer single-quoted strings when you don't need string interpolation or special symbols.
+            "#},
+            "x = 'foo' \"bar #{baz}\"\n",
+        );
+    }
+
+    #[test]
+    fn mixed_percent_and_quoted_literal_flags_quoted_literal() {
+        // `%Q[foo] "bar"` — the whole expression is a `dstr`, but the second
+        // child `"bar"` carries its own double quotes (a previous-sibling
+        // literal makes it adjacent concatenation), so it is flagged even
+        // though the percent-literal first piece is not.
+        use murphy_plugin_api::test_support::{indoc, test};
+        test::<StringLiterals>().expect_correction(
+            indoc! {r#"
+                x = %Q[foo] "bar"
+                            ^^^^^ Prefer single-quoted strings when you don't need string interpolation or special symbols.
+            "#},
+            "x = %Q[foo] 'bar'\n",
+        );
+    }
+
+    #[test]
+    fn quote_like_segment_in_interpolation_not_corrupted_double_mode() {
+        // `"'foo'#{bar}"` — the leading content segment `'foo'` looks like a
+        // single-quoted literal but has no delimiter of its own. In
+        // double_quotes mode it must NOT be treated as an independent literal
+        // (which would autocorrect inside the interpolation and corrupt it).
+        use murphy_plugin_api::test_support::test;
+        test::<StringLiterals>()
+            .with_options(&StringLiteralsOptions {
+                enforced_style: EnforcedStyle::DoubleQuotes,
+            })
+            .expect_no_offenses("x = \"'foo'#{bar}\"\n");
     }
 }
 murphy_plugin_api::submit_cop!(StringLiterals);
