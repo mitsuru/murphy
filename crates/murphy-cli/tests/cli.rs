@@ -281,6 +281,106 @@ fn lint_file_with_todo_comment_skips_current_line_only() {
     assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
+/// RuboCop-compatible: `# rubocop:disable` (not just `# murphy:disable`) must
+/// suppress offenses. Real-world Ruby codebases (e.g. Mastodon) annotate with
+/// the `rubocop:` prefix; Murphy aims to lint them without rewrites.
+#[test]
+fn lint_file_with_rubocop_disable_block_comment_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_block.rb");
+    fs::write(
+        &path,
+        // Proper block form: the disable is re-enabled so this isolates
+        // suppression (a dangling disable would correctly trip
+        // Lint/MissingCopEnableDirective, like RuboCop).
+        "# frozen_string_literal: true\n\n# rubocop:disable Lint/Debugger\ndebugger\n# rubocop:enable Lint/Debugger\n",
+    )
+    .expect("write rc_block.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+/// Same-line trailing `# rubocop:disable <Cop>` suppresses the offense on its
+/// own line.
+#[test]
+fn lint_rubocop_disable_same_line_trailing_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_trailing.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Lint/Debugger\n",
+    )
+    .expect("write rc_trailing.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+/// Comma-separated cop lists: `# rubocop:disable A, B` must extract each cop,
+/// not treat `A,` (with the trailing comma) as the cop name.
+#[test]
+fn lint_rubocop_disable_comma_separated_cops_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_comma.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Style/SomethingElse, Lint/Debugger\n",
+    )
+    .expect("write rc_comma.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+/// A `-- reason` suffix after the cop list must be stripped before matching the
+/// cop name, mirroring RuboCop's directive grammar.
+#[test]
+fn lint_rubocop_disable_with_reason_suffix_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_reason.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Lint/Debugger -- left for diagnostics\n",
+    )
+    .expect("write rc_reason.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
 #[test]
 fn lint_file_with_todo_without_cop_suppresses_all_offenses_on_line() {
     let dir = tempdir().expect("create tempdir");

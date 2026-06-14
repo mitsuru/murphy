@@ -606,7 +606,9 @@ enum InlineDirectiveKind {
 #[derive(Debug, Clone)]
 struct InlineDirective {
     kind: InlineDirectiveKind,
-    cop: Option<String>,
+    /// Cop names targeted by the directive. Empty means "all cops" (a bare
+    /// directive or the `all` keyword).
+    cops: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -619,20 +621,41 @@ struct DirectiveState {
     line_end: usize,
 }
 
+/// Parse a `# murphy:…` / `# rubocop:…` inline directive. Mirrors the canonical
+/// engine in `murphy_plugin_api::cx::parse_comment_directive`: both prefixes are
+/// honored (RuboCop-annotated codebases lint without rewrites), a `-- reason`
+/// suffix is stripped, the cop list is comma-separated, and an empty list or
+/// `all` targets every cop.
 fn parse_inline_directive(line: &str) -> Option<InlineDirective> {
     let hash_pos = line.find('#')?;
     let comment = line[hash_pos + 1..].trim_start();
-    let rest = comment.strip_prefix("murphy:")?;
-    let mut parts = rest.split_whitespace();
-    let keyword = parts.next()?;
-    let cop = parts.next().map(str::to_string);
+    let rest = comment
+        .strip_prefix("murphy:")
+        .or_else(|| comment.strip_prefix("rubocop:"))?
+        .trim_start();
+    let (keyword, tail) = rest
+        .split_once(char::is_whitespace)
+        .map_or((rest, ""), |(keyword, tail)| (keyword, tail));
     let kind = match keyword {
         "disable" => InlineDirectiveKind::Disable,
         "enable" => InlineDirectiveKind::Enable,
         "todo" => InlineDirectiveKind::Todo,
         _ => return None,
     };
-    Some(InlineDirective { kind, cop })
+    // The cop list ends at a `-- reason` suffix; an empty list or `all` means
+    // every cop.
+    let cops_text = tail.split_once("--").map_or(tail, |(cops, _)| cops).trim();
+    let cops = if cops_text.is_empty() || cops_text.eq_ignore_ascii_case("all") {
+        Vec::new()
+    } else {
+        cops_text
+            .split(',')
+            .map(str::trim)
+            .filter(|cop| !cop.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    Some(InlineDirective { kind, cops })
 }
 
 fn directive_states_by_line(source: &str) -> Vec<DirectiveState> {
@@ -648,22 +671,25 @@ fn directive_states_by_line(source: &str) -> Vec<DirectiveState> {
         let mut todo_cops: BTreeSet<String> = BTreeSet::new();
 
         if let Some(directive) = parse_inline_directive(line) {
-            match (directive.kind, directive.cop) {
-                (InlineDirectiveKind::Disable, Some(cop)) => {
-                    disabled_cops.insert(cop);
+            let all = directive.cops.is_empty();
+            match directive.kind {
+                InlineDirectiveKind::Disable if all => disable_all = true,
+                InlineDirectiveKind::Disable => {
+                    disabled_cops.extend(directive.cops);
                 }
-                (InlineDirectiveKind::Disable, None) => disable_all = true,
-                (InlineDirectiveKind::Enable, Some(cop)) => {
-                    disabled_cops.remove(&cop);
-                }
-                (InlineDirectiveKind::Enable, None) => {
+                InlineDirectiveKind::Enable if all => {
                     disable_all = false;
                     disabled_cops.clear();
                 }
-                (InlineDirectiveKind::Todo, Some(cop)) => {
-                    todo_cops.insert(cop);
+                InlineDirectiveKind::Enable => {
+                    for cop in &directive.cops {
+                        disabled_cops.remove(cop);
+                    }
                 }
-                (InlineDirectiveKind::Todo, None) => todo_all = true,
+                InlineDirectiveKind::Todo if all => todo_all = true,
+                InlineDirectiveKind::Todo => {
+                    todo_cops.extend(directive.cops);
+                }
             }
         }
 
