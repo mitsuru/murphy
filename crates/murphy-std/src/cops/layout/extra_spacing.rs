@@ -153,7 +153,7 @@ impl ExtraSpacing {
 
             // RuboCop `extra_space_range`:
             // `return if allow_for_alignment? && aligned_tok?(token2)`.
-            if opts.allow_for_alignment && aligned_tok(src, token2, &aligned_comment_offsets) {
+            if opts.allow_for_alignment && aligned_tok(cx, src, token2, &aligned_comment_offsets) {
                 continue;
             }
 
@@ -174,8 +174,11 @@ impl ExtraSpacing {
 
 /// RuboCop's `aligned_tok?`: a comment token is aligned when its line is in
 /// the precomputed same-column comment set; any other token is aligned when a
-/// non-whitespace character sits at the same column on an adjacent line.
+/// non-whitespace character sits at the same start column on an adjacent line
+/// (`aligned_words?`), or when an assignment/comparison operator's trailing-`=`
+/// end column aligns with one on an adjacent line (`aligned_equals_operator?`).
 fn aligned_tok(
+    cx: &Cx<'_>,
     src: &[u8],
     token: SourceToken,
     aligned_comment_offsets: &HashSet<u32>,
@@ -187,6 +190,7 @@ fn aligned_tok(
         aligned_comment_offsets.contains(&token.range.start)
     } else {
         crate::cops::util::is_alignment_at_column(src, token.range.start as usize)
+            || crate::cops::util::is_equals_aligned(cx, token.range)
     }
 }
 
@@ -350,6 +354,19 @@ mod tests {
             # a comment between the two aligned assignments
             PER_THREAD_BUDGET  = 5
         "});
+    }
+
+    /// Mastodon FP: an op-assignment `+=` aligned by its trailing `=` END column
+    /// with a preceding bare `=` (RuboCop's `aligned_equals_operator?` /
+    /// `aligned_with_preceding_equals?`). The `+=`'s `=` ends at the same column
+    /// as `@http_client =`'s `=`, so the extra space before `+=` is intentional
+    /// alignment and must not be flagged.
+    #[test]
+    fn allows_equals_end_column_alignment() {
+        test::<ExtraSpacing>().expect_no_offenses(indoc! {r#"
+            @http_client = http_client
+            retries     += 1
+        "#});
     }
 
     #[test]

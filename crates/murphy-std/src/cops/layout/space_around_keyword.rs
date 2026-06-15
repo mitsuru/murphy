@@ -28,20 +28,22 @@
 //!   expression start, so `cx.loc(node).keyword()` locates them without any
 //!   new loc surface.
 //!
+//!   The `preceded_by_operator?` before-space exception IS ported: a keyword
+//!   nested directly in an operator expression (`!yield`, `a || yield`,
+//!   `-foo`, `1..yield`) does not flag a missing before-space, walking the
+//!   ancestor chain exactly as RuboCop does (operator-keyword / range ancestor,
+//!   or an operator-method send; the first non-send ancestor stops the climb).
+//!
 //!   REMAINING GAPS (murphy-qeef): modifier forms (`x if y`, `x while y`)
 //!   where the keyword sits mid-expression (not `keyword_bearing`, so
 //!   `keyword()` returns `Range::ZERO`); the ternary `then` and other
 //!   `if`-internal locations (`else`/`begin`/`end`/`then`);
 //!   `rescue`/`ensure`/`begin`/`kwbegin`/`for`/`in`-pattern keywords;
-//!   pre/postexe (`BEGIN`/`END`), and pattern-matching operators; and the
-//!   `preceded_by_operator?` before-space exception. Those keyword locations
-//!   require parser loc fields (`.keyword`/`.begin`/`.end`/`.else`) that
-//!   Murphy's `NodeLoc` (only `expression` + `name`) does not expose, or
-//!   AST-ancestor walks the single-surface ABI does not support. Because
-//!   `preceded_by_operator?` is not ported, the before-space check may
-//!   false-positive (and autocorrect) on a keyword nested directly in an
-//!   operator expression (e.g. `-yield`) where RuboCop suppresses it; this is
-//!   rare and tracked under the same gap issue.
+//!   pre/postexe (`BEGIN`/`END`), and pattern-matching operators. Those
+//!   keyword locations require parser loc fields
+//!   (`.keyword`/`.begin`/`.end`/`.else`) that Murphy's `NodeLoc` (only
+//!   `expression` + `name`) does not expose, or AST-ancestor walks the
+//!   single-surface ABI does not support.
 //! ```
 //!
 //! ## Matched shapes
@@ -181,7 +183,7 @@ impl SpaceAroundKeyword {
         let Some(do_tok) = do_tok else {
             return; // brace block — no keyword to check.
         };
-        check_keyword_range(cx, do_tok.range);
+        check_keyword_range(cx, node, do_tok.range);
 
         // `end` terminator — RuboCop's `check_end` fires only the before-space
         // half (no after-space). The `end` keyword ends exactly at the node's
@@ -197,7 +199,7 @@ impl SpaceAroundKeyword {
         let NodeKind::And { lhs, rhs } = *cx.kind(node) else {
             return;
         };
-        check_word_operator(cx, lhs, rhs, "and");
+        check_word_operator(cx, node, lhs, rhs, "and");
     }
 
     #[on_node(kind = "or")]
@@ -205,7 +207,7 @@ impl SpaceAroundKeyword {
         let NodeKind::Or { lhs, rhs } = *cx.kind(node) else {
             return;
         };
-        check_word_operator(cx, lhs, rhs, "or");
+        check_word_operator(cx, node, lhs, rhs, "or");
     }
 }
 
@@ -223,13 +225,13 @@ fn check_leading_keyword(cx: &Cx<'_>, node: NodeId, keywords: &[&str]) {
     if !keywords.contains(&kw) {
         return;
     }
-    check_keyword_range(cx, kw_range);
+    check_keyword_range(cx, node, kw_range);
 }
 
 /// Check the keyword form of `and` / `or` (operator `&&`/`||` forms are out of
 /// scope for this cop — handled by `SpaceAroundOperators`). Only fires when the
 /// gap between lhs and rhs literally contains the word operator.
-fn check_word_operator(cx: &Cx<'_>, lhs: NodeId, rhs: NodeId, word: &str) {
+fn check_word_operator(cx: &Cx<'_>, node: NodeId, lhs: NodeId, rhs: NodeId, word: &str) {
     let gap = Range {
         start: cx.range(lhs).end,
         end: cx.range(rhs).start,
@@ -244,20 +246,42 @@ fn check_word_operator(cx: &Cx<'_>, lhs: NodeId, rhs: NodeId, word: &str) {
         .take_while(|t| t.range.end <= gap.end)
         .find(|t| t.kind == SourceTokenKind::Other && cx.raw_source(t.range) == word)
     {
-        check_keyword_range(cx, op.range);
+        check_keyword_range(cx, node, op.range);
     }
 }
 
 /// RuboCop `check_keyword`: emit before- and after-space offenses for the
-/// keyword at `range`.
-fn check_keyword_range(cx: &Cx<'_>, range: Range) {
+/// keyword at `range`. The before-space offense is suppressed when the keyword
+/// is `preceded_by_operator?` (e.g. `!yield`, `a || yield`).
+fn check_keyword_range(cx: &Cx<'_>, node: NodeId, range: Range) {
     let src = cx.source().as_bytes();
-    if space_before_missing(src, range) {
+    if space_before_missing(src, range) && !preceded_by_operator(cx, node) {
         emit_before(cx, range);
     }
     if space_after_missing(cx, src, range) {
         emit_after(cx, range);
     }
+}
+
+/// RuboCop `preceded_by_operator?`: climb the ancestor chain. An
+/// operator-keyword (`and`/`or`/`&&`/`||`) or range (`..`/`...`) ancestor means
+/// the keyword binds inside an operator expression (suppress the before-space
+/// offense). A dotted method call binds tighter than operators, so a plain send
+/// ancestor is climbed past — unless it is an operator-method send (`!yield`,
+/// `-foo`), which also suppresses. The first non-send ancestor returns false.
+fn preceded_by_operator(cx: &Cx<'_>, node: NodeId) -> bool {
+    for ancestor in cx.ancestors(node) {
+        if cx.is_operator_keyword(ancestor) || cx.is_range_type(ancestor) {
+            return true;
+        }
+        if !matches!(*cx.kind(ancestor), NodeKind::Send { .. }) {
+            return false;
+        }
+        if cx.is_operator_method(ancestor) {
+            return true;
+        }
+    }
+    false
 }
 
 /// RuboCop `check_end`: only the before-space half (used for `end`).
@@ -547,6 +571,28 @@ mod tests {
                 "#},
                 "x = defined? :foo\n",
             );
+    }
+
+    // ---------- preceded_by_operator? before-space exception ----------
+
+    /// Mastodon FP: `!yield(x)` was flagged "Space before keyword `yield` is
+    /// missing". RuboCop's `check_keyword` suppresses the before-space offense
+    /// when `preceded_by_operator?(node, range)` is true — here `yield`'s parent
+    /// is the `!` operator-method send. Porting that gate accepts `!yield`.
+    #[test]
+    fn accepts_yield_preceded_by_bang_operator() {
+        test::<SpaceAroundKeyword>().expect_no_offenses(indoc! {r#"
+            def f(arr)
+              arr.find_index { |item| !yield(item) }
+            end
+        "#});
+    }
+
+    /// `preceded_by_operator?` also fires for an operator-keyword ancestor
+    /// (`and`/`or`/`&&`/`||`): `a||yield` must not flag a missing before-space.
+    #[test]
+    fn accepts_yield_preceded_by_or_keyword() {
+        test::<SpaceAroundKeyword>().expect_no_offenses("def f; a||yield; end\n");
     }
 
     #[test]

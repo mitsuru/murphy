@@ -2350,11 +2350,14 @@ impl<'a> Cx<'a> {
         false
     }
 
-    /// `BlockNode#send_node` — the call the block is attached to.
-    /// `OptNodeId::NONE` if not a `Block`.
+    /// `BlockNode#send_node` — the call the block is attached to, for all three
+    /// block kinds (`Block`/`Numblock`/`Itblock`). `OptNodeId::NONE` if `id` is
+    /// not a block.
     pub fn block_call(&self, id: NodeId) -> OptNodeId {
         match *self.kind(id) {
-            NodeKind::Block { call, .. } => OptNodeId::some(call),
+            NodeKind::Block { call, .. }
+            | NodeKind::Numblock { send: call, .. }
+            | NodeKind::Itblock { send: call, .. } => OptNodeId::some(call),
             _ => OptNodeId::NONE,
         }
     }

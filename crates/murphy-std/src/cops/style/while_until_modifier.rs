@@ -119,6 +119,15 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    // RuboCop's StatementModifier exempts a condition that assigns a local
+    // variable anywhere in its subtree (`condition.each_node.any?(&:lvasgn_type?)`).
+    // The condition is often parenthesised (`while (buffer = read)`), so the
+    // lvasgn lives below a `Begin` wrapper — a descendant walk (and a self-check)
+    // is required.
+    if crate::cops::util::condition_contains_lvasgn(cond, cx) {
+        return;
+    }
+
     // Build the modifier-form candidate to check length.
     let cond_src = cx.raw_source(cx.range(cond));
     let body_src = cx.raw_source(cx.range(body));
@@ -292,6 +301,18 @@ mod tests {
             begin
               x += 1
             end while x < 10
+        "});
+    }
+
+    #[test]
+    fn accepts_lvasgn_in_parenthesized_condition() {
+        // RuboCop's StatementModifier exempts conditions that assign a local
+        // variable: `while (buffer = adapter.read(1024))` reads worse as a
+        // modifier and is a common intentional idiom.
+        test::<WhileUntilModifier>().expect_no_offenses(indoc! {"
+            while (buffer = adapter.read(1024))
+              io.write(buffer)
+            end
         "});
     }
 }

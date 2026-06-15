@@ -37,7 +37,14 @@
 //!   - AllowURI (default true): RuboCop builds a URI regex from Ruby's URI
 //!     parser and validates with `URI.parse`; that grammar cannot be faithfully
 //!     reproduced in Rust. Murphy uses a pragmatic `https?://…`-to-end-of-line
-//!     matcher (and the configured `URISchemes`); it is approximate.
+//!     matcher (and the configured `URISchemes`); it is approximate. One known
+//!     divergence: RuboCop's `extend_end_position` has a YARD-comment branch
+//!     (`/{(\s|\S)*}$/`) that, on a line ending in `}`, extends a URI match to
+//!     the closing brace — so a `let(:value) { '…https://…  text' }` line whose
+//!     URI starts before `Max` is exempted even though the URI is mid-line.
+//!     Murphy does not reproduce this brace-extension (it would broaden the
+//!     exemption to any too-long line ending in `}`), so such lines may
+//!     false-positive; config todo-disable is the recommended workaround.
 //!   - Tab width is hardcoded to 2 (RuboCop reads `Layout/IndentationStyle`'s
 //!     `IndentationWidth`; cross-cop config is not read, matching the
 //!     `Layout/ParameterAlignment` precedent). Only affects tab-indented lines.

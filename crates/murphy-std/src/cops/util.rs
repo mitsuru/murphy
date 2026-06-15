@@ -199,6 +199,136 @@ pub fn is_alignment_at_column(src: &[u8], offset: usize) -> bool {
     false
 }
 
+/// RuboCop's `ASSIGNMENT_OR_COMPARISON_TOKENS` source spellings: operators that
+/// end with `=` (assignment, op-assignment, comparison) plus the append `<<`
+/// (`tLSHFT`). These are the tokens `aligned_equals_operator?` aligns by their
+/// trailing-`=` end column.
+fn is_assignment_or_comparison_operator(text: &str) -> bool {
+    // `=`, `==`, `===`, `!=`, `<=`, `>=` (the `=`-ending comparison/assignment
+    // tokens), every op-assignment `<op>=` (`+=`, `||=`, `<<=`, …), and `<<`.
+    if text == "<<" {
+        return true;
+    }
+    // Everything reaching here ends with `=`. `<=>` (the spaceship) ends with
+    // `>`, so it was already filtered out by the `ends_with('=')` check.
+    // Op-assignments and the `=`-ending comparisons all qualify; a lone `=`
+    // (setter / assignment) is the bare-`=` case and qualifies too, matching
+    // RuboCop's `tEQL`.
+    text.ends_with('=')
+}
+
+/// RuboCop's `aligned_equals_operator?` (the `aligned_token?`/`aligned_operator?`
+/// disjunct that `is_alignment_at_column` does not cover): the operator at
+/// `op_range` is aligned when its trailing-`=` END column equals the END column
+/// of the first assignment/comparison operator on the nearest preceding or
+/// following *content* line.
+///
+/// Faithful to `aligned_with_preceding_equals?`: the operator must itself end
+/// with `=` (or be `<<`), and its `last_column` must match the adjacent
+/// operator's `last_column`. The adjacent operator is found via the token
+/// stream (not a raw `=` byte scan) so an `=` inside a string literal on the
+/// adjacent line is not mistaken for an alignment anchor.
+///
+/// Shared by `Layout/ExtraSpacing` (`aligned_tok`) and
+/// `Layout/SpaceAroundOperators` (`is_alignment_spacing`).
+pub fn is_equals_aligned(cx: &Cx<'_>, op_range: Range) -> bool {
+    let src = cx.source().as_bytes();
+    let op_end = op_range.end as usize;
+    if op_end == 0 || op_end > src.len() {
+        return false;
+    }
+    let op_text = cx.raw_source(op_range);
+    // `range.source[-1] == '=' || range.source == '<<'`.
+    if !(op_text.ends_with('=') || op_text == "<<") {
+        return false;
+    }
+
+    // End column (exclusive) of the operator, i.e. RuboCop's `last_column`.
+    let op_line_start = src[..op_range.start as usize]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let op_end_col = op_end - op_line_start;
+
+    let is_skippable = |line: &[u8]| -> bool {
+        match line.iter().position(|&b| !is_ruby_blank_byte(b)) {
+            None => true,
+            Some(i) => line[i] == b'#',
+        }
+    };
+
+    // First assignment/comparison operator token whose end column equals
+    // `op_end_col` on `line` (byte range `[line_start, line_end)`), found via the
+    // token stream to avoid matching `=` inside string literals.
+    let line_has_aligned_op = |line_start: usize, line_end: usize| -> bool {
+        let toks = cx.tokens_in(Range {
+            start: line_start as u32,
+            end: line_end as u32,
+        });
+        for tok in toks {
+            if tok.kind != SourceTokenKind::Other {
+                continue;
+            }
+            let text = cx.raw_source(tok.range);
+            if is_assignment_or_comparison_operator(text) {
+                // First such token on the line (RuboCop's `detect`): its end
+                // column decides alignment.
+                let tok_end_col = tok.range.end as usize - line_start;
+                return tok_end_col == op_end_col;
+            }
+        }
+        false
+    };
+
+    // Nearest preceding content line.
+    let mut end = op_line_start;
+    while end > 0 {
+        let prev_end = end - 1;
+        let prev_start = src[..prev_end]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let line = &src[prev_start..prev_end];
+        if !is_skippable(line) {
+            if line_has_aligned_op(prev_start, prev_end) {
+                return true;
+            }
+            break;
+        }
+        end = prev_start;
+    }
+
+    // Nearest following content line.
+    let mut start = src[op_end..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| op_end + i + 1)
+        .unwrap_or(src.len());
+    while start < src.len() {
+        let line_end = src[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| start + i)
+            .unwrap_or(src.len());
+        let line = &src[start..line_end];
+        if !is_skippable(line) {
+            if line_has_aligned_op(start, line_end) {
+                return true;
+            }
+            break;
+        }
+        start = if line_end < src.len() {
+            line_end + 1
+        } else {
+            src.len()
+        };
+    }
+
+    false
+}
+
 /// RuboCop's `CommentsHelp#allow_comments?` comment clause for empty-branch
 /// cops (`Lint/EmptyWhen`, `Lint/EmptyInPattern`):
 ///
@@ -517,6 +647,27 @@ pub fn block_is_single_line(node: NodeId, cx: &Cx<'_>) -> bool {
     // inside it (on its line). "Same line as the opener" ⇔ no intervening newline.
     let close = cx.range(node).end.saturating_sub(1).max(opener.start);
     !gap_has_newline(cx.source().as_bytes(), opener.start, close)
+}
+
+/// Returns true if `cond` contains a local-variable assignment anywhere in its
+/// subtree (the node itself or any descendant).
+///
+/// Mirrors RuboCop's `StatementModifier#parenthesized_lvasgn?` precondition
+/// `condition.each_node.any?(&:lvasgn_type?)`: a modifier conversion of an
+/// `if`/`unless`/`while`/`until` whose condition assigns a local variable
+/// (e.g. `if (batch = next_batch)`) is suppressed, because the assignment is
+/// commonly intentional and the modifier form reads worse.
+///
+/// `each_node` includes the receiver node itself, so this checks `cond`
+/// directly *and* its descendants — a bare `if x = foo` has `cond` as a lone
+/// `Lvasgn` with no `begin` wrapper, which a descendants-only walk would miss.
+pub fn condition_contains_lvasgn(cond: NodeId, cx: &Cx<'_>) -> bool {
+    if matches!(cx.kind(cond), NodeKind::Lvasgn { .. }) {
+        return true;
+    }
+    cx.descendants(cond)
+        .iter()
+        .any(|&n| matches!(cx.kind(n), NodeKind::Lvasgn { .. }))
 }
 
 // Note: is_parenthesized is tested indirectly via the cops that use it:

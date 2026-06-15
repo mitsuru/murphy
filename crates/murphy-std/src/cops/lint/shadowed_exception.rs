@@ -12,9 +12,13 @@
 //!   Covers modifier rescue exclusion, empty rescue as StandardError, same-rescue
 //!   ancestor pairs, duplicate exceptions, and ordered/misordered multiple rescue
 //!   groups for common built-in exception classes. v1 cannot constant-resolve
-//!   arbitrary user exception classes or compare platform-specific SystemCallError
-//!   Errno values, so unknown constants are conservatively ignored except when
-//!   shadowed by an earlier Exception group.
+//!   arbitrary user exception classes, so unknown constants are conservatively
+//!   ignored except when shadowed by an earlier Exception group. Every `Errno::*`
+//!   constant is a `SystemCallError` subclass whose `<=>` is nil; RuboCop never
+//!   treats two `Errno` constants as comparable (even identical ones never
+//!   shadow), but a broad `Exception`/`StandardError`/`SystemCallError` rescue
+//!   does shadow a later `Errno::*` rescue. Modelled with a dedicated `Errno`
+//!   exception class so distinct siblings never collide.
 //! ```
 //!
 //! ## Matched shapes
@@ -88,6 +92,11 @@ fn rescue_line_range(resbody: NodeId, cx: &Cx<'_>) -> Range {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExceptionClass {
     Known(&'static str),
+    /// Any `Errno::*` (a `SystemCallError` subclass). RuboCop never treats two
+    /// distinct `Errno` constants as comparable (their `<=>` is nil), and even
+    /// identical ones do not shadow, so the specific name is not retained — a
+    /// single variant captures the per-class incomparability.
+    Errno,
     Unknown,
     Splat,
 }
@@ -104,10 +113,13 @@ fn exception_group(resbody: NodeId, cx: &Cx<'_>) -> Vec<ExceptionClass> {
         .iter()
         .map(|&node| match *cx.kind(node) {
             NodeKind::Splat(_) => ExceptionClass::Splat,
-            _ => const_name(node, cx)
-                .and_then(known_exception_name)
-                .map(ExceptionClass::Known)
-                .unwrap_or(ExceptionClass::Unknown),
+            _ => match const_name(node, cx) {
+                Some(name) if name.starts_with("Errno::") => ExceptionClass::Errno,
+                Some(name) => known_exception_name(&name)
+                    .map(ExceptionClass::Known)
+                    .unwrap_or(ExceptionClass::Unknown),
+                None => ExceptionClass::Unknown,
+            },
         })
         .collect()
 }
@@ -124,8 +136,8 @@ fn const_name(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     }
 }
 
-fn known_exception_name(name: String) -> Option<&'static str> {
-    match name.as_str() {
+fn known_exception_name(name: &str) -> Option<&'static str> {
+    match name {
         "Exception" => Some("Exception"),
         "StandardError" => Some("StandardError"),
         "RuntimeError" => Some("RuntimeError"),
@@ -136,7 +148,6 @@ fn known_exception_name(name: String) -> Option<&'static str> {
         "SystemCallError" => Some("SystemCallError"),
         "Interrupt" => Some("Interrupt"),
         "SignalException" => Some("SignalException"),
-        name if name.starts_with("Errno::") => Some("SystemCallError"),
         _ => None,
     }
 }
@@ -163,8 +174,21 @@ fn shadows_later(earlier: &[ExceptionClass], later: &[ExceptionClass]) -> bool {
 fn comparable_shadow(a: ExceptionClass, b: ExceptionClass) -> bool {
     match (a, b) {
         (ExceptionClass::Known(a), ExceptionClass::Known(b)) => a == b || is_ancestor(a, b),
+        // A broad class shadows a more specific `Errno::*` (a SystemCallError
+        // subclass) — `a` is an ancestor of `b`.
+        (ExceptionClass::Known(a), ExceptionClass::Errno) => is_errno_ancestor(a),
+        // Two `Errno::*` are never comparable (RuboCop's `<=>` is nil), so even
+        // identical ones never shadow. `Errno` never shadows a `Known` class.
+        (ExceptionClass::Errno, _) => false,
         _ => false,
     }
+}
+
+/// True when `a` is a class that is an ancestor of every `Errno::*` (i.e. a
+/// `SystemCallError` subclass). `Exception` and `StandardError` are above
+/// `SystemCallError`, which is the direct superclass of all `Errno` constants.
+fn is_errno_ancestor(a: &str) -> bool {
+    matches!(a, "Exception" | "StandardError" | "SystemCallError")
 }
 
 fn is_ancestor(a: &str, b: &str) -> bool {
@@ -274,6 +298,66 @@ mod tests {
                   handle_errno
                 end
             "#});
+    }
+
+    #[test]
+    fn accepts_distinct_errno_siblings_in_one_group() {
+        // Mastodon FP: distinct `Errno::*` constants are SystemCallError
+        // subclasses whose `<=>` is nil (incomparable), so RuboCop never flags
+        // a group of distinct Errno siblings. Clean.
+        test::<ShadowedException>().expect_no_offenses(indoc! {r#"
+            begin
+              foo
+            rescue Errno::EEXIST, Errno::ENOTEMPTY, Errno::ENOENT
+              bar
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_duplicate_errno_in_one_group() {
+        // Even identical `Errno::*` constants do not shadow (their `<=>` is
+        // nil), unlike duplicate `NameError`. Clean.
+        test::<ShadowedException>().expect_no_offenses(indoc! {r#"
+            begin
+              foo
+            rescue Errno::ENOENT, Errno::ENOENT
+              bar
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_standard_error_shadowing_errno() {
+        // Regression guard: a broad `StandardError` rescue before a narrow
+        // `Errno::ENOENT` rescue still shadows it.
+        test::<ShadowedException>().expect_offense(indoc! {r#"
+            begin
+              foo
+            rescue StandardError
+            ^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+              a
+            rescue Errno::ENOENT
+              b
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_system_call_error_shadowing_errno() {
+        // `SystemCallError` is the direct superclass of every `Errno::*`, so a
+        // broad `SystemCallError` rescue before a narrow `Errno::ENOENT` rescue
+        // shadows it.
+        test::<ShadowedException>().expect_offense(indoc! {r#"
+            begin
+              foo
+            rescue SystemCallError
+            ^^^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+              a
+            rescue Errno::ENOENT
+              b
+            end
+        "#});
     }
 
     #[test]

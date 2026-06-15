@@ -105,34 +105,28 @@ fn brace_tokens(node: NodeId, cx: &Cx<'_>) -> Option<(SourceToken, SourceToken)>
     let body = body_start(node, cx);
 
     let toks = cx.sorted_tokens();
-    let src = cx.source().as_bytes();
-    let idx = toks.partition_point(|t| t.range.start < node_range.start);
 
-    // Opener: first depth-0 `{` before the body (skip hash braces inside
-    // parenthesised call args).
-    let mut paren_depth: i32 = 0;
-    let mut left_brace = None;
-    for tok in &toks[idx..] {
-        if tok.range.start >= body {
-            break;
-        }
-        match tok.kind {
-            SourceTokenKind::LeftParen => paren_depth += 1,
-            SourceTokenKind::RightParen => paren_depth -= 1,
-            SourceTokenKind::LeftBrace if paren_depth == 0 => {
-                left_brace = Some(*tok);
-                break;
-            }
-            SourceTokenKind::Other
-                if paren_depth == 0
-                    && &src[tok.range.start as usize..tok.range.end as usize] == b"do" =>
-            {
-                return None; // do/end block
-            }
-            _ => {}
-        }
+    // Scope-aware opener: the block's OWN opener (`{` or `do`) is the last such
+    // token immediately preceding its args/body. Scan BACKWARD from the body
+    // (bounded by the node start) so that openers in the receiver chain — a
+    // nested brace block (`foo { … }.bar do`) or a hash-literal argument
+    // (`bar({}) do`) — are passed over: those lie before the block's own
+    // opener. RuboCop reads `node.loc.begin` directly; this reconstructs the
+    // same opener positionally. The first `do`/`{` found going backward is the
+    // opener; if it is `do`, this is a do/end block and the cop does not apply.
+    let idx = toks.partition_point(|t| t.range.start < body);
+    let opener = toks[..idx]
+        .iter()
+        .rev()
+        .take_while(|t| t.range.start >= node_range.start)
+        .find(|t| {
+            t.kind == SourceTokenKind::LeftBrace
+                || (t.kind == SourceTokenKind::Other && cx.raw_source(t.range) == "do")
+        })?;
+    if opener.kind != SourceTokenKind::LeftBrace {
+        return None; // do/end block
     }
-    let left_brace = left_brace?;
+    let left_brace = *opener;
 
     // Closer: the last `}` token within the node range.
     let node_tokens = cx.tokens_in(node_range);
@@ -636,6 +630,22 @@ mod tests {
             foo {
               bar
             }
+        "#});
+    }
+
+    /// Mastodon FP: a `do/end` block whose receiver chain contains a nested
+    /// brace block and a hash-literal argument. The outer block opener is `do`,
+    /// so the cop must return None. The old opener scan started at the node
+    /// range and picked the nested `flat_map` block's `{`; the closer scan
+    /// picked the `each_with_object({})` hash arg's `}`, producing a bogus
+    /// "Space missing inside }". Scanning the opener from the *call node's end*
+    /// finds the block's own `do` first and bails out.
+    #[test]
+    fn does_not_flag_do_end_block_with_nested_brace_and_hash_arg() {
+        test::<SpaceInsideBlockBraces>().expect_no_offenses(indoc! {r#"
+            SOURCES.flat_map { |k| k }.each_with_object({}) do |a, h|
+              h
+            end
         "#});
     }
 }

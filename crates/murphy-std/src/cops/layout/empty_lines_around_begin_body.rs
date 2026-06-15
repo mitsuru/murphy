@@ -53,13 +53,29 @@ impl EmptyLinesAroundBeginBody {
         // excludes parenthesized `(...)` (first token `(`) and the implicit
         // begin produced by a method-level `rescue` (range does not start at
         // a `begin` keyword).
-        let start = cx.range(node).start;
+        let range = cx.range(node);
+        let start = range.start;
         let is_keyword_begin = cx.token_after(start).is_some_and(|t| {
             t.range.start == start
                 && t.kind == SourceTokenKind::Other
                 && cx.raw_source(t.range) == "begin"
         });
         if !is_keyword_begin {
+            return;
+        }
+        // When a keyword `begin … end` is one of several statements in a body,
+        // an implicit outer `(begin <kwbegin> <other-stmts>)` wrapper begins at
+        // the *same* byte as the real `begin` keyword, so it also passes the
+        // first-token check. Discriminate by the last token: a real begin … end
+        // ends at the `end` keyword, whereas the wrapper ends at its last
+        // statement. This prevents the wrapper from flagging the blank line that
+        // follows the real `end`.
+        let ends_with_end_keyword = cx.token_before(range.end).is_some_and(|t| {
+            t.range.end == range.end
+                && t.kind == SourceTokenKind::Other
+                && cx.raw_source(t.range) == "end"
+        });
+        if !ends_with_end_keyword {
             return;
         }
         check_empty_lines_around_body_no_empty_lines(node, start, "begin", cx);
@@ -161,6 +177,28 @@ mod tests {
     #[test]
     fn ignores_whitespace_only_line() {
         test::<EmptyLinesAroundBeginBody>().expect_no_offenses("begin\n  \n  foo\nend\n");
+    }
+
+    /// Mastodon FP: a `begin … rescue … end` that is one of several statements
+    /// in a method body has an implicit outer `(begin <kwbegin> <stmts>)`
+    /// wrapper starting at the *same* byte as the real `begin` keyword. The
+    /// first-token heuristic is true for both, so the wrapper (whose range runs
+    /// to the last statement) treats the blank line after the real `end` as a
+    /// "body end" blank and flags it. Requiring the node's last token to be the
+    /// `end` keyword discriminates the real kwbegin from the wrapper.
+    #[test]
+    fn no_offense_for_blank_after_begin_among_statements() {
+        test::<EmptyLinesAroundBeginBody>().expect_no_offenses(concat!(
+            "def f(u)\n",
+            "  begin\n",
+            "    x = parse(u)\n",
+            "  rescue StandardError\n",
+            "    return false\n",
+            "  end\n",
+            "\n",
+            "  other(x)\n",
+            "end\n",
+        ));
     }
 
     #[test]

@@ -14,9 +14,12 @@
 //!   character classes are scanned from the raw regexp source, modelled on
 //!   `Lint/MixedCaseRange`'s raw-source scanner. Elements are tokenized as:
 //!   POSIX classes (`[:alpha:]` / `[:^alpha:]`), escapes (`\d`, `\x41`,
-//!   `\u{1F600}`, octal, etc.), merged ranges (`0-9`, `\x41-\x5A`), and single
-//!   characters. A `-` at the class start/end or immediately after a completed
-//!   range is a literal element, not a range operator. The element source is
+//!   `\u{1F600}`, `\p{Name}` / `\P{Name}` unicode properties, octal, etc.),
+//!   merged ranges (`0-9`, `\x41-\x5A`), and single characters. A `-` at the
+//!   class start or with no following member (class end) is a literal element,
+//!   not a range operator. regexp-parser keeps extending a range across
+//!   adjacent `-member` segments, so `0-9-0-9` is one element (clean) while
+//!   `0-90-9` is two `0-9` ranges (the second a duplicate). The element source is
 //!   compared exactly (matching RuboCop's string identity), so semantic overlaps
 //!   like `[a-cb]` are intentionally not flagged. The duplicate's full span is
 //!   removed by the autocorrect (unsafe in RuboCop as well, since regexp meaning
@@ -30,6 +33,10 @@
 //!     operator and its operands are tokenized as ordinary members. RuboCop skips
 //!     `:intersection` sets entirely. False positives there are avoided because
 //!     the operand sub-classes start a nested `[`, which terminates the scan.
+//!   - Braceless unicode property escapes (`\pL`, `\PL`) are tokenized as a
+//!     bare `\p`/`\P` plus a separate following char rather than one element.
+//!     Ruby accepts only the braced form in practice for multi-letter names; no
+//!     known case hits this, so it is left as a conservative parity gap.
 //! ```
 
 use std::collections::HashSet;
@@ -203,10 +210,6 @@ fn scan_char_class(class: &[u8], class_offset: u32, cx: &Cx<'_>) {
     let mut seen: HashSet<&[u8]> = HashSet::new();
     let mut i = usize::from(class.first() == Some(&b'^'));
     let len = class.len();
-    // True when the element just consumed was a range (`a-b`). A `-` directly
-    // following a completed range is a literal element, not a range operator
-    // (e.g. `[0-9-0-9]` is `0-9`, literal `-`, `0-9`).
-    let mut prev_was_range = false;
 
     while i < len {
         let member_start = i;
@@ -214,22 +217,19 @@ fn scan_char_class(class: &[u8], class_offset: u32, cx: &Cx<'_>) {
         i = member_end(class, i);
 
         // A range `member - member` merges into a single element. `-` is the
-        // range operator only when it's between two members (not at class
-        // start/end), is not itself escaped, and the preceding element was not
-        // itself a range (so the `-` is not a dangling literal).
-        if !prev_was_range && i < len && class[i] == b'-' && i + 1 < len {
-            let after_dash = i + 1;
-            let range_member_end = member_end(class, after_dash);
-            i = range_member_end;
-            let element = &class[member_start..i];
-            check_member(element, member_start, class_offset, &mut seen, cx);
-            prev_was_range = true;
-            continue;
+        // range operator only when it's between two members: not at class
+        // start/end (a `-` with no following member is a literal element), and
+        // not itself escaped. regexp-parser keeps extending a range across
+        // adjacent `-member` segments, so `0-9-0-9` is ONE element (clean),
+        // while `0-90-9` is two separate `0-9` ranges (the second a duplicate).
+        // The whole element (with any continuation segments) is checked once,
+        // after the run ends.
+        while i < len && class[i] == b'-' && i + 1 < len {
+            i = member_end(class, i + 1);
         }
 
         let member = &class[member_start..i];
         check_member(member, member_start, class_offset, &mut seen, cx);
-        prev_was_range = false;
     }
 }
 
@@ -301,6 +301,23 @@ fn escape_end(class: &[u8], i: usize) -> usize {
                 count += 1;
             }
             j
+        }
+        b'p' | b'P' => {
+            // Unicode property escape `\p{Name}` / `\P{Name}`. The whole
+            // `{...}` is part of the one element (mirror the `\u{...}` scan),
+            // so it isn't consumed char-by-char (which would collide repeated
+            // letters in the property name).
+            if class.get(i + 2) == Some(&b'{') {
+                let mut j = i + 3;
+                while j < len && class[j] != b'}' {
+                    j += 1;
+                }
+                if j < len { j + 1 } else { j }
+            } else {
+                // `\p` without a brace is not a valid property escape; treat
+                // the `p`/`P` as a single escaped char.
+                i + 2
+            }
         }
         // Clamp to `len` so a truncated multi-byte escaped char can't overrun.
         _ => (i + 1 + utf8_char_len(c)).min(len),
@@ -409,12 +426,54 @@ mod tests {
 
     #[test]
     fn dash_after_completed_range_is_literal() {
-        // `[0-9-0-9]` parses as `0-9`, literal `-`, `0-9` — the trailing `0-9`
-        // is a duplicate of the first range. The `-` between the ranges is a
-        // literal element, not a range operator.
+        // `[0-9-0-9]` — regexp-parser (and thus RuboCop) reads this as a single
+        // nested range, NOT `0-9`, literal `-`, `0-9`. It is CLEAN. This matches
+        // `rubocop --only Lint/DuplicateRegexpCharacterClassElement`.
+        test::<Cop>().expect_no_offenses("r = /[0-9-0-9]/\n");
+    }
+
+    #[test]
+    fn flags_adjacent_duplicate_range() {
+        // `[0-90-9]` — two adjacent `0-9` ranges with no separator. The second
+        // `0-9` is a duplicate of the first. RuboCop flags the second range.
         test::<Cop>().expect_offense(indoc! {r#"
-            r = /[0-9-0-9]/
-                      ^^^ Duplicate element inside regexp character class
+            r = /[0-90-9]/
+                     ^^^ Duplicate element inside regexp character class
+        "#});
+    }
+
+    #[test]
+    fn range_then_trailing_dash_is_clean() {
+        // `[a-z0-9-]` — `a-z`, `0-9`, trailing literal `-`. No duplicates.
+        // RuboCop clean (the dash bug previously split `0-9` and collided).
+        test::<Cop>().expect_no_offenses("r = /[a-z0-9-]/\n");
+    }
+
+    #[test]
+    fn range_then_dot_dash_is_clean() {
+        // `[a-z0-9.-]` — `a-z`, `0-9`, `.`, trailing literal `-`. Clean.
+        test::<Cop>().expect_no_offenses("r = /[a-z0-9.-]/\n");
+    }
+
+    #[test]
+    fn complex_class_with_trailing_dash_is_clean() {
+        // Mastodon FP: a large class ending in a literal `-`. Clean.
+        test::<Cop>().expect_no_offenses("r = /[0-9a-zA-Z!#$%&'*+.^_`|~-]/\n");
+    }
+
+    #[test]
+    fn unicode_property_escape_is_one_element() {
+        // Mastodon FP: `\p{White_Space}` must tokenize as one element, not be
+        // consumed char-by-char (which collided the two `e`s). Clean.
+        test::<Cop>().expect_no_offenses("r = /[^\\p{White_Space}<>()?]/\n");
+    }
+
+    #[test]
+    fn flags_duplicate_unicode_property_escape() {
+        // Two identical `\p{...}` escapes ARE a duplicate.
+        test::<Cop>().expect_offense(indoc! {r#"
+            r = /[\p{Alpha}\p{Alpha}]/
+                           ^^^^^^^^^ Duplicate element inside regexp character class
         "#});
     }
 

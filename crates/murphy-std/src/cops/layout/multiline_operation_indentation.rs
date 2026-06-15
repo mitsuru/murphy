@@ -264,8 +264,11 @@ fn kw_node_with_special_indentation(node: NodeId, cx: &Cx<'_>) -> Option<NodeId>
     for ancestor in cx.ancestors(node) {
         let cond = match *cx.kind(ancestor) {
             NodeKind::If { cond, .. } => {
-                // Exclude ternaries (no `end` keyword).
-                if cx.loc(ancestor).end_keyword() == Range::ZERO {
+                // Exclude ternaries (RuboCop's `IfNode#ternary?`). A modifier
+                // `if`/`unless` also has no `end` keyword, but unlike a ternary
+                // its condition must align — so test `is_ternary`, not the
+                // `end_keyword == ZERO` heuristic which conflated the two.
+                if cx.is_ternary(ancestor) {
                     continue;
                 }
                 cond
@@ -576,6 +579,23 @@ mod tests {
                 a = b +
                   c
             "});
+    }
+
+    /// Mastodon FP: a modifier `if`/`unless` whose condition spans lines
+    /// (`return unless a? &&\n  b?`) parses to an `If` with no `end` keyword,
+    /// just like a ternary. The old guard skipped it via `end_keyword == ZERO`,
+    /// so alignment was not forced and the aligned operand was wrongly flagged
+    /// as needing `indented`. `cx.is_ternary` distinguishes the two: a modifier
+    /// `unless` is not a ternary, so alignment is correctly forced and the
+    /// aligned `b?` is accepted.
+    #[test]
+    fn accepts_aligned_modifier_unless_condition() {
+        test::<MultilineOperationIndentation>().expect_no_offenses(indoc! {"
+            def f
+              return unless a? &&
+                            b?
+            end
+        "});
     }
 
     /// Cross-cop fallback (murphy-kke2): with this cop's own `IndentationWidth`

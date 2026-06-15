@@ -10,24 +10,26 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Known v1 limitations: Casgn, OrAsgn, AndAsgn, OpAsgn tracking mirrors
-//!   RuboCop's MethodVariableTracker for Lvasgn/Ivasgn/Cvasgn/Gvasgn.
-//!   OpAsgn (+= etc.) marks the target as non-local (always flags the setter)
-//!   which is a conservative approximation of RuboCop's behavior. The
-//!   cop does not handle `for` loop iteration variables or `rescue => var`
-//!   exception bindings as assignment sources. All common shapes are verified:
-//!   def/defs, lvar/ivar/cvar/gvar receiver, setter method (attr=, []=),
-//!   nested assignment tracking through multiple/logical/binary operator
-//!   assignments, constructor detection (ClassName.new), literal sources,
-//!   and argument-source exclusion.
+//!   RuboCop's MethodVariableTracker tracks only LOCAL variables (lvasgn), and
+//!   the setter receiver must itself be a local variable — a setter on an
+//!   ivar/cvar/gvar is never a "useless setter call to a local variable", so
+//!   those are not tracked and never flagged. OrAsgn, AndAsgn, OpAsgn and Masgn
+//!   tracking mirrors that local-variable tracker. OpAsgn (+= etc.) marks the
+//!   target as non-local (always flags the setter), a conservative
+//!   approximation of RuboCop's behavior. The cop does not handle `for` loop
+//!   iteration variables or `rescue => var` exception bindings as assignment
+//!   sources. Verified shapes: def/defs, lvar receiver, setter method
+//!   (attr=, []=), nested assignment tracking through multiple/logical/binary
+//!   operator assignments, constructor detection (ClassName.new), literal
+//!   sources, and argument-source exclusion.
 //! ```
 //!
 //! ## Matched shapes
 //!
 //! The last expression of a `def`/`defs` body is a setter call on a local
-//! variable (lvar/ivar/cvar/gvar) that was assigned from a constructor
-//! call or literal (i.e., a local object that is not visible outside the
-//! method scope).
+//! variable (lvar) that was assigned from a constructor call or literal (i.e.,
+//! a local object that is not visible outside the method scope). Setters on
+//! ivar/cvar/gvar receivers are not matched — those are not method-local.
 //!
 //! ## Autocorrect
 //!
@@ -89,9 +91,11 @@ fn check_def_like(node: NodeId, cx: &Cx<'_>) {
         return;
     };
 
-    // Receiver must be a local variable read (lvar/ivar/cvar/gvar).
+    // Receiver must be a LOCAL variable read. RuboCop's MethodVariableTracker
+    // tracks only local variables, so a setter on an ivar/cvar/gvar is never
+    // considered useless (those are visible outside the method scope).
     let var_name = match *cx.kind(recv_id) {
-        NodeKind::Lvar(name) | NodeKind::Ivar(name) | NodeKind::Cvar(name) | NodeKind::Gvar(name) => name,
+        NodeKind::Lvar(name) => name,
         _ => return,
     };
     let var_name_str = cx.symbol_str(var_name);
@@ -183,13 +187,10 @@ fn contain_local_object(body_id: NodeId, var_name: &str, cx: &Cx<'_>) -> bool {
 /// variable holds a local object.
 fn scan_assignments(node: NodeId, local: &mut HashMap<String, bool>, cx: &Cx<'_>) {
     match *cx.kind(node) {
-        NodeKind::Lvasgn { name, value } | NodeKind::Ivasgn { name, value } => {
-            let var = cx.symbol_str(name).to_string();
-            if let Some(rhs) = value.get() {
-                process_plain_assignment(&var, rhs, local, cx);
-            }
-        }
-        NodeKind::Cvasgn { name, value } | NodeKind::Gvasgn { name, value } => {
+        // Only local variables are tracked. RuboCop's MethodVariableTracker
+        // does not consider ivar/cvar/gvar assignments, since a setter on those
+        // is never a "useless setter call to a local variable".
+        NodeKind::Lvasgn { name, value } => {
             let var = cx.symbol_str(name).to_string();
             if let Some(rhs) = value.get() {
                 process_plain_assignment(&var, rhs, local, cx);
@@ -304,34 +305,27 @@ fn process_binary_op_asgn(
     local.insert(name.to_string(), true);
 }
 
-/// Returns the variable name from a write-target node (Lvasgn target).
+/// Returns the local-variable name from a write-target node (Lvasgn target).
+/// Only local variables are tracked (parity with RuboCop's
+/// `MethodVariableTracker`), so ivar/cvar/gvar targets are not registered.
 fn target_name<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<&'a str> {
     match *cx.kind(node) {
-        NodeKind::Lvasgn { name, .. }
-        | NodeKind::Ivasgn { name, .. }
-        | NodeKind::Cvasgn { name, .. }
-        | NodeKind::Gvasgn { name, .. } => Some(cx.symbol_str(name)),
+        NodeKind::Lvasgn { name, .. } => Some(cx.symbol_str(name)),
         _ => None,
     }
 }
 
-/// Returns the variable name from a variable read node.
+/// Returns the local-variable name from a variable read node.
 fn variable_name<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<&'a str> {
     match *cx.kind(node) {
-        NodeKind::Lvar(name)
-        | NodeKind::Ivar(name)
-        | NodeKind::Cvar(name)
-        | NodeKind::Gvar(name) => Some(cx.symbol_str(name)),
+        NodeKind::Lvar(name) => Some(cx.symbol_str(name)),
         _ => None,
     }
 }
 
-/// True if the node is a variable read.
+/// True if the node is a local-variable read.
 fn is_variable_read(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(
-        *cx.kind(node),
-        NodeKind::Lvar(_) | NodeKind::Ivar(_) | NodeKind::Cvar(_) | NodeKind::Gvar(_)
-    )
+    matches!(*cx.kind(node), NodeKind::Lvar(_))
 }
 
 /// True if the node represents a "local object" — either a literal or a
@@ -489,6 +483,31 @@ mod tests {
             def test
               some_lvar = Foo.shared_object
               some_lvar[:attr] = 1
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_setter_call_on_ivar_from_constructor() {
+        // Mastodon FP: RuboCop's MethodVariableTracker tracks only LOCAL
+        // variables. An ivar setter is never useless, even when the ivar was
+        // assigned from a constructor. RuboCop does not flag this.
+        test::<UselessSetterCall>().expect_no_offenses(indoc! {r#"
+            def f
+              @x = Object.new
+              @x.bar = 1
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_setter_call_on_lvar_from_constructor() {
+        // Regression guard: a LOCAL variable setter IS still flagged.
+        test::<UselessSetterCall>().expect_offense(indoc! {r#"
+            def f
+              x = Object.new
+              x.bar = 1
+              ^ Useless setter call to local variable `x`.
             end
         "#});
     }

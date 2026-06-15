@@ -716,6 +716,183 @@ impl Translator {
                 .builder
                 .push(NodeKind::OpAsgn { target, op, value }, range);
         }
+        // `x.y ||= z`: mirror the `as_call_operator_write_node` arm (Send/Csend
+        // target + safe-nav handling), but emit OrAsgn. There is no
+        // `binary_operator()` on these nodes (`||=` is not a binary op), so no
+        // `op` is captured. Without this arm the node fell to `Unknown`,
+        // dropping every read inside the receiver and RHS.
+        if let Some(w) = node.as_call_or_write_node() {
+            let method = self.sym(&w.read_name());
+            let receiver = w.receiver();
+            let selector_range = Self::opt_loc_range(w.message_loc());
+            let target_range = receiver
+                .as_ref()
+                .zip(w.message_loc())
+                .map(|(recv, message)| Range {
+                    start: Self::node_range(recv).start,
+                    end: Self::range(&message).end,
+                })
+                .unwrap_or(selector_range);
+            let args = self.builder.push_list(&[]);
+            let target = match (receiver, w.is_safe_navigation()) {
+                (Some(r), true) => {
+                    let recv = self.translate_node(&r);
+                    self.builder.push_named(
+                        NodeKind::Csend {
+                            receiver: recv,
+                            method,
+                            args,
+                        },
+                        target_range,
+                        selector_range,
+                    )
+                }
+                (recv_opt, _) => {
+                    let receiver = recv_opt
+                        .map(|r| OptNodeId::some(self.translate_node(&r)))
+                        .unwrap_or(OptNodeId::NONE);
+                    self.builder.push_named(
+                        NodeKind::Send {
+                            receiver,
+                            method,
+                            args,
+                        },
+                        target_range,
+                        selector_range,
+                    )
+                }
+            };
+            if let Some(operator) = w.call_operator_loc() {
+                self.builder
+                    .add_call_operator_loc(target, Self::range(&operator));
+            }
+            let value = self.translate_node(&w.value());
+            return self.builder.push(NodeKind::OrAsgn { target, value }, range);
+        }
+        // `x.y &&= z`: as above, but emit AndAsgn.
+        if let Some(w) = node.as_call_and_write_node() {
+            let method = self.sym(&w.read_name());
+            let receiver = w.receiver();
+            let selector_range = Self::opt_loc_range(w.message_loc());
+            let target_range = receiver
+                .as_ref()
+                .zip(w.message_loc())
+                .map(|(recv, message)| Range {
+                    start: Self::node_range(recv).start,
+                    end: Self::range(&message).end,
+                })
+                .unwrap_or(selector_range);
+            let args = self.builder.push_list(&[]);
+            let target = match (receiver, w.is_safe_navigation()) {
+                (Some(r), true) => {
+                    let recv = self.translate_node(&r);
+                    self.builder.push_named(
+                        NodeKind::Csend {
+                            receiver: recv,
+                            method,
+                            args,
+                        },
+                        target_range,
+                        selector_range,
+                    )
+                }
+                (recv_opt, _) => {
+                    let receiver = recv_opt
+                        .map(|r| OptNodeId::some(self.translate_node(&r)))
+                        .unwrap_or(OptNodeId::NONE);
+                    self.builder.push_named(
+                        NodeKind::Send {
+                            receiver,
+                            method,
+                            args,
+                        },
+                        target_range,
+                        selector_range,
+                    )
+                }
+            };
+            if let Some(operator) = w.call_operator_loc() {
+                self.builder
+                    .add_call_operator_loc(target, Self::range(&operator));
+            }
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::AndAsgn { target, value }, range);
+        }
+        // `h[k] ||= z`: mirror the `as_index_operator_write_node` arm (Index
+        // target + block-arg handling), but emit OrAsgn.
+        if let Some(w) = node.as_index_or_write_node() {
+            let Some(receiver_node) = w.receiver() else {
+                return self.builder.push(NodeKind::Unknown, range);
+            };
+            let receiver_range = Self::node_range(&receiver_node);
+            let receiver = self.translate_node(&receiver_node);
+            let mut arg_ids = self.translate_arg_list(w.arguments());
+            if let Some(ba) = w.block() {
+                let expr = ba
+                    .expression()
+                    .map(|e| OptNodeId::some(self.translate_node(&e)))
+                    .unwrap_or(OptNodeId::NONE);
+                let bp = self
+                    .builder
+                    .push(NodeKind::BlockPass(expr), Self::range(&ba.location()));
+                arg_ids.push(bp);
+            }
+            let args = self.builder.push_list(&arg_ids);
+            let target_range = Range {
+                start: receiver_range.start,
+                end: Self::range(&w.closing_loc()).end,
+            };
+            let target = self
+                .builder
+                .push(NodeKind::Index { receiver, args }, target_range);
+            if let Some(operator) = w.call_operator_loc() {
+                self.builder
+                    .add_call_operator_loc(target, Self::range(&operator));
+            }
+            self.builder
+                .add_call_closing_loc(target, Self::range(&w.closing_loc()));
+            let value = self.translate_node(&w.value());
+            return self.builder.push(NodeKind::OrAsgn { target, value }, range);
+        }
+        // `h[k] &&= z`: as above, but emit AndAsgn.
+        if let Some(w) = node.as_index_and_write_node() {
+            let Some(receiver_node) = w.receiver() else {
+                return self.builder.push(NodeKind::Unknown, range);
+            };
+            let receiver_range = Self::node_range(&receiver_node);
+            let receiver = self.translate_node(&receiver_node);
+            let mut arg_ids = self.translate_arg_list(w.arguments());
+            if let Some(ba) = w.block() {
+                let expr = ba
+                    .expression()
+                    .map(|e| OptNodeId::some(self.translate_node(&e)))
+                    .unwrap_or(OptNodeId::NONE);
+                let bp = self
+                    .builder
+                    .push(NodeKind::BlockPass(expr), Self::range(&ba.location()));
+                arg_ids.push(bp);
+            }
+            let args = self.builder.push_list(&arg_ids);
+            let target_range = Range {
+                start: receiver_range.start,
+                end: Self::range(&w.closing_loc()).end,
+            };
+            let target = self
+                .builder
+                .push(NodeKind::Index { receiver, args }, target_range);
+            if let Some(operator) = w.call_operator_loc() {
+                self.builder
+                    .add_call_operator_loc(target, Self::range(&operator));
+            }
+            self.builder
+                .add_call_closing_loc(target, Self::range(&w.closing_loc()));
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::AndAsgn { target, value }, range);
+        }
 
         // --- calls / splat ---
         if let Some(call) = node.as_call_node() {
@@ -2252,6 +2429,130 @@ mod tests {
             }
             other => panic!("expected Const, got {other:?}"),
         }
+    }
+
+    // --- logical-op-assign on call / index targets (murphy mastodon FP fix) ---
+    //
+    // `x.y ||= z`, `x.y &&= z`, `h[k] ||= z`, `h[k] &&= z` previously fell to
+    // `Unknown`, dropping every read inside the receiver / index / RHS (the
+    // `z`/`k` `Lvar`s vanished from the tree → false "unused" liveness offenses
+    // on Mastodon). These pins assert the target/value subtree is present.
+
+    /// Collect every `Lvar` name appearing anywhere in the tree, so a pin can
+    /// assert a particular read survived translation (was not swallowed into
+    /// `Unknown`).
+    fn lvar_names(ast: &murphy_ast::Ast) -> Vec<String> {
+        (0..ast.len())
+            .filter_map(|i| match ast.kind(murphy_ast::NodeId(i as u32)) {
+                NodeKind::Lvar(s) => Some(ast.interner().resolve(s.0).to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn translates_call_or_write() {
+        // `x.y ||= z` → OrAsgn { target: Send(:y, recv=Send(:x)), value: <z> }.
+        // The RHS `z` must survive as a read inside the value subtree.
+        let ast = translate("x = 1\nz = 1\nx.y ||= z\n", "t.rb");
+        let kids: Vec<_> = ast.children(ast.root()).collect();
+        let last = *kids.last().unwrap();
+        let NodeKind::OrAsgn { target, value } = *ast.kind(last) else {
+            panic!("expected OrAsgn, got {:?}", ast.kind(last));
+        };
+        assert!(
+            matches!(ast.kind(target), NodeKind::Send { .. }),
+            "target should be Send, got {:?}",
+            ast.kind(target)
+        );
+        // `z` is read on the RHS — must be an Lvar (proves it was translated,
+        // not dropped into Unknown).
+        assert!(
+            matches!(ast.kind(value), NodeKind::Lvar(_)),
+            "value should be Lvar(z), got {:?}",
+            ast.kind(value)
+        );
+        assert!(lvar_names(&ast).iter().any(|n| n == "z"));
+    }
+
+    #[test]
+    fn translates_call_and_write() {
+        // `x.y &&= z` → AndAsgn { target: Send, value: Lvar(z) }.
+        let ast = translate("x = 1\nz = 1\nx.y &&= z\n", "t.rb");
+        let kids: Vec<_> = ast.children(ast.root()).collect();
+        let last = *kids.last().unwrap();
+        let NodeKind::AndAsgn { target, value } = *ast.kind(last) else {
+            panic!("expected AndAsgn, got {:?}", ast.kind(last));
+        };
+        assert!(matches!(ast.kind(target), NodeKind::Send { .. }));
+        assert!(matches!(ast.kind(value), NodeKind::Lvar(_)));
+        assert!(lvar_names(&ast).iter().any(|n| n == "z"));
+    }
+
+    #[test]
+    fn translates_index_or_write() {
+        // `h[k] ||= z` → OrAsgn { target: Index(recv=Send(:h), [Lvar(k)]),
+        // value: Lvar(z) }. Both `k` (index) and `z` (RHS) must survive.
+        let ast = translate("h = {}\nk = 1\nz = 1\nh[k] ||= z\n", "t.rb");
+        let kids: Vec<_> = ast.children(ast.root()).collect();
+        let last = *kids.last().unwrap();
+        let NodeKind::OrAsgn { target, value } = *ast.kind(last) else {
+            panic!("expected OrAsgn, got {:?}", ast.kind(last));
+        };
+        assert!(
+            matches!(ast.kind(target), NodeKind::Index { .. }),
+            "expected Index target, got {:?}",
+            ast.kind(target)
+        );
+        // The index key `k` appears as an Lvar child of the Index target.
+        assert!(
+            ast.children(target)
+                .any(|c| matches!(ast.kind(c), NodeKind::Lvar(_))),
+            "index key k must be an Lvar child of the Index target"
+        );
+        assert!(matches!(ast.kind(value), NodeKind::Lvar(_)));
+        let names = lvar_names(&ast);
+        assert!(names.iter().any(|n| n == "k"), "index key k must survive");
+        assert!(names.iter().any(|n| n == "z"), "RHS z must survive");
+    }
+
+    #[test]
+    fn translates_index_and_write() {
+        // `h[k] &&= z` → AndAsgn { target: Index, value: Lvar(z) }.
+        let ast = translate("h = {}\nk = 1\nz = 1\nh[k] &&= z\n", "t.rb");
+        let kids: Vec<_> = ast.children(ast.root()).collect();
+        let last = *kids.last().unwrap();
+        let NodeKind::AndAsgn { target, value } = *ast.kind(last) else {
+            panic!("expected AndAsgn, got {:?}", ast.kind(last));
+        };
+        assert!(
+            matches!(ast.kind(target), NodeKind::Index { .. }),
+            "expected Index target, got {:?}",
+            ast.kind(target)
+        );
+        assert!(matches!(ast.kind(value), NodeKind::Lvar(_)));
+        let names = lvar_names(&ast);
+        assert!(names.iter().any(|n| n == "k"));
+        assert!(names.iter().any(|n| n == "z"));
+    }
+
+    #[test]
+    fn translates_safe_nav_call_or_write() {
+        // `x&.y ||= z` → OrAsgn { target: Csend, .. }. Safe-nav must produce a
+        // Csend target (mirrors the operator-write arm) and still keep `z`.
+        let ast = translate("x = 1\nz = 1\nx&.y ||= z\n", "t.rb");
+        let kids: Vec<_> = ast.children(ast.root()).collect();
+        let last = *kids.last().unwrap();
+        let NodeKind::OrAsgn { target, value } = *ast.kind(last) else {
+            panic!("expected OrAsgn, got {:?}", ast.kind(last));
+        };
+        assert!(
+            matches!(ast.kind(target), NodeKind::Csend { .. }),
+            "safe-nav target should be Csend, got {:?}",
+            ast.kind(target)
+        );
+        assert!(matches!(ast.kind(value), NodeKind::Lvar(_)));
+        assert!(lvar_names(&ast).iter().any(|n| n == "z"));
     }
 
     #[test]

@@ -81,10 +81,14 @@ fn is_string_literal_part(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn ends_with_string_delimiter(node: NodeId, cx: &Cx<'_>) -> bool {
-    let src = cx.raw_source(cx.range(node)).trim_end();
-    match src.as_bytes().first().copied() {
-        Some(b'\'') => src.ends_with('\''),
-        Some(b'"') => src.ends_with('"'),
+    // Test the UNtrimmed last byte against the opening delimiter. Trimming
+    // trailing whitespace would mis-read a heredoc per-line `Str` part whose
+    // raw source is `'\n` (literal apostrophe + newline) as ending in a `'`
+    // delimiter, producing a false positive.
+    let bytes = cx.raw_source(cx.range(node)).as_bytes();
+    match (bytes.first().copied(), bytes.last().copied()) {
+        (Some(b'\''), Some(last)) => last == b'\'',
+        (Some(b'"'), Some(last)) => last == b'"',
         _ => false,
     }
 }
@@ -150,6 +154,21 @@ mod tests {
                   'def'
                 ]
             "#});
+    }
+
+    #[test]
+    fn accepts_squiggly_heredoc_with_interpolation() {
+        // Mastodon FP: a squiggly heredoc with interpolations lowers to a Dstr
+        // with adjacent per-line Str parts. At a line boundary the lhs raw
+        // source is `'\n` — trimming the trailing newline made it look like it
+        // ended with a `'` delimiter. RuboCop checks the UNtrimmed last char
+        // (`\n` ≠ `'`), so there is no implicit concatenation. Clean.
+        test::<ImplicitStringConcatenation>().expect_no_offenses(indoc! {r#"
+            x = <<~SQL
+              SELECT '#{name}'
+              WHERE name = '#{name}'
+            SQL
+        "#});
     }
 
     #[test]

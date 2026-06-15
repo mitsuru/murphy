@@ -136,6 +136,15 @@ fn has_invalid_forwarded_args(args: &[NodeId], cx: &Cx<'_>) -> bool {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // `check_csend` registers on every csend node (the cop macro does not support
+    // a `methods` filter on csend), so guard the method name here. Without this,
+    // a single `&.dig` followed by other csends — e.g.
+    // `foo[bar]&.dig('a','b','c')&.to_i&.positive?` — runs `check` on `&.to_i`,
+    // whose receiver is the lone `&.dig`, and a one-element chain gets flagged.
+    if cx.method_name(node) != Some("dig") {
+        return;
+    }
+
     // Only report at the outermost dig in a chain.
     if is_inner_dig(node, cx) {
         return;
@@ -224,6 +233,15 @@ mod tests {
     #[test]
     fn accepts_no_receiver() {
         test::<DigChain>().expect_no_offenses("dig(:key)\n");
+    }
+
+    #[test]
+    fn accepts_single_csend_dig_followed_by_other_csends() {
+        // `check_csend` fires on every csend (the cop macro can't filter csend by
+        // method name). Here `&.to_i`'s receiver is the single `&.dig`, but there
+        // is only one dig in the chain, so there is nothing to collapse.
+        test::<DigChain>()
+            .expect_no_offenses("x = foo.get_settings[bar]&.dig('a', 'b', 'c')&.to_i&.positive?\n");
     }
 }
 murphy_plugin_api::submit_cop!(DigChain);

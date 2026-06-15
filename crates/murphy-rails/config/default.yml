@@ -1,5 +1,12 @@
-# Murphy rails pack bundled defaults — mirrors rubocop-rails: enable
-# ActiveSupport extension awareness for cops that consult it.
+# Murphy rails pack bundled defaults — mirrors rubocop-rails 2.x config/default.yml.
+#
+# This file carries the non-`Rails/` cop overrides that rubocop-rails ships in
+# its own `config/default.yml`. RuboCop applies a plugin's default config as a
+# layer beneath the user's `.rubocop.yml`, so a project that loads
+# `rubocop-rails` (here: `murphy-rails`) inherits these option/exclude defaults
+# unless it overrides them. Murphy mirrors that by merging this file's cop rules
+# into the bundled-defaults layer (`apply_pack_default_layers`). Keep in sync
+# with the pinned rubocop-rails version when bumping parity.
 AllCops:
   ActiveSupportExtensionsEnabled: true
   # Mirrors rubocop-rails-2.x config/default.yml AllCops.Exclude. These join
@@ -14,3 +21,90 @@ AllCops:
     - log/**/*
     - public/**/*
     - storage/**/*
+
+Lint/NumberConversion:
+  # Rails' duration methods are added to the ignore list so calling `to_i` on
+  # one of them does not register an offense.
+  AllowedMethods:
+    - ago
+    - from_now
+    - second
+    - seconds
+    - minute
+    - minutes
+    - hour
+    - hours
+    - day
+    - days
+    - week
+    - weeks
+    - fortnight
+    - fortnights
+    - in_milliseconds
+  AllowedPatterns: []
+
+Lint/RedundantSafeNavigation:
+  # Adds `presence`/`present?` to the RuboCop core default.
+  AllowedMethods:
+    - instance_of?
+    - kind_of?
+    - is_a?
+    - eql?
+    - respond_to?
+    - equal?
+    - presence
+    - present?
+
+Lint/SafeNavigationChain:
+  # Adds `presence_in` to the RuboCop core default.
+  AllowedMethods:
+    - present?
+    - blank?
+    - presence
+    - presence_in
+    - try
+    - try!
+    - in?
+
+Lint/UselessAccessModifier:
+  # Adds context-creating methods from `ActiveSupport::Concern` and
+  # `Module::Concerning`.
+  inherit_mode:
+    merge:
+      - ContextCreatingMethods
+  ContextCreatingMethods:
+    - class_methods
+    - included
+    - prepended
+    - concern
+    - concerning
+
+Lint/UselessMethodDefinition:
+  # Avoids conflict with the `Rails/LexicallyScopedActionFilter` cop.
+  Exclude:
+    - '**/app/controllers/**/*.rb'
+    - '**/app/mailers/**/*.rb'
+
+Style/AndOr:
+  EnforcedStyle: conditionals
+
+Style/CollectionCompact:
+  AllowedReceivers:
+    - params
+
+Style/FormatStringToken:
+  AllowedMethods:
+    - redirect
+
+Style/InvertibleUnlessCondition:
+  InverseMethods:
+    :present?: :blank?
+    :blank?: :present?
+    :include?: :exclude?
+    :exclude?: :include?
+
+Style/SymbolProc:
+  AllowedMethods:
+    - define_method
+    - mail
+    - respond_to

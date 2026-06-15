@@ -193,8 +193,17 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 }
 
 /// `extract_rhs`: a setter send's last argument, or an assignment's value.
+///
+/// RuboCop's `extract_rhs` only treats a send as an assignment when its
+/// selector is a setter (`assignment_method?`). Gating here prevents a
+/// non-setter send (e.g. `foo.with(a, b)` where an argument's own body
+/// contains an `=`) from being misclassified as a setter by the downstream
+/// `=`-token scan.
 fn extract_rhs(node: NodeId, is_send: bool, cx: &Cx<'_>) -> Option<NodeId> {
     if is_send {
+        if !cx.is_assignment_method(node) {
+            return None;
+        }
         return cx.call_arguments(node).last().copied();
     }
     assignment_value(node, cx).get()
@@ -459,5 +468,24 @@ mod tests {
         let src = "obj.foo =\nbar_method\n";
         let offenses = run_cop::<Cop>(src);
         assert_eq!(offenses.len(), 1, "got {offenses:?}");
+    }
+
+    /// Mastodon FP: a non-setter send whose last argument spans lines must not
+    /// be treated as an assignment. `.with(satisfying do … end, a, b)` is not a
+    /// setter, but the block body contains an `lvasgn`'s `=`, which the
+    /// setter-operator token scan misidentified as the assignment operator,
+    /// then flagged the last argument's indentation. Gating `extract_rhs` on
+    /// `is_assignment_method` skips non-setter sends entirely.
+    #[test]
+    fn ignores_non_setter_send_with_block_arg() {
+        test::<Cop>().expect_no_offenses(concat!(
+            "expect { subject.perform }\n",
+            "  .to enqueue_sidekiq_job(W)\n",
+            "  .with(satisfying do |body|\n",
+            "    json = JSON.parse(body)\n",
+            "    json['type'] == 'Accept' &&\n",
+            "      json['to'] == sender.uri\n",
+            "  end, recipient.id, sender.inbox_url)\n",
+        ));
     }
 }
