@@ -57,10 +57,16 @@ pub enum PatKind {
     Not(Box<Pat>),
     /// `$x` capture. `slot` is the positional capture index, assigned in
     /// source order (left-to-right, outer-before-inner) when the parser
-    /// sees the `$` token — see `parser.rs`. `name` is `Some` for `$ident`
-    /// named captures, whose `body` is an implicit `Wildcard`; to capture a
-    /// sub-pattern use anonymous `$(...)` (so `$send` is a capture *named*
-    /// `send`, while `$(send)` captures a node of *kind* `send`).
+    /// sees the `$` token — see `parser.rs`.
+    ///
+    /// `$<known-kind>` (e.g. `$send`, `$array`, `$str`, `$int`) is a **typed
+    /// capture**: `name` is `None` and `body` is `Kind(tag)`, so it captures
+    /// the node *and* requires it to be of that kind — matching RuboCop's
+    /// `$type` node-pattern semantics (murphy-m4dc). `$<non-kind-ident>`
+    /// (e.g. `$lhs`) is a **named capture**: `name` is `Some(ident)` and
+    /// `body` is an implicit `Wildcard` (matches anything); the name lets a
+    /// later predicate arg back-reference it. `$(...)` captures an explicit
+    /// sub-pattern, and `$_` captures any single node anonymously.
     Capture {
         slot: u16,
         name: Option<String>,

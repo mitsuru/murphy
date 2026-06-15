@@ -95,13 +95,14 @@ pub fn parse(src: &str) -> Result<PatternAst, ParseError> {
         return Err(ParseError::new("empty pattern", PatSpan::new(0, 0)));
     }
     let mut root = run_lalrpop(&tokens)?;
-    // Restore `$ident` named-capture semantics: the grammar parses every
-    // `$ident` uniformly as `Capture { name: None, body: Kind(tag) }` (or
-    // `Predicate(name)` for unknown idents) to dodge an LR(1) shift-reduce
-    // conflict at the `$ident vs $ident postfix` boundary. The post-pass
-    // here rewrites those forms back to the expected `Capture { name:
-    // Some(ident), body: Wildcard }` shape. `$send?` and friends stay as
-    // anonymous-with-Quantifier — only bare-ident bodies are touched.
+    // The grammar parses every `$ident` uniformly as `Capture { name: None,
+    // body: Kind(tag) }` (known kind) or `Capture { body: Predicate(name) }`
+    // (unknown ident) to dodge an LR(1) shift-reduce conflict at the `$ident
+    // vs $ident postfix` boundary. `convert_named_captures` rewrites only the
+    // unknown-ident `Predicate` form into a named `Wildcard` capture
+    // (`$lhs` → `Capture { name: Some("lhs"), body: Wildcard }`). The
+    // known-kind `Kind(tag)` form is LEFT as a RuboCop-aligned typed capture
+    // (`$str` → `Capture { name: None, body: Kind(Str) }`); see murphy-m4dc.
     convert_named_captures(&mut root);
     // Reject bare-predicate shorthand at positions that don't allow it
     // (root, Sym-slot node children, Union-of-non-uniform-sugar arms, etc.)
@@ -724,7 +725,16 @@ fn convert_named_captures(pat: &mut Pat) {
         && name.is_none()
     {
         let new_name: Option<String> = match &body.kind {
-            PatKind::Kind(tag) => murphy_ast::pattern_name(*tag).map(|s| s.to_string()),
+            // RuboCop-aligned typed capture (murphy-m4dc): a `$kind` whose body
+            // is a bare `Kind(tag)` matcher is LEFT as an anonymous typed
+            // capture — `Capture { name: None, body: Kind(tag) }` — so it
+            // captures the node AND requires it to be of `tag`, exactly like
+            // RuboCop's `$send` / `$str`. (Previously this arm rewrote it to a
+            // named `Wildcard`, making `$send` a capture *named* "send" that
+            // matched anything. The quantifier forms `$int+` / `$int*` were
+            // already typed, so this also removes that inconsistency.) Only the
+            // non-kind bare-ident `Predicate` form below becomes a named
+            // capture, preserving `$name` predicate back-references.
             PatKind::Predicate {
                 name: pred_name,
                 args,
