@@ -10,17 +10,21 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
-//!   Faithful port. We match `each_with_object` calls with exactly one
-//!   argument; the offense fires when that argument is an immutable literal
+//!   Verbatim port of RuboCop's matcher `(call _ :each_with_object $_)`
+//!   (murphy-b6nq): `call` expands to `{send csend}`, the `_` receiver binds
+//!   an absent (receiverless) or present receiver, and `$_` captures the single
+//!   argument. The offense fires when that argument is an immutable literal
 //!   (`cx.is_immutable_literal`, mirroring RuboCop's `immutable_literal?`).
-//!   Both receiverless (`each_with_object(0)`) and receiver calls are flagged,
-//!   matching RuboCop's `(call _ :each_with_object ...)` where `_` binds the
-//!   nil-filled receiver slot. Safe-navigation calls
-//!   (`x&.each_with_object(0) { … }`) are handled via the `csend` arm,
-//!   matching RuboCop's `alias_method :on_csend, :on_send`.
+//!   Receiverless (`each_with_object(0)`), receiver, and safe-navigation
+//!   (`x&.each_with_object(0)`) calls are all flagged.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NodeId, NoOptions, Range, SourceTokenKind};
+use murphy_plugin_api::{cop, def_node_matcher, Cx, NodeId, NoOptions, Range, SourceTokenKind};
+
+// Verbatim port of RuboCop's matcher (murphy-b6nq): `call` = `{send csend}`,
+// the `_` receiver binds an absent (receiverless) or present receiver, and `$_`
+// captures the single argument. A zero- or multi-argument call does not match.
+def_node_matcher!(each_with_object_arg, "(call _ :each_with_object $_)");
 
 #[derive(Default)]
 pub struct EachWithObjectArgument;
@@ -45,13 +49,10 @@ impl EachWithObjectArgument {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    if cx.method_name(node) != Some("each_with_object") {
-        return;
-    }
-    let [arg] = cx.call_arguments(node) else {
+    let Some((arg,)) = each_with_object_arg(node, cx) else {
         return;
     };
-    if cx.is_immutable_literal(*arg) {
+    if cx.is_immutable_literal(arg) {
         cx.emit_offense(
             call_range(node, cx),
             "The argument to each_with_object cannot be immutable.",
@@ -175,11 +176,10 @@ mod tests {
 
     #[test]
     fn flags_receiverless_call() {
-        // Parity documentation: RuboCop's `(call _ :each_with_object ...)`
-        // matches a receiverless `each_with_object(0)` (the `_` binds the
-        // nil-filled receiver slot). This cop is hand-rolled on
-        // `cx.method_name`, which already matches receiverless calls — so this
-        // is the same behavior, not an exercise of the pattern infra.
+        // The verbatim `(call _ :each_with_object $_)` matcher flags a
+        // receiverless call: the `_` receiver binds the absent (nil-filled)
+        // slot, matching RuboCop. This is the case that motivated the
+        // RecvOptNode + OneOf-head-with-children infra (murphy-if9y, b6nq).
         test::<EachWithObjectArgument>().expect_offense(indoc! {r#"
             each_with_object(0) { |e, a| a }
             ^^^^^^^^^^^^^^^^^^^ The argument to each_with_object cannot be immutable.

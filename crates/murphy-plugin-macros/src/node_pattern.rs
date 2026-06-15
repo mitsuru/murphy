@@ -1635,7 +1635,10 @@ fn is_kind_only_children(children: &[murphy_pattern::Pat]) -> bool {
 /// member gets a real dispatch arm or falls through to the catch-all fail arm
 /// (mirroring the C interpreter, which simply returns `false` for a node whose
 /// kind can't fit the children). A kind with no v1 pattern schema never accepts.
-fn exact_node_accepts_children(tag: murphy_ast::NodeKindTag, children: &[murphy_pattern::Pat]) -> bool {
+fn exact_node_accepts_children(
+    tag: murphy_ast::NodeKindTag,
+    children: &[murphy_pattern::Pat],
+) -> bool {
     let Some(schema) = schema_for(tag.0) else {
         return false;
     };
