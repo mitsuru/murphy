@@ -620,9 +620,12 @@ impl<'a, 'cx> Fixer<'a, 'cx> {
         self.cx.emit_edit(self.cx.range(arg), "**");
     }
 
-    /// `register_forward_block_arg_offense`: skip below 3.1, when absent, when
-    /// already `&`, or under `Naming/BlockForwarding: explicit` (a documented
-    /// gap — treated as default `anonymous`).
+    /// `register_forward_block_arg_offense`: skip below 3.1 (`target <= 3.0`),
+    /// when the block arg is absent, when it is already `&`, or under
+    /// `Naming/BlockForwarding: explicit`. The `explicit` gate mirrors RuboCop's
+    /// `explicit_block_name?` and lives here (not in `forwardable_blockarg`) so
+    /// it suppresses only the block-only `&block` -> `&` anonymization, while a
+    /// def that also forwards a rest/kwrest still collapses to `...`.
     fn register_block_offense(
         &mut self,
         add_parens: bool,
@@ -635,6 +638,9 @@ impl<'a, 'cx> Fixer<'a, 'cx> {
             return;
         }
         if self.cx.raw_source(self.cx.range(arg)) == "&" {
+            return;
+        }
+        if self.cx.block_forwarding_explicit() {
             return;
         }
         self.cx.emit_offense(self.cx.range(arg), BLOCK_MSG, None);
@@ -937,12 +943,13 @@ fn forwardable_kwrestarg(id: Option<NodeId>, redundant: &[String], cx: &Cx<'_>) 
 
 fn forwardable_blockarg(id: Option<NodeId>, redundant: &[String], cx: &Cx<'_>) -> Option<NodeId> {
     let id = id?;
-    // RuboCop's `explicit_block_name?`: when `Naming/BlockForwarding` is
-    // configured `EnforcedStyle: explicit`, a named block argument is kept and
-    // never anonymized to `&`, so it is not a forwarding candidate.
-    if cx.block_forwarding_explicit() {
-        return None;
-    }
+    // NOTE: `Naming/BlockForwarding: explicit` is intentionally NOT consulted
+    // here. RuboCop keeps the block in the forwardable set even under
+    // `explicit` — the style only suppresses the block-*only* `&block` -> `&`
+    // anonymization (gated in `register_block_offense`). A def that also
+    // forwards a rest/kwrest must still collapse to `...`, which keeps the
+    // block named inside `...`. Dropping the block here would lose that
+    // forward-all offense (a false negative vs RuboCop).
     let NodeKind::Blockarg(sym) = *cx.kind(id) else {
         return None;
     };
@@ -1148,6 +1155,30 @@ mod tests {
                   bar(&block)
                 end
             "#});
+    }
+
+    #[test]
+    fn explicit_block_forwarding_still_offers_full_triple_dot() {
+        // `explicit` only suppresses the block-only `&block` -> `&` rewrite.
+        // When a rest/kwrest is also forwarded, RuboCop still collapses the
+        // whole signature to `...` (the forward-all path keeps the block named
+        // inside `...`), so this must still be flagged under `explicit`.
+        test::<ArgumentsForwarding>()
+            .with_block_forwarding_explicit(true)
+            .expect_correction(
+                indoc! {r#"
+                    def foo(*args, **kwargs, &block)
+                            ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                      bar(*args, **kwargs, &block)
+                          ^^^^^^^^^^^^^^^^^^^^^^^ Use shorthand syntax `...` for arguments forwarding.
+                    end
+                "#},
+                indoc! {r#"
+                    def foo(...)
+                      bar(...)
+                    end
+                "#},
+            );
     }
 
     #[test]
