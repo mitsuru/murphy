@@ -85,15 +85,16 @@ fn check_no_space_style(cx: &Cx<'_>) {
                 SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline,
                 SourceTokenKind::RightParen,
             ) => {}
-            (_, SourceTokenKind::RightParen) if left.kind != SourceTokenKind::LeftParen => {
-                // A `)` that begins its own line is a multiline close; the
-                // leading whitespace is indentation, not inline space inside
-                // the parens. This also covers the case where the preceding
-                // line is a heredoc terminator (whose token folds in the
-                // newline, so `left` is `HeredocEnd`, not a `Newline`).
-                if !paren_begins_line(cx, right.range.start) {
-                    emit_inline_gap(cx, left.range.end, right.range.start);
-                }
+            // A `)` that begins its own line is a multiline close; the leading
+            // whitespace is indentation, not inline space inside the parens.
+            // This also covers the case where the preceding line is a heredoc
+            // terminator (whose token folds in the newline, so `left` is
+            // `HeredocEnd`, not a `Newline`).
+            (_, SourceTokenKind::RightParen)
+                if left.kind != SourceTokenKind::LeftParen
+                    && !paren_begins_line(cx, right.range.start) =>
+            {
+                emit_inline_gap(cx, left.range.end, right.range.start);
             }
             _ => {}
         }
