@@ -33,7 +33,10 @@ use murphy_core::{
     aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
     migrate_rubocop_yml_to_murphy_yml, parse, parse_with_cache, run_to_fixpoint,
 };
-use murphy_plugin_api::{PluginCopV1, PluginRegistration, RawSlice, tristate_from_wire};
+use murphy_plugin_api::{
+    PluginCopV1, PluginRegistration, Range, RawSlice, SourceToken, SourceTokenKind,
+    tristate_from_wire,
+};
 use murphy_reporting::{OutputFormat, format_lint_output};
 
 /// The standard built-in cop pack (`murphy-std`), unpacked once and
@@ -414,7 +417,7 @@ fn lint_source(
     config: &MurphyConfig,
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
-    let mut offenses = match parse_with_cache(source, file, cache) {
+    let (mut offenses, comments) = match parse_with_cache(source, file, cache) {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
@@ -433,17 +436,20 @@ fn lint_source(
             );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
-            offenses
+            (offenses, comment_ranges(ast.sorted_tokens()))
         }
-        Err(err) => vec![Offense::new(
-            file,
-            SYNTAX_COP_NAME,
-            err.range,
-            Severity::Error,
-            &err.message,
-        )],
+        Err(err) => (
+            vec![Offense::new(
+                file,
+                SYNTAX_COP_NAME,
+                err.range,
+                Severity::Error,
+                &err.message,
+            )],
+            Vec::new(),
+        ),
     };
-    offenses = apply_inline_directive_filter(offenses, source);
+    offenses = apply_inline_directive_filter(offenses, source, &comments);
     offenses
 }
 
@@ -559,7 +565,7 @@ fn lint_source_timed(
     let parsed = parse_with_cache(source, file, cache);
     let parse_micros = parse_started.elapsed().as_micros();
     let cops_started = Instant::now();
-    let offenses = match parsed {
+    let (offenses, comments) = match parsed {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
@@ -578,19 +584,22 @@ fn lint_source_timed(
             );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
-            offenses
+            (offenses, comment_ranges(ast.sorted_tokens()))
         }
-        Err(err) => vec![Offense::new(
-            file,
-            SYNTAX_COP_NAME,
-            err.range,
-            Severity::Error,
-            &err.message,
-        )],
+        Err(err) => (
+            vec![Offense::new(
+                file,
+                SYNTAX_COP_NAME,
+                err.range,
+                Severity::Error,
+                &err.message,
+            )],
+            Vec::new(),
+        ),
     };
     let cops_micros = cops_started.elapsed().as_micros();
     TimedOffenses {
-        offenses: apply_inline_directive_filter(offenses, source),
+        offenses: apply_inline_directive_filter(offenses, source, &comments),
         parse_micros,
         cops_micros,
     }
@@ -621,14 +630,28 @@ struct DirectiveState {
     line_end: usize,
 }
 
-/// Parse a `# murphy:…` / `# rubocop:…` inline directive. Mirrors the canonical
-/// engine in `murphy_plugin_api::cx::parse_comment_directive`: both prefixes are
-/// honored (RuboCop-annotated codebases lint without rewrites), a `-- reason`
-/// suffix is stripped, the cop list is comma-separated, and an empty list or
-/// `all` targets every cop.
-fn parse_inline_directive(line: &str) -> Option<InlineDirective> {
-    let hash_pos = line.find('#')?;
-    let comment = line[hash_pos + 1..].trim_start();
+/// Byte ranges of the source's real comment tokens. A directive is only honored
+/// when it sits in an actual comment — a `#` inside a string or heredoc (e.g.
+/// `log("# rubocop:disable Foo")`) is NOT a comment token, so it can never
+/// disable a cop. Mirrors RuboCop, which reads its directives from the comment
+/// table, not raw line text.
+fn comment_ranges(tokens: &[SourceToken]) -> Vec<Range> {
+    tokens
+        .iter()
+        .filter(|t| t.kind == SourceTokenKind::Comment)
+        .map(|t| t.range)
+        .collect()
+}
+
+/// Parse a `# murphy:…` / `# rubocop:…` inline directive from a comment's source
+/// text. Mirrors the canonical engine in
+/// `murphy_plugin_api::cx::parse_comment_directive`: both prefixes are honored
+/// (RuboCop-annotated codebases lint without rewrites), a `-- reason` suffix is
+/// stripped, the cop list is comma-separated, and an empty list or `all` targets
+/// every cop.
+fn parse_inline_directive(comment_src: &str) -> Option<InlineDirective> {
+    let hash_pos = comment_src.find('#')?;
+    let comment = comment_src[hash_pos + 1..].trim_start();
     let rest = comment
         .strip_prefix("murphy:")
         .or_else(|| comment.strip_prefix("rubocop:"))?
@@ -658,7 +681,7 @@ fn parse_inline_directive(line: &str) -> Option<InlineDirective> {
     Some(InlineDirective { kind, cops })
 }
 
-fn directive_states_by_line(source: &str) -> Vec<DirectiveState> {
+fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveState> {
     let mut states = Vec::new();
     let mut disable_all = false;
     let mut disabled_cops: BTreeSet<String> = BTreeSet::new();
@@ -670,7 +693,14 @@ fn directive_states_by_line(source: &str) -> Vec<DirectiveState> {
         let mut todo_all = false;
         let mut todo_cops: BTreeSet<String> = BTreeSet::new();
 
-        if let Some(directive) = parse_inline_directive(line) {
+        // Only a real comment token on this line can carry a directive — a `#`
+        // inside a string/heredoc is not a comment and must be ignored.
+        let comment_src = comments
+            .iter()
+            .find(|r| (r.start as usize) >= line_start && (r.start as usize) < line_end)
+            .map(|r| &source[r.start as usize..r.end as usize]);
+
+        if let Some(directive) = comment_src.and_then(parse_inline_directive) {
             let all = directive.cops.is_empty();
             match directive.kind {
                 InlineDirectiveKind::Disable if all => disable_all = true,
@@ -723,11 +753,15 @@ fn is_directive_disabled(offense: &Offense, states: &[DirectiveState]) -> bool {
     false
 }
 
-fn apply_inline_directive_filter(mut offenses: Vec<Offense>, source: &str) -> Vec<Offense> {
+fn apply_inline_directive_filter(
+    mut offenses: Vec<Offense>,
+    source: &str,
+    comments: &[Range],
+) -> Vec<Offense> {
     if offenses.is_empty() {
         return Vec::new();
     }
-    let states = directive_states_by_line(source);
+    let states = directive_states_by_line(source, comments);
     offenses.retain(|offense| !is_directive_disabled(offense, &states));
     offenses
 }

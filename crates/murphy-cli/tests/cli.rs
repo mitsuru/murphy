@@ -381,6 +381,36 @@ fn lint_rubocop_disable_with_reason_suffix_suppresses() {
     assert_eq!(assert.get_output().stdout, b"[]\n");
 }
 
+/// A `# rubocop:disable` that appears inside a string literal (not a real
+/// comment) must NOT disable the cop — the directive scanner reads the parser's
+/// comment table, not raw line text. The `debugger` on the next line must still
+/// be flagged.
+#[test]
+fn lint_directive_inside_string_literal_is_not_honored() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dir_in_str.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\nputs \"# rubocop:disable Lint/Debugger\"\ndebugger\n",
+    )
+    .expect("write dir_in_str.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("Lint/Debugger"),
+        "string-embedded directive must not suppress the real debugger offense, got {stdout}"
+    );
+}
+
 /// RuboCop-compatible: a same-line `# rubocop:todo <Cop>` suppresses the offense
 /// on its own line, like `# murphy:todo`.
 #[test]
