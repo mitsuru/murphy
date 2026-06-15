@@ -467,6 +467,60 @@ fn lint_trailing_disable_is_line_local() {
     assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
+/// A RuboCop department directive (`# rubocop:disable Lint`, no slash) suppresses
+/// every cop in that department — `Lint/Debugger` here.
+#[test]
+fn lint_department_directive_suppresses_cop_in_department() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dept.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Lint\n",
+    )
+    .expect("write dept.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
+/// A department directive must NOT suppress cops in a different department:
+/// `# rubocop:disable Lint` leaves a `Style/*` offense reported.
+#[test]
+fn lint_department_directive_does_not_suppress_other_departments() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dept_neg.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\nputs \"hi\" # rubocop:disable Lint\n",
+    )
+    .expect("write dept_neg.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert!(
+        parsed
+            .iter()
+            .any(|o| o["cop_name"] == "Style/StringLiterals"),
+        "a Lint department disable must not silence Style cops, got {parsed:?}"
+    );
+}
+
 /// RuboCop-compatible: a same-line `# rubocop:todo <Cop>` suppresses the offense
 /// on its own line, like `# murphy:todo`.
 #[test]

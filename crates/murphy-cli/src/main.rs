@@ -764,12 +764,25 @@ fn is_directive_disabled(offense: &Offense, states: &[DirectiveState]) -> bool {
     for state in states {
         if start >= state.line_start && start < state.line_end {
             return state.disable_all
-                || state.disabled_cops.contains(&offense.cop_name)
+                || cop_set_matches(&state.disabled_cops, &offense.cop_name)
                 || state.todo_all
-                || state.todo_cops.contains(&offense.cop_name);
+                || cop_set_matches(&state.todo_cops, &offense.cop_name);
         }
     }
     false
+}
+
+/// True when `cops` disables `cop_name`, either by an exact cop-name entry or by
+/// a RuboCop **department** entry. A slashless entry (e.g. `Lint`) is a
+/// department: it matches every cop whose name is `<Department>/...` (e.g.
+/// `Lint/Debugger`), mirroring `# rubocop:disable Lint`.
+fn cop_set_matches(cops: &BTreeSet<String>, cop_name: &str) -> bool {
+    if cops.contains(cop_name) {
+        return true;
+    }
+    let department = cop_name.split('/').next();
+    cops.iter()
+        .any(|entry| !entry.contains('/') && department == Some(entry.as_str()))
 }
 
 fn apply_inline_directive_filter(
