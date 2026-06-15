@@ -1609,10 +1609,7 @@ fn lower_pat(
 /// capture is a `PatKind::Capture` (not a bare `Rest`), so it falls into the
 /// `else` arm here and is rejected, as v1 requires.
 fn check_kind_only_children(children: &[murphy_pattern::Pat]) -> syn::Result<()> {
-    use murphy_pattern::PatKind;
-    let ok =
-        children.is_empty() || (children.len() == 1 && matches!(children[0].kind, PatKind::Rest));
-    if ok {
+    if is_kind_only_children(children) {
         Ok(())
     } else {
         Err(syn::Error::new(
@@ -1621,6 +1618,36 @@ fn check_kind_only_children(children: &[murphy_pattern::Pat]) -> syn::Result<()>
              is not supported in v1",
         ))
     }
+}
+
+/// Predicate form of [`check_kind_only_children`]: `true` when the child list
+/// is kind-only (empty or a single bare `...`). Used by [`lower_node`] to route
+/// a `Head::OneOf` with *concrete* children to per-variant schema dispatch
+/// ([`lower_oneof_node_with_children`]) instead of rejecting it (murphy-b6nq).
+fn is_kind_only_children(children: &[murphy_pattern::Pat]) -> bool {
+    use murphy_pattern::PatKind;
+    children.is_empty() || (children.len() == 1 && matches!(children[0].kind, PatKind::Rest))
+}
+
+/// Whether the structural schema for `tag` can structurally accept `children`
+/// at fixed/list slots — the same arity rule [`lower_exact_node`] enforces, but
+/// as a non-erroring predicate. Used to decide whether a `Head::OneOf` union
+/// member gets a real dispatch arm or falls through to the catch-all fail arm
+/// (mirroring the C interpreter, which simply returns `false` for a node whose
+/// kind can't fit the children). A kind with no v1 pattern schema never accepts.
+fn exact_node_accepts_children(tag: murphy_ast::NodeKindTag, children: &[murphy_pattern::Pat]) -> bool {
+    let Some(schema) = schema_for(tag.0) else {
+        return false;
+    };
+    let has_list = schema
+        .slots
+        .last()
+        .is_some_and(|s| matches!(s.ty, SlotTy::List));
+    let fixed_count = schema.slots.len() - usize::from(has_list);
+    if children.len() < fixed_count {
+        return false;
+    }
+    has_list || children.len() == fixed_count
 }
 
 /// Lower a `(head child...)` node match against `subject`.
@@ -1644,23 +1671,75 @@ fn lower_node(
             check_kind_only_children(children)?;
             Ok(quote!())
         }
-        // `({a b} ...)` — kind must be one of `tags`. Validate the child
-        // list, emit a single `matches!` guard on the tag.
+        // `({a b} ...)` — kind must be one of `tags`.
         Head::OneOf(tags) => {
-            check_kind_only_children(children)?;
-            let fail = fail_stmt(ctx);
-            let tag_u8s: Vec<u8> = tags.iter().map(|t| t.0).collect();
-            let t = gensym(ctx, "__t");
-            Ok(quote! {
-                let #t: u8 = cx.kind(#subject).tag().0;
-                if !::core::matches!(#t, #(#tag_u8s)|*) {
-                    #fail
-                }
-            })
+            if is_kind_only_children(children) {
+                // Kind-only: emit a single `matches!` guard on the tag.
+                let fail = fail_stmt(ctx);
+                let tag_u8s: Vec<u8> = tags.iter().map(|t| t.0).collect();
+                let t = gensym(ctx, "__t");
+                Ok(quote! {
+                    let #t: u8 = cx.kind(#subject).tag().0;
+                    if !::core::matches!(#t, #(#tag_u8s)|*) {
+                        #fail
+                    }
+                })
+            } else {
+                // `({send csend} _ :m $_)` etc. — concrete children: dispatch
+                // them per union-variant schema (murphy-b6nq).
+                lower_oneof_node_with_children(tags, children, subject, ctx)
+            }
         }
         // `(send ...)` — exact kind; dispatch children onto the schema.
         Head::Exact(t) => lower_exact_node(*t, children, subject, ctx),
     }
+}
+
+/// Lower a `Head::OneOf` node match whose child list carries *concrete*
+/// children (not kind-only) — e.g. `(call _ :each_with_object $_)` after
+/// `call` expands to `{send csend}` (murphy-b6nq).
+///
+/// The node's kind is already known to be one of `tags` only at runtime, and
+/// each union member has its own structural schema (a `send`'s receiver is a
+/// nil-fillable `RecvOptNode` slot, a `csend`'s is a plain `Node`). So this
+/// emits a `match` on the runtime tag, dispatching the *same* child sequence
+/// onto each member's schema via [`lower_exact_node`] — identical to what the
+/// C interpreter does when it looks up `schema_children` for the actual node.
+///
+/// A union member whose schema can't structurally accept the children
+/// ([`exact_node_accepts_children`] is `false`) gets no arm and falls through
+/// to the catch-all fail arm, so it simply never matches — mirroring the C
+/// backend's per-node `false`, rather than aborting compilation.
+fn lower_oneof_node_with_children(
+    tags: &[murphy_ast::NodeKindTag],
+    children: &[murphy_pattern::Pat],
+    subject: &TokenStream,
+    ctx: &mut Lower,
+) -> syn::Result<TokenStream> {
+    let fail = fail_stmt(ctx);
+    let t = gensym(ctx, "__t");
+    let mut arms: Vec<TokenStream> = Vec::new();
+    for tag in tags {
+        if !exact_node_accepts_children(*tag, children) {
+            continue;
+        }
+        let tag_u8 = tag.0;
+        let block = lower_exact_node(*tag, children, subject, ctx)?;
+        arms.push(quote!(#tag_u8 => #block));
+    }
+    if arms.is_empty() {
+        // No union member can accept these children — the pattern can never
+        // match. Emit an unconditional fail (B==C: the C interpreter returns
+        // `false` for the same shape).
+        return Ok(quote!({ #fail }));
+    }
+    Ok(quote! {
+        let #t: u8 = cx.kind(#subject).tag().0;
+        match #t {
+            #(#arms,)*
+            _ => { #fail }
+        }
+    })
 }
 
 /// Lower a `Head::Exact` node match: look up the structural schema for `tag`

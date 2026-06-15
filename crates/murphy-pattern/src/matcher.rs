@@ -463,15 +463,30 @@ fn match_node_match<P: PredicateHost + ?Sized>(
         }
     }
 
-    // `Any` / `OneOf` are kind-only: B backend accepts only an empty child
-    // list or a single bare `...`. Either way the body is "any structure" —
-    // succeed without dispatching children onto a slot schema.
+    // `Any` / `OneOf` with a kind-only child list (empty or a single bare
+    // `...`) is "any structure" — succeed without dispatching children onto a
+    // slot schema.
     if matches!(head, IrHead::Any | IrHead::OneOf(_)) {
-        return match pattern_kids {
+        let kind_only = match pattern_kids {
             [] => true,
             [only] => matches!(ctx.ir_node(*only), IrNode::Rest),
             _ => false,
         };
+        if kind_only {
+            return true;
+        }
+        // Concrete children. `Any` (`(_ child...)`) is unsupported in v1: the B
+        // backend cannot enumerate every NodeKind to dispatch on, so reject it
+        // here too — a deliberate `false` keeps B==C, not an incidental
+        // fall-through.
+        if matches!(head, IrHead::Any) {
+            return false;
+        }
+        // `OneOf` (`(call child...)`) with concrete children (murphy-b6nq): the
+        // head tag is already confirmed to be in the union above, so fall
+        // through and dispatch the children onto the ACTUAL node's schema —
+        // identical to the `Exact` path below, which is exactly what the B
+        // backend's per-variant `match` arms do.
     }
 
     // `Exact`: dispatch pattern children onto the kind's structural slots.
