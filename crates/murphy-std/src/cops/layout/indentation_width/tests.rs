@@ -61,6 +61,47 @@ fn accepts_correctly_indented_module() {
     "#});
 }
 
+// ── adjacent def modifier (`private def …`) ─────────────────────────────────
+
+#[test]
+fn accepts_modifier_wrapped_def_singleton() {
+    // `private_class_method def self.foo` — RuboCop's `adjacent_def_modifier?`
+    // makes the indentation base the modifier send's column (default
+    // `Layout/DefEndAlignment` `start_of_line`), not the inner `def` keyword.
+    // Previously this false-fired with `Use 2 (not -19)` (Mastodon:
+    // app/helpers/languages_helper.rb:253).
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        module M
+          private_class_method def self.locale_name_for_sorting(locale)
+            if locale
+              locale
+            end
+          end
+        end
+    "#});
+}
+
+#[test]
+fn accepts_modifier_wrapped_def_instance() {
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        private def foo
+          bar
+        end
+    "#});
+}
+
+#[test]
+fn flags_misindented_modifier_wrapped_def_body() {
+    // The modifier base still catches genuine misindentation: `bar` is indented
+    // 4 past the `private` column, not 2.
+    test::<IndentationWidth>().expect_offense(indoc! {r#"
+        private def foo
+            bar
+        ^^^^ Use 2 (not 4) spaces for indentation.
+        end
+    "#});
+}
+
 // ── false-positive corpus (the safe-port gate) ──────────────────────────────
 
 #[test]
