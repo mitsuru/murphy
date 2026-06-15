@@ -175,9 +175,11 @@ mod tests {
 
     #[test]
     fn flags_receiverless_call() {
-        // murphy-if9y: `(call _ :each_with_object $_)` matches a receiverless
-        // call too — the `_` receiver binds the absent (nil-filled) slot, just
-        // as RuboCop's `(call _ ...)` matches `each_with_object(0)`.
+        // Parity documentation: RuboCop's `(call _ :each_with_object ...)`
+        // matches a receiverless `each_with_object(0)` (the `_` binds the
+        // nil-filled receiver slot). This cop is hand-rolled on
+        // `cx.method_name`, which already matches receiverless calls — so this
+        // is the same behavior, not an exercise of the pattern infra.
         test::<EachWithObjectArgument>().expect_offense(indoc! {r#"
             each_with_object(0) { |e, a| a }
             ^^^^^^^^^^^^^^^^^^^ The argument to each_with_object cannot be immutable.

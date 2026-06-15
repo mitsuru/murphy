@@ -335,6 +335,7 @@ fn send_match_with_nil_test_and_sym_slot_agrees() {
 
 def_node_matcher!(b_send_wild_recv, "(send _ :foo)");
 def_node_matcher!(b_return_wild, "(return _)");
+def_node_matcher!(b_send_cap_recv, "(send $_ :foo)");
 
 #[test]
 fn wildcard_matches_absent_send_receiver_but_not_omitted_return_value() {
@@ -397,6 +398,23 @@ fn wildcard_matches_absent_send_receiver_but_not_omitted_return_value() {
     );
     assert_c_matches("(return _)", &ast, val_return, true);
     assert_c_matches("(return _)", &ast, bare_return, false);
+
+    // `(send $_ :foo)` — a `$_` CAPTURE (not a bare `_` wildcard) at the
+    // receiver still requires a present node to bind: it binds `x` in `x.foo`
+    // but does NOT match the receiverless `foo` (an absent slot has no NodeId).
+    // This is the invariant merged `Style/IdentityComparison` depends on —
+    // `(send $_ :object_id)` must not fire on a bare `object_id`. B==C.
+    assert!(
+        b_send_cap_recv(bare_send, &cx).is_none(),
+        "(send $_ :foo) must NOT match receiverless foo (no node to bind)"
+    );
+    assert_eq!(
+        b_send_cap_recv(recv_send, &cx),
+        Some((recv,)),
+        "(send $_ :foo) must bind the present receiver of x.foo"
+    );
+    assert_c_matches("(send $_ :foo)", &ast, bare_send, false);
+    assert_c_matches("(send $_ :foo)", &ast, recv_send, true);
 }
 
 // ────────────────────────────────────────────────────────────────────────

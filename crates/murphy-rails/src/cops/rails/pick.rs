@@ -251,6 +251,20 @@ mod tests {
     }
 
     #[test]
+    fn flags_receiverless_pluck_first() {
+        // murphy-if9y: receiverless `pluck(:id)` (e.g. inside a model method
+        // where the relation receiver is implicit `self`) is `(send nil :pluck
+        // …)` in RuboCop, so the inner `(send _ :pluck _ ...)` wildcard receiver
+        // matches the absent slot — `pluck(:id).first` IS flagged. Murphy missed
+        // this before the `RecvOptNode` fix; standalone RuboCop NodePattern
+        // confirms `(send (send _ :pluck _ ...) :first)` matches `pluck(:id).first`.
+        test::<Pick>().expect_offense(indoc! {r#"
+                pluck(:id).first
+                ^^^^^^^^^^^^^^^^ Prefer `pick(:id)` over `pluck(:id).first`.
+            "#});
+    }
+
+    #[test]
     fn flags_chain_then_pluck_first() {
         // The receiver of `pluck` is itself a chain — the inner Send's
         // receiver shape is unconstrained, so this still hits.
