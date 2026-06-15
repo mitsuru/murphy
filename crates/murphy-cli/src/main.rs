@@ -624,6 +624,10 @@ struct InlineDirective {
 struct DirectiveState {
     disable_all: bool,
     disabled_cops: BTreeSet<String>,
+    /// Cops re-enabled inside a `disable all` region via `# rubocop:enable <Cop>`.
+    /// While `disable_all` is set, an offense is still reported if its cop matches
+    /// an entry here, mirroring RuboCop's "disable all, then opt one back in".
+    enabled_exceptions: BTreeSet<String>,
     todo_all: bool,
     todo_cops: BTreeSet<String>,
     line_start: usize,
@@ -690,6 +694,7 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
     let mut states = Vec::new();
     let mut disable_all = false;
     let mut disabled_cops: BTreeSet<String> = BTreeSet::new();
+    let mut enabled_exceptions: BTreeSet<String> = BTreeSet::new();
 
     let mut offset = 0usize;
     for line in source.split_inclusive('\n') {
@@ -716,27 +721,45 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
             let is_full_line = source.as_bytes()[line_start..comment.start as usize]
                 .iter()
                 .all(u8::is_ascii_whitespace);
-            match directive.kind {
-                InlineDirectiveKind::Enable if all => {
+            // RuboCop treats `todo` as an alias of `disable`; the scope (range vs
+            // line-local) is decided purely by whether the directive sits on its
+            // own line (range) or trails code (line-local) — identically for both
+            // keywords.
+            match (&directive.kind, is_full_line, all) {
+                (InlineDirectiveKind::Enable, _, true) => {
                     disable_all = false;
                     disabled_cops.clear();
+                    enabled_exceptions.clear();
                 }
-                InlineDirectiveKind::Enable => {
+                (InlineDirectiveKind::Enable, _, false) => {
                     for cop in &directive.cops {
                         disabled_cops.remove(cop);
+                        // Re-enabling inside a `disable all` region opts this cop
+                        // back in even though the blanket disable stays active.
+                        if disable_all {
+                            enabled_exceptions.insert(cop.clone());
+                        }
                     }
                 }
-                // A full-line `disable` is a range directive that persists until
-                // a matching `enable`; a trailing `disable` (code before the
-                // `#`) scopes to its own line only.
-                InlineDirectiveKind::Disable if is_full_line && all => disable_all = true,
-                InlineDirectiveKind::Disable if is_full_line => {
+                // A full-line `disable`/`todo` is a range directive that persists
+                // until a matching `enable`.
+                (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, true, true) => {
+                    disable_all = true;
+                    // A fresh blanket disable resets prior per-cop opt-ins.
+                    enabled_exceptions.clear();
+                }
+                (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, true, false) => {
+                    for cop in &directive.cops {
+                        enabled_exceptions.remove(cop);
+                    }
                     disabled_cops.extend(directive.cops);
                 }
-                // `todo` always scopes to its own line in Murphy (a trailing
-                // disable lands in the same line-local channel).
-                InlineDirectiveKind::Disable | InlineDirectiveKind::Todo if all => todo_all = true,
-                InlineDirectiveKind::Disable | InlineDirectiveKind::Todo => {
+                // A trailing `disable`/`todo` (code before the `#`) scopes to its
+                // own line only; the line-local channel reuses the `todo_*` fields.
+                (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, false, true) => {
+                    todo_all = true;
+                }
+                (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, false, false) => {
                     todo_cops.extend(directive.cops);
                 }
             }
@@ -745,6 +768,7 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
         states.push(DirectiveState {
             disable_all,
             disabled_cops: disabled_cops.clone(),
+            enabled_exceptions: enabled_exceptions.clone(),
             todo_all,
             todo_cops,
             line_start,
@@ -756,14 +780,31 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
     states
 }
 
+/// Cops that validate inline directives themselves. RuboCop never lets a
+/// directive suppress these — otherwise a dangling `# rubocop:disable Lint`
+/// would silence the very `Lint/MissingCopEnableDirective` warning reported on
+/// it, since that cop lives in the disabled `Lint` department.
+const DIRECTIVE_VALIDATION_COPS: [&str; 4] = [
+    "Lint/MissingCopEnableDirective",
+    "Lint/RedundantCopDisableDirective",
+    "Lint/RedundantCopEnableDirective",
+    "Lint/CopDirectiveSyntax",
+];
+
 fn is_directive_disabled(offense: &Offense, states: &[DirectiveState]) -> bool {
-    if offense.cop_name == SYNTAX_COP_NAME {
+    if offense.cop_name == SYNTAX_COP_NAME
+        || DIRECTIVE_VALIDATION_COPS.contains(&offense.cop_name.as_str())
+    {
         return false;
     }
     let start = offense.range.start_offset as usize;
     for state in states {
         if start >= state.line_start && start < state.line_end {
-            return state.disable_all
+            // A blanket `disable all` suppresses everything except cops that were
+            // explicitly opted back in with a later `# rubocop:enable <Cop>`.
+            let blanket_disabled =
+                state.disable_all && !cop_set_matches(&state.enabled_exceptions, &offense.cop_name);
+            return blanket_disabled
                 || cop_set_matches(&state.disabled_cops, &offense.cop_name)
                 || state.todo_all
                 || cop_set_matches(&state.todo_cops, &offense.cop_name);

@@ -521,6 +521,98 @@ fn lint_department_directive_does_not_suppress_other_departments() {
     );
 }
 
+/// RuboCop treats `# rubocop:todo` as an alias of `disable`: a full-line todo
+/// (own line, no trailing code) persists as a range directive and suppresses the
+/// *following* line's offense, not just its own.
+#[test]
+fn lint_full_line_rubocop_todo_persists_like_disable() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("fullline_todo.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:todo Lint/Debugger\ndebugger\n",
+    )
+    .expect("write fullline_todo.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
+/// RuboCop allows re-enabling a specific cop inside a `disable all` region:
+/// `# rubocop:disable all` then `# rubocop:enable Lint/Debugger` must let the
+/// `Lint/Debugger` offense through again, even though the rest stays disabled.
+#[test]
+fn lint_enable_specific_cop_inside_disable_all_region() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("disable_all_enable.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable all\n# rubocop:enable Lint/Debugger\ndebugger\n",
+    )
+    .expect("write disable_all_enable.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert!(
+        parsed.iter().any(|o| o["cop_name"] == "Lint/Debugger"),
+        "enable inside a disable-all region must re-enable that cop, got {parsed:?}"
+    );
+}
+
+/// A dangling full-line department disable (`# rubocop:disable Lint`, no matching
+/// enable) must still surface `Lint/MissingCopEnableDirective`: a directive must
+/// never suppress the directive-validation cop that reports on it, even though
+/// that cop lives in the disabled `Lint` department.
+#[test]
+fn lint_dangling_department_disable_still_warns_missing_enable() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dangling_dept.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable Lint\ndebugger\n",
+    )
+    .expect("write dangling_dept.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert!(
+        parsed
+            .iter()
+            .any(|o| o["cop_name"] == "Lint/MissingCopEnableDirective"),
+        "a dangling department disable must not silence its own missing-enable warning, got {parsed:?}"
+    );
+    // The real debugger offense stays suppressed by the department disable.
+    assert!(
+        !parsed.iter().any(|o| o["cop_name"] == "Lint/Debugger"),
+        "the department disable must still suppress Lint/Debugger, got {parsed:?}"
+    );
+}
+
 /// RuboCop-compatible: a same-line `# rubocop:todo <Cop>` suppresses the offense
 /// on its own line, like `# murphy:todo`.
 #[test]
