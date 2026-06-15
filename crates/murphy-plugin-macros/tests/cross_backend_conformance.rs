@@ -425,6 +425,71 @@ fn seq_capture_collects_same_args() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// 5b. RuboCop-aligned typed `$kind` captures (murphy-m4dc). `$str` / `$array`
+// capture the subject AND require it to be of that kind — the same semantics
+// as RuboCop's `$str` / `$array`, NOT a named wildcard. This is the path with
+// no prior conformance coverage, so it is pinned explicitly on both backends:
+// match + capture-value for the right kind, no-match for the wrong kind.
+// `$str` exercises an *atom* kind (the path the macro previously could not
+// capture at all); `$array` exercises a *node* kind.
+// ────────────────────────────────────────────────────────────────────────
+
+def_node_matcher!(b_cap_str_typed, "$str");
+def_node_matcher!(b_cap_array_typed, "$array");
+
+#[test]
+fn typed_kind_capture_atom_and_node_agree() {
+    // `["x", 1]` — an array holding one str element and one int element.
+    let mut b = AstBuilder::new("[\"x\", 1]", "t.rb");
+    let s = b.intern_string("x");
+    let str_node = b.push(NodeKind::Str(s), r());
+    let int_node = b.push(NodeKind::Int(1), r());
+    let elems = b.push_list(&[str_node, int_node]);
+    let arr = b.push(NodeKind::Array(elems), r());
+    let ast = b.finish(arr);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // `$str` (atom kind): captures the str node, rejects int and array.
+    let b_str: Option<(NodeId,)> = b_cap_str_typed(str_node, &cx);
+    assert_eq!(b_str, Some((str_node,)), "$str must capture the str node");
+    assert_eq!(
+        b_cap_str_typed(int_node, &cx),
+        None,
+        "$str must reject an int"
+    );
+    assert_eq!(b_cap_str_typed(arr, &cx), None, "$str must reject an array");
+    // B==C on hit/miss for each subject, and on the captured value.
+    let c = assert_c_matches("$str", &ast, str_node, b_str.is_some());
+    match (b_str, c.expect("C also matched").get(0).cloned()) {
+        (Some((bi,)), Some(CaptureValue::Node(ci))) => {
+            assert_eq!(bi, ci, "$str capture id disagrees")
+        }
+        other => panic!("backends disagree on $str capture: {other:?}"),
+    }
+    assert_c_matches("$str", &ast, int_node, false);
+    assert_c_matches("$str", &ast, arr, false);
+
+    // `$array` (node kind): captures the array node, rejects str.
+    let b_arr: Option<(NodeId,)> = b_cap_array_typed(arr, &cx);
+    assert_eq!(b_arr, Some((arr,)), "$array must capture the array node");
+    assert_eq!(
+        b_cap_array_typed(str_node, &cx),
+        None,
+        "$array must reject a str"
+    );
+    let c2 = assert_c_matches("$array", &ast, arr, b_arr.is_some());
+    match (b_arr, c2.expect("C also matched").get(0).cloned()) {
+        (Some((bi,)), Some(CaptureValue::Node(ci))) => {
+            assert_eq!(bi, ci, "$array capture id disagrees")
+        }
+        other => panic!("backends disagree on $array capture: {other:?}"),
+    }
+    assert_c_matches("$array", &ast, str_node, false);
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // 6. Unsupported kinds — `(int)` is rejected at compile time by B (so it
 // is not added as a matcher here), and reported as a no-match at runtime
 // by C. The runtime behaviour is exercised in

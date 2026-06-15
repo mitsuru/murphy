@@ -211,7 +211,14 @@ once per pattern at module top level, then call the matcher from any
 cop's dispatch body. Pattern grammar (v1 RuboCop subset): atoms
 (`42`, `:foo`, `true`, `nil`), node-kind heads (`int`, `send`, …),
 wildcard `_`, alternation `{a b c}`, `...` rest, `$_` captures, `$...`
-seq captures. Full grammar in `docs/plans/2026-05-22-murphy-9cr17-pattern-grammar.md`.
+seq captures. `$<kind>` is a **typed capture** matching RuboCop — `$send`,
+`$array`, `$str`, `$int` capture the node *and* require it to be of that
+kind (atom kinds like `$str`/`$int` included); `$<non-kind-ident>` (e.g.
+`$lhs`) is a named wildcard capture whose name a later predicate arg can
+back-reference. A kind name is therefore always a typed capture — `$def`,
+`$hash`, `$sym` cannot be used as named-capture identifiers (kind names are
+reserved, matching RuboCop). Full grammar in
+`docs/plans/2026-05-22-murphy-9cr17-pattern-grammar.md`.
 
 ### Reference: what `#[cop]` generates
 

@@ -49,18 +49,13 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
 
 const MSG: &str = "Favor `Array#join` over `Array#*`.";
 
-// RuboCop parity: RuboCop's `Style/ArrayJoin` matcher is `(send $array :* $str)`.
-// Murphy's macro differs in two ways from RuboCop node-pattern:
-//   1. A bare `$array` is a capture *named* "array" with a `Wildcard` body
-//      (matches anything), NOT a typed capture; the typed form is `$(array ...)`.
-//   2. Atom kinds (`str`, `int`, `sym`, ...) cannot be captured generically —
-//      `$(str ...)` is rejected; only a specific literal (`$"x"`) or the bare
-//      kind matcher `str` is allowed. So the string arg is type-constrained with
-//      a bare `str` and its node is read back via `cx.call_arguments`.
-// The `str` arg slot (no `...`) means exactly one string argument, matching the
-// prior `arg_nodes.len() != 1` + `NodeKind::Str` check; `$(array ...)` enforces
-// the array-literal receiver and captures it for the `array.join(str)` rewrite.
-def_node_matcher!(join_candidate, "(send $(array ...) :* str)");
+// RuboCop parity: this is RuboCop's `Style/ArrayJoin` matcher verbatim,
+// `(send $array :* $str)`. Since murphy-m4dc, `$array` / `$str` are typed
+// captures (capture the node AND require its kind), so this captures the
+// array-literal receiver and the string-literal argument directly. The `$str`
+// arg slot (no `...`) means exactly one string argument, matching the prior
+// `arg_nodes.len() != 1` + `NodeKind::Str` check.
+def_node_matcher!(join_candidate, "(send $array :* $str)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -76,12 +71,8 @@ pub struct ArrayJoin;
 impl ArrayJoin {
     #[on_node(kind = "send", methods = ["*"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        // Array-literal receiver (captured) `*` single string arg.
-        let Some((recv_id,)) = join_candidate(node, cx) else {
-            return;
-        };
-        // The match guarantees exactly one `str` argument; read its node back.
-        let Some(&arg_id) = cx.call_arguments(node).first() else {
+        // `(send $array :* $str)` — captures the array receiver and string arg.
+        let Some((recv_id, arg_id)) = join_candidate(node, cx) else {
             return;
         };
 
