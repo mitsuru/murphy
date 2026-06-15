@@ -458,6 +458,11 @@ fn head_any_and_oneof_agree() {
 // ────────────────────────────────────────────────────────────────────────
 
 def_node_matcher!(b_call_ewo_cap, "(call _ :each_with_object $_)");
+// Heterogeneous union: `int`'s schema (one fixed slot) can't accept two
+// children, so its dispatch arm is skipped (B) / count-mismatches (C) — an int
+// subject never matches, a send subject does. Grounded on standalone
+// `RuboCop::AST::NodePattern`: `({send int} _ :foo)` matches `x.foo`/`foo`, not `5`.
+def_node_matcher!(b_union_send_int_foo, "({send int} _ :foo)");
 
 #[test]
 fn oneof_head_with_concrete_children_dispatches_per_variant() {
@@ -564,6 +569,57 @@ fn oneof_head_with_concrete_children_dispatches_per_variant() {
             "B: must NOT match {label}"
         );
         assert_c_matches("(call _ :each_with_object $_)", &ast, subject, false);
+    }
+}
+
+#[test]
+fn oneof_head_with_concrete_children_skips_arity_incompatible_member() {
+    // A union member whose schema can't accept the children (`int`: one fixed
+    // slot, given two children) gets NO B dispatch arm — it falls to the
+    // catch-all fail — and the C interpreter count-mismatches the same way, so
+    // an int subject never matches while a send subject does (murphy-b6nq).
+    let mut b = AstBuilder::new("x.foo; foo; 5", "t.rb");
+    let foo = b.intern_symbol("foo");
+    let xsym = b.intern_symbol("x");
+    let empty = b.push_list(&[]);
+    let recv = b.push(NodeKind::Lvar(xsym), r());
+    let send_recv = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv),
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    let send_bare = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    let int_node = b.push(NodeKind::Int(5), r());
+    let root_list = b.push_list(&[send_recv, send_bare, int_node]);
+    let root = b.push(NodeKind::Begin(root_list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // Both sends match (the `int` arm is skipped, the `send` arm fires); the
+    // int subject hits the catch-all fail. B==C on all three.
+    for (subject, expect, label) in [
+        (send_recv, true, "x.foo (send)"),
+        (send_bare, true, "foo (receiverless send)"),
+        (int_node, false, "5 (int — arity-incompatible union member)"),
+    ] {
+        assert_eq!(
+            b_union_send_int_foo(subject, &cx),
+            expect,
+            "B: ({{send int}} _ :foo) on {label}"
+        );
+        assert_c_matches("({send int} _ :foo)", &ast, subject, expect);
     }
 }
 
