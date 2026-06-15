@@ -12,8 +12,10 @@ use murphy_plugin_api::{CommentDirectiveKind, Cx, NodeId, NodeKind, Range, Sourc
 /// `#{}` is correctly *not* covered (a `(dstr (str ";") (begin …))` keeps the
 /// literal `;` in the `Str` part and the interpolated code in the `begin`).
 pub fn string_literal_content_ranges(cx: &Cx<'_>) -> Vec<Range> {
-    cx.descendants(cx.root())
-        .into_iter()
+    // Include the root itself: when the whole file is a bare literal (`';'` or
+    // `:';'`), the root *is* the `Str`/`Sym` node, which `descendants` omits.
+    std::iter::once(cx.root())
+        .chain(cx.descendants(cx.root()))
         .filter(|&id| matches!(*cx.kind(id), NodeKind::Str(_) | NodeKind::Sym(_)))
         .map(|id| cx.range(id))
         .collect()

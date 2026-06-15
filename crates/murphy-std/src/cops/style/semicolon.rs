@@ -399,6 +399,14 @@ mod tests {
     }
 
     #[test]
+    fn does_not_flag_semicolon_when_whole_file_is_a_literal() {
+        // The whole program is a bare `;`-bearing literal, so the root node *is*
+        // the `Str`/`Sym` — its content range must still be covered.
+        test::<Semicolon>().expect_no_offenses("';'\n");
+        test::<Semicolon>().expect_no_offenses(":';'\n");
+    }
+
+    #[test]
     fn does_not_flag_semicolon_in_dstr_string_part() {
         // The `;` sits in a literal string part between two interpolations.
         test::<Semicolon>().expect_no_offenses("x = \"a=#{b};#{c}\"\n");

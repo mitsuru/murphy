@@ -74,8 +74,25 @@ fn offensive_usage(node: NodeId, cx: &Cx<'_>) -> bool {
     let Some(parent_id) = cx.parent(node).get() else {
         return false;
     };
-    matches!(*cx.kind(parent_id), NodeKind::Lvasgn { .. })
-        || cx.call_receiver(parent_id).get() == Some(node)
+    matches!(*cx.kind(parent_id), NodeKind::Lvasgn { .. }) || is_chained_receiver(node, cx)
+}
+
+/// True when `node` is the receiver of a chained call, looking through any
+/// wrapping parentheses: `File.open('f').read` and `(File.open('f')).read` both
+/// qualify (a parenthesised group lowers to a single-child `Begin`).
+fn is_chained_receiver(mut node: NodeId, cx: &Cx<'_>) -> bool {
+    while let Some(parent) = cx.parent(node).get() {
+        if cx.call_receiver(parent).get() == Some(node) {
+            return true;
+        }
+        match cx.kind(parent) {
+            NodeKind::Begin(list) if matches!(cx.list(*list), [only] if *only == node) => {
+                node = parent;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
@@ -128,6 +145,16 @@ mod tests {
         test::<FileOpen>().expect_offense(indoc! {"
             File.open('file').read
             ^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+        "});
+    }
+
+    #[test]
+    fn flags_parenthesized_file_open_chained() {
+        // A chained call on a parenthesised `File.open` still leaks the
+        // descriptor; the wrapping `Begin` must be looked through.
+        test::<FileOpen>().expect_offense(indoc! {"
+            (File.open('file')).read
+             ^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
         "});
     }
 

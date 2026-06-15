@@ -650,12 +650,17 @@ fn comment_ranges(tokens: &[SourceToken]) -> Vec<Range> {
 /// stripped, the cop list is comma-separated, and an empty list or `all` targets
 /// every cop.
 fn parse_inline_directive(comment_src: &str) -> Option<InlineDirective> {
-    let hash_pos = comment_src.find('#')?;
-    let comment = comment_src[hash_pos + 1..].trim_start();
-    let rest = comment
-        .strip_prefix("murphy:")
-        .or_else(|| comment.strip_prefix("rubocop:"))?
-        .trim_start();
+    // RuboCop honors an "inner directive" — a `# rubocop:…` that follows other
+    // comment text on the same comment line, e.g.
+    // `# coding: utf-8 # rubocop:disable Style/Encoding`. Scan every `#`, not
+    // just the first, for a `murphy:`/`rubocop:` prefix.
+    let rest = comment_src.match_indices('#').find_map(|(hash_pos, _)| {
+        let comment = comment_src[hash_pos + 1..].trim_start();
+        comment
+            .strip_prefix("murphy:")
+            .or_else(|| comment.strip_prefix("rubocop:"))
+            .map(str::trim_start)
+    })?;
     let (keyword, tail) = rest
         .split_once(char::is_whitespace)
         .map_or((rest, ""), |(keyword, tail)| (keyword, tail));
@@ -695,18 +700,23 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
 
         // Only a real comment token on this line can carry a directive — a `#`
         // inside a string/heredoc is not a comment and must be ignored.
-        let comment_src = comments
+        let comment = comments
             .iter()
-            .find(|r| (r.start as usize) >= line_start && (r.start as usize) < line_end)
-            .map(|r| &source[r.start as usize..r.end as usize]);
+            .find(|r| (r.start as usize) >= line_start && (r.start as usize) < line_end);
+        let directive =
+            comment.and_then(|r| parse_inline_directive(&source[r.start as usize..r.end as usize]));
 
-        if let Some(directive) = comment_src.and_then(parse_inline_directive) {
+        if let (Some(comment), Some(directive)) = (comment, directive) {
             let all = directive.cops.is_empty();
+            // A directive on its own line (only whitespace before the `#`) is a
+            // range directive: it persists until a matching `enable`. A trailing
+            // directive (code before the `#`) scopes to its own line only. This
+            // mirrors RuboCop's `disable`/`todo` comment-directive scope; the
+            // line-local channel reuses the `todo_*` fields.
+            let is_full_line = source.as_bytes()[line_start..comment.start as usize]
+                .iter()
+                .all(u8::is_ascii_whitespace);
             match directive.kind {
-                InlineDirectiveKind::Disable if all => disable_all = true,
-                InlineDirectiveKind::Disable => {
-                    disabled_cops.extend(directive.cops);
-                }
                 InlineDirectiveKind::Enable if all => {
                     disable_all = false;
                     disabled_cops.clear();
@@ -716,8 +726,17 @@ fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveSt
                         disabled_cops.remove(cop);
                     }
                 }
-                InlineDirectiveKind::Todo if all => todo_all = true,
-                InlineDirectiveKind::Todo => {
+                // A full-line `disable` is a range directive that persists until
+                // a matching `enable`; a trailing `disable` (code before the
+                // `#`) scopes to its own line only.
+                InlineDirectiveKind::Disable if is_full_line && all => disable_all = true,
+                InlineDirectiveKind::Disable if is_full_line => {
+                    disabled_cops.extend(directive.cops);
+                }
+                // `todo` always scopes to its own line in Murphy (a trailing
+                // disable lands in the same line-local channel).
+                InlineDirectiveKind::Disable | InlineDirectiveKind::Todo if all => todo_all = true,
+                InlineDirectiveKind::Disable | InlineDirectiveKind::Todo => {
                     todo_cops.extend(directive.cops);
                 }
             }

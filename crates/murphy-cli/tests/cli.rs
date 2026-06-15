@@ -391,7 +391,7 @@ fn lint_directive_inside_string_literal_is_not_honored() {
     let path = dir.path().join("dir_in_str.rb");
     fs::write(
         &path,
-        "# frozen_string_literal: true\n\nputs \"# rubocop:disable Lint/Debugger\"\ndebugger\n",
+        "# frozen_string_literal: true\n\nputs '# rubocop:disable Lint/Debugger'\ndebugger\n",
     )
     .expect("write dir_in_str.rb");
 
@@ -404,11 +404,67 @@ fn lint_directive_inside_string_literal_is_not_honored() {
         .assert()
         .code(1);
 
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
-    assert!(
-        stdout.contains("Lint/Debugger"),
-        "string-embedded directive must not suppress the real debugger offense, got {stdout}"
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(parsed.len(), 1, "expected one offense, got {parsed:?}");
+    assert_eq!(
+        parsed[0]["cop_name"], "Lint/Debugger",
+        "string-embedded directive must not suppress the real debugger offense, got {parsed:?}"
     );
+}
+
+/// RuboCop's "inner directive": a `# rubocop:disable` that follows other comment
+/// text on the same comment line is still honored.
+#[test]
+fn lint_inner_directive_after_comment_text_is_honored() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("inner.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # keep this # rubocop:disable Lint/Debugger\n",
+    )
+    .expect("write inner.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
+/// A trailing `code # rubocop:disable <Cop>` is line-local — it must NOT suppress
+/// the cop on subsequent lines (RuboCop comment-directive scope).
+#[test]
+fn lint_trailing_disable_is_line_local() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("trailing_local.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Lint/Debugger\ndebugger\n",
+    )
+    .expect("write trailing_local.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "a trailing disable must only scope its own line, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
 /// RuboCop-compatible: a same-line `# rubocop:todo <Cop>` suppresses the offense

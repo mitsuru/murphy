@@ -192,6 +192,14 @@ mod tests {
     }
 
     #[test]
+    fn ignores_semicolon_when_whole_file_is_a_literal() {
+        // The whole program is a bare `;`-bearing literal (the root node itself
+        // is the `Str`/`Sym`), so its content range must still be covered.
+        test::<SpaceAfterSemicolon>().expect_no_offenses("';'\n");
+        test::<SpaceAfterSemicolon>().expect_no_offenses(":';'\n");
+    }
+
+    #[test]
     fn accepts_semicolon_at_end_of_line() {
         test::<SpaceAfterSemicolon>().expect_no_offenses("x = 1;\ny = 2\n");
     }
