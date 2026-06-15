@@ -13,7 +13,9 @@
 //!   IgnoreEmptyBlocks (RuboCop default true) is implemented: empty-bodied
 //!   blocks do not flag unused args. Shadow args (`|x; y|`) are intentionally
 //!   excluded from reporting (they are the domain of
-//!   Lint/ShadowingOuterLocalVariable).
+//!   Lint/ShadowingOuterLocalVariable). Anonymous args (`*`, `**`, `&` with no
+//!   name) are skipped — RuboCop never flags the explicit "accept but ignore"
+//!   forms.
 //! ```
 //!
 //! ## Autocorrect
@@ -75,6 +77,14 @@ impl UnusedBlockArgument {
 
         for var in scope.variables().iter().filter(|v| v.is_argument) {
             let name_str = cx.symbol_str(var.name);
+
+            // Skip anonymous args (`*`, `**`, `&` with no name — `restarg ""`,
+            // `kwrestarg ""`, `blockarg ""`). They are the explicit "accept but
+            // ignore" forms and RuboCop never flags them. Without this guard the
+            // empty name has no `loc.name`, so the offense mislocates to 1:1.
+            if name_str.is_empty() {
+                continue;
+            }
 
             // Skip `_`-prefixed args — intentionally unused.
             if name_str.starts_with('_') {
@@ -240,6 +250,31 @@ mod tests {
         test::<UnusedBlockArgument>().expect_no_offenses(indoc! {r#"
             [1].each do |_|
               puts 1
+            end
+        "#});
+    }
+
+    #[test]
+    fn no_offense_for_anonymous_args() {
+        // Anonymous `*` / `**` / `&` parameters carry an empty name in the
+        // var model (`restarg ""`, `kwrestarg ""`, `blockarg ""`). They are
+        // the explicit "accept but ignore" forms — RuboCop never flags them.
+        // Previously Murphy reported `Unused block argument - `` mislocated to
+        // 1:1 (Mastodon: app/models/backup.rb `->(*) {}`,
+        // spec/.../add_spec.rb `do |..., **|`).
+        test::<UnusedBlockArgument>().expect_no_offenses("x = ->(*) { nil }\n");
+        test::<UnusedBlockArgument>().expect_no_offenses("foo { |**| 1 }\n");
+        test::<UnusedBlockArgument>().expect_no_offenses("foo { |&| 1 }\n");
+    }
+
+    #[test]
+    fn flags_named_arg_but_not_anonymous_sibling() {
+        // The anonymous `**` is skipped; a genuinely unused *named* arg in the
+        // same block is still reported.
+        test::<UnusedBlockArgument>().expect_offense(indoc! {r#"
+            foo do |x, **|
+                    ^ Unused block argument - `x`. If it's necessary, use `_` or `_x` as an argument name to indicate that it won't be used.
+              1
             end
         "#});
     }

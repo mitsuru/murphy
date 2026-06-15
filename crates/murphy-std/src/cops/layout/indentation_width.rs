@@ -39,8 +39,12 @@
 //!       aligned style is valid but would false-fire against the keyword base,
 //!       so an `if`/`while` that is the RHS of an assignment is SKIPPED.
 //!     * `private def …` (`adjacent_def_modifier?`) uses a base chosen by
-//!       `Layout/DefEndAlignment`; not modelled — such defs are reached via
-//!       the ordinary `on_def` path and the modifier-relative base is a gap.
+//!       `Layout/DefEndAlignment`. The default `EnforcedStyleAlignWith:
+//!       start_of_line` (RuboCop's `leftmost_modifier_of`) IS modelled — see
+//!       `adjacent_def_modifier_base` — so the body is measured against the
+//!       modifier's column, not the inner `def` keyword. The non-default
+//!       `EnforcedStyleAlignWith: def` base depends on sibling config Murphy
+//!       cannot read and is not modelled.
 //!     * Tabs (`Layout/IndentationStyle: EnforcedStyle: tabs`) changes the
 //!       column math (`visual_column`); only the spaces default is handled.
 //!       Lines whose indentation contains a tab are SKIPPED to avoid wrong
@@ -80,13 +84,13 @@ pub struct IndentationWidthOptions {
 impl IndentationWidth {
     #[on_node(kind = "def")]
     fn check_def(&self, node: NodeId, cx: &Cx<'_>, options: &IndentationWidthOptions) {
-        let base = cx.loc(node).keyword();
+        let base = def_indentation_base(node, cx);
         check_indentation(base, cx.def_body(node), cx, options);
     }
 
     #[on_node(kind = "defs")]
     fn check_defs(&self, node: NodeId, cx: &Cx<'_>, options: &IndentationWidthOptions) {
-        let base = cx.loc(node).keyword();
+        let base = def_indentation_base(node, cx);
         check_indentation(base, cx.def_body(node), cx, options);
     }
 
@@ -295,6 +299,55 @@ fn message(configured: i64, indentation: i64) -> String {
 }
 
 // ── node-shape helpers ───────────────────────────────────────────────────
+
+/// The indentation base for a `def`/`defs`. Normally the `def` keyword, but for
+/// an "adjacent def modifier" — RuboCop's `adjacent_def_modifier?` shape
+/// `(send nil? _ (any_def ...))`, e.g. `private def foo` or
+/// `private_class_method def self.foo` — the base is the leftmost modifier
+/// send's column, matching RuboCop's `on_send`/`leftmost_modifier_of` under the
+/// default `Layout/DefEndAlignment` `EnforcedStyleAlignWith: start_of_line`.
+/// Using the inner `def` keyword (which sits mid-line after the modifier) would
+/// false-fire with a negative width.
+///
+/// `Layout/DefEndAlignment: EnforcedStyleAlignWith: def` (non-default) would
+/// instead base on the `def` keyword; Murphy cannot read that sibling config and
+/// assumes the `start_of_line` default, consistent with the cop's other
+/// default-config assumptions.
+fn def_indentation_base(def_node: NodeId, cx: &Cx<'_>) -> Range {
+    adjacent_def_modifier_base(def_node, cx).unwrap_or_else(|| cx.loc(def_node).keyword())
+}
+
+/// If `def_node` is the sole argument of a bare (implicit-receiver) send —
+/// RuboCop's `adjacent_def_modifier?` `(send nil? _ (any_def ...))` — return the
+/// `start_of_line` indentation base: the start range of the leftmost modifier
+/// send in the chain (RuboCop's `leftmost_modifier_of`, which handles stacked
+/// modifiers like `private module_function def foo`). Otherwise `None`.
+fn adjacent_def_modifier_base(def_node: NodeId, cx: &Cx<'_>) -> Option<Range> {
+    let parent = cx.parent(def_node).get()?;
+    if !matches!(*cx.kind(parent), NodeKind::Send { .. }) {
+        return None;
+    }
+    // Implicit receiver only: `private def`, not `obj.wrap def`.
+    if cx.call_receiver(parent).get().is_some() {
+        return None;
+    }
+    // The def must be the send's sole argument (`(send nil? _ (any_def ...))`).
+    let args = cx.call_arguments(parent);
+    if args.len() != 1 || args[0] != def_node {
+        return None;
+    }
+    // `leftmost_modifier_of`: walk up while the parent is itself a send, so
+    // stacked modifiers resolve to the outermost one.
+    let mut leftmost = parent;
+    while let Some(grandparent) = cx.parent(leftmost).get() {
+        if matches!(*cx.kind(grandparent), NodeKind::Send { .. }) {
+            leftmost = grandparent;
+        } else {
+            break;
+        }
+    }
+    Some(cx.range(leftmost))
+}
 
 fn class_or_module_body(node: NodeId, cx: &Cx<'_>) -> OptNodeId {
     match *cx.kind(node) {
