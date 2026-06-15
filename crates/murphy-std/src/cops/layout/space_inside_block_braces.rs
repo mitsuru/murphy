@@ -121,10 +121,23 @@ fn brace_tokens(node: NodeId, cx: &Cx<'_>) -> Option<(SourceToken, SourceToken)>
     // default (`foo { |opts = {}| opts }`). Only the block's own opener is then
     // matched. RuboCop reads `node.loc.begin` directly; this reconstructs the
     // same opener positionally. A `{` at brace-depth 0 is the opener; a `do` at
-    // depth 0 means a do/end block and the cop does not apply. Capping at the
-    // closer keeps the block's own `}` out of the scan so empty braces (`{}`,
-    // `{  }`) still locate their opener.
-    let scan_from = body_start(node, cx).min(right_brace.range.start);
+    // depth 0 means a do/end block and the cop does not apply.
+    //
+    // `body_start` is the scan boundary whenever the block has a real body or
+    // args (always *before* the closer). Only a bodyless, argless block makes
+    // `body_start` fall back to the node end (past the closing `}`); there we
+    // scan from before the closer so an empty brace block (`{}`, `{  }`) still
+    // finds its opener. Crucially we do NOT cap at `right_brace` in the
+    // body/args case: for a do/end block with a brace argument
+    // (`foo({a: 1}) do … end`) the "last `}`" is that hash argument, which sits
+    // *before* `do` — capping there would skip the `do` and misread the hash as
+    // the block's braces.
+    let body = body_start(node, cx);
+    let scan_from = if body >= node_range.end {
+        right_brace.range.start
+    } else {
+        body
+    };
     let idx = toks.partition_point(|t| t.range.start < scan_from);
     let mut depth: u32 = 0;
     let mut opener: Option<SourceToken> = None;
@@ -693,6 +706,17 @@ mod tests {
         let result =
             run_cop_with_options_and_edits::<SpaceInsideBlockBraces>("foo {|opts = {}| opts }\n", &opts);
         assert_eq!(result.offenses.len(), 1, "offenses: {:?}", result.offenses);
+    }
+
+    #[test]
+    fn does_not_flag_do_end_block_with_tight_hash_argument() {
+        // A do/end block whose receiver call has a (tight) hash-literal argument
+        // before `do` (`foo({a: 1}) do |x| x end`). The hash `{a: 1}` is a call
+        // argument, NOT the block's braces — the block opens with `do`, so the
+        // cop must not apply. Regression: the "last `}`" closer is the hash's,
+        // and the opener scan must still reach `do` rather than pairing the hash
+        // braces.
+        test::<SpaceInsideBlockBraces>().expect_no_offenses("foo({a: 1}) do |x|\n  x\nend\n");
     }
 
     #[test]
