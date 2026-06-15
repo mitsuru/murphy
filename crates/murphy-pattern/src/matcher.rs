@@ -549,6 +549,19 @@ fn match_fixed_slot<P: PredicateHost + ?Sized>(
             (Some(n), _) => match_pat(ctx, pat_id, n, buf, predicates),
         },
 
+        // The `Send` receiver is a nil-filled slot in RuboCop (`(send nil :m)`),
+        // so — unlike a plain `OptNode` — a bare `_` wildcard matches an absent
+        // receiver, making `(send _ :m)` match a receiverless `m` (murphy-if9y).
+        // A `$_` capture lowers to `IrNode::Capture`, NOT `IrNode::Wildcard`, so
+        // it falls through to `(None, _) => false`: a captured receiver still
+        // requires a present node (an absent slot has no `NodeId` to bind).
+        PatChild::RecvOptNode(opt) => match (opt, ctx.ir_node(pat_id)) {
+            (None, IrNode::Wildcard | IrNode::NilTest) => true,
+            (Some(n), IrNode::NilTest) => matches!(*ctx.ast.kind(n), NodeKind::Nil),
+            (None, _) => false,
+            (Some(n), _) => match_pat(ctx, pat_id, n, buf, predicates),
+        },
+
         // Symbol slots accept `_`, a `:sym` literal, or a `{:a :b ...}`
         // union whose arms are all `:sym` literals (murphy-rs7) — same
         // surface as the B backend's `SlotTy::Sym`. Anything else is a

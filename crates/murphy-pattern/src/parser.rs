@@ -626,6 +626,25 @@ pub(crate) fn resolve_kind(name: &str, span: PatSpan) -> Result<NodeKindTag, Par
         .ok_or_else(|| ParseError::new(format!("unknown node type `{name}`"), span))
 }
 
+/// Resolve a head node-type `name` to a [`Head`], expanding RuboCop's synthetic
+/// group names to a [`Head::OneOf`] so patterns port verbatim (murphy-if9y).
+///
+/// * A single concrete kind (`send`, `array`, …) → [`Head::Exact`].
+/// * A group alias (`call` = `{send csend}`, `any_block`, `numeric`, …) →
+///   [`Head::OneOf`] over the group's tags — the same shape an explicit
+///   `{send csend}` head produces, so both backends already handle it.
+/// * Anything else → an `unknown node type` error.
+pub(crate) fn resolve_head(name: &str, span: PatSpan) -> Result<Head, ParseError> {
+    if let Some(tag) = murphy_ast::tag_from_pattern_name(name) {
+        return Ok(Head::Exact(tag));
+    }
+    match murphy_ast::tags_for_type_name(name) {
+        [] => Err(ParseError::new(format!("unknown node type `{name}`"), span)),
+        [single] => Ok(Head::Exact(*single)),
+        tags => Ok(Head::OneOf(tags.to_vec())),
+    }
+}
+
 /// Resolve a bare ident at primary position, expanding uppercase-start names
 /// (tPARAM_CONST, D3 — murphy-kq57) to `(const _ :Name)` node patterns.
 ///
@@ -1885,6 +1904,27 @@ mod tests {
                 assert_eq!(
                     tags,
                     vec![murphy_ast::NodeKindTag(17), murphy_ast::NodeKindTag(18)]
+                );
+            }
+            other => panic!("expected OneOf head, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_group_alias_head_as_oneof() {
+        // A RuboCop group alias (`call` = `{send csend}`) at head position
+        // expands to the same `Head::OneOf` an explicit union produces, so
+        // `(call ...)` ports verbatim (murphy-if9y).
+        let p = parse("(call ...)").expect("ok");
+        match p.root.kind {
+            PatKind::Node {
+                head: Head::OneOf(tags),
+                ..
+            } => {
+                assert_eq!(
+                    tags,
+                    vec![murphy_ast::NodeKindTag(17), murphy_ast::NodeKindTag(18)],
+                    "`call` must expand to {{send csend}}"
                 );
             }
             other => panic!("expected OneOf head, got {other:?}"),

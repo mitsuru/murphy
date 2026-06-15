@@ -325,6 +325,81 @@ fn send_match_with_nil_test_and_sym_slot_agrees() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// 2b. Wildcard `_` on the `Send` receiver matches an absent (receiverless)
+// receiver — RuboCop parity: `(send _ :foo)` matches `foo` because the receiver
+// is a nil-filled slot (`(send nil :foo)`) (murphy-if9y). The fix is scoped to
+// the receiver: `(return _)` must still NOT match a bare `return` (an omitted
+// slot), and `$_` (a capture, not a wildcard) must still require a present
+// receiver. All pinned on both backends.
+// ────────────────────────────────────────────────────────────────────────
+
+def_node_matcher!(b_send_wild_recv, "(send _ :foo)");
+def_node_matcher!(b_return_wild, "(return _)");
+
+#[test]
+fn wildcard_matches_absent_send_receiver_but_not_omitted_return_value() {
+    let mut b = AstBuilder::new("foo; x.foo; return; return 1", "t.rb");
+    let foo = b.intern_symbol("foo");
+    let empty = b.push_list(&[]);
+    // Receiverless `foo` — `Send { receiver: None, .. }`.
+    let bare_send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    // `x.foo` — receiver present.
+    let xsym = b.intern_symbol("x");
+    let recv = b.push(NodeKind::Lvar(xsym), r());
+    let recv_send = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv),
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    // Bare `return` (absent value) and `return 1` (present value).
+    let bare_return = b.push(NodeKind::Return(OptNodeId::NONE), r());
+    let one = b.push(NodeKind::Int(1), r());
+    let val_return = b.push(NodeKind::Return(OptNodeId::some(one)), r());
+    // Keep every node reachable from the root.
+    let root_list = b.push_list(&[bare_send, recv_send, bare_return, val_return]);
+    let root = b.push(NodeKind::Begin(root_list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // `(send _ :foo)` matches BOTH the receiverless `foo` AND `x.foo`. B==C.
+    assert!(
+        b_send_wild_recv(bare_send, &cx),
+        "(send _ :foo) must match receiverless foo"
+    );
+    assert!(
+        b_send_wild_recv(recv_send, &cx),
+        "(send _ :foo) must match x.foo"
+    );
+    assert_c_matches("(send _ :foo)", &ast, bare_send, true);
+    assert_c_matches("(send _ :foo)", &ast, recv_send, true);
+
+    // `(return _)` matches `return 1` but NOT bare `return` — the receiver fix
+    // must not leak to other (omitted) `OptNode` slots. B==C.
+    assert!(
+        b_return_wild(val_return, &cx),
+        "(return _) must match return 1"
+    );
+    assert!(
+        !b_return_wild(bare_return, &cx),
+        "(return _) must NOT match bare return"
+    );
+    assert_c_matches("(return _)", &ast, val_return, true);
+    assert_c_matches("(return _)", &ast, bare_return, false);
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // 3. Heads — Any / OneOf — kind-only with optional `...`.
 // ────────────────────────────────────────────────────────────────────────
 

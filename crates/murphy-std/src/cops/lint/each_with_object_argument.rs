@@ -10,11 +10,14 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
-//!   Faithful port. The matcher captures `each_with_object` calls with exactly
-//!   one argument; the offense fires when that argument is an immutable literal
+//!   Faithful port. We match `each_with_object` calls with exactly one
+//!   argument; the offense fires when that argument is an immutable literal
 //!   (`cx.is_immutable_literal`, mirroring RuboCop's `immutable_literal?`).
-//!   Safe-navigation calls (`x&.each_with_object(0) { … }`) are handled via the
-//!   `csend` arm, matching RuboCop's `alias_method :on_csend, :on_send`.
+//!   Both receiverless (`each_with_object(0)`) and receiver calls are flagged,
+//!   matching RuboCop's `(call _ :each_with_object ...)` where `_` binds the
+//!   nil-filled receiver slot. Safe-navigation calls
+//!   (`x&.each_with_object(0) { … }`) are handled via the `csend` arm,
+//!   matching RuboCop's `alias_method :on_csend, :on_send`.
 //! ```
 
 use murphy_plugin_api::{cop, Cx, NodeId, NoOptions, Range, SourceTokenKind};
@@ -45,8 +48,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     if cx.method_name(node) != Some("each_with_object") {
         return;
     }
-    // RuboCop's matcher `(call _ :each_with_object $_)` captures exactly one
-    // argument; a zero- or multi-argument call does not match.
     let [arg] = cx.call_arguments(node) else {
         return;
     };
@@ -170,5 +171,16 @@ mod tests {
     #[test]
     fn ignores_other_methods() {
         test::<EachWithObjectArgument>().expect_no_offenses("collection.reduce(0) { |a, e| a + e }\n");
+    }
+
+    #[test]
+    fn flags_receiverless_call() {
+        // murphy-if9y: `(call _ :each_with_object $_)` matches a receiverless
+        // call too — the `_` receiver binds the absent (nil-filled) slot, just
+        // as RuboCop's `(call _ ...)` matches `each_with_object(0)`.
+        test::<EachWithObjectArgument>().expect_offense(indoc! {r#"
+            each_with_object(0) { |e, a| a }
+            ^^^^^^^^^^^^^^^^^^^ The argument to each_with_object cannot be immutable.
+        "#});
     }
 }
