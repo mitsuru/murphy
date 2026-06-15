@@ -26,7 +26,18 @@
 //!
 //! There is no safe autocorrect.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
+
+// RuboCop parity: RuboCop's `Lint/UnifiedInteger` matcher is
+// `(:const {nil? (:cbase)} ${:Fixnum :Bignum})`. In Murphy's AST a `::`-prefixed
+// const collapses to `Const{scope:None}`, so a single `nil?` scope already
+// covers both bare and top-level forms — there is no separate `cbase` arm (and
+// `cbase` is an unsupported pattern tag anyway). We split into two matchers
+// instead of capturing the name symbol (atom-kind capture is not supported),
+// which also keeps each offense message a plain constant. Equivalent to the
+// prior `cx.is_global_const(node, "Fixnum"/"Bignum")` calls.
+def_node_matcher!(is_global_fixnum, "(const nil? :Fixnum)");
+def_node_matcher!(is_global_bignum, "(const nil? :Bignum)");
 
 #[derive(Default)]
 pub struct UnifiedInteger;
@@ -41,9 +52,9 @@ pub struct UnifiedInteger;
 impl UnifiedInteger {
     #[on_node(kind = "const")]
     fn check_const(&self, node: NodeId, cx: &Cx<'_>) {
-        if cx.is_global_const(node, "Fixnum") {
+        if is_global_fixnum(node, cx) {
             cx.emit_offense(cx.range(node), "Use `Integer` instead of `Fixnum`.", None);
-        } else if cx.is_global_const(node, "Bignum") {
+        } else if is_global_bignum(node, cx) {
             cx.emit_offense(cx.range(node), "Use `Integer` instead of `Bignum`.", None);
         }
     }
@@ -112,6 +123,27 @@ mod tests {
         test::<UnifiedInteger>().expect_no_offenses(indoc! {"
             1.is_a?(MyNamespace::Bignum)
         "});
+    }
+
+    // --- Boundary characterization (murphy-vn3o): pin the exact node set
+    // `is_global_const(_, "Fixnum"/"Bignum")` matches, so the
+    // `(const nil? :{Fixnum,Bignum})` refactor can be proven equivalent.
+
+    #[test]
+    fn boundary_fixnum_used_as_namespace_flags_inner_const() {
+        // `Fixnum::Foo` — the inner top-level `Fixnum` const is still flagged
+        // (scope:None, name Fixnum); the outer `Foo` (scope present) is not.
+        test::<UnifiedInteger>().expect_offense(indoc! {r#"
+            Fixnum::Foo
+            ^^^^^^ Use `Integer` instead of `Fixnum`.
+        "#});
+    }
+
+    #[test]
+    fn boundary_lowercase_and_other_consts_not_flagged() {
+        test::<UnifiedInteger>()
+            .expect_no_offenses("Fixnums\n")
+            .expect_no_offenses("MyFixnum\n");
     }
 }
 

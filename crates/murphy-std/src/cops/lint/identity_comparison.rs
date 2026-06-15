@@ -14,7 +14,18 @@
 //!   `!equal?`.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, def_node_matcher, Cx, NoOptions, NodeId};
+
+// RuboCop parity: mirrors `Lint/IdentityComparison`'s `object_id_comparison`
+// node matcher, `(send (send _lhs :object_id) ${:== :!=} (send _rhs :object_id))`.
+// We capture the two receivers (for the `equal?` autocorrect) rather than the
+// operator symbol — the operator is recovered from `cx.method_name(node)`.
+// `$_` does not bind an absent receiver, so a receiverless `object_id` is not
+// matched, preserving the prior hand-rolled `receiver.get()?` behaviour.
+def_node_matcher!(
+    object_id_comparison,
+    "(send (send $_ :object_id) {:== :!=} (send $_ :object_id))"
+);
 
 #[derive(Default)]
 pub struct IdentityComparison;
@@ -29,10 +40,11 @@ pub struct IdentityComparison;
 impl IdentityComparison {
     #[on_node(kind = "send", methods = ["==", "!="])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let Some((is_inequality, receiver, argument)) = object_id_comparison(node, cx) else {
+        let Some((receiver, argument)) = object_id_comparison(node, cx) else {
             return;
         };
 
+        let is_inequality = cx.method_name(node) == Some("!=");
         let comparison_method = if is_inequality { "!=" } else { "==" };
         let bang = if is_inequality { "!" } else { "" };
         let message = format!(
@@ -46,44 +58,6 @@ impl IdentityComparison {
             cx.raw_source(cx.range(argument))
         );
         cx.emit_edit(cx.range(node), &replacement);
-    }
-}
-
-fn object_id_comparison(node: NodeId, cx: &Cx<'_>) -> Option<(bool, NodeId, NodeId)> {
-    let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
-        return None;
-    };
-    let comparison_method = cx.symbol_str(method);
-    if comparison_method != "==" && comparison_method != "!=" {
-        return None;
-    }
-    let lhs = object_id_receiver(receiver.get()?, cx)?;
-    let args = cx.list(args);
-    let [rhs_node] = args else {
-        return None;
-    };
-    let rhs = object_id_receiver(*rhs_node, cx)?;
-    Some((comparison_method == "!=", lhs, rhs))
-}
-
-fn object_id_receiver(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
-    let NodeKind::Send {
-        receiver,
-        method,
-        args,
-    } = *cx.kind(node)
-    else {
-        return None;
-    };
-    if cx.symbol_str(method) == "object_id" && cx.list(args).is_empty() {
-        receiver.get()
-    } else {
-        None
     }
 }
 
@@ -125,5 +99,33 @@ mod tests {
             .expect_no_offenses("foo.object_id != object_id\n")
             .expect_no_offenses("foo.equal?(bar)\n")
             .expect_no_offenses("!foo.equal?(bar)\n");
+    }
+
+    // --- Boundary characterization (murphy-vn3o): pin the exact node set the
+    // hand-rolled predicate matches, so the def_node_matcher! refactor can be
+    // proven equivalent (not just "didn't break the happy-path pins").
+
+    #[test]
+    fn boundary_inner_object_id_with_arg_not_flagged() {
+        // `object_id` must be argument-less. `object_id(x)` is a different call;
+        // RuboCop's `(send _ :object_id)` has no arg slot, so it rejects it too.
+        test::<IdentityComparison>()
+            .expect_no_offenses("foo.object_id(x) == bar.object_id\n")
+            .expect_no_offenses("foo.object_id == bar.object_id(y)\n");
+    }
+
+    #[test]
+    fn boundary_safe_navigation_object_id_not_flagged() {
+        // `&.object_id` lowers to a csend, not a send; RuboCop's `(send ...)`
+        // pattern does not match csend, and neither does the hand-rolled check.
+        test::<IdentityComparison>()
+            .expect_no_offenses("foo&.object_id == bar.object_id\n")
+            .expect_no_offenses("foo.object_id == bar&.object_id\n");
+    }
+
+    #[test]
+    fn boundary_extra_argument_on_comparison_not_flagged() {
+        // The comparison send must have exactly one argument.
+        test::<IdentityComparison>().expect_no_offenses("foo.object_id.==(bar.object_id, baz)\n");
     }
 }

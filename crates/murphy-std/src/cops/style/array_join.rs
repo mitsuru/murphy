@@ -45,9 +45,22 @@
 //! source of both sub-nodes. Whole-node replacement is used because the rewrite
 //! rearranges the structure: a * b becomes a.join(b).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
 
 const MSG: &str = "Favor `Array#join` over `Array#*`.";
+
+// RuboCop parity: RuboCop's `Style/ArrayJoin` matcher is `(send $array :* $str)`.
+// Murphy's macro differs in two ways from RuboCop node-pattern:
+//   1. A bare `$array` is a capture *named* "array" with a `Wildcard` body
+//      (matches anything), NOT a typed capture; the typed form is `$(array ...)`.
+//   2. Atom kinds (`str`, `int`, `sym`, ...) cannot be captured generically —
+//      `$(str ...)` is rejected; only a specific literal (`$"x"`) or the bare
+//      kind matcher `str` is allowed. So the string arg is type-constrained with
+//      a bare `str` and its node is read back via `cx.call_arguments`.
+// The `str` arg slot (no `...`) means exactly one string argument, matching the
+// prior `arg_nodes.len() != 1` + `NodeKind::Str` check; `$(array ...)` enforces
+// the array-literal receiver and captures it for the `array.join(str)` rewrite.
+def_node_matcher!(join_candidate, "(send $(array ...) :* str)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -63,27 +76,14 @@ pub struct ArrayJoin;
 impl ArrayJoin {
     #[on_node(kind = "send", methods = ["*"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
+        // Array-literal receiver (captured) `*` single string arg.
+        let Some((recv_id,)) = join_candidate(node, cx) else {
             return;
         };
-
-        // Receiver must be an array literal.
-        let Some(recv_id) = receiver.get() else {
+        // The match guarantees exactly one `str` argument; read its node back.
+        let Some(&arg_id) = cx.call_arguments(node).first() else {
             return;
         };
-        if !matches!(cx.kind(recv_id), NodeKind::Array(_)) {
-            return;
-        }
-
-        // Must have exactly one argument that is a string literal.
-        let arg_nodes = cx.list(args);
-        if arg_nodes.len() != 1 {
-            return;
-        }
-        let arg_id = arg_nodes[0];
-        if !matches!(cx.kind(arg_id), NodeKind::Str(_)) {
-            return;
-        }
 
         // Offense on the `*` selector (loc.selector / loc.name in RuboCop).
         let selector_range = cx.selector(node);
@@ -153,5 +153,40 @@ mod tests {
     #[test]
     fn does_not_flag_variable_receiver() {
         test::<ArrayJoin>().expect_no_offenses("foo * \",\"\n");
+    }
+
+    // --- Boundary characterization (murphy-vn3o): pin the exact node set the
+    // hand-rolled `NodeKind::Array` / `NodeKind::Str` destructure matches, so the
+    // `(send $array :* $str)` refactor can be proven equivalent.
+
+    #[test]
+    fn boundary_bracket_array_literal_flagged() {
+        // `[..]` is also NodeKind::Array, like `%w(..)`.
+        test::<ArrayJoin>().expect_correction(
+            indoc! {r#"
+                [1, 2, 3] * ", "
+                          ^ Favor `Array#join` over `Array#*`.
+            "#},
+            "[1, 2, 3].join(\", \")\n",
+        );
+    }
+
+    #[test]
+    fn boundary_explicit_dot_star_flagged() {
+        // Explicit `.*( )` dot form is the same `send :*` node; the matcher must
+        // treat it identically to the infix form.
+        test::<ArrayJoin>().expect_correction(
+            indoc! {r#"
+                [1, 2].*(", ")
+                       ^ Favor `Array#join` over `Array#*`.
+            "#},
+            "[1, 2].join(\", \")\n",
+        );
+    }
+
+    #[test]
+    fn boundary_two_string_args_not_flagged() {
+        // `*` with two arguments is not the `Array#*` shape (exactly one str arg).
+        test::<ArrayJoin>().expect_no_offenses("[1, 2].*(\",\", \"x\")\n");
     }
 }
