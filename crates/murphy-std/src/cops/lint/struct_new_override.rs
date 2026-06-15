@@ -16,7 +16,14 @@
 //!   No autocorrect.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, def_node_matcher, Cx, NoOptions, NodeId, NodeKind};
+
+// RuboCop parity: RuboCop's `Lint/StructNewOverride` matcher `struct_new` is
+// `(send (const {nil? cbase} :Struct) :new ...)`. In Murphy's AST `::Struct`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare and
+// `::`-prefixed forms — equivalent to the prior `receiver present &&
+// is_global_const(receiver, "Struct")` check.
+def_node_matcher!(struct_new, "(send (const nil? :Struct) :new ...)");
 
 const MSG_PREFIX: &str = "member overrides";
 
@@ -50,17 +57,12 @@ pub struct StructNewOverride;
 impl StructNewOverride {
     #[on_node(kind = "send", methods = ["new"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else {
-            return;
-        };
-        let Some(receiver) = receiver.get() else {
-            return;
-        };
-        if !cx.is_global_const(receiver, "Struct") {
+        // `(send (const nil? :Struct) :new ...)` — top-level `Struct.new(...)`.
+        if !struct_new(node, cx) {
             return;
         }
 
-        for (index, &arg) in cx.list(args).iter().enumerate() {
+        for (index, &arg) in cx.call_arguments(node).iter().enumerate() {
             if index == 0 && matches!(*cx.kind(arg), NodeKind::Str(_)) {
                 continue;
             }
@@ -139,6 +141,13 @@ mod tests {
               end
             end
         "#});
+    }
+
+    #[test]
+    fn accepts_namespaced_struct_new() {
+        // `(const nil? :Struct)` matches only top-level `Struct`; a namespaced
+        // `Foo::Struct.new(:members)` has a non-nil scope and is not flagged.
+        test::<StructNewOverride>().expect_no_offenses("Bad = Foo::Struct.new(:members)\n");
     }
 }
 

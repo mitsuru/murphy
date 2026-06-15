@@ -27,10 +27,17 @@
 //!   No autocorrect — same as upstream.
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
 
 const MSG: &str =
     "Avoid using `OpenStruct`; use `Struct`, `Hash`, a class or test doubles instead.";
+
+// RuboCop parity: RuboCop's `Style/OpenStructUse` matcher `uses_open_struct?` is
+// `(const {nil? (cbase)} :OpenStruct)`. In Murphy's AST `::OpenStruct` collapses
+// to `Const{scope:None}`, so a single `nil?` scope covers both bare and
+// top-level forms. Equivalent to the prior `scope.is_none() && name ==
+// "OpenStruct"` check; the class/module-definition-name guard stays separate.
+def_node_matcher!(uses_open_struct, "(const nil? :OpenStruct)");
 
 #[derive(Default)]
 pub struct OpenStructUse;
@@ -50,15 +57,10 @@ impl OpenStructUse {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let NodeKind::Const { scope, name } = *cx.kind(node) else {
-        return;
-    };
-
-    // Only top-level `OpenStruct` (scope == None covers both bare and `::` cbase).
-    if scope.get().is_some() {
-        return;
-    }
-    if cx.symbol_str(name) != "OpenStruct" {
+    // `(const nil? :OpenStruct)` — top-level `OpenStruct` (bare or `::`-prefixed,
+    // both `Const{scope:None}` in Murphy's AST). Namespaced `Ns::OpenStruct` has
+    // a non-nil scope and is not matched.
+    if !uses_open_struct(node, cx) {
         return;
     }
 
