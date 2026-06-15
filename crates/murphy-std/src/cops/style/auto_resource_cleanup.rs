@@ -41,14 +41,18 @@
 //! RuboCop does not provide an autocorrect for this cop — the block body is
 //! user-supplied and cannot be inferred statically.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
 
 /// Stateless unit struct.
 #[derive(Default)]
 pub struct AutoResourceCleanup;
 
-/// Receiver class names that must use the block form.
-const RESOURCE_CLASSES: &[&str] = &["File", "Tempfile"];
+// RuboCop parity: RuboCop's `Style/AutoResourceCleanup` matcher
+// `file_open_method?` is `(send (const {nil? cbase} {:File :Tempfile}) :open ...)`.
+// In Murphy's AST `::File` / `::Tempfile` collapse to `Const{scope:None}`, so a
+// single `nil?` scope covers bare and `::`-prefixed forms — equivalent to the
+// prior receiver-const check over {File, Tempfile} at nil/cbase scope.
+def_node_matcher!(file_open_method, "(send (const nil? {:File :Tempfile}) :open ...)");
 
 #[cop(
     name = "Style/AutoResourceCleanup",
@@ -60,13 +64,17 @@ const RESOURCE_CLASSES: &[&str] = &["File", "Tempfile"];
 impl AutoResourceCleanup {
     #[on_node(kind = "send", methods = ["open"])]
     fn check_open(&self, node: NodeId, cx: &Cx<'_>) {
-        // Receiver must be File or Tempfile (nil- or cbase-scoped).
+        // `(send (const nil? {:File :Tempfile}) :open ...)` — `File.open` /
+        // `Tempfile.open` (bare or `::`-prefixed) with any arguments.
+        if !file_open_method(node, cx) {
+            return;
+        }
+        // The match guarantees a const receiver; its source (e.g. `File`,
+        // `::Tempfile`) is the class name used in the message.
         let Some(recv) = cx.call_receiver(node).get() else {
             return;
         };
-        let Some(class_name) = match_resource_class(recv, cx) else {
-            return;
-        };
+        let class_name = cx.raw_source(cx.range(recv));
 
         // Skip if already using a block-pass argument (&blk, &:read, etc.).
         let args = cx.call_arguments(node);
@@ -91,25 +99,6 @@ impl AutoResourceCleanup {
 
         let msg = format!("Use the block version of `{class_name}.open`.");
         cx.emit_offense(cx.range(node), &msg, None);
-    }
-}
-
-/// Returns the source text for the receiver (e.g. `"File"`, `"::Tempfile"`) if
-/// the const is one of [`RESOURCE_CLASSES`] at top-level scope (nil or cbase).
-/// Returns `None` otherwise.
-fn match_resource_class<'a>(recv: NodeId, cx: &'a Cx<'_>) -> Option<&'a str> {
-    let NodeKind::Const { name, scope } = *cx.kind(recv) else {
-        return None;
-    };
-    let class_str = cx.symbol_str(name);
-    if !RESOURCE_CLASSES.contains(&class_str) {
-        return None;
-    }
-    // Scope must be absent (nil) or cbase (::).
-    match scope.get() {
-        None => Some(cx.raw_source(cx.range(recv))),
-        Some(p) if matches!(cx.kind(p), NodeKind::Cbase) => Some(cx.raw_source(cx.range(recv))),
-        _ => None,
     }
 }
 
