@@ -128,6 +128,14 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    // RuboCop's StatementModifier mixin also exempts nodes spanning more than 3
+    // nonempty physical lines (`nonempty_line_count > 3`). A single-line body
+    // that pulls in a multi-line heredoc, for example, makes the whole loop too
+    // tall to collapse into a modifier even though the body is "single-line".
+    if crate::cops::util::nonempty_line_count(node, cx) > 3 {
+        return;
+    }
+
     // Build the modifier-form candidate to check length.
     let cond_src = cx.raw_source(cx.range(cond));
     let body_src = cx.raw_source(cx.range(body));
@@ -238,6 +246,21 @@ mod tests {
             while condition
               do_something
               do_other
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_node_spanning_more_than_three_nonempty_lines() {
+        // A heredoc-bearing single-line body makes the whole `until` node span
+        // >3 nonempty physical lines, so RuboCop's `nonempty_line_count > 3`
+        // exempts it (matching Style/IfUnlessModifier).
+        test::<WhileUntilModifier>().expect_no_offenses(indoc! {"
+            until finished?
+              log(<<~MESSAGE.squish)
+                one
+                two
+              MESSAGE
             end
         "});
     }

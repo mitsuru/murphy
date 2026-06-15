@@ -105,40 +105,32 @@ fn brace_tokens(node: NodeId, cx: &Cx<'_>) -> Option<(SourceToken, SourceToken)>
 
     let toks = cx.sorted_tokens();
 
-    // Closer: the last `}` token within the node range. A do/end block has none
-    // from the block itself (any `}` would be an inner hash); the backward
-    // opener scan below distinguishes the two by hitting `do` first.
+    // Closer: a block is a brace block IFF its last meaningful token is `}`.
+    // A do/end block always closes with `end`, and any `}` it contains is an
+    // inner hash / call argument (`foo({a: 1}) do … end`) that sits before the
+    // `end`. So we take the LAST token in the node (skipping trailing trivia)
+    // and require it to be `}`; otherwise this is a do/end block (or has no
+    // braces) and the cop does not apply. RuboCop reads `node.loc.end`; this
+    // reconstructs it positionally.
     let node_tokens = cx.tokens_in(node_range);
-    let right_brace = *node_tokens
-        .iter()
-        .rev()
-        .find(|t| t.kind == SourceTokenKind::RightBrace)?;
+    let closer = node_tokens.iter().rev().find(|t| {
+        !matches!(
+            t.kind,
+            SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline | SourceTokenKind::Comment
+        )
+    })?;
+    if closer.kind != SourceTokenKind::RightBrace {
+        return None; // do/end block, or no braces
+    }
+    let right_brace = *closer;
 
-    // Scope-aware opener: the block's OWN opener (`{` or `do`) sits immediately
-    // before its args/body. Scan BACKWARD from the body — or, for a bodyless
-    // block, from the closing brace — skipping any balanced `{ … }` pair on the
-    // way: a hash-literal argument (`bar({}) {`) or a brace inside a parameter
-    // default (`foo { |opts = {}| opts }`). Only the block's own opener is then
-    // matched. RuboCop reads `node.loc.begin` directly; this reconstructs the
-    // same opener positionally. A `{` at brace-depth 0 is the opener; a `do` at
-    // depth 0 means a do/end block and the cop does not apply.
-    //
-    // `body_start` is the scan boundary whenever the block has a real body or
-    // args (always *before* the closer). Only a bodyless, argless block makes
-    // `body_start` fall back to the node end (past the closing `}`); there we
-    // scan from before the closer so an empty brace block (`{}`, `{  }`) still
-    // finds its opener. Crucially we do NOT cap at `right_brace` in the
-    // body/args case: for a do/end block with a brace argument
-    // (`foo({a: 1}) do … end`) the "last `}`" is that hash argument, which sits
-    // *before* `do` — capping there would skip the `do` and misread the hash as
-    // the block's braces.
-    let body = body_start(node, cx);
-    let scan_from = if body >= node_range.end {
-        right_brace.range.start
-    } else {
-        body
-    };
-    let idx = toks.partition_point(|t| t.range.start < scan_from);
+    // Opener: scan BACKWARD from the closing `}`, tracking brace depth so that
+    // every balanced `{ … }` pair on the way — a hash-literal call argument
+    // (`bar({}) { … }`), a brace inside a parameter default
+    // (`foo { |opts = {}| opts }`), or a nested hash in the body
+    // (`items.map { {v: _1} }`) — is skipped. The block's own opener is the
+    // first `{` reached at brace-depth 0.
+    let idx = toks.partition_point(|t| t.range.start < right_brace.range.start);
     let mut depth: u32 = 0;
     let mut opener: Option<SourceToken> = None;
     for t in toks[..idx]
@@ -153,17 +145,11 @@ fn brace_tokens(node: NodeId, cx: &Cx<'_>) -> Option<(SourceToken, SourceToken)>
                 opener = Some(*t);
                 break;
             }
-            SourceTokenKind::Other if depth == 0 && cx.raw_source(t.range) == "do" => {
-                return None; // do/end block
-            }
             _ => {}
         }
     }
     let left_brace = opener?;
 
-    if right_brace.range.start < left_brace.range.end {
-        return None;
-    }
     Some((left_brace, right_brace))
 }
 
@@ -717,6 +703,15 @@ mod tests {
         // and the opener scan must still reach `do` rather than pairing the hash
         // braces.
         test::<SpaceInsideBlockBraces>().expect_no_offenses("foo({a: 1}) do |x|\n  x\nend\n");
+    }
+
+    #[test]
+    fn does_not_flag_bodyless_do_end_block_with_tight_hash_argument() {
+        // A do/end block with neither body nor params but a tight hash argument
+        // before `do` (`foo({a: 1}) do\nend`). The block closes with `end`, so
+        // it is not a brace block — the hash `{a: 1}` must not be paired as the
+        // block's braces. Regression for the bodyless fallback path.
+        test::<SpaceInsideBlockBraces>().expect_no_offenses("foo({a: 1}) do\nend\n");
     }
 
     #[test]

@@ -671,6 +671,19 @@ pub fn condition_contains_lvasgn(cond: NodeId, cx: &Cx<'_>) -> bool {
         .any(|&n| matches!(cx.kind(n), NodeKind::Lvasgn { .. }))
 }
 
+/// Count physical lines in `node`'s source that are not blank (whitespace-only).
+///
+/// Mirrors RuboCop's `nonempty_line_count` — `source.lines.grep_v(/\A\s*\z/).size`
+/// — used by the `StatementModifier` mixin to exempt nodes spanning more than 3
+/// nonempty physical lines from `Style/IfUnlessModifier` /
+/// `Style/WhileUntilModifier`.
+pub fn nonempty_line_count(node: NodeId, cx: &Cx<'_>) -> usize {
+    cx.raw_source(cx.range(node))
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
 // Note: is_parenthesized is tested indirectly via the cops that use it:
 // - `cops::style::parentheses_around_condition::tests::flags_if_with_paren_condition`
 //   verifies `is_parenthesized` returns true for `(x > 10)`.

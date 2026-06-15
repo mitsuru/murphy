@@ -154,7 +154,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // physical lines (`nonempty_line_count > 3`). A single-line body that pulls
     // in a multi-line heredoc, for example, makes the whole `if` too tall to be
     // a sensible modifier even though the body node is "single-line".
-    if nonempty_line_count(node, cx) > 3 {
+    if crate::cops::util::nonempty_line_count(node, cx) > 3 {
         return;
     }
 
@@ -198,15 +198,6 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     cx.emit_edit(node_range, &replacement);
 }
 
-/// Count physical lines in `node`'s source that are not blank (whitespace-only).
-///
-/// Mirrors RuboCop's `nonempty_line_count` — `source.lines.grep_v(/\A\s*\z/).size`.
-fn nonempty_line_count(node: NodeId, cx: &Cx<'_>) -> usize {
-    cx.raw_source(cx.range(node))
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count()
-}
 
 #[cfg(test)]
 mod tests {
