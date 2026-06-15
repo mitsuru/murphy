@@ -115,6 +115,17 @@ pub enum PatChild<'a> {
     Node(NodeId),
     /// An `OptNodeId` field, with the sentinel resolved.
     OptNode(Option<NodeId>),
+    /// A `Send` receiver `OptNodeId` slot (murphy-if9y). Distinguished from
+    /// plain [`OptNode`] because RuboCop renders a receiverless call as
+    /// `(send nil :m)` — the receiver is a *nil-filled* slot — so a `_`
+    /// wildcard matches an absent receiver here (RuboCop `(send _ :m)` matches
+    /// `m`), whereas `_` on a plain `OptNode` (e.g. a `return` value, which
+    /// RuboCop *omits*: `(return)`) does not. Only the `Send` receiver carries
+    /// this marker; `Csend` always has a receiver and uses [`Node`].
+    ///
+    /// [`OptNode`]: PatChild::OptNode
+    /// [`Node`]: PatChild::Node
+    RecvOptNode(Option<NodeId>),
     /// A `Symbol` field (e.g. `Send::method`, `Lvasgn::name`).
     Sym(Symbol),
     /// A `NodeList` field (e.g. `Send::args`). Borrowed against the
@@ -185,7 +196,7 @@ pub fn pattern_children<'a>(kind: &'a NodeKind, lists: &'a [NodeId]) -> Option<V
             method,
             args,
         } => vec![
-            PatChild::OptNode(opt(receiver)),
+            PatChild::RecvOptNode(opt(receiver)),
             PatChild::Sym(method),
             PatChild::List(list(args, lists)),
         ],
@@ -325,7 +336,9 @@ mod tests {
 
         let kids = pattern_children(ast.kind(send), ast.raw_parts().node_lists).expect("send");
         assert_eq!(kids.len(), 3);
-        assert!(matches!(kids[0], PatChild::OptNode(None)));
+        // `Send` receiver is the dedicated `RecvOptNode` slot (murphy-if9y), so
+        // a `_` wildcard matches this absent (receiverless) receiver.
+        assert!(matches!(kids[0], PatChild::RecvOptNode(None)));
         assert!(matches!(kids[1], PatChild::Sym(Symbol(_))));
         let PatChild::List(args_slice) = kids[2] else {
             panic!("expected List slot, got {:?}", kids[2]);

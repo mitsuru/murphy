@@ -68,7 +68,7 @@
 
 use crate::lexer::Token;
 use crate::{Head, Lit, ParseError, Pat, PatKind, PatSpan};
-use crate::parser::{make_capture_placeholder, resolve_kind};
+use crate::parser::{make_capture_placeholder, resolve_head, resolve_kind};
 use murphy_ast::NodeKindTag;
 
 grammar;
@@ -233,8 +233,7 @@ NodeMatch: Pat = {
 
 Head: Head = {
     <l:@L> <name:"ident"> <r:@R> =>? {
-        resolve_kind(&name, PatSpan::new(l, r))
-            .map(Head::Exact)
+        resolve_head(&name, PatSpan::new(l, r))
             .map_err(|e| lalrpop_util::ParseError::User { error: e })
     },
     "_" => Head::Any,

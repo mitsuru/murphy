@@ -529,6 +529,14 @@ enum SlotTy {
     /// `OptNodeId` field — `nil?` matches absence, else the child must be
     /// present and recurse.
     OptNode,
+    /// `Send` receiver `OptNodeId` slot (murphy-if9y). Like [`OptNode`] except a
+    /// bare `_` wildcard ALSO matches an absent (receiverless) slot, because
+    /// RuboCop renders a receiverless call as `(send nil :m)` (a nil-filled
+    /// slot), so `(send _ :m)` matches `m`. A `$_` capture is a `PatKind::Capture`,
+    /// not `PatKind::Wildcard`, so it still requires a present receiver to bind.
+    ///
+    /// [`OptNode`]: SlotTy::OptNode
+    RecvOptNode,
     /// `Symbol` field — accepts `_`, a single `:sym` literal, or a
     /// `{:a :b ...}` union of `:sym` literals (murphy-rs7).
     Sym,
@@ -602,7 +610,7 @@ static CASGN_SLOTS: &[Slot] = &[
 static SEND_SLOTS: &[Slot] = &[
     Slot {
         field: FieldRef::Named("receiver"),
-        ty: SlotTy::OptNode,
+        ty: SlotTy::RecvOptNode,
     },
     Slot {
         field: FieldRef::Named("method"),
@@ -1783,7 +1791,16 @@ fn lower_fixed_slot(
     let fail = fail_stmt(ctx);
     match ty {
         SlotTy::Node => lower_pat(child, &quote!(#bind), ctx),
-        SlotTy::OptNode => {
+        SlotTy::OptNode | SlotTy::RecvOptNode => {
+            // `Send`'s receiver (`RecvOptNode`) is a nil-filled slot in RuboCop
+            // (`(send nil :m)`), so a bare `_` wildcard matches an absent
+            // (receiverless) receiver — emit no guard. `$_` is a
+            // `PatKind::Capture`, not `Wildcard`, so it falls through and still
+            // requires a present receiver. Plain `OptNode` slots (e.g. a
+            // `return` value, which RuboCop omits) keep `_` require-present.
+            if matches!(ty, SlotTy::RecvOptNode) && matches!(child.kind, PatKind::Wildcard) {
+                return Ok(quote!());
+            }
             if matches!(child.kind, PatKind::NilTest) {
                 let n = gensym(ctx, "__n");
                 Ok(quote! {
@@ -2832,7 +2849,13 @@ fn lower_bool_anyorder_probe_fixed_slot(
     use murphy_pattern::PatKind;
     match ty {
         SlotTy::Node => lower_bool_anyorder_probe(child, &quote!(#bind), ctx),
-        SlotTy::OptNode => {
+        SlotTy::OptNode | SlotTy::RecvOptNode => {
+            // `RecvOptNode` (`Send` receiver) treats a bare `_` as matching an
+            // absent receiver (murphy-if9y); `$_` is a `Capture`, not a
+            // `Wildcard`, so it still requires a present slot.
+            if matches!(ty, SlotTy::RecvOptNode) && matches!(child.kind, PatKind::Wildcard) {
+                return Ok(quote!(true));
+            }
             if matches!(child.kind, PatKind::NilTest) {
                 // Bare `nil?` at an `OptNode` slot: an absent slot matches,
                 // a present slot must be a `nil` node.
@@ -3456,7 +3479,13 @@ fn lower_bool_fixed_slot(
     use murphy_pattern::PatKind;
     match ty {
         SlotTy::Node => lower_bool(child, &quote!(#bind), ctx),
-        SlotTy::OptNode => {
+        SlotTy::OptNode | SlotTy::RecvOptNode => {
+            // `RecvOptNode` (`Send` receiver) treats a bare `_` as matching an
+            // absent receiver (murphy-if9y); `$_` is a `Capture`, not a
+            // `Wildcard`, so it still requires a present slot.
+            if matches!(ty, SlotTy::RecvOptNode) && matches!(child.kind, PatKind::Wildcard) {
+                return Ok(quote!(true));
+            }
             if matches!(child.kind, PatKind::NilTest) {
                 // Bare `nil?` at an `OptNode` slot: an absent slot matches,
                 // a present slot must be a `nil` node.
