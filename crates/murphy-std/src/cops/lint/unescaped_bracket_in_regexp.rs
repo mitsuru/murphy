@@ -99,7 +99,7 @@ fn find_unescaped_brackets(s: &str, body_start: usize, body_end: usize) -> Vec<u
             // are POSIX bracket / collating / equivalence expressions, not
             // nested classes — their `]` must not close the outer class. Skip
             // to the matching `<kind>]`.
-            b'[' if in_cc && matches!(bytes.get(i + 1), Some(b':' | b'.' | b'=')) => {
+            b'[' if in_cc && i + 1 < body_end && matches!(bytes[i + 1], b':' | b'.' | b'=') => {
                 let kind = bytes[i + 1];
                 let mut j = i + 2;
                 while j + 1 < body_end && !(bytes[j] == kind && bytes[j + 1] == b']') {

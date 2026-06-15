@@ -64,7 +64,11 @@ impl FileOpen {
 /// when its immediate parent assigns it to a local variable, or when it is the
 /// receiver of a chained call.
 fn offensive_usage(node: NodeId, cx: &Cx<'_>) -> bool {
-    if !value_used(node, cx) {
+    // `is_value_used` is the canonical port of rubocop-ast's `Node#value_used?`:
+    // it propagates discard through `if`/`case` branches, loop bodies, and
+    // pass-through containers, not just `begin` sequences. A discarded value
+    // means the descriptor leaks, so the usage is offensive.
+    if !cx.is_value_used(node) {
         return true;
     }
     let Some(parent_id) = cx.parent(node).get() else {
@@ -72,21 +76,6 @@ fn offensive_usage(node: NodeId, cx: &Cx<'_>) -> bool {
     };
     matches!(*cx.kind(parent_id), NodeKind::Lvasgn { .. })
         || cx.call_receiver(parent_id).get() == Some(node)
-}
-
-/// Approximates rubocop-ast's `Node#value_used?`. A program's top-level
-/// statement value, and any non-final statement of a `begin` sequence, are
-/// discarded; every other position (assignment, argument, return, implicit
-/// method/block return, …) uses the value.
-fn value_used(node: NodeId, cx: &Cx<'_>) -> bool {
-    let Some(parent_id) = cx.parent(node).get() else {
-        return false;
-    };
-    if let NodeKind::Begin(list) = *cx.kind(parent_id) {
-        let children = cx.list(list);
-        return children.last() == Some(&node) && value_used(parent_id, cx);
-    }
-    true
 }
 
 fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
@@ -190,6 +179,30 @@ mod tests {
     fn accepts_file_open_as_block_return_value() {
         // `let(:f) { File.open('…') }` — the block's value is the open file.
         test::<FileOpen>().expect_no_offenses("let(:f) { File.open('file') }\n");
+    }
+
+    #[test]
+    fn flags_file_open_in_discarded_if_branch() {
+        // The `if`'s value is discarded (a non-final statement), so the branch
+        // value — the open file — is discarded too and the descriptor leaks.
+        test::<FileOpen>().expect_offense(indoc! {"
+            if cond
+              File.open('file')
+              ^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+            end
+            do_more
+        "});
+    }
+
+    #[test]
+    fn accepts_file_open_as_used_if_branch_value() {
+        // The `if` is the assigned value, so its branch — the open file — is
+        // used; the caller manages the descriptor.
+        test::<FileOpen>().expect_no_offenses(indoc! {"
+            f = if cond
+              File.open('file')
+            end
+        "});
     }
 }
 murphy_plugin_api::submit_cop!(FileOpen);

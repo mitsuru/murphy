@@ -92,7 +92,13 @@ impl Semicolon {
             if crate::cops::util::offset_within_any(tok.range.start, &literal_ranges) {
                 continue;
             }
-            let flag = should_flag(i, tokens, bytes, opts.allow_as_expression_separator);
+            let flag = should_flag(
+                i,
+                tokens,
+                bytes,
+                opts.allow_as_expression_separator,
+                &literal_ranges,
+            );
             if flag {
                 cx.emit_offense(tok.range, MSG, None);
             }
@@ -119,6 +125,7 @@ fn should_flag(
     tokens: &[murphy_plugin_api::SourceToken],
     bytes: &[u8],
     allow_separator: bool,
+    literal_ranges: &[murphy_plugin_api::Range],
 ) -> bool {
     let semi_start = tokens[idx].range.start as usize;
 
@@ -151,7 +158,7 @@ fn should_flag(
     // token is a loop/conditional keyword, and no other `;` lies between that
     // keyword and this one (which would mean a real multi-statement body).
     if next.is_some_and(|n| is_end_keyword(&tokens[n], bytes))
-        && empty_body_control_separator(idx, tokens, bytes)
+        && empty_body_control_separator(idx, tokens, bytes, literal_ranges)
     {
         return false;
     }
@@ -256,12 +263,18 @@ fn empty_body_control_separator(
     idx: usize,
     tokens: &[murphy_plugin_api::SourceToken],
     bytes: &[u8],
+    literal_ranges: &[murphy_plugin_api::Range],
 ) -> bool {
-    let semi_line = line_of(bytes, tokens[idx].range.start as usize);
+    let semi_start = tokens[idx].range.start as usize;
     let mut first_kw: Option<&[u8]> = None;
     for i in (0..idx).rev() {
         let tok = &tokens[i];
-        if line_of(bytes, tok.range.start as usize) < semi_line {
+        let tok_start = tok.range.start as usize;
+        // Tokens are sorted, so any newline between this token and the `;`
+        // means we have crossed onto an earlier line. Scanning the in-between
+        // bytes keeps the whole scan O(N) for the file; computing absolute line
+        // numbers per token would be O(N^2) on long lines.
+        if bytes[tok_start..semi_start].contains(&b'\n') {
             break;
         }
         match tok.kind {
@@ -271,7 +284,11 @@ fn empty_body_control_separator(
             SourceTokenKind::Other => {
                 let text = &bytes[tok.range.start as usize..tok.range.end as usize];
                 // Another `;` before the keyword → a real multi-statement body.
-                if text == b";" {
+                // A `;` inside a string/symbol literal (e.g. `while x == ';';
+                // end`) is literal text, not a separator, so it must not count.
+                if text == b";"
+                    && !crate::cops::util::offset_within_any(tok.range.start, literal_ranges)
+                {
                     return false;
                 }
                 first_kw = Some(text);
@@ -398,6 +415,15 @@ mod tests {
         // RuboCop never flags it.
         test::<Semicolon>().expect_no_offenses("until cond.nil?; end\n");
         test::<Semicolon>().expect_no_offenses("while x; end\n");
+    }
+
+    #[test]
+    fn does_not_flag_semicolon_before_end_with_literal_semicolon_in_condition() {
+        // The `;` inside the string literal in the condition is literal text,
+        // not a statement separator, so the body is still empty and the
+        // grammatical `;` before `end` must not be flagged.
+        test::<Semicolon>().expect_no_offenses("while x == ';'; end\n");
+        test::<Semicolon>().expect_no_offenses("until x == :';'; end\n");
     }
 
     // ----- Trailing semicolons -----
