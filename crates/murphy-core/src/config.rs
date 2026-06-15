@@ -1347,6 +1347,40 @@ mod tests {
     }
 
     #[test]
+    fn allcops_context_resolves_block_forwarding_explicit() {
+        // User `EnforcedStyle: explicit` flows into the context (drives
+        // `Style/ArgumentsForwarding`).
+        let cfg =
+            MurphyConfig::from_yaml_str("Naming/BlockForwarding:\n  EnforcedStyle: explicit\n")
+                .expect("config parses");
+        assert!(cfg.allcops_context().block_forwarding_explicit);
+
+        // Explicit `anonymous` resolves to false.
+        let cfg =
+            MurphyConfig::from_yaml_str("Naming/BlockForwarding:\n  EnforcedStyle: anonymous\n")
+                .expect("config parses");
+        assert!(!cfg.allcops_context().block_forwarding_explicit);
+
+        // Unconfigured -> RuboCop's `anonymous` default (false).
+        let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
+        assert!(!cfg.allcops_context().block_forwarding_explicit);
+
+        // Bundled default `explicit` is honoured when the user does not set it.
+        let cfg =
+            MurphyConfig::with_defaults("", "Naming/BlockForwarding:\n  EnforcedStyle: explicit\n")
+                .expect("config parses");
+        assert!(cfg.allcops_context().block_forwarding_explicit);
+
+        // User `anonymous` overrides a bundled `explicit` default.
+        let cfg = MurphyConfig::with_defaults(
+            "Naming/BlockForwarding:\n  EnforcedStyle: anonymous\n",
+            "Naming/BlockForwarding:\n  EnforcedStyle: explicit\n",
+        )
+        .expect("config parses");
+        assert!(!cfg.allcops_context().block_forwarding_explicit);
+    }
+
+    #[test]
     fn default_cops_data_parses_active_support_flag() {
         assert_eq!(
             DefaultCopsData::from_yaml("AllCops:\n  ActiveSupportExtensionsEnabled: true\n")

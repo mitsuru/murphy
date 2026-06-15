@@ -381,6 +381,30 @@ fn lint_rubocop_disable_with_reason_suffix_suppresses() {
     assert_eq!(assert.get_output().stdout, b"[]\n");
 }
 
+/// RuboCop-compatible: a same-line `# rubocop:todo <Cop>` suppresses the offense
+/// on its own line, like `# murphy:todo`.
+#[test]
+fn lint_rubocop_todo_same_line_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_todo.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:todo Lint/Debugger\n",
+    )
+    .expect("write rc_todo.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
 #[test]
 fn lint_file_with_todo_without_cop_suppresses_all_offenses_on_line() {
     let dir = tempdir().expect("create tempdir");

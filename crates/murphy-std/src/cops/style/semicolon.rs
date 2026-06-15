@@ -391,6 +391,14 @@ mod tests {
     }
 
     #[test]
+    fn does_not_flag_semicolon_that_is_symbol_content() {
+        // `:';'` is a symbol whose content is `;`; `string_literal_content_ranges`
+        // covers `Sym` nodes, so the literal `;` must not be flagged.
+        test::<Semicolon>().expect_no_offenses("x = :';'\n");
+        test::<Semicolon>().expect_no_offenses("h = { foo: :';' }\n");
+    }
+
+    #[test]
     fn does_not_flag_semicolon_in_dstr_string_part() {
         // The `;` sits in a literal string part between two interpolations.
         test::<Semicolon>().expect_no_offenses("x = \"a=#{b};#{c}\"\n");

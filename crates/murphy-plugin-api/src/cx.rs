@@ -3217,6 +3217,24 @@ mod tests {
     }
 
     #[test]
+    fn block_forwarding_explicit_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+
+        raw.block_forwarding_explicit = true;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.block_forwarding_explicit());
+
+        raw.block_forwarding_explicit = false;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.block_forwarding_explicit());
+    }
+
+    #[test]
     fn missing_target_rails_version_allows_version_guard() {
         let ast = murphy_translate::translate("nil\n", "t.rb");
         let fns = FnTable {

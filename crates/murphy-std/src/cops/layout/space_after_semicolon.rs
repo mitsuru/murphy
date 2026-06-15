@@ -185,6 +185,13 @@ mod tests {
     }
 
     #[test]
+    fn ignores_semicolon_that_is_symbol_literal_content() {
+        // `:';'` is a symbol whose content is `;`; `string_literal_content_ranges`
+        // covers `Sym`, so no missing-space-after-semicolon offense fires.
+        test::<SpaceAfterSemicolon>().expect_no_offenses("x = :';'\n");
+    }
+
+    #[test]
     fn accepts_semicolon_at_end_of_line() {
         test::<SpaceAfterSemicolon>().expect_no_offenses("x = 1;\ny = 2\n");
     }

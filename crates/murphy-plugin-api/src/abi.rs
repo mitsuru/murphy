@@ -298,6 +298,10 @@ pub struct CxRaw {
 /// `CxRaw::target_ruby_version` was tail-appended into existing padding (between
 /// `indentation_width` and `config_disabled_cops`) under ABI v4 lockstep for
 /// murphy-484s (size unchanged).
+/// `CxRaw::block_forwarding_explicit` (the resolved
+/// `Naming/BlockForwarding.EnforcedStyle == "explicit"` flag, consumed by
+/// `Style/ArgumentsForwarding`) was tail-appended under ABI v4 lockstep; it is a
+/// trailing `bool`, so it grows `size_of::<CxRaw>()` by its alignment padding.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.

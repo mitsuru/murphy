@@ -136,16 +136,14 @@ pub fn is_alignment_at_column(src: &[u8], offset: usize) -> bool {
         .unwrap_or(0);
     let col = offset - line_start;
 
-    let non_ws_at_col = |line: &[u8]| -> bool {
-        col < line.len() && !matches!(line[col], b' ' | b'\t' | b'\n' | b'\r')
-    };
+    let non_ws_at_col =
+        |line: &[u8]| -> bool { col < line.len() && !is_ruby_blank_byte(line[col]) };
     // A blank line or a full-line comment (first non-blank byte is `#`) is
-    // skipped when searching for the line to align against.
+    // skipped when searching for the line to align against. Blankness uses
+    // Ruby's `\s` set (incl. VT/FF) so it matches `is_ruby_blank_byte` and
+    // RuboCop's `line.blank?`, not just space/tab/CR.
     let is_skippable = |line: &[u8]| -> bool {
-        match line
-            .iter()
-            .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'))
-        {
+        match line.iter().position(|&b| !is_ruby_blank_byte(b)) {
             None => true,
             Some(i) => line[i] == b'#',
         }
