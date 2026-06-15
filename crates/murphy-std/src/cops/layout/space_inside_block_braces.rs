@@ -102,47 +102,54 @@ fn check(node: NodeId, cx: &Cx<'_>, options: &SpaceInsideBlockBracesOptions) {
 /// `do`/`end` block (the opener is the `do` keyword, not a brace).
 fn brace_tokens(node: NodeId, cx: &Cx<'_>) -> Option<(SourceToken, SourceToken)> {
     let node_range = cx.range(node);
-    let body = body_start(node, cx);
 
     let toks = cx.sorted_tokens();
-    let src = cx.source().as_bytes();
-    let idx = toks.partition_point(|t| t.range.start < node_range.start);
 
-    // Opener: first depth-0 `{` before the body (skip hash braces inside
-    // parenthesised call args).
-    let mut paren_depth: i32 = 0;
-    let mut left_brace = None;
-    for tok in &toks[idx..] {
-        if tok.range.start >= body {
-            break;
-        }
-        match tok.kind {
-            SourceTokenKind::LeftParen => paren_depth += 1,
-            SourceTokenKind::RightParen => paren_depth -= 1,
-            SourceTokenKind::LeftBrace if paren_depth == 0 => {
-                left_brace = Some(*tok);
+    // Closer: a block is a brace block IFF its last meaningful token is `}`.
+    // A do/end block always closes with `end`, and any `}` it contains is an
+    // inner hash / call argument (`foo({a: 1}) do … end`) that sits before the
+    // `end`. So we take the LAST token in the node (skipping trailing trivia)
+    // and require it to be `}`; otherwise this is a do/end block (or has no
+    // braces) and the cop does not apply. RuboCop reads `node.loc.end`; this
+    // reconstructs it positionally.
+    let node_tokens = cx.tokens_in(node_range);
+    let closer = node_tokens.iter().rev().find(|t| {
+        !matches!(
+            t.kind,
+            SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline | SourceTokenKind::Comment
+        )
+    })?;
+    if closer.kind != SourceTokenKind::RightBrace {
+        return None; // do/end block, or no braces
+    }
+    let right_brace = *closer;
+
+    // Opener: scan BACKWARD from the closing `}`, tracking brace depth so that
+    // every balanced `{ … }` pair on the way — a hash-literal call argument
+    // (`bar({}) { … }`), a brace inside a parameter default
+    // (`foo { |opts = {}| opts }`), or a nested hash in the body
+    // (`items.map { {v: _1} }`) — is skipped. The block's own opener is the
+    // first `{` reached at brace-depth 0.
+    let idx = toks.partition_point(|t| t.range.start < right_brace.range.start);
+    let mut depth: u32 = 0;
+    let mut opener: Option<SourceToken> = None;
+    for t in toks[..idx]
+        .iter()
+        .rev()
+        .take_while(|t| t.range.start >= node_range.start)
+    {
+        match t.kind {
+            SourceTokenKind::RightBrace => depth += 1,
+            SourceTokenKind::LeftBrace if depth > 0 => depth -= 1,
+            SourceTokenKind::LeftBrace => {
+                opener = Some(*t);
                 break;
-            }
-            SourceTokenKind::Other
-                if paren_depth == 0
-                    && &src[tok.range.start as usize..tok.range.end as usize] == b"do" =>
-            {
-                return None; // do/end block
             }
             _ => {}
         }
     }
-    let left_brace = left_brace?;
+    let left_brace = opener?;
 
-    // Closer: the last `}` token within the node range.
-    let node_tokens = cx.tokens_in(node_range);
-    let right_brace = *node_tokens
-        .iter()
-        .rev()
-        .find(|t| t.kind == SourceTokenKind::RightBrace)?;
-    if right_brace.range.start < left_brace.range.end {
-        return None;
-    }
     Some((left_brace, right_brace))
 }
 
@@ -637,6 +644,87 @@ mod tests {
               bar
             }
         "#});
+    }
+
+    /// Mastodon FP: a `do/end` block whose receiver chain contains a nested
+    /// brace block and a hash-literal argument. The outer block opener is `do`,
+    /// so the cop must return None. The old opener scan started at the node
+    /// range and picked the nested `flat_map` block's `{`; the closer scan
+    /// picked the `each_with_object({})` hash arg's `}`, producing a bogus
+    /// "Space missing inside }". Scanning the opener from the *call node's end*
+    /// finds the block's own `do` first and bails out.
+    #[test]
+    fn does_not_flag_do_end_block_with_nested_brace_and_hash_arg() {
+        test::<SpaceInsideBlockBraces>().expect_no_offenses(indoc! {r#"
+            SOURCES.flat_map { |k| k }.each_with_object({}) do |a, h|
+              h
+            end
+        "#});
+    }
+
+    #[test]
+    fn does_not_flag_numblock_with_inner_hash_braces() {
+        // A numbered-parameter block whose body is a hash literal
+        // (`items.map { {value: _1} }`). The block's own braces are spaced
+        // correctly; the inner hash `{` must NOT be mistaken for the block opener
+        // (it would otherwise be flagged "Space missing inside {").
+        test::<SpaceInsideBlockBraces>().expect_no_offenses("items.map { {value: _1} }\n");
+    }
+
+    #[test]
+    fn does_not_flag_block_param_default_with_braces() {
+        // A brace block with a parameter whose default is a hash literal
+        // (`foo { |opts = {}| opts }`). The block's own braces are spaced
+        // correctly; the inner default-hash `{` must NOT be mistaken for the
+        // block opener (it would otherwise be flagged "Space missing inside {").
+        test::<SpaceInsideBlockBraces>().expect_no_offenses("foo { |opts = {}| opts }\n");
+    }
+
+    #[test]
+    fn flags_own_brace_spacing_with_param_default_braces() {
+        // The block's own braces ARE still checked even when a parameter default
+        // contains braces — confirms the opener is located before the params.
+        let opts = SpaceInsideBlockBracesOptions {
+            enforced_style: BlockBraceStyle::Space,
+            empty_style: EmptyBlockBraceStyle::NoSpace,
+            space_before_block_parameters: true,
+        };
+        let result =
+            run_cop_with_options_and_edits::<SpaceInsideBlockBraces>("foo {|opts = {}| opts }\n", &opts);
+        assert_eq!(result.offenses.len(), 1, "offenses: {:?}", result.offenses);
+    }
+
+    #[test]
+    fn does_not_flag_do_end_block_with_tight_hash_argument() {
+        // A do/end block whose receiver call has a (tight) hash-literal argument
+        // before `do` (`foo({a: 1}) do |x| x end`). The hash `{a: 1}` is a call
+        // argument, NOT the block's braces — the block opens with `do`, so the
+        // cop must not apply. Regression: the "last `}`" closer is the hash's,
+        // and the opener scan must still reach `do` rather than pairing the hash
+        // braces.
+        test::<SpaceInsideBlockBraces>().expect_no_offenses("foo({a: 1}) do |x|\n  x\nend\n");
+    }
+
+    #[test]
+    fn does_not_flag_bodyless_do_end_block_with_tight_hash_argument() {
+        // A do/end block with neither body nor params but a tight hash argument
+        // before `do` (`foo({a: 1}) do\nend`). The block closes with `end`, so
+        // it is not a brace block — the hash `{a: 1}` must not be paired as the
+        // block's braces. Regression for the bodyless fallback path.
+        test::<SpaceInsideBlockBraces>().expect_no_offenses("foo({a: 1}) do\nend\n");
+    }
+
+    #[test]
+    fn flags_numblock_own_brace_spacing() {
+        // The block's own braces ARE still checked on a numblock (`{_1}` is
+        // missing the inner spaces), confirming the opener is located correctly.
+        let opts = SpaceInsideBlockBracesOptions {
+            enforced_style: BlockBraceStyle::Space,
+            empty_style: EmptyBlockBraceStyle::NoSpace,
+            space_before_block_parameters: true,
+        };
+        let result = run_cop_with_options_and_edits::<SpaceInsideBlockBraces>("items.map {_1}\n", &opts);
+        assert_eq!(result.offenses.len(), 2, "offenses: {:?}", result.offenses);
     }
 }
 murphy_plugin_api::submit_cop!(SpaceInsideBlockBraces);

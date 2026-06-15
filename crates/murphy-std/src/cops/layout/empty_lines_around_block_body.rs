@@ -100,6 +100,24 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         .map(|t| t.range.start)
         .unwrap_or(node_range.start);
 
+    // RuboCop's `Block#single_line?` compares `loc.begin` (`{`/`do`) line to
+    // `loc.end` (`}`/`end`) line — NOT the whole node range. A single-line
+    // brace block whose receiver chain spans several physical lines has a
+    // multi-line node range, but the block body itself is single-line. Skip it
+    // here so a blank line in the *receiver* is not mistaken for a body blank.
+    // The closer is the last `}`/`end` token, which ends at the node range end.
+    let closer_end = cx
+        .token_before(node_range.end)
+        .filter(|t| {
+            t.kind == SourceTokenKind::RightBrace
+                || (t.kind == SourceTokenKind::Other && cx.raw_source(t.range) == "end")
+        })
+        .map(|t| t.range.end)
+        .unwrap_or(node_range.end);
+    if !cx.source().as_bytes()[opener_start as usize..closer_end as usize].contains(&b'\n') {
+        return;
+    }
+
     check_empty_lines_around_body_no_empty_lines(node, opener_start, "block", cx);
 }
 
@@ -184,6 +202,28 @@ mod tests {
         // `foo({}) do ... end` — the `{}` argument must not be mistaken for
         // the block opener. No blank line, so no offense.
         test::<EmptyLinesAroundBlockBody>().expect_no_offenses("foo({}) do\n  bar\nend\n");
+    }
+
+    /// Mastodon FP: a single-line brace block whose receiver chain spans
+    /// several physical lines (`[ ...multiline... ].reduce { |u, q| ... }`) has
+    /// a node range from the receiver (line N) to `}` (line N+k). `is_single_line`
+    /// over the full node range is false, so a blank line inside the *receiver*
+    /// (not the block body) was wrongly flagged as a block-body blank. RuboCop's
+    /// `Block#single_line?` compares the `{` line to the `}` line; the block here
+    /// is single-line, so it must be skipped.
+    #[test]
+    fn no_offense_for_single_line_block_with_multiline_receiver() {
+        test::<EmptyLinesAroundBlockBody>().expect_no_offenses(concat!(
+            "def f\n",
+            "  subquery = [\n",
+            "    A.where(x: 1).arel,\n",
+            "\n",
+            "    B.where(y: 2).arel,\n",
+            "  ].reduce { |u, q| Union.new(u, q) }\n",
+            "\n",
+            "  Log.latest\n",
+            "end\n",
+        ));
     }
 
     #[test]

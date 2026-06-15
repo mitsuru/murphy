@@ -132,8 +132,13 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // The receiver block must be multiline.
-    if !cx.is_multiline(recv_id) {
+    // The receiver block must be multiline. Use RuboCop's `BlockNode#single_line?`
+    // semantics (opener line vs. closer line), not the receiver's whole expression
+    // range: in `foo.map {…}\n  .sort_by {…}` each block's braces sit on one line
+    // and only the surrounding chain spans lines, so `cx.is_multiline` (which
+    // measures the entire chained receiver) would over-report. `block_is_single_line`
+    // compares just the block's own `{`/`do` line to its `}`/`end` line.
+    if crate::cops::util::block_is_single_line(recv_id, cx) {
         return;
     }
 
@@ -252,6 +257,19 @@ mod tests {
               bar
             end.baz { _1 }
             ^^^^^^^  Avoid multi-line chains of blocks.
+        "});
+    }
+
+    #[test]
+    fn accepts_chain_of_single_line_blocks_spanning_lines() {
+        // Each block's braces are single-line; only the chain spans physical
+        // lines. RuboCop's `BlockNode#single_line?` compares the block's own
+        // opener line to its closer line, so none of these blocks is multiline
+        // and there is no offense.
+        test::<MultilineBlockChain>().expect_no_offenses(indoc! {"
+            foo.map { |f| f }
+              .sort_by { |r| -r[0] }
+              .reject { |r| r[1] }
         "});
     }
 }

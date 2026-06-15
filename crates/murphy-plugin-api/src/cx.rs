@@ -2350,11 +2350,14 @@ impl<'a> Cx<'a> {
         false
     }
 
-    /// `BlockNode#send_node` — the call the block is attached to.
-    /// `OptNodeId::NONE` if not a `Block`.
+    /// `BlockNode#send_node` — the call the block is attached to, for all three
+    /// block kinds (`Block`/`Numblock`/`Itblock`). `OptNodeId::NONE` if `id` is
+    /// not a block.
     pub fn block_call(&self, id: NodeId) -> OptNodeId {
         match *self.kind(id) {
-            NodeKind::Block { call, .. } => OptNodeId::some(call),
+            NodeKind::Block { call, .. }
+            | NodeKind::Numblock { send: call, .. }
+            | NodeKind::Itblock { send: call, .. } => OptNodeId::some(call),
             _ => OptNodeId::NONE,
         }
     }
@@ -2368,11 +2371,14 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// `BlockNode#body` — the block body. `OptNodeId::NONE` for an empty
-    /// body or a non-`Block` node.
+    /// `BlockNode#body` — the block body, for all three block kinds
+    /// (`Block`/`Numblock`/`Itblock`). `OptNodeId::NONE` for an empty body or a
+    /// non-block node.
     pub fn block_body(&self, id: NodeId) -> OptNodeId {
         match *self.kind(id) {
-            NodeKind::Block { body, .. } => body,
+            NodeKind::Block { body, .. }
+            | NodeKind::Numblock { body, .. }
+            | NodeKind::Itblock { body, .. } => body,
             _ => OptNodeId::NONE,
         }
     }
@@ -7086,5 +7092,45 @@ mod tests {
         });
         // A plain expression is not a void context.
         with_parsed("1", |cx, root| assert!(!cx.is_void_context(root)));
+    }
+
+    #[test]
+    fn block_call_and_block_body_cover_all_block_kinds() {
+        // `block_call`/`block_body` must resolve the receiver call and body for
+        // `Block`, `Numblock`, and `Itblock` — not just `Block`.
+        for (src, kind) in [
+            ("items.map { |x| x }\n", "block"),
+            ("items.map { _1 }\n", "numblock"),
+            ("items.map { it }\n", "itblock"),
+        ] {
+            with_parsed(src, |cx, root| {
+                let block = find_node(cx, root, |k| {
+                    matches!(
+                        k,
+                        NodeKind::Block { .. }
+                            | NodeKind::Numblock { .. }
+                            | NodeKind::Itblock { .. }
+                    )
+                });
+                let call = cx
+                    .block_call(block)
+                    .get()
+                    .unwrap_or_else(|| panic!("{kind}: block_call should resolve the send"));
+                assert_eq!(cx.method_name(call), Some("map"), "{kind}: block_call send");
+                assert!(
+                    cx.block_body(block).get().is_some(),
+                    "{kind}: block_body should resolve the body"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn block_call_and_block_body_are_none_for_non_block() {
+        with_parsed("items.map(&:to_s)\n", |cx, root| {
+            let send = find_node(cx, root, |k| matches!(k, NodeKind::Send { .. }));
+            assert!(cx.block_call(send).get().is_none());
+            assert!(cx.block_body(send).get().is_none());
+        });
     }
 }

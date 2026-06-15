@@ -13,7 +13,13 @@
 //!   reduce/inject blocks where the accumulator is not included in any
 //!   return value and the element is not modified in the block body are
 //!   flagged.  Accumulator index returns are always flagged.  Inner blocks
-//!   are skipped when collecting return values.
+//!   are skipped when collecting return values.  `acceptable_return?` is a
+//!   faithful port of RuboCop's `expression_values` node-search: a return is
+//!   acceptable when it contains no captured value, or any captured value that
+//!   is not the iterated element — including a NO-ARG send anywhere in the
+//!   expression (`el.foo`, `el[:k].last`).  A send WITH an argument
+//!   (`el.foo(2)`), a bare element, an operator send on the element (`el + 2`),
+//!   or a direct index on the element (`el[:x]`) is unacceptable.
 //! ```
 //!
 //! ## Matched shapes
@@ -260,27 +266,68 @@ fn is_element_modified_node(d: NodeId, el_name: Symbol, cx: &Cx<'_>) -> bool {
         }
     }
 
+/// Determine if a return value is acceptable for the purposes of this cop.
+///
+/// Faithful port of RuboCop's `acceptable_return?` + `expression_values`:
+/// a return is acceptable if `expression_values` finds no captures at all, OR
+/// at least one capture that is NOT the iterated element. Otherwise (every
+/// captured value is the element) the return is unacceptable.
+///
+/// `expression_values` is a `def_node_search` that walks the whole expression
+/// subtree, capturing from each matching node:
+///   - `(VARIABLES $_)`          — ivar/gvar/cvar/lvar name
+///   - `(EQUALS_ASSIGNMENTS $_)` — lvasgn/ivasgn/cvasgn/gvasgn/casgn target
+///   - `(send (VARIABLES $_) :<<)` — receiver-var name of a `<<` send
+///   - `$(send _ _)`             — a NO-ARG send node (any receiver, incl. none)
+///   - `(dstr (begin (VARIABLES $_)))` — interpolated variable
+///   - shorthand-assignment target
+///
+/// A captured variable/assignment is "the element" only when it is `lvar el`
+/// or `lvasgn el` (ivar/gvar/cvar/casgn etc. live in a different namespace and
+/// can never equal the block-local element name). A captured no-arg send node
+/// is always a non-element value.
 fn acceptable_return(node: NodeId, el_name: Symbol, cx: &Cx<'_>) -> bool {
-    let vars = collect_expression_vars(node, cx);
-    vars.is_empty() || vars.iter().any(|&v| v != el_name)
+    let mut has_capture = false;
+    let mut has_non_element = false;
+
+    let mut visit = |id: NodeId| {
+        if let Some(is_element) = expression_value_is_element(id, el_name, cx) {
+            has_capture = true;
+            if !is_element {
+                has_non_element = true;
+            }
+        }
+    };
+
+    visit(node);
+    for &d in cx.descendants(node).iter() {
+        visit(d);
+    }
+
+    !has_capture || has_non_element
 }
 
-fn collect_expression_vars(node: NodeId, cx: &Cx<'_>) -> Vec<Symbol> {
-    let mut result = Vec::new();
-    if let NodeKind::Lvar(s) = *cx.kind(node) {
-        result.push(s);
+/// If `id` is captured by `expression_values`, return `Some(is_element)` where
+/// `is_element` is true only when the capture is the iterated element. Returns
+/// `None` if the node is not captured by any pattern.
+fn expression_value_is_element(id: NodeId, el_name: Symbol, cx: &Cx<'_>) -> Option<bool> {
+    match *cx.kind(id) {
+        // `(VARIABLES $_)` — lvar can be the element; ivar/gvar/cvar cannot.
+        NodeKind::Lvar(name) => Some(name == el_name),
+        NodeKind::Ivar(_) | NodeKind::Gvar(_) | NodeKind::Cvar(_) => Some(false),
+        // `(EQUALS_ASSIGNMENTS $_ ...)` — lvasgn target can be the element.
+        NodeKind::Lvasgn { name, .. } => Some(name == el_name),
+        NodeKind::Ivasgn { .. }
+        | NodeKind::Gvasgn { .. }
+        | NodeKind::Cvasgn { .. }
+        | NodeKind::Casgn { .. } => Some(false),
+        // `$(send _ _)` — a send with NO arguments is captured as a non-element
+        // value (the send node itself, never equal to the element name).
+        // Note: Csend (`&.`) is intentionally excluded, matching RuboCop's
+        // `(send _ _)` (not `csend`).
+        NodeKind::Send { args, .. } if cx.list(args).is_empty() => Some(false),
+        _ => None,
     }
-    if let NodeKind::Lvasgn { name, .. } = *cx.kind(node) {
-        result.push(name);
-    }
-    for &d in cx.descendants(node).iter() {
-        if let NodeKind::Lvar(s) = *cx.kind(d) {
-            result.push(s);
-        } else if let NodeKind::Lvasgn { name, .. } = *cx.kind(d) {
-            result.push(name);
-        }
-    }
-    result
 }
 
 #[cfg(test)]
@@ -504,6 +551,55 @@ mod tests {
               el
             end
         "});
+    }
+
+    #[test]
+    fn does_not_flag_element_derived_value() {
+        // Mastodon FP: a return that is an element-DERIVED value (a no-arg send
+        // such as `.last` on the element index) is acceptable. RuboCop's
+        // `expression_values` captures the no-arg `.last` send as a non-element
+        // value, so the return is acceptable. Clean.
+        test::<UnmodifiedReduceAccumulator>().expect_no_offenses(indoc! {"
+            entities.reduce(0) do |index, entity|
+              str << index
+              entity[:indices].last
+            end
+        "});
+    }
+
+    #[test]
+    fn does_not_flag_no_arg_send_on_element() {
+        // `el.foo` — a no-arg named-method send on the element is captured as a
+        // non-element value. Clean.
+        test::<UnmodifiedReduceAccumulator>().expect_no_offenses(indoc! {"
+            (1..4).reduce(0) do |acc, el|
+              el.upcase
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_named_send_on_element_with_arg() {
+        // `el.foo(2)` — the send has an argument, so it is NOT captured as a
+        // no-arg send. The only captured value is the element `el`, so the
+        // return is unacceptable. RuboCop flags this.
+        test::<UnmodifiedReduceAccumulator>().expect_offense(indoc! {r#"
+            (1..4).reduce(0) do |acc, el|
+              el.foo(2)
+              ^^^^^^^^^ Ensure the accumulator `acc` will be modified by `reduce`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_element_index_directly() {
+        // `el[:x]` — direct index on the element. RuboCop flags this.
+        test::<UnmodifiedReduceAccumulator>().expect_offense(indoc! {r#"
+            (1..4).reduce(0) do |acc, el|
+              el[:x]
+              ^^^^^^ Ensure the accumulator `acc` will be modified by `reduce`.
+            end
+        "#});
     }
 
     #[test]

@@ -649,7 +649,13 @@ fn check_operator(cx: &Cx<'_>, op_range: Range, allow_for_alignment: bool) {
 
     let leading_count = op_start - leading_start;
     let trailing_count = trailing_end - op_end;
-    let at_eol = trailing_end >= src.len() || matches!(src[trailing_end], b'\n' | b'\r');
+    // RuboCop's `check_operator` returns when a trailing comment begins where the
+    // operator's surrounding space ends (`with_space.last_column == comment.loc.column`):
+    // the right operand is on the next line and the excess space merely reaches the
+    // comment. Treat a following `#` like end-of-line so the trailing-space excess
+    // is not flagged.
+    let at_eol =
+        trailing_end >= src.len() || matches!(src[trailing_end], b'\n' | b'\r' | b'#');
 
     let op_text = match std::str::from_utf8(&src[op_start..op_end]) {
         Ok(t) => t,
@@ -668,8 +674,13 @@ fn check_operator(cx: &Cx<'_>, op_range: Range, allow_for_alignment: bool) {
         );
     } else if leading_count > 1 || (trailing_count > 1 && !at_eol) {
         // AllowForAlignment: skip the offense when the extra space aligns the
-        // operator with one on an adjacent source line.
-        if allow_for_alignment && is_alignment_spacing(src, op_start) {
+        // operator with one on an adjacent source line — either by start column
+        // (`aligned_words?`) or by an assignment/comparison operator's trailing
+        // `=` end column (`aligned_equals_operator?`).
+        if allow_for_alignment
+            && (is_alignment_spacing(src, op_start)
+                || crate::cops::util::is_equals_aligned(cx, op_range))
+        {
             return;
         }
         emit_fix(
@@ -869,6 +880,30 @@ mod tests {
         test::<SpaceAroundOperators>().expect_offense(indoc! {r#"
             a  +  b
                ^ Operator `+` should be surrounded by a single space.
+        "#});
+    }
+
+    /// Mastodon FP: an op-assignment `+=` aligned by its trailing `=` END column
+    /// with a preceding `=` is RuboCop's `aligned_equals_operator?` case. The
+    /// `+=`'s `=` ends at the same column as the `=` of `@http_client =`, so the
+    /// extra space before `+=` is intentional alignment and must not be flagged.
+    #[test]
+    fn allow_for_alignment_accepts_equals_end_column_alignment() {
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            @http_client = http_client
+            retries     += 1
+        "#});
+    }
+
+    /// Mastodon FP: the right operand of `||` is on the next line and the excess
+    /// trailing space before a `#` comment reaches the comment column. RuboCop
+    /// suppresses this (`with_space.last_column == comment.loc.column`); treating
+    /// a following `#` as end-of-line does the same.
+    #[test]
+    fn accepts_trailing_space_before_comment_with_operand_next_line() {
+        test::<SpaceAroundOperators>().expect_no_offenses(indoc! {r#"
+            x = a ||          # c
+                b
         "#});
     }
 

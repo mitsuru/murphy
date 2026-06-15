@@ -23,7 +23,7 @@
 //!   in RuboCop due to potential reordering of method calls with side effects).
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 #[derive(Default)]
 pub struct IdenticalConditionalBranches;
@@ -199,6 +199,97 @@ fn head_of(node: NodeId, cx: &Cx<'_>) -> NodeId {
     node
 }
 
+/// Collect the body source range of every heredoc in the file, paired with the
+/// byte offset of each heredoc's opener (`<<~LABEL`). The opener offset lets a
+/// caller associate a heredoc body with the expression that contains its opener.
+///
+/// Heredoc openers and terminators are matched **by label**, not by stack
+/// position. A position-based stack is only correct for one nesting direction:
+/// same-line sibling heredocs (`foo(<<~A, <<~B)`) close in FIFO order (A's body
+/// comes first), while a heredoc opened inside another's interpolated body closes
+/// in LIFO order — so neither `pop()` (LIFO) nor `remove(0)` (FIFO) alone is right
+/// for both. Matching each `HeredocEnd` label to its `HeredocStart` label (FIFO
+/// among the rare same-label case) pairs them correctly regardless of nesting.
+///
+/// The body spans from the line *after* the opener's line to the start of the
+/// terminator's line (so the squiggly closing-label indentation is excluded).
+fn heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, Range)> {
+    let source = cx.source().as_bytes();
+    // (label, opener_start) for each heredoc whose terminator hasn't been seen.
+    let mut open: Vec<(&str, u32)> = Vec::new();
+    let mut ranges: Vec<(u32, Range)> = Vec::new();
+
+    for tok in cx.sorted_tokens() {
+        match tok.kind {
+            SourceTokenKind::HeredocStart => {
+                open.push((heredoc_label(cx.raw_source(tok.range)), tok.range.start));
+            }
+            SourceTokenKind::HeredocEnd => {
+                let label = heredoc_label(cx.raw_source(tok.range));
+                // FIFO among same-label openers (the first-opened body closes
+                // first); distinct labels match unambiguously.
+                let Some(i) = open.iter().position(|&(l, _)| l == label) else {
+                    continue;
+                };
+                let (_, opener_start) = open.remove(i);
+                // Body starts on the line after the opener's line.
+                let body_start = source[opener_start as usize..]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(source.len() as u32, |p| opener_start + p as u32 + 1);
+                // The body ends at the start of the terminator's line so the
+                // squiggly indentation of the closing label is excluded.
+                let line_start = source[..tok.range.start as usize]
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(0, |p| p as u32 + 1);
+                ranges.push((
+                    opener_start,
+                    Range {
+                        start: body_start,
+                        end: line_start,
+                    },
+                ));
+            }
+            _ => {}
+        }
+    }
+    ranges
+}
+
+/// Extract a heredoc's label from a `HeredocStart` (`<<~LABEL`, `<<-'LABEL'`, …)
+/// or `HeredocEnd` (the bare terminator) token's source, so the two can be
+/// matched. Strips `<<`, the optional squiggly/dash, surrounding quotes, and any
+/// indentation/whitespace.
+fn heredoc_label(src: &str) -> &str {
+    src.trim()
+        .trim_start_matches('<')
+        .trim_start_matches(['~', '-'])
+        .trim_matches(['\'', '"', '`'])
+        .trim()
+}
+
+/// Build the comparison key for a branch expression: its raw source plus the
+/// content of any heredoc bodies whose opener lies within the expression's range.
+///
+/// `heredoc_bodies` is the file-wide list produced by [`heredoc_body_ranges`].
+fn expr_comparison_key(expr: NodeId, heredoc_bodies: &[(u32, Range)], cx: &Cx<'_>) -> String {
+    let expr_range = cx.range(expr);
+    let mut key = cx.raw_source(expr_range).to_owned();
+    for &(opener_start, body) in heredoc_bodies {
+        if opener_start >= expr_range.start && opener_start < expr_range.end {
+            key.push('\u{0}'); // separator that cannot appear in Ruby source
+            // Skip an empty body (`<<~A\nA`): body-start (line after the opener)
+            // equals the terminator line, so the range is empty. `raw_source`
+            // would also panic on `start > end`, so slice only when valid.
+            if body.start < body.end {
+                key.push_str(cx.raw_source(body));
+            }
+        }
+    }
+    key
+}
+
 /// Returns true if all expressions in the slice have the same source text,
 /// and the expression (if it's an assignment) doesn't assign to a variable
 /// that appears in the condition.
@@ -207,9 +298,18 @@ fn duplicated_expressions(node: NodeId, exprs: &[NodeId], cx: &Cx<'_>) -> bool {
         return false;
     }
 
-    // All expressions must have the same raw source.
-    let first_src = cx.raw_source(cx.range(exprs[0]));
-    if !exprs[1..].iter().all(|&e| cx.raw_source(cx.range(e)) == first_src) {
+    // All expressions must have the same comparison key. The key is the
+    // expression's raw source plus the content of any heredoc bodies it opens.
+    // `raw_source(range(expr))` for a heredoc-bearing call (`puts <<~MSG`) covers
+    // only the opener line, not the body that follows after the line's `\n`, so
+    // two branches with identical openers but different heredoc bodies would
+    // otherwise compare equal. Including the body text restores correctness.
+    let heredoc_bodies = heredoc_body_ranges(cx);
+    let first_key = expr_comparison_key(exprs[0], &heredoc_bodies, cx);
+    if !exprs[1..]
+        .iter()
+        .all(|&e| expr_comparison_key(e, &heredoc_bodies, cx) == first_key)
+    {
         return false;
     }
 
@@ -467,6 +567,112 @@ mod tests {
               do_x
             when 2
               do_y
+            end
+        "});
+    }
+
+    // --- heredoc bodies: differ → no offense ---
+
+    #[test]
+    fn accepts_identical_openers_with_different_heredoc_bodies() {
+        // Both branches call `puts <<~MSG`, so the opener line (the only part
+        // covered by `raw_source(range(expr))`) is identical — but the heredoc
+        // bodies differ, so the expressions are NOT identical.
+        test::<IdenticalConditionalBranches>().expect_no_offenses(indoc! {"
+            if cond
+              puts <<~MSG
+                first
+              MSG
+            else
+              puts <<~MSG
+                second different
+              MSG
+            end
+        "});
+    }
+
+    // --- heredoc bodies: identical → still flag ---
+
+    #[test]
+    fn flags_identical_openers_with_identical_heredoc_bodies() {
+        test::<IdenticalConditionalBranches>().expect_offense(indoc! {"
+            if cond
+              puts <<~MSG
+              ^^^^^^^^^^^ Move `puts <<~MSG` out of the conditional.
+                same
+              MSG
+            else
+              puts <<~MSG
+              ^^^^^^^^^^^ Move `puts <<~MSG` out of the conditional.
+                same
+              MSG
+            end
+        "});
+    }
+
+    // --- same-line sibling heredocs: matched by label, not stack position ---
+
+    #[test]
+    fn accepts_same_line_sibling_heredocs_with_different_bodies() {
+        // Two heredocs share an opener line (`process(<<~A, <<~B)`). In Ruby they
+        // terminate in FIFO order, which a LIFO `pop()` would mispair. Bodies
+        // differ between the branches, so this must NOT be flagged.
+        test::<IdenticalConditionalBranches>().expect_no_offenses(indoc! {"
+            if cond
+              process(<<~A, <<~B)
+                alpha
+              A
+                beta
+              B
+            else
+              process(<<~A, <<~B)
+                gamma
+              A
+                delta
+              B
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_same_line_sibling_heredocs_with_identical_bodies() {
+        test::<IdenticalConditionalBranches>().expect_offense(indoc! {"
+            if cond
+              process(<<~A, <<~B)
+              ^^^^^^^^^^^^^^^^^^^ Move `process(<<~A, <<~B)` out of the conditional.
+                alpha
+              A
+                beta
+              B
+            else
+              process(<<~A, <<~B)
+              ^^^^^^^^^^^^^^^^^^^ Move `process(<<~A, <<~B)` out of the conditional.
+                alpha
+              A
+                beta
+              B
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_nested_heredocs_with_different_inner_bodies() {
+        // A heredoc opened inside another's interpolated body terminates in LIFO
+        // order; label matching pairs both correctly. The inner bodies differ, so
+        // the branches are not identical.
+        test::<IdenticalConditionalBranches>().expect_no_offenses(indoc! {"
+            if cond
+              puts <<~OUTER
+                pre #{<<~INNER}
+                  first inner
+                INNER
+              OUTER
+            else
+              puts <<~OUTER
+                pre #{<<~INNER}
+                  second inner
+                INNER
+              OUTER
             end
         "});
     }

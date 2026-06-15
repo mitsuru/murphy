@@ -20,7 +20,10 @@
 //!   `/.../ ` parses as division, so no regexp node appears (mirroring RuboCop
 //!   emitting no diagnostic). The `find_offense_node` walk-up (including the
 //!   `method_chain_to_regexp_receiver?` recursion) is ported so chains like
-//!   `do_something /re/.foo bar` are handled. Autocorrect adds parentheses
+//!   `do_something /re/.foo bar` are handled. The parser emits the diagnostic
+//!   only for command calls, never for binary-operator sends, so an offense
+//!   node whose selector is an operator method (`=~`, `===`, `|`, …) is skipped
+//!   (`second_segment =~ /\d/` is clean). Autocorrect adds parentheses
 //!   around the call's arguments (`add_parentheses`). The offense is reported
 //!   at the regexp's opening `/` (a single column), matching the parser
 //!   diagnostic's location. All RuboCop spec shapes are covered; `yield`/`super`
@@ -67,6 +70,15 @@ impl AmbiguousRegexpLiteral {
         // first argument begins with the regexp. Guard against parenthesized
         // calls (`do_something(/re/)`) and non-call landing nodes (assignment).
         if !matches!(*cx.kind(offense_node), NodeKind::Send { .. } | NodeKind::Csend { .. }) {
+            return;
+        }
+        // The parser only emits `:ambiguous_regexp` for command calls, never for
+        // binary-operator sends (`second_segment =~ /\d/`). An operator-method
+        // selector means this is an operator send, not a command — skip it.
+        if cx
+            .method_name(offense_node)
+            .is_some_and(murphy_plugin_api::method_predicates::is_operator_method)
+        {
             return;
         }
         if cx.is_parenthesized(offense_node) {
@@ -359,6 +371,23 @@ mod tests {
     #[test]
     fn accepts_assignment() {
         test::<AmbiguousRegexpLiteral>().expect_no_offenses("x = /pattern/\n");
+    }
+
+    #[test]
+    fn accepts_match_operator() {
+        // Mastodon FP: `second_segment =~ /\d/` is a binary-operator send, not a
+        // command call. The parser only emits `:ambiguous_regexp` for command
+        // calls (`puts /re/`), never for operator sends, so RuboCop is clean.
+        test::<AmbiguousRegexpLiteral>().expect_no_offenses("second_segment =~ /\\d/\n");
+    }
+
+    #[test]
+    fn accepts_other_binary_operators() {
+        // Any operator-method send (`===`, `|`, etc.) with a regexp argument is
+        // not a command call and is never flagged.
+        test::<AmbiguousRegexpLiteral>()
+            .expect_no_offenses("x === /pattern/\n")
+            .expect_no_offenses("x | /pattern/\n");
     }
 
     #[test]

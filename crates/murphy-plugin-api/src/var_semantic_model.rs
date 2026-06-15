@@ -179,6 +179,50 @@ fn is_in_loop_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
     }
 }
 
+/// Returns `true` if `node` sits inside a block/lambda body that is nested
+/// *within* the variable's declaring scope (`scope_root`) — i.e. the
+/// assignment writes a variable captured from an enclosing scope.
+///
+/// RuboCop's `Lint/UselessAssignment` never flags such a write: the block may
+/// run zero or many times, so the value is indeterminate and the write cannot
+/// be proven dead (matches `Variable#captured_by_block?`). Verified against
+/// standalone rubocop 1.87.0.
+///
+/// The walk stops (returning `false`) at a `Def`/`Defs`/`Class`/`Module`/
+/// `Sclass` boundary: Ruby locals do not cross those, so a same-named variable
+/// resolved across one is a (pre-existing) resolution artifact, not a real
+/// capture — we must not force-mark it referenced and thereby mask a genuine
+/// offense inside the nested method/class body.
+fn is_in_captured_block(ast: &Ast, scope_root: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == scope_root {
+            return false;
+        }
+        match *ast.kind(parent) {
+            // Only the deferred block BODY captures the variable. The block's
+            // receiver call and its arguments (`items.each(n = 1) { … }`) run in
+            // the parent scope at the call site, so an assignment reached via the
+            // `call`/`send` child is NOT captured — fall through and keep walking
+            // outward.
+            NodeKind::Block { call, .. } if current != call => return true,
+            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } if current != send => {
+                return true;
+            }
+            NodeKind::Lambda => return true,
+            // Hard local-scope boundary: stop without claiming capture.
+            NodeKind::Def { .. }
+            | NodeKind::Defs { .. }
+            | NodeKind::Class { .. }
+            | NodeKind::Module { .. }
+            | NodeKind::Sclass { .. } => return false,
+            _ => {}
+        }
+        current = parent;
+    }
+    false
+}
+
 /// Compute `is_referenced` for every `Assignment` in `scope` once the DFS
 /// has fully populated the scope's variables, assignments, and references.
 fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeInfo) {
@@ -201,6 +245,19 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
 
             // Loop body: always referenced (next iteration may read it).
             if is_in_loop_body(ast, scope_root, asgn_node) {
+                var.assignments[i].is_referenced = true;
+                continue;
+            }
+
+            // Captured-by-block write: an assignment physically inside a block
+            // (nested under this variable's declaring scope) is always
+            // referenced — the block's run count is indeterminate, so the write
+            // can't be proven dead (RuboCop `captured_by_block?`). In-block
+            // writes also never act as dominating overwrites of outer writes,
+            // since `Block` is a branch barrier and `chain_is_prefix` rejects a
+            // deeper chain — so outer dataflow (e.g. `n = 0` killed by an outer
+            // `n = 1`) is unaffected.
+            if is_in_captured_block(ast, scope_root, asgn_node) {
                 var.assignments[i].is_referenced = true;
                 continue;
             }
@@ -1179,6 +1236,158 @@ mod tests {
         assert!(
             threshold.assignments[0].is_referenced,
             "threshold destructuring assignment is observed by the later condition"
+        );
+    }
+
+    // ── captured-by-block writes (Mastodon FP fix) ──────────────────────────
+    //
+    // RuboCop's `Lint/UselessAssignment` never flags a write that is *physically
+    // inside a block* to a variable captured from an enclosing scope — the block
+    // may run zero or many times, so the write's value is indeterminate and
+    // cannot be proven dead. Verified against standalone rubocop 1.87.0.
+
+    /// Look up the outer-scope variable `name` in `def`'s scope and return it.
+    fn captured_var<'a>(ast: &'a Ast, model: &'a VarSemanticModel, name: &str) -> &'a Variable {
+        let def_id =
+            find_scope_node(ast, ast.root(), |k| matches!(k, NodeKind::Def { .. })).unwrap();
+        let scope = model.scope(def_id).unwrap();
+        scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(ast, v.name) == name)
+            .unwrap_or_else(|| panic!("`{name}` must be tracked in the def scope"))
+    }
+
+    #[test]
+    fn in_block_compound_write_to_captured_var_is_referenced() {
+        // Target Mastodon FP: `n += 1` inside `each` writes the captured `n`.
+        // The back-edge read `use(n)` is positionally before the write, so the
+        // forward scan misses it — but the in-block write must still be
+        // referenced (RuboCop: clean).
+        let ast = translate(
+            "def f(items)\n  n = 0\n  items.each do |x|\n    use(n)\n    n += 1\n  end\nend\n",
+            "test.rb",
+        );
+        let model = VarSemanticModel::build(&ast);
+        let n = captured_var(&ast, &model, "n");
+        // Two writes: `n = 0` (outer) and `n += 1` (in block).
+        assert_eq!(n.assignments.len(), 2);
+        // The in-block `n += 1` must be referenced (no longer a false useless).
+        assert!(
+            n.assignments.iter().all(|a| a.is_referenced),
+            "captured `n` writes (incl. the in-block `n += 1`) must be referenced"
+        );
+    }
+
+    #[test]
+    fn in_block_overwrite_of_captured_var_both_referenced() {
+        // `n = 5; n = 6` both inside the block — even though `n = 6` lexically
+        // dominates `n = 5`, neither in-block write is flagged. In-block writes
+        // never dominate, and are themselves always referenced.
+        //
+        // (Accepted divergence from RuboCop, NOT a target FP: the *outer*
+        // `n = 0` here — written only inside the block, never read — is still
+        // flagged by Murphy. RuboCop treats the capture as a virtual read at
+        // the block site and stays clean. This test only pins the in-block
+        // writes; the outer-write divergence is documented and out of scope.)
+        let ast = translate(
+            "def f\n  n = 0\n  [1, 2].each do\n    n = 5\n    n = 6\n  end\nend\n",
+            "test.rb",
+        );
+        let model = VarSemanticModel::build(&ast);
+        let n = captured_var(&ast, &model, "n");
+        // `n = 0` (outer) + `n = 5` + `n = 6` (both in block).
+        assert_eq!(n.assignments.len(), 3);
+        // Identify in-block writes by walking parents to a Block before the Def.
+        let def_id =
+            find_scope_node(&ast, ast.root(), |k| matches!(k, NodeKind::Def { .. })).unwrap();
+        let is_in_block = |node: NodeId| -> bool {
+            let mut cur = node;
+            while let Some(p) = ast.parent(cur).get() {
+                if p == def_id {
+                    return false;
+                }
+                if matches!(ast.kind(p), NodeKind::Block { .. }) {
+                    return true;
+                }
+                cur = p;
+            }
+            false
+        };
+        let in_block: Vec<&Assignment> = n
+            .assignments
+            .iter()
+            .filter(|a| is_in_block(a.node_id))
+            .collect();
+        assert_eq!(in_block.len(), 2, "two in-block writes to captured `n`");
+        assert!(
+            in_block.iter().all(|a| a.is_referenced),
+            "both in-block writes to captured `n` must be referenced"
+        );
+    }
+
+    #[test]
+    fn outer_dominated_write_still_flagged_despite_capture() {
+        // Discriminator: `n = 0; n = 1; each { use(n) }` — `n = 0` is dominated
+        // by the outer `n = 1` before any read, so it STAYS flagged even though
+        // `n` is captured (RuboCop: `n = 0` flagged, `n = 1` clean). Capture
+        // does NOT blanket-mark outer writes.
+        let ast = translate(
+            "def f\n  n = 0\n  n = 1\n  [1, 2].each { use(n) }\nend\n",
+            "test.rb",
+        );
+        let model = VarSemanticModel::build(&ast);
+        let n = captured_var(&ast, &model, "n");
+        assert_eq!(n.assignments.len(), 2, "two outer writes: n=0, n=1");
+        // n = 0 (first, dominated) must NOT be referenced.
+        assert!(
+            !n.assignments[0].is_referenced,
+            "outer `n = 0` dominated by `n = 1` must stay flagged"
+        );
+        // n = 1 (read via block) must be referenced.
+        assert!(
+            n.assignments[1].is_referenced,
+            "outer `n = 1` read by the block must be referenced"
+        );
+    }
+
+    #[test]
+    fn block_local_dead_write_still_flagged() {
+        // Regression guard g1: `dead` is a *block-local* (not captured), assigned
+        // and never read → still useless (RuboCop: flagged).
+        let ast = translate("[1, 2].each { |x| dead = x }", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let block_id =
+            find_scope_node(&ast, ast.root(), |k| matches!(k, NodeKind::Block { .. })).unwrap();
+        let scope = model.scope(block_id).expect("block scope");
+        let dead = scope
+            .variables
+            .iter()
+            .find(|v| resolve_sym(&ast, v.name) == "dead")
+            .expect("`dead` is block-local");
+        assert!(
+            !dead.assignments[0].is_referenced,
+            "block-local dead write must stay flagged (not captured)"
+        );
+    }
+
+    #[test]
+    fn assignment_in_block_call_arguments_is_not_captured() {
+        // Regression guard g4: `n = 1` sits in the block's RECEIVER CALL
+        // arguments (`items.each(n = 1) { … }`), which run in the parent scope
+        // at the call site — not the deferred block body. With `n` never read it
+        // must stay flagged (RuboCop: `n = 1` is useless); capture must not
+        // force-mark a call-side assignment referenced.
+        let ast = translate(
+            "def f(items)\n  items.each(n = 1) { |x| x }\nend\n",
+            "test.rb",
+        );
+        let model = VarSemanticModel::build(&ast);
+        let n = captured_var(&ast, &model, "n");
+        assert_eq!(n.assignments.len(), 1, "single write `n = 1`");
+        assert!(
+            !n.assignments[0].is_referenced,
+            "call-argument `n = 1` (parent scope, never read) must stay flagged"
         );
     }
 }

@@ -19,10 +19,15 @@
 //!   for `on_class`/`on_module`. A definition fires when its parent is a block
 //!   (block/numblock/itblock), or its parent is an implicit `begin` whose own
 //!   parent is a block. The `casgn` variant additionally requires a `nil`
-//!   scope (relative const assignment `BAR =`, not `Foo::BAR =`). The block's
-//!   method name is the nearest block ancestor's selector; `AllowedMethods`
-//!   (default `[enums]`) suppresses the offense and is user-configurable via a
-//!   `Vec<String>` runtime option, matching RuboCop's `include AllowedMethods`.
+//!   scope (relative const assignment `BAR =`, not `Foo::BAR =`). Murphy's
+//!   prism lowering drops a `cbase` scope, so `::BAR =` lowers to the same
+//!   `(casgn :BAR nil ...)` shape as `BAR =`; RuboCop matches only
+//!   `(casgn nil? ...)` and `::BAR` has a cbase (non-nil) scope, so the cop
+//!   interim-excludes a casgn whose source starts with `::` until the lowering
+//!   preserves cbase. The block's method name is the nearest block ancestor's
+//!   selector; `AllowedMethods` (default `[enums]`) suppresses the offense and
+//!   is user-configurable via a `Vec<String>` runtime option, matching
+//!   RuboCop's `include AllowedMethods`.
 //! ```
 //!
 //! ## Matched shapes
@@ -67,6 +72,14 @@ impl ConstantDefinitionInBlock {
             return;
         };
         if scope.get().is_some() {
+            return;
+        }
+        // Interim: murphy's prism lowering drops a `cbase` scope, so `::BAR = 1`
+        // lowers to the same `(casgn :BAR nil ...)` shape as `BAR = 1`. RuboCop
+        // matches only `(casgn nil? ...)`, and `::BAR` has a cbase (non-nil)
+        // scope, so it is not matched. Distinguish by the leading `::` in source
+        // until the lowering preserves cbase.
+        if cx.raw_source(cx.range(node)).trim_start().starts_with("::") {
             return;
         }
         self.check_definition(node, cx);
@@ -180,6 +193,19 @@ mod tests {
         test::<ConstantDefinitionInBlock>().expect_no_offenses(indoc! {r#"
             foo do
               Foo::BAR = 42
+            end
+        "#});
+    }
+
+    #[test]
+    fn does_not_flag_cbase_constant_assignment() {
+        // Mastodon FP: `::BAR =` has a `cbase` scope in RuboCop, so the
+        // `(casgn nil? ...)` matcher does not fire. Murphy's prism lowering
+        // drops the cbase (scope becomes nil), so it is distinguished here by
+        // the leading `::` in the source. Clean.
+        test::<ConstantDefinitionInBlock>().expect_no_offenses(indoc! {r#"
+            foo do
+              ::BAR = 1
             end
         "#});
     }

@@ -141,6 +141,23 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    // RuboCop's StatementModifier exempts a condition that assigns a local
+    // variable anywhere in its subtree (`condition.each_node.any?(&:lvasgn_type?)`).
+    // The condition is often parenthesised (`if (batch = next_batch)`), so the
+    // lvasgn lives below a `Begin` wrapper — a descendant walk (and a self-check)
+    // is required.
+    if crate::cops::util::condition_contains_lvasgn(cond, cx) {
+        return;
+    }
+
+    // RuboCop's StatementModifier exempts nodes spanning more than 3 nonempty
+    // physical lines (`nonempty_line_count > 3`). A single-line body that pulls
+    // in a multi-line heredoc, for example, makes the whole `if` too tall to be
+    // a sensible modifier even though the body node is "single-line".
+    if crate::cops::util::nonempty_line_count(node, cx) > 3 {
+        return;
+    }
+
     // Build the modifier-form candidate to check length.
     // `cond` was already extracted earlier in this function.
     let cond_src = cx.raw_source(cx.range(cond));
@@ -180,6 +197,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let replacement = format!("{body_src} {keyword} {cond_src}");
     cx.emit_edit(node_range, &replacement);
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -346,6 +364,32 @@ mod tests {
             unless condition
               # comment
               do_something
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_lvasgn_in_parenthesized_condition() {
+        // RuboCop's StatementModifier exempts conditions that assign a local
+        // variable: `if (batch = ...)` reads worse as a modifier and is a
+        // common intentional idiom.
+        test::<IfUnlessModifier>().expect_no_offenses(indoc! {"
+            if (batch = Thread.current[:batch])
+              batch.add_jobs([msg])
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_node_spanning_more_than_three_nonempty_lines() {
+        // A heredoc-bearing body makes the whole `if` node span >3 nonempty
+        // physical lines, so RuboCop's `nonempty_line_count > 3` exempts it.
+        test::<IfUnlessModifier>().expect_no_offenses(indoc! {"
+            if ENV.key?('WHITELIST_MODE')
+              warn(<<~MESSAGE.squish)
+                one
+                two
+              MESSAGE
             end
         "});
     }
