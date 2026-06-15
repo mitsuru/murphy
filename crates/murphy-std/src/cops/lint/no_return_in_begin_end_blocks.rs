@@ -47,18 +47,18 @@ impl NoReturnInBeginEndBlocks {
         let mut begin_block = None;
         for ancestor in cx.ancestors(node) {
             let kind = cx.kind(ancestor);
-            // An enclosing method or block (including lambdas/procs) scopes the
-            // `return` to itself — RuboCop's `on_kwbegin` only flags returns
-            // directly inside a `begin..end` value block, never those nested in
-            // a method or block.
-            if matches!(
-                kind,
-                NodeKind::Def { .. }
-                    | NodeKind::Defs { .. }
-                    | NodeKind::Block { .. }
-                    | NodeKind::Numblock { .. }
-                    | NodeKind::Itblock { .. }
-            ) || cx.is_lambda(ancestor)
+            // A `def`/`defs` or a lambda/proc scopes the `return` to itself, so a
+            // `return` nested in one does not skip the assignment and is not this
+            // cop's concern. A *non-lambda* block (`each { return }`, numblock,
+            // itblock) does NOT scope the return — it still exits the enclosing
+            // method, skipping the assignment — so RuboCop's
+            // `kwbegin.each_node(:return)` descends into it. Mirror that by
+            // continuing the walk up through plain blocks to the enclosing
+            // `begin`. (The `def`/lambda exclusions intentionally diverge from
+            // RuboCop's naive descent, which would flag returns that cannot
+            // actually escape the method.)
+            if matches!(kind, NodeKind::Def { .. } | NodeKind::Defs { .. })
+                || cx.is_lambda(ancestor)
             {
                 return;
             }
@@ -325,6 +325,19 @@ mod tests {
                 return 1
                 ^^^^^^^^ Do not `return` in `begin..end` blocks in assignment contexts.
               end
+            end
+        "#});
+    }
+
+    #[test]
+    fn rejects_return_in_non_lambda_block_inside_assigned_begin() {
+        // A `return` inside a non-lambda block still exits the enclosing method,
+        // skipping the assignment — RuboCop's `kwbegin.each_node(:return)`
+        // descends into the block and flags it, so Murphy must too.
+        test::<NoReturnInBeginEndBlocks>().expect_offense(indoc! {r#"
+            x = begin
+              items.each { return 1 }
+                           ^^^^^^^^ Do not `return` in `begin..end` blocks in assignment contexts.
             end
         "#});
     }
