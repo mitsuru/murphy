@@ -448,6 +448,182 @@ fn head_any_and_oneof_agree() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// 3b. OneOf head with CONCRETE children (murphy-b6nq). `(call _ :each_with_object
+// $_)` — `call` expands to `{send csend}` (resolve_head), and the concrete child
+// list `[_ :each_with_object $_]` is dispatched per union-variant schema: a send
+// (receiver is a nil-fillable `RecvOptNode`) AND a csend (receiver is a plain
+// `Node`) both match, capturing the single argument. Verified against standalone
+// `RuboCop::AST::NodePattern`: matches receiverless / receiver / safe-nav forms
+// with exactly one arg, captures the arg, rejects zero/two args. B==C throughout.
+// ────────────────────────────────────────────────────────────────────────
+
+def_node_matcher!(b_call_ewo_cap, "(call _ :each_with_object $_)");
+// Heterogeneous union: `int`'s schema (one fixed slot) can't accept two
+// children, so its dispatch arm is skipped (B) / count-mismatches (C) — an int
+// subject never matches, a send subject does. Grounded on standalone
+// `RuboCop::AST::NodePattern`: `({send int} _ :foo)` matches `x.foo`/`foo`, not `5`.
+def_node_matcher!(b_union_send_int_foo, "({send int} _ :foo)");
+
+#[test]
+fn oneof_head_with_concrete_children_dispatches_per_variant() {
+    let mut b = AstBuilder::new("each_with_object etc.", "t.rb");
+    let ewo = b.intern_symbol("each_with_object");
+    let xsym = b.intern_symbol("x");
+
+    // `each_with_object(0)` — receiverless send, one arg.
+    let zero_a = b.push(NodeKind::Int(0), r());
+    let args_a = b.push_list(&[zero_a]);
+    let recvless = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: ewo,
+            args: args_a,
+        },
+        r(),
+    );
+    // `x.each_with_object(0)` — send with receiver, one arg.
+    let recv_b = b.push(NodeKind::Lvar(xsym), r());
+    let zero_b = b.push(NodeKind::Int(0), r());
+    let args_b = b.push_list(&[zero_b]);
+    let with_recv = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv_b),
+            method: ewo,
+            args: args_b,
+        },
+        r(),
+    );
+    // `x&.each_with_object(0)` — csend (safe-nav), one arg. This exercises the
+    // csend dispatch arm, whose receiver is a plain `Node` (always present),
+    // distinct from the send arm's `RecvOptNode`.
+    let recv_c = b.push(NodeKind::Lvar(xsym), r());
+    let zero_c = b.push(NodeKind::Int(0), r());
+    let args_c = b.push_list(&[zero_c]);
+    let csend = b.push(
+        NodeKind::Csend {
+            receiver: recv_c,
+            method: ewo,
+            args: args_c,
+        },
+        r(),
+    );
+    // `each_with_object` — zero args: must NOT match (the `$_` arg slot is
+    // required).
+    let no_args = b.push_list(&[]);
+    let zero_arg = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: ewo,
+            args: no_args,
+        },
+        r(),
+    );
+    // `x.each_with_object(0, 1)` — two args: must NOT match.
+    let recv_d = b.push(NodeKind::Lvar(xsym), r());
+    let a0 = b.push(NodeKind::Int(0), r());
+    let a1 = b.push(NodeKind::Int(1), r());
+    let args_d = b.push_list(&[a0, a1]);
+    let two_args = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv_d),
+            method: ewo,
+            args: args_d,
+        },
+        r(),
+    );
+
+    let root_list = b.push_list(&[recvless, with_recv, csend, zero_arg, two_args]);
+    let root = b.push(NodeKind::Begin(root_list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // Positive: send (receiverless), send (receiver), csend — all match and
+    // capture the single argument. B==C on hit/miss and the captured id.
+    for (subject, arg, label) in [
+        (recvless, zero_a, "receiverless send"),
+        (with_recv, zero_b, "send with receiver"),
+        (csend, zero_c, "csend"),
+    ] {
+        let b_cap: Option<(NodeId,)> = b_call_ewo_cap(subject, &cx);
+        assert_eq!(
+            b_cap,
+            Some((arg,)),
+            "B: (call _ :each_with_object $_) must match {label} and capture its arg"
+        );
+        let c = assert_c_matches("(call _ :each_with_object $_)", &ast, subject, true)
+            .expect("C also matched");
+        match c.get(0).cloned() {
+            Some(CaptureValue::Node(ci)) => {
+                assert_eq!(ci, arg, "{label}: backends disagree on captured arg id")
+            }
+            other => panic!("{label}: C capture not a Node: {other:?}"),
+        }
+    }
+
+    // Negative: zero-arg and two-arg calls must NOT match, on both backends.
+    for (subject, label) in [(zero_arg, "zero args"), (two_args, "two args")] {
+        assert!(
+            b_call_ewo_cap(subject, &cx).is_none(),
+            "B: must NOT match {label}"
+        );
+        assert_c_matches("(call _ :each_with_object $_)", &ast, subject, false);
+    }
+}
+
+#[test]
+fn oneof_head_with_concrete_children_skips_arity_incompatible_member() {
+    // A union member whose schema can't accept the children (`int`: one fixed
+    // slot, given two children) gets NO B dispatch arm — it falls to the
+    // catch-all fail — and the C interpreter count-mismatches the same way, so
+    // an int subject never matches while a send subject does (murphy-b6nq).
+    let mut b = AstBuilder::new("x.foo; foo; 5", "t.rb");
+    let foo = b.intern_symbol("foo");
+    let xsym = b.intern_symbol("x");
+    let empty = b.push_list(&[]);
+    let recv = b.push(NodeKind::Lvar(xsym), r());
+    let send_recv = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv),
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    let send_bare = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::NONE,
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    let int_node = b.push(NodeKind::Int(5), r());
+    let root_list = b.push_list(&[send_recv, send_bare, int_node]);
+    let root = b.push(NodeKind::Begin(root_list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    // Both sends match (the `int` arm is skipped, the `send` arm fires); the
+    // int subject hits the catch-all fail. B==C on all three.
+    for (subject, expect, label) in [
+        (send_recv, true, "x.foo (send)"),
+        (send_bare, true, "foo (receiverless send)"),
+        (int_node, false, "5 (int — arity-incompatible union member)"),
+    ] {
+        assert_eq!(
+            b_union_send_int_foo(subject, &cx),
+            expect,
+            "B: ({{send int}} _ :foo) on {label}"
+        );
+        assert_c_matches("({send int} _ :foo)", &ast, subject, expect);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // 4. Union / Not.
 // ────────────────────────────────────────────────────────────────────────
 

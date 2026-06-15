@@ -54,22 +54,21 @@
 //!
 //! ## Implementation
 //!
-//! Four [`def_node_matcher!`] patterns cover the four outer/inner
-//! Send/Csend combinations:
+//! A single [`def_node_matcher!`] pattern `(call (call _ :pluck _ ...)
+//! :first)` covers all four outer/inner Send/Csend combinations, because
+//! the `call` head expands to `{send csend}` at each level (murphy-b6nq) —
+//! mirroring RuboCop-rails' `(call (call _ :pluck ...) :first)`:
 //!
-//! - `is_pluck_first_send`: outer Send + inner Send (original shape).
-//! - `is_pluck_first_send_csend_inner`: outer Send + inner Csend
-//!   (`x&.pluck(:a).first`).
-//! - `is_pluck_first_csend_outer`: outer Csend + inner Send
-//!   (`x.pluck(:a)&.first`).
-//! - `is_pluck_first_csend_both`: outer Csend + inner Csend
-//!   (`x&.pluck(:a)&.first`).
+//! - outer Send + inner Send: `Post.pluck(:id).first`.
+//! - outer Send + inner Csend: `x&.pluck(:a).first`.
+//! - outer Csend + inner Send: `x.pluck(:a)&.first`.
+//! - outer Csend + inner Csend: `x&.pluck(:a)&.first`.
 //!
 //! `_ ...` in the inner node's argument list means "one wildcard
 //! followed by zero-or-more rest" — i.e. ≥1 arg — which rules out the
-//! zero-arg `pluck.first` shape. Trailing argument placeholders are
-//! omitted on the outer node (it must take exactly zero args, ruling
-//! out `.first(5)`).
+//! zero-arg `pluck.first` shape (a deliberate divergence from upstream's
+//! bare `...`). Trailing argument placeholders are omitted on the outer
+//! node (it must take exactly zero args, ruling out `.first(5)`).
 //!
 //! ## Offense message
 //!
@@ -99,42 +98,16 @@ use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_ma
 
 // --- node-pattern matchers --------------------------------------------------
 //
-// RuboCop uses a single `(call ...)` wildcard that matches both `send` and
-// `csend`. Murphy has no `call` alias, so we need four separate matchers
-// to cover all four outer/inner combinations.
+// A single `call` head matches both `send` and `csend` at each level
+// (murphy-b6nq), collapsing the four outer/inner combinations into one matcher
+// that mirrors RuboCop-rails' `(call (call _ :pluck ...) :first)`.
 //
 // Pattern grammar: `_ ...` = one wildcard + rest ≥0 → arity ≥1 (excludes
-// zero-arg `pluck.first`). No trailing placeholders on the outer node
-// (outer must have exactly zero args, ruling out `.first(5)`).
-
-// Outer send, inner send: `Post.pluck(:id).first`
-def_node_matcher!(is_pluck_first_send, "(send (send _ :pluck _ ...) :first)");
-
-// Outer send, inner csend: `x&.pluck(:a).first`
-def_node_matcher!(
-    is_pluck_first_send_csend_inner,
-    "(send (csend _ :pluck _ ...) :first)"
-);
-
-// Outer csend, inner send: `x.pluck(:a)&.first`
-def_node_matcher!(
-    is_pluck_first_csend_outer,
-    "(csend (send _ :pluck _ ...) :first)"
-);
-
-// Outer csend, inner csend: `x&.pluck(:a)&.first`
-def_node_matcher!(
-    is_pluck_first_csend_both,
-    "(csend (csend _ :pluck _ ...) :first)"
-);
-
-/// Returns true if `node` matches any of the four pluck-first patterns.
-fn is_any_pluck_first(node: NodeId, cx: &Cx<'_>) -> bool {
-    is_pluck_first_send(node, cx)
-        || is_pluck_first_send_csend_inner(node, cx)
-        || is_pluck_first_csend_outer(node, cx)
-        || is_pluck_first_csend_both(node, cx)
-}
+// zero-arg `pluck.first`). This `_ ...` is a deliberate divergence from
+// upstream's bare `...` (which would also match zero-arg `pluck.first`); see
+// the `does_not_flag_pluck_zero_args_then_first` test. No trailing placeholders
+// on the outer node (outer must have exactly zero args, ruling out `.first(5)`).
+def_node_matcher!(is_pluck_first, "(call (call _ :pluck _ ...) :first)");
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
 #[derive(Default)]
@@ -173,7 +146,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    if !is_any_pluck_first(node, cx) {
+    if !is_pluck_first(node, cx) {
         return;
     }
 
