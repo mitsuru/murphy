@@ -648,5 +648,27 @@ mod tests {
             end
         "#});
     }
+
+    #[test]
+    fn does_not_flag_numblock_with_inner_hash_braces() {
+        // A numbered-parameter block whose body is a hash literal
+        // (`items.map { {value: _1} }`). The block's own braces are spaced
+        // correctly; the inner hash `{` must NOT be mistaken for the block opener
+        // (it would otherwise be flagged "Space missing inside {").
+        test::<SpaceInsideBlockBraces>().expect_no_offenses("items.map { {value: _1} }\n");
+    }
+
+    #[test]
+    fn flags_numblock_own_brace_spacing() {
+        // The block's own braces ARE still checked on a numblock (`{_1}` is
+        // missing the inner spaces), confirming the opener is located correctly.
+        let opts = SpaceInsideBlockBracesOptions {
+            enforced_style: BlockBraceStyle::Space,
+            empty_style: EmptyBlockBraceStyle::NoSpace,
+            space_before_block_parameters: true,
+        };
+        let result = run_cop_with_options_and_edits::<SpaceInsideBlockBraces>("items.map {_1}\n", &opts);
+        assert_eq!(result.offenses.len(), 2, "offenses: {:?}", result.offenses);
+    }
 }
 murphy_plugin_api::submit_cop!(SpaceInsideBlockBraces);

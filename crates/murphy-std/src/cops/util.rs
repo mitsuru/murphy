@@ -209,12 +209,13 @@ fn is_assignment_or_comparison_operator(text: &str) -> bool {
     if text == "<<" {
         return true;
     }
-    // Everything reaching here ends with `=`. `<=>` (the spaceship) ends with
-    // `>`, so it was already filtered out by the `ends_with('=')` check.
-    // Op-assignments and the `=`-ending comparisons all qualify; a lone `=`
-    // (setter / assignment) is the bare-`=` case and qualifies too, matching
-    // RuboCop's `tEQL`.
-    text.ends_with('=')
+    // Everything reaching here must end with `=`. `<=>` (the spaceship) ends
+    // with `>`, so it was already filtered out. Op-assignments and the
+    // `=`-ending comparisons all qualify; a lone `=` (setter / assignment) is
+    // the bare-`=` case and qualifies too, matching RuboCop's `tEQL`. The
+    // all-punctuation guard excludes a setter-method identifier token like
+    // `foo=`, which ends with `=` but is not an operator.
+    text.ends_with('=') && text.bytes().all(|b| b.is_ascii_punctuation())
 }
 
 /// RuboCop's `aligned_equals_operator?` (the `aligned_token?`/`aligned_operator?`
@@ -980,5 +981,33 @@ fn blank_run_range(lines: &[PhysicalLine], idx: usize, dir: BlankRunDirection) -
     Range {
         start: lines[lo].start,
         end: lines[hi].end,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_assignment_or_comparison_operator;
+
+    #[test]
+    fn operator_classifier_accepts_operators_and_rejects_setter_identifiers() {
+        // `=`-ending operators and `<<` qualify (RuboCop's `aligned_equals_operator?`).
+        for op in [
+            "=", "==", "===", "!=", "<=", ">=", "+=", "-=", "*=", "||=", "&&=", "<<=", "<<",
+        ] {
+            assert!(
+                is_assignment_or_comparison_operator(op),
+                "{op} should qualify"
+            );
+        }
+        // A setter-method identifier token also ends with `=` but is NOT an
+        // operator — it must be rejected so it is not treated as alignment.
+        for ident in ["foo=", "bar=", "value="] {
+            assert!(
+                !is_assignment_or_comparison_operator(ident),
+                "{ident} (setter identifier) must not qualify"
+            );
+        }
+        // The spaceship does not end with `=` and never reaches the guard.
+        assert!(!is_assignment_or_comparison_operator("<=>"));
     }
 }

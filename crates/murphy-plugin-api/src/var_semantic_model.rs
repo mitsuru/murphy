@@ -200,10 +200,16 @@ fn is_in_captured_block(ast: &Ast, scope_root: NodeId, node: NodeId) -> bool {
             return false;
         }
         match *ast.kind(parent) {
-            NodeKind::Block { .. }
-            | NodeKind::Numblock { .. }
-            | NodeKind::Itblock { .. }
-            | NodeKind::Lambda => return true,
+            // Only the deferred block BODY captures the variable. The block's
+            // receiver call and its arguments (`items.each(n = 1) { … }`) run in
+            // the parent scope at the call site, so an assignment reached via the
+            // `call`/`send` child is NOT captured — fall through and keep walking
+            // outward.
+            NodeKind::Block { call, .. } if current != call => return true,
+            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } if current != send => {
+                return true;
+            }
+            NodeKind::Lambda => return true,
             // Hard local-scope boundary: stop without claiming capture.
             NodeKind::Def { .. }
             | NodeKind::Defs { .. }
@@ -1362,6 +1368,26 @@ mod tests {
         assert!(
             !dead.assignments[0].is_referenced,
             "block-local dead write must stay flagged (not captured)"
+        );
+    }
+
+    #[test]
+    fn assignment_in_block_call_arguments_is_not_captured() {
+        // Regression guard g4: `n = 1` sits in the block's RECEIVER CALL
+        // arguments (`items.each(n = 1) { … }`), which run in the parent scope
+        // at the call site — not the deferred block body. With `n` never read it
+        // must stay flagged (RuboCop: `n = 1` is useless); capture must not
+        // force-mark a call-side assignment referenced.
+        let ast = translate(
+            "def f(items)\n  items.each(n = 1) { |x| x }\nend\n",
+            "test.rb",
+        );
+        let model = VarSemanticModel::build(&ast);
+        let n = captured_var(&ast, &model, "n");
+        assert_eq!(n.assignments.len(), 1, "single write `n = 1`");
+        assert!(
+            !n.assignments[0].is_referenced,
+            "call-argument `n = 1` (parent scope, never read) must stay flagged"
         );
     }
 }
