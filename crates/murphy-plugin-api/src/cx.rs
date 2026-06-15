@@ -540,6 +540,16 @@ impl<'a> Cx<'a> {
         self.raw.indentation_width as i64
     }
 
+    /// The run-wide resolved `Naming/BlockForwarding.EnforcedStyle == "explicit"`.
+    ///
+    /// RuboCop's `Style/ArgumentsForwarding#explicit_block_name?` reads
+    /// `config.for_cop('Naming/BlockForwarding')['EnforcedStyle']`; when it is
+    /// `explicit` a named block argument is kept (never anonymized to `&`).
+    /// Default `false` (RuboCop's `anonymous`).
+    pub fn block_forwarding_explicit(&self) -> bool {
+        self.raw.block_forwarding_explicit
+    }
+
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
     pub fn alloc_node_slice(&self, elements: &[NodeId]) -> &'a [NodeId] {
         if elements.is_empty() {
@@ -3170,6 +3180,7 @@ mod tests {
             target_ruby_version: 0,
             config_disabled_cops: std::ptr::null(),
             config_disabled_cops_len: 0,
+            block_forwarding_explicit: false,
         }
     }
 
@@ -3203,6 +3214,24 @@ mod tests {
         );
         assert!(!cx.rails_version_at_least(6, 0));
         assert!(cx.rails_version_at_least(5, 2));
+    }
+
+    #[test]
+    fn block_forwarding_explicit_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+
+        raw.block_forwarding_explicit = true;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.block_forwarding_explicit());
+
+        raw.block_forwarding_explicit = false;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.block_forwarding_explicit());
     }
 
     #[test]

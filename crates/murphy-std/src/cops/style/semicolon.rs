@@ -80,12 +80,25 @@ impl Semicolon {
         let source = cx.source();
         let bytes = source.as_bytes();
         let tokens = cx.sorted_tokens();
+        // A lone `;` whose entire string/symbol literal content is `;` is
+        // tokenized as an `Other` `b";"` token; skip those — they are literal
+        // text, not statement separators (see `string_literal_content_ranges`).
+        let literal_ranges = crate::cops::util::string_literal_content_ranges(cx);
 
         for (i, tok) in tokens.iter().enumerate() {
             if !is_semicolon(tok, bytes) {
                 continue;
             }
-            let flag = should_flag(i, tokens, bytes, opts.allow_as_expression_separator);
+            if crate::cops::util::offset_within_any(tok.range.start, &literal_ranges) {
+                continue;
+            }
+            let flag = should_flag(
+                i,
+                tokens,
+                bytes,
+                opts.allow_as_expression_separator,
+                &literal_ranges,
+            );
             if flag {
                 cx.emit_offense(tok.range, MSG, None);
             }
@@ -112,6 +125,7 @@ fn should_flag(
     tokens: &[murphy_plugin_api::SourceToken],
     bytes: &[u8],
     allow_separator: bool,
+    literal_ranges: &[murphy_plugin_api::Range],
 ) -> bool {
     let semi_start = tokens[idx].range.start as usize;
 
@@ -134,6 +148,19 @@ fn should_flag(
     // (3) Before closing `}`.
     if next.is_some_and(|n| tokens[n].kind == SourceTokenKind::RightBrace) {
         return true;
+    }
+
+    // Empty-body single-line control construct: `until cond; end`,
+    // `while x; end`, `for … ; end`. The `;` is the construct's grammatical
+    // body separator (its `do`), not a statement separator — RuboCop, whose
+    // check fires only when a line carries two or more statements, never flags
+    // it. Recognised by: next token is `end`, the line's first significant
+    // token is a loop/conditional keyword, and no other `;` lies between that
+    // keyword and this one (which would mean a real multi-statement body).
+    if next.is_some_and(|n| is_end_keyword(&tokens[n], bytes))
+        && empty_body_control_separator(idx, tokens, bytes, literal_ranges)
+    {
+        return false;
     }
 
     // (4) Trailing: nothing significant after `;` on this line.
@@ -220,6 +247,61 @@ fn line_of(bytes: &[u8], pos: usize) -> usize {
     bytes[..pos].iter().filter(|&&b| b == b'\n').count()
 }
 
+/// True when `tok` is the `end` keyword.
+fn is_end_keyword(tok: &murphy_plugin_api::SourceToken, bytes: &[u8]) -> bool {
+    tok.kind == SourceTokenKind::Other
+        && &bytes[tok.range.start as usize..tok.range.end as usize] == b"end"
+}
+
+/// True when the `;` at `tokens[idx]` is the body separator of an empty-body
+/// single-line control construct (`until cond; end`, `while x; end`,
+/// `for … ; end`). That holds when the line's first significant token is a
+/// loop/conditional keyword and no other `;` lies between it and this one — a
+/// second `;` would indicate a real multi-statement body, where RuboCop does
+/// flag every separator.
+fn empty_body_control_separator(
+    idx: usize,
+    tokens: &[murphy_plugin_api::SourceToken],
+    bytes: &[u8],
+    literal_ranges: &[murphy_plugin_api::Range],
+) -> bool {
+    let semi_start = tokens[idx].range.start as usize;
+    let mut first_kw: Option<&[u8]> = None;
+    for i in (0..idx).rev() {
+        let tok = &tokens[i];
+        let tok_start = tok.range.start as usize;
+        // Tokens are sorted, so any newline between this token and the `;`
+        // means we have crossed onto an earlier line. Scanning the in-between
+        // bytes keeps the whole scan O(N) for the file; computing absolute line
+        // numbers per token would be O(N^2) on long lines.
+        if bytes[tok_start..semi_start].contains(&b'\n') {
+            break;
+        }
+        match tok.kind {
+            SourceTokenKind::Comment
+            | SourceTokenKind::Newline
+            | SourceTokenKind::IgnoredNewline => continue,
+            SourceTokenKind::Other => {
+                let text = &bytes[tok.range.start as usize..tok.range.end as usize];
+                // Another `;` before the keyword → a real multi-statement body.
+                // A `;` inside a string/symbol literal (e.g. `while x == ';';
+                // end`) is literal text, not a separator, so it must not count.
+                if text == b";"
+                    && !crate::cops::util::offset_within_any(tok.range.start, literal_ranges)
+                {
+                    return false;
+                }
+                first_kw = Some(text);
+            }
+            _ => first_kw = None,
+        }
+    }
+    matches!(
+        first_kw,
+        Some(b"while" | b"until" | b"for" | b"if" | b"unless" | b"case")
+    )
+}
+
 /// Returns true if the `;` is a `def`/`class`/`module` one-liner signature
 /// separator that should NOT be flagged.
 ///
@@ -297,6 +379,68 @@ fn is_def_like_separator(
 mod tests {
     use super::{Semicolon, SemicolonOptions};
     use murphy_plugin_api::test_support::{indoc, test};
+
+    // ----- Semicolons inside string/symbol literals are not Ruby syntax -----
+
+    #[test]
+    fn does_not_flag_semicolon_that_is_string_content() {
+        // `';'` is a string whose entire content is `;`; the lexer never emits
+        // a `tSEMI` there, so RuboCop (and Murphy) must not flag it.
+        test::<Semicolon>().expect_no_offenses("x = ';'\n");
+        test::<Semicolon>().expect_no_offenses("y = [1].join(';')\n");
+    }
+
+    #[test]
+    fn does_not_flag_semicolon_that_is_symbol_content() {
+        // `:';'` is a symbol whose content is `;`; `string_literal_content_ranges`
+        // covers `Sym` nodes, so the literal `;` must not be flagged.
+        test::<Semicolon>().expect_no_offenses("x = :';'\n");
+        test::<Semicolon>().expect_no_offenses("h = { foo: :';' }\n");
+    }
+
+    #[test]
+    fn does_not_flag_semicolon_when_whole_file_is_a_literal() {
+        // The whole program is a bare `;`-bearing literal, so the root node *is*
+        // the `Str`/`Sym` — its content range must still be covered.
+        test::<Semicolon>().expect_no_offenses("';'\n");
+        test::<Semicolon>().expect_no_offenses(":';'\n");
+    }
+
+    #[test]
+    fn does_not_flag_semicolon_in_dstr_string_part() {
+        // The `;` sits in a literal string part between two interpolations.
+        test::<Semicolon>().expect_no_offenses("x = \"a=#{b};#{c}\"\n");
+    }
+
+    #[test]
+    fn still_flags_semicolon_inside_interpolation_code() {
+        // A `;` inside `#{ ... }` is real code (a `begin` with two statements),
+        // not string content — it must still be flagged.
+        test::<Semicolon>().expect_offense(indoc! {r#"
+            x = "a#{b; c}d"
+                     ^ Do not use semicolons to terminate expressions.
+        "#});
+    }
+
+    // ----- Grammatical separator before `end` -----
+
+    #[test]
+    fn does_not_flag_semicolon_before_end_keyword() {
+        // A `;` immediately before `end` is the grammatical body separator of a
+        // loop/conditional (the `do`/`then`), not an expression terminator;
+        // RuboCop never flags it.
+        test::<Semicolon>().expect_no_offenses("until cond.nil?; end\n");
+        test::<Semicolon>().expect_no_offenses("while x; end\n");
+    }
+
+    #[test]
+    fn does_not_flag_semicolon_before_end_with_literal_semicolon_in_condition() {
+        // The `;` inside the string literal in the condition is literal text,
+        // not a statement separator, so the body is still empty and the
+        // grammatical `;` before `end` must not be flagged.
+        test::<Semicolon>().expect_no_offenses("while x == ';'; end\n");
+        test::<Semicolon>().expect_no_offenses("until x == :';'; end\n");
+    }
 
     // ----- Trailing semicolons -----
 

@@ -76,41 +76,58 @@ fn regexp_body_bounds(src: &str) -> (usize, usize) {
 }
 
 fn find_unescaped_brackets(s: &str, body_start: usize, body_end: usize) -> Vec<usize> {
+    let bytes = s.as_bytes();
     let mut positions = Vec::new();
     let mut in_cc = false;
     let mut cc_just_opened = false;
-    let mut chars = s.char_indices();
+    let mut i = body_start;
 
-    while let Some((idx, ch)) = chars.next() {
-        if idx < body_start || idx >= body_end {
-            continue;
-        }
-        match ch {
-            '\\' => {
-                chars.next();
+    while i < body_end {
+        match bytes[i] {
+            b'\\' => {
+                // Skip the escaped byte (ASCII escapes; a multi-byte escapee's
+                // continuation bytes fall through harmlessly on later passes).
+                i += 2;
                 cc_just_opened = false;
+                continue;
             }
-            '[' if !in_cc => {
+            b'[' if !in_cc => {
                 in_cc = true;
                 cc_just_opened = true;
             }
-            '^' if cc_just_opened => {
+            // Inside a character class, `[:name:]`, `[.coll.]` and `[=equiv=]`
+            // are POSIX bracket / collating / equivalence expressions, not
+            // nested classes — their `]` must not close the outer class. Skip
+            // to the matching `<kind>]`.
+            b'[' if in_cc && i + 1 < body_end && matches!(bytes[i + 1], b':' | b'.' | b'=') => {
+                let kind = bytes[i + 1];
+                let mut j = i + 2;
+                while j + 1 < body_end && !(bytes[j] == kind && bytes[j + 1] == b']') {
+                    j += 1;
+                }
+                // Advance past the closing `<kind>]` (or to body_end if absent).
+                i = if j + 1 < body_end { j + 2 } else { body_end };
+                cc_just_opened = false;
+                continue;
+            }
+            b'^' if cc_just_opened => {
                 cc_just_opened = true;
             }
-            ']' => {
+            b']' => {
                 if cc_just_opened {
                     cc_just_opened = false;
                 } else if in_cc {
                     in_cc = false;
                     cc_just_opened = false;
-                } else if idx > body_start {
-                    positions.push(idx);
+                } else if i > body_start {
+                    positions.push(i);
                 }
             }
             _ => {
                 cc_just_opened = false;
             }
         }
+        i += 1;
     }
     positions
 }
@@ -228,6 +245,32 @@ mod tests {
     fn accepts_character_class_in_percent_r_regexp() {
         test::<UnescapedBracketInRegexp>().expect_no_offenses(indoc! {r#"
             %r{[abc]}
+        "#});
+    }
+
+    #[test]
+    fn accepts_posix_bracket_class_inside_character_class() {
+        // `[[:alnum:]]` etc.: the inner `[:…:]` is a POSIX bracket expression,
+        // not a nested class; its `]` must not close the outer class and leave
+        // the real `]` looking unescaped.
+        test::<UnescapedBracketInRegexp>().expect_no_offenses("/[[:alnum:]:]/\n");
+        test::<UnescapedBracketInRegexp>().expect_no_offenses("/[[:word:]]/\n");
+        test::<UnescapedBracketInRegexp>()
+            .expect_no_offenses("%r{(?<![=/[:word:]])@username}\n");
+    }
+
+    #[test]
+    fn accepts_collating_and_equivalence_classes() {
+        test::<UnescapedBracketInRegexp>().expect_no_offenses("/[[.span-ll.]x]/\n");
+        test::<UnescapedBracketInRegexp>().expect_no_offenses("/[[=a=]b]/\n");
+    }
+
+    #[test]
+    fn still_flags_unescaped_bracket_after_posix_class() {
+        // A genuinely unescaped `]` outside the class must still be flagged.
+        test::<UnescapedBracketInRegexp>().expect_offense(indoc! {r#"
+            /[[:alnum:]]abc]/
+                           ^ Regular expression has `]` without escape.
         "#});
     }
 

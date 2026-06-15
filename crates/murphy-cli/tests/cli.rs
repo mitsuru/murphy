@@ -281,6 +281,362 @@ fn lint_file_with_todo_comment_skips_current_line_only() {
     assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
 }
 
+/// RuboCop-compatible: `# rubocop:disable` (not just `# murphy:disable`) must
+/// suppress offenses. Real-world Ruby codebases (e.g. Mastodon) annotate with
+/// the `rubocop:` prefix; Murphy aims to lint them without rewrites.
+#[test]
+fn lint_file_with_rubocop_disable_block_comment_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_block.rb");
+    fs::write(
+        &path,
+        // Proper block form: the disable is re-enabled so this isolates
+        // suppression (a dangling disable would correctly trip
+        // Lint/MissingCopEnableDirective, like RuboCop).
+        "# frozen_string_literal: true\n\n# rubocop:disable Lint/Debugger\ndebugger\n# rubocop:enable Lint/Debugger\n",
+    )
+    .expect("write rc_block.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+/// Same-line trailing `# rubocop:disable <Cop>` suppresses the offense on its
+/// own line.
+#[test]
+fn lint_rubocop_disable_same_line_trailing_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_trailing.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Lint/Debugger\n",
+    )
+    .expect("write rc_trailing.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+/// Comma-separated cop lists: `# rubocop:disable A, B` must extract each cop,
+/// not treat `A,` (with the trailing comma) as the cop name.
+#[test]
+fn lint_rubocop_disable_comma_separated_cops_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_comma.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Style/SomethingElse, Lint/Debugger\n",
+    )
+    .expect("write rc_comma.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+/// A `-- reason` suffix after the cop list must be stripped before matching the
+/// cop name, mirroring RuboCop's directive grammar.
+#[test]
+fn lint_rubocop_disable_with_reason_suffix_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_reason.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Lint/Debugger -- left for diagnostics\n",
+    )
+    .expect("write rc_reason.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
+/// A `# rubocop:disable` that appears inside a string literal (not a real
+/// comment) must NOT disable the cop — the directive scanner reads the parser's
+/// comment table, not raw line text. The `debugger` on the next line must still
+/// be flagged.
+#[test]
+fn lint_directive_inside_string_literal_is_not_honored() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dir_in_str.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\nputs '# rubocop:disable Lint/Debugger'\ndebugger\n",
+    )
+    .expect("write dir_in_str.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(parsed.len(), 1, "expected one offense, got {parsed:?}");
+    assert_eq!(
+        parsed[0]["cop_name"], "Lint/Debugger",
+        "string-embedded directive must not suppress the real debugger offense, got {parsed:?}"
+    );
+}
+
+/// RuboCop's "inner directive": a `# rubocop:disable` that follows other comment
+/// text on the same comment line is still honored.
+#[test]
+fn lint_inner_directive_after_comment_text_is_honored() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("inner.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # keep this # rubocop:disable Lint/Debugger\n",
+    )
+    .expect("write inner.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
+/// A trailing `code # rubocop:disable <Cop>` is line-local — it must NOT suppress
+/// the cop on subsequent lines (RuboCop comment-directive scope).
+#[test]
+fn lint_trailing_disable_is_line_local() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("trailing_local.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Lint/Debugger\ndebugger\n",
+    )
+    .expect("write trailing_local.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "a trailing disable must only scope its own line, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
+}
+
+/// A RuboCop department directive (`# rubocop:disable Lint`, no slash) suppresses
+/// every cop in that department — `Lint/Debugger` here.
+#[test]
+fn lint_department_directive_suppresses_cop_in_department() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dept.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable Lint\n",
+    )
+    .expect("write dept.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
+/// A department directive must NOT suppress cops in a different department:
+/// `# rubocop:disable Lint` leaves a `Style/*` offense reported.
+#[test]
+fn lint_department_directive_does_not_suppress_other_departments() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dept_neg.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\nputs \"hi\" # rubocop:disable Lint\n",
+    )
+    .expect("write dept_neg.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert!(
+        parsed
+            .iter()
+            .any(|o| o["cop_name"] == "Style/StringLiterals"),
+        "a Lint department disable must not silence Style cops, got {parsed:?}"
+    );
+}
+
+/// RuboCop treats `# rubocop:todo` as an alias of `disable`: a full-line todo
+/// (own line, no trailing code) persists as a range directive and suppresses the
+/// *following* line's offense, not just its own.
+#[test]
+fn lint_full_line_rubocop_todo_persists_like_disable() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("fullline_todo.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:todo Lint/Debugger\ndebugger\n",
+    )
+    .expect("write fullline_todo.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
+/// RuboCop allows re-enabling a specific cop inside a `disable all` region:
+/// `# rubocop:disable all` then `# rubocop:enable Lint/Debugger` must let the
+/// `Lint/Debugger` offense through again, even though the rest stays disabled.
+#[test]
+fn lint_enable_specific_cop_inside_disable_all_region() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("disable_all_enable.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable all\n# rubocop:enable Lint/Debugger\ndebugger\n",
+    )
+    .expect("write disable_all_enable.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert!(
+        parsed.iter().any(|o| o["cop_name"] == "Lint/Debugger"),
+        "enable inside a disable-all region must re-enable that cop, got {parsed:?}"
+    );
+}
+
+/// A dangling full-line department disable (`# rubocop:disable Lint`, no matching
+/// enable) must still surface `Lint/MissingCopEnableDirective`: a directive must
+/// never suppress the directive-validation cop that reports on it, even though
+/// that cop lives in the disabled `Lint` department.
+#[test]
+fn lint_dangling_department_disable_still_warns_missing_enable() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("dangling_dept.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable Lint\ndebugger\n",
+    )
+    .expect("write dangling_dept.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert!(
+        parsed
+            .iter()
+            .any(|o| o["cop_name"] == "Lint/MissingCopEnableDirective"),
+        "a dangling department disable must not silence its own missing-enable warning, got {parsed:?}"
+    );
+    // The real debugger offense stays suppressed by the department disable.
+    assert!(
+        !parsed.iter().any(|o| o["cop_name"] == "Lint/Debugger"),
+        "the department disable must still suppress Lint/Debugger, got {parsed:?}"
+    );
+}
+
+/// RuboCop-compatible: a same-line `# rubocop:todo <Cop>` suppresses the offense
+/// on its own line, like `# murphy:todo`.
+#[test]
+fn lint_rubocop_todo_same_line_suppresses() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("rc_todo.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:todo Lint/Debugger\n",
+    )
+    .expect("write rc_todo.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0);
+
+    assert_eq!(assert.get_output().stdout, b"[]\n");
+}
+
 #[test]
 fn lint_file_with_todo_without_cop_suppresses_all_offenses_on_line() {
     let dir = tempdir().expect("create tempdir");

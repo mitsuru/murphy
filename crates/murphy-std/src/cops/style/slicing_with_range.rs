@@ -95,9 +95,14 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         node_range
     };
 
+    // An exclusive `-1` end (`ary[n...-1]`) drops the last element, so it is
+    // NOT equivalent to the endless `ary[n...]` and RuboCop never flags it. The
+    // `-1` collapse applies to inclusive ranges only.
+    let end_minus_one_collapsible = is_minus_one(end_, cx) && !exclusive;
+
     // Pattern 1 (highest precedence): useless range.
-    // `ary[0..-1]`, `ary[0..]`, `ary[0...]` — begin=0, end=-1 or absent.
-    if is_zero(begin_, cx) && (is_minus_one(end_, cx) || end_.get().is_none()) {
+    // `ary[0..-1]`, `ary[0..]`, `ary[0...]` — begin=0, inclusive end=-1 or absent.
+    if is_zero(begin_, cx) && (end_minus_one_collapsible || end_.get().is_none()) {
         let bracket_src = cx.raw_source(bracket_region);
         let msg = format!("Remove the useless `{bracket_src}`.");
         cx.emit_offense(bracket_region, &msg, None);
@@ -109,10 +114,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // `ary[n..-1]` where begin is present and not a nil literal, end is -1.
     // Already-endless (`ary[n..]`) is not flagged (end absent).
     if let Some(begin_id) = begin_.get()
-        && !is_nil_literal(begin_id, cx) && is_minus_one(end_, cx) {
+        && !is_nil_literal(begin_id, cx) && end_minus_one_collapsible {
             let begin_src = cx.raw_source(cx.range(begin_id));
-            let op = if exclusive { "..." } else { ".." };
-            let prefer_bracket = format!("[{begin_src}{op}]");
+            let prefer_bracket = format!("[{begin_src}..]");
             let current_bracket = cx.raw_source(bracket_region);
             let msg = format!("Prefer `{prefer_bracket}` over `{current_bracket}`.");
             cx.emit_offense(bracket_region, &msg, None);
@@ -214,14 +218,13 @@ mod tests {
     }
 
     #[test]
-    fn flags_partial_exclusive_to_minus_one() {
-        test::<SlicingWithRange>().expect_correction(
-            indoc! {r#"
-                ary[2...-1]
-                   ^^^^^^^^ Prefer `[2...]` over `[2...-1]`.
-            "#},
-            "ary[2...]\n",
-        );
+    fn accepts_exclusive_to_minus_one() {
+        // `ary[2...-1]` excludes the last element, so it is NOT equivalent to
+        // the endless `ary[2...]`; RuboCop leaves it alone (it would otherwise
+        // be an unsafe, behaviour-changing autocorrect).
+        test::<SlicingWithRange>().expect_no_offenses("ary[2...-1]\n");
+        test::<SlicingWithRange>().expect_no_offenses("ary[1...-1]\n");
+        test::<SlicingWithRange>().expect_no_offenses("ary[0...-1]\n");
     }
 
     // --- beginless range (begin=nil literal, end=present) ---

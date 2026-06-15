@@ -2,6 +2,30 @@
 
 use murphy_plugin_api::{CommentDirectiveKind, Cx, NodeId, NodeKind, Range, SourceTokenKind};
 
+/// Byte ranges of string/symbol literal *content* nodes (`Str`, `Sym`).
+///
+/// A structural-looking token — most notably a lone `;` — whose position falls
+/// inside one of these ranges is literal text, not Ruby syntax. RuboCop's lexer
+/// never emits a `tSEMI` (or other structural token) inside a string, so cops
+/// that scan the token stream for `;` must skip these. Interpolation code
+/// (`#{ ... }`) lives in non-`Str` child nodes, so a genuine separator inside
+/// `#{}` is correctly *not* covered (a `(dstr (str ";") (begin …))` keeps the
+/// literal `;` in the `Str` part and the interpolated code in the `begin`).
+pub fn string_literal_content_ranges(cx: &Cx<'_>) -> Vec<Range> {
+    // Include the root itself: when the whole file is a bare literal (`';'` or
+    // `:';'`), the root *is* the `Str`/`Sym` node, which `descendants` omits.
+    std::iter::once(cx.root())
+        .chain(cx.descendants(cx.root()))
+        .filter(|&id| matches!(*cx.kind(id), NodeKind::Str(_) | NodeKind::Sym(_)))
+        .map(|id| cx.range(id))
+        .collect()
+}
+
+/// True when `offset` lies within any half-open range in `ranges`.
+pub fn offset_within_any(offset: u32, ranges: &[Range]) -> bool {
+    ranges.iter().any(|r| offset >= r.start && offset < r.end)
+}
+
 /// The portion of `node`'s source range up to (but excluding) the first
 /// newline — i.e. the node's first physical line. Used to clamp whole-node
 /// offenses that RuboCop renders across multiple lines: Murphy's
@@ -93,13 +117,19 @@ pub fn emit_edit_with_preceding_space(cond_range: Range, replacement: &str, cx: 
 }
 
 /// Returns `true` when the byte at `offset` sits at a column that holds a
-/// non-whitespace character on the immediately preceding or following source
-/// line. Mirrors RuboCop's `AllowForAlignment` / `PrecedingFollowingAlignment`
-/// vertical-alignment heuristic: extra spacing is treated as intentional
-/// alignment when something lines up directly above or below.
+/// non-whitespace character on the nearest preceding or following *content*
+/// source line. Mirrors RuboCop's `AllowForAlignment` /
+/// `PrecedingFollowingAlignment` vertical-alignment heuristic: extra spacing is
+/// treated as intentional alignment when something lines up above or below.
 ///
-/// Shared by `Layout/SpaceAroundOperators` (operator column) and
-/// `Layout/SpaceBeforeFirstArg` (first-argument column).
+/// Like RuboCop's `aligned_with_line?`, blank lines and full-line comments are
+/// skipped — the nearest line with real content in each direction is the one
+/// compared (so an aligned pair separated by a blank line or a comment block,
+/// e.g. successive `let(...)  {` blocks or constant assignments, still counts
+/// as aligned).
+///
+/// Shared by `Layout/ExtraSpacing`, `Layout/SpaceAroundOperators` (operator
+/// column) and `Layout/SpaceBeforeFirstArg` (first-argument column).
 pub fn is_alignment_at_column(src: &[u8], offset: usize) -> bool {
     let line_start = src[..offset]
         .iter()
@@ -108,38 +138,62 @@ pub fn is_alignment_at_column(src: &[u8], offset: usize) -> bool {
         .unwrap_or(0);
     let col = offset - line_start;
 
-    let non_ws_at_col = |line: &[u8]| -> bool {
-        col < line.len() && !matches!(line[col], b' ' | b'\t' | b'\n' | b'\r')
+    let non_ws_at_col =
+        |line: &[u8]| -> bool { col < line.len() && !is_ruby_blank_byte(line[col]) };
+    // A blank line or a full-line comment (first non-blank byte is `#`) is
+    // skipped when searching for the line to align against. Blankness uses
+    // Ruby's `\s` set (incl. VT/FF) so it matches `is_ruby_blank_byte` and
+    // RuboCop's `line.blank?`, not just space/tab/CR.
+    let is_skippable = |line: &[u8]| -> bool {
+        match line.iter().position(|&b| !is_ruby_blank_byte(b)) {
+            None => true,
+            Some(i) => line[i] == b'#',
+        }
     };
 
-    // Check previous line.
-    if line_start > 0 {
-        let prev_end = line_start - 1;
+    // Nearest preceding content line.
+    let mut end = line_start;
+    while end > 0 {
+        let prev_end = end - 1; // strip the '\n'
         let prev_start = src[..prev_end]
             .iter()
             .rposition(|&b| b == b'\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        if non_ws_at_col(&src[prev_start..prev_end]) {
-            return true;
+        let line = &src[prev_start..prev_end];
+        if !is_skippable(line) {
+            if non_ws_at_col(line) {
+                return true;
+            }
+            break;
         }
+        end = prev_start;
     }
 
-    // Check next line.
-    let rest_start = src[offset..]
+    // Nearest following content line.
+    let mut start = src[offset..]
         .iter()
         .position(|&b| b == b'\n')
         .map(|i| offset + i + 1)
         .unwrap_or(src.len());
-    if rest_start < src.len() {
-        let next_end = src[rest_start..]
+    while start < src.len() {
+        let line_end = src[start..]
             .iter()
             .position(|&b| b == b'\n')
-            .map(|i| rest_start + i)
+            .map(|i| start + i)
             .unwrap_or(src.len());
-        if non_ws_at_col(&src[rest_start..next_end]) {
-            return true;
+        let line = &src[start..line_end];
+        if !is_skippable(line) {
+            if non_ws_at_col(line) {
+                return true;
+            }
+            break;
         }
+        start = if line_end < src.len() {
+            line_end + 1
+        } else {
+            src.len()
+        };
     }
 
     false

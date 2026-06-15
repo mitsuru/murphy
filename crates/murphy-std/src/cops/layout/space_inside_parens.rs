@@ -85,12 +85,36 @@ fn check_no_space_style(cx: &Cx<'_>) {
                 SourceTokenKind::Newline | SourceTokenKind::IgnoredNewline,
                 SourceTokenKind::RightParen,
             ) => {}
-            (_, SourceTokenKind::RightParen) if left.kind != SourceTokenKind::LeftParen => {
+            // A `)` that begins its own line is a multiline close; the leading
+            // whitespace is indentation, not inline space inside the parens.
+            // This also covers the case where the preceding line is a heredoc
+            // terminator (whose token folds in the newline, so `left` is
+            // `HeredocEnd`, not a `Newline`).
+            (_, SourceTokenKind::RightParen)
+                if left.kind != SourceTokenKind::LeftParen
+                    && !paren_begins_line(cx, right.range.start) =>
+            {
                 emit_inline_gap(cx, left.range.end, right.range.start);
             }
             _ => {}
         }
     }
+}
+
+/// True when the `)` at `paren_start` is the first non-whitespace byte on its
+/// physical line (preceded only by spaces/tabs back to a newline or BOF).
+fn paren_begins_line(cx: &Cx<'_>, paren_start: u32) -> bool {
+    let src = cx.source().as_bytes();
+    let mut i = paren_start as usize;
+    while i > 0 {
+        i -= 1;
+        match src[i] {
+            b' ' | b'\t' => {}
+            b'\n' => return true,
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn emit_inline_gap(cx: &Cx<'_>, start: u32, end: u32) {
@@ -354,6 +378,21 @@ mod tests {
   1)
 ",
         );
+    }
+
+    /// RuboCop parity: a `)` alone on its own line after a heredoc terminator
+    /// is a multiline close, not inline space inside parens. The heredoc-end
+    /// token folds in its newline, so `)` is preceded by `HeredocEnd` rather
+    /// than a `Newline` token.
+    #[test]
+    fn no_space_accepts_closing_paren_after_heredoc_on_own_line() {
+        test::<SpaceInsideParens>().expect_no_offenses(indoc! {"
+            Arel.sql(
+              <<~SQL.squish
+                SELECT 1
+              SQL
+            )
+        "});
     }
 
     /// RuboCop parity: accepts parentheses with comment and line break.

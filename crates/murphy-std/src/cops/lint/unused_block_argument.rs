@@ -10,10 +10,10 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Known gaps: IgnoreEmptyBlocks (RuboCop default true: skip empty-bodied
-//!   blocks) is not yet implemented — empty-bodied blocks will still flag
-//!   unused args. Shadow args (`|x; y|`) are intentionally excluded from
-//!   reporting (they are the domain of Lint/ShadowingOuterLocalVariable).
+//!   IgnoreEmptyBlocks (RuboCop default true) is implemented: empty-bodied
+//!   blocks do not flag unused args. Shadow args (`|x; y|`) are intentionally
+//!   excluded from reporting (they are the domain of
+//!   Lint/ShadowingOuterLocalVariable).
 //! ```
 //!
 //! ## Autocorrect
@@ -23,17 +23,27 @@
 
 use std::collections::HashSet;
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
 #[derive(Default)]
 pub struct UnusedBlockArgument;
+
+#[derive(CopOptions)]
+pub struct UnusedBlockArgumentOptions {
+    #[option(
+        name = "IgnoreEmptyBlocks",
+        default = true,
+        description = "Do not flag unused arguments of empty-bodied blocks."
+    )]
+    pub ignore_empty_blocks: bool,
+}
 
 #[cop(
     name = "Lint/UnusedBlockArgument",
     description = "Flag unused block arguments.",
     default_severity = "warning",
     default_enabled = true,
-    options = NoOptions
+    options = UnusedBlockArgumentOptions
 )]
 impl UnusedBlockArgument {
     #[on_node(kind = "block")]
@@ -41,6 +51,17 @@ impl UnusedBlockArgument {
         let NodeKind::Block { args: _, body, .. } = *cx.kind(node) else {
             return;
         };
+
+        // RuboCop's `IgnoreEmptyBlocks` (default true): an empty-bodied block
+        // (`->(error) {}`, `foo { |x| }`) keeps its argument names for the API
+        // it satisfies, so its unused args are not flagged.
+        if cx
+            .options_or_default::<UnusedBlockArgumentOptions>()
+            .ignore_empty_blocks
+            && body.get().is_none()
+        {
+            return;
+        }
 
         let Some(model) = cx.var_model() else { return };
         let Some(scope) = model.scope(node) else {
@@ -133,6 +154,14 @@ mod tests {
               puts 1
             end
         "#});
+    }
+
+    #[test]
+    fn ignores_unused_arg_in_empty_block() {
+        // IgnoreEmptyBlocks (default): the empty-bodied lambda/block keeps its
+        // argument for the callback API it satisfies.
+        test::<UnusedBlockArgument>().expect_no_offenses("x = ->(error) {}\n");
+        test::<UnusedBlockArgument>().expect_no_offenses("[1].each { |y| }\n");
     }
 
     #[test]

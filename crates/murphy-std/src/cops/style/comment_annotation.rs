@@ -49,18 +49,24 @@ impl CommentAnnotation {
             }
             let body = text.trim_start_matches('#').trim();
             for kw in &["TODO", "FIXME", "OPTIMIZE", "HACK", "REVIEW"] {
-                if body.len() < kw.len() || !body[..kw.len()].eq_ignore_ascii_case(kw) {
+                // `get(..kw.len())` is char-boundary-safe: it yields `None` when
+                // the comment is shorter than the keyword OR when `kw.len()`
+                // lands inside a multibyte char (e.g. a Japanese comment), so a
+                // bare `body[..kw.len()]` byte slice cannot panic here.
+                let Some(actual_kw) = body.get(..kw.len()) else {
+                    continue;
+                };
+                if !actual_kw.eq_ignore_ascii_case(kw) {
                     continue;
                 }
-                if body.len() > kw.len() {
-                    let next = body.as_bytes()[kw.len()];
-                    if next.is_ascii_alphanumeric() || next == b'_' {
-                        continue;
-                    }
-                }
-                let actual_kw = &body[..kw.len()];
+                // `kw.len()` is a confirmed char boundary, so this slice is safe.
                 let after_kw = &body[kw.len()..];
-                if *actual_kw == **kw {
+                if let Some(&next) = after_kw.as_bytes().first()
+                    && (next.is_ascii_alphanumeric() || next == b'_')
+                {
+                    continue;
+                }
+                if actual_kw == *kw {
                     if opts.require_colon {
                         if after_kw.starts_with(": ") {
                             continue;
@@ -165,6 +171,31 @@ mod tests {
             .expect_offense(indoc! {"
                 # TODO
                 ^^^^^^ Annotation keywords like `TODO` should be all upper case, followed by a colon, and a space.
+            "});
+    }
+
+    #[test]
+    fn does_not_panic_on_multibyte_comment() {
+        // A multibyte comment whose bytes at a keyword length land inside a
+        // UTF-8 char must not panic on a byte-boundary slice.
+        test::<CommentAnnotation>()
+            .with_options(&CommentAnnotationOptions {
+                require_colon: true,
+            })
+            .expect_no_offenses("# 警告がある場合のみ改行付きで追加\n");
+    }
+
+    #[test]
+    fn does_not_panic_on_multibyte_comment_after_keyword() {
+        // Keyword immediately followed by a multibyte char (no separator) must
+        // not panic and must not be treated as a properly formatted annotation.
+        test::<CommentAnnotation>()
+            .with_options(&CommentAnnotationOptions {
+                require_colon: true,
+            })
+            .expect_offense(indoc! {"
+                # TODO日本語
+                ^^^^^^^^^ Annotation keywords like `TODO` should be all upper case, followed by a colon, and a space.
             "});
     }
 }

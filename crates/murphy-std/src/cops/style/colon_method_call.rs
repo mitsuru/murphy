@@ -40,6 +40,15 @@ impl ColonMethodCall {
         if !cx.source()[recv_end as usize..].starts_with("::") {
             return;
         }
+        // A method name beginning with an uppercase letter is ambiguous with
+        // constant access (`Nokogiri::HTML5(...)`); RuboCop leaves the `::`.
+        if cx
+            .method_name(node)
+            .and_then(|m| m.chars().next())
+            .is_some_and(|c| c.is_uppercase())
+        {
+            return;
+        }
         let colon_range = Range {
             start: recv_end,
             end: recv_end + 2,
@@ -88,6 +97,15 @@ mod tests {
     #[test]
     fn accepts_constant_ref() {
         test::<ColonMethodCall>().expect_no_offenses("x = Foo::Bar\n");
+    }
+
+    #[test]
+    fn accepts_capitalized_method_name() {
+        // `Nokogiri::HTML5(html)` calls a method whose name begins with an
+        // uppercase letter; that is ambiguous with constant access, so RuboCop
+        // (and Murphy) leave the `::` alone.
+        test::<ColonMethodCall>().expect_no_offenses("Nokogiri::HTML5(html)\n");
+        test::<ColonMethodCall>().expect_no_offenses("doc = Nokogiri::XML(str)\n");
     }
 }
 murphy_plugin_api::submit_cop!(ColonMethodCall);

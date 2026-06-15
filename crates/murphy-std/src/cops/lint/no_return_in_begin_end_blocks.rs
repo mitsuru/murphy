@@ -27,7 +27,7 @@
 //!   block is excluded (the return exits the inner scope, not the assignment
 //!   context)
 
-use murphy_plugin_api::{cop, Cx, NodeId, NodeKind, NoOptions};
+use murphy_plugin_api::{cop, Cx, NodeId, NodeKind, NoOptions, SourceTokenKind};
 
 const MSG: &str = "Do not `return` in `begin..end` blocks in assignment contexts.";
 
@@ -47,15 +47,31 @@ impl NoReturnInBeginEndBlocks {
         let mut begin_block = None;
         for ancestor in cx.ancestors(node) {
             let kind = cx.kind(ancestor);
-            if matches!(kind, NodeKind::Def { .. } | NodeKind::Defs { .. }) {
-                return;
-            }
-            if cx.is_lambda(ancestor) {
+            // A `def`/`defs` or a lambda/proc scopes the `return` to itself, so a
+            // `return` nested in one does not skip the assignment and is not this
+            // cop's concern. A *non-lambda* block (`each { return }`, numblock,
+            // itblock) does NOT scope the return — it still exits the enclosing
+            // method, skipping the assignment — so RuboCop's
+            // `kwbegin.each_node(:return)` descends into it. Mirror that by
+            // continuing the walk up through plain blocks to the enclosing
+            // `begin`. (The `def`/lambda exclusions intentionally diverge from
+            // RuboCop's naive descent, which would flag returns that cannot
+            // actually escape the method.)
+            if matches!(kind, NodeKind::Def { .. } | NodeKind::Defs { .. })
+                || cx.is_lambda(ancestor)
+            {
                 return;
             }
             if matches!(kind, NodeKind::Begin(_)) {
-                begin_block = Some(ancestor);
-                break;
+                // Murphy lowers explicit `begin..end`, parenthesised groups AND
+                // implicit statement sequences (if/case branches, block/method
+                // bodies) all to `Begin`. Only the first two are value blocks;
+                // an implicit sequence is skipped so the walk continues to the
+                // real `begin..end` or scope boundary above it.
+                if is_kwbegin_or_paren(ancestor, cx) {
+                    begin_block = Some(ancestor);
+                    break;
+                }
             }
         }
         let Some(begin_block) = begin_block else {
@@ -68,6 +84,20 @@ impl NoReturnInBeginEndBlocks {
 
         cx.emit_offense(cx.range(node), MSG, None);
     }
+}
+
+/// True when the `Begin` node is an explicit `begin..end` block or a
+/// parenthesised group `(...)` — the only `Begin` shapes that act as a value
+/// block. The first source token at the node's start is `begin` or `(`
+/// respectively; an implicit statement sequence starts with its first
+/// statement's token instead.
+fn is_kwbegin_or_paren(node: NodeId, cx: &Cx<'_>) -> bool {
+    let start = cx.range(node).start;
+    cx.token_after(start).is_some_and(|t| {
+        t.range.start == start
+            && (t.kind == SourceTokenKind::LeftParen
+                || (t.kind == SourceTokenKind::Other && cx.raw_source(t.range) == "begin"))
+    })
 }
 
 /// Check whether `node` has an assignment ancestor before any method
@@ -230,6 +260,48 @@ mod tests {
         "#});
     }
 
+    #[test]
+    fn accepts_guard_return_in_assigned_multiline_lambda() {
+        // Mastodon shape: a multi-statement lambda body (lowered to `Begin`)
+        // assigned to a constant. The `return` belongs to the lambda, not a
+        // `begin..end` value block, so it must not be flagged.
+        test::<NoReturnInBeginEndBlocks>().expect_no_offenses(indoc! {r#"
+            TRANSFORMER = lambda do |env|
+              return unless env[:node]
+
+              env[:node].do_something
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_return_inside_if_branch_within_assigned_lambda() {
+        // The `if` branch body is also lowered to `Begin`; the `return` still
+        // belongs to the lambda, not a `begin..end` value block.
+        test::<NoReturnInBeginEndBlocks>().expect_no_offenses(indoc! {r#"
+            X = lambda do |env|
+              if env[:node]
+                env[:node].do_something
+                return
+              end
+
+              env
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_guard_return_in_assigned_multiline_block() {
+        // The same with a non-lambda block assigned via a method call.
+        test::<NoReturnInBeginEndBlocks>().expect_no_offenses(indoc! {r#"
+            X = [1].each do |env|
+              return unless env
+
+              env.to_s
+            end
+        "#});
+    }
+
     // ── no offense (not in assignment context) ──────────────────────────
 
     #[test]
@@ -253,6 +325,19 @@ mod tests {
                 return 1
                 ^^^^^^^^ Do not `return` in `begin..end` blocks in assignment contexts.
               end
+            end
+        "#});
+    }
+
+    #[test]
+    fn rejects_return_in_non_lambda_block_inside_assigned_begin() {
+        // A `return` inside a non-lambda block still exits the enclosing method,
+        // skipping the assignment — RuboCop's `kwbegin.each_node(:return)`
+        // descends into the block and flags it, so Murphy must too.
+        test::<NoReturnInBeginEndBlocks>().expect_offense(indoc! {r#"
+            x = begin
+              items.each { return 1 }
+                           ^^^^^^^^ Do not `return` in `begin..end` blocks in assignment contexts.
             end
         "#});
     }

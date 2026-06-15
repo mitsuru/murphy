@@ -33,7 +33,10 @@ use murphy_core::{
     aggregate_with_config, ast_to_sexp, discover_with_config, dispatch,
     migrate_rubocop_yml_to_murphy_yml, parse, parse_with_cache, run_to_fixpoint,
 };
-use murphy_plugin_api::{PluginCopV1, PluginRegistration, RawSlice, tristate_from_wire};
+use murphy_plugin_api::{
+    PluginCopV1, PluginRegistration, Range, RawSlice, SourceToken, SourceTokenKind,
+    tristate_from_wire,
+};
 use murphy_reporting::{OutputFormat, format_lint_output};
 
 /// The standard built-in cop pack (`murphy-std`), unpacked once and
@@ -414,7 +417,7 @@ fn lint_source(
     config: &MurphyConfig,
     cache: Option<&Cache>,
 ) -> Vec<Offense> {
-    let mut offenses = match parse_with_cache(source, file, cache) {
+    let (mut offenses, comments) = match parse_with_cache(source, file, cache) {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
@@ -433,17 +436,20 @@ fn lint_source(
             );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
-            offenses
+            (offenses, comment_ranges(ast.sorted_tokens()))
         }
-        Err(err) => vec![Offense::new(
-            file,
-            SYNTAX_COP_NAME,
-            err.range,
-            Severity::Error,
-            &err.message,
-        )],
+        Err(err) => (
+            vec![Offense::new(
+                file,
+                SYNTAX_COP_NAME,
+                err.range,
+                Severity::Error,
+                &err.message,
+            )],
+            Vec::new(),
+        ),
     };
-    offenses = apply_inline_directive_filter(offenses, source);
+    offenses = apply_inline_directive_filter(offenses, source, &comments);
     offenses
 }
 
@@ -559,7 +565,7 @@ fn lint_source_timed(
     let parsed = parse_with_cache(source, file, cache);
     let parse_micros = parse_started.elapsed().as_micros();
     let cops_started = Instant::now();
-    let offenses = match parsed {
+    let (offenses, comments) = match parsed {
         Ok(ast) => {
             let mut sink = dispatch::OffenseSink::new(file);
             let scoped_cops = scoped_native_cops(cops, config, file);
@@ -578,19 +584,22 @@ fn lint_source_timed(
             );
             let mut offenses = sink.into_offenses();
             offenses.extend(run_mruby_user_cops(source, file, mruby_cops, config));
-            offenses
+            (offenses, comment_ranges(ast.sorted_tokens()))
         }
-        Err(err) => vec![Offense::new(
-            file,
-            SYNTAX_COP_NAME,
-            err.range,
-            Severity::Error,
-            &err.message,
-        )],
+        Err(err) => (
+            vec![Offense::new(
+                file,
+                SYNTAX_COP_NAME,
+                err.range,
+                Severity::Error,
+                &err.message,
+            )],
+            Vec::new(),
+        ),
     };
     let cops_micros = cops_started.elapsed().as_micros();
     TimedOffenses {
-        offenses: apply_inline_directive_filter(offenses, source),
+        offenses: apply_inline_directive_filter(offenses, source, &comments),
         parse_micros,
         cops_micros,
     }
@@ -606,39 +615,86 @@ enum InlineDirectiveKind {
 #[derive(Debug, Clone)]
 struct InlineDirective {
     kind: InlineDirectiveKind,
-    cop: Option<String>,
+    /// Cop names targeted by the directive. Empty means "all cops" (a bare
+    /// directive or the `all` keyword).
+    cops: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 struct DirectiveState {
     disable_all: bool,
     disabled_cops: BTreeSet<String>,
+    /// Cops re-enabled inside a `disable all` region via `# rubocop:enable <Cop>`.
+    /// While `disable_all` is set, an offense is still reported if its cop matches
+    /// an entry here, mirroring RuboCop's "disable all, then opt one back in".
+    enabled_exceptions: BTreeSet<String>,
     todo_all: bool,
     todo_cops: BTreeSet<String>,
     line_start: usize,
     line_end: usize,
 }
 
-fn parse_inline_directive(line: &str) -> Option<InlineDirective> {
-    let hash_pos = line.find('#')?;
-    let comment = line[hash_pos + 1..].trim_start();
-    let rest = comment.strip_prefix("murphy:")?;
-    let mut parts = rest.split_whitespace();
-    let keyword = parts.next()?;
-    let cop = parts.next().map(str::to_string);
+/// Byte ranges of the source's real comment tokens. A directive is only honored
+/// when it sits in an actual comment — a `#` inside a string or heredoc (e.g.
+/// `log("# rubocop:disable Foo")`) is NOT a comment token, so it can never
+/// disable a cop. Mirrors RuboCop, which reads its directives from the comment
+/// table, not raw line text.
+fn comment_ranges(tokens: &[SourceToken]) -> Vec<Range> {
+    tokens
+        .iter()
+        .filter(|t| t.kind == SourceTokenKind::Comment)
+        .map(|t| t.range)
+        .collect()
+}
+
+/// Parse a `# murphy:…` / `# rubocop:…` inline directive from a comment's source
+/// text. Mirrors the canonical engine in
+/// `murphy_plugin_api::cx::parse_comment_directive`: both prefixes are honored
+/// (RuboCop-annotated codebases lint without rewrites), a `-- reason` suffix is
+/// stripped, the cop list is comma-separated, and an empty list or `all` targets
+/// every cop.
+fn parse_inline_directive(comment_src: &str) -> Option<InlineDirective> {
+    // RuboCop honors an "inner directive" — a `# rubocop:…` that follows other
+    // comment text on the same comment line, e.g.
+    // `# coding: utf-8 # rubocop:disable Style/Encoding`. Scan every `#`, not
+    // just the first, for a `murphy:`/`rubocop:` prefix.
+    let rest = comment_src.match_indices('#').find_map(|(hash_pos, _)| {
+        let comment = comment_src[hash_pos + 1..].trim_start();
+        comment
+            .strip_prefix("murphy:")
+            .or_else(|| comment.strip_prefix("rubocop:"))
+            .map(str::trim_start)
+    })?;
+    let (keyword, tail) = rest
+        .split_once(char::is_whitespace)
+        .map_or((rest, ""), |(keyword, tail)| (keyword, tail));
     let kind = match keyword {
         "disable" => InlineDirectiveKind::Disable,
         "enable" => InlineDirectiveKind::Enable,
         "todo" => InlineDirectiveKind::Todo,
         _ => return None,
     };
-    Some(InlineDirective { kind, cop })
+    // The cop list ends at a `-- reason` suffix; an empty list or `all` means
+    // every cop.
+    let cops_text = tail.split_once("--").map_or(tail, |(cops, _)| cops).trim();
+    let cops = if cops_text.is_empty() || cops_text.eq_ignore_ascii_case("all") {
+        Vec::new()
+    } else {
+        cops_text
+            .split(',')
+            .map(str::trim)
+            .filter(|cop| !cop.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    Some(InlineDirective { kind, cops })
 }
 
-fn directive_states_by_line(source: &str) -> Vec<DirectiveState> {
+fn directive_states_by_line(source: &str, comments: &[Range]) -> Vec<DirectiveState> {
     let mut states = Vec::new();
     let mut disable_all = false;
     let mut disabled_cops: BTreeSet<String> = BTreeSet::new();
+    let mut enabled_exceptions: BTreeSet<String> = BTreeSet::new();
 
     let mut offset = 0usize;
     for line in source.split_inclusive('\n') {
@@ -647,29 +703,72 @@ fn directive_states_by_line(source: &str) -> Vec<DirectiveState> {
         let mut todo_all = false;
         let mut todo_cops: BTreeSet<String> = BTreeSet::new();
 
-        if let Some(directive) = parse_inline_directive(line) {
-            match (directive.kind, directive.cop) {
-                (InlineDirectiveKind::Disable, Some(cop)) => {
-                    disabled_cops.insert(cop);
-                }
-                (InlineDirectiveKind::Disable, None) => disable_all = true,
-                (InlineDirectiveKind::Enable, Some(cop)) => {
-                    disabled_cops.remove(&cop);
-                }
-                (InlineDirectiveKind::Enable, None) => {
+        // Only a real comment token on this line can carry a directive — a `#`
+        // inside a string/heredoc is not a comment and must be ignored.
+        let comment = comments
+            .iter()
+            .find(|r| (r.start as usize) >= line_start && (r.start as usize) < line_end);
+        let directive =
+            comment.and_then(|r| parse_inline_directive(&source[r.start as usize..r.end as usize]));
+
+        if let (Some(comment), Some(directive)) = (comment, directive) {
+            let all = directive.cops.is_empty();
+            // A directive on its own line (only whitespace before the `#`) is a
+            // range directive: it persists until a matching `enable`. A trailing
+            // directive (code before the `#`) scopes to its own line only. This
+            // mirrors RuboCop's `disable`/`todo` comment-directive scope; the
+            // line-local channel reuses the `todo_*` fields.
+            let is_full_line = source.as_bytes()[line_start..comment.start as usize]
+                .iter()
+                .all(u8::is_ascii_whitespace);
+            // RuboCop treats `todo` as an alias of `disable`; the scope (range vs
+            // line-local) is decided purely by whether the directive sits on its
+            // own line (range) or trails code (line-local) — identically for both
+            // keywords.
+            match (&directive.kind, is_full_line, all) {
+                (InlineDirectiveKind::Enable, _, true) => {
                     disable_all = false;
                     disabled_cops.clear();
+                    enabled_exceptions.clear();
                 }
-                (InlineDirectiveKind::Todo, Some(cop)) => {
-                    todo_cops.insert(cop);
+                (InlineDirectiveKind::Enable, _, false) => {
+                    for cop in &directive.cops {
+                        disabled_cops.remove(cop);
+                        // Re-enabling inside a `disable all` region opts this cop
+                        // back in even though the blanket disable stays active.
+                        if disable_all {
+                            enabled_exceptions.insert(cop.clone());
+                        }
+                    }
                 }
-                (InlineDirectiveKind::Todo, None) => todo_all = true,
+                // A full-line `disable`/`todo` is a range directive that persists
+                // until a matching `enable`.
+                (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, true, true) => {
+                    disable_all = true;
+                    // A fresh blanket disable resets prior per-cop opt-ins.
+                    enabled_exceptions.clear();
+                }
+                (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, true, false) => {
+                    for cop in &directive.cops {
+                        enabled_exceptions.remove(cop);
+                    }
+                    disabled_cops.extend(directive.cops);
+                }
+                // A trailing `disable`/`todo` (code before the `#`) scopes to its
+                // own line only; the line-local channel reuses the `todo_*` fields.
+                (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, false, true) => {
+                    todo_all = true;
+                }
+                (InlineDirectiveKind::Disable | InlineDirectiveKind::Todo, false, false) => {
+                    todo_cops.extend(directive.cops);
+                }
             }
         }
 
         states.push(DirectiveState {
             disable_all,
             disabled_cops: disabled_cops.clone(),
+            enabled_exceptions: enabled_exceptions.clone(),
             todo_all,
             todo_cops,
             line_start,
@@ -681,27 +780,61 @@ fn directive_states_by_line(source: &str) -> Vec<DirectiveState> {
     states
 }
 
+/// Cops that validate inline directives themselves. RuboCop never lets a
+/// directive suppress these — otherwise a dangling `# rubocop:disable Lint`
+/// would silence the very `Lint/MissingCopEnableDirective` warning reported on
+/// it, since that cop lives in the disabled `Lint` department.
+const DIRECTIVE_VALIDATION_COPS: [&str; 4] = [
+    "Lint/MissingCopEnableDirective",
+    "Lint/RedundantCopDisableDirective",
+    "Lint/RedundantCopEnableDirective",
+    "Lint/CopDirectiveSyntax",
+];
+
 fn is_directive_disabled(offense: &Offense, states: &[DirectiveState]) -> bool {
-    if offense.cop_name == SYNTAX_COP_NAME {
+    if offense.cop_name == SYNTAX_COP_NAME
+        || DIRECTIVE_VALIDATION_COPS.contains(&offense.cop_name.as_str())
+    {
         return false;
     }
     let start = offense.range.start_offset as usize;
     for state in states {
         if start >= state.line_start && start < state.line_end {
-            return state.disable_all
-                || state.disabled_cops.contains(&offense.cop_name)
+            // A blanket `disable all` suppresses everything except cops that were
+            // explicitly opted back in with a later `# rubocop:enable <Cop>`.
+            let blanket_disabled =
+                state.disable_all && !cop_set_matches(&state.enabled_exceptions, &offense.cop_name);
+            return blanket_disabled
+                || cop_set_matches(&state.disabled_cops, &offense.cop_name)
                 || state.todo_all
-                || state.todo_cops.contains(&offense.cop_name);
+                || cop_set_matches(&state.todo_cops, &offense.cop_name);
         }
     }
     false
 }
 
-fn apply_inline_directive_filter(mut offenses: Vec<Offense>, source: &str) -> Vec<Offense> {
+/// True when `cops` disables `cop_name`, either by an exact cop-name entry or by
+/// a RuboCop **department** entry. A slashless entry (e.g. `Lint`) is a
+/// department: it matches every cop whose name is `<Department>/...` (e.g.
+/// `Lint/Debugger`), mirroring `# rubocop:disable Lint`.
+fn cop_set_matches(cops: &BTreeSet<String>, cop_name: &str) -> bool {
+    if cops.contains(cop_name) {
+        return true;
+    }
+    let department = cop_name.split('/').next();
+    cops.iter()
+        .any(|entry| !entry.contains('/') && department == Some(entry.as_str()))
+}
+
+fn apply_inline_directive_filter(
+    mut offenses: Vec<Offense>,
+    source: &str,
+    comments: &[Range],
+) -> Vec<Offense> {
     if offenses.is_empty() {
         return Vec::new();
     }
-    let states = directive_states_by_line(source);
+    let states = directive_states_by_line(source, comments);
     offenses.retain(|offense| !is_directive_disabled(offense, &states));
     offenses
 }

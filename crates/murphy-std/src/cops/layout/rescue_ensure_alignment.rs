@@ -139,19 +139,21 @@ fn check(node: NodeId, kw_range: Range, cx: &Cx<'_>) {
 fn alignment_node(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     let ancestor = ancestor_anchor(node, cx)?;
 
-    // An explicit `begin...end` (parser-gem `:kwbegin`) is its own anchor; no
-    // refinement applies.
-    if is_kwbegin(ancestor, cx) {
-        return Some(ancestor);
-    }
-
     // Assignment RHS: `x = begin ... rescue`. If the anchor's parent is an
-    // assignment and they share a line, align to the assignment target.
+    // assignment and they share a line, align to the assignment target. This
+    // applies even when the anchor is an explicit `begin...end` (`:kwbegin`):
+    // RuboCop aligns `rescue` with `x`, not with the `begin` keyword.
     if let Some(assignment) = assignment_parent(ancestor, cx)
         && line_of(cx.source(), cx.range(ancestor).start)
             == line_of(cx.source(), cx.range(assignment).start)
     {
         return Some(assignment);
+    }
+
+    // An explicit `begin...end` (parser-gem `:kwbegin`) is otherwise its own
+    // anchor; no further refinement applies.
+    if is_kwbegin(ancestor, cx) {
+        return Some(ancestor);
     }
 
     // Access modifier: `private def ... rescue`. If the anchor is a def whose
@@ -592,28 +594,30 @@ mod tests {
     }
 
     #[test]
-    fn accepts_assignment_begin_rescue_aligned_to_begin() {
-        // `x = begin ... rescue` aligns `rescue` to the `begin` keyword column
-        // (col 4 here), matching RuboCop's kwbegin anchor.
+    fn accepts_assignment_begin_rescue_aligned_to_assignment() {
+        // `x = begin ... rescue` aligns `rescue` to the assignment target
+        // column (col 0, the `x`), NOT the `begin` keyword — RuboCop's anchor
+        // for a begin that is an assignment RHS is the assignment.
         test::<RescueEnsureAlignment>().expect_no_offenses(indoc! {"
             x = begin
-                  foo
-                rescue
-                  bar
-                end
+              foo
+            rescue
+              bar
+            end
         "});
     }
 
     #[test]
-    fn flags_assignment_begin_rescue_misaligned() {
-        // `rescue` at col 0 is not aligned with the `begin` keyword (col 4).
+    fn flags_assignment_begin_rescue_aligned_to_begin_keyword() {
+        // `rescue` aligned to the `begin` keyword (col 4) is wrong: it must
+        // align to the assignment target `x` (col 0).
         test::<RescueEnsureAlignment>().expect_offense(indoc! {"
             x = begin
-              foo
-            rescue
-            ^^^^^^ `rescue` at 3, 0 is not aligned with `begin` at 1, 4.
-              bar
-            end
+                  foo
+                rescue
+                ^^^^^^ `rescue` at 3, 4 is not aligned with `x = begin` at 1, 0.
+                  bar
+                end
         "});
     }
 

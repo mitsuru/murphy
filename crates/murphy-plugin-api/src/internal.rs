@@ -270,6 +270,7 @@ mod tests {
             target_ruby_version: 0,
             config_disabled_cops: std::ptr::null(),
             config_disabled_cops_len: 0,
+            block_forwarding_explicit: false,
         }
     }
 

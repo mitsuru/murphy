@@ -230,6 +230,7 @@ fn build_cx_raw(
         target_ruby_version: RubyVersion::to_wire(ctx.target_ruby_version),
         config_disabled_cops: config_disabled_cops.as_ptr(),
         config_disabled_cops_len: config_disabled_cops.len(),
+        block_forwarding_explicit: ctx.block_forwarding_explicit,
     }
 }
 
@@ -648,6 +649,73 @@ mod tests {
         );
 
         assert_eq!(INDENTATION_WIDTH_SEEN.load(Ordering::SeqCst), 4);
+    }
+
+    // Per-test atomic (one tagged per test) so context-threading tests stay
+    // independent under `cargo test` parallelism.
+    static BLOCK_FORWARDING_EXPLICIT_SEEN: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    unsafe extern "C" fn block_forwarding_explicit_dispatch(
+        _node: NodeId,
+        cx: *const CxRaw,
+    ) -> i32 {
+        let cx = unsafe { &*cx };
+        BLOCK_FORWARDING_EXPLICIT_SEEN.store(cx.block_forwarding_explicit, Ordering::SeqCst);
+        0
+    }
+    static BLOCK_FORWARDING_EXPLICIT_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/BlockForwardingExplicit"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: block_forwarding_explicit_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_block_forwarding_explicit_to_cx_raw() {
+        // The resolved `Naming/BlockForwarding.EnforcedStyle == "explicit"` flag
+        // threaded through the context reaches the cop's `CxRaw`.
+        BLOCK_FORWARDING_EXPLICIT_SEEN.store(false, Ordering::SeqCst);
+        let ast = ast_nil_and_int();
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_context(
+            &ast,
+            &[&BLOCK_FORWARDING_EXPLICIT_COP],
+            &mut sink,
+            AllCopsContext {
+                block_forwarding_explicit: true,
+                ..AllCopsContext::default()
+            },
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(BLOCK_FORWARDING_EXPLICIT_SEEN.load(Ordering::SeqCst));
+
+        // And the default (false) is faithfully threaded too.
+        BLOCK_FORWARDING_EXPLICIT_SEEN.store(true, Ordering::SeqCst);
+        let mut sink = OffenseSink::new("t.rb");
+        run_cops_with_options_and_context(
+            &ast,
+            &[&BLOCK_FORWARDING_EXPLICIT_COP],
+            &mut sink,
+            AllCopsContext::default(),
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(!BLOCK_FORWARDING_EXPLICIT_SEEN.load(Ordering::SeqCst));
     }
 
     // (1) DispatchIndex correctly buckets the arena's nodes by tag.
