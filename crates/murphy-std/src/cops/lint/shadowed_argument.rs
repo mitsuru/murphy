@@ -112,14 +112,13 @@ fn first_shadowing_assignment(
         return None;
     }
 
-    // Iterate assignments in source order so `location_known` degrades the same
-    // way RuboCop's left-to-right reduce does.
-    let mut assignments: Vec<NodeId> = variable.assignments.iter().map(|a| a.node_id).collect();
-    assignments.sort_by_key(|&node| cx.range(node).start);
-
+    // `variable.assignments` is already in source order: VarSemanticModel builds
+    // it with a source-order DFS. `location_known` relies on that order to
+    // degrade the same way RuboCop's left-to-right reduce does.
     let mut location_known = true;
     let mut shadowing = None;
-    for node in assignments {
+    for assignment in &variable.assignments {
+        let node = assignment.node_id;
         let meta = meta_assignment_node(node, cx);
         // Shorthand assignments (`op=`, `||=`, `&&=`) always use their argument,
         // so they never shadow it; they only blur the known location.
