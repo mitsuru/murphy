@@ -1262,5 +1262,85 @@ mod tests {
             end
         "#});
     }
+
+    // Module-doc promise (Known v1 limitations): writes in different
+    // `resbody`s of the same `Rescue` are mutually exclusive — a write in
+    // one resbody is never reported as "overwritten" by a sibling resbody.
+    // Verified against standalone RuboCop 1.87.0.
+
+    #[test]
+    fn sibling_resbody_writes_both_observed_by_later_read() {
+        // Two resbody writes are mutually exclusive (neither dominates the
+        // other), and both reach the post-block read. RuboCop 1.87 reports
+        // nothing — the sibling resbody must NOT be treated as an overwrite.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              work
+            rescue A
+              result = 1
+            rescue B
+              result = 2
+            end
+            use(result)
+        "#});
+    }
+
+    #[test]
+    fn sibling_resbody_writes_dominated_by_post_block_write_are_flagged() {
+        // A post-block write (`result = 3`) dominates the read regardless of
+        // which rescue arm ran, so both resbody writes are dead. The sibling
+        // resbody exclusivity must not suppress this — the dominating write
+        // outside the begin/rescue still makes both arms useless.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              work
+            rescue A
+              result = 1
+              ^^^^^^ Useless assignment to variable - `result`.
+            rescue B
+              result = 2
+              ^^^^^^ Useless assignment to variable - `result`.
+            end
+            result = 3
+            use(result)
+        "#});
+    }
+
+    #[test]
+    fn ensure_write_dominates_body_and_resbody_writes() {
+        // The ensure write runs on every path, so it overwrites both the
+        // begin-body write and the resbody write before the read. Both are
+        // dead; the ensure write itself is read afterward and is clean.
+        // Pins the Phase A ensure-interaction dependence.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              total = 1
+              ^^^^^ Useless assignment to variable - `total`.
+            rescue
+              total = 2
+              ^^^^^ Useless assignment to variable - `total`.
+            ensure
+              total = 3
+            end
+            use(total)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_dominated_after_rescue_still_flagged() {
+        // Guard the begin-body arm against over-relaxation: a begin-body
+        // write that is overwritten after the whole begin/rescue and never
+        // read in any arm is still dead. RuboCop 1.87 flags `count = 1`.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              count = 1
+              ^^^^^ Useless assignment to variable - `count`.
+            rescue
+              handle
+            end
+            count = 2
+            use(count)
+        "#});
+    }
 }
 murphy_plugin_api::submit_cop!(UselessAssignment);
