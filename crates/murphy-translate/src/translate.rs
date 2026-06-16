@@ -1203,6 +1203,10 @@ impl Translator {
             let v = self.translate_jump_arg(n.arguments(), range);
             return self.builder.push(NodeKind::Next(v), range);
         }
+        if node.as_retry_node().is_some() {
+            // `retry` は引数を取らない葉ノード。
+            return self.builder.push(NodeKind::Retry, range);
+        }
         if let Some(y) = node.as_yield_node() {
             let ids = self.translate_arg_list(y.arguments());
             let list = self.builder.push_list(&ids);
@@ -3231,6 +3235,17 @@ mod tests {
             NodeKind::Next(v) => assert!(v.is_none(), "bare next → 引数 None"),
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn translates_retry_keyword_to_retry_node() {
+        // `retry` inside a rescue must lower to NodeKind::Retry, not Unknown.
+        let ast = translate("begin\nrescue\n  retry\nend\n", "t.rb");
+        assert!(
+            ast.descendants(ast.root())
+                .any(|n| matches!(ast.kind(n), NodeKind::Retry)),
+            "retry keyword must lower to NodeKind::Retry, not Unknown"
+        );
     }
 
     #[test]
