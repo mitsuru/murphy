@@ -556,7 +556,7 @@ mod tests {
         test::<RedundantLineBreak>().expect_correction(
             indoc! {r#"
                 foo("日本語",
-                ^^^^^^^^^^^^^ Redundant line break detected.
+                ^^^^^^^^^^ Redundant line break detected.
                   "café")
             "#},
             "foo(\"日本語\", \"café\")\n",

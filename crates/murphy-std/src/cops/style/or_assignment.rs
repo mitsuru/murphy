@@ -273,7 +273,7 @@ mod tests {
     fn flags_ternary_local() {
         test::<OrAssignment>().expect_offense(indoc! {"
             name = name ? name : 'Bozhidar'
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the double pipe equals operator `||=` instead.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the double pipe equals operator `||=` instead.
         "});
     }
 
@@ -282,7 +282,7 @@ mod tests {
         test::<OrAssignment>().expect_correction(
             indoc! {"
                 name = name ? name : 'Bozhidar'
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the double pipe equals operator `||=` instead.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the double pipe equals operator `||=` instead.
             "},
             "name ||= 'Bozhidar'\n",
         );
@@ -351,7 +351,7 @@ mod tests {
     fn flags_if_else_local() {
         test::<OrAssignment>().expect_offense(indoc! {"
             name = if name; name; else; 'Bozhidar'; end
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the double pipe equals operator `||=` instead.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the double pipe equals operator `||=` instead.
         "});
     }
 
@@ -360,7 +360,7 @@ mod tests {
         test::<OrAssignment>().expect_correction(
             indoc! {"
                 name = if name; name; else; 'Bozhidar'; end
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the double pipe equals operator `||=` instead.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the double pipe equals operator `||=` instead.
             "},
             "name ||= 'Bozhidar'\n",
         );

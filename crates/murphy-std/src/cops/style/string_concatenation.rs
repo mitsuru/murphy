@@ -584,7 +584,7 @@ mod tests {
         test::<StringConcatenation>().expect_correction(
             indoc! {"
                 'こんにちは' + ' World'
-                ^^^^^^^^^^^^^^^^^^^^^^^ Prefer string interpolation to string concatenation.
+                ^^^^^^^^^^^^^^^^^^ Prefer string interpolation to string concatenation.
             "},
             "\"こんにちは World\"\n",
         );

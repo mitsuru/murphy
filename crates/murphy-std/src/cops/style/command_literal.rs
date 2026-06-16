@@ -138,7 +138,7 @@ mod tests {
             })
             .expect_offense(indoc! {"
                 `find . -type d`
-                ^^^^^^^^^^^^^^^^^ Use `%x` around command string.
+                ^^^^^^^^^^^^^^^^ Use `%x` around command string.
             "});
     }
 

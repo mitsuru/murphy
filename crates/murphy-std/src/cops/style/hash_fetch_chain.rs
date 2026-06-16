@@ -207,7 +207,7 @@ mod tests {
         test::<HashFetchChain>().expect_correction(
             indoc! {r#"
                 h.fetch('foo', nil).fetch('bar', nil)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `dig('foo', 'bar')` instead.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `dig('foo', 'bar')` instead.
             "#},
             "h.dig('foo', 'bar')\n",
         );
@@ -218,7 +218,7 @@ mod tests {
         test::<HashFetchChain>().expect_correction(
             indoc! {r#"
                 h.fetch('foo', nil).fetch('bar', nil).fetch('baz', nil)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `dig('foo', 'bar', 'baz')` instead.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `dig('foo', 'bar', 'baz')` instead.
             "#},
             "h.dig('foo', 'bar', 'baz')\n",
         );

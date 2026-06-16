@@ -356,7 +356,7 @@ mod tests {
         // dstr is NOT frozen by frozen_string_literal: true in Ruby 3.0+
         test::<MutableConstant>().expect_offense(
             "# frozen_string_literal: true\nCONST = \"hello #{name}\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20^^^^^^^^^^^^^^^^ Freeze mutable objects assigned to constants.\n",
+             \x20\x20\x20\x20\x20\x20\x20\x20^^^^^^^^^^^^^^^ Freeze mutable objects assigned to constants.\n",
         );
     }
 

@@ -387,7 +387,7 @@ mod tests {
     fn flags_select_with_match_predicate() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.select { |x| x.match?(/regexp/) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
         "#});
     }
 
@@ -395,7 +395,7 @@ mod tests {
     fn flags_select_with_tilde_match() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.select { |x| x =~ /regexp/ }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
         "#});
     }
 
@@ -403,7 +403,7 @@ mod tests {
     fn flags_select_with_reversed_match() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.select { |x| /regexp/.match? x }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
         "#});
     }
 
@@ -411,7 +411,7 @@ mod tests {
     fn flags_select_with_reversed_tilde() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.select { |x| /regexp/ =~ x }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
         "#});
     }
 
@@ -419,7 +419,7 @@ mod tests {
     fn flags_filter_method() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.filter { |x| x.match?(/regexp/) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `filter` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `filter` with a regexp match.
         "#});
     }
 
@@ -427,7 +427,7 @@ mod tests {
     fn flags_find_all_method() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.find_all { |x| x.match?(/regexp/) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `find_all` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `find_all` with a regexp match.
         "#});
     }
 
@@ -437,7 +437,7 @@ mod tests {
     fn flags_reject_non_negated() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.reject { |x| x.match?(/regexp/) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `reject` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `reject` with a regexp match.
         "#});
     }
 
@@ -447,7 +447,7 @@ mod tests {
     fn flags_select_with_negated_match() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.select { |x| !x.match?(/regexp/) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `select` with a regexp match.
         "#});
     }
 
@@ -455,7 +455,7 @@ mod tests {
     fn flags_select_with_not_tilde() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.select { |x| x !~ /regexp/ }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `select` with a regexp match.
         "#});
     }
 
@@ -463,7 +463,7 @@ mod tests {
     fn flags_select_with_negated_reversed_match() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.select { |x| !/regexp/.match?(x) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `select` with a regexp match.
         "#});
     }
 
@@ -473,7 +473,7 @@ mod tests {
     fn flags_reject_with_not_tilde() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.reject { |x| x !~ /regexp/ }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `reject` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `reject` with a regexp match.
         "#});
     }
 
@@ -483,7 +483,7 @@ mod tests {
     fn flags_numblock_select() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.select { _1.match?(/regexp/) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
         "#});
     }
 
@@ -491,7 +491,7 @@ mod tests {
     fn flags_numblock_with_tilde() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array.select { _1 =~ /regexp/ }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
         "#});
     }
 
@@ -501,7 +501,7 @@ mod tests {
     fn flags_safe_nav_select() {
         test::<SelectByRegexp>().expect_offense(indoc! {r#"
             array&.select { |x| x.match?(/regexp/) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
         "#});
     }
 
@@ -565,7 +565,7 @@ mod tests {
         test::<SelectByRegexp>().expect_correction(
             indoc! {r#"
                 array.select { |x| x.match?(/regexp/) }
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
             "#},
             "array.grep(/regexp/)\n",
         );
@@ -576,7 +576,7 @@ mod tests {
         test::<SelectByRegexp>().expect_correction(
             indoc! {r#"
                 array.select { |x| x =~ /regexp/ }
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
             "#},
             "array.grep(/regexp/)\n",
         );
@@ -587,7 +587,7 @@ mod tests {
         test::<SelectByRegexp>().expect_correction(
             indoc! {r#"
                 array.select { |x| !x.match?(/regexp/) }
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `select` with a regexp match.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `select` with a regexp match.
             "#},
             "array.grep_v(/regexp/)\n",
         );
@@ -598,7 +598,7 @@ mod tests {
         test::<SelectByRegexp>().expect_correction(
             indoc! {r#"
                 array.reject { |x| x.match?(/regexp/) }
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `reject` with a regexp match.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep_v` to `reject` with a regexp match.
             "#},
             "array.grep_v(/regexp/)\n",
         );
@@ -609,7 +609,7 @@ mod tests {
         test::<SelectByRegexp>().expect_correction(
             indoc! {r#"
                 array&.select { |x| x.match?(/regexp/) }
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a regexp match.
             "#},
             "array&.grep(/regexp/)\n",
         );

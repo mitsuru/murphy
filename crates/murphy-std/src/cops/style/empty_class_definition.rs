@@ -107,7 +107,7 @@ mod tests {
     fn flags_class_new_assignment() {
         test::<EmptyClassDefinition>().expect_offense(indoc! {"
             FooError = Class.new(StandardError)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the `class` keyword instead of `Class.new` to define an empty class.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the `class` keyword instead of `Class.new` to define an empty class.
         "});
     }
 
@@ -115,7 +115,7 @@ mod tests {
     fn flags_parenthesized_class_new_assignment() {
         test::<EmptyClassDefinition>().expect_offense(indoc! {"
             FooError = (Class.new(StandardError))
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the `class` keyword instead of `Class.new` to define an empty class.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use the `class` keyword instead of `Class.new` to define an empty class.
         "});
     }
 

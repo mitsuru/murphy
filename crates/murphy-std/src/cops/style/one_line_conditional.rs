@@ -529,7 +529,7 @@ mod tests {
         test::<OneLineConditional>().expect_correction(
             indoc! {r#"
                 if c then 1 + 1 else 2 + 2 end
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor the ternary operator (`?:`) over single-line `if/then/else/end` constructs.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor the ternary operator (`?:`) over single-line `if/then/else/end` constructs.
             "#},
             "c ? 1 + 1 : 2 + 2\n",
         );
@@ -540,7 +540,7 @@ mod tests {
         test::<OneLineConditional>().expect_correction(
             indoc! {r#"
                 0 + if cond then run else dont end
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor the ternary operator (`?:`) over single-line `if/then/else/end` constructs.
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Favor the ternary operator (`?:`) over single-line `if/then/else/end` constructs.
             "#},
             "0 + (cond ? run : dont)\n",
         );

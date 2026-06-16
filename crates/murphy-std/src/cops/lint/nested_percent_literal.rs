@@ -66,7 +66,7 @@ mod tests {
     fn flags_nested_percent_i_within_percent_i() {
         test::<NestedPercentLiteral>().expect_offense(indoc! {r#"
             %i[%i[a b]]
-            ^^^^^^^^^^^^ Within percent literals, nested percent literals do not function and may be unwanted in the result.
+            ^^^^^^^^^^^ Within percent literals, nested percent literals do not function and may be unwanted in the result.
         "#});
     }
 
@@ -84,7 +84,7 @@ mod tests {
     fn flags_nested_percent_w() {
         test::<NestedPercentLiteral>().expect_offense(indoc! {r#"
             %w[%w[a b]]
-            ^^^^^^^^^^^^ Within percent literals, nested percent literals do not function and may be unwanted in the result.
+            ^^^^^^^^^^^ Within percent literals, nested percent literals do not function and may be unwanted in the result.
         "#});
     }
 

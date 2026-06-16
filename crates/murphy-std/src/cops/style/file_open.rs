@@ -128,7 +128,7 @@ mod tests {
     fn flags_file_open_assigned() {
         test::<FileOpen>().expect_offense(indoc! {"
             f = File.open('file')
-                ^^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
+                ^^^^^^^^^^^^^^^^^ `File.open` without a block may leak a file descriptor; use the block form.
         "});
     }
 

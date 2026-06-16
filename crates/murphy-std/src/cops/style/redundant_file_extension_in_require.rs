@@ -240,7 +240,7 @@ mod tests {
         //  emit_edit is produced the expect_offense still passes.)
         test::<RedundantFileExtensionInRequire>().expect_offense(indoc! {r#"
             require "foo.\x72b"
-                    ^^^^^^^^^^^^ Redundant `.rb` file extension detected.
+                    ^^^^^^^^^^^ Redundant `.rb` file extension detected.
         "#});
     }
 }

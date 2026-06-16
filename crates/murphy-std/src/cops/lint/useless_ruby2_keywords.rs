@@ -136,7 +136,7 @@ mod tests {
     fn flags_no_args() {
         test::<UselessRuby2Keywords>().expect_offense(indoc! {r#"
             ruby2_keywords def foo; end
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ruby2_keywords` is unnecessary for method `foo`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ruby2_keywords` is unnecessary for method `foo`.
         "#});
     }
 
@@ -144,7 +144,7 @@ mod tests {
     fn flags_positional_args() {
         test::<UselessRuby2Keywords>().expect_offense(indoc! {r#"
             ruby2_keywords def foo(arg); end
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ruby2_keywords` is unnecessary for method `foo`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ruby2_keywords` is unnecessary for method `foo`.
         "#});
     }
 
@@ -160,7 +160,7 @@ mod tests {
     fn flags_keyword_args() {
         test::<UselessRuby2Keywords>().expect_offense(indoc! {r#"
             ruby2_keywords def foo(i:, j:); end
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ruby2_keywords` is unnecessary for method `foo`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ruby2_keywords` is unnecessary for method `foo`.
         "#});
     }
 

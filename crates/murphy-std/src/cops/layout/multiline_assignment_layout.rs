@@ -352,7 +352,7 @@ mod tests {
     fn new_line_flags_rhs_on_operator_line() {
         test::<MultilineAssignmentLayout>().expect_offense(indoc! {"
             foo = if expression
-            ^^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
+            ^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
               'bar'
             end
         "});
@@ -420,7 +420,7 @@ mod tests {
     fn new_line_flags_setter_send() {
         test::<MultilineAssignmentLayout>().expect_offense(indoc! {"
             obj.foo = if expression
-            ^^^^^^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
+            ^^^^^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
               'bar'
             end
         "});
@@ -432,7 +432,7 @@ mod tests {
     fn new_line_flags_index_setter() {
         test::<MultilineAssignmentLayout>().expect_offense(indoc! {"
             foo[:x] = if expression
-            ^^^^^^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
+            ^^^^^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
               'bar'
             end
         "});
@@ -442,7 +442,7 @@ mod tests {
     fn new_line_flags_masgn() {
         test::<MultilineAssignmentLayout>().expect_offense(indoc! {"
             a, b = if expression
-            ^^^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
+            ^^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
               [1, 2]
             end
         "});
@@ -478,7 +478,7 @@ mod tests {
     fn new_line_flags_block_rhs() {
         test::<MultilineAssignmentLayout>().expect_offense(indoc! {"
             foo = [1].map do |i|
-            ^^^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
+            ^^^^^^^^^^^^^^^^^^^^ Right hand side of multi-line assignment is on the same line as the assignment operator `=`.
               i + 1
             end
         "});

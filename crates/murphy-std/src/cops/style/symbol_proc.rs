@@ -680,7 +680,7 @@ mod tests {
     fn flags_non_hash_reject() {
         test::<SymbolProc>().expect_offense(indoc! {"
             [1, 2, 3].reject { |x| x.odd? }
-                             ^^^^^^^^^^^^^^^ Pass `&:odd?` as an argument to `reject` instead of a block.
+                             ^^^^^^^^^^^^^^ Pass `&:odd?` as an argument to `reject` instead of a block.
         "});
     }
 

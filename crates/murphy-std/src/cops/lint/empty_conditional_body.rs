@@ -165,7 +165,7 @@ mod tests {
             if condition
               do_something
             elsif other_condition
-            ^^^^^^^^^^^^^^^^^^^^^^ Avoid `elsif` branches without a body.
+            ^^^^^^^^^^^^^^^^^^^^^ Avoid `elsif` branches without a body.
             end
         "#});
     }
@@ -229,7 +229,7 @@ mod tests {
                 if condition
                   do_something
                 elsif other_condition
-                ^^^^^^^^^^^^^^^^^^^^^^ Avoid `elsif` branches without a body.
+                ^^^^^^^^^^^^^^^^^^^^^ Avoid `elsif` branches without a body.
                   # noop
                 end
             "#});
@@ -244,7 +244,7 @@ mod tests {
             if condition
               do_something
             elsif other_condition
-            ^^^^^^^^^^^^^^^^^^^^^^ Avoid `elsif` branches without a body.
+            ^^^^^^^^^^^^^^^^^^^^^ Avoid `elsif` branches without a body.
             else
               # noop
             end

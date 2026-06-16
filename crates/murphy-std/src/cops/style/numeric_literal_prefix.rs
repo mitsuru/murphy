@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn flags_negative_uppercase_hex() {
         test::<NumericLiteralPrefix>().expect_correction(
-            "num = -0X1F\n      ^^^^^^ Use 0x for hexadecimal literals.\n",
+            "num = -0X1F\n      ^^^^^ Use 0x for hexadecimal literals.\n",
             "num = -0x1F\n",
         );
     }

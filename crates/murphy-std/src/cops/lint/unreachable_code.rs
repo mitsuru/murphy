@@ -288,7 +288,7 @@ mod tests {
             def foo
               return
               puts 'x'
-              ^^^^^^^^^ Unreachable code detected.
+              ^^^^^^^^ Unreachable code detected.
             end
         "#});
     }
@@ -311,7 +311,7 @@ mod tests {
             def foo
               raise 'bad'
               puts 'x'
-              ^^^^^^^^^ Unreachable code detected.
+              ^^^^^^^^ Unreachable code detected.
             end
         "#});
     }

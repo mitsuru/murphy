@@ -389,7 +389,7 @@ mod tests {
     fn flags_map_ternary_compact() {
         test::<MapCompactWithConditionalBlock>().expect_offense(indoc! {"
             array.map { |e| some_condition? ? e : next }.compact
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `select`.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `select`.
         "});
     }
 
@@ -398,7 +398,7 @@ mod tests {
         test::<MapCompactWithConditionalBlock>().expect_correction(
             indoc! {"
                 array.map { |e| some_condition? ? e : next }.compact
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `select`.
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `select`.
             "},
             "array.select { |e| some_condition? }\n",
         );
@@ -410,7 +410,7 @@ mod tests {
     fn flags_map_modifier_if_compact() {
         test::<MapCompactWithConditionalBlock>().expect_offense(indoc! {"
             array.map { |e| e if some_condition? }.compact
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `select`.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `select`.
         "});
     }
 
@@ -419,7 +419,7 @@ mod tests {
         test::<MapCompactWithConditionalBlock>().expect_correction(
             indoc! {"
                 array.map { |e| e if some_condition? }.compact
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `select`.
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `select`.
             "},
             "array.select { |e| some_condition? }\n",
         );
@@ -431,7 +431,7 @@ mod tests {
     fn flags_map_modifier_unless_compact() {
         test::<MapCompactWithConditionalBlock>().expect_offense(indoc! {"
             array.map { |e| e unless some_condition? }.compact
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
         "});
     }
 
@@ -440,7 +440,7 @@ mod tests {
         test::<MapCompactWithConditionalBlock>().expect_correction(
             indoc! {"
                 array.map { |e| e unless some_condition? }.compact
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
             "},
             "array.reject { |e| some_condition? }\n",
         );
@@ -452,7 +452,7 @@ mod tests {
     fn flags_filter_map_ternary() {
         test::<MapCompactWithConditionalBlock>().expect_offense(indoc! {"
             array.filter_map { |e| some_condition? ? e : next }
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `filter_map { ... }` with `select`.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `filter_map { ... }` with `select`.
         "});
     }
 
@@ -461,7 +461,7 @@ mod tests {
         test::<MapCompactWithConditionalBlock>().expect_correction(
             indoc! {"
                 array.filter_map { |e| some_condition? ? e : next }
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `filter_map { ... }` with `select`.
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `filter_map { ... }` with `select`.
             "},
             "array.select { |e| some_condition? }\n",
         );
@@ -473,7 +473,7 @@ mod tests {
     fn flags_map_if_next_else_lvar_compact() {
         test::<MapCompactWithConditionalBlock>().expect_offense(indoc! {"
             array.map { |e| if cond; next; else; e; end }.compact
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
         "});
     }
 
@@ -482,7 +482,7 @@ mod tests {
         test::<MapCompactWithConditionalBlock>().expect_correction(
             indoc! {"
                 array.map { |e| if cond; next; else; e; end }.compact
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
             "},
             "array.reject { |e| cond }\n",
         );
@@ -494,7 +494,7 @@ mod tests {
     fn flags_map_guard_next_compact() {
         test::<MapCompactWithConditionalBlock>().expect_offense(indoc! {"
             array.map { |e| next if some_condition?; e }.compact
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
         "});
     }
 
@@ -503,7 +503,7 @@ mod tests {
         test::<MapCompactWithConditionalBlock>().expect_correction(
             indoc! {"
                 array.map { |e| next if some_condition?; e }.compact
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Replace `map { ... }.compact` with `reject`.
             "},
             "array.reject { |e| some_condition? }\n",
         );
