@@ -196,28 +196,55 @@ fn is_in_loop_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
 /// a `Retry`. RuboCop treats such a `begin..rescue..end` as a loop
 /// (`process_rescue` -> `process_loop`), so writes inside it may be read on the
 /// next iteration via the retry back-edge and must not be flagged.
-fn is_in_retry_rescue(ast: &Ast, root: NodeId, node: NodeId) -> bool {
+///
+/// This mirrors RuboCop 1.87's `process_rescue` -> `process_loop`: it
+/// loop-ifies the *whole* rescue, so — like the `is_in_loop_body`
+/// approximation — every write inside a retry-rescue is blanket-marked
+/// referenced. A genuinely never-read write inside such a rescue is therefore a
+/// known false-negative, consistent with the documented `while`/`until`/`for`
+/// loop-body approximation. `subtree_contains_retry` intentionally descends
+/// through nested `begin..rescue` boundaries: a `retry` in a nested *inner*
+/// rescue also loop-ifies this outer rescue, matching RuboCop's
+/// `resbody_node.each_descendant.any?(&:retry_type?)` scope. Do NOT add a
+/// boundary stop — that would diverge from RuboCop and risk false positives.
+///
+/// `retry_cache` memoizes "does this `Rescue`'s resbody subtree contain a
+/// `Retry`" so the subtree DFS runs at most once per `Rescue` node across all
+/// assignments in the scope (see `safe-rust-patterns.md`: avoid redundant
+/// repeated work / per-node allocation in the hot analysis path).
+fn is_in_retry_rescue(
+    ast: &Ast,
+    root: NodeId,
+    node: NodeId,
+    retry_cache: &mut HashMap<NodeId, bool>,
+) -> bool {
     let mut current = node;
     while let Some(parent) = ast.parent(current).get() {
         if parent == root {
             return false;
         }
-        // `ast.children(Rescue)` yields body + resbodies + else; only the
-        // `Resbody` children carry the legal `retry` back-edge, so scan those.
-        if matches!(*ast.kind(parent), NodeKind::Rescue { .. })
-            && ast
-                .children(parent)
-                .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
-                .any(|rb| subtree_contains_retry(ast, rb))
-        {
-            return true;
+        if matches!(*ast.kind(parent), NodeKind::Rescue { .. }) {
+            // `ast.children(Rescue)` yields body + resbodies + else; only the
+            // `Resbody` children carry the legal `retry` back-edge, so scan
+            // those. Memoize per `Rescue` so this DFS runs at most once.
+            let contains = *retry_cache.entry(parent).or_insert_with(|| {
+                ast.children(parent)
+                    .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
+                    .any(|rb| subtree_contains_retry(ast, rb))
+            });
+            if contains {
+                return true;
+            }
         }
         current = parent;
     }
     false
 }
 
-/// DFS over `node`'s subtree for a `Retry`.
+/// DFS over `node`'s subtree for a `Retry`. Descends through nested
+/// `begin..rescue` boundaries by design — see `is_in_retry_rescue` for why this
+/// matches RuboCop's `each_descendant` scope. Runs at most once per `Rescue`
+/// node thanks to `is_in_retry_rescue`'s `retry_cache`.
 fn subtree_contains_retry(ast: &Ast, node: NodeId) -> bool {
     matches!(*ast.kind(node), NodeKind::Retry)
         || ast.children(node).any(|c| subtree_contains_retry(ast, c))
@@ -270,6 +297,11 @@ fn is_in_captured_block(ast: &Ast, scope_root: NodeId, node: NodeId) -> bool {
 /// Compute `is_referenced` for every `Assignment` in `scope` once the DFS
 /// has fully populated the scope's variables, assignments, and references.
 fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeInfo) {
+    // Per-scope memo: "does this `Rescue`'s resbody subtree contain a `Retry`".
+    // Declared once here (not per-assignment) so the subtree DFS amortizes to at
+    // most one run per `Rescue` node across every variable/assignment in the
+    // scope. Keyed by `Rescue` `NodeId`, which is stable for the scope's lifetime.
+    let mut retry_cache: HashMap<NodeId, bool> = HashMap::new();
     for var in &mut scope.variables {
         // Pre-compute branch chains for all assignments and references.
         let asgn_chains: Vec<Vec<(NodeId, NodeId)>> = var
@@ -290,7 +322,7 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
             // Loop body OR retry-rescue (RuboCop process_loop): always
             // referenced — the next iteration may read it.
             if is_in_loop_body(ast, scope_root, asgn_node)
-                || is_in_retry_rescue(ast, scope_root, asgn_node)
+                || is_in_retry_rescue(ast, scope_root, asgn_node, &mut retry_cache)
             {
                 var.assignments[i].is_referenced = true;
                 continue;

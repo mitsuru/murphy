@@ -1376,5 +1376,23 @@ mod tests {
             end
         "#});
     }
+
+    #[test]
+    fn dead_write_in_rescue_without_retry_still_flagged() {
+        // Negative control for the retry-rescue loop-ification: a rescue body
+        // with NO `retry` is not loop-ified, so `is_in_retry_rescue` is false
+        // and a never-read write inside it must still be flagged by normal
+        // dataflow. Guards against `is_in_retry_rescue` over-broadening to any
+        // rescue body.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              work
+            rescue StandardError
+              leftover = compute
+              ^^^^^^^^ Useless assignment to variable - `leftover`.
+              raise
+            end
+        "#});
+    }
 }
 murphy_plugin_api::submit_cop!(UselessAssignment);
