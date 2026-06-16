@@ -1179,5 +1179,86 @@ mod tests {
             offenses[0].message
         );
     }
+
+    #[test]
+    fn rescue_alt_branch_does_not_overwrite_begin_body_write() {
+        // request.rb `encoding`: begin-body write and rescue write are
+        // mutually exclusive; the begin-body value reaches the read on the
+        // no-exception path. RuboCop 1.87 reports nothing.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            if charset.nil?
+              encoding = Encoding::BINARY
+            else
+              begin
+                encoding = Encoding.find(charset)
+              rescue ArgumentError
+                encoding = Encoding::BINARY
+              end
+            end
+            String.new(encoding: encoding)
+        "#});
+    }
+
+    #[test]
+    fn rescue_alt_branch_does_not_overwrite_pre_begin_write() {
+        // request.rb `addresses`: a pre-begin init plus a begin-body write,
+        // both with a rescue alternative. None are useless per RuboCop 1.87.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            addresses = []
+            begin
+              addresses = [resolve(host)]
+            rescue StandardError
+              addresses = lookup(host)
+              addresses = addresses.first(2)
+            end
+            addresses.each { |a| p a }
+        "#});
+    }
+
+    #[test]
+    fn rescue_alt_branch_nested_in_conditional_not_flagged() {
+        // process_mentions_service.rb `mentioned_account`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            mentioned_account = find_remote(username)
+            if undeliverable?(mentioned_account)
+              begin
+                mentioned_account = resolve(match)
+              rescue Error
+                mentioned_account = nil
+              end
+            end
+            use(mentioned_account)
+        "#});
+    }
+
+    #[test]
+    fn multi_statement_begin_body_write_observed_by_rescue() {
+        // CANARY for body-arm identity: with a MULTI-statement begin body the
+        // body wraps in a `(begin ...)` stmt-list node, so the arm recorded in
+        // barrier_chain must still `==` Rescue.body. `value` is only read in
+        // the handler via exception flow.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              setup
+              value = compute
+            rescue
+              log(value)
+            end
+        "#});
+    }
+
+    #[test]
+    fn genuinely_unused_rescue_handler_write_still_flagged() {
+        // Guard against over-suppression: a never-read write inside a resbody
+        // is still useless (RuboCop flags it too).
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              work
+            rescue
+              x = 1
+              ^ Useless assignment to variable - `x`.
+            end
+        "#});
+    }
 }
 murphy_plugin_api::submit_cop!(UselessAssignment);
