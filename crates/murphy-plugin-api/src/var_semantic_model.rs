@@ -192,6 +192,37 @@ fn is_in_loop_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
     }
 }
 
+/// Returns `true` if `node` is inside a `Rescue` whose resbody subtree contains
+/// a `Retry`. RuboCop treats such a `begin..rescue..end` as a loop
+/// (`process_rescue` -> `process_loop`), so writes inside it may be read on the
+/// next iteration via the retry back-edge and must not be flagged.
+fn is_in_retry_rescue(ast: &Ast, root: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == root {
+            return false;
+        }
+        // `ast.children(Rescue)` yields body + resbodies + else; only the
+        // `Resbody` children carry the legal `retry` back-edge, so scan those.
+        if matches!(*ast.kind(parent), NodeKind::Rescue { .. })
+            && ast
+                .children(parent)
+                .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
+                .any(|rb| subtree_contains_retry(ast, rb))
+        {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// DFS over `node`'s subtree for a `Retry`.
+fn subtree_contains_retry(ast: &Ast, node: NodeId) -> bool {
+    matches!(*ast.kind(node), NodeKind::Retry)
+        || ast.children(node).any(|c| subtree_contains_retry(ast, c))
+}
+
 /// Returns `true` if `node` sits inside a block/lambda body that is nested
 /// *within* the variable's declaring scope (`scope_root`) — i.e. the
 /// assignment writes a variable captured from an enclosing scope.
@@ -256,8 +287,11 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
             let asgn_node = var.assignments[i].node_id;
             let asgn_end = var.assignments[i].end;
 
-            // Loop body: always referenced (next iteration may read it).
-            if is_in_loop_body(ast, scope_root, asgn_node) {
+            // Loop body OR retry-rescue (RuboCop process_loop): always
+            // referenced — the next iteration may read it.
+            if is_in_loop_body(ast, scope_root, asgn_node)
+                || is_in_retry_rescue(ast, scope_root, asgn_node)
+            {
                 var.assignments[i].is_referenced = true;
                 continue;
             }
