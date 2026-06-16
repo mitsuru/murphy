@@ -17,7 +17,7 @@ pub use translate::translate;
 /// **`NodeKind` の variant 追加・削除・並べ替えに伴って必ず bump。**
 /// バイナリ形式そのものを変える場合は代わりに
 /// [`murphy_ast::FORMAT_VERSION`] を bump する。
-pub const LAYER_VERSION: u32 = 3;
+pub const LAYER_VERSION: u32 = 4;
 
 #[cfg(test)]
 mod lib_tests {
@@ -26,9 +26,9 @@ mod lib_tests {
     #[test]
     fn layer_version_is_initialized() {
         // Anchors the current value. Bump alongside any prism→arena
-        // mapping change so cache invalidation kicks in. Last bumped to 3
-        // when call/index `||=`/`&&=` writes started mapping to
-        // OrAsgn/AndAsgn instead of Unknown.
-        assert_eq!(LAYER_VERSION, 3);
+        // mapping change so cache invalidation kicks in. Last bumped to 4
+        // when `retry` started mapping to NodeKind::Retry instead of
+        // Unknown (murphy-l1iy).
+        assert_eq!(LAYER_VERSION, 4);
     }
 }
