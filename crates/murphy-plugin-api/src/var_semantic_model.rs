@@ -200,13 +200,17 @@ fn is_in_loop_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
 /// This mirrors RuboCop 1.87's `process_rescue` -> `process_loop`: it
 /// loop-ifies the *whole* rescue, so — like the `is_in_loop_body`
 /// approximation — every write inside a retry-rescue is blanket-marked
-/// referenced. A genuinely never-read write inside such a rescue is therefore a
-/// known false-negative, consistent with the documented `while`/`until`/`for`
-/// loop-body approximation. `subtree_contains_retry` intentionally descends
-/// through nested `begin..rescue` boundaries: a `retry` in a nested *inner*
-/// rescue also loop-ifies this outer rescue, matching RuboCop's
-/// `resbody_node.each_descendant.any?(&:retry_type?)` scope. Do NOT add a
-/// boundary stop — that would diverge from RuboCop and risk false positives.
+/// referenced. The descent over `subtree_contains_retry` matches RuboCop's
+/// detection scope (`resbody_node.each_descendant.any?(&:retry_type?)` also
+/// descends into nested `begin..rescue`).
+///
+/// KNOWN DIVERGENCE (false-negative, tracked in murphy-w5za): RuboCop still
+/// flags a write that has *no* reference anywhere in the loop, whereas this
+/// blanket-mark suppresses it — same approximation as the documented
+/// `while`/`until`/`for` loop-body handling. This also manifests when the
+/// `retry` lives in a nested *inner* rescue: a never-read write in the outer
+/// resbody is flagged by RuboCop but missed here. The case does not occur in
+/// the Mastodon corpus this fix targets; refining it is deferred to murphy-w5za.
 ///
 /// `retry_cache` memoizes "does this `Rescue`'s resbody subtree contain a
 /// `Retry`" so the subtree DFS runs at most once per `Rescue` node across all
