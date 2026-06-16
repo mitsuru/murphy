@@ -2065,6 +2065,23 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_retry_redo() {
+        // The fieldless jump leaves `Retry`/`Redo` (discriminants 80/81) must
+        // survive the byte round-trip. This is load-bearing: `retry` flows
+        // through the arena binary cache, so a broken (de)serialization would
+        // silently corrupt cached ASTs (murphy-l1iy).
+        let mut b = AstBuilder::new("begin\nrescue\n  retry\nend\nloop { redo }", "t.rb");
+        let retry = b.push(NodeKind::Retry, r(15, 20));
+        let redo_ = b.push(NodeKind::Redo, r(28, 32));
+        let list = b.push_list(&[retry, redo_]);
+        let root = b.push(NodeKind::Begin(list), r(0, 32));
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
+        assert_eq!(ast, restored, "retry/redo round-trip must be bit-equal");
+    }
+
+    #[test]
     fn round_trip_exception_variants() {
         // The three exception variants appended after `Defined`
         // (discriminants 57..=59) must survive the byte round-trip. Covers
