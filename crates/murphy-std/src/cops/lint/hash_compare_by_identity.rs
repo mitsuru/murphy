@@ -91,7 +91,7 @@ mod tests {
         // first argument is still the `object_id` send.
         test::<HashCompareByIdentity>().expect_offense(indoc! {r#"
             hash.fetch(foo.object_id, :default)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `Hash#compare_by_identity` instead of using `object_id` for keys.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `Hash#compare_by_identity` instead of using `object_id` for keys.
         "#});
     }
 
