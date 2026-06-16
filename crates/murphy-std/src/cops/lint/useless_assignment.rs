@@ -1342,5 +1342,39 @@ mod tests {
             use(count)
         "#});
     }
+
+    #[test]
+    fn retry_accumulator_op_assign_not_flagged() {
+        // request_pool.rb `retries`: `retries += 1; retry` — the op-assign
+        // is read on the next iteration via the retry back-edge.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            retries = 0
+            begin
+              do_work
+            rescue StandardError
+              if retries.positive?
+                raise
+              else
+                retries += 1
+                retry
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn retry_accumulator_simple_not_flagged() {
+        // snowflake.rb `tries`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            tries = 0
+            begin
+              insert_record
+            rescue RecordNotUnique
+              raise if tries > 100
+              tries += 1
+              retry
+            end
+        "#});
+    }
 }
 murphy_plugin_api::submit_cop!(UselessAssignment);
