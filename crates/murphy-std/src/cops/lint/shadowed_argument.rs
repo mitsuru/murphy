@@ -132,7 +132,7 @@ fn first_shadowing_assignment(
         if assignment_uses_var(meta, variable.name, cx) {
             continue;
         }
-        if is_conditional(meta, scope_id, cx) {
+        if conditional_assignment(meta, scope_id, cx) {
             location_known = false;
             continue;
         }
@@ -188,25 +188,25 @@ fn implicit_reference_after(scope_id: NodeId, assignment_start: u32, cx: &Cx<'_>
 }
 
 /// Whether the assignment sits inside a branch/block whose execution is
-/// undecidable. Mirrors RuboCop's `node.conditional? || node.type?(:block,
-/// :rescue)`, where `conditional?` covers `if`/`while`/`until`/`case`/`case_match`.
-fn is_conditional(node: NodeId, scope_id: NodeId, cx: &Cx<'_>) -> bool {
+/// undecidable. Mirrors RuboCop's `conditional_assignment?`:
+/// `node.conditional? || node.type?(:block, :rescue)` walked up to the scope
+/// boundary. `cx.is_conditional` is RuboCop's `conditional?`
+/// (`if`/`while`/`until`/`case`/`case_match`) and already excludes
+/// post-condition (`begin..end while/until`) loops, whose body always runs once.
+/// Only the regular `block` type counts (not `numblock`/`itblock`), matching
+/// RuboCop's literal `type?(:block, :rescue)`.
+fn conditional_assignment(node: NodeId, scope_id: NodeId, cx: &Cx<'_>) -> bool {
     let mut current = node;
     while let Some(parent) = cx.parent(current).get() {
         if parent == scope_id {
             return false;
         }
-        if matches!(
-            *cx.kind(parent),
-            NodeKind::If { .. }
-                | NodeKind::While { .. }
-                | NodeKind::Until { .. }
-                | NodeKind::Case { .. }
-                | NodeKind::CaseMatch { .. }
-                | NodeKind::Block { .. }
-                | NodeKind::Rescue { .. }
-                | NodeKind::Resbody { .. }
-        ) {
+        if cx.is_conditional(parent)
+            || matches!(
+                *cx.kind(parent),
+                NodeKind::Block { .. } | NodeKind::Rescue { .. } | NodeKind::Resbody { .. }
+            )
+        {
             return true;
         }
         current = parent;
@@ -339,6 +339,36 @@ mod tests {
               case bar
               when 1
                 foo = 42
+              end
+              puts foo
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_shadow_in_post_condition_loop() {
+        // A `begin..end while`/`until` body always runs at least once, so the
+        // reassignment is unconditional (RuboCop's `conditional?` excludes
+        // `while_post`/`until_post`).
+        test::<ShadowedArgument>().expect_offense(indoc! {r#"
+            def m(foo)
+              begin
+                foo = 1
+                ^^^^^^^ Argument `foo` was shadowed by a local variable before it was used.
+              end while bar
+              puts foo
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_shadowing_inside_while_loop() {
+        // A pre-condition `while`/`until` may execute zero times, so it stays
+        // conditional and is not flagged.
+        test::<ShadowedArgument>().expect_no_offenses(indoc! {r#"
+            def m(foo)
+              while bar
+                foo = 1
               end
               puts foo
             end
