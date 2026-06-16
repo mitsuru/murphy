@@ -310,7 +310,7 @@ mod tests {
     fn flags_array_fetch_int_body() {
         test::<RedundantFetchBlock>().expect_offense(indoc! {r#"
             array.fetch(5) { :value }
-                  ^^^^^^^^^^^^^^^^^^^^ Use `fetch(5, :value)` instead of `fetch(5) { :value }`.
+                  ^^^^^^^^^^^^^^^^^^^ Use `fetch(5, :value)` instead of `fetch(5) { :value }`.
         "#});
     }
 
@@ -451,7 +451,7 @@ mod tests {
         // Bare hash key `foo: :bar` (no braces) — offense is flagged.
         test::<RedundantFetchBlock>().expect_offense(indoc! {r#"
             hash.fetch(foo: :bar) { 1 }
-                 ^^^^^^^^^^^^^^^^^^^^^^^ Use `fetch({foo: :bar}, 1)` instead of `fetch(foo: :bar) { 1 }`.
+                 ^^^^^^^^^^^^^^^^^^^^^^ Use `fetch({foo: :bar}, 1)` instead of `fetch(foo: :bar) { 1 }`.
         "#});
     }
 
@@ -461,7 +461,7 @@ mod tests {
         test::<RedundantFetchBlock>().expect_correction(
             indoc! {r#"
                 hash.fetch(foo: :bar) { 1 }
-                     ^^^^^^^^^^^^^^^^^^^^^^^ Use `fetch({foo: :bar}, 1)` instead of `fetch(foo: :bar) { 1 }`.
+                     ^^^^^^^^^^^^^^^^^^^^^^ Use `fetch({foo: :bar}, 1)` instead of `fetch(foo: :bar) { 1 }`.
             "#},
             "hash.fetch({foo: :bar}, 1)\n",
         );
@@ -473,7 +473,7 @@ mod tests {
         test::<RedundantFetchBlock>().expect_correction(
             indoc! {r#"
                 hash.fetch({foo: :bar}) { 1 }
-                     ^^^^^^^^^^^^^^^^^^^^^^^^^ Use `fetch({foo: :bar}, 1)` instead of `fetch({foo: :bar}) { 1 }`.
+                     ^^^^^^^^^^^^^^^^^^^^^^^^ Use `fetch({foo: :bar}, 1)` instead of `fetch({foo: :bar}) { 1 }`.
             "#},
             "hash.fetch({foo: :bar}, 1)\n",
         );

@@ -439,7 +439,7 @@ mod tests {
     fn flags_dir_glob_block_pass_require() {
         test::<NonDeterministicRequireOrder>().expect_offense(indoc! {r#"
             Dir.glob('./lib/**/*.rb', &method(:require))
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Sort files before requiring them.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Sort files before requiring them.
         "#});
     }
 
@@ -447,7 +447,7 @@ mod tests {
     fn flags_dir_glob_block_pass_require_relative() {
         test::<NonDeterministicRequireOrder>().expect_offense(indoc! {r#"
             Dir.glob('./lib/**/*.rb', &method(:require_relative))
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Sort files before requiring them.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Sort files before requiring them.
         "#});
     }
 

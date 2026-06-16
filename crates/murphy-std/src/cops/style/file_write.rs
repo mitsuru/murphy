@@ -329,7 +329,7 @@ mod tests {
     fn flags_block_write_text_mode() {
         test::<FileWrite>().expect_offense(indoc! {r#"
             File.open(filename, 'w') { |f| f.write(content) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `File.write`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `File.write`.
         "#});
     }
 
@@ -337,7 +337,7 @@ mod tests {
     fn flags_block_write_binary_mode() {
         test::<FileWrite>().expect_offense(indoc! {r#"
             File.open(filename, 'wb') { |f| f.write(content) }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `File.binwrite`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `File.binwrite`.
         "#});
     }
 
@@ -346,7 +346,7 @@ mod tests {
         test::<FileWrite>().expect_correction(
             indoc! {r#"
                 File.open(filename, 'w') { |f| f.write(content) }
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `File.write`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `File.write`.
             "#},
             "File.write(filename, content)\n",
         );

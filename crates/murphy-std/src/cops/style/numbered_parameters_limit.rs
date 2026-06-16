@@ -111,7 +111,7 @@ mod tests {
             .with_options(&NumberedParametersLimitOptions { max: 2 })
             .expect_offense(indoc! {"
                 [1, 2, 3].map { _1 + _2 + _3 }
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Avoid using more than 2 numbered parameters; 3 detected.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Avoid using more than 2 numbered parameters; 3 detected.
             "});
     }
 

@@ -403,7 +403,7 @@ mod tests {
     fn flags_map_to_h() {
         test::<HashTransformValues>().expect_offense(indoc! {r#"
             {a: 1}.map { |k, v| [k, foo(v)] }.to_h
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
         "#});
     }
 
@@ -412,7 +412,7 @@ mod tests {
         test::<HashTransformValues>().expect_correction(
             indoc! {r#"
                 {a: 1}.map { |k, v| [k, foo(v)] }.to_h
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
             "#},
             "{a: 1}.transform_values { |v| foo(v) }\n",
         );
@@ -422,7 +422,7 @@ mod tests {
     fn flags_collect_to_h() {
         test::<HashTransformValues>().expect_offense(indoc! {r#"
             {a: 1}.collect { |k, v| [k, v * 2] }.to_h
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
         "#});
     }
 
@@ -432,7 +432,7 @@ mod tests {
     fn flags_to_h_block() {
         test::<HashTransformValues>().expect_offense(indoc! {r#"
             {a: 1}.to_h { |k, v| [k, v * v] }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `to_h {...}`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `to_h {...}`.
         "#});
     }
 
@@ -441,7 +441,7 @@ mod tests {
         test::<HashTransformValues>().expect_correction(
             indoc! {r#"
                 {a: 1}.to_h { |k, v| [k, v * v] }
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `to_h {...}`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `to_h {...}`.
             "#},
             "{a: 1}.transform_values { |v| v * v }\n",
         );
@@ -453,7 +453,7 @@ mod tests {
     fn flags_hash_brackets_map() {
         test::<HashTransformValues>().expect_offense(indoc! {r#"
             Hash[{a: 1}.map { |k, v| [k, foo(v)] }]
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `Hash[_.map {...}]`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `Hash[_.map {...}]`.
         "#});
     }
 
@@ -462,7 +462,7 @@ mod tests {
         test::<HashTransformValues>().expect_correction(
             indoc! {r#"
                 Hash[{a: 1}.map { |k, v| [k, foo(v)] }]
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `Hash[_.map {...}]`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `Hash[_.map {...}]`.
             "#},
             "{a: 1}.transform_values { |v| foo(v) }\n",
         );
@@ -475,7 +475,7 @@ mod tests {
         // foo.to_h is a hash receiver
         test::<HashTransformValues>().expect_offense(indoc! {r#"
             foo.to_h.map { |k, v| [k, v.upcase] }.to_h
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
         "#});
     }
 
@@ -548,7 +548,7 @@ mod tests {
     fn flags_merge_receiver() {
         test::<HashTransformValues>().expect_offense(indoc! {r#"
             foo.merge(bar).map { |k, v| [k, v.to_s] }.to_h
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
         "#});
     }
 
@@ -557,7 +557,7 @@ mod tests {
         test::<HashTransformValues>().expect_correction(
             indoc! {r#"
                 foo.merge(bar).map { |k, v| [k, v.to_s] }.to_h
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `transform_values` over `map {...}.to_h`.
             "#},
             "foo.merge(bar).transform_values { |v| v.to_s }\n",
         );

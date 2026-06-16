@@ -76,7 +76,7 @@ mod tests {
     fn flags_instance_methods_include() {
         test::<ModuleMemberExistenceCheck>().expect_offense(indoc! {"
             Array.instance_methods.include?(:size)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `method_defined?` instead.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `method_defined?` instead.
         "});
     }
 
@@ -84,7 +84,7 @@ mod tests {
     fn flags_parenthesized_instance_methods_include() {
         test::<ModuleMemberExistenceCheck>().expect_offense(indoc! {"
             (Array.instance_methods).include?(:size)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `method_defined?` instead.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `method_defined?` instead.
         "});
     }
 

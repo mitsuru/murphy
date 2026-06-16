@@ -297,7 +297,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.first
-                          ^^^^^^^^^^^^^^ Use `sample` instead of `shuffle.first`.
+                          ^^^^^^^^^^^^^ Use `sample` instead of `shuffle.first`.
             "#},
             "[1, 2, 3].sample\n",
         );
@@ -308,7 +308,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.last
-                          ^^^^^^^^^^^^^ Use `sample` instead of `shuffle.last`.
+                          ^^^^^^^^^^^^ Use `sample` instead of `shuffle.last`.
             "#},
             "[1, 2, 3].sample\n",
         );
@@ -356,7 +356,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.first(2)
-                          ^^^^^^^^^^^^^^^^^ Use `sample(2)` instead of `shuffle.first(2)`.
+                          ^^^^^^^^^^^^^^^^ Use `sample(2)` instead of `shuffle.first(2)`.
             "#},
             "[1, 2, 3].sample(2)\n",
         );
@@ -367,7 +367,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.last(3)
-                          ^^^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle.last(3)`.
+                          ^^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle.last(3)`.
             "#},
             "[1, 2, 3].sample(3)\n",
         );
@@ -378,7 +378,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.first(foo)
-                          ^^^^^^^^^^^^^^^^^^^ Use `sample(foo)` instead of `shuffle.first(foo)`.
+                          ^^^^^^^^^^^^^^^^^^ Use `sample(foo)` instead of `shuffle.first(foo)`.
             "#},
             "[1, 2, 3].sample(foo)\n",
         );
@@ -391,7 +391,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle[0, 3]
-                          ^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle[0, 3]`.
+                          ^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle[0, 3]`.
             "#},
             "[1, 2, 3].sample(3)\n",
         );
@@ -404,7 +404,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle[0..3]
-                          ^^^^^^^^^^^^^^ Use `sample(4)` instead of `shuffle[0..3]`.
+                          ^^^^^^^^^^^^^ Use `sample(4)` instead of `shuffle[0..3]`.
             "#},
             "[1, 2, 3].sample(4)\n",
         );
@@ -415,7 +415,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle[0...3]
-                          ^^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle[0...3]`.
+                          ^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle[0...3]`.
             "#},
             "[1, 2, 3].sample(3)\n",
         );
@@ -427,7 +427,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle[...3]
-                          ^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle[...3]`.
+                          ^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle[...3]`.
             "#},
             "[1, 2, 3].sample(3)\n",
         );
@@ -440,7 +440,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.at(0)
-                          ^^^^^^^^^^^^^^ Use `sample` instead of `shuffle.at(0)`.
+                          ^^^^^^^^^^^^^ Use `sample` instead of `shuffle.at(0)`.
             "#},
             "[1, 2, 3].sample\n",
         );
@@ -451,7 +451,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.at(-1)
-                          ^^^^^^^^^^^^^^^ Use `sample` instead of `shuffle.at(-1)`.
+                          ^^^^^^^^^^^^^^ Use `sample` instead of `shuffle.at(-1)`.
             "#},
             "[1, 2, 3].sample\n",
         );
@@ -464,7 +464,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.slice(0)
-                          ^^^^^^^^^^^^^^^^^ Use `sample` instead of `shuffle.slice(0)`.
+                          ^^^^^^^^^^^^^^^^ Use `sample` instead of `shuffle.slice(0)`.
             "#},
             "[1, 2, 3].sample\n",
         );
@@ -475,7 +475,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.slice(-1)
-                          ^^^^^^^^^^^^^^^^^^ Use `sample` instead of `shuffle.slice(-1)`.
+                          ^^^^^^^^^^^^^^^^^ Use `sample` instead of `shuffle.slice(-1)`.
             "#},
             "[1, 2, 3].sample\n",
         );
@@ -488,7 +488,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.slice(0, 3)
-                          ^^^^^^^^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle.slice(0, 3)`.
+                          ^^^^^^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle.slice(0, 3)`.
             "#},
             "[1, 2, 3].sample(3)\n",
         );
@@ -499,7 +499,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.slice(0..3)
-                          ^^^^^^^^^^^^^^^^^^^^^ Use `sample(4)` instead of `shuffle.slice(0..3)`.
+                          ^^^^^^^^^^^^^^^^^^^ Use `sample(4)` instead of `shuffle.slice(0..3)`.
             "#},
             "[1, 2, 3].sample(4)\n",
         );
@@ -510,7 +510,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle.slice(0...3)
-                          ^^^^^^^^^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle.slice(0...3)`.
+                          ^^^^^^^^^^^^^^^^^^^^ Use `sample(3)` instead of `shuffle.slice(0...3)`.
             "#},
             "[1, 2, 3].sample(3)\n",
         );
@@ -523,7 +523,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle(random: Random.new).first
-                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `sample(random: Random.new)` instead of `shuffle(random: Random.new).first`.
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `sample(random: Random.new)` instead of `shuffle(random: Random.new).first`.
             "#},
             "[1, 2, 3].sample(random: Random.new)\n",
         );
@@ -534,7 +534,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle(random: Random.new).first(2)
-                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `sample(2, random: Random.new)` instead of `shuffle(random: Random.new).first(2)`.
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `sample(2, random: Random.new)` instead of `shuffle(random: Random.new).first(2)`.
             "#},
             "[1, 2, 3].sample(2, random: Random.new)\n",
         );
@@ -545,7 +545,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle(random: foo).last(bar)
-                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `sample(bar, random: foo)` instead of `shuffle(random: foo).last(bar)`.
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `sample(bar, random: foo)` instead of `shuffle(random: foo).last(bar)`.
             "#},
             "[1, 2, 3].sample(bar, random: foo)\n",
         );
@@ -556,7 +556,7 @@ mod tests {
         test::<Sample>().expect_correction(
             indoc! {r#"
                 [1, 2, 3].shuffle(random: Random.new)[0..3]
-                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `sample(4, random: Random.new)` instead of `shuffle(random: Random.new)[0..3]`.
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `sample(4, random: Random.new)` instead of `shuffle(random: Random.new)[0..3]`.
             "#},
             "[1, 2, 3].sample(4, random: Random.new)\n",
         );

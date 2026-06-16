@@ -428,7 +428,7 @@ mod tests {
     fn flags_reject_include() {
         test::<HashExcept>().expect_offense(indoc! {r#"
             h.reject { |k, v| [:a, :b].include?(k) }
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
         "#});
     }
 
@@ -437,7 +437,7 @@ mod tests {
         test::<HashExcept>().expect_correction(
             indoc! {r#"
                 h.reject { |k, v| [:a, :b].include?(k) }
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
             "#},
             "h.except(:a, :b)\n",
         );
@@ -468,7 +468,7 @@ mod tests {
     fn flags_select_negated_include() {
         test::<HashExcept>().expect_offense(indoc! {r#"
             h.select { |k, v| ![:a, :b].include?(k) }
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
         "#});
     }
 
@@ -477,7 +477,7 @@ mod tests {
         test::<HashExcept>().expect_correction(
             indoc! {r#"
                 h.select { |k, v| ![:a, :b].include?(k) }
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
             "#},
             "h.except(:a, :b)\n",
         );
@@ -487,7 +487,7 @@ mod tests {
     fn flags_filter_negated_include() {
         test::<HashExcept>().expect_offense(indoc! {r#"
             h.filter { |k, v| ![:a, :b].include?(k) }
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:a, :b)` instead.
         "#});
     }
 
@@ -570,7 +570,7 @@ mod tests {
     fn corrects_reject_do_end_block_singleline() {
         test::<HashExcept>().expect_correction(
             "h.reject do |k, v| k == :foo; end
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:foo)` instead.\n",
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `except(:foo)` instead.\n",
             "h.except(:foo)\n",
         );
     }

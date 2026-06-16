@@ -297,7 +297,7 @@ mod tests {
         test::<MinMaxComparison>().expect_correction(
             indoc! {"
                 foo.bar > baz.qux ? foo.bar : baz.qux
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `[foo.bar, baz.qux].max` instead.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `[foo.bar, baz.qux].max` instead.
             "},
             "[foo.bar, baz.qux].max\n",
         );

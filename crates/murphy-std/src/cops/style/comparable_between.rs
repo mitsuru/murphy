@@ -144,7 +144,7 @@ mod tests {
         test::<ComparableBetween>().expect_correction(
             indoc! {"
                 a + b >= min && a + b <= max
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
             "},
             "(a + b).between?(min, max)\n",
         );
@@ -155,7 +155,7 @@ mod tests {
         test::<ComparableBetween>().expect_correction(
             indoc! {"
                 foo.bar >= min && foo.bar <= max
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `between?` over logical comparison.
             "},
             "(foo.bar).between?(min, max)\n",
         );

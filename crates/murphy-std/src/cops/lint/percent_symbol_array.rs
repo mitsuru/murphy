@@ -75,7 +75,7 @@ mod tests {
     fn flags_colons_and_commas_in_percent_i() {
         test::<PercentSymbolArray>().expect_offense(indoc! {r#"
             %i(:foo, :bar, :baz)
-            ^^^^^^^^^^^^^^^^^^^^^ Within `%i`/`%I`, ':' and ',' are unnecessary and may be unwanted in the resulting symbols.
+            ^^^^^^^^^^^^^^^^^^^^ Within `%i`/`%I`, ':' and ',' are unnecessary and may be unwanted in the resulting symbols.
         "#});
     }
 
@@ -93,7 +93,7 @@ mod tests {
     fn handles_percent_i_with_brackets() {
         test::<PercentSymbolArray>().expect_offense(indoc! {r#"
             %i[foo bar, baz]
-            ^^^^^^^^^^^^^^^^^ Within `%i`/`%I`, ':' and ',' are unnecessary and may be unwanted in the resulting symbols.
+            ^^^^^^^^^^^^^^^^ Within `%i`/`%I`, ':' and ',' are unnecessary and may be unwanted in the resulting symbols.
         "#});
     }
 }

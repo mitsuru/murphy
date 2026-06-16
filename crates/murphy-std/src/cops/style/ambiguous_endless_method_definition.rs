@@ -401,7 +401,7 @@ mod tests {
         // `=` in the range, not the first (which belongs to the default).
         test::<AmbiguousEndlessMethodDefinition>().expect_correction(
             "def foo(x = 1) = x if bar
-^^^^^^^^^^^^^^^^^^^^^^^^^^ Avoid using `if` statements with endless methods.
+^^^^^^^^^^^^^^^^^^^^^^^^^ Avoid using `if` statements with endless methods.
 ",
             "def foo(x = 1)
   x

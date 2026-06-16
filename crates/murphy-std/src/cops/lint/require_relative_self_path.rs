@@ -90,7 +90,7 @@ mod tests {
     fn flags_self_require() {
         test::<RequireRelativeSelfPath>().expect_offense(indoc! {r#"
             require_relative 't'
-            ^^^^^^^^^^^^^^^^^^^^^^ Remove the `require_relative` that requires itself.
+            ^^^^^^^^^^^^^^^^^^^^ Remove the `require_relative` that requires itself.
         "#});
     }
 

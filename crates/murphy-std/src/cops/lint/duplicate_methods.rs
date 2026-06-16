@@ -504,7 +504,7 @@ mod tests {
               end
 
               alias_method :foo, :bar
-              ^^^^^^^^^^^^^^^^^^^^^^^^ Method `foo` is defined at both line 2 and line 6.
+              ^^^^^^^^^^^^^^^^^^^^^^^ Method `foo` is defined at both line 2 and line 6.
             end
         "#});
     }

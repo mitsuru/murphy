@@ -424,7 +424,7 @@ mod tests {
         test::<ExplicitBlockArgument>().expect_offense(indoc! {"
             def with_dir
               Dir.chdir(tmp_dir) { |dir| yield dir }
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Consider using explicit block argument in the surrounding method's signature over `yield`.
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Consider using explicit block argument in the surrounding method's signature over `yield`.
             end
         "});
     }
@@ -454,7 +454,7 @@ mod tests {
             indoc! {"
                 def with_dir
                   Dir.chdir(tmp_dir) { |dir| yield dir }
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Consider using explicit block argument in the surrounding method's signature over `yield`.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Consider using explicit block argument in the surrounding method's signature over `yield`.
                 end
             "},
             indoc! {"

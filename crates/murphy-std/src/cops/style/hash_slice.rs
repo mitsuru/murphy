@@ -404,7 +404,7 @@ mod tests {
     fn flags_select_include() {
         test::<HashSlice>().expect_offense(indoc! {r#"
             h.select { |k, v| [:a, :b].include?(k) }
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:a, :b)` instead.
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:a, :b)` instead.
         "#});
     }
 
@@ -413,7 +413,7 @@ mod tests {
         test::<HashSlice>().expect_correction(
             indoc! {r#"
                 h.select { |k, v| [:a, :b].include?(k) }
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:a, :b)` instead.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:a, :b)` instead.
             "#},
             "h.slice(:a, :b)\n",
         );
@@ -444,7 +444,7 @@ mod tests {
     fn flags_reject_negated_include() {
         test::<HashSlice>().expect_offense(indoc! {r#"
             h.reject { |k, v| ![:a, :b].include?(k) }
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:a, :b)` instead.
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:a, :b)` instead.
         "#});
     }
 
@@ -453,7 +453,7 @@ mod tests {
         test::<HashSlice>().expect_correction(
             indoc! {r#"
                 h.reject { |k, v| ![:a, :b].include?(k) }
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:a, :b)` instead.
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:a, :b)` instead.
             "#},
             "h.slice(:a, :b)\n",
         );
@@ -533,7 +533,7 @@ mod tests {
         // Single-line do/end to keep offense on one line.
         test::<HashSlice>().expect_correction(
             "h.select do |k, v| k == :foo; end
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:foo)` instead.\n",
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `slice(:foo)` instead.\n",
             "h.slice(:foo)\n",
         );
     }

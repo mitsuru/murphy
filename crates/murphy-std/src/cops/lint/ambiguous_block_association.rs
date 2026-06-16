@@ -245,7 +245,7 @@ mod tests {
     fn flags_unparenthesized_to_call() {
         test::<AmbiguousBlockAssociation>().expect_offense(indoc! {r#"
             expect { order.expire }.to change { order.events }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Parenthesize the param `change { order.events }` to make sure that the block will be associated with the `to` method call.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Parenthesize the param `change { order.events }` to make sure that the block will be associated with the `to` method call.
         "#});
     }
 
@@ -301,7 +301,7 @@ mod tests {
     fn flags_safe_navigation_call() {
         test::<AmbiguousBlockAssociation>().expect_offense(indoc! {r#"
             foo&.some_method a { |val| puts val }
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Parenthesize the param `a { |val| puts val }` to make sure that the block will be associated with the `some_method` method call.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Parenthesize the param `a { |val| puts val }` to make sure that the block will be associated with the `some_method` method call.
         "#});
     }
 }

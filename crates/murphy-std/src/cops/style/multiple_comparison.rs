@@ -307,7 +307,7 @@ mod tests {
         test::<MultipleComparison>().expect_correction(
             indoc! {r#"
                 foo if a == 'a' || a == 'b' || a == 'c'
-                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Avoid comparing a variable with multiple items in a conditional, use `Array#include?` instead.
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Avoid comparing a variable with multiple items in a conditional, use `Array#include?` instead.
             "#},
             "foo if ['a', 'b', 'c'].include?(a)\n",
         );
@@ -381,7 +381,7 @@ mod tests {
             })
             .expect_offense(indoc! {r#"
                 foo if a == 'a' || a == 'b' || a == 'c'
-                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Avoid comparing a variable with multiple items in a conditional, use `Array#include?` instead.
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Avoid comparing a variable with multiple items in a conditional, use `Array#include?` instead.
             "#});
     }
 

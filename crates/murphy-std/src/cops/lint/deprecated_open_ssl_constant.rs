@@ -278,7 +278,7 @@ mod tests {
     fn flags_digest_digest() {
         test::<DeprecatedOpenSSLConstant>().expect_offense(indoc! {r#"
             OpenSSL::Digest::SHA256.digest('foo')
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `OpenSSL::Digest.digest('SHA256', 'foo')` instead of `OpenSSL::Digest::SHA256.digest('foo')`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `OpenSSL::Digest.digest('SHA256', 'foo')` instead of `OpenSSL::Digest::SHA256.digest('foo')`.
         "#});
     }
 
@@ -348,7 +348,7 @@ mod tests {
         test::<DeprecatedOpenSSLConstant>().expect_correction(
             indoc! {r#"
                 OpenSSL::Digest::SHA256.digest('foo')
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `OpenSSL::Digest.digest('SHA256', 'foo')` instead of `OpenSSL::Digest::SHA256.digest('foo')`.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `OpenSSL::Digest.digest('SHA256', 'foo')` instead of `OpenSSL::Digest::SHA256.digest('foo')`.
             "#},
             "OpenSSL::Digest.digest('SHA256', 'foo')\n",
         );
@@ -364,7 +364,7 @@ mod tests {
         // Murphy mirrors that exact (arguably surprising) upstream behavior.
         test::<DeprecatedOpenSSLConstant>().expect_offense(indoc! {r#"
             ::OpenSSL::Cipher::AES.new(128, :GCM)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `::OpenSSL::Cipher.new('AES', 128, :GCM)` instead of `::OpenSSL::Cipher::AES.new(128, :GCM)`.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `::OpenSSL::Cipher.new('AES', 128, :GCM)` instead of `::OpenSSL::Cipher::AES.new(128, :GCM)`.
         "#});
     }
 

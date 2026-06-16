@@ -99,7 +99,7 @@ mod tests {
     fn flags_utf8_encoding_comment() {
         test::<Encoding>().expect_offense(indoc! {"
             # encoding: utf-8
-            ^^^^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
+            ^^^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
             x = 1
         "});
     }
@@ -108,7 +108,7 @@ mod tests {
     fn flags_utf8_uppercase() {
         test::<Encoding>().expect_offense(indoc! {"
             # encoding: UTF-8
-            ^^^^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
+            ^^^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
             x = 1
         "});
     }
@@ -117,7 +117,7 @@ mod tests {
     fn flags_coding_alias() {
         test::<Encoding>().expect_offense(indoc! {"
             # coding: utf-8
-            ^^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
+            ^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
             x = 1
         "});
     }
@@ -142,7 +142,7 @@ mod tests {
         test::<Encoding>().expect_correction(
             indoc! {"
                 # encoding: utf-8
-                ^^^^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
+                ^^^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
                 x = 1
             "},
             "x = 1\n",
@@ -155,7 +155,7 @@ mod tests {
             indoc! {"
                 #!/usr/bin/env ruby
                 # encoding: utf-8
-                ^^^^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
+                ^^^^^^^^^^^^^^^^^ Unnecessary utf-8 encoding comment.
                 x = 1
             "},
             "#!/usr/bin/env ruby\nx = 1\n",

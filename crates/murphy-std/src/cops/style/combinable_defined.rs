@@ -85,7 +85,7 @@ mod tests {
     fn flags_combinable_nested_constants() {
         test::<CombinableDefined>().expect_offense(indoc! {"
             defined?(Foo) && defined?(Foo::Bar) && defined?(Foo::Bar::Baz)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Combine nested `defined?` calls.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Combine nested `defined?` calls.
         "});
     }
 

@@ -368,7 +368,7 @@ mod tests {
     fn flags_duplicate_directives() {
         test::<CopDirectiveSyntax>().expect_offense(concat!(
             "# rubocop:disable Layout/LineLength # rubocop:disable Style/Encoding\n",
-            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Malformed directive comment detected. ",
+            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Malformed directive comment detected. ",
             "Cop names must be separated by commas. Comment in the directive must start with `--`.\n",
         ));
     }
@@ -385,7 +385,7 @@ mod tests {
     fn flags_invalid_mode() {
         test::<CopDirectiveSyntax>().expect_offense(concat!(
             "# rubocop:disabled Layout/LineLength\n",
-            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Malformed directive comment detected. ",
+            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Malformed directive comment detected. ",
             "The mode name must be one of `enable`, `disable`, `todo`, `push`, or `pop`.\n",
         ));
     }
@@ -402,7 +402,7 @@ mod tests {
     fn flags_bad_trailing_comment() {
         test::<CopDirectiveSyntax>().expect_offense(concat!(
             "# rubocop:disable Layout/LineLength == This is a bad comment.\n",
-            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Malformed directive comment detected. ",
+            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Malformed directive comment detected. ",
             "Cop names must be separated by commas. Comment in the directive must start with `--`.\n",
         ));
     }
@@ -439,7 +439,7 @@ mod tests {
         // tail check fails and the directive is malformed.
         test::<CopDirectiveSyntax>().expect_offense(concat!(
             "# rubocop:push Layout/LineLength\n",
-            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Malformed directive comment detected. ",
+            "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Malformed directive comment detected. ",
             "Cop names must be separated by commas. Comment in the directive must start with `--`.\n",
         ));
     }

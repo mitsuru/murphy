@@ -330,7 +330,7 @@ mod tests {
             })
             .expect_offense(indoc! {r#"
                 # rubocop:disable Metrics/MethodLength
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RuboCop disable/enable directives for `Metrics/MethodLength` are not permitted.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RuboCop disable/enable directives for `Metrics/MethodLength` are not permitted.
                 def foo
                 end
             "#});
@@ -364,7 +364,7 @@ end
             .expect_correction(
                 indoc! {r#"
                     # rubocop:disable Metrics/AbcSize, Metrics/MethodLength
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RuboCop disable/enable directives for `Metrics/MethodLength` are not permitted.
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ RuboCop disable/enable directives for `Metrics/MethodLength` are not permitted.
                     def foo
                     end
                 "#},

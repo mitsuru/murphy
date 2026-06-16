@@ -178,7 +178,7 @@ mod tests {
     fn flags_def_with_zsuper() {
         test::<UselessMethodDefinition>().expect_offense(indoc! {r#"
             def method; super; end
-            ^^^^^^^^^^^^^^^^^^^^^^^ Useless method definition detected.
+            ^^^^^^^^^^^^^^^^^^^^^^ Useless method definition detected.
         "#});
     }
 

@@ -73,7 +73,7 @@ fn consistent_flags_special_inside_parentheses_indent() {
             indoc! {r#"
                 but_in_a_method_call({
                                        its_like: :this
-                                       ^^^^^^^^^^^^^^^^ Use 2 spaces for indentation in a hash, relative to the start of the line where the left curly brace is.
+                                       ^^^^^^^^^^^^^^^ Use 2 spaces for indentation in a hash, relative to the start of the line where the left curly brace is.
                                      })
                                      ^ Indent the right brace the same as the start of the line where the left brace is.
             "#},

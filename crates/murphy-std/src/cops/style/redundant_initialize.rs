@@ -291,7 +291,7 @@ mod tests {
     fn flags_explicit_super_same_args() {
         test::<RedundantInitialize>().expect_offense(indoc! {"
             def initialize(a, b); super(a, b); end
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Remove unnecessary `initialize` method.
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Remove unnecessary `initialize` method.
         "});
     }
 
@@ -300,7 +300,7 @@ mod tests {
         test::<RedundantInitialize>().expect_correction(
             indoc! {"
                 def initialize(a, b); super(a, b); end
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Remove unnecessary `initialize` method.
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Remove unnecessary `initialize` method.
             "},
             "",
         );

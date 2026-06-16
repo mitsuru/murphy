@@ -418,7 +418,7 @@ mod tests {
     fn flags_count_block_freeze() {
         test::<RedundantFreeze>().expect_offense(indoc! {"
             CONST = arr.count { |x| x > 1 }.freeze
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not freeze immutable objects, as freezing them has no effect.
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not freeze immutable objects, as freezing them has no effect.
         "});
     }
 
@@ -427,7 +427,7 @@ mod tests {
         test::<RedundantFreeze>().expect_correction(
             indoc! {"
                 CONST = arr.count { |x| x > 1 }.freeze
-                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not freeze immutable objects, as freezing them has no effect.
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not freeze immutable objects, as freezing them has no effect.
             "},
             "CONST = arr.count { |x| x > 1 }\n",
         );
