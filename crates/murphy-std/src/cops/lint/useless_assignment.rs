@@ -48,9 +48,12 @@
 //! `AndAsgn`, `Resbody.var`, `For.var`) and reads (`Lvar`, plus the implicit
 //! read inside `OpAsgn`/`OrAsgn`/`AndAsgn`) per scope and computes
 //! `is_referenced` via a branch-aware dominance analysis: `If` / `Case` /
-//! `When` / `While` / `Until` introduce exclusive-branch barriers, while
-//! `Resbody` / `Rescue` / `Ensure` are *not* barriers (exception flow carries
-//! partial begin-body writes into the rescue handler). See that module for the
+//! `When` / `While` / `Until` introduce exclusive-branch barriers. `Rescue` is
+//! an *asymmetric* barrier: its arms (begin `body` / each `Resbody` / `else`)
+//! are mutually exclusive for domination, but the begin `body` stays
+//! read-compatible with every sibling arm because exception flow carries a
+//! partial begin-body write into the rescue / else / fall-through paths.
+//! `Resbody` / `Ensure` are themselves *not* barriers. See that module for the
 //! barrier-chain details.
 //!
 //! This cop keeps only the offense-shaping concerns: mapping each
@@ -60,10 +63,9 @@
 //!
 //! ### Known v1 limitations
 //!
-//! * Two writes in different `resbody`s of the same `Rescue` are not
-//!   recognised as mutually exclusive (we conservatively treat them as
-//!   compatible). The cop will not flag a write in one resbody as
-//!   "overwritten" by a write in a sibling resbody.
+//! * Writes in different `resbody`s of the same `Rescue` (and a `resbody`
+//!   vs. the `else`) are mutually exclusive, so a write in one resbody is
+//!   never reported as "overwritten" by a write in a sibling resbody.
 //! * Loops are treated as a single barrier — we don't unroll. A write
 //!   inside a `while` body is in the loop's chunk; we don't reason about
 //!   iteration counts.

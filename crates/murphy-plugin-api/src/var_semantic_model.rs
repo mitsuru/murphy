@@ -78,7 +78,13 @@ fn barrier_chain(ast: &Ast, root: NodeId, node: NodeId) -> Vec<(NodeId, NodeId)>
 }
 
 /// Returns `true` for nodes that introduce exclusive branches.
-/// `Rescue`/`Resbody`/`Ensure` are intentionally NOT barriers.
+///
+/// `Resbody`/`Ensure` are intentionally NOT barriers. `Rescue` IS a barrier,
+/// but an *asymmetric* one: its arms (begin `body`, each `Resbody`, and `else`)
+/// are mutually exclusive for *domination* (`chain_is_prefix`), yet the begin
+/// `body` arm stays read-compatible with every sibling arm
+/// (`barrier_condition_is_compatible`) because exception control flow carries a
+/// partial begin-body write into the rescue/else/fall-through paths.
 fn is_branch_barrier(ast: &Ast, node: NodeId) -> bool {
     matches!(
         *ast.kind(node),
@@ -91,6 +97,7 @@ fn is_branch_barrier(ast: &Ast, node: NodeId) -> bool {
             | NodeKind::Block { .. }
             | NodeKind::Numblock { .. }
             | NodeKind::Itblock { .. }
+            | NodeKind::Rescue { .. }
     )
 }
 
@@ -122,6 +129,12 @@ fn barrier_condition_is_compatible(ast: &Ast, barrier: NodeId, a: NodeId, b: Nod
         NodeKind::If { cond, .. } | NodeKind::While { cond, .. } | NodeKind::Until { cond, .. } => {
             a == cond || b == cond
         }
+        // The begin body (`body`) flows into every rescue/else/after arm via
+        // exception control flow, so a begin-body write stays observable by a
+        // read in any sibling arm. Resbody-vs-resbody and resbody-vs-else stay
+        // exclusive. (Domination via `chain_is_prefix` is unaffected — only
+        // read-compatibility relaxes here.)
+        NodeKind::Rescue { body, .. } => body.get() == Some(a) || body.get() == Some(b),
         _ => false,
     }
 }
