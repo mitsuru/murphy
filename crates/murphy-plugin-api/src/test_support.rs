@@ -405,6 +405,16 @@ struct Expected {
 /// Caret columns are interpreted as **char indices** of the source
 /// line, then translated to bytes via `char_indices`. Non-ASCII source
 /// lines are supported.
+///
+/// # Strict caret bounds (RuboCop parity)
+///
+/// A caret run that starts within the source line's content must not
+/// extend past its last char — `nth_char_byte` would otherwise clamp the
+/// overshoot to `line.len()` and silently pass an over-padded annotation.
+/// Such overshoots panic. EOL insertion carets (start column at or past
+/// the line's char count) are exempt: a single caret one column past the
+/// last char legitimately marks a zero-width insertion point.
+#[track_caller]
 fn parse_annotated(annotated: &str) -> (String, Vec<Expected>) {
     let mut cleaned_lines: Vec<&str> = Vec::new();
     let mut expected: Vec<Expected> = Vec::new();
@@ -428,6 +438,27 @@ fn parse_annotated(annotated: &str) -> (String, Vec<Expected>) {
             let line_start = last_source_line_start
                 .expect("expect_offense: annotation precedes any source line");
             let src_line = last_source_line.unwrap();
+
+            // Strict, insertion-aware bounds (RuboCop parity). A caret run
+            // anchored *within* the source content must not run past its
+            // last char; without this guard `nth_char_byte` clamps the end
+            // to `line.len()` and a too-wide annotation passes silently.
+            // EOL insertion carets (start at/after the line's char count)
+            // are exempt — they mark zero-width insertion points.
+            let line_char_count = src_line.chars().count();
+            let start_char = leading_ws;
+            let end_char = start_char + caret_len;
+            if start_char < line_char_count && end_char > line_char_count {
+                let correct_len = line_char_count - start_char;
+                panic!(
+                    "expect_offense: caret annotation overshoots source line\n  \
+                     source ({line_char_count} chars): {src_line:?}\n  \
+                     carets start at col {start_char}, run {caret_len} caret(s) \
+                     reaching char {end_char} (over by {})\n  \
+                     fix: use {correct_len} caret(s) so the run ends at the last source char",
+                    end_char - line_char_count,
+                );
+            }
 
             let s_byte = nth_char_byte(src_line, leading_ws);
             let e_byte = nth_char_byte(src_line, leading_ws + caret_len);
@@ -1730,6 +1761,61 @@ mod tests {
         // Use a plain string (not `\` continuation) so leading whitespace
         // in the annotation lines is preserved literally.
         super::test::<TwoColOnLineCop>().expect_offense("abc\n^ left\n  ^ right\n");
+    }
+
+    // ---------- strict caret bounds (RuboCop parity) ----------
+    //
+    // RuboCop's `expect_offense` rejects caret runs that extend past the
+    // last char of the source line. murphy historically clamped the caret
+    // end to `line.len()` (lenient), silently passing over-padded
+    // annotations. These tests pin the strict, insertion-aware bounds.
+
+    /// Fixture: emits a zero-width offense at the end of the first source
+    /// line's content (byte 3 of "abc"). Models an EOL insertion point
+    /// (trailing comma, missing newline) annotated with a caret one column
+    /// past the last char.
+    #[derive(Default)]
+    struct EolInsertionCop;
+    impl Cop for EolInsertionCop {
+        type Options = NoOptions;
+        const NAME: &'static str = "Test/EolInsertion";
+    }
+    impl NodeCop for EolInsertionCop {
+        const KINDS: &'static [NodeKindTag] = &[];
+        fn check(&self, _node: NodeId, cx: &Cx<'_>) {
+            cx.emit_offense(Range { start: 3, end: 3 }, "insert here", None);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "caret annotation overshoots source line")]
+    fn expect_offense_panics_when_carets_overshoot_line() {
+        // "abc" is 3 chars; 4 carets reach char 4, one past the last
+        // char. The clamp used to hide this — RuboCop fails it, so must we.
+        super::test::<FixedRangeCop>().expect_offense(
+            "abc\n\
+             ^^^^ fixed\n",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "caret annotation overshoots source line")]
+    fn expect_offense_panics_when_carets_overshoot_multibyte_line() {
+        // "あい" is 2 chars / 6 bytes. 3 carets overshoot by one *char*;
+        // a byte-based check would miss it. Guards char-unit counting.
+        super::test::<FirstCharCop>().expect_offense(
+            "あい\n\
+             ^^^ first char\n",
+        );
+    }
+
+    #[test]
+    fn expect_offense_allows_eol_insertion_caret() {
+        // A single caret one column past the last char marks a zero-width
+        // EOL insertion point (e.g. "add trailing comma"). The strict
+        // overshoot guard must exempt `start_char >= line_char_count`.
+        // Plain string (not `\` continuation) to preserve leading spaces.
+        super::test::<EolInsertionCop>().expect_offense("abc\n   ^ insert here\n");
     }
 
     #[test]
