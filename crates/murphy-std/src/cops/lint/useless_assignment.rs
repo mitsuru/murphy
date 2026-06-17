@@ -1413,6 +1413,24 @@ mod tests {
     }
 
     #[test]
+    fn begin_body_write_with_short_circuited_else_overwrite_not_flagged() {
+        // FP guard: the `else`-arm overwrite is guarded by a short-circuit
+        // `&&`, so the no-exception path with `cond` false leaves the
+        // begin-body value intact and reads it. The distributed kill must not
+        // treat a short-circuited (`&&`/`||`) write as a guaranteed overwrite.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              x = 3
+            else
+              cond && (x = 2)
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
     fn begin_body_write_with_one_silent_resbody_not_flagged() {
         // FP guard: one of two `resbody` arms does not overwrite `x`, leaving
         // the begin-body value observable on that exception path. RuboCop 1.87

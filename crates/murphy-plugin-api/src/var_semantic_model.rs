@@ -190,10 +190,12 @@ fn enclosing_protected_rescue(ast: &Ast, root: NodeId, node: NodeId) -> Option<N
 }
 
 /// Classify which arm of `rescue` a node lives in, but only when the node is an
-/// *unconditional* statement of that arm — i.e. no branch barrier sits strictly
-/// between the node and `rescue`. A write guarded by an inner branch (e.g.
-/// `else; x = 2 if foo`) is not a guaranteed overwrite of that arm's exit, so it
-/// returns `None` and cannot contribute to a distributed kill.
+/// *unconditional* statement of that arm — i.e. no branch barrier and no
+/// short-circuit operator (`&&`/`||`) sits strictly between the node and
+/// `rescue`. A write guarded by an inner branch (e.g. `else; x = 2 if foo`) or
+/// short-circuited (e.g. `else; cond && (x = 2)`) is not a guaranteed overwrite
+/// of that arm's exit, so it returns `None` and cannot contribute to a
+/// distributed kill.
 fn rescue_arm_of(ast: &Ast, rescue: NodeId, node: NodeId) -> Option<RescueArm> {
     let NodeKind::Rescue { body, else_, .. } = *ast.kind(rescue) else {
         return None;
@@ -212,7 +214,15 @@ fn rescue_arm_of(ast: &Ast, rescue: NodeId, node: NodeId) -> Option<RescueArm> {
             }
             return None;
         }
-        if is_branch_barrier(ast, parent) {
+        // A branch barrier (if/case/loop/block) or a short-circuit operator
+        // (`&&`/`||`) between the write and the arm means the write may be
+        // skipped, so it is not a guaranteed overwrite of that arm's exit.
+        if is_branch_barrier(ast, parent)
+            || matches!(
+                *ast.kind(parent),
+                NodeKind::And { .. } | NodeKind::Or { .. }
+            )
+        {
             return None;
         }
         current = parent;
@@ -239,7 +249,22 @@ fn rescue_arm_of(ast: &Ast, rescue: NodeId, node: NodeId) -> Option<RescueArm> {
 /// unconditional overwrite in *every* `resbody` arm (each exception path). A
 /// `rescue` arm that does not overwrite (e.g. `rescue; log`) leaves the body
 /// write observable on that path, so the kill does not apply. A missing `else`
-/// arm leaves it observable on the no-exception fall-through.
+/// arm leaves it observable on the no-exception fall-through. A write reached
+/// through an inner branch or a short-circuit `&&`/`||` is not counted (see
+/// `rescue_arm_of`), so a conditional overwrite never triggers the kill.
+///
+/// KNOWN LIMITATIONS (false-negative direction only, tracked in murphy-w5za —
+/// same conservative-approximation tolerance as the loop-body handling):
+///   1. A missing `else` arm whose no-exception path is instead covered by a
+///      *later unconditional write in the begin body itself* is not recognised
+///      (`begin; x = 1; x = 2; rescue; x = 3; end; use(x)` — RuboCop flags
+///      `x = 1`, we miss it). The `else_.is_none()` guard returns early.
+///   2. A read positioned *inside* an arm, but after that arm has already
+///      overwritten the variable on every reaching path, is not recognised
+///      (`begin; x = 1; rescue; x = 2; use(x); else; x = 3; end; use(x)` —
+///      RuboCop flags `x = 1`). The `read_pos <= rescue.end` guard
+///      conservatively disables the kill for any in-construct read. Refining
+///      either requires per-arm intra-arm dominance and is deferred.
 fn begin_body_distributed_kill(
     ast: &Ast,
     root: NodeId,
