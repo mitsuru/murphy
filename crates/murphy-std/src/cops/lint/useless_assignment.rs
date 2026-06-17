@@ -48,9 +48,12 @@
 //! `AndAsgn`, `Resbody.var`, `For.var`) and reads (`Lvar`, plus the implicit
 //! read inside `OpAsgn`/`OrAsgn`/`AndAsgn`) per scope and computes
 //! `is_referenced` via a branch-aware dominance analysis: `If` / `Case` /
-//! `When` / `While` / `Until` introduce exclusive-branch barriers, while
-//! `Resbody` / `Rescue` / `Ensure` are *not* barriers (exception flow carries
-//! partial begin-body writes into the rescue handler). See that module for the
+//! `When` / `While` / `Until` introduce exclusive-branch barriers. `Rescue` is
+//! an *asymmetric* barrier: its arms (begin `body` / each `Resbody` / `else`)
+//! are mutually exclusive for domination, but the begin `body` stays
+//! read-compatible with every sibling arm because exception flow carries a
+//! partial begin-body write into the rescue / else / fall-through paths.
+//! `Resbody` / `Ensure` are themselves *not* barriers. See that module for the
 //! barrier-chain details.
 //!
 //! This cop keeps only the offense-shaping concerns: mapping each
@@ -60,10 +63,9 @@
 //!
 //! ### Known v1 limitations
 //!
-//! * Two writes in different `resbody`s of the same `Rescue` are not
-//!   recognised as mutually exclusive (we conservatively treat them as
-//!   compatible). The cop will not flag a write in one resbody as
-//!   "overwritten" by a write in a sibling resbody.
+//! * Writes in different `resbody`s of the same `Rescue` (and a `resbody`
+//!   vs. the `else`) are mutually exclusive, so a write in one resbody is
+//!   never reported as "overwritten" by a write in a sibling resbody.
 //! * Loops are treated as a single barrier — we don't unroll. A write
 //!   inside a `while` body is in the loop's chunk; we don't reason about
 //!   iteration counts.
@@ -1178,6 +1180,418 @@ mod tests {
             "lambda-internal `environment` must not leak as candidate: {}",
             offenses[0].message
         );
+    }
+
+    #[test]
+    fn rescue_alt_branch_does_not_overwrite_begin_body_write() {
+        // request.rb `encoding`: begin-body write and rescue write are
+        // mutually exclusive; the begin-body value reaches the read on the
+        // no-exception path. RuboCop 1.87 reports nothing.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            if charset.nil?
+              encoding = Encoding::BINARY
+            else
+              begin
+                encoding = Encoding.find(charset)
+              rescue ArgumentError
+                encoding = Encoding::BINARY
+              end
+            end
+            String.new(encoding: encoding)
+        "#});
+    }
+
+    #[test]
+    fn rescue_alt_branch_does_not_overwrite_pre_begin_write() {
+        // request.rb `addresses`: a pre-begin init plus a begin-body write,
+        // both with a rescue alternative. None are useless per RuboCop 1.87.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            addresses = []
+            begin
+              addresses = [resolve(host)]
+            rescue StandardError
+              addresses = lookup(host)
+              addresses = addresses.first(2)
+            end
+            addresses.each { |a| p a }
+        "#});
+    }
+
+    #[test]
+    fn rescue_alt_branch_nested_in_conditional_not_flagged() {
+        // process_mentions_service.rb `mentioned_account`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            mentioned_account = find_remote(username)
+            if undeliverable?(mentioned_account)
+              begin
+                mentioned_account = resolve(match)
+              rescue Error
+                mentioned_account = nil
+              end
+            end
+            use(mentioned_account)
+        "#});
+    }
+
+    #[test]
+    fn multi_statement_begin_body_write_observed_by_rescue() {
+        // CANARY for body-arm identity: with a MULTI-statement begin body the
+        // body wraps in a `(begin ...)` stmt-list node, so the arm recorded in
+        // barrier_chain must still `==` Rescue.body. `value` is only read in
+        // the handler via exception flow.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              setup
+              value = compute
+            rescue
+              log(value)
+            end
+        "#});
+    }
+
+    #[test]
+    fn genuinely_unused_rescue_handler_write_still_flagged() {
+        // Guard against over-suppression: a never-read write inside a resbody
+        // is still useless (RuboCop flags it too).
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              work
+            rescue
+              x = 1
+              ^ Useless assignment to variable - `x`.
+            end
+        "#});
+    }
+
+    // Module-doc promise (Known v1 limitations): writes in different
+    // `resbody`s of the same `Rescue` are mutually exclusive — a write in
+    // one resbody is never reported as "overwritten" by a sibling resbody.
+    // Verified against standalone RuboCop 1.87.0.
+
+    #[test]
+    fn sibling_resbody_writes_both_observed_by_later_read() {
+        // Two resbody writes are mutually exclusive (neither dominates the
+        // other), and both reach the post-block read. RuboCop 1.87 reports
+        // nothing — the sibling resbody must NOT be treated as an overwrite.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              work
+            rescue A
+              result = 1
+            rescue B
+              result = 2
+            end
+            use(result)
+        "#});
+    }
+
+    #[test]
+    fn sibling_resbody_writes_dominated_by_post_block_write_are_flagged() {
+        // A post-block write (`result = 3`) dominates the read regardless of
+        // which rescue arm ran, so both resbody writes are dead. The sibling
+        // resbody exclusivity must not suppress this — the dominating write
+        // outside the begin/rescue still makes both arms useless.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              work
+            rescue A
+              result = 1
+              ^^^^^^ Useless assignment to variable - `result`.
+            rescue B
+              result = 2
+              ^^^^^^ Useless assignment to variable - `result`.
+            end
+            result = 3
+            use(result)
+        "#});
+    }
+
+    #[test]
+    fn ensure_write_dominates_body_and_resbody_writes() {
+        // The ensure write runs on every path, so it overwrites both the
+        // begin-body write and the resbody write before the read. Both are
+        // dead; the ensure write itself is read afterward and is clean.
+        // Pins the Phase A ensure-interaction dependence.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              total = 1
+              ^^^^^ Useless assignment to variable - `total`.
+            rescue
+              total = 2
+              ^^^^^ Useless assignment to variable - `total`.
+            ensure
+              total = 3
+            end
+            use(total)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_dominated_after_rescue_still_flagged() {
+        // Guard the begin-body arm against over-relaxation: a begin-body
+        // write that is overwritten after the whole begin/rescue and never
+        // read in any arm is still dead. RuboCop 1.87 flags `count = 1`.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              count = 1
+              ^^^^^ Useless assignment to variable - `count`.
+            rescue
+              handle
+            end
+            count = 2
+            use(count)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_killed_by_else_and_every_resbody_flagged() {
+        // Distributed kill: the no-exception path overwrites via `else`, the
+        // exception path via the (sole) `resbody`. Every exit of the rescue
+        // overwrites `x` before the trailing read, so `x = 1` is useless.
+        // RuboCop 1.87 flags it.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              x = 1
+              ^ Useless assignment to variable - `x`.
+            rescue
+              x = 3
+            else
+              x = 2
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_with_non_overwriting_rescue_not_flagged() {
+        // FP guard: the `rescue` arm does NOT overwrite `x`, so on the
+        // exception path the begin-body value reaches the read. RuboCop 1.87
+        // reports nothing — the distributed kill must require *every* resbody
+        // to overwrite.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              log(error)
+            else
+              x = 2
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_without_else_arm_not_flagged() {
+        // FP guard: no `else` arm ⇒ the no-exception path falls through with
+        // the begin-body value intact ⇒ it is read. RuboCop 1.87 reports
+        // nothing.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_with_conditional_else_overwrite_not_flagged() {
+        // FP guard: the `else`-arm overwrite is itself conditional, so the
+        // no-exception path may leave the begin-body value intact. The
+        // distributed kill must require an *unconditional* else overwrite.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              x = 3
+            else
+              x = 2 if foo
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_with_short_circuited_else_overwrite_not_flagged() {
+        // FP guard: the `else`-arm overwrite is guarded by a short-circuit
+        // `&&`, so the no-exception path with `cond` false leaves the
+        // begin-body value intact and reads it. The distributed kill must not
+        // treat a short-circuited (`&&`/`||`) write as a guaranteed overwrite.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              x = 3
+            else
+              cond && (x = 2)
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_with_one_silent_resbody_not_flagged() {
+        // FP guard: one of two `resbody` arms does not overwrite `x`, leaving
+        // the begin-body value observable on that exception path. RuboCop 1.87
+        // reports nothing.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue A
+              x = 3
+            rescue B
+              log(error)
+            else
+              x = 2
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_killed_by_later_body_write_without_else_flagged() {
+        // Distributed kill with no `else`: the no-exception path is covered by a
+        // later *unconditional begin-body* write (`x = 2`), the exception path by
+        // the `resbody` (`x = 3`). Every exit overwrites `x = 1` before the
+        // trailing read. RuboCop 1.87 flags `x = 1`.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              x = 1
+              ^ Useless assignment to variable - `x`.
+              x = 2
+            rescue
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_killed_with_in_arm_reads_flagged() {
+        // Distributed kill where the earliest compatible read sits *inside* the
+        // `resbody`, but only after that arm's own overwrite (`x = 2`). The
+        // no-exception path is covered by `else` (`x = 3`). No path observes
+        // `x = 1`. RuboCop 1.87 flags it.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              x = 1
+              ^ Useless assignment to variable - `x`.
+            rescue
+              x = 2
+              use(x)
+            else
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_read_before_later_body_write_not_flagged() {
+        // FP guard: a begin-body read of `x` sits between the write and the
+        // later body overwrite, so the no-exception path observes `x = 1`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+              use(x)
+              x = 2
+            rescue
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_read_before_resbody_overwrite_not_flagged() {
+        // FP guard: the `resbody` reads `x` before overwriting it, so the
+        // exception path observes `x = 1`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              use(x)
+              x = 2
+            else
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_with_escaping_exception_to_outer_ensure_not_flagged() {
+        // FP guard: a `RuntimeError` bypasses the inner `rescue IOError` and the
+        // outer `ensure` reads the original `x = 1` on the propagation path, so
+        // the inner body write is live. The distributed kill must stay
+        // conservative when the rescue is nested in an enclosing `ensure`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              begin
+                x = 1
+                raise RuntimeError
+              rescue IOError
+                x = 2
+              else
+                x = 3
+              end
+            ensure
+              use(x)
+            end
+        "#});
+    }
+
+    #[test]
+    fn retry_accumulator_op_assign_not_flagged() {
+        // request_pool.rb `retries`: `retries += 1; retry` — the op-assign
+        // is read on the next iteration via the retry back-edge.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            retries = 0
+            begin
+              do_work
+            rescue StandardError
+              if retries.positive?
+                raise
+              else
+                retries += 1
+                retry
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn retry_accumulator_simple_not_flagged() {
+        // snowflake.rb `tries`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            tries = 0
+            begin
+              insert_record
+            rescue RecordNotUnique
+              raise if tries > 100
+              tries += 1
+              retry
+            end
+        "#});
+    }
+
+    #[test]
+    fn dead_write_in_rescue_without_retry_still_flagged() {
+        // Negative control for the retry-rescue loop-ification: a rescue body
+        // with NO `retry` is not loop-ified, so `is_in_retry_rescue` is false
+        // and a never-read write inside it must still be flagged by normal
+        // dataflow. Guards against `is_in_retry_rescue` over-broadening to any
+        // rescue body.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              work
+            rescue StandardError
+              leftover = compute
+              ^^^^^^^^ Useless assignment to variable - `leftover`.
+              raise
+            end
+        "#});
     }
 }
 murphy_plugin_api::submit_cop!(UselessAssignment);

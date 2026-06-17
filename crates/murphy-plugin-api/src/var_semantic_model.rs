@@ -78,7 +78,13 @@ fn barrier_chain(ast: &Ast, root: NodeId, node: NodeId) -> Vec<(NodeId, NodeId)>
 }
 
 /// Returns `true` for nodes that introduce exclusive branches.
-/// `Rescue`/`Resbody`/`Ensure` are intentionally NOT barriers.
+///
+/// `Resbody`/`Ensure` are intentionally NOT barriers. `Rescue` IS a barrier,
+/// but an *asymmetric* one: its arms (begin `body`, each `Resbody`, and `else`)
+/// are mutually exclusive for *domination* (`chain_is_prefix`), yet the begin
+/// `body` arm stays read-compatible with every sibling arm
+/// (`barrier_condition_is_compatible`) because exception control flow carries a
+/// partial begin-body write into the rescue/else/fall-through paths.
 fn is_branch_barrier(ast: &Ast, node: NodeId) -> bool {
     matches!(
         *ast.kind(node),
@@ -91,6 +97,7 @@ fn is_branch_barrier(ast: &Ast, node: NodeId) -> bool {
             | NodeKind::Block { .. }
             | NodeKind::Numblock { .. }
             | NodeKind::Itblock { .. }
+            | NodeKind::Rescue { .. }
     )
 }
 
@@ -122,6 +129,12 @@ fn barrier_condition_is_compatible(ast: &Ast, barrier: NodeId, a: NodeId, b: Nod
         NodeKind::If { cond, .. } | NodeKind::While { cond, .. } | NodeKind::Until { cond, .. } => {
             a == cond || b == cond
         }
+        // The begin body (`body`) flows into every rescue/else/after arm via
+        // exception control flow, so a begin-body write stays observable by a
+        // read in any sibling arm. Resbody-vs-resbody and resbody-vs-else stay
+        // exclusive. (Domination via `chain_is_prefix` is unaffected — only
+        // read-compatibility relaxes here.)
+        NodeKind::Rescue { body, .. } => body.get() == Some(a) || body.get() == Some(b),
         _ => false,
     }
 }
@@ -151,6 +164,254 @@ fn is_in_protected_begin_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
     false
 }
 
+/// Which arm of an enclosing `Rescue` a node sits in.
+enum RescueArm {
+    Body,
+    Else,
+    Resbody(NodeId),
+}
+
+/// Nearest `Rescue` ancestor of `node` whose protected `body` arm (transitively)
+/// contains `node`, or `None` if there is none before `root`.
+fn enclosing_protected_rescue(ast: &Ast, root: NodeId, node: NodeId) -> Option<NodeId> {
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == root {
+            return None;
+        }
+        if let NodeKind::Rescue { body, .. } = *ast.kind(parent)
+            && body.get() == Some(current)
+        {
+            return Some(parent);
+        }
+        current = parent;
+    }
+    None
+}
+
+/// Classify which arm of `rescue` a node lives in, but only when the node is an
+/// *unconditional* statement of that arm — i.e. no branch barrier and no
+/// short-circuit operator (`&&`/`||`) sits strictly between the node and
+/// `rescue`. A write guarded by an inner branch (e.g. `else; x = 2 if foo`) or
+/// short-circuited (e.g. `else; cond && (x = 2)`) is not a guaranteed overwrite
+/// of that arm's exit, so it returns `None` and cannot contribute to a
+/// distributed kill.
+fn rescue_arm_of(ast: &Ast, rescue: NodeId, node: NodeId) -> Option<RescueArm> {
+    let NodeKind::Rescue { body, else_, .. } = *ast.kind(rescue) else {
+        return None;
+    };
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == rescue {
+            if body.get() == Some(current) {
+                return Some(RescueArm::Body);
+            }
+            if else_.get() == Some(current) {
+                return Some(RescueArm::Else);
+            }
+            if matches!(*ast.kind(current), NodeKind::Resbody { .. }) {
+                return Some(RescueArm::Resbody(current));
+            }
+            return None;
+        }
+        // A branch barrier (if/case/loop/block) or a short-circuit operator
+        // (`&&`/`||`) between the write and the arm means the write may be
+        // skipped, so it is not a guaranteed overwrite of that arm's exit.
+        if is_branch_barrier(ast, parent)
+            || matches!(
+                *ast.kind(parent),
+                NodeKind::And { .. } | NodeKind::Or { .. }
+            )
+        {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
+/// RuboCop-parity fallback for a begin-body write whose kill is *distributed*
+/// across an enclosing `Rescue`'s sibling arms.
+///
+/// The branch-chain dominance model treats the `else` and each `resbody` arm as
+/// mutually exclusive from the protected `body`, so a body write that is killed
+/// only by the *combination* of the no-exception and exception exits is never
+/// matched by a single prefix-dominator. This reconstructs that distributed kill
+/// by verifying, path by path, that every control-flow path leaving the body
+/// write reaches an unconditional overwrite before any read can observe it.
+///
+/// `begin; x = 1; rescue; x = 3; else; x = 2; end; use(x)` — the no-exception
+/// path overwrites via `else` (`x = 2`), the exception path via the `resbody`
+/// (`x = 3`), so `x = 1` is useless (RuboCop 1.87 flags it).
+///
+/// ## Paths from a body write `W` (in `body` of `rescue`)
+///
+/// - **No-exception path:** the body runs to completion, then the `else` arm,
+///   then falls through past the construct. `W` is killed here by the earliest
+///   *unconditional* overwrite among the later begin-body writes (the body runs
+///   fully on this path) and the `else`-arm writes (`ne_kill`). With neither,
+///   the body value falls through intact and is live.
+/// - **Exception path (one per `resbody`):** an exception anywhere after `W`
+///   diverts into that `resbody`, then falls through. `W` is killed here only by
+///   an *unconditional* overwrite inside that `resbody` (`rb_kill`) — a later
+///   begin-body write does NOT help, since the exception may precede it. Every
+///   `resbody` must overwrite.
+///
+/// On each path an overwrite only kills `W` if no compatible read on that path
+/// observes `W` first. `compatible_reads` are the variable's reads after `W` on
+/// a control-flow-compatible path (pre-filtered by the caller via
+/// `paths_compatible`); each is classified by the arm it sits in.
+///
+/// ## Soundness (no false positives)
+///
+/// A write reached through an inner branch or a short-circuit `&&`/`||` is not
+/// counted as an unconditional overwrite (see `rescue_arm_of`). A path with no
+/// unconditional overwrite, or one whose overwrite is preceded by a read of
+/// `W`, leaves `W` observable and suppresses the kill. An exception that
+/// escapes `rescue` unhandled (no matching `resbody`) is handled by the
+/// `within_enclosing_exception_region` guard, which keeps the kill conservative
+/// when an enclosing `ensure`/`rescue` could observe the body write on the
+/// propagation path.
+///
+/// ## Known limitations (false-negative direction only, conservative)
+///
+/// - `rescue` nested in an enclosing `ensure`/`rescue` is skipped entirely by
+///   the guard above, even when no escaping exception actually reaches an
+///   un-overwritten reader.
+/// - A *pre-begin* write (before the `begin`) killed on every exit by the body
+///   and handler arms is not reached — this fallback only runs for writes
+///   *inside* the protected body (`enclosing_protected_rescue` gates it).
+/// - A nested inner `begin..rescue..else` that overwrites on all of its own
+///   exits cannot cover the *outer* rescue's no-exception path, because the
+///   inner writes sit behind the inner `Rescue` branch barrier and
+///   `rescue_arm_of` rejects them as not unconditional in the outer body.
+fn begin_body_distributed_kill(
+    ast: &Ast,
+    root: NodeId,
+    assignments: &[Assignment],
+    body_idx: usize,
+    compatible_reads: &[&Reference],
+) -> bool {
+    let body_write = &assignments[body_idx];
+    let Some(rescue) = enclosing_protected_rescue(ast, root, body_write.node_id) else {
+        return false;
+    };
+    // Soundness guard against exceptions that escape `rescue` *unhandled*. The
+    // per-path model below only accounts for `rescue`'s own arms (no-exception
+    // → body/else, exception → a direct `resbody`). But an exception whose type
+    // no `resbody` matches bypasses every arm and propagates outward: if
+    // `rescue` is nested in an enclosing `ensure` (which always runs) or the
+    // protected `body` of an enclosing `rescue` (which may catch it), a reader
+    // on that propagation path observes the *un-overwritten* body write. We do
+    // not model those paths, so stay conservative (false-negative direction)
+    // whenever such an enclosing exception region exists.
+    if within_enclosing_exception_region(ast, root, rescue) {
+        return false;
+    }
+    let resbodies: Vec<NodeId> = ast
+        .children(rescue)
+        .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
+        .collect();
+
+    // ── No-exception path ──
+    // Earliest unconditional overwrite among later begin-body writes (the body
+    // runs to completion on this path) and `else`-arm writes.
+    let ne_kill = assignments
+        .iter()
+        .enumerate()
+        .filter(|(j, w)| *j != body_idx && w.end > body_write.end)
+        .filter(|(_, w)| {
+            matches!(
+                rescue_arm_of(ast, rescue, w.node_id),
+                Some(RescueArm::Body) | Some(RescueArm::Else)
+            )
+        })
+        .map(|(_, w)| w.end)
+        .min();
+    let Some(ne_kill) = ne_kill else {
+        return false;
+    };
+    // A read on the no-exception path (after `W`, not inside any `resbody`)
+    // positioned before `ne_kill` observes `W`.
+    for r in compatible_reads {
+        if r.pos <= body_write.end {
+            continue;
+        }
+        if resbodies
+            .iter()
+            .any(|&rb| node_in_subtree(ast, rb, r.node_id))
+        {
+            continue; // exception-path read, handled per-resbody below
+        }
+        if r.pos < ne_kill {
+            return false;
+        }
+    }
+
+    // ── Exception paths (one per resbody) ──
+    for &rb in &resbodies {
+        let rb_kill = assignments
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != body_idx)
+            .filter(|(_, w)| {
+                matches!(
+                    rescue_arm_of(ast, rescue, w.node_id),
+                    Some(RescueArm::Resbody(x)) if x == rb
+                )
+            })
+            .map(|(_, w)| w.end)
+            .min();
+        let Some(rb_kill) = rb_kill else {
+            return false;
+        };
+        // A read inside this resbody positioned before its overwrite observes W.
+        for r in compatible_reads {
+            if node_in_subtree(ast, rb, r.node_id) && r.pos < rb_kill {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Returns `true` if `node` lies within the protected region of an enclosing
+/// exception construct before `root` — the `body` of an enclosing `Ensure`
+/// (its `ensure` clause always runs on an escaping exception) or the protected
+/// `body` of an enclosing `Rescue` (which may catch an escaping exception).
+/// In either case an exception that escapes `node` unhandled can reach readers
+/// on the propagation path, which the distributed-kill fallback does not model.
+fn within_enclosing_exception_region(ast: &Ast, root: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == root {
+            return false;
+        }
+        match *ast.kind(parent) {
+            NodeKind::Ensure { body, .. } if body.get() == Some(current) => return true,
+            NodeKind::Rescue { body, .. } if body.get() == Some(current) => return true,
+            _ => {}
+        }
+        current = parent;
+    }
+    false
+}
+
+/// Returns `true` if `node` is `ancestor` itself or lies within its subtree.
+fn node_in_subtree(ast: &Ast, ancestor: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    loop {
+        if current == ancestor {
+            return true;
+        }
+        match ast.parent(current).get() {
+            Some(parent) => current = parent,
+            None => return false,
+        }
+    }
+}
+
 /// Returns `true` if `node` is inside the loop body of an enclosing `While`,
 /// `Until`, or `For`. Assignments here are conservatively marked as referenced
 /// since the next loop iteration may read them.
@@ -177,6 +438,68 @@ fn is_in_loop_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
         }
         current = parent;
     }
+}
+
+/// Returns `true` if `node` is inside a `Rescue` whose resbody subtree contains
+/// a `Retry`. RuboCop treats such a `begin..rescue..end` as a loop
+/// (`process_rescue` -> `process_loop`), so writes inside it may be read on the
+/// next iteration via the retry back-edge and must not be flagged.
+///
+/// This mirrors RuboCop 1.87's `process_rescue` -> `process_loop`: it
+/// loop-ifies the *whole* rescue, so — like the `is_in_loop_body`
+/// approximation — every write inside a retry-rescue is blanket-marked
+/// referenced. The descent over `subtree_contains_retry` matches RuboCop's
+/// detection scope (`resbody_node.each_descendant.any?(&:retry_type?)` also
+/// descends into nested `begin..rescue`).
+///
+/// KNOWN DIVERGENCE (false-negative, tracked in murphy-w5za): RuboCop still
+/// flags a write that has *no* reference anywhere in the loop, whereas this
+/// blanket-mark suppresses it — same approximation as the documented
+/// `while`/`until`/`for` loop-body handling. This also manifests when the
+/// `retry` lives in a nested *inner* rescue: a never-read write in the outer
+/// resbody is flagged by RuboCop but missed here. The case does not occur in
+/// the Mastodon corpus this fix targets; refining it is deferred to murphy-w5za.
+///
+/// `retry_cache` memoizes "does this `Rescue`'s resbody subtree contain a
+/// `Retry`" so the subtree DFS runs at most once per `Rescue` node across all
+/// assignments in the scope (see `safe-rust-patterns.md`: avoid redundant
+/// repeated work / per-node allocation in the hot analysis path).
+fn is_in_retry_rescue(
+    ast: &Ast,
+    root: NodeId,
+    node: NodeId,
+    retry_cache: &mut HashMap<NodeId, bool>,
+) -> bool {
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == root {
+            return false;
+        }
+        if matches!(*ast.kind(parent), NodeKind::Rescue { .. }) {
+            // `ast.children(Rescue)` yields body + resbodies + else; only the
+            // `Resbody` children carry the legal `retry` back-edge, so scan
+            // those. Memoize per `Rescue` so this DFS runs at most once.
+            let contains = *retry_cache.entry(parent).or_insert_with(|| {
+                ast.children(parent)
+                    .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
+                    .any(|rb| subtree_contains_retry(ast, rb))
+            });
+            if contains {
+                return true;
+            }
+        }
+        current = parent;
+    }
+    false
+}
+
+/// DFS over `node`'s subtree for a `Retry`. Descends through nested
+/// `begin..rescue` boundaries by design — see `is_in_retry_rescue` for why this
+/// matches RuboCop's `each_descendant` scope. Runs at most once per `Rescue`
+/// node thanks to `is_in_retry_rescue`'s `retry_cache`.
+fn subtree_contains_retry(ast: &Ast, node: NodeId) -> bool {
+    matches!(*ast.kind(node), NodeKind::Retry)
+        || ast.children(node).any(|c| subtree_contains_retry(ast, c))
 }
 
 /// Returns `true` if `node` sits inside a block/lambda body that is nested
@@ -226,6 +549,11 @@ fn is_in_captured_block(ast: &Ast, scope_root: NodeId, node: NodeId) -> bool {
 /// Compute `is_referenced` for every `Assignment` in `scope` once the DFS
 /// has fully populated the scope's variables, assignments, and references.
 fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeInfo) {
+    // Per-scope memo: "does this `Rescue`'s resbody subtree contain a `Retry`".
+    // Declared once here (not per-assignment) so the subtree DFS amortizes to at
+    // most one run per `Rescue` node across every variable/assignment in the
+    // scope. Keyed by `Rescue` `NodeId`, which is stable for the scope's lifetime.
+    let mut retry_cache: HashMap<NodeId, bool> = HashMap::new();
     for var in &mut scope.variables {
         // Pre-compute branch chains for all assignments and references.
         let asgn_chains: Vec<Vec<(NodeId, NodeId)>> = var
@@ -243,8 +571,11 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
             let asgn_node = var.assignments[i].node_id;
             let asgn_end = var.assignments[i].end;
 
-            // Loop body: always referenced (next iteration may read it).
-            if is_in_loop_body(ast, scope_root, asgn_node) {
+            // Loop body OR retry-rescue (RuboCop process_loop): always
+            // referenced — the next iteration may read it.
+            if is_in_loop_body(ast, scope_root, asgn_node)
+                || is_in_retry_rescue(ast, scope_root, asgn_node, &mut retry_cache)
+            {
                 var.assignments[i].is_referenced = true;
                 continue;
             }
@@ -262,15 +593,17 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
                 continue;
             }
 
-            // Earliest later read that is on a compatible control-flow path.
-            let next_read_pos = var
+            // Later reads on a compatible control-flow path.
+            let compatible_reads: Vec<&Reference> = var
                 .references
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| r.pos > asgn_end)
                 .filter(|(k, _)| paths_compatible(ast, &ref_chains[*k], &asgn_chains[i]))
-                .map(|(_, r)| r.pos)
-                .min();
+                .map(|(_, r)| r)
+                .collect();
+            // Earliest later read that is on a compatible control-flow path.
+            let next_read_pos = compatible_reads.iter().map(|r| r.pos).min();
 
             // Earliest later write that dominates this write (same or shallower
             // branch), not in a protected begin body.
@@ -286,7 +619,17 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
             var.assignments[i].is_referenced = match (next_read_pos, dominating_overwrite) {
                 (None, _) => false,
                 (Some(r), Some((_, w))) if w.end <= r => false,
-                (Some(_), _) => true,
+                // No single prefix-dominator kills this write before the read,
+                // but a begin-body write may still be killed on *every* exit of
+                // its rescue by the combination of sibling arms (else + every
+                // resbody). RuboCop's CFG model catches this; reconstruct it.
+                (Some(_), _) => !begin_body_distributed_kill(
+                    ast,
+                    scope_root,
+                    &var.assignments,
+                    i,
+                    &compatible_reads,
+                ),
             };
         }
     }

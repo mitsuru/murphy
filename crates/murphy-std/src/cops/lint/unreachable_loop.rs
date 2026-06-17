@@ -13,9 +13,12 @@
 //! notes: >
 //!   while/until/for loops whose body always terminates (break / return /
 //!   raise / exit / etc.) are flagged.  if-else where both branches
-//!   terminate, and continue-statement guards (next) are respected.
-//!   Enumerable block methods (on_block) and AllowedPatterns are not
-//!   implemented; redo is not yet emitted by the translator.
+//!   terminate, and continue-statement guards (RuboCop's
+//!   CONTINUE_KEYWORDS = next / redo) are respected. `retry` is NOT a
+//!   continue keyword: it restarts the enclosing begin/rescue, not the
+//!   loop, so a loop body of `begin; ...; rescue; retry; end; break` is
+//!   still flagged. Enumerable block methods (on_block) and AllowedPatterns
+//!   are not implemented; redo is not yet emitted by the translator.
 //! ```
 //!
 //! ## Matched shapes
@@ -150,7 +153,11 @@ fn is_break_statement(node: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 fn contains_next(node: NodeId, cx: &Cx<'_>) -> bool {
-    if matches!(*cx.kind(node), NodeKind::Next(_) | NodeKind::Retry) {
+    // Mirror RuboCop's `CONTINUE_KEYWORDS = %i[next redo]`. `retry` is
+    // deliberately excluded: a `retry` inside a `begin/rescue` restarts the
+    // protected block, not the surrounding loop, so it does not let the outer
+    // loop iterate more than once.
+    if matches!(*cx.kind(node), NodeKind::Next(_) | NodeKind::Redo) {
         return true;
     }
     if is_block_or_loop(node, cx) {
@@ -191,7 +198,7 @@ fn conditional_continue_keyword(break_stmt: NodeId, cx: &Cx<'_>) -> bool {
         .find(|&&d| matches!(*cx.kind(d), NodeKind::Or { .. }));
     let Some(&or_id) = or_node else { return false; };
     let NodeKind::Or { rhs, .. } = *cx.kind(or_id) else { return false; };
-    matches!(*cx.kind(rhs), NodeKind::Next(_) | NodeKind::Retry)
+    matches!(*cx.kind(rhs), NodeKind::Next(_) | NodeKind::Redo)
 }
 
 #[cfg(test)]
@@ -328,6 +335,27 @@ mod tests {
               next
             end
         "});
+    }
+
+    #[test]
+    fn flags_while_with_rescue_retry_then_break() {
+        // `retry` restarts the begin/rescue attempt, not the outer loop, so
+        // the loop still runs at most once before the unconditional `break`.
+        // RuboCop's CONTINUE_KEYWORDS is `%i[next redo]` — retry is excluded —
+        // so this must still be flagged. (Regression: when `retry` lowered to
+        // NodeKind::Retry, the dead `Retry` arm in `contains_next` went live
+        // and suppressed this offense as if retry were a `next`.)
+        test::<UnreachableLoop>().expect_offense(indoc! {r#"
+            while cond
+            ^^^^^ This loop will have at most one iteration.
+              begin
+                work
+              rescue
+                retry
+              end
+              break
+            end
+        "#});
     }
 
     #[test]

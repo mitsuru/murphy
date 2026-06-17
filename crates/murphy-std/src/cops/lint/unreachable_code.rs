@@ -8,9 +8,9 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
-//!   Translator-blocked items (not cop gaps): retry/redo nodes are not
-//!   emitted by the translator (retry causes parse errors, redo translates
-//!   to Unknown), so those keyword terminator arms are forward-compat only.
+//!   `retry` now lowers to NodeKind::Retry, so its terminator arm is live
+//!   (code after a bare retry is unreachable). `redo` still translates to
+//!   Unknown, so its terminator arm remains forward-compat only.
 //!   case/in (CaseMatch) also translates to Unknown; a forward-compat arm
 //!   mirrors the Case arm but is similarly untestable today. All other
 //!   RuboCop parity items are implemented: message parity, first-only
@@ -27,7 +27,8 @@
 //! - `Return(_)` — `return ...`
 //! - `Break(_)` — `break ...`
 //! - `Next(_)`  — `next ...`
-//! - `Retry` / `Redo` — (forward-compat; translator currently emits Unknown)
+//! - `Retry` — `retry` (live). `Redo` — `redo` (forward-compat; translator
+//!   currently emits Unknown for redo).
 //! - `Send { receiver: None, method: "raise"|"fail"|"throw"|"exit"|"exit!"|"abort", ... }`
 //!   — receiver-less Kernel method calls, unless redefined as a sibling `def`.
 //! - `Send { receiver: Const("Kernel")|Cbase, method: <redefinable>, ... }`
@@ -155,8 +156,8 @@ fn is_flow_terminator(
     match cx.kind(node) {
         NodeKind::Return(_) | NodeKind::Break(_) | NodeKind::Next(_) => true,
 
-        // Forward-compat: translator currently emits Unknown for redo (and
-        // parse-errors on retry), but these arms are correct when they arrive.
+        // `retry` lowers to NodeKind::Retry (live); `redo` still translates to
+        // Unknown, so the Redo arm is forward-compat until that lands.
         NodeKind::Retry | NodeKind::Redo => true,
 
         NodeKind::Send {

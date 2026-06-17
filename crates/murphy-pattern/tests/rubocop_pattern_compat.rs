@@ -331,9 +331,11 @@ fn cases() -> Vec<CompatCase> {
             category: GapProbe,
         },
         CompatCase {
+            // `retry` now lowers to NodeKind::Retry (a real node), so this is a
+            // supported keyword-node pattern, not a gap. Mirrors `(return)`.
             pattern: "(retry)",
-            source: "gap probe: `retry` keyword",
-            category: GapProbe,
+            source: "retry keyword node",
+            category: RuboCopCanon,
         },
         CompatCase {
             pattern: "(redo)",
