@@ -164,6 +164,129 @@ fn is_in_protected_begin_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
     false
 }
 
+/// Which arm of an enclosing `Rescue` a node sits in.
+enum RescueArm {
+    Body,
+    Else,
+    Resbody(NodeId),
+}
+
+/// Nearest `Rescue` ancestor of `node` whose protected `body` arm (transitively)
+/// contains `node`, or `None` if there is none before `root`.
+fn enclosing_protected_rescue(ast: &Ast, root: NodeId, node: NodeId) -> Option<NodeId> {
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == root {
+            return None;
+        }
+        if let NodeKind::Rescue { body, .. } = *ast.kind(parent)
+            && body.get() == Some(current)
+        {
+            return Some(parent);
+        }
+        current = parent;
+    }
+    None
+}
+
+/// Classify which arm of `rescue` a node lives in, but only when the node is an
+/// *unconditional* statement of that arm — i.e. no branch barrier sits strictly
+/// between the node and `rescue`. A write guarded by an inner branch (e.g.
+/// `else; x = 2 if foo`) is not a guaranteed overwrite of that arm's exit, so it
+/// returns `None` and cannot contribute to a distributed kill.
+fn rescue_arm_of(ast: &Ast, rescue: NodeId, node: NodeId) -> Option<RescueArm> {
+    let NodeKind::Rescue { body, else_, .. } = *ast.kind(rescue) else {
+        return None;
+    };
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == rescue {
+            if body.get() == Some(current) {
+                return Some(RescueArm::Body);
+            }
+            if else_.get() == Some(current) {
+                return Some(RescueArm::Else);
+            }
+            if matches!(*ast.kind(current), NodeKind::Resbody { .. }) {
+                return Some(RescueArm::Resbody(current));
+            }
+            return None;
+        }
+        if is_branch_barrier(ast, parent) {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
+/// RuboCop-parity fallback for a begin-body write whose kill is *distributed*
+/// across an enclosing `Rescue`'s sibling arms.
+///
+/// The branch-chain dominance model treats the `else` and each `resbody` arm as
+/// mutually exclusive from the protected `body`, so a body write that is killed
+/// only by the *combination* of every sibling arm — the `else` arm on the
+/// no-exception path and every `resbody` arm on its exception path — is never
+/// matched by a single prefix-dominator. This reconstructs that distributed kill
+/// for a read positioned after the whole construct:
+///
+/// `begin; x = 1; rescue; x = 3; else; x = 2; end; use(x)` — every exit of the
+/// rescue overwrites `x` before the trailing read, so `x = 1` is useless
+/// (RuboCop 1.87 flags it).
+///
+/// Sound (no false positives): requires the read to lie *after* the construct,
+/// an unconditional `else`-arm overwrite (no-exception path), and an
+/// unconditional overwrite in *every* `resbody` arm (each exception path). A
+/// `rescue` arm that does not overwrite (e.g. `rescue; log`) leaves the body
+/// write observable on that path, so the kill does not apply. A missing `else`
+/// arm leaves it observable on the no-exception fall-through.
+fn begin_body_distributed_kill(
+    ast: &Ast,
+    root: NodeId,
+    assignments: &[Assignment],
+    body_idx: usize,
+    read_pos: u32,
+) -> bool {
+    let body_write = &assignments[body_idx];
+    let Some(rescue) = enclosing_protected_rescue(ast, root, body_write.node_id) else {
+        return false;
+    };
+    // Only sound when the read lies entirely past the construct: a read inside
+    // any arm could observe the body write before that arm's overwrite.
+    if read_pos <= ast.range(rescue).end {
+        return false;
+    }
+    let NodeKind::Rescue { else_, .. } = *ast.kind(rescue) else {
+        return false;
+    };
+    // No `else` arm ⇒ the no-exception path falls through with the body value
+    // intact ⇒ the body write is live on that path.
+    if else_.get().is_none() {
+        return false;
+    }
+    let mut else_killed = false;
+    let mut killed_resbodies: Vec<NodeId> = Vec::new();
+    for (j, w) in assignments.iter().enumerate() {
+        if j == body_idx || w.end <= body_write.end {
+            continue;
+        }
+        match rescue_arm_of(ast, rescue, w.node_id) {
+            Some(RescueArm::Else) => else_killed = true,
+            Some(RescueArm::Resbody(rb)) if !killed_resbodies.contains(&rb) => {
+                killed_resbodies.push(rb);
+            }
+            _ => {}
+        }
+    }
+    if !else_killed {
+        return false;
+    }
+    // Every `resbody` arm of the rescue must contain an overwrite.
+    ast.children(rescue)
+        .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
+        .all(|rb| killed_resbodies.contains(&rb))
+}
+
 /// Returns `true` if `node` is inside the loop body of an enclosing `While`,
 /// `Until`, or `For`. Assignments here are conservatively marked as referenced
 /// since the next loop iteration may read them.
@@ -369,7 +492,13 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
             var.assignments[i].is_referenced = match (next_read_pos, dominating_overwrite) {
                 (None, _) => false,
                 (Some(r), Some((_, w))) if w.end <= r => false,
-                (Some(_), _) => true,
+                // No single prefix-dominator kills this write before the read,
+                // but a begin-body write may still be killed on *every* exit of
+                // its rescue by the combination of sibling arms (else + every
+                // resbody). RuboCop's CFG model catches this; reconstruct it.
+                (Some(r), _) => {
+                    !begin_body_distributed_kill(ast, scope_root, &var.assignments, i, r)
+                }
             };
         }
     }

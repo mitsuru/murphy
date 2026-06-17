@@ -1344,6 +1344,94 @@ mod tests {
     }
 
     #[test]
+    fn begin_body_write_killed_by_else_and_every_resbody_flagged() {
+        // Distributed kill: the no-exception path overwrites via `else`, the
+        // exception path via the (sole) `resbody`. Every exit of the rescue
+        // overwrites `x` before the trailing read, so `x = 1` is useless.
+        // RuboCop 1.87 flags it.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              x = 1
+              ^ Useless assignment to variable - `x`.
+            rescue
+              x = 3
+            else
+              x = 2
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_with_non_overwriting_rescue_not_flagged() {
+        // FP guard: the `rescue` arm does NOT overwrite `x`, so on the
+        // exception path the begin-body value reaches the read. RuboCop 1.87
+        // reports nothing — the distributed kill must require *every* resbody
+        // to overwrite.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              log(error)
+            else
+              x = 2
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_without_else_arm_not_flagged() {
+        // FP guard: no `else` arm ⇒ the no-exception path falls through with
+        // the begin-body value intact ⇒ it is read. RuboCop 1.87 reports
+        // nothing.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_with_conditional_else_overwrite_not_flagged() {
+        // FP guard: the `else`-arm overwrite is itself conditional, so the
+        // no-exception path may leave the begin-body value intact. The
+        // distributed kill must require an *unconditional* else overwrite.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              x = 3
+            else
+              x = 2 if foo
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_with_one_silent_resbody_not_flagged() {
+        // FP guard: one of two `resbody` arms does not overwrite `x`, leaving
+        // the begin-body value observable on that exception path. RuboCop 1.87
+        // reports nothing.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue A
+              x = 3
+            rescue B
+              log(error)
+            else
+              x = 2
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
     fn retry_accumulator_op_assign_not_flagged() {
         // request_pool.rb `retries`: `retries += 1; retry` — the op-assign
         // is read on the next iteration via the retry back-edge.
