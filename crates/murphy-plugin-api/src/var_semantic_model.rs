@@ -235,81 +235,130 @@ fn rescue_arm_of(ast: &Ast, rescue: NodeId, node: NodeId) -> Option<RescueArm> {
 ///
 /// The branch-chain dominance model treats the `else` and each `resbody` arm as
 /// mutually exclusive from the protected `body`, so a body write that is killed
-/// only by the *combination* of every sibling arm — the `else` arm on the
-/// no-exception path and every `resbody` arm on its exception path — is never
+/// only by the *combination* of the no-exception and exception exits is never
 /// matched by a single prefix-dominator. This reconstructs that distributed kill
-/// for a read positioned after the whole construct:
+/// by verifying, path by path, that every control-flow path leaving the body
+/// write reaches an unconditional overwrite before any read can observe it.
 ///
-/// `begin; x = 1; rescue; x = 3; else; x = 2; end; use(x)` — every exit of the
-/// rescue overwrites `x` before the trailing read, so `x = 1` is useless
-/// (RuboCop 1.87 flags it).
+/// `begin; x = 1; rescue; x = 3; else; x = 2; end; use(x)` — the no-exception
+/// path overwrites via `else` (`x = 2`), the exception path via the `resbody`
+/// (`x = 3`), so `x = 1` is useless (RuboCop 1.87 flags it).
 ///
-/// Sound (no false positives): requires the read to lie *after* the construct,
-/// an unconditional `else`-arm overwrite (no-exception path), and an
-/// unconditional overwrite in *every* `resbody` arm (each exception path). A
-/// `rescue` arm that does not overwrite (e.g. `rescue; log`) leaves the body
-/// write observable on that path, so the kill does not apply. A missing `else`
-/// arm leaves it observable on the no-exception fall-through. A write reached
-/// through an inner branch or a short-circuit `&&`/`||` is not counted (see
-/// `rescue_arm_of`), so a conditional overwrite never triggers the kill.
+/// ## Paths from a body write `W` (in `body` of `rescue`)
 ///
-/// KNOWN LIMITATIONS (false-negative direction only, tracked in murphy-w5za —
-/// same conservative-approximation tolerance as the loop-body handling):
-///   1. A missing `else` arm whose no-exception path is instead covered by a
-///      *later unconditional write in the begin body itself* is not recognised
-///      (`begin; x = 1; x = 2; rescue; x = 3; end; use(x)` — RuboCop flags
-///      `x = 1`, we miss it). The `else_.is_none()` guard returns early.
-///   2. A read positioned *inside* an arm, but after that arm has already
-///      overwritten the variable on every reaching path, is not recognised
-///      (`begin; x = 1; rescue; x = 2; use(x); else; x = 3; end; use(x)` —
-///      RuboCop flags `x = 1`). The `read_pos <= rescue.end` guard
-///      conservatively disables the kill for any in-construct read. Refining
-///      either requires per-arm intra-arm dominance and is deferred.
+/// - **No-exception path:** the body runs to completion, then the `else` arm,
+///   then falls through past the construct. `W` is killed here by the earliest
+///   *unconditional* overwrite among the later begin-body writes (the body runs
+///   fully on this path) and the `else`-arm writes (`ne_kill`). With neither,
+///   the body value falls through intact and is live.
+/// - **Exception path (one per `resbody`):** an exception anywhere after `W`
+///   diverts into that `resbody`, then falls through. `W` is killed here only by
+///   an *unconditional* overwrite inside that `resbody` (`rb_kill`) — a later
+///   begin-body write does NOT help, since the exception may precede it. Every
+///   `resbody` must overwrite.
+///
+/// On each path an overwrite only kills `W` if no compatible read on that path
+/// observes `W` first. `compatible_reads` are the variable's reads after `W` on
+/// a control-flow-compatible path (pre-filtered by the caller via
+/// `paths_compatible`); each is classified by the arm it sits in.
+///
+/// ## Soundness (no false positives)
+///
+/// A write reached through an inner branch or a short-circuit `&&`/`||` is not
+/// counted as an unconditional overwrite (see `rescue_arm_of`). A path with no
+/// unconditional overwrite, or one whose overwrite is preceded by a read of
+/// `W`, leaves `W` observable and suppresses the kill.
 fn begin_body_distributed_kill(
     ast: &Ast,
     root: NodeId,
     assignments: &[Assignment],
     body_idx: usize,
-    read_pos: u32,
+    compatible_reads: &[&Reference],
 ) -> bool {
     let body_write = &assignments[body_idx];
     let Some(rescue) = enclosing_protected_rescue(ast, root, body_write.node_id) else {
         return false;
     };
-    // Only sound when the read lies entirely past the construct: a read inside
-    // any arm could observe the body write before that arm's overwrite.
-    if read_pos <= ast.range(rescue).end {
-        return false;
-    }
-    let NodeKind::Rescue { else_, .. } = *ast.kind(rescue) else {
+    let resbodies: Vec<NodeId> = ast
+        .children(rescue)
+        .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
+        .collect();
+
+    // ── No-exception path ──
+    // Earliest unconditional overwrite among later begin-body writes (the body
+    // runs to completion on this path) and `else`-arm writes.
+    let ne_kill = assignments
+        .iter()
+        .enumerate()
+        .filter(|(j, w)| *j != body_idx && w.end > body_write.end)
+        .filter(|(_, w)| {
+            matches!(
+                rescue_arm_of(ast, rescue, w.node_id),
+                Some(RescueArm::Body) | Some(RescueArm::Else)
+            )
+        })
+        .map(|(_, w)| w.end)
+        .min();
+    let Some(ne_kill) = ne_kill else {
         return false;
     };
-    // No `else` arm ⇒ the no-exception path falls through with the body value
-    // intact ⇒ the body write is live on that path.
-    if else_.get().is_none() {
-        return false;
-    }
-    let mut else_killed = false;
-    let mut killed_resbodies: Vec<NodeId> = Vec::new();
-    for (j, w) in assignments.iter().enumerate() {
-        if j == body_idx || w.end <= body_write.end {
+    // A read on the no-exception path (after `W`, not inside any `resbody`)
+    // positioned before `ne_kill` observes `W`.
+    for r in compatible_reads {
+        if r.pos <= body_write.end {
             continue;
         }
-        match rescue_arm_of(ast, rescue, w.node_id) {
-            Some(RescueArm::Else) => else_killed = true,
-            Some(RescueArm::Resbody(rb)) if !killed_resbodies.contains(&rb) => {
-                killed_resbodies.push(rb);
-            }
-            _ => {}
+        if resbodies
+            .iter()
+            .any(|&rb| node_in_subtree(ast, rb, r.node_id))
+        {
+            continue; // exception-path read, handled per-resbody below
+        }
+        if r.pos < ne_kill {
+            return false;
         }
     }
-    if !else_killed {
-        return false;
+
+    // ── Exception paths (one per resbody) ──
+    for &rb in &resbodies {
+        let rb_kill = assignments
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != body_idx)
+            .filter(|(_, w)| {
+                matches!(
+                    rescue_arm_of(ast, rescue, w.node_id),
+                    Some(RescueArm::Resbody(x)) if x == rb
+                )
+            })
+            .map(|(_, w)| w.end)
+            .min();
+        let Some(rb_kill) = rb_kill else {
+            return false;
+        };
+        // A read inside this resbody positioned before its overwrite observes W.
+        for r in compatible_reads {
+            if node_in_subtree(ast, rb, r.node_id) && r.pos < rb_kill {
+                return false;
+            }
+        }
     }
-    // Every `resbody` arm of the rescue must contain an overwrite.
-    ast.children(rescue)
-        .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
-        .all(|rb| killed_resbodies.contains(&rb))
+
+    true
+}
+
+/// Returns `true` if `node` is `ancestor` itself or lies within its subtree.
+fn node_in_subtree(ast: &Ast, ancestor: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    loop {
+        if current == ancestor {
+            return true;
+        }
+        match ast.parent(current).get() {
+            Some(parent) => current = parent,
+            None => return false,
+        }
+    }
 }
 
 /// Returns `true` if `node` is inside the loop body of an enclosing `While`,
@@ -493,15 +542,17 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
                 continue;
             }
 
-            // Earliest later read that is on a compatible control-flow path.
-            let next_read_pos = var
+            // Later reads on a compatible control-flow path.
+            let compatible_reads: Vec<&Reference> = var
                 .references
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| r.pos > asgn_end)
                 .filter(|(k, _)| paths_compatible(ast, &ref_chains[*k], &asgn_chains[i]))
-                .map(|(_, r)| r.pos)
-                .min();
+                .map(|(_, r)| r)
+                .collect();
+            // Earliest later read that is on a compatible control-flow path.
+            let next_read_pos = compatible_reads.iter().map(|r| r.pos).min();
 
             // Earliest later write that dominates this write (same or shallower
             // branch), not in a protected begin body.
@@ -521,9 +572,13 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
                 // but a begin-body write may still be killed on *every* exit of
                 // its rescue by the combination of sibling arms (else + every
                 // resbody). RuboCop's CFG model catches this; reconstruct it.
-                (Some(r), _) => {
-                    !begin_body_distributed_kill(ast, scope_root, &var.assignments, i, r)
-                }
+                (Some(_), _) => !begin_body_distributed_kill(
+                    ast,
+                    scope_root,
+                    &var.assignments,
+                    i,
+                    &compatible_reads,
+                ),
             };
         }
     }

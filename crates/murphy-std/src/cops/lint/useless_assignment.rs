@@ -1450,6 +1450,77 @@ mod tests {
     }
 
     #[test]
+    fn begin_body_write_killed_by_later_body_write_without_else_flagged() {
+        // Distributed kill with no `else`: the no-exception path is covered by a
+        // later *unconditional begin-body* write (`x = 2`), the exception path by
+        // the `resbody` (`x = 3`). Every exit overwrites `x = 1` before the
+        // trailing read. RuboCop 1.87 flags `x = 1`.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              x = 1
+              ^ Useless assignment to variable - `x`.
+              x = 2
+            rescue
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_killed_with_in_arm_reads_flagged() {
+        // Distributed kill where the earliest compatible read sits *inside* the
+        // `resbody`, but only after that arm's own overwrite (`x = 2`). The
+        // no-exception path is covered by `else` (`x = 3`). No path observes
+        // `x = 1`. RuboCop 1.87 flags it.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              x = 1
+              ^ Useless assignment to variable - `x`.
+            rescue
+              x = 2
+              use(x)
+            else
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_read_before_later_body_write_not_flagged() {
+        // FP guard: a begin-body read of `x` sits between the write and the
+        // later body overwrite, so the no-exception path observes `x = 1`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+              use(x)
+              x = 2
+            rescue
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn begin_body_write_read_before_resbody_overwrite_not_flagged() {
+        // FP guard: the `resbody` reads `x` before overwriting it, so the
+        // exception path observes `x = 1`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+            rescue
+              use(x)
+              x = 2
+            else
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
     fn retry_accumulator_op_assign_not_flagged() {
         // request_pool.rb `retries`: `retries += 1; retry` — the op-assign
         // is read on the next iteration via the retry back-edge.
