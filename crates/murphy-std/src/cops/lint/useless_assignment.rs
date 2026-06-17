@@ -1521,6 +1521,28 @@ mod tests {
     }
 
     #[test]
+    fn begin_body_write_with_escaping_exception_to_outer_ensure_not_flagged() {
+        // FP guard: a `RuntimeError` bypasses the inner `rescue IOError` and the
+        // outer `ensure` reads the original `x = 1` on the propagation path, so
+        // the inner body write is live. The distributed kill must stay
+        // conservative when the rescue is nested in an enclosing `ensure`.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              begin
+                x = 1
+                raise RuntimeError
+              rescue IOError
+                x = 2
+              else
+                x = 3
+              end
+            ensure
+              use(x)
+            end
+        "#});
+    }
+
+    #[test]
     fn retry_accumulator_op_assign_not_flagged() {
         // request_pool.rb `retries`: `retries += 1; retry` — the op-assign
         // is read on the next iteration via the retry back-edge.

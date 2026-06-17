@@ -267,7 +267,24 @@ fn rescue_arm_of(ast: &Ast, rescue: NodeId, node: NodeId) -> Option<RescueArm> {
 /// A write reached through an inner branch or a short-circuit `&&`/`||` is not
 /// counted as an unconditional overwrite (see `rescue_arm_of`). A path with no
 /// unconditional overwrite, or one whose overwrite is preceded by a read of
-/// `W`, leaves `W` observable and suppresses the kill.
+/// `W`, leaves `W` observable and suppresses the kill. An exception that
+/// escapes `rescue` unhandled (no matching `resbody`) is handled by the
+/// `within_enclosing_exception_region` guard, which keeps the kill conservative
+/// when an enclosing `ensure`/`rescue` could observe the body write on the
+/// propagation path.
+///
+/// ## Known limitations (false-negative direction only, conservative)
+///
+/// - `rescue` nested in an enclosing `ensure`/`rescue` is skipped entirely by
+///   the guard above, even when no escaping exception actually reaches an
+///   un-overwritten reader.
+/// - A *pre-begin* write (before the `begin`) killed on every exit by the body
+///   and handler arms is not reached — this fallback only runs for writes
+///   *inside* the protected body (`enclosing_protected_rescue` gates it).
+/// - A nested inner `begin..rescue..else` that overwrites on all of its own
+///   exits cannot cover the *outer* rescue's no-exception path, because the
+///   inner writes sit behind the inner `Rescue` branch barrier and
+///   `rescue_arm_of` rejects them as not unconditional in the outer body.
 fn begin_body_distributed_kill(
     ast: &Ast,
     root: NodeId,
@@ -279,6 +296,18 @@ fn begin_body_distributed_kill(
     let Some(rescue) = enclosing_protected_rescue(ast, root, body_write.node_id) else {
         return false;
     };
+    // Soundness guard against exceptions that escape `rescue` *unhandled*. The
+    // per-path model below only accounts for `rescue`'s own arms (no-exception
+    // → body/else, exception → a direct `resbody`). But an exception whose type
+    // no `resbody` matches bypasses every arm and propagates outward: if
+    // `rescue` is nested in an enclosing `ensure` (which always runs) or the
+    // protected `body` of an enclosing `rescue` (which may catch it), a reader
+    // on that propagation path observes the *un-overwritten* body write. We do
+    // not model those paths, so stay conservative (false-negative direction)
+    // whenever such an enclosing exception region exists.
+    if within_enclosing_exception_region(ast, root, rescue) {
+        return false;
+    }
     let resbodies: Vec<NodeId> = ast
         .children(rescue)
         .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
@@ -345,6 +374,28 @@ fn begin_body_distributed_kill(
     }
 
     true
+}
+
+/// Returns `true` if `node` lies within the protected region of an enclosing
+/// exception construct before `root` — the `body` of an enclosing `Ensure`
+/// (its `ensure` clause always runs on an escaping exception) or the protected
+/// `body` of an enclosing `Rescue` (which may catch an escaping exception).
+/// In either case an exception that escapes `node` unhandled can reach readers
+/// on the propagation path, which the distributed-kill fallback does not model.
+fn within_enclosing_exception_region(ast: &Ast, root: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == root {
+            return false;
+        }
+        match *ast.kind(parent) {
+            NodeKind::Ensure { body, .. } if body.get() == Some(current) => return true,
+            NodeKind::Rescue { body, .. } if body.get() == Some(current) => return true,
+            _ => {}
+        }
+        current = parent;
+    }
+    false
 }
 
 /// Returns `true` if `node` is `ancestor` itself or lies within its subtree.
