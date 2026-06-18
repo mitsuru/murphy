@@ -26,8 +26,9 @@
 //!   `base_column` of the first part is the enclosing hash `pair`'s column when
 //!   the concatenation is a hash value, otherwise the column of the first
 //!   non-whitespace character on the first part's line. Columns are display
-//!   columns (`.chars().count()` from the line start) so multi-byte source
-//!   aligns by visible column.
+//!   columns (`crate::cops::util::display_column` from the line start,
+//!   murphy-vafs) so an East-Asian wide glyph counts as width 2, matching
+//!   RuboCop's `Alignment#display_column`.
 //!
 //!   Autocorrect: not implemented (v1 gap). RuboCop reindents the offending
 //!   line via `AlignmentCorrector`; the detect-only port ships without it,
@@ -209,7 +210,7 @@ fn base_column(child: NodeId, cx: &Cx<'_>, src: &str) -> usize {
     while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
         i += 1;
     }
-    src[line_start..i].chars().count()
+    crate::cops::util::display_column(&src[line_start..i])
 }
 
 /// Configured indentation width. Only an unset (`None`) override falls back to
@@ -219,10 +220,13 @@ fn indentation_width(opts: &LineEndStringConcatenationIndentationOptions) -> usi
     opts.indentation_width.map_or(2, |w| w.max(0) as usize)
 }
 
-/// Visible column (0-based, char count) of a byte offset within its line.
+/// Visible column (0-based, display width) of a byte offset within its line.
+///
+/// Uses [`crate::cops::util::display_column`] so an East-Asian wide glyph in
+/// the prefix counts as width 2, matching RuboCop's `Alignment#display_column`.
 fn display_column(offset: u32, src: &str) -> usize {
     let line_start = src[..offset as usize].rfind('\n').map_or(0, |p| p + 1);
-    src[line_start..offset as usize].chars().count()
+    crate::cops::util::display_column(&src[line_start..offset as usize])
 }
 
 /// Highlight the offending part, trimmed to its first line.

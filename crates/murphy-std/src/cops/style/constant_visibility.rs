@@ -5,12 +5,27 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Style/ConstantVisibility
-//! upstream_version_checked: 1.86.2
+//! upstream_version_checked: 1.87.0
 //! status: partial
-//! gap_issues: []
+//! gap_issues: [murphy-4g1g]
 //! notes: >
-//!   Ignores modules when IgnoreModules: true (default false).
-//!   Only handles direct casgn inside class/module body.
+//!   Flags `casgn` inside a `class`/`module` body without a `public_constant`/
+//!   `private_constant` declaration for that constant (matching `on_casgn` +
+//!   `class_or_module_scope?` + `visibility_declaration?`).
+//!
+//!   `IgnoreModules: true` skips constructor assignments, mirroring RuboCop's
+//!   `module?(node)` → `class_constructor?`: `Class`/`Module`/`Struct.new`,
+//!   `Data.define`, and the block forms (`Struct.new do … end`), with the
+//!   receiver allowed to be a top-level (`::`) constant.
+//!
+//!   Gaps vs upstream:
+//!   - `class_or_module_scope?` is checked one `begin` level deep (direct body
+//!     or a single wrapping `begin`); RuboCop recurses through arbitrarily
+//!     nested `begin` blocks — murphy-4g1g.
+//!   - Murphy additionally accepts a `self.private_constant`/`self.public_constant`
+//!     receiver; RuboCop's matcher requires no receiver (`nil?`) and would flag
+//!     it. This is a deliberate Murphy leniency (an explicit `self.` receiver on
+//!     the private `private_constant` method would itself raise at runtime).
 //! ```
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, cop};
@@ -73,6 +88,11 @@ impl ConstantVisibility {
     }
 }
 
+/// RuboCop's `module?(node)` → `node.expression.class_constructor?`, matching
+/// `Class`/`Module`/`Struct.new`, `Data.define`, and the block forms of each
+/// (`Struct.new do … end`), with the receiver allowed to be a top-level
+/// (`::`) constant. The send is resolved through `cx.block_call` so the
+/// block-wrapped constructor is reached.
 fn is_module_assignment(node: NodeId, cx: &Cx<'_>) -> bool {
     let NodeKind::Casgn { value, .. } = *cx.kind(node) else {
         return false;
@@ -81,20 +101,20 @@ fn is_module_assignment(node: NodeId, cx: &Cx<'_>) -> bool {
         return false;
     };
     let val_id = unwrap_begin(val_id, cx);
-    let NodeKind::Send { receiver, method, .. } = *cx.kind(val_id) else {
-        return false;
-    };
-    if cx.symbol_str(method) != "new" {
-        return false;
-    }
-    let Some(recv_id) = receiver.get() else {
+    // A block-form constructor (`Struct.new do … end`) wraps the send; resolve
+    // to the underlying call. A bare send resolves to itself.
+    let call_id = cx.block_call(val_id).get().unwrap_or(val_id);
+    let Some(recv_id) = cx.call_receiver(call_id).get() else {
         return false;
     };
     let recv_id = unwrap_begin(recv_id, cx);
-    let NodeKind::Const { name, .. } = *cx.kind(recv_id) else {
-        return false;
-    };
-    matches!(cx.symbol_str(name), "Struct" | "Class" | "Module")
+    match cx.method_name(call_id) {
+        Some("new") => cx.is_global_const(recv_id, "Class")
+            || cx.is_global_const(recv_id, "Module")
+            || cx.is_global_const(recv_id, "Struct"),
+        Some("define") => cx.is_global_const(recv_id, "Data"),
+        _ => false,
+    }
 }
 
 fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
@@ -184,6 +204,29 @@ mod tests {
                   ^^^^^^^^^^^^^^^^^ Explicitly make `BAR` public or private using either `#public_constant` or `#private_constant`.
                 end
             "});
+    }
+
+    // `class_constructor?` also covers `Data.define`, block-form constructors,
+    // and top-level (`::`) constants — all accepted under `IgnoreModules: true`.
+    #[test]
+    fn ignore_modules_enabled_accepts_data_define() {
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_no_offenses("class Foo\n  MyData = Data.define(:x)\nend\n");
+    }
+
+    #[test]
+    fn ignore_modules_enabled_accepts_block_form_constructor() {
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_no_offenses("class Foo\n  S = Struct.new(:x) do\n    def y; end\n  end\nend\n");
+    }
+
+    #[test]
+    fn ignore_modules_enabled_accepts_toplevel_constructor() {
+        test::<ConstantVisibility>()
+            .with_options(&ConstantVisibilityOptions { ignore_modules: true })
+            .expect_no_offenses("class Foo\n  C = ::Class.new\nend\n");
     }
 }
 murphy_plugin_api::submit_cop!(ConstantVisibility);

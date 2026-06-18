@@ -131,15 +131,15 @@ fn check_alignment(items: &[NodeId], cx: &Cx<'_>) {
     }
 }
 
-/// RuboCop `display_column(range)`: the column of the node's start measured in
-/// characters from the start of its line. (ASCII-only column; Murphy does not
-/// yet weight by `Unicode::DisplayWidth`, so full-width glyphs count as one
-/// column — a documented simplification shared with sibling layout cops.)
+/// RuboCop `display_column(range)`: the column of the node's start measured as
+/// the East-Asian display width from the start of its line via
+/// [`crate::cops::util::display_column`], so a full-width glyph counts as two
+/// columns (matching `Unicode::DisplayWidth.of`).
 fn display_column(node: NodeId, cx: &Cx<'_>) -> usize {
     let start = cx.range(node).start as usize;
     let src = cx.source();
     let line_start = src[..start].rfind('\n').map_or(0, |pos| pos + 1);
-    src[line_start..start].chars().count()
+    crate::cops::util::display_column(&src[line_start..start])
 }
 
 /// RuboCop `begins_its_line?(range)`: the node is the first non-whitespace on

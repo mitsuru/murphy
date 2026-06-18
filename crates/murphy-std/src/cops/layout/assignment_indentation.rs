@@ -8,7 +8,7 @@
 //! upstream_cop: Layout/AssignmentIndentation
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-vafs]
+//! gap_issues: []
 //! notes: >
 //!   Ports `check_assignment` over the `CheckAssignment` mixin's node set:
 //!   every `*asgn` write (`lvasgn`/`ivasgn`/`cvasgn`/`gvasgn`/`casgn`/`masgn`/
@@ -36,10 +36,12 @@
 //!   back to the run-wide resolved `Layout/IndentationWidth: Width` via
 //!   `cx.indentation_width()` (default 2) — murphy-kke2.
 //!
-//!   Gaps vs upstream:
-//!   - Column is counted by Unicode scalar (`chars().count()`), not RuboCop's
-//!     `display_column` (which counts East-Asian wide glyphs as width 2). Wide
-//!     characters before the assignment are an edge gap.
+//!   Columns are display-width columns (`crate::cops::util::display_column`,
+//!   murphy-vafs): an East-Asian wide glyph counts as width 2, matching
+//!   RuboCop's `Alignment#display_column`. Because the autocorrect re-indents a
+//!   whitespace-only prefix (display width == char count for whitespace), the
+//!   `" ".repeat(expected)` correction stays exact even with wide glyphs in the
+//!   surrounding code.
 //! ```
 //!
 //! ## Matched shapes
@@ -302,12 +304,13 @@ fn assignment_op_range(node: NodeId, cx: &Cx<'_>) -> Range {
         })
 }
 
-/// 0-based character column of `offset` (RuboCop's `column`).
+/// 0-based display-width column of `offset` (RuboCop's `display_column`), so a
+/// full-width glyph in the prefix counts as two columns.
 fn column_of(cx: &Cx<'_>, offset: u32) -> usize {
     let src = cx.source();
     let upper = (offset as usize).min(src.len());
     let line_start = src[..upper].rfind('\n').map_or(0, |pos| pos + 1);
-    src[line_start..upper].chars().count()
+    crate::cops::util::display_column(&src[line_start..upper])
 }
 
 /// The portion of `node`'s source range up to (but excluding) the first

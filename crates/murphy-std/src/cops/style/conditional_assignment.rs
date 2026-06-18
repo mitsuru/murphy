@@ -7,12 +7,25 @@
 //! upstream_cop: Style/ConditionalAssignment
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: []
+//! gap_issues: [murphy-7mc2]
 //! notes: >
-//!   EnforcedStyle: assign_to_condition (default) supported.
-//!   Handles simple if/else and case/when patterns where each branch
-//!   assigns to the same variable.
-//!   Autocorrect is a v1 gap (report-only).
+//!   `EnforcedStyle: assign_to_condition` (the default) only. Flags simple
+//!   `if`/`else` and `case`/`when`+`else` where every branch's tail assigns to
+//!   the same variable (`lvasgn`/`ivasgn`/`gvasgn`/`casgn`), unwrapping
+//!   single-expression parentheses. Conservative: branches must each be a bare
+//!   assignment, so no false positives.
+//!
+//!   Gaps vs upstream (all false-negatives — narrower than RuboCop, never
+//!   firing where RuboCop would not) — murphy-7mc2:
+//!   - `EnforcedStyle: assign_inside_condition` is not implemented.
+//!   - Ternary (`IncludeTernaryExpressions`) and `if`/`elsif`/`else` chains
+//!     (where the outer `else` is itself an `if`) are not detected.
+//!   - `case`-in / `case_match` (pattern matching) is not handled.
+//!   - The comparison form (`on_send`, assigning then comparing the same var)
+//!     and `SingleLineConditionsOnly` are not modelled.
+//!   - `op_asgn`/`or_asgn`/`and_asgn` branch tails are not recognised as the
+//!     same assignment target.
+//!   - Autocorrect is not implemented (report-only).
 //! ```
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
