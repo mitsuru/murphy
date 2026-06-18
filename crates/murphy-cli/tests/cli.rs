@@ -575,6 +575,43 @@ fn lint_enable_specific_cop_inside_disable_all_region() {
     );
 }
 
+/// The `all` keyword is a blanket toggle, NOT a literal cop name. A full-line
+/// `# rubocop:disable all` opens a range that suppresses every cop, and a
+/// matching `# rubocop:enable all` closes it — exactly the shape Mastodon's
+/// `lib/action_dispatch/remote_ip_extensions.rb` uses. This discriminates the
+/// murphy-92kp gap-2 bug: if `all` were parsed as a literal cop name, the
+/// disable would be a no-op and BOTH `debugger` lines would fire (2 offenses);
+/// if `enable all` failed to close the range, NEITHER would (0 offenses). Only
+/// the correct blanket semantics leave exactly the post-`enable` `debugger`.
+#[test]
+fn lint_rubocop_disable_all_then_enable_all_scopes_blanket_region() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("disable_all_enable_all.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable all\ndebugger\n# rubocop:enable all\ndebugger\n",
+    )
+    .expect("write disable_all_enable_all.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "`disable all`/`enable all` must blanket-suppress only inside the range, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
+}
+
 /// A dangling full-line department disable (`# rubocop:disable Lint`, no matching
 /// enable) must still surface `Lint/MissingCopEnableDirective`: a directive must
 /// never suppress the directive-validation cop that reports on it, even though
