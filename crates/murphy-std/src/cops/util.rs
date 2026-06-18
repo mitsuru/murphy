@@ -48,6 +48,35 @@ pub fn first_line_range(node: NodeId, cx: &Cx<'_>) -> Range {
     }
 }
 
+/// Display width of a column prefix, mirroring RuboCop's
+/// `Alignment#display_column`.
+///
+/// RuboCop computes alignment columns as
+/// `Unicode::DisplayWidth.of(line[0, range.column])` — the East-Asian-width of
+/// the substring from the line start up to the target column. A wide (CJK)
+/// glyph therefore counts as **2** columns, not 1, so two lines that look
+/// vertically aligned in a monospace editor are treated as aligned even when
+/// their leading text contains wide characters.
+///
+/// `prefix` must be the *characters* from the start of the line up to (but not
+/// including) the column being measured — exactly what the layout cops obtain
+/// with `src[line_start..offset]`. Callers should pass that slice here instead
+/// of `chars().count()`.
+///
+/// Tabs and other zero-width control characters: the Rust `unicode-width` crate
+/// reports width `0` for control characters, whereas RuboCop's
+/// `Unicode::DisplayWidth.of("\t")` is `1`. To stay faithful to RuboCop we
+/// count every control character (anything the crate maps to width `0` that is
+/// also a `char::is_control`) as width `1`. Ordinary zero-width combining marks
+/// keep their `0` width.
+pub fn display_column(prefix: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    prefix
+        .chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or_else(|| usize::from(c.is_control())))
+        .sum()
+}
+
 /// Returns `true` if `byte` is whitespace under Ruby's `\s` / `String#strip`
 /// semantics. Unlike Rust's [`u8::is_ascii_whitespace`] (which matches the five
 /// bytes `[ \t\n\r\x0C]`), this also matches the vertical tab `\v` (`0x0B`), so
@@ -999,7 +1028,23 @@ fn blank_run_range(lines: &[PhysicalLine], idx: usize, dir: BlankRunDirection) -
 
 #[cfg(test)]
 mod tests {
-    use super::is_assignment_or_comparison_operator;
+    use super::{display_column, is_assignment_or_comparison_operator};
+
+    #[test]
+    fn display_column_matches_rubocop_unicode_display_width() {
+        // ASCII: width == scalar count.
+        assert_eq!(display_column(""), 0);
+        assert_eq!(display_column("  "), 2);
+        assert_eq!(display_column("abc"), 3);
+        // East-Asian wide glyph counts as 2 (RuboCop's `Unicode::DisplayWidth.of`).
+        assert_eq!(display_column("あ"), 2);
+        assert_eq!(display_column("  あ"), 4);
+        // Half-width katakana stays width 1, matching the gem.
+        assert_eq!(display_column("ｱ"), 1);
+        // Tabs count as 1 each, matching `Unicode::DisplayWidth.of("\t")` == 1
+        // (the raw unicode-width crate reports 0 for control chars).
+        assert_eq!(display_column("\t\t"), 2);
+    }
 
     #[test]
     fn operator_classifier_accepts_operators_and_rejects_setter_identifiers() {

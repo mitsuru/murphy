@@ -8,7 +8,7 @@
 //! upstream_cop: Layout/BlockAlignment
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-vafs]
+//! gap_issues: []
 //! notes: >
 //!   Ports `on_block` (aliased to `on_numblock`/`on_itblock`). Three styles via
 //!   `EnforcedStyleAlignWith` (`SupportedStylesAlignWith: [either,
@@ -47,10 +47,14 @@
 //!   block has no same-line ancestor to climb to, so the line node equals the
 //!   block node and no message permutation differs).
 //!
-//!   Gaps vs upstream:
-//!   - Column is counted by Unicode scalar (`chars().count()`), not RuboCop's
-//!     `display_column` (East-Asian wide glyph = width 2). Shared edge gap with
-//!     the other Layout column cops.
+//!   Columns are display-width columns (`crate::cops::util::display_column`,
+//!   murphy-vafs), so an East-Asian wide glyph counts as two columns, matching
+//!   RuboCop's `Alignment#display_column`. Autocorrect re-indents the `end`/`}`
+//!   line to `target_col` spaces; because the autocorrect target
+//!   (`start_for_line_node`) always begins its own line, its prefix is
+//!   whitespace-only (display width == char count), so the `" ".repeat` stays
+//!   exact even with wide glyphs elsewhere on the line (verified against
+//!   RuboCop `-a`).
 //! ```
 //!
 //! ## Matched shapes
@@ -203,7 +207,8 @@ fn compute_do_source_line_column(
         .map_or(src.len(), |idx| line_start + idx);
     let line = &src[line_start..line_end];
     let leading_ws = line.len() - line.trim_start().len();
-    let indentation_of_do_line = src[line_start..line_start + leading_ws].chars().count();
+    let indentation_of_do_line =
+        crate::cops::util::display_column(&src[line_start..line_start + leading_ws]);
 
     // `return unless end_loc.column != indentation_of_do_line || style == :start_of_line`.
     if end_col == indentation_of_do_line && style != AlignWith::StartOfLine {
@@ -419,21 +424,21 @@ fn begins_its_line(offset: u32, cx: &Cx<'_>) -> bool {
     src[line_start..offset].bytes().all(|b| b == b' ' || b == b'\t')
 }
 
-/// 0-based character column of `offset`.
+/// 0-based display-width column of `offset` (RuboCop's `display_column`).
 fn column_of(cx: &Cx<'_>, offset: u32) -> usize {
     let src = cx.source();
     let upper = (offset as usize).min(src.len());
     let line_start = src[..upper].rfind('\n').map_or(0, |pos| pos + 1);
-    src[line_start..upper].chars().count()
+    crate::cops::util::display_column(&src[line_start..upper])
 }
 
-/// 1-based line and 0-based char column of `offset`.
+/// 1-based line and 0-based display-width column of `offset`.
 fn line_and_column_at(offset: u32, cx: &Cx<'_>) -> (usize, usize) {
     let src = cx.source();
     let upper = (offset as usize).min(src.len());
     let line = src[..upper].bytes().filter(|&b| b == b'\n').count() + 1;
     let line_start = src[..upper].rfind('\n').map_or(0, |pos| pos + 1);
-    let col = src[line_start..upper].chars().count();
+    let col = crate::cops::util::display_column(&src[line_start..upper]);
     (line, col)
 }
 
@@ -617,6 +622,23 @@ mod tests {
         let run = run_cop_with_edits::<Cop>(src);
         let fixed = apply(src, &run.edits);
         assert!(run_cop::<Cop>(&fixed).is_empty(), "not idempotent: {fixed:?}");
+    }
+
+    /// murphy-vafs: a wide-glyph (CJK) receiver counts as display width 2, but
+    /// the autocorrect target (`start_for_line_node`) begins its own line at
+    /// column 0, so its whitespace prefix is empty and `end` re-indents to
+    /// column 0. Verified identical to RuboCop `-a` on `あ.each do … end`.
+    #[test]
+    fn corrects_wide_glyph_receiver_block_end() {
+        let src = "あ.each do |x|\n  x\n  end\n";
+        let run = run_cop_with_edits::<Cop>(src);
+        assert_eq!(run.offenses.len(), 1, "got {:?}", run.offenses);
+        // The aligning expression `あ.each do |x|` starts at display column 0.
+        assert_eq!(
+            run.offenses[0].message,
+            "`end` at 3, 2 is not aligned with `あ.each do |x|` at 1, 0."
+        );
+        assert_eq!(apply(src, &run.edits), "あ.each do |x|\n  x\nend\n");
     }
 
     /// murphy-o3b2 no-regression: a deep `a.b do … end.c do … end` chain. The

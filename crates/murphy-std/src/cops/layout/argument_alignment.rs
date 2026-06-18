@@ -35,9 +35,9 @@
 //!       call's method-name line (the opening `(` line for `l.(…)`-style calls
 //!       with no selector) plus the configured indentation width (default 2).
 //!
-//!   Columns use `.chars().count()` from the line start (RuboCop's
-//!   `display_column`, modulo full Unicode east-asian-width handling — a known
-//!   minor gap shared with the other alignment cops).
+//!   Columns use `crate::cops::util::display_column` from the line start
+//!   (murphy-vafs), so an East-Asian wide glyph counts as width 2, matching
+//!   RuboCop's `Alignment#display_column`.
 //!
 //!   Single-surface ABI blocker (intentionally NOT bypassed):
 //!   RuboCop's `autocorrect_incompatible_with_other_cops?` reads
@@ -132,10 +132,13 @@ impl ArgumentAlignment {
     }
 }
 
-/// Visible column (0-based, char count) of a byte offset within its line.
+/// Visible column (0-based, display width) of a byte offset within its line.
+///
+/// Uses [`crate::cops::util::display_column`] so an East-Asian wide glyph in
+/// the prefix counts as width 2, matching RuboCop's `Alignment#display_column`.
 fn display_column(offset: u32, src: &str) -> usize {
     let line_start = src[..offset as usize].rfind('\n').map_or(0, |p| p + 1);
-    src[line_start..offset as usize].chars().count()
+    crate::cops::util::display_column(&src[line_start..offset as usize])
 }
 
 /// Returns true when `offset` is the first non-whitespace byte on its line.

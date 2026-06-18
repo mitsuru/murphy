@@ -27,10 +27,9 @@
 //!     anchor line (the `[` line when bracketed, otherwise the parent's line)
 //!     plus the configured indentation width (default 2).
 //!
-//!   Columns use `.chars().count()` from the line start so multi-byte source
-//!   aligns by visible column, matching RuboCop's `display_column` (modulo full
-//!   Unicode east-asian-width handling, a known minor gap shared with the other
-//!   alignment cops).
+//!   Columns use `crate::cops::util::display_column` from the line start
+//!   (murphy-vafs), so an East-Asian wide glyph counts as width 2, matching
+//!   RuboCop's `Alignment#display_column`.
 //!
 //!   Autocorrect: not implemented (v1 gap). RuboCop shifts each misaligned
 //!   element to the base column via `AlignmentCorrector`, which also re-indents
@@ -102,10 +101,13 @@ impl ArrayAlignment {
     }
 }
 
-/// Visible column (0-based, char count) of a byte offset within its line.
+/// Visible column (0-based, display width) of a byte offset within its line.
+///
+/// Uses [`crate::cops::util::display_column`] so an East-Asian wide glyph in
+/// the prefix counts as width 2, matching RuboCop's `Alignment#display_column`.
 fn display_column(offset: u32, src: &str) -> usize {
     let line_start = src[..offset as usize].rfind('\n').map_or(0, |p| p + 1);
-    src[line_start..offset as usize].chars().count()
+    crate::cops::util::display_column(&src[line_start..offset as usize])
 }
 
 /// Returns true when `offset` is the first non-whitespace byte on its line.
@@ -358,6 +360,31 @@ mod tests {
             array = [1, 2, 3,
               4, 5, 6]
               ^ Align the elements of an array literal if they span more than one line.
+        "});
+    }
+
+    // murphy-vafs: columns weight East-Asian wide glyphs by display width.
+    // In `あ = [1,` the receiver `あ` occupies two display columns, so the first
+    // element `1` sits at display column 6. RuboCop's `display_column` accepts
+    // `2` aligned under it with six leading spaces; a naive `chars().count()`
+    // base (5) would falsely flag this.
+    #[test]
+    fn accepts_wide_glyph_aligned_with_first_element() {
+        test::<ArrayAlignment>().expect_no_offenses(indoc! {"
+            あ = [1,
+                  2]
+        "});
+    }
+
+    // The mirror case: aligning under the *scalar* column (five spaces, one per
+    // character of `あ = [`) is a real offense because the wide glyph counts as
+    // two display columns.
+    #[test]
+    fn flags_wide_glyph_aligned_to_scalar_column() {
+        test::<ArrayAlignment>().expect_offense(indoc! {"
+            あ = [1,
+                 2]
+                 ^ Align the elements of an array literal if they span more than one line.
         "});
     }
 
