@@ -34,8 +34,13 @@
 //!   (`**`). `blockarg` gets NO sigil adjustment, so `&d` highlights only the
 //!   `&` — this is RuboCop's actual (verified) behavior, reproduced for parity.
 //!
-//!   Multiple offenses can stack on one parameter (forbidden + uppercase +
-//!   length + number), in that order — non-exclusive, matching `issue_offenses`.
+//!   At most ONE offense fires per parameter, in RuboCop's precedence order:
+//!   forbidden > uppercase > too-short > ends-in-number. RuboCop's `add_offense`
+//!   records each `range` in a per-cop `current_offense_locations` Set and
+//!   returns early when the range repeats; the mixin calls all four checks with
+//!   the *same* parameter range, so only the first applicable one fires.
+//!   Verified vs rubocop 1.87.0: `def foo(aB)` (uppercase + too short) emits the
+//!   lowercase-characters message only.
 //!
 //!   Skipped, matching the mixin's `next` guards: anonymous parameters whose
 //!   name is empty (`*`, `**`, `&`), the bare `_`, and allowed names. Destructured
@@ -177,18 +182,27 @@ fn arg_range(arg: NodeId, full_name: &str, sigil_extra: u32, cx: &Cx<'_>) -> Ran
     }
 }
 
-/// Emit every applicable offense for `name` on `range`, in RuboCop's order:
-/// forbidden, uppercase, too-short, ends-in-number. Non-exclusive — a single
-/// parameter may stack several.
+/// Emit at most ONE offense for `name` on `range`, in RuboCop's precedence
+/// order: forbidden > uppercase > too-short > ends-in-number.
+///
+/// RuboCop's `add_offense` records each `range` into a per-cop
+/// `current_offense_locations` Set and returns early if that range is already
+/// present. The `UncommunicativeName` mixin calls all four checks with the
+/// *same* parameter range, so only the first applicable check fires and the
+/// rest are dropped. Verified vs rubocop 1.87.0: `def foo(aB)` (uppercase + too
+/// short) emits the lowercase-characters message only. We reproduce that with
+/// an early-return chain, matching `BlockParameterName::issue_offenses`.
 fn issue_offenses(opts: &Options, name: &str, range: Range, cx: &Cx<'_>) {
     if opts.forbidden_names.iter().any(|f| f == name) {
         let msg = format!("Do not use {name} as a name for a {NAME_TYPE}.");
         cx.emit_offense(range, &msg, None);
+        return;
     }
 
     if name.chars().any(|c| c.is_uppercase()) {
         let msg = format!("Only use lowercase characters for {NAME_TYPE}.");
         cx.emit_offense(range, &msg, None);
+        return;
     }
 
     if (name.chars().count() as i64) < opts.min_name_length {
@@ -197,6 +211,7 @@ fn issue_offenses(opts: &Options, name: &str, range: Range, cx: &Cx<'_>) {
             opts.min_name_length
         );
         cx.emit_offense(range, &msg, None);
+        return;
     }
 
     if !opts.allow_names_ending_in_numbers && ends_with_num(name) {
@@ -364,17 +379,34 @@ mod tests {
             "#});
     }
 
-    // --- stacking: multiple offenses on one parameter ---
+    // --- precedence: at most one offense per parameter ---
 
     #[test]
-    fn stacks_case_and_length() {
-        // `Ab` -> uppercase + too short. Both fire on the same range.
-        test::<MethodParameterName>().expect_offense(indoc! {r#"
-            def foo(Ab)
-                    ^^ Only use lowercase characters for method parameter.
-                    ^^ Method parameter must be at least 3 characters long.
-            end
-        "#});
+    fn uppercase_wins_over_length() {
+        // `aB` -> uppercase + too short (MinNameLength 3). RuboCop 1.87.0 dedupes
+        // by range: CASE fires, length is suppressed. Verified vs rubocop 1.87.0
+        // (`def foo(aB)` emits only the lowercase-characters message). Mirrors
+        // `BlockParameterName::uppercase_wins_over_length`.
+        test::<MethodParameterName>()
+            .with_options(&opts(3, true, &[], &[]))
+            .expect_offense(indoc! {r#"
+                def foo(aB)
+                        ^^ Only use lowercase characters for method parameter.
+                end
+            "#});
+    }
+
+    #[test]
+    fn forbidden_wins_over_length() {
+        // forbidden `ab` (len 2 < 3): forbidden fires, length suppressed.
+        // Mirrors `BlockParameterName::forbidden_wins_over_length`.
+        test::<MethodParameterName>()
+            .with_options(&opts(3, true, &[], &["ab"]))
+            .expect_offense(indoc! {r#"
+                def foo(ab)
+                        ^^ Do not use ab as a name for a method parameter.
+                end
+            "#});
     }
 
     // --- scope: def vs block / nested lambda defaults ---

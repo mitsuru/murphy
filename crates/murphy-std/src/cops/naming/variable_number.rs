@@ -265,11 +265,13 @@ fn numbered_target<'a>(
             let s = cx.symbol_str(name);
             Some((s, arg_range(id, s, cx), IdentifierType::Variable))
         }
-        // Method-definition names (gated by CheckMethodNames). `loc.name` is
-        // populated and already excludes the `def`/receiver.
+        // Method-definition names (gated by CheckMethodNames). Murphy leaves
+        // `loc.name == ZERO` on `Def`/`Defs`, so locate the name by source
+        // search starting past any singleton receiver (`def self.x` /
+        // `def foo1.foo1`).
         NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } if opts.check_method_names => {
             let s = cx.symbol_str(name);
-            Some((s, arg_range(id, s, cx), IdentifierType::MethodName))
+            Some((s, def_name_range(id, s, cx), IdentifierType::MethodName))
         }
         // Every symbol literal (gated by CheckSymbols). RuboCop reports the
         // whole `sym` node: a standalone `:sym1` keeps its leading colon, a
@@ -317,6 +319,34 @@ fn arg_range(id: NodeId, name: &str, cx: &Cx<'_>) -> Range {
             start: name_loc.start,
             end: name_loc.start + name.len() as u32,
         }
+    }
+}
+
+/// `loc.name` for a `def`/`defs` method name. Murphy leaves `loc.name == ZERO`
+/// on `Def`/`Defs`, so the name is located by source search starting past any
+/// singleton receiver (`def self.x` / `def foo1.foo1`) so a receiver whose
+/// source contains the name as a substring cannot mis-anchor the caret. Mirrors
+/// `method_name.rs::def_name_range`. Falls back to a name-length caret at the
+/// node start if the name is not found.
+fn def_name_range(id: NodeId, name: &str, cx: &Cx<'_>) -> Range {
+    let expr = cx.range(id);
+    let src = cx.raw_source(expr);
+    let from = cx
+        .def_receiver(id)
+        .get()
+        .map_or(0, |r| (cx.range(r).end - expr.start) as usize);
+    match src[from..].find(name) {
+        Some(off) => {
+            let start = expr.start + (from + off) as u32;
+            Range {
+                start,
+                end: start + name.len() as u32,
+            }
+        }
+        None => Range {
+            start: expr.start,
+            end: expr.start + name.len() as u32,
+        },
     }
 }
 
@@ -540,6 +570,21 @@ mod tests {
             .expect_offense(indoc! {r#"
                 def self.smethod1
                          ^^^^^^^^ Use snake_case for method name numbers.
+                end
+            "#});
+    }
+
+    #[test]
+    fn snake_flags_singleton_method_when_receiver_name_matches_method_name() {
+        // `def foo1.foo1`: rubocop 1.87.0 reports the method name at col 10..13.
+        // The receiver `foo1` parses as a `send` (not visited by VariableNumber),
+        // so only the method name fires — but the def-name search must skip the
+        // receiver or the caret mis-anchors onto the receiver's `foo1` at col 5.
+        test::<VariableNumber>()
+            .with_options(&opts(VariableNumberStyle::SnakeCase))
+            .expect_offense(indoc! {r#"
+                def foo1.foo1
+                         ^^^^ Use snake_case for method name numbers.
                 end
             "#});
     }

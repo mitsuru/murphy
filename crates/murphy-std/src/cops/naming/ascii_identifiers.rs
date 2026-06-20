@@ -144,7 +144,7 @@ fn name_target<'a>(id: NodeId, cx: &Cx<'a>) -> Option<(u32, &'a str, bool)> {
         }
         NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => {
             let s = cx.symbol_str(name);
-            Some((named_start(id, s, cx), s, false))
+            Some((def_named_start(id, s, cx), s, false))
         }
         // Argument family carries a populated `loc.name` that already skips the
         // ASCII sigil (`*`/`**`/`&`). `kwarg`/`kwoptarg` are intentionally
@@ -201,6 +201,26 @@ fn named_start(id: NodeId, name: &str, cx: &Cx<'_>) -> u32 {
     let src = cx.raw_source(expr);
     match src.find(name) {
         Some(off) => expr.start + off as u32,
+        None => expr.start,
+    }
+}
+
+/// Byte offset where a `def`/`defs` method name begins, searching past any
+/// singleton receiver (`def self.x` / `def δ.δ`). Murphy leaves `loc.name ==
+/// ZERO` on `Def`/`Defs`, so the name is located by source search; without the
+/// receiver skip a receiver whose source contains the name as a substring
+/// (`def δ.δ`) would mis-anchor the caret onto the receiver. Mirrors
+/// `method_name.rs::def_name_range`. Falls back to the expression start if the
+/// name is not found.
+fn def_named_start(id: NodeId, name: &str, cx: &Cx<'_>) -> u32 {
+    let expr = cx.range(id);
+    let src = cx.raw_source(expr);
+    let from = cx
+        .def_receiver(id)
+        .get()
+        .map_or(0, |r| (cx.range(r).end - expr.start) as usize);
+    match src[from..].find(name) {
+        Some(off) => expr.start + (from + off) as u32,
         None => expr.start,
     }
 }
@@ -293,6 +313,20 @@ mod tests {
         test::<AsciiIdentifiers>().expect_offense(indoc! {r#"
             def self.μεθοδος
                      ^^^^^^^ Use only ascii symbols in identifiers.
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_singleton_method_with_receiver_name_matching_method_name() {
+        // `def δ.δ`: rubocop 1.87.0 reports TWO offenses — the receiver `δ`
+        // (parsed as a `send`, anchored via `loc.name`, col 5) and the method
+        // name `δ` (col 7). The def-name search must skip the receiver so the
+        // method-name caret does not mis-anchor onto the receiver's `δ`.
+        test::<AsciiIdentifiers>().expect_offense(indoc! {r#"
+            def δ.δ
+                ^ Use only ascii symbols in identifiers.
+                  ^ Use only ascii symbols in identifiers.
             end
         "#});
     }
