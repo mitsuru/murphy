@@ -763,6 +763,27 @@ mod tests {
             "#});
     }
 
+    #[test]
+    fn aggressive_flags_super_mixed_with_boolean_return() {
+        // `def foo; return super if c; true; end` — RuboCop's
+        // `all_return_values_boolean?` *rejects* (skips) super/zsuper returns,
+        // then judges the remaining returns: here only `true`, so the method is
+        // treated as a predicate and flagged for the missing `?`. Verified vs
+        // rubocop 1.87.0 (Mode: aggressive): L1 col5 "Predicate method names
+        // should end with `?`." Returning `false` on super instead of skipping
+        // it would diverge from RuboCop (under-report). Pins this against a
+        // regression toward the wrong reading.
+        test::<PredicateMethod>()
+            .with_options(&aggressive())
+            .expect_offense(indoc! {r#"
+                def foo
+                    ^^^ Predicate method names should end with `?`.
+                  return super if c
+                  true
+                end
+            "#});
+    }
+
     // --- AllowBangMethods ---
 
     #[test]
