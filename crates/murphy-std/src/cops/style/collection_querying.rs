@@ -41,14 +41,13 @@ impl CollectionQuerying {
         let predicate = cx.method_name(node).unwrap_or("");
 
         // The predicate's raw receiver: a `count` send, or a block wrapping it.
-        // RuboCop does NOT match a parenthesized receiver (its `begin` node
-        // breaks the node pattern), so a `Begin` receiver is rejected.
+        // A parenthesized receiver (`(x.count).positive?`) is a `Begin` node;
+        // RuboCop's node pattern does not match it. No explicit reject is
+        // needed — `Begin` carries no `method_name`, so the `count` selector
+        // check below already returns for it.
         let Some(recv_id) = cx.call_receiver(node).get() else {
             return;
         };
-        if matches!(*cx.kind(recv_id), NodeKind::Begin(_)) {
-            return;
-        }
 
         // Resolve the inner `count` send, delegating through a block form.
         let count_send = match cx.block_call(recv_id).get() {

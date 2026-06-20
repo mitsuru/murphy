@@ -22,9 +22,10 @@
 //!   `SingleLineConditionsOnly` (default true) suppresses branches whose tail
 //!   is a multi-statement begin, matching upstream.
 //!
-//!   `assign_inside_condition` (`on_lvasgn`/`ivasgn`/`gvasgn`/`cvasgn`/`casgn`):
-//!   flags `bar = if foo … end` / `case` / `case`/`in` where the RHS is a
-//!   conditional (not an allowed ternary), with the offense on the assignment.
+//!   `assign_inside_condition` (`on_lvasgn`/`ivasgn`/`gvasgn`/`cvasgn`/`casgn`
+//!   plus `on_op_asgn`/`or_asgn`/`and_asgn`): flags `bar = if foo … end` /
+//!   `bar += if … end` / `case` / `case`/`in` where the RHS is a conditional
+//!   (not an allowed ternary), with the offense on the assignment.
 //!   Honours `return unless else_branch` (so `x = if foo; 1; end` is not
 //!   flagged) and `SingleLineConditionsOnly` (multi-statement branches suppress
 //!   the offense by default), matching upstream.
@@ -169,6 +170,26 @@ impl ConditionalAssignment {
     fn check_casgn(&self, node: NodeId, cx: &Cx<'_>) {
         self.check_assign_inside(node, cx);
     }
+
+    // Upstream aliases `on_op_asgn`/`on_or_asgn`/`on_and_asgn` to the same
+    // handler, so `x += if … end` / `x ||= case … end` are reported on the
+    // shorthand-assign node itself. The inner `*vasgn` write target is skipped
+    // by the `shorthand_asgn?` guard in `check_assign_inside`, so the offense
+    // fires exactly once, on the op-assign node.
+    #[on_node(kind = "op_asgn")]
+    fn check_op_asgn(&self, node: NodeId, cx: &Cx<'_>) {
+        self.check_assign_inside(node, cx);
+    }
+
+    #[on_node(kind = "or_asgn")]
+    fn check_or_asgn(&self, node: NodeId, cx: &Cx<'_>) {
+        self.check_assign_inside(node, cx);
+    }
+
+    #[on_node(kind = "and_asgn")]
+    fn check_and_asgn(&self, node: NodeId, cx: &Cx<'_>) {
+        self.check_assign_inside(node, cx);
+    }
 }
 
 impl ConditionalAssignment {
@@ -190,16 +211,24 @@ impl ConditionalAssignment {
         {
             return;
         }
-        let value = match *cx.kind(node) {
+        // The RHS conditional. `*vasgn`/`casgn` carry an `Option` value (the
+        // value-less write target of a shorthand assign has `None`); the
+        // shorthand-assign nodes themselves carry a plain `value`.
+        let rhs = match *cx.kind(node) {
             NodeKind::Lvasgn { value, .. }
             | NodeKind::Ivasgn { value, .. }
             | NodeKind::Gvasgn { value, .. }
             | NodeKind::Cvasgn { value, .. }
-            | NodeKind::Casgn { value, .. } => value,
+            | NodeKind::Casgn { value, .. } => {
+                let Some(rhs) = value.get() else {
+                    return;
+                };
+                rhs
+            }
+            NodeKind::OpAsgn { value, .. }
+            | NodeKind::OrAsgn { value, .. }
+            | NodeKind::AndAsgn { value, .. } => value,
             _ => return,
-        };
-        let Some(rhs) = value.get() else {
-            return;
         };
         let rhs = unwrap_single_begin(rhs, cx);
         // `candidate_condition?`: must be `if`/`case`/`case_match`, excluding a
@@ -620,6 +649,38 @@ mod tests {
             .expect_offense(indoc! {"
                 bar = case foo
                 ^^^^^^^^^^^^^^ Assign variables inside of conditionals.
+                when 'a'
+                  1
+                else
+                  2
+                end
+            "});
+    }
+
+    #[test]
+    fn assign_inside_flags_op_asgn_to_if() {
+        // Upstream aliases `on_op_asgn` to the same handler. Verified against
+        // rubocop 1.87: `bar += if … end` reports on the op-assign node.
+        test::<ConditionalAssignment>()
+            .with_options(&assign_inside())
+            .expect_offense(indoc! {"
+                bar += if foo
+                ^^^^^^^^^^^^^ Assign variables inside of conditionals.
+                  1
+                else
+                  2
+                end
+            "});
+    }
+
+    #[test]
+    fn assign_inside_flags_or_asgn_to_case() {
+        // `bar ||= case … end` must also fire (on_or_asgn alias).
+        test::<ConditionalAssignment>()
+            .with_options(&assign_inside())
+            .expect_offense(indoc! {"
+                bar ||= case foo
+                ^^^^^^^^^^^^^^^^ Assign variables inside of conditionals.
                 when 'a'
                   1
                 else

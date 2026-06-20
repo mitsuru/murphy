@@ -30,7 +30,10 @@
 //!   `AutocorrectNotice` is empty or `normalized.gsub(/^# */, '')` does not
 //!   match `Notice` — this is RuboCop's `verify_autocorrect_notice!` guard,
 //!   and the guard is also load-bearing for idempotency (a non-matching notice
-//!   would re-insert on every pass).
+//!   would re-insert on every pass). A shebang-/comment-only or empty file is
+//!   `processed_source.blank?` upstream (no AST → global offense, no corrector),
+//!   so the fix is withheld rather than inserted before the shebang/comment;
+//!   a literal `nil` file is not blank and is corrected.
 //!
 //!   Gaps vs upstream:
 //!   - RuboCop *raises* a config `Warning` (aborting the run) when
@@ -130,7 +133,15 @@ fn emit_autocorrect(
     if !notice_re.is_match(&strip_comment_prefixes(&normalized)) {
         return;
     }
-    let insert_at = insert_offset(cx);
+    // Upstream gates the corrector on `processed_source.blank?` (no AST):
+    // shebang-only / comment-only / empty files report a *global* offense but
+    // register no corrector, so the file is left untouched. Murphy mirrors that
+    // by withholding the fix when there is no code token to insert before —
+    // inserting at offset 0 (or after the shebang) would otherwise corrupt the
+    // shebang line.
+    let Some(insert_at) = insert_offset(cx) else {
+        return;
+    };
     cx.emit_edit(
         Range {
             start: insert_at,
@@ -186,10 +197,15 @@ fn strip_comment_prefixes(normalized: &str) -> String {
 /// shebang token, then an encoding magic-comment token, and return the byte
 /// offset of the next token's start (the notice is inserted before it).
 ///
+/// Returns `None` when no token remains after the shebang/encoding prefix
+/// (i.e. a shebang-/comment-only file with no code). Upstream treats such a
+/// file as `processed_source.blank?` and registers no corrector at all, so the
+/// caller must withhold the fix rather than insert at offset 0.
+///
 /// RuboCop indexes into the full token stream. Murphy's stream carries
 /// `Newline`/`IgnoredNewline` tokens that the parser-gem stream does not, so
 /// those are skipped to align the index with RuboCop's.
-fn insert_offset(cx: &Cx<'_>) -> u32 {
+fn insert_offset(cx: &Cx<'_>) -> Option<u32> {
     use murphy_plugin_api::SourceTokenKind;
     let significant: Vec<_> = cx
         .sorted_tokens()
@@ -203,6 +219,20 @@ fn insert_offset(cx: &Cx<'_>) -> u32 {
         .copied()
         .collect();
     let is_comment = |t: &murphy_plugin_api::SourceToken| t.kind == SourceTokenKind::Comment;
+    // Mirror `processed_source.blank?` (no AST): a shebang-/comment-only or
+    // empty file carries only comments plus whitespace, so there is no code
+    // token to insert before. Upstream registers a global offense but no
+    // corrector for such files; withhold the fix here. (Murphy's token stream
+    // also carries a stray whitespace-only `Other` newline that the parser-gem
+    // stream lacks, so the `trim().is_empty()` check excludes it too.) A literal
+    // `nil` file is *not* blank — its `nil` keyword is a code token — and is
+    // corrected, matching upstream.
+    let has_code = significant.iter().any(|t| {
+        !is_comment(t) && !cx.raw_source(t.range).trim().is_empty()
+    });
+    if !has_code {
+        return None;
+    }
     let mut idx = 0usize;
     if significant
         .first()
@@ -216,10 +246,7 @@ fn insert_offset(cx: &Cx<'_>) -> u32 {
     {
         idx += 1;
     }
-    match significant.get(idx) {
-        Some(t) => t.range.start,
-        None => 0,
-    }
+    significant.get(idx).map(|t| t.range.start)
 }
 
 /// `/\A#!.*\z/` — a shebang comment.
@@ -501,6 +528,48 @@ mod tests {
                     x = 1
                 "},
                 "#!/usr/bin/env ruby\n# encoding: utf-8\n# Copyright Acme\nx = 1\n",
+            );
+    }
+
+    // Shebang-only / comment-only files have no AST: upstream registers a
+    // global offense but no corrector, leaving the file untouched. Murphy must
+    // withhold the fix rather than corrupt the shebang line. Verified against
+    // rubocop 1.87 (offense reported, 0 corrected, file byte-identical).
+    #[test]
+    fn no_autocorrect_for_shebang_only_file() {
+        test::<Copyright>()
+            .with_options(&opts2("Copyright", "# Copyright Acme"))
+            .expect_offense(indoc! {"
+                #!/usr/bin/env ruby
+                ^^^^^^^^^^^^^^^^^^^ Include a copyright notice matching /Copyright/ before any code.
+            "})
+            .expect_no_corrections("#!/usr/bin/env ruby\n");
+    }
+
+    // Comment-only files are likewise `blank?` upstream (no AST) — withhold.
+    #[test]
+    fn no_autocorrect_for_comment_only_file() {
+        test::<Copyright>()
+            .with_options(&opts2("Copyright", "# Copyright Acme"))
+            .expect_offense(indoc! {"
+                # just a comment
+                ^^^^^^^^^^^^^^^^ Include a copyright notice matching /Copyright/ before any code.
+            "})
+            .expect_no_corrections("# just a comment\n");
+    }
+
+    // A literal `nil` file is *not* blank (the `nil` keyword is code), so the
+    // notice is inserted before it. Verified against rubocop 1.87.
+    #[test]
+    fn autocorrects_literal_nil_file() {
+        test::<Copyright>()
+            .with_options(&opts2("Copyright", "# Copyright Acme"))
+            .expect_correction(
+                indoc! {"
+                    nil
+                    ^^^ Include a copyright notice matching /Copyright/ before any code.
+                "},
+                "# Copyright Acme\nnil\n",
             );
     }
 
