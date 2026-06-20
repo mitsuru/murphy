@@ -594,6 +594,11 @@ fn is_iterating_method(name: &str) -> bool {
             // enumerator
             | "with_index" | "with_object"
             // array
+            // NOTE: `d_permutation` and `repeat` are upstream typos in
+            // rubocop 1.87.0's `IteratingBlock::KNOWN_ITERATING_METHODS`
+            // (`repeated_permutation` was split into `repeat` + `d_permutation`).
+            // Reproduced verbatim for parity — do NOT "fix" to
+            // `repeated_permutation` or that would diverge from rubocop.
             | "bsearch" | "bsearch_index" | "collect!" | "combination"
             | "d_permutation" | "delete_if" | "each_index" | "keep_if" | "map!"
             | "permutation" | "product" | "reject!" | "repeat"
