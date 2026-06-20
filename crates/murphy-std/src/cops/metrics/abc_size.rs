@@ -12,15 +12,18 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.20.1, murphy-e7bz.20.2]
+//! gap_issues: [murphy-e7bz.20.1, murphy-e7bz.20.2, murphy-e7bz.20.3, murphy-e7bz.20.4]
 //! notes: >
 //!   Mirrors RuboCop's `Metrics::Utils::AbcSizeCalculator` and the
 //!   `MethodComplexity` mixin numerically (verified against rubocop 1.87.0
 //!   across assignments, branches, conditions, comparison methods, csend
-//!   discounts, the iterating-block gate, the else-keyword condition, the
-//!   `CountRepeatedAttributes` discount, `[]=`/setter/index writes, and
+//!   discounts, the iterating-block gate, the else-keyword condition,
+//!   `[]=`/setter/index writes, and
 //!   `define_method(:name) { ... }`/numbered-param blocks via the
-//!   `on_block`/`on_numblock`/`on_itblock` dispatch).
+//!   `on_block`/`on_numblock`/`on_itblock` dispatch). The default-config
+//!   path (`CountRepeatedAttributes: true`) matches rubocop; the non-default
+//!   `CountRepeatedAttributes: false` discount path has two known gaps
+//!   (murphy-e7bz.20.3, murphy-e7bz.20.4 — see below).
 //!
 //!   Known gap (murphy-e7bz.20.1): a multiple assignment whose LHS targets
 //!   are *setter* or *index* writes (`self.x, self.y = 1, 2`) is undercounted
@@ -36,6 +39,22 @@
 //!   reference is not counted as a branch. RuboCop: `<0, 2, 1>`; murphy:
 //!   `<0, 1, 0>`. Numbered-param blocks (`_1`) and regular blocks match.
 //!   The fix belongs in murphy-translate.
+//!
+//!   Known gap (murphy-e7bz.20.3): with `CountRepeatedAttributes: false`,
+//!   a shorthand op-assign onto an attribute (`foo.bar ||= x`, `foo.bar +=
+//!   x`) does not invalidate the tracked getter chain. RuboCop's
+//!   `setter_to_getter` treats `node.shorthand_asgn?` as a setter, so a
+//!   later `foo.bar` re-counts; murphy's `update_repeated_attribute` only
+//!   handles var-asgn and setter sends, so the later read stays discounted
+//!   and the branch count is undercounted (`foo.bar; foo.bar ||= baz;
+//!   foo.bar` → rubocop `<2, 4, 1>`). The fix belongs in this cop.
+//!
+//!   Known gap (murphy-e7bz.20.4): with `CountRepeatedAttributes: false`,
+//!   scoped-constant receivers collapse to their terminal name in the
+//!   discount key, so `A::B.foo` and `C::B.foo` are treated as the same
+//!   attribute and the second is wrongly discounted (rubocop keys by the
+//!   const AST node, keeping them distinct: `<0, 2, 0>`). The fix belongs
+//!   in this cop (`receiver_chain_key`).
 //!
 //!   The calculator walks the method body in post-order
 //!   (`visit_depth_last`) and accumulates three counters:
@@ -443,6 +462,13 @@ impl<'a> AbcCalculator<'a> {
 
     /// `update_repeated_attribute`: a setter (`var = x`, `self.foo = x`,
     /// `var ||= x`) invalidates tracked chains rooted at that target.
+    ///
+    /// KNOWN GAP (murphy-e7bz.20.3): RuboCop's `setter_to_getter` also treats
+    /// `node.shorthand_asgn?` onto an attribute (`foo.bar ||= x`) as a setter
+    /// and invalidates the getter chain. This impl does not yet invalidate on
+    /// `OpAsgn`/`OrAsgn`/`AndAsgn` attribute targets, so a later identical
+    /// read stays discounted (undercounts branch under `CountRepeatedAttributes:
+    /// false`). Default config is unaffected.
     fn update_repeated_attribute(&mut self, node: NodeId, cx: &Cx<'a>) {
         match cx.kind(node) {
             // Variable reassignment clears everything rooted at that var.
@@ -668,6 +694,10 @@ fn receiver_chain_key(node: NodeId, cx: &Cx<'_>) -> Option<String> {
         NodeKind::Ivar(s) => Some(format!("ivar:{}", cx.symbol_str(*s))),
         NodeKind::Cvar(s) => Some(format!("cvar:{}", cx.symbol_str(*s))),
         NodeKind::Gvar(s) => Some(format!("gvar:{}", cx.symbol_str(*s))),
+        // KNOWN GAP (murphy-e7bz.20.4): RuboCop keys const receivers by the
+        // const AST node, keeping scoped constants distinct (`A::B` != `C::B`).
+        // Using only the terminal name collapses them, so the second is wrongly
+        // discounted under `CountRepeatedAttributes: false`. Default unaffected.
         NodeKind::Const { name, .. } => Some(format!("const:{}", cx.symbol_str(*name))),
         NodeKind::Send { .. } | NodeKind::Csend { .. } => attribute_chain_key(node, cx),
         _ => None,
