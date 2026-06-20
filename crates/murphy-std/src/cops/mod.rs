@@ -7,5 +7,6 @@
 
 pub mod layout;
 pub mod lint;
+pub mod security;
 pub mod style;
 pub mod util;
