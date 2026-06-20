@@ -45,6 +45,7 @@
 //! ```
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, cop, regex::Regex};
+use std::borrow::Cow;
 
 const MSG: &str = "Use CamelCase for classes and modules.";
 
@@ -69,19 +70,37 @@ pub struct Options {
     options = Options
 )]
 impl ClassAndModuleCamelCase {
-    #[on_node(kind = "class")]
-    fn check_class(&self, node: NodeId, cx: &Cx<'_>) {
-        self.check(node, cx);
-    }
+    #[on_new_investigation]
+    fn check_file(&self, cx: &Cx<'_>) {
+        let opts = cx.options_or_default::<Options>();
 
-    #[on_node(kind = "module")]
-    fn check_module(&self, node: NodeId, cx: &Cx<'_>) {
-        self.check(node, cx);
+        // Compile the `AllowedNames` regex once per file (it is constant per
+        // investigation). `None` means "strip nothing": an empty list and an
+        // invalid pattern both fall through unchanged, matching RuboCop's
+        // `gsub` on an empty/never-matching regex and murphy's
+        // `matches_any_pattern` skip-on-error convention.
+        let allowed_re: Option<Regex> = if opts.allowed_names.is_empty() {
+            None
+        } else {
+            Regex::new(&opts.allowed_names.join("|")).ok()
+        };
+
+        // `descendants` excludes the root; chain it so a single top-level
+        // `class`/`module` (whose root *is* that node) is also inspected.
+        for id in cx
+            .descendants(cx.root())
+            .into_iter()
+            .chain(std::iter::once(cx.root()))
+        {
+            if class_or_module_name(id, cx).is_some() {
+                self.check(id, allowed_re.as_ref(), cx);
+            }
+        }
     }
 }
 
 impl ClassAndModuleCamelCase {
-    fn check(&self, node: NodeId, cx: &Cx<'_>) {
+    fn check(&self, node: NodeId, allowed_re: Option<&Regex>, cx: &Cx<'_>) {
         // The name node (`Const`/`ConstantPath`) — its range mirrors RuboCop's
         // `node.loc.name`, spanning the full qualified path.
         let Some(name_node) = class_or_module_name(node, cx) else {
@@ -95,11 +114,12 @@ impl ClassAndModuleCamelCase {
             return;
         }
 
-        let opts = cx.options_or_default::<Options>();
-
         // RuboCop: `name = source.gsub(/allowed.join('|')/, '')`. Remove every
         // match of the joined-allowed regex, then re-check for an underscore.
-        let residual = strip_allowed(name_src, &opts.allowed_names);
+        let residual: Cow<'_, str> = match allowed_re {
+            Some(re) => re.replace_all(name_src, ""),
+            None => Cow::Borrowed(name_src),
+        };
         if !residual.contains('_') {
             return;
         }
@@ -116,24 +136,6 @@ fn class_or_module_name(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     match *cx.kind(node) {
         NodeKind::Class { name, .. } | NodeKind::Module { name, .. } => Some(name),
         _ => None,
-    }
-}
-
-/// Port of RuboCop's `source.gsub(/#{AllowedNames.join('|')}/, '')`.
-///
-/// Joins the allowed names with `|` into a single regex and removes every
-/// match from `name`. An empty list yields an empty regex (matches the empty
-/// string everywhere → removes nothing, like Ruby). An invalid regex is
-/// skipped (no removal) rather than panicking, mirroring murphy's
-/// `matches_any_pattern` convention.
-fn strip_allowed<'a>(name: &'a str, allowed: &[String]) -> std::borrow::Cow<'a, str> {
-    if allowed.is_empty() {
-        return std::borrow::Cow::Borrowed(name);
-    }
-    let joined = allowed.join("|");
-    match Regex::new(&joined) {
-        Ok(re) => re.replace_all(name, ""),
-        Err(_) => std::borrow::Cow::Borrowed(name),
     }
 }
 

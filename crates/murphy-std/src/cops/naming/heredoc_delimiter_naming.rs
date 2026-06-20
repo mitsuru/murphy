@@ -16,8 +16,14 @@
 //!   `ForbiddenDelimiters`. Murphy reproduces this token-based: Murphy's AST
 //!   hides heredoc-ness (a heredoc `str` node looks identical to a normal
 //!   `str`), so the cop walks `HeredocStart`/`HeredocEnd` token pairs from
-//!   `cx.sorted_tokens()`, paired FIFO (Ruby reads heredoc bodies in opener
-//!   order — verified against stacked `foo(<<~A, <<~B)`).
+//!   `cx.sorted_tokens()`, pairing each terminator to a pending opener by
+//!   delimiter LABEL. Same-line siblings (`foo(<<~A, <<~B)`) close FIFO and
+//!   nested interpolated heredocs (`<<~OUTER` with `#{<<~INNER}` in its body)
+//!   close LIFO; label-pairing (FIFO among same-label openers) handles both —
+//!   verified against rubocop 1.87.0 for stacked siblings, stacked empty-body
+//!   siblings, and nested interpolated heredocs. Body-emptiness uses a
+//!   per-opener-line cursor so sequential same-line bodies chain without
+//!   nested (different-line) bodies sharing state.
 //!
 //!   Offense range mirrors RuboCop exactly:
 //!     * empty body (`node.children.empty?`, i.e. zero body bytes) → the
@@ -112,31 +118,70 @@ struct Heredoc {
     body_is_empty: bool,
 }
 
-/// Pair `HeredocStart`/`HeredocEnd` tokens FIFO. Ruby reads heredoc bodies in
-/// opener order, so the first `HeredocEnd` terminates the earliest unmatched
-/// `HeredocStart`. A running `cursor` chains past each consumed terminator so
-/// that stacked heredocs sharing one opener line (`foo(<<~A, <<~B)`) do not
-/// overlap — `body_start = max(cursor, opener_line_end)`.
+/// Pair `HeredocStart`/`HeredocEnd` tokens by delimiter LABEL.
+///
+/// Ruby closes heredocs in two orders depending on shape:
+///   * same-line siblings (`foo(<<~A, <<~B)`) close FIFO (A then B);
+///   * nested interpolated heredocs (`<<~OUTER` whose body has `#{<<~INNER}`)
+///     close LIFO (INNER then OUTER).
+///
+/// A plain arrival-order FIFO queue mispairs the nested case: it would terminate
+/// the OUTER opener with the INNER terminator, reading the wrong delimiter at the
+/// wrong line. Pairing each `HeredocEnd` to the nearest pending `HeredocStart`
+/// whose delimiter matches the terminator's label handles both orders (FIFO is
+/// applied only among same-label openers).
+///
+/// Body-emptiness is computed with a per-opener-line cursor. Same-line siblings
+/// share an opener line and their bodies are sequential, so the cursor chains
+/// past each consumed terminator to keep the next sibling's body from absorbing
+/// the previous one's gap line. Nested heredocs sit on DIFFERENT opener lines and
+/// their bodies overlap, so they must NOT share a cursor — keying the cursor by
+/// opener-line keeps each independent. `body_start = max(line_cursor,
+/// opener_line_end).min(term_line_start)`; an empty body has `body_start >=
+/// term_line_start`.
 fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
-    use std::collections::VecDeque;
+    use std::collections::HashMap;
     let source = cx.source().as_bytes();
-    let mut pending: VecDeque<Range> = VecDeque::new();
+    // Pending openers in arrival order, each tagged with its delimiter label so a
+    // terminator can be matched to the right opener even across LIFO nesting.
+    let mut pending: Vec<(Range, String)> = Vec::new();
     let mut out: Vec<Heredoc> = Vec::new();
-    let mut cursor: u32 = 0;
+    // Per-opener-line body cursor: maps an opener line-start to the byte offset
+    // just past the most recently consumed terminator that opened on that line.
+    let mut line_cursor: HashMap<u32, u32> = HashMap::new();
 
     for tok in cx.sorted_tokens() {
         match tok.kind {
-            SourceTokenKind::HeredocStart => pending.push_back(tok.range),
+            SourceTokenKind::HeredocStart => {
+                let opener_src = cx.raw_source(tok.range);
+                let label = delimiter_string(opener_src).map(str::to_owned).unwrap_or_default();
+                pending.push((tok.range, label));
+            }
             SourceTokenKind::HeredocEnd => {
-                let Some(opener) = pending.pop_front() else {
+                // The terminator label is the bare `HeredocEnd` token text. For
+                // indented (`<<~`) or dash (`<<-`) terminators the token spans the
+                // leading indent and the trailing newline, so trim BOTH ends to
+                // recover the bare delimiter for label matching.
+                let term_label = cx.raw_source(tok.range).trim();
+                // Match the EARLIEST pending opener with this delimiter (FIFO
+                // among same-label openers); fall back to the earliest pending
+                // opener if no label matches (defensive — should not happen for
+                // valid source).
+                let idx = pending
+                    .iter()
+                    .position(|(_, label)| label == term_label)
+                    .or(if pending.is_empty() { None } else { Some(0) });
+                let Some(idx) = idx else {
                     continue;
                 };
+                let (opener, _) = pending.remove(idx);
+
+                let opener_line = line_start(source, opener.start);
                 let opener_line_end = next_line_start(source, opener.end);
                 let term_line_start = line_start(source, tok.range.start);
-                let body_start = cursor
-                    .max(opener_line_end)
-                    .min(term_line_start);
-                cursor = next_line_start(source, tok.range.start);
+                let cursor = line_cursor.get(&opener_line).copied().unwrap_or(0);
+                let body_start = cursor.max(opener_line_end).min(term_line_start);
+                line_cursor.insert(opener_line, next_line_start(source, tok.range.start));
 
                 // The `HeredocEnd` token spans the terminator line's label and
                 // its trailing `\n`; strip the newline so the range matches
@@ -449,7 +494,7 @@ mod tests {
         "#});
     }
 
-    // ---- stacked heredocs (FIFO pairing) ----
+    // ---- stacked heredocs (same-line siblings, FIFO among same label) ----
 
     #[test]
     fn flags_only_forbidden_in_stacked_heredocs() {
@@ -461,6 +506,44 @@ mod tests {
             ^^^ Use meaningful heredoc delimiters.
               b
             SQL
+        "#});
+    }
+
+    #[test]
+    fn stacked_empty_body_heredocs_flag_openers() {
+        // Two same-line empty-body heredocs: each opener immediately followed by
+        // its terminator. Both bodies are empty → offense on the OPENER tokens
+        // (cols 5..10 for `<<~END`, 13..18 for `<<~EOF`). The per-opener-line
+        // body cursor must keep the second heredoc's body from being computed
+        // as non-empty by chaining past the first terminator. Verified vs
+        // rubocop 1.87.0.
+        test::<HeredocDelimiterNaming>().expect_offense(indoc! {r#"
+            foo(<<~END, <<~EOF)
+                ^^^^^^ Use meaningful heredoc delimiters.
+                        ^^^^^^ Use meaningful heredoc delimiters.
+            END
+            EOF
+        "#});
+    }
+
+    // ---- nested interpolated heredocs (LIFO close order; label pairing) ----
+
+    #[test]
+    fn nested_interpolated_heredoc_pairs_by_label() {
+        // Inner `<<~SQL` is interpolated into the body of outer `<<~END`, so the
+        // tokens close LIFO: HeredocEnd(SQL) then HeredocEnd(END). FIFO-by-arrival
+        // would pair SQL's terminator with END's opener and mis-read the forbidden
+        // delimiter at the wrong line. Pairing by LABEL, with a per-opener-line
+        // body cursor, anchors the offense on the OUTER `END` terminator (L5 cols
+        // 1..3) and leaves the meaningful inner `SQL` silent. Verified vs rubocop
+        // 1.87.0 (single offense, L5 col1-3).
+        test::<HeredocDelimiterNaming>().expect_offense(indoc! {r#"
+            x = <<~END
+              #{<<~SQL}
+                SELECT 1
+              SQL
+            END
+            ^^^ Use meaningful heredoc delimiters.
         "#});
     }
 
