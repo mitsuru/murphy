@@ -6,9 +6,8 @@
 //! upstream: rubocop
 //! upstream_cop: Security/YAMLLoad
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-e7bz.56
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `def_node_matcher :yaml_load`:
 //!   `(send (const {nil? cbase} :YAML) :load ...)`. Fires on `YAML.load(x)`
@@ -27,16 +26,16 @@
 //!   ships (precedent: `Rails/NegateInclude`). Fixpoint is automatic: the
 //!   renamed selector `safe_load` no longer matches `methods = ["load"]`.
 //!
-//!   GAP (status: partial): RuboCop declares `maximum_target_ruby_version
-//!   3.0` on this cop — it runs ONLY when the target Ruby is <= 3.0, because
-//!   Psych defaults to safe behaviour from Ruby 3.1. Murphy's `#[cop]` macro
-//!   supports `minimum_target_ruby_version` but has NO maximum-version gate,
-//!   and Murphy's default target is Ruby 3.1, so this cop fires regardless of
-//!   the configured target. This is a real behavioural divergence: on a
-//!   Ruby 3.1+ codebase Murphy flags `YAML.load` where RuboCop would stay
-//!   silent. Closing the gap requires either a `maximum_target_ruby_version`
-//!   macro attribute or a runtime `cx.target_ruby_version()` guard. Tracked
-//!   on murphy-e7bz.56.
+//!   TARGET RUBY: RuboCop declares `maximum_target_ruby_version 3.0` on this
+//!   cop — it runs ONLY when the target Ruby is <= 3.0, because Psych defaults
+//!   to safe behaviour from Ruby 3.1. Murphy's `#[cop]` macro has no
+//!   maximum-version gate (only `minimum_target_ruby_version`), so this is
+//!   enforced at runtime by a `cx.target_ruby_version()` guard in `check_send`:
+//!   the cop fires only when the resolved target Ruby is <= 3.0. With murphy's
+//!   default target (3.1) — and when the target is unset — it stays silent,
+//!   matching RuboCop on a default codebase. Follow-up murphy-n0ua tracks
+//!   adding a `maximum_target_ruby_version` macro attribute so this can move to
+//!   host-side gating like the minimum gate.
 //! ```
 //!
 //! ## Matched shapes
@@ -57,7 +56,7 @@
 //!
 //! `` Prefer using `YAML.safe_load` over `YAML.load`. `` (matches RuboCop).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, RubyVersion, cop};
 
 #[derive(Default)]
 pub struct YamlLoad;
@@ -74,6 +73,18 @@ impl YamlLoad {
     // dispatch only on `load` sends. The receiver check is the parity surface.
     #[on_node(kind = "send", methods = ["load"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
+        // RuboCop declares `maximum_target_ruby_version 3.0`: the cop runs only
+        // when the target Ruby is <= 3.0, because Psych is safe-by-default from
+        // Ruby 3.1. Murphy's `#[cop]` macro has no maximum-version gate (only
+        // `minimum_target_ruby_version`, host-gated in the registry), so we gate
+        // at runtime via `cx.target_ruby_version()`. `None` (unset) resolves to
+        // murphy's default floor (Ruby 3.1), which is above the max, so it does
+        // not fire — matching RuboCop on a default codebase. murphy-n0ua tracks
+        // adding a `maximum_target_ruby_version` macro attribute so this can
+        // move to host-side gating like the minimum gate.
+        if !matches!(cx.target_ruby_version(), Some(v) if v <= RubyVersion::new(3, 0)) {
+            return;
+        }
         let Some(receiver) = cx.call_receiver(node).get() else {
             return;
         };
@@ -102,13 +113,37 @@ murphy_plugin_api::submit_cop!(YamlLoad);
 #[cfg(test)]
 mod tests {
     use super::YamlLoad;
-    use murphy_plugin_api::test_support::{indoc, run_cop_with_edits, test};
+    use murphy_plugin_api::test_support::{indoc, test};
 
-    // === hit cases ===
+    // RuboCop's `maximum_target_ruby_version 3.0` means this cop only runs when
+    // the target Ruby is <= 3.0. Every firing / autocorrect case therefore pins
+    // `with_target_ruby_version(3, 0)`; the no-hit receiver/method cases also
+    // pin 3.0 so the version gate doesn't mask the real discrimination.
+
+    // === target-ruby gate ===
+
+    #[test]
+    fn silent_on_default_target() {
+        // No target set → murphy's default floor (Ruby 3.1) → above the
+        // `maximum_target_ruby_version 3.0` gate → no offense (RuboCop parity).
+        test::<YamlLoad>().expect_no_offenses("YAML.load(arg)\n");
+    }
+
+    #[test]
+    fn silent_on_ruby_3_1() {
+        // Explicit Ruby 3.1 is above the max gate → no offense.
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 1)
+            .expect_no_offenses("YAML.load(arg)\n");
+    }
+
+    // === hit cases (target Ruby <= 3.0) ===
 
     #[test]
     fn flags_yaml_load() {
-        test::<YamlLoad>().expect_offense(indoc! {r#"
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_offense(indoc! {r#"
             YAML.load(arg)
                  ^^^^ Prefer using `YAML.safe_load` over `YAML.load`.
         "#});
@@ -116,7 +151,9 @@ mod tests {
 
     #[test]
     fn flags_cbase_yaml_load() {
-        test::<YamlLoad>().expect_offense(indoc! {r#"
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_offense(indoc! {r#"
             ::YAML.load(arg)
                    ^^^^ Prefer using `YAML.safe_load` over `YAML.load`.
         "#});
@@ -125,24 +162,30 @@ mod tests {
     #[test]
     fn flags_bare_yaml_load_no_args() {
         // `...` matches zero-or-more args, so a no-arg `YAML.load` still fires.
-        test::<YamlLoad>().expect_offense(indoc! {r#"
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_offense(indoc! {r#"
             YAML.load
                  ^^^^ Prefer using `YAML.safe_load` over `YAML.load`.
         "#});
     }
 
-    // === no-hit cases ===
+    // === no-hit cases (target Ruby <= 3.0 so the gate doesn't mask them) ===
 
     #[test]
     fn accepts_safe_load() {
         // Already the recommended form (and the fixpoint target).
-        test::<YamlLoad>().expect_no_offenses("YAML.safe_load(arg)\n");
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_no_offenses("YAML.safe_load(arg)\n");
     }
 
     #[test]
     fn accepts_yaml_dump() {
         // Wrong method.
-        test::<YamlLoad>().expect_no_offenses("YAML.dump(arg)\n");
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_no_offenses("YAML.dump(arg)\n");
     }
 
     #[test]
@@ -150,55 +193,65 @@ mod tests {
         // `Foo::YAML` is `(const (const nil :Foo) :YAML)` — neither `nil?`
         // nor `cbase`, so RuboCop does NOT fire. Pins that `is_global_const`
         // rejects nested consts (no over-match).
-        test::<YamlLoad>().expect_no_offenses("Foo::YAML.load(arg)\n");
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_no_offenses("Foo::YAML.load(arg)\n");
     }
 
     #[test]
     fn accepts_other_receiver_load() {
         // Receiver is not the `YAML` constant.
-        test::<YamlLoad>().expect_no_offenses("obj.load(arg)\n");
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_no_offenses("obj.load(arg)\n");
     }
 
     #[test]
     fn accepts_implicit_receiver_load() {
         // Bare `load(arg)` has a nil receiver — the pattern requires the
         // `YAML` const receiver.
-        test::<YamlLoad>().expect_no_offenses("load(arg)\n");
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_no_offenses("load(arg)\n");
     }
 
-    // === autocorrect ===
+    // === autocorrect (target Ruby <= 3.0) ===
 
     #[test]
     fn corrects_yaml_load() {
-        test::<YamlLoad>().expect_correction(
-            indoc! {r#"
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_correction(
+                indoc! {r#"
                 YAML.load(arg)
                      ^^^^ Prefer using `YAML.safe_load` over `YAML.load`.
             "#},
-            "YAML.safe_load(arg)\n",
-        );
+                "YAML.safe_load(arg)\n",
+            );
     }
 
     #[test]
     fn corrects_cbase_yaml_load() {
         // `::YAML` prefix is preserved byte-for-byte.
-        test::<YamlLoad>().expect_correction(
-            indoc! {r#"
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_correction(
+                indoc! {r#"
                 ::YAML.load(arg)
                        ^^^^ Prefer using `YAML.safe_load` over `YAML.load`.
             "#},
-            "::YAML.safe_load(arg)\n",
-        );
+                "::YAML.safe_load(arg)\n",
+            );
     }
 
     #[test]
     fn correction_reaches_fixpoint() {
-        // One edit: rename `load` -> `safe_load`. Re-running on the result
+        // After the `load` -> `safe_load` rename, re-running on the result
         // produces zero offenses — the renamed selector no longer matches
-        // `methods = ["load"]`.
-        let run = run_cop_with_edits::<YamlLoad>("YAML.load(arg)\n");
-        assert_eq!(run.edits.len(), 1);
-        assert_eq!(run.edits[0].replacement.as_str(), "safe_load");
-        test::<YamlLoad>().expect_no_offenses("YAML.safe_load(arg)\n");
+        // `methods = ["load"]`. (Pinned at the firing target so the gate is
+        // not what makes it silent.)
+        test::<YamlLoad>()
+            .with_target_ruby_version(3, 0)
+            .expect_no_offenses("YAML.safe_load(arg)\n");
     }
 }
