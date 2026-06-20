@@ -12,11 +12,11 @@
 //! gap_issues: [murphy-f0xe]
 //! notes: >
 //!   Mirrors RuboCop's `on_def`/`on_defs` (aliased) and `on_send` (dynamic
-//!   method-define macros) exactly for the default and any non-Sorbet config.
+//!   method-define macros) exactly for the default config (and any config whose
+//!   `NamePrefix` entries are mutually exclusive, which the default is).
 //!
-//!   Offense predicate, per prefix in `NamePrefix` (iterated, no early break —
-//!   prefixes are mutually exclusive so at most one fires): emit unless ANY of
-//!   RuboCop's `allowed_method_name?` disjuncts hold:
+//!   Offense predicate, per prefix in `NamePrefix`: emit unless ANY of RuboCop's
+//!   `allowed_method_name?` disjuncts hold:
 //!     * name does not start with the prefix, OR the char immediately after the
 //!       prefix is a digit (`/^prefix[^0-9]/` — `is_1?` and bare `is_` are
 //!       allowed);
@@ -48,6 +48,14 @@
 //!   not in default list), and `even?` all produce no offense.
 //!
 //!   Report-only, matching RuboCop (no autocorrect).
+//!
+//!   DIVERGENCE (rare custom config): RuboCop iterates every `NamePrefix` entry
+//!   and emits one offense per non-allowed prefix, so OVERLAPPING prefixes can
+//!   yield multiple offenses on the same name (e.g. `NamePrefix: [is_, is_a_]`,
+//!   `is_a_thing` → two offenses, `a_thing?` and `thing?`). Murphy stops at the
+//!   first non-allowed prefix and emits one offense. This is unreachable with
+//!   the default config (prefixes are mutually exclusive) and any non-overlapping
+//!   `NamePrefix`; verified against rubocop 1.87.0.
 //!
 //!   GAP (murphy-f0xe): `UseSorbetSigs` is exposed (default false, matching
 //!   default.yml) but is a no-op. With `UseSorbetSigs: true` RuboCop reports a
@@ -175,9 +183,10 @@ impl PredicatePrefix {
 /// Returns the expected (renamed) method name if `name` offends under any prefix
 /// in `NamePrefix`, or `None` if every prefix is allowed for this name.
 ///
-/// Mirrors RuboCop's `on_def`/`on_send` loop: it iterates all prefixes and
-/// short-circuits on the first that is NOT allowed. Prefixes are mutually
-/// exclusive, so at most one fires.
+/// Short-circuits on the first non-allowed prefix. With the default config (and
+/// any non-overlapping `NamePrefix`) the prefixes are mutually exclusive, so this
+/// matches RuboCop's per-prefix loop exactly. For overlapping custom prefixes
+/// RuboCop would emit one offense per matching prefix; see the DIVERGENCE note.
 fn offense_rename(name: &str, opts: &Options) -> Option<String> {
     for prefix in &opts.name_prefix {
         if allowed_method_name(name, prefix, opts) {
