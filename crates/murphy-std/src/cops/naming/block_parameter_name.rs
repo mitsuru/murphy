@@ -21,11 +21,11 @@
 //!   (`->(a) { }`) ARE `Block` nodes in Murphy and ARE checked, matching
 //!   rubocop 1.87.0 (verified: `->(a) { a }` flags `a`).
 //!
-//!   All four block parameter kinds RuboCop iterates are covered: `arg`,
-//!   `optarg`, `restarg`, `blockarg`. (Block parameters cannot be `kwarg`/
-//!   `kwoptarg`/`kwrestarg` in Ruby block syntax — only `def` parameters can.)
-//!   Offense columns for every kind were verified byte-for-byte against
-//!   rubocop 1.87.0.
+//!   All seven block parameter kinds RuboCop iterates are covered: `arg`,
+//!   `optarg`, `restarg`, `kwarg`, `kwoptarg`, `kwrestarg`, `blockarg`. Ruby
+//!   blocks accept keyword parameters (`proc { |ab:, cd: 1, **xx| }`), so the
+//!   keyword family is checked exactly as `def` parameters are. Offense columns
+//!   for every kind were verified byte-for-byte against rubocop 1.87.0.
 //!
 //!   Two name values, kept distinct (matching the mixin):
 //!     * the *checked* name is the basename with leading underscores stripped
@@ -35,9 +35,9 @@
 //!       too-short `_x` highlights `_x` (2 cols), not just `x`.
 //!
 //!   Range start is the parameter's source start, which INCLUDES the sigil. The
-//!   span is `full_name` plus `+1` for `restarg` (`*`). `blockarg` gets NO
-//!   sigil adjustment, so `&d` highlights only the `&` — this is RuboCop's
-//!   actual (verified) behavior, reproduced for parity.
+//!   span is `full_name` plus `+1` for `restarg` (`*`) and `+2` for `kwrestarg`
+//!   (`**`). `blockarg` gets NO sigil adjustment, so `&d` highlights only the
+//!   `&` — this is RuboCop's actual (verified) behavior, reproduced for parity.
 //!
 //!   At most ONE offense fires per parameter, in RuboCop's precedence order:
 //!   forbidden > uppercase > too-short > ends-in-number. RuboCop's `add_offense`
@@ -123,16 +123,18 @@ impl BlockParameterName {
 
 /// `(name_symbol, sigil_extra_bytes)` for the block parameter kinds RuboCop
 /// checks. `sigil_extra` is the source-length adjustment applied to `full_name`
-/// for the leading sigil: `*` → +1 (restarg), everything else → 0 (RuboCop
-/// applies no adjustment to `blockarg`, so its range covers only the `&`).
-/// `kwrestarg` is intentionally absent — block parameters cannot be `**rest` in
-/// Ruby block syntax. Returns `None` for non-parameter kinds (e.g.
-/// destructuring `mlhs` nodes carry no name symbol).
+/// for the leading sigil: `*` → +1 (restarg), `**` → +2 (kwrestarg), everything
+/// else → 0 (RuboCop applies no adjustment to `blockarg`, so its range covers
+/// only the `&`). Ruby blocks support keyword parameters (`proc { |ab:, **xx|
+/// }`), so `kwarg`/`kwoptarg`/`kwrestarg` are covered, matching rubocop 1.87.0.
+/// Returns `None` for non-parameter kinds (e.g. destructuring `mlhs` nodes
+/// carry no name symbol).
 fn arg_name(id: NodeId, cx: &Cx<'_>) -> Option<(Symbol, u32)> {
     match *cx.kind(id) {
-        NodeKind::Arg(name) | NodeKind::Blockarg(name) => Some((name, 0)),
-        NodeKind::Optarg { name, .. } => Some((name, 0)),
+        NodeKind::Arg(name) | NodeKind::Kwarg(name) | NodeKind::Blockarg(name) => Some((name, 0)),
+        NodeKind::Optarg { name, .. } | NodeKind::Kwoptarg { name, .. } => Some((name, 0)),
         NodeKind::Restarg(name) => Some((name, 1)),
+        NodeKind::Kwrestarg(name) => Some((name, 2)),
         _ => None,
     }
 }
@@ -278,6 +280,20 @@ mod tests {
                                ^^ Block parameter must be at least 3 characters long.
                                        ^^ Block parameter must be at least 3 characters long.
                                            ^ Block parameter must be at least 3 characters long.
+            "#});
+    }
+
+    #[test]
+    fn flags_keyword_block_parameters() {
+        // Ruby blocks accept keyword params. rubocop (MinNameLength 3):
+        //   `ab` cols 9..10; `cd` cols 14..15; `**xx` cols 21..24 (`**` + name).
+        test::<BlockParameterName>()
+            .with_options(&opts(3, true, &[], &[]))
+            .expect_offense(indoc! {r#"
+                proc { |ab:, cd: 1, **xx| nil }
+                        ^^ Block parameter must be at least 3 characters long.
+                             ^^ Block parameter must be at least 3 characters long.
+                                    ^^^^ Block parameter must be at least 3 characters long.
             "#});
     }
 
