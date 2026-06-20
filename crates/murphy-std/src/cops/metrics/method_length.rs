@@ -12,7 +12,7 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.70]
+//! gap_issues: [murphy-e7bz.70, murphy-e7bz.71]
 //! notes: >
 //!   Mirrors RuboCop's `CodeLength` mixin + `Metrics::Utils::CodeLengthCalculator`,
 //!   verified numerically against standalone rubocop 1.87.0
@@ -61,6 +61,12 @@
 //!      with the def *node*, so a multiline foldable inside a parameter default
 //!      (e.g. `def m(x = [\n…\n])` with `CountAsOne: ['array']`) is folded.
 //!      Murphy walks the body only, so such defaults are not folded (over-count).
+//!
+//!   Gap (murphy-e7bz.71): with `CountAsOne: ['heredoc']`, a *nested
+//!   interpolated* heredoc (`<<~OUTER` whose body holds `#{<<~INNER}`) is
+//!   mispaired by the shared `heredoc_end_line_of_opener` FIFO logic, so the
+//!   folded heredoc body extent is wrong (rubocop `[2/0]`, murphy `[4/0]`).
+//!   Default config (no `CountAsOne`) is unaffected and matches rubocop.
 //!
 //!   No autocorrect: RuboCop does not autocorrect this cop.
 //! ```

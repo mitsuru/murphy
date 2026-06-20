@@ -1092,8 +1092,16 @@ fn is_heredoc_node(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// The 0-based source line of the `HeredocEnd` terminator for the heredoc whose
 /// `HeredocStart` opener begins at byte `opener_start`, or `None` when no
-/// heredoc opens there. Pairs openers to terminators FIFO via a stack (the same
-/// model RuboCop relies on), so stacked heredocs on one line resolve correctly.
+/// heredoc opens there. Pairs openers to terminators FIFO via a stack, so
+/// stacked sibling heredocs on one line (`foo(<<~A, <<~B)`) resolve correctly.
+///
+/// KNOWN GAP (murphy-e7bz.71): FIFO pairing is wrong for *nested interpolated*
+/// heredocs (an OUTER heredoc whose body contains `#{<<~INNER}`), which close
+/// LIFO — the OUTER opener is mispaired with the INNER terminator. This only
+/// affects [`heredoc_length`] (the non-default `CountAsOne: [heredoc]` fold);
+/// [`node_line_span`] is unaffected because it takes the max end-line over all
+/// in-range openers, so the correct furthest terminator is found regardless of
+/// pairing (default config matches rubocop).
 fn heredoc_end_line_of_opener(opener_start: u32, cx: &Cx<'_>) -> Option<u32> {
     let mut opener_stack: Vec<u32> = Vec::new(); // opener byte starts, FIFO order
     for tok in cx.sorted_tokens() {

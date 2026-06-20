@@ -11,7 +11,7 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.70]
+//! gap_issues: [murphy-e7bz.70, murphy-e7bz.71]
 //! notes: >
 //!   Mirrors RuboCop's `Metrics::ClassLength` (`CodeLength` mixin +
 //!   `Metrics::Utils::CodeLengthCalculator`), verified numerically against
@@ -78,6 +78,11 @@
 //!   here): the casgn arm ignores RuboCop's `find_expression_within_parent`
 //!   (masgn / chained-assignment) fallback. (RuboCop's `class_definition?` imposes
 //!   no casgn-scope constraint, so scoped constant targets ARE handled — see (3).)
+//!
+//!   Gap (murphy-e7bz.71): with `CountAsOne: ['heredoc']`, the shared
+//!   `heredoc_end_line_of_opener` FIFO logic mispairs *nested interpolated*
+//!   heredocs, so the folded heredoc body extent is wrong. Default config (no
+//!   `CountAsOne`) is unaffected and matches rubocop.
 //!
 //!   No autocorrect: RuboCop does not autocorrect this cop.
 //! ```

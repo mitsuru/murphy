@@ -12,7 +12,7 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.70]
+//! gap_issues: [murphy-e7bz.70, murphy-e7bz.71]
 //! notes: >
 //!   Mirrors RuboCop's `CodeLength` mixin + `Metrics::Utils::CodeLengthCalculator`
 //!   driven from `Metrics/BlockLength#on_block`, verified numerically against
@@ -64,6 +64,11 @@
 //!      of the body, e.g. a multiline arg of the block's own method call) can be
 //!      folded. Murphy walks the body only, so such constructs are not folded
 //!      (over-count). Both are common-case-safe: ordinary block bodies match.
+//!
+//!   Gap (murphy-e7bz.71): with `CountAsOne: ['heredoc']`, the shared
+//!   `heredoc_end_line_of_opener` FIFO logic mispairs *nested interpolated*
+//!   heredocs, so the folded heredoc body extent is wrong. Default config (no
+//!   `CountAsOne`) is unaffected and matches rubocop.
 //!
 //!   No autocorrect: RuboCop does not autocorrect this cop.
 //! ```

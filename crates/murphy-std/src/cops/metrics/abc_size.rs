@@ -507,9 +507,11 @@ impl<'a> AbcCalculator<'a> {
     /// (`prefix.method...`). RuboCop deletes the exact getter (and its
     /// subtree) or clears the whole receiver subtree on var reassignment.
     fn invalidate_prefix(&mut self, prefix: &str) {
-        let nested = format!("{prefix}.");
-        self.known_attributes
-            .retain(|k| k != prefix && !k.starts_with(&nested));
+        // Match `prefix` exactly or `prefix.<rest>` without allocating a
+        // `"{prefix}."` needle per call (safe-rust-patterns.md).
+        self.known_attributes.retain(|k| {
+            k != prefix && !k.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('.'))
+        });
     }
 }
 
