@@ -1287,6 +1287,110 @@ pub fn body_code_length(
     length
 }
 
+/// RuboCop `CodeLengthCalculator#classlike_code_length` for a `class`/`module`
+/// node — the path taken by `code_length` when `classlike_node?(node)` is true
+/// (`Metrics/ClassLength`'s `on_class`/`on_sclass` and `Metrics/ModuleLength`'s
+/// `on_module`). This is **not** the `extract_body` path used by
+/// [`body_code_length`]; pass the whole class/module node, not its body.
+///
+/// Mirrors RuboCop exactly:
+///
+/// 1. `namespace_module?` — when the node's sole body is itself a `class`/
+///    `module`, the length is `0` (a pure namespace wrapper is not measured).
+/// 2. Base count = the line numbers strictly between the first (`class Foo` /
+///    `module Foo`) and last (`end`) line — `line_range(node).to_a[1...-1]` —
+///    minus every line covered by an inner `class`/`module` descendant
+///    (`line_numbers_of_inner_nodes(node, :module, :class)`), then dropping
+///    blank/comment lines (`irrelevant_line?`).
+/// 3. `CountAsOne` folding via `each_top_level_descendant` seeded with the whole
+///    class/module node: `length = length - code_length(descendant) + 1` per
+///    enabled foldable.
+///
+/// Like [`body_code_length`], the `omit_length` unbraced-hash subtraction is not
+/// applied (the same documented fold gap).
+pub fn classlike_code_length(
+    node: NodeId,
+    count_comments: bool,
+    foldable_types: &[FoldableType],
+    cx: &Cx<'_>,
+) -> i64 {
+    // `namespace_module?(node)` — body is a single class/module → length 0.
+    if is_namespace_module(node, cx) {
+        return 0;
+    }
+
+    let range = cx.range(node);
+    let first = line_of(range.start, cx);
+    let last_byte = range.end.saturating_sub(1).max(range.start);
+    let last = line_of(last_byte, cx).max(first);
+
+    // The classlike body span is the line numbers strictly between the header
+    // line and the `end` line (`line_range(node).to_a[1...-1]`). A single-line
+    // class/module (`first == last`, or no interior line) has length 0.
+    if last <= first + 1 {
+        // No interior body lines; folds cannot apply either. Length is 0.
+        return 0;
+    }
+
+    let inner_lines = inner_classlike_lines(node, cx);
+
+    let mut length: i64 = (first + 1..last)
+        .filter(|line| !inner_lines.contains(line))
+        .filter(|&line| !irrelevant_line(cx, line, count_comments))
+        .count() as i64;
+
+    if foldable_types.is_empty() {
+        return length;
+    }
+
+    // `each_top_level_descendant(@node, …)` is seeded with the whole class/
+    // module node, halting at (and never recursing into) inner classlike nodes.
+    let mut descendants = Vec::new();
+    collect_top_level_foldables(node, foldable_types, cx, &mut descendants);
+    for descendant in descendants {
+        if !foldable_node(descendant, foldable_types, cx) {
+            continue;
+        }
+        let descendant_length = code_length(descendant, count_comments, cx);
+        length = length - descendant_length + 1;
+    }
+    length
+}
+
+/// RuboCop `namespace_module?(node)` — `classlike_node?(node.body)`: the class/
+/// module's body is itself a single `class`/`module` node.
+fn is_namespace_module(node: NodeId, cx: &Cx<'_>) -> bool {
+    let body = match *cx.kind(node) {
+        NodeKind::Class { body, .. } | NodeKind::Module { body, .. } => body.get(),
+        _ => None,
+    };
+    body.is_some_and(|b| is_classlike(b, cx))
+}
+
+/// RuboCop `line_numbers_of_inner_nodes(node, :module, :class)`: the set of
+/// 0-based source lines covered by every inner `class`/`module` descendant's
+/// full line range (`Sclass` is deliberately excluded — RuboCop passes only
+/// `:module`/`:class`).
+fn inner_classlike_lines(node: NodeId, cx: &Cx<'_>) -> std::collections::HashSet<u32> {
+    let mut lines = std::collections::HashSet::new();
+    for descendant in cx.descendants(node) {
+        if !matches!(
+            *cx.kind(descendant),
+            NodeKind::Class { .. } | NodeKind::Module { .. }
+        ) {
+            continue;
+        }
+        let range = cx.range(descendant);
+        let first = line_of(range.start, cx);
+        let last_byte = range.end.saturating_sub(1).max(range.start);
+        let last = line_of(last_byte, cx).max(first);
+        for line in first..=last {
+            lines.insert(line);
+        }
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::{display_column, is_assignment_or_comparison_operator};
