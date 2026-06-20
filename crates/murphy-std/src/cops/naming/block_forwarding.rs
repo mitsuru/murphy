@@ -13,6 +13,11 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
+//!   `Enabled: pending` upstream (config/default.yml) → `default_enabled =
+//!   false`, matching the sibling pending cop `Naming/PredicateMethod` and
+//!   Murphy's convention for pending cops (they do not run unless explicitly
+//!   opted in).
+//!
 //!   Detection is fully implemented for both EnforcedStyle: anonymous
 //!   (default) and EnforcedStyle: explicit, verified against rubocop 1.87.0.
 //!
@@ -103,7 +108,8 @@ pub struct BlockForwarding;
     name = "Naming/BlockForwarding",
     description = "Use anonymous block forwarding.",
     default_severity = "warning",
-    default_enabled = true,
+    // `Enabled: pending` upstream → disabled by default (see parity note).
+    default_enabled = false,
     minimum_target_ruby_version = "3.1",
     options = Options,
 )]
