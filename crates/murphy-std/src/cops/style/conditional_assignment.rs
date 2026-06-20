@@ -622,6 +622,21 @@ mod tests {
     }
 
     #[test]
+    fn accepts_parenthesized_tail_in_multi_statement_branch() {
+        // RuboCop's `tail` (`branch.begin_type? ? Array(branch).last : branch`)
+        // unwraps exactly ONE level: a multi-statement branch unwraps to its
+        // last statement, but a *parenthesized* assignment tail `(bar = 1)` is
+        // itself a begin node, so the assignment check fails and no offense is
+        // reported. Murphy must not fully unwrap here. Verified against rubocop
+        // 1.87 (no offense), even with SingleLineConditionsOnly disabled.
+        test::<ConditionalAssignment>()
+            .with_options(&opts(EnforcedStyle::AssignToCondition, false, true))
+            .expect_no_offenses(
+                "if foo\n  do_a\n  (bar = 1)\nelse\n  do_b\n  (bar = 2)\nend\n",
+            );
+    }
+
+    #[test]
     fn accepts_if_without_else_branch() {
         test::<ConditionalAssignment>().expect_no_offenses("if foo\n  bar = 1\nend\n");
     }
