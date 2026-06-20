@@ -7,6 +7,7 @@
 
 pub mod layout;
 pub mod lint;
+pub mod metrics;
 pub mod naming;
 pub mod security;
 pub mod style;
