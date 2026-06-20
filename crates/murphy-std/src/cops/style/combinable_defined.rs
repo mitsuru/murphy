@@ -38,23 +38,36 @@
 //!
 //! ## Autocorrect
 //!
-//! Each redundant term is removed surgically: a non-last redundant term plus
-//! its trailing operator (`[term.start, next_term.start)`), or the last
-//! redundant term plus its preceding operator (`[prev_term.end, term.end)`).
-//! Surviving terms and their operators (including the `and` keyword) pass
-//! through byte-for-byte.
+//! Each redundant term is removed surgically, anchored to the *full* source
+//! chain (every `defined?` term, including non-candidate ones such as
+//! `defined?($x)`): a redundant term that has a following term in the chain is
+//! deleted up to that following term's start (`[term.start, next.start)`,
+//! taking its trailing operator), while a trailing redundant term is deleted
+//! from the preceding term's end (`[prev.end, term.end)`, taking its preceding
+//! operator). Maximal runs of consecutive redundant terms collapse into a
+//! single non-overlapping edit. Using full-chain adjacency (rather than the
+//! candidate-only subset) ensures an interspersed `defined?($x)` is never
+//! swept into a redundant term's deletion range. Surviving terms and their
+//! operators (including the `and` keyword) pass through byte-for-byte.
 
 use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
 
 #[derive(Default)]
 pub struct CombinableDefined;
 
-/// A `defined?` term in the `and` chain whose subject is a `const`/`call`.
+/// One `defined?` term in the `and` chain, in source order. *Every* term in
+/// the chain is represented (not just `const`/`call` subjects) so that deletion
+/// ranges use the full-chain adjacency — otherwise a redundant term's deletion
+/// could span an interspersed non-candidate term (e.g. `defined?($x)`) and drop
+/// its runtime check. Terms whose subject is not a `const`/`call` are kept as
+/// survivors with `subject_src`/`namespace_src` set to `None`, so they never
+/// participate in redundancy detection.
 struct Term<'a> {
     /// The whole `defined?(...)` node range.
     range: Range,
-    /// The subject's source text (e.g. `Foo::Bar` or `foo.bar`).
-    subject_src: &'a str,
+    /// The subject's source text (e.g. `Foo::Bar` or `foo.bar`), or `None` when
+    /// the subject is not a `const`/`call` (a non-candidate survivor).
+    subject_src: Option<&'a str>,
     /// The subject's *immediate* namespace/receiver source, if any.
     namespace_src: Option<&'a str>,
 }
@@ -92,33 +105,48 @@ impl CombinableDefined {
         let mut terms: Vec<Term<'_>> = Vec::new();
         for &dn in &defined_nodes {
             let NodeKind::Defined(subject) = *cx.kind(dn) else {
+                // Not a `defined?` node — `collect_defined_terms` already
+                // guaranteed otherwise, so this is unreachable, but keep the
+                // term as an opaque survivor rather than dropping the chain.
+                terms.push(Term { range: cx.range(dn), subject_src: None, namespace_src: None });
                 continue;
             };
-            let namespace_src = match cx.kind(subject) {
-                NodeKind::Const { scope, .. } => {
-                    scope.get().map(|s| cx.raw_source(cx.range(s)))
-                }
-                NodeKind::Send { .. } => {
-                    cx.call_receiver(subject).get().map(|r| cx.raw_source(cx.range(r)))
-                }
-                _ => continue,
+            // Non-`const`/`call` subjects (e.g. `defined?($x)`) are kept as
+            // survivors with no subject/namespace, mirroring RuboCop's
+            // `defined_calls` filter while preserving source-chain adjacency.
+            let (subject_src, namespace_src) = match cx.kind(subject) {
+                NodeKind::Const { scope, .. } => (
+                    Some(cx.raw_source(cx.range(subject))),
+                    scope.get().map(|s| cx.raw_source(cx.range(s))),
+                ),
+                NodeKind::Send { .. } => (
+                    Some(cx.raw_source(cx.range(subject))),
+                    cx.call_receiver(subject).get().map(|r| cx.raw_source(cx.range(r))),
+                ),
+                _ => (None, None),
             };
             terms.push(Term {
                 range: cx.range(dn),
-                subject_src: cx.raw_source(cx.range(subject)),
+                subject_src,
                 namespace_src,
             });
         }
 
         // A term is redundant when its subject is the immediate namespace /
         // receiver of some *other* term's subject.
+        // A term is redundant when its subject is the immediate namespace /
+        // receiver of some *other* term's subject. The `subject_src.is_some()`
+        // guard is load-bearing: without it, a non-candidate survivor (whose
+        // `subject_src`/`namespace_src` are both `None`) would self-match via
+        // `None == None` and be wrongly flagged.
         let redundant: Vec<usize> = terms
             .iter()
             .enumerate()
             .filter(|&(_, term)| {
-                terms.iter().any(|other| {
-                    other.namespace_src == Some(term.subject_src)
-                })
+                let Some(subject) = term.subject_src else {
+                    return false;
+                };
+                terms.iter().any(|other| other.namespace_src == Some(subject))
             })
             .map(|(i, _)| i)
             .collect();
@@ -290,6 +318,59 @@ mod tests {
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Combine nested `defined?` calls.
             "},
             "defined?(Foo::Bar) && defined?(Baz)\n",
+        );
+    }
+
+    #[test]
+    fn flags_redundant_first_with_noncandidate_middle() {
+        // Regression: a non-candidate term (`defined?($x)`) sits between the
+        // redundant `Foo` and its namespace user `Foo::Bar`. The deletion must
+        // NOT span `defined?($x) &&` (which would drop the global-var check).
+        // Verified against rubocop 1.87: `defined?($x) && defined?(Foo::Bar)`.
+        test::<CombinableDefined>().expect_correction(
+            indoc! {"
+                defined?(Foo) && defined?($x) && defined?(Foo::Bar)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Combine nested `defined?` calls.
+            "},
+            "defined?($x) && defined?(Foo::Bar)\n",
+        );
+    }
+
+    #[test]
+    fn flags_redundant_last_with_noncandidate_middle() {
+        // Trailing redundant term with a non-candidate middle: the preceding
+        // operator deleted must be the one before `Foo`, not span `$x`.
+        // Verified against rubocop 1.87: `defined?(Foo::Bar) && defined?($x)`.
+        test::<CombinableDefined>().expect_correction(
+            indoc! {"
+                defined?(Foo::Bar) && defined?($x) && defined?(Foo)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Combine nested `defined?` calls.
+            "},
+            "defined?(Foo::Bar) && defined?($x)\n",
+        );
+    }
+
+    #[test]
+    fn accepts_noncandidate_subject_self_match() {
+        // A non-candidate subject must never self-match into redundancy.
+        // `defined?(@x)` (an ivar) is not a `const`/`call`; even though `@x`
+        // is the receiver of `@x.foo`, RuboCop is silent here. Guards the
+        // `subject_src.is_some()` redundancy gate. Verified against rubocop 1.87.
+        test::<CombinableDefined>().expect_no_offenses(
+            "defined?(@x) && defined?(@x.foo)\n",
+        );
+    }
+
+    #[test]
+    fn flags_chain_with_noncandidate_between_two_redundancies() {
+        // A non-candidate term interspersed among two separate redundancy
+        // collapses. Verified against rubocop 1.87.
+        test::<CombinableDefined>().expect_correction(
+            indoc! {"
+                defined?(Foo) && defined?(Foo::Bar) && defined?($x) && defined?(Foo::Bar::Baz)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Combine nested `defined?` calls.
+            "},
+            "defined?($x) && defined?(Foo::Bar::Baz)\n",
         );
     }
 
