@@ -433,6 +433,22 @@ mod tests {
     }
 
     #[test]
+    fn itblock_measured() {
+        // `alias on_itblock on_block` — `it`-param blocks are measured
+        // (verified == rubocop 1.87.0: [2/1]).
+        let src = indoc! {"
+            foo do
+              a = it
+              b = it
+            end
+        "};
+        assert_eq!(
+            messages(&opts(1), src),
+            vec!["Block has too many lines. [2/1]".to_string()]
+        );
+    }
+
+    #[test]
     fn lambda_block_measured() {
         // No lambda/proc skip in BlockLength — multiline lambdas ARE measured
         // (verified == rubocop 1.87.0: [2/1]).
