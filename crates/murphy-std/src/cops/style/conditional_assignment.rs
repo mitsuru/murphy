@@ -25,9 +25,12 @@
 //!   `assign_inside_condition` (`on_lvasgn`/`ivasgn`/`gvasgn`/`cvasgn`/`casgn`):
 //!   flags `bar = if foo … end` / `case` / `case`/`in` where the RHS is a
 //!   conditional (not an allowed ternary), with the offense on the assignment.
+//!   Honours `return unless else_branch` (so `x = if foo; 1; end` is not
+//!   flagged) and `SingleLineConditionsOnly` (multi-statement branches suppress
+//!   the offense by default), matching upstream.
 //!
 //!   Gaps vs upstream (all false-negatives — narrower than RuboCop, never
-//!   firing where RuboCop would not) — murphy-7mc2:
+//!   firing where RuboCop would not) unless noted — murphy-7mc2:
 //!   - The `on_send` comparison form (assignment-like sends: `<<`, `=~`, `!~`,
 //!     `<=>`, `<`, `>`, `[]=`, setter `foo.bar = …`) is not modelled in either
 //!     direction. `masgn` is likewise not handled.
@@ -35,6 +38,13 @@
 //!     with re-indentation and a `Layout/LineLength` guard.
 //!   - The offense range is the conditional/assignment's first line (Murphy
 //!     house style) rather than upstream's whole-node range.
+//!   - `correction_exceeds_line_limit?` is not modelled: upstream suppresses
+//!     when the rewrite would overflow `Layout/LineLength`, so Murphy may
+//!     *over-fire* (false-positive) on very long branches.
+//!   - Nested `assign_inside_condition` assignments double-fire: Murphy lacks
+//!     upstream's `ignore_node`/`part_of_ignored_node?`, so a conditional whose
+//!     branches are themselves `var = if … end` reports on both the outer and
+//!     inner assignment (false-positive count, not false-positive location).
 //! ```
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
@@ -98,36 +108,10 @@ impl ConditionalAssignment {
         if cx.is_ternary(node) && !opts.include_ternary_expressions {
             return;
         }
-        let NodeKind::If { then_, else_, .. } = *cx.kind(node) else {
+        // `return if node.elsif?` is handled above; collect branch bodies.
+        let Some(branches) = collect_branches(node, cx) else {
             return;
         };
-        let Some(then_id) = then_.get() else {
-            return;
-        };
-        // Collect every branch tail: the `then`, each `elsif`, and the final
-        // `else`. `expand_elses`: walk the `else_` chain while it is an `elsif`.
-        let mut branches: Vec<NodeId> = vec![then_id];
-        let mut cursor = else_;
-        loop {
-            let Some(branch) = cursor.get() else {
-                // No final `else` branch → upstream `return unless else_branch`.
-                return;
-            };
-            if matches!(cx.kind(branch), NodeKind::If { .. }) && cx.is_elsif(branch) {
-                let NodeKind::If { then_, else_, .. } = *cx.kind(branch) else {
-                    return;
-                };
-                let Some(elsif_then) = then_.get() else {
-                    return;
-                };
-                branches.push(elsif_then);
-                cursor = else_;
-            } else {
-                branches.push(branch);
-                break;
-            }
-        }
-
         if branches_assign_same(&branches, &opts, cx) {
             cx.emit_offense(first_line_range(cx.range(node), cx.source()), MSG, None);
         }
@@ -139,24 +123,9 @@ impl ConditionalAssignment {
         if opts.enforced_style != EnforcedStyle::AssignToCondition {
             return;
         }
-        let NodeKind::Case { else_, whens, .. } = *cx.kind(node) else {
+        let Some(branches) = collect_branches(node, cx) else {
             return;
         };
-        let Some(else_id) = else_.get() else {
-            return;
-        };
-        let mut branches: Vec<NodeId> = Vec::with_capacity(cx.list(whens).len() + 1);
-        for &wc in cx.list(whens) {
-            let NodeKind::When { body, .. } = *cx.kind(wc) else {
-                return;
-            };
-            let Some(body_id) = body.get() else {
-                return;
-            };
-            branches.push(body_id);
-        }
-        branches.push(else_id);
-
         if branches_assign_same(&branches, &opts, cx) {
             cx.emit_offense(first_line_range(cx.range(node), cx.source()), MSG, None);
         }
@@ -168,24 +137,9 @@ impl ConditionalAssignment {
         if opts.enforced_style != EnforcedStyle::AssignToCondition {
             return;
         }
-        let NodeKind::CaseMatch { in_patterns, else_body, .. } = *cx.kind(node) else {
+        let Some(branches) = collect_branches(node, cx) else {
             return;
         };
-        let Some(else_id) = else_body.get() else {
-            return;
-        };
-        let mut branches: Vec<NodeId> = Vec::with_capacity(cx.list(in_patterns).len() + 1);
-        for &ip in cx.list(in_patterns) {
-            let NodeKind::InPattern { body, .. } = *cx.kind(ip) else {
-                return;
-            };
-            let Some(body_id) = body.get() else {
-                return;
-            };
-            branches.push(body_id);
-        }
-        branches.push(else_id);
-
         if branches_assign_same(&branches, &opts, cx) {
             cx.emit_offense(first_line_range(cx.range(node), cx.source()), MSG, None);
         }
@@ -248,13 +202,34 @@ impl ConditionalAssignment {
             return;
         };
         let rhs = unwrap_single_begin(rhs, cx);
-        if is_candidate_condition(rhs, &opts, cx) {
-            cx.emit_offense(
-                first_line_range(cx.range(node), cx.source()),
-                ASSIGN_INSIDE_MSG,
-                None,
-            );
+        // `candidate_condition?`: must be `if`/`case`/`case_match`, excluding a
+        // ternary when `IncludeTernaryExpressions` is off.
+        if !is_candidate_condition(rhs, &opts, cx) {
+            return;
         }
+        // Upstream `check_assignment_to_condition`:
+        //   `_condition, *branches, else_branch = *assignment`
+        //   `return unless else_branch`
+        //   `return if allowed_single_line?([*branches, else_branch])`
+        // `collect_branches` returns `None` when there is no final `else`
+        // (e.g. `x = if foo; 1; end`), which RuboCop never flags.
+        let Some(branches) = collect_branches(rhs, cx) else {
+            return;
+        };
+        // `allowed_single_line?`: under `SingleLineConditionsOnly` (default
+        // true), a multi-statement branch suppresses the offense.
+        if opts.single_line_conditions_only
+            && branches
+                .iter()
+                .any(|&b| matches!(multi_statement_tail(b, cx), MultiStatement::Begin(_)))
+        {
+            return;
+        }
+        cx.emit_offense(
+            first_line_range(cx.range(node), cx.source()),
+            ASSIGN_INSIDE_MSG,
+            None,
+        );
     }
 }
 
@@ -266,6 +241,61 @@ fn is_candidate_condition(node: NodeId, opts: &ConditionalAssignmentOptions, cx:
         NodeKind::If { .. } => opts.include_ternary_expressions || !cx.is_ternary(node),
         NodeKind::Case { .. } | NodeKind::CaseMatch { .. } => true,
         _ => false,
+    }
+}
+
+/// Collect the body of every branch of an `if`/`case`/`case_match` conditional:
+/// the `then`, each `elsif`, and the final `else` for `if`; each `when`/`in`
+/// body and the `else` for `case`/`case_match`. Returns `None` when there is no
+/// final `else` branch (upstream `return unless else_branch`), or when the node
+/// is not a recognised conditional. Mirrors `expand_elses` + `expand_when_branches`.
+fn collect_branches(node: NodeId, cx: &Cx<'_>) -> Option<Vec<NodeId>> {
+    match *cx.kind(node) {
+        NodeKind::If { then_, else_, .. } => {
+            let then_id = then_.get()?;
+            let mut branches: Vec<NodeId> = vec![then_id];
+            let mut cursor = else_;
+            loop {
+                // No final `else` (or an `elsif` with no `else`) → not flagged.
+                let branch = cursor.get()?;
+                if matches!(cx.kind(branch), NodeKind::If { .. }) && cx.is_elsif(branch) {
+                    let NodeKind::If { then_, else_, .. } = *cx.kind(branch) else {
+                        return None;
+                    };
+                    branches.push(then_.get()?);
+                    cursor = else_;
+                } else {
+                    branches.push(branch);
+                    break;
+                }
+            }
+            Some(branches)
+        }
+        NodeKind::Case { else_, whens, .. } => {
+            let else_id = else_.get()?;
+            let mut branches: Vec<NodeId> = Vec::with_capacity(cx.list(whens).len() + 1);
+            for &wc in cx.list(whens) {
+                let NodeKind::When { body, .. } = *cx.kind(wc) else {
+                    return None;
+                };
+                branches.push(body.get()?);
+            }
+            branches.push(else_id);
+            Some(branches)
+        }
+        NodeKind::CaseMatch { in_patterns, else_body, .. } => {
+            let else_id = else_body.get()?;
+            let mut branches: Vec<NodeId> = Vec::with_capacity(cx.list(in_patterns).len() + 1);
+            for &ip in cx.list(in_patterns) {
+                let NodeKind::InPattern { body, .. } = *cx.kind(ip) else {
+                    return None;
+                };
+                branches.push(body.get()?);
+            }
+            branches.push(else_id);
+            Some(branches)
+        }
+        _ => None,
     }
 }
 
@@ -594,6 +624,38 @@ mod tests {
                   1
                 else
                   2
+                end
+            "});
+    }
+
+    #[test]
+    fn assign_inside_accepts_if_without_else() {
+        // Verified against rubocop 1.87: `x = if foo; 1; end` is silent.
+        test::<ConditionalAssignment>()
+            .with_options(&assign_inside())
+            .expect_no_offenses("bar = if foo\n  1\nend\n");
+    }
+
+    #[test]
+    fn assign_inside_accepts_multi_statement_branch_by_default() {
+        // SingleLineConditionsOnly defaults true; a multi-statement branch
+        // suppresses the offense. Verified against rubocop 1.87 (silent).
+        test::<ConditionalAssignment>()
+            .with_options(&assign_inside())
+            .expect_no_offenses("bar = if foo\n  a\n  b\nelse\n  c\nend\n");
+    }
+
+    #[test]
+    fn assign_inside_flags_multi_statement_branch_when_single_line_only_disabled() {
+        test::<ConditionalAssignment>()
+            .with_options(&opts(EnforcedStyle::AssignInsideCondition, false, true))
+            .expect_offense(indoc! {"
+                bar = if foo
+                ^^^^^^^^^^^^ Assign variables inside of conditionals.
+                  a
+                  b
+                else
+                  c
                 end
             "});
     }
