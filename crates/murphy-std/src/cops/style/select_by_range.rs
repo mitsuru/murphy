@@ -205,6 +205,12 @@ fn is_hash_like_receiver(call: NodeId, cx: &Cx<'_>) -> bool {
         NodeKind::Csend { receiver: inner, method, .. } => {
             is_hash_chain(cx.symbol_str(method), Some(inner), cx)
         }
+        // `Hash.new { ... }.select { ... }` — the receiver is a block whose
+        // call is `Hash.new` (upstream `creates_hash?` block arm).
+        NodeKind::Block { call, .. } => {
+            cx.method_name(call) == Some("new")
+                && cx.call_receiver(call).get().is_some_and(|r| is_const_named(r, "Hash", cx))
+        }
         _ => false,
     }
 }
@@ -531,6 +537,19 @@ mod tests {
     }
 
     #[test]
+    fn accepts_hash_new_block_receiver() {
+        test::<SelectByRange>().expect_no_offenses(
+            "Hash.new { |h, k| h[k] = 0 }.select { |x| x.between?(1, 10) }\n",
+        );
+    }
+
+    #[test]
+    fn accepts_hash_index_receiver() {
+        test::<SelectByRange>()
+            .expect_no_offenses("Hash[pairs].select { |x| x.between?(1, 10) }\n");
+    }
+
+    #[test]
     fn accepts_to_h_chain() {
         test::<SelectByRange>().expect_no_offenses("foo.to_h.select { |x| x.between?(1, 10) }\n");
     }
@@ -615,6 +634,17 @@ mod tests {
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a range check.
             "#},
             "array.grep(1..10)\n",
+        );
+    }
+
+    #[test]
+    fn corrects_safe_nav() {
+        test::<SelectByRange>().expect_correction(
+            indoc! {r#"
+                array&.select { |x| x.between?(1, 10) }
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a range check.
+            "#},
+            "array&.grep(1..10)\n",
         );
     }
 }
