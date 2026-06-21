@@ -94,7 +94,7 @@ impl UnreachablePatternBranch {
             return;
         };
         let else_range = else_keyword_range(node, cx.range(else_body).start, cx)
-            .unwrap_or_else(|| cx.range(else_body));
+            .unwrap_or(cx.range(else_body));
         cx.emit_offense(else_range, MSG_ELSE, None);
     }
 }

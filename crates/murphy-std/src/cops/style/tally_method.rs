@@ -209,7 +209,16 @@ impl ParamRef {
         };
         match self {
             ParamRef::Named(s) => sym == s,
-            ParamRef::Numbered(n) => cx.symbol_str(sym) == format!("_{n}"),
+            ParamRef::Numbered(n) => {
+                // `n` is realistically 1 or 2; match static strings to avoid an
+                // allocation in the common case.
+                let name = cx.symbol_str(sym);
+                match n {
+                    1 => name == "_1",
+                    2 => name == "_2",
+                    _ => name == format!("_{n}"),
+                }
+            }
         }
     }
 }

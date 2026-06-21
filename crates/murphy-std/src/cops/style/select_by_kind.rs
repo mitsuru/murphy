@@ -241,9 +241,15 @@ fn receiver_allowed(receiver: Option<NodeId>, cx: &Cx<'_>) -> bool {
 /// / `x.to_h` / `x.to_hash`.
 fn creates_hash(node: NodeId, cx: &Cx<'_>) -> bool {
     // `Hash.new { ... }` block form: unwrap to the underlying `Hash.new` call.
+    // RuboCop's `creates_hash?` is `(block (call (const _ :Hash) :new ...) ...)`
+    // — a normal `block` only. A numblock/itblock `Hash.new` default proc does
+    // NOT match and so does not suppress the offense (verified against rubocop
+    // 1.87.0). Bail explicitly: `cx.method_name`/`cx.call_receiver` delegate
+    // through Numblock/Itblock to the inner send, so falling to `_ => node`
+    // would incorrectly resolve `Hash.new` and suppress.
     let call = match *cx.kind(node) {
         NodeKind::Block { call, .. } => call,
-        NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => send,
+        NodeKind::Numblock { .. } | NodeKind::Itblock { .. } => return false,
         _ => node,
     };
 
@@ -482,6 +488,18 @@ mod tests {
     fn accepts_hash_new_block_receiver() {
         test::<SelectByKind>()
             .expect_no_offenses("Hash.new { |h, k| h[k] = 0 }.select { |x| x.is_a?(Foo) }\n");
+    }
+
+    #[test]
+    fn flags_hash_new_numblock_receiver() {
+        // RuboCop's `creates_hash?` is `(block (call (const _ :Hash) :new ...) ...)`
+        // — it matches a normal `block` only, NOT a numblock. So a `Hash.new`
+        // numblock default proc does not suppress the offense (verified against
+        // rubocop 1.87.0, which fires here).
+        test::<SelectByKind>().expect_offense(indoc! {r#"
+            Hash.new { _1 }.select { |x| x.is_a?(Foo) }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a kind check.
+        "#});
     }
 
     #[test]

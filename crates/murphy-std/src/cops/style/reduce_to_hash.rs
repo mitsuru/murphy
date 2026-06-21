@@ -71,6 +71,7 @@
 //! ```
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, Symbol, cop};
+use std::borrow::Cow;
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -209,11 +210,11 @@ fn match_block(is_ewo: bool, args: NodeId, body: Option<NodeId>, cx: &Cx<'_>) ->
 
 /// Match a numblock body for the given method form.
 fn match_numblock(is_ewo: bool, body: Option<NodeId>, cx: &Cx<'_>) -> Option<Match> {
+    let body = body?;
     // each_with_object numblock: element=_1, accumulator=_2.
     // inject/reduce numblock:    accumulator=_1, element=_2.
-    let accumulator = lvar_symbol(if is_ewo { "_2" } else { "_1" }, cx)?;
+    let accumulator = lvar_symbol(body, if is_ewo { "_2" } else { "_1" }, cx)?;
 
-    let body = body?;
     let (key, value) = match_body(is_ewo, body, accumulator, cx)?;
     Some(Match {
         key,
@@ -288,7 +289,7 @@ fn autocorrect(send: NodeId, block: NodeId, m: &Match, cx: &Cx<'_>) {
         if braces {
             format!("to_h {{ |{arg}| {body} }}")
         } else {
-            do_end_replacement(block, &body, Some(&arg), cx)
+            do_end_replacement(block, &body, Some(arg.as_ref()), cx)
         }
     };
 
@@ -314,30 +315,29 @@ fn do_end_replacement(block: NodeId, body: &str, arg: Option<&str>, cx: &Cx<'_>)
 ///
 /// each_with_object named block: element is the FIRST block param.
 /// inject/reduce named block:    element is the SECOND block param.
-fn element_arg_source(send: NodeId, block: NodeId, cx: &Cx<'_>) -> String {
+fn element_arg_source<'a>(send: NodeId, block: NodeId, cx: &'a Cx<'_>) -> Cow<'a, str> {
     let NodeKind::Block { args, .. } = *cx.kind(block) else {
-        return "elem".to_owned();
+        return Cow::Borrowed("elem");
     };
     let NodeKind::Args(arg_list) = *cx.kind(args) else {
-        return "elem".to_owned();
+        return Cow::Borrowed("elem");
     };
     let block_args = cx.list(arg_list);
     let is_ewo = cx.method_name(send) == Some("each_with_object");
     let idx = usize::from(!is_ewo);
     block_args
         .get(idx)
-        .map(|&a| cx.raw_source(cx.range(a)).to_owned())
-        .unwrap_or_else(|| "elem".to_owned())
+        .map_or(Cow::Borrowed("elem"), |&a| Cow::Borrowed(cx.raw_source(cx.range(a))))
 }
 
 /// Source for a key/value expression, rewriting `_2` → `_1` for inject/reduce
 /// numblocks so the implicit `to_h` param lines up.
-fn adjusted_source(expr: NodeId, m: &Match, cx: &Cx<'_>) -> String {
+fn adjusted_source<'a>(expr: NodeId, m: &Match, cx: &'a Cx<'_>) -> Cow<'a, str> {
     let src = cx.raw_source(cx.range(expr));
     if m.rewrite_elem_two_to_one {
-        src.replace("_2", "_1")
+        Cow::Owned(src.replace("_2", "_1"))
     } else {
-        src.to_owned()
+        Cow::Borrowed(src)
     }
 }
 
@@ -368,11 +368,14 @@ fn is_lvar(node: NodeId, sym: Symbol, cx: &Cx<'_>) -> bool {
 }
 
 /// Resolve a numblock implicit-param name (e.g. `_1`) to its `Symbol` by
-/// searching the AST. Returns `None` if the name never appears.
-fn lvar_symbol(name: &str, cx: &Cx<'_>) -> Option<Symbol> {
-    // Numblock implicit params are guaranteed to be referenced in the body
-    // (the `[]=` receiver), so the symbol must be interned somewhere.
-    find_lvar_symbol(cx.root(), name, cx)
+/// searching the numblock's `body`. Returns `None` if the name never appears.
+///
+/// Numblock implicit params are scoped to the numblock itself, so searching the
+/// body (rather than the whole file from `cx.root()`) is both faster and avoids
+/// accidentally picking up a same-named implicit param from an unrelated
+/// numblock elsewhere in the file.
+fn lvar_symbol(body: NodeId, name: &str, cx: &Cx<'_>) -> Option<Symbol> {
+    find_lvar_symbol(body, name, cx)
 }
 
 fn find_lvar_symbol(node: NodeId, name: &str, cx: &Cx<'_>) -> Option<Symbol> {
