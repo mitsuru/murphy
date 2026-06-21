@@ -15,16 +15,21 @@
 //! gap_issues: []
 //! notes: >
 //!   Hand-rolled port of RuboCop's `DISABLE_COMMENT_FORMAT` regex
-//!   (`/\A(# *rubocop *: *((dis|en)able|todo) +)(.*)/`) and its token scan
-//!   (`/[^,]+|\W+/`) — no `regex` dependency in murphy-std. Detection covers
-//!   the three directive modes (`disable`/`enable`/`todo`; `push`/`pop` are
-//!   deliberately out of scope, matching RuboCop's regex), the comma-separated
-//!   token list, the `break` on the first token containing a character outside
-//!   `[A-Za-z/, ]` (which terminates the scan at a trailing `-- comment`), and
-//!   the three "valid token" branches: a token containing any non-word char
-//!   (`/\W+/` partial match — e.g. has a slash, space, or dash), the
-//!   `[A-Za-z]+/[A-Za-z]+|all` partial match, and a registered department.
-//!   Offense range = the trimmed bare cop name, byte-precise per RuboCop's
+//!   (`/\A(# *rubocop *: *((dis|en)able|todo) +)(.*)/`) — no `regex` dependency
+//!   in murphy-std. The cop-name list is tokenised by `scan_tokens` into
+//!   maximal comma runs and maximal non-comma runs (a faithful-enough analogue
+//!   of RuboCop's `cop_names.scan(/[^,]+|\W+/)` for offense detection; it
+//!   differs only in that `", "` becomes `","` + `" Bar"` instead of one
+//!   `", "` separator, which is why the offense-range calc below skips a token's
+//!   leading whitespace). Detection covers the three directive modes
+//!   (`disable`/`enable`/`todo`; `push`/`pop` are deliberately out of scope,
+//!   matching RuboCop's regex), the comma-separated token list, the `break` on
+//!   the first token containing a character outside `[A-Za-z/, ]` (which
+//!   terminates the scan at a trailing `-- comment`), and the three "valid
+//!   token" branches: a token containing any non-word char (`/\W+/` partial
+//!   match — e.g. has a slash, space, or dash), the `[A-Za-z]+/[A-Za-z]+|all`
+//!   partial match, and a registered department. Offense range = the trimmed
+//!   bare cop name (leading whitespace skipped), byte-precise per RuboCop's
 //!   `range_between(begin_pos + offset, + name.length)`.
 //!
 //!   Autocorrect: not implemented (v1 gap). RuboCop prepends the department via
@@ -82,13 +87,13 @@ impl DepartmentName {
                 let trimmed = token.trim();
 
                 if !valid_content_token(trimmed) {
-                    // Offense range = the trimmed bare cop name. Any flagged
-                    // token is pure word chars with no leading whitespace (a
-                    // leading space would make `/\W+/` match -> valid, and the
-                    // greedy `[^,]+`/`\W+` scan consumes inter-token whitespace
-                    // into separate tokens), so `offset` already points at the
-                    // first byte of `trimmed`.
-                    let start = comment.range.start + offset as u32;
+                    // Offense range = the trimmed bare cop name. The comma-run
+                    // scan groups `", "` as `","` + `" Bar"`, so a flagged token
+                    // can carry leading whitespace (e.g. `" Bar"` after the
+                    // comma); advance past it so the range starts at the first
+                    // byte of `trimmed`, matching RuboCop's `begin_pos`.
+                    let leading_ws = token.len() - token.trim_start().len();
+                    let start = comment.range.start + offset as u32 + leading_ws as u32;
                     let range = Range { start, end: start + trimmed.len() as u32 };
                     cx.emit_offense(range, MSG, None);
                 }
@@ -333,7 +338,7 @@ mod tests {
         test::<DepartmentName>().expect_offense(concat!(
             "x = 1 # rubocop:disable Foo, Bar\n",
             "                        ^^^ Department name is missing.\n",
-            "                            ^^^ Department name is missing.\n",
+            "                             ^^^ Department name is missing.\n",
         ));
     }
 

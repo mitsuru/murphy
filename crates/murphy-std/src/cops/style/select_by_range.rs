@@ -196,9 +196,13 @@ fn is_hash_like_receiver(call: NodeId, cx: &Cx<'_>) -> bool {
     let Some(receiver) = cx.call_receiver(call).get() else {
         return false;
     };
+    if cx.is_global_const(receiver, "ENV") {
+        // Upstream `env_const?` is `(const {nil? cbase} :ENV)` — only top-level
+        // `ENV` / `::ENV`, not a namespaced `Foo::ENV`.
+        return true;
+    }
     match *cx.kind(receiver) {
         NodeKind::Hash(_) => true,
-        NodeKind::Const { name, .. } => cx.symbol_str(name) == "ENV",
         NodeKind::Send { receiver: inner, method, .. } => {
             is_hash_chain(cx.symbol_str(method), inner.get(), cx)
         }
@@ -557,6 +561,22 @@ mod tests {
     #[test]
     fn accepts_env_constant() {
         test::<SelectByRange>().expect_no_offenses("ENV.select { |x| x.between?(1, 10) }\n");
+    }
+
+    #[test]
+    fn accepts_toplevel_env_constant() {
+        // `::ENV` matches upstream `env_const?` (`(const {nil? cbase} :ENV)`).
+        test::<SelectByRange>().expect_no_offenses("::ENV.select { |x| x.between?(1, 10) }\n");
+    }
+
+    #[test]
+    fn flags_namespaced_env_constant() {
+        // `Foo::ENV` is NOT the top-level ENV, so upstream's `env_const?` does
+        // not match and the offense fires (verified against rubocop 1.87.0).
+        test::<SelectByRange>().expect_offense(indoc! {r#"
+            Foo::ENV.select { |x| x.between?(1, 10) }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Prefer `grep` to `select` with a range check.
+        "#});
     }
 
     #[test]
