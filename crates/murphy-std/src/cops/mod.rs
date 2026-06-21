@@ -6,6 +6,7 @@
 //! `murphy-rails`.
 
 pub mod bundler;
+pub mod gemspec;
 pub mod layout;
 pub mod lint;
 pub mod metrics;
