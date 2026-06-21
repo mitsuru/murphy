@@ -27,7 +27,9 @@
 //!   across normal blocks, numblocks (`_1`), and itblocks (`it`).
 //!
 //!   Hash exclusions (matching upstream): hash literal receiver, `Hash.new`,
-//!   `Hash[]`, `to_h`/`to_hash` chain, and `ENV` constant are all suppressed.
+//!   `Hash[]`, `to_h`/`to_hash` chain, and the top-level `ENV` constant
+//!   (`ENV`/`::ENV` only, per upstream `(const {nil? cbase} :ENV)`) are all
+//!   suppressed.
 //!
 //!   Bodies that are `begin`/multi-statement (`{ |x| x.between?(1,10); true }`)
 //!   are skipped, matching upstream's `return if block_node.body&.begin_type?`.
