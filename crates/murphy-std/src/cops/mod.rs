@@ -5,6 +5,7 @@
 //! id at a glance, matching the convention used by `murphy-rspec` and
 //! `murphy-rails`.
 
+pub mod bundler;
 pub mod layout;
 pub mod lint;
 pub mod metrics;
