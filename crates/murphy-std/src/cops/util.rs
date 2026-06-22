@@ -1026,6 +1026,379 @@ fn blank_run_range(lines: &[PhysicalLine], idx: usize, dir: BlankRunDirection) -
     }
 }
 
+// --- Metrics code-length counting (RuboCop `Metrics::Utils::CodeLengthCalculator`) ---
+
+/// Foldable construct types for `CountAsOne` (RuboCop `FOLDABLE_TYPES`).
+/// Each variant, when enabled, collapses a top-level descendant of that kind
+/// to a single counted line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FoldableType {
+    /// `array` — array literals.
+    Array,
+    /// `hash` — hash literals.
+    Hash,
+    /// `heredoc` — `str`/`dstr` nodes that are heredocs.
+    Heredoc,
+    /// `method_call` — `send`/`csend` call nodes.
+    MethodCall,
+}
+
+impl FoldableType {
+    /// Parse a `CountAsOne` config string (`"array"`, `"hash"`, `"heredoc"`,
+    /// `"method_call"`). Unknown strings are ignored (RuboCop raises a warning;
+    /// Murphy silently drops them — the offending value simply does not fold).
+    pub fn from_config(name: &str) -> Option<Self> {
+        match name {
+            "array" => Some(Self::Array),
+            "hash" => Some(Self::Hash),
+            "heredoc" => Some(Self::Heredoc),
+            "method_call" => Some(Self::MethodCall),
+            _ => None,
+        }
+    }
+}
+
+/// Parse a `CountAsOne` string list into the deduplicated foldable-type set.
+pub fn parse_foldable_types(names: &[String]) -> Vec<FoldableType> {
+    let mut out: Vec<FoldableType> = Vec::new();
+    for name in names {
+        if let Some(ty) = FoldableType::from_config(name)
+            && !out.contains(&ty)
+        {
+            out.push(ty);
+        }
+    }
+    out
+}
+
+/// `true` when 0-based source `line` shall not be counted: blank, or (when
+/// `count_comments` is false) a comment line. Mirrors RuboCop's
+/// `irrelevant_line?`.
+fn irrelevant_line(cx: &Cx<'_>, line: u32, count_comments: bool) -> bool {
+    line_is_blank(cx, line) || (!count_comments && line_is_comment(cx, line))
+}
+
+/// Returns `true` when `node` is a heredoc string (`str`/`dstr` whose opening
+/// delimiter is `<<` — RuboCop's `heredoc?`). Detected from the source bytes at
+/// the node's start, since a heredoc literal always begins with `<<`.
+fn is_heredoc_node(node: NodeId, cx: &Cx<'_>) -> bool {
+    if !matches!(*cx.kind(node), NodeKind::Str(_) | NodeKind::Dstr(..)) {
+        return false;
+    }
+    let start = cx.range(node).start as usize;
+    let bytes = cx.source().as_bytes();
+    bytes.get(start..start + 2) == Some(b"<<")
+}
+
+/// The 0-based source line of the `HeredocEnd` terminator for the heredoc whose
+/// `HeredocStart` opener begins at byte `opener_start`, or `None` when no
+/// heredoc opens there. Pairs openers to terminators FIFO via a stack, so
+/// stacked sibling heredocs on one line (`foo(<<~A, <<~B)`) resolve correctly.
+///
+/// KNOWN GAP (murphy-e7bz.71): FIFO pairing is wrong for *nested interpolated*
+/// heredocs (an OUTER heredoc whose body contains `#{<<~INNER}`), which close
+/// LIFO — the OUTER opener is mispaired with the INNER terminator. This only
+/// affects [`heredoc_length`] (the non-default `CountAsOne: [heredoc]` fold);
+/// [`node_line_span`] is unaffected because it takes the max end-line over all
+/// in-range openers, so the correct furthest terminator is found regardless of
+/// pairing (default config matches rubocop).
+fn heredoc_end_line_of_opener(opener_start: u32, cx: &Cx<'_>) -> Option<u32> {
+    let mut opener_stack: Vec<u32> = Vec::new(); // opener byte starts, FIFO order
+    for tok in cx.sorted_tokens() {
+        match tok.kind {
+            SourceTokenKind::HeredocStart => opener_stack.push(tok.range.start),
+            SourceTokenKind::HeredocEnd => {
+                if opener_stack.is_empty() {
+                    continue;
+                }
+                // FIFO: the earliest-opened heredoc terminates first.
+                let opener = opener_stack.remove(0);
+                if opener == opener_start {
+                    return Some(line_of(tok.range.start, cx));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The 0-based first and (heredoc-extended) last source line of a node's byte
+/// range. For a node containing a trailing heredoc whose AST range stops at the
+/// `<<~LABEL` opener, the last line is extended to the matching `HeredocEnd`
+/// token's line so the heredoc body is counted (RuboCop's
+/// `source_from_node_with_heredoc`). Robust whether or not Prism's range
+/// already reaches the terminator.
+fn node_line_span(node: NodeId, cx: &Cx<'_>) -> (u32, u32) {
+    let range = cx.range(node);
+    let first = line_of(range.start, cx);
+    // `range.end` is one-past-the-last byte; the last *content* byte is
+    // `range.end - 1`. Empty ranges collapse to a single line.
+    let last_byte = range.end.saturating_sub(1).max(range.start);
+    let mut last = line_of(last_byte, cx);
+
+    // Extend through heredoc bodies whose opener lies within the node range.
+    // RuboCop keys on the heredoc opener position, not the terminator, because
+    // a trailing heredoc's terminator can sit past the node's AST range.
+    for tok in cx.sorted_tokens() {
+        if tok.kind == SourceTokenKind::HeredocStart
+            && tok.range.start >= range.start
+            && tok.range.start < range.end
+            && let Some(end_line) = heredoc_end_line_of_opener(tok.range.start, cx)
+        {
+            last = last.max(end_line);
+        }
+    }
+    (first, last.max(first))
+}
+
+/// Count non-irrelevant lines in a node's (heredoc-extended) line span.
+fn count_lines(node: NodeId, count_comments: bool, cx: &Cx<'_>) -> i64 {
+    let (first, last) = node_line_span(node, cx);
+    (first..=last)
+        .filter(|&line| !irrelevant_line(cx, line, count_comments))
+        .count() as i64
+}
+
+/// RuboCop `CodeLengthCalculator#heredoc_length`: count non-irrelevant lines of
+/// the heredoc *body* and add 2 for the opening and closing delimiter lines.
+fn heredoc_length(node: NodeId, count_comments: bool, cx: &Cx<'_>) -> i64 {
+    let range = cx.range(node);
+    let opener_line = line_of(range.start, cx);
+    let end_line = heredoc_end_line_of_opener(range.start, cx).unwrap_or(opener_line);
+    let body_count = if end_line > opener_line + 1 {
+        (opener_line + 1..end_line)
+            .filter(|&line| !irrelevant_line(cx, line, count_comments))
+            .count() as i64
+    } else {
+        0
+    };
+    body_count + 2
+}
+
+/// RuboCop `CodeLengthCalculator#code_length` for a non-classlike node: count
+/// non-irrelevant lines of the node's source span, with heredoc nodes counted
+/// via `heredoc_length`.
+fn code_length(node: NodeId, count_comments: bool, cx: &Cx<'_>) -> i64 {
+    if is_heredoc_node(node, cx) {
+        heredoc_length(node, count_comments, cx)
+    } else {
+        count_lines(node, count_comments, cx)
+    }
+}
+
+/// Does `node`'s kind match an enabled foldable type? (RuboCop `foldable_node?`.)
+fn foldable_node(node: NodeId, types: &[FoldableType], cx: &Cx<'_>) -> bool {
+    types.iter().any(|ty| match ty {
+        FoldableType::Array => matches!(*cx.kind(node), NodeKind::Array(_)),
+        FoldableType::Hash => matches!(*cx.kind(node), NodeKind::Hash(_)),
+        FoldableType::Heredoc => is_heredoc_node(node, cx),
+        FoldableType::MethodCall => {
+            matches!(
+                *cx.kind(node),
+                NodeKind::Send { .. } | NodeKind::Csend { .. }
+            )
+        }
+    })
+}
+
+/// `true` when a node kind participates in the normalized foldable-descendant
+/// walk (the kinds `each_top_level_descendant` stops at). Mirrors RuboCop's
+/// `normalize_foldable_types`: heredoc → `str`/`dstr`, method_call →
+/// `send`/`csend`.
+fn matches_normalized_foldable(node: NodeId, types: &[FoldableType], cx: &Cx<'_>) -> bool {
+    types.iter().any(|ty| match ty {
+        FoldableType::Array => matches!(*cx.kind(node), NodeKind::Array(_)),
+        FoldableType::Hash => matches!(*cx.kind(node), NodeKind::Hash(_)),
+        FoldableType::Heredoc => {
+            matches!(*cx.kind(node), NodeKind::Str(_) | NodeKind::Dstr(..))
+        }
+        FoldableType::MethodCall => {
+            matches!(
+                *cx.kind(node),
+                NodeKind::Send { .. } | NodeKind::Csend { .. }
+            )
+        }
+    })
+}
+
+/// `true` for a classlike node (`class`/`module`) — skipped by the
+/// top-level-descendant walk (RuboCop `classlike_node?`).
+fn is_classlike(node: NodeId, cx: &Cx<'_>) -> bool {
+    matches!(
+        *cx.kind(node),
+        NodeKind::Class { .. } | NodeKind::Module { .. }
+    )
+}
+
+/// RuboCop `each_top_level_descendant`: walk children, stopping (yielding) at
+/// the first descendant matching a normalized foldable type, never recursing
+/// into a matched node or into a classlike node. Collected nodes are then
+/// re-filtered by `foldable_node` (so a plain non-heredoc string halts the
+/// recursion but is not folded).
+fn collect_top_level_foldables(
+    node: NodeId,
+    types: &[FoldableType],
+    cx: &Cx<'_>,
+    out: &mut Vec<NodeId>,
+) {
+    for child in cx.children(node) {
+        if is_classlike(child, cx) {
+            continue;
+        }
+        if matches_normalized_foldable(child, types, cx) {
+            out.push(child);
+        } else {
+            collect_top_level_foldables(child, types, cx, out);
+        }
+    }
+}
+
+/// RuboCop `Metrics::Utils::CodeLengthCalculator#calculate` for a method/block
+/// **body** node: count non-irrelevant lines, then fold each enabled
+/// `CountAsOne` construct to a single line.
+///
+/// `body` is the def/block body node (RuboCop's `extract_body(node)`); pass
+/// the body, not the enclosing `def`. Returns the code-line count used for the
+/// `[length/max]` message. Reusable by `ClassLength`/`ModuleLength`/
+/// `BlockLength` (each extracts its own body / classlike span).
+pub fn body_code_length(
+    body: NodeId,
+    count_comments: bool,
+    foldable_types: &[FoldableType],
+    cx: &Cx<'_>,
+) -> i64 {
+    let mut length = code_length(body, count_comments, cx);
+    if foldable_types.is_empty() {
+        return length;
+    }
+
+    // RuboCop's `each_top_level_descendant` is seeded with the def/block
+    // *node*, whose direct child is the body. So the body node itself is a
+    // top-level fold candidate when it is a foldable kind (e.g. the whole body
+    // is a single multiline `foo(...)` call). Mirror that by checking the body
+    // first; only when it is not itself foldable do we recurse into its
+    // children.
+    let mut descendants = Vec::new();
+    if matches_normalized_foldable(body, foldable_types, cx) {
+        descendants.push(body);
+    } else {
+        collect_top_level_foldables(body, foldable_types, cx, &mut descendants);
+    }
+    for descendant in descendants {
+        if !foldable_node(descendant, foldable_types, cx) {
+            continue;
+        }
+        let descendant_length = code_length(descendant, count_comments, cx);
+        length = length - descendant_length + 1;
+    }
+    length
+}
+
+/// RuboCop `CodeLengthCalculator#classlike_code_length` for a `class`/`module`
+/// node — the path taken by `code_length` when `classlike_node?(node)` is true
+/// (`Metrics/ClassLength`'s `on_class`/`on_sclass` and `Metrics/ModuleLength`'s
+/// `on_module`). This is **not** the `extract_body` path used by
+/// [`body_code_length`]; pass the whole class/module node, not its body.
+///
+/// Mirrors RuboCop exactly:
+///
+/// 1. `namespace_module?` — when the node's sole body is itself a `class`/
+///    `module`, the length is `0` (a pure namespace wrapper is not measured).
+/// 2. Base count = the line numbers strictly between the first (`class Foo` /
+///    `module Foo`) and last (`end`) line — `line_range(node).to_a[1...-1]` —
+///    minus every line covered by an inner `class`/`module` descendant
+///    (`line_numbers_of_inner_nodes(node, :module, :class)`), then dropping
+///    blank/comment lines (`irrelevant_line?`).
+/// 3. `CountAsOne` folding via `each_top_level_descendant` seeded with the whole
+///    class/module node: `length = length - code_length(descendant) + 1` per
+///    enabled foldable.
+///
+/// Like [`body_code_length`], the `omit_length` unbraced-hash subtraction is not
+/// applied (the same documented fold gap).
+pub fn classlike_code_length(
+    node: NodeId,
+    count_comments: bool,
+    foldable_types: &[FoldableType],
+    cx: &Cx<'_>,
+) -> i64 {
+    // `namespace_module?(node)` — body is a single class/module → length 0.
+    if is_namespace_module(node, cx) {
+        return 0;
+    }
+
+    let range = cx.range(node);
+    let first = line_of(range.start, cx);
+    let last_byte = range.end.saturating_sub(1).max(range.start);
+    let last = line_of(last_byte, cx).max(first);
+
+    // The classlike body span is the line numbers strictly between the header
+    // line and the `end` line (`line_range(node).to_a[1...-1]`). A single-line
+    // class/module (`first == last`, or no interior line) has length 0.
+    if last <= first + 1 {
+        // No interior body lines; folds cannot apply either. Length is 0.
+        return 0;
+    }
+
+    let inner_lines = inner_classlike_lines(node, cx);
+
+    let mut length: i64 = (first + 1..last)
+        .filter(|line| !inner_lines.contains(line))
+        .filter(|&line| !irrelevant_line(cx, line, count_comments))
+        .count() as i64;
+
+    if foldable_types.is_empty() {
+        return length;
+    }
+
+    // `each_top_level_descendant(@node, …)` is seeded with the whole class/
+    // module node, halting at (and never recursing into) inner classlike nodes.
+    let mut descendants = Vec::new();
+    collect_top_level_foldables(node, foldable_types, cx, &mut descendants);
+    for descendant in descendants {
+        if !foldable_node(descendant, foldable_types, cx) {
+            continue;
+        }
+        let descendant_length = code_length(descendant, count_comments, cx);
+        length = length - descendant_length + 1;
+    }
+    length
+}
+
+/// RuboCop `namespace_module?(node)` — `classlike_node?(node.body)`: the class/
+/// module's body is itself a single `class`/`module` node.
+fn is_namespace_module(node: NodeId, cx: &Cx<'_>) -> bool {
+    let body = match *cx.kind(node) {
+        NodeKind::Class { body, .. } | NodeKind::Module { body, .. } => body.get(),
+        _ => None,
+    };
+    body.is_some_and(|b| is_classlike(b, cx))
+}
+
+/// RuboCop `line_numbers_of_inner_nodes(node, :module, :class)`: the set of
+/// 0-based source lines covered by every inner `class`/`module` descendant's
+/// full line range (`Sclass` is deliberately excluded — RuboCop passes only
+/// `:module`/`:class`).
+fn inner_classlike_lines(node: NodeId, cx: &Cx<'_>) -> std::collections::HashSet<u32> {
+    let mut lines = std::collections::HashSet::new();
+    for descendant in cx.descendants(node) {
+        if !matches!(
+            *cx.kind(descendant),
+            NodeKind::Class { .. } | NodeKind::Module { .. }
+        ) {
+            continue;
+        }
+        let range = cx.range(descendant);
+        let first = line_of(range.start, cx);
+        let last_byte = range.end.saturating_sub(1).max(range.start);
+        let last = line_of(last_byte, cx).max(first);
+        for line in first..=last {
+            lines.insert(line);
+        }
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::{display_column, is_assignment_or_comparison_operator};
