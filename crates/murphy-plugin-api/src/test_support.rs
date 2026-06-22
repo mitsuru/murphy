@@ -266,9 +266,16 @@ pub fn test<T: NodeCop + Default>() -> Tester<T> {
     Tester {
         options_json: DEFAULT_OPTIONS_JSON.to_string(),
         context: crate::AllCopsContext::default(),
+        file_path: DEFAULT_TEST_FILE_PATH.to_string(),
         _phantom: PhantomData,
     }
 }
+
+/// File path threaded into `Cx::file_path()` for cop tests that do not
+/// override it via [`Tester::with_file_path`]. Matches the path the
+/// translator stamps on the test AST so existing tests keep their
+/// behavior.
+const DEFAULT_TEST_FILE_PATH: &str = "t.rb";
 
 /// Cop-tester returned by [`test`]. Holds the per-test options JSON and
 /// dispatches every expectation through the shared internal assertion
@@ -280,6 +287,7 @@ pub fn test<T: NodeCop + Default>() -> Tester<T> {
 pub struct Tester<T: NodeCop + Default> {
     options_json: String,
     context: crate::AllCopsContext,
+    file_path: String,
     _phantom: PhantomData<fn() -> T>,
 }
 
@@ -329,19 +337,34 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Override the file path threaded into `Cx::file_path()` for this cop
+    /// test. Defaults to `"t.rb"`. Use this for cops that inspect the source
+    /// file name (e.g. `Naming/FileName`); the path is decoupled from the
+    /// in-memory source content, so the `expect_*` body still carries the
+    /// Ruby source while this carries the on-disk path.
+    pub fn with_file_path(mut self, path: &str) -> Self {
+        self.file_path = path.to_string();
+        self
+    }
+
     /// Assert the cop emits exactly the offenses described by the caret
     /// annotations in `annotated`. See the module docs for the
     /// annotation grammar.
     #[track_caller]
     pub fn expect_offense(&self, annotated: &str) -> &Self {
-        assert_offenses_match_inner::<T>(annotated, &self.options_json, self.context);
+        assert_offenses_match_inner::<T>(
+            annotated,
+            &self.options_json,
+            self.context,
+            &self.file_path,
+        );
         self
     }
 
     /// Assert the cop emits no offenses against `src`.
     #[track_caller]
     pub fn expect_no_offenses(&self, src: &str) -> &Self {
-        assert_no_offenses_inner::<T>(src, &self.options_json, self.context);
+        assert_no_offenses_inner::<T>(src, &self.options_json, self.context, &self.file_path);
         self
     }
 
@@ -349,7 +372,13 @@ impl<T: NodeCop + Default> Tester<T> {
     /// and that applying its autocorrect edits produces `after`.
     #[track_caller]
     pub fn expect_correction(&self, annotated: &str, after: &str) -> &Self {
-        assert_correction_match_inner::<T>(annotated, after, &self.options_json, self.context);
+        assert_correction_match_inner::<T>(
+            annotated,
+            after,
+            &self.options_json,
+            self.context,
+            &self.file_path,
+        );
         self
     }
 
@@ -358,7 +387,7 @@ impl<T: NodeCop + Default> Tester<T> {
     /// [`Tester::expect_offense`] when both must hold.
     #[track_caller]
     pub fn expect_no_corrections(&self, src: &str) -> &Self {
-        assert_no_corrections_inner::<T>(src, &self.options_json, self.context);
+        assert_no_corrections_inner::<T>(src, &self.options_json, self.context, &self.file_path);
         self
     }
 }
@@ -368,12 +397,14 @@ fn assert_no_offenses_inner<T: NodeCop + Default>(
     src: &str,
     options_json: &str,
     ctx: crate::AllCopsContext,
+    file_path: &str,
 ) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!("expect_no_offenses must not contain annotations; use expect_offense instead");
     }
-    let offenses = run_cop_with_options_json_and_context::<T>(src, options_json, ctx);
+    let offenses =
+        run_cop_with_options_json_and_context_and_path::<T>(src, options_json, ctx, file_path);
     if !offenses.is_empty() {
         panic!(
             "expect_no_offenses found {} offense(s) for {}",
@@ -521,6 +552,7 @@ fn assert_offenses_match_inner<T: NodeCop + Default>(
     annotated: &str,
     options_json: &str,
     ctx: crate::AllCopsContext,
+    file_path: &str,
 ) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
@@ -528,7 +560,8 @@ fn assert_offenses_match_inner<T: NodeCop + Default>(
             "expect_offense must contain at least one annotation; use expect_no_offenses instead"
         );
     }
-    let actuals = run_cop_with_options_json_and_context::<T>(&cleaned, options_json, ctx);
+    let actuals =
+        run_cop_with_options_json_and_context_and_path::<T>(&cleaned, options_json, ctx, file_path);
     assert_offenses_match("expect_offense", &cleaned, &expected, &actuals);
 }
 
@@ -586,6 +619,7 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
     expected_after: &str,
     options_json: &str,
     ctx: crate::AllCopsContext,
+    file_path: &str,
 ) {
     let (cleaned, expected) = parse_annotated(annotated);
     if expected.is_empty() {
@@ -594,8 +628,12 @@ fn assert_correction_match_inner<T: NodeCop + Default>(
         );
     }
 
-    let captured =
-        run_cop_with_options_and_edits_json_and_context::<T>(&cleaned, options_json, ctx);
+    let captured = run_cop_with_options_and_edits_json_and_context_and_path::<T>(
+        &cleaned,
+        options_json,
+        ctx,
+        file_path,
+    );
     assert_offenses_match("expect_correction", &cleaned, &expected, &captured.offenses);
 
     let actual_after = apply_captured_edits(&cleaned, &captured.edits);
@@ -613,13 +651,19 @@ fn assert_no_corrections_inner<T: NodeCop + Default>(
     src: &str,
     options_json: &str,
     ctx: crate::AllCopsContext,
+    file_path: &str,
 ) {
     let (_cleaned, expected) = parse_annotated(src);
     if !expected.is_empty() {
         panic!("expect_no_corrections must not contain annotations; use expect_correction instead");
     }
 
-    let captured = run_cop_with_options_and_edits_json_and_context::<T>(src, options_json, ctx);
+    let captured = run_cop_with_options_and_edits_json_and_context_and_path::<T>(
+        src,
+        options_json,
+        ctx,
+        file_path,
+    );
     if !captured.edits.is_empty() {
         panic!(
             "expect_no_corrections found {} edit(s) for {}",
@@ -829,6 +873,21 @@ fn run_cop_with_options_json_and_context<T: NodeCop + Default>(
     run_cop_with_options_and_edits_json_and_context::<T>(source, options_json, ctx).offenses
 }
 
+fn run_cop_with_options_json_and_context_and_path<T: NodeCop + Default>(
+    source: &str,
+    options_json: &str,
+    ctx: crate::AllCopsContext,
+    file_path: &str,
+) -> Vec<CapturedOffense> {
+    run_cop_with_options_and_edits_json_and_context_and_path::<T>(
+        source,
+        options_json,
+        ctx,
+        file_path,
+    )
+    .offenses
+}
+
 fn run_cop_with_options_and_edits_json<T: NodeCop + Default>(
     source: &str,
     options_json: &str,
@@ -845,7 +904,21 @@ fn run_cop_with_options_and_edits_json_and_context<T: NodeCop + Default>(
     options_json: &str,
     ctx: crate::AllCopsContext,
 ) -> CapturedRun {
-    let ast = murphy_translate::translate(source, "t.rb");
+    run_cop_with_options_and_edits_json_and_context_and_path::<T>(
+        source,
+        options_json,
+        ctx,
+        DEFAULT_TEST_FILE_PATH,
+    )
+}
+
+fn run_cop_with_options_and_edits_json_and_context_and_path<T: NodeCop + Default>(
+    source: &str,
+    options_json: &str,
+    ctx: crate::AllCopsContext,
+    file_path: &str,
+) -> CapturedRun {
+    let ast = murphy_translate::translate(source, file_path);
     let var_model = crate::var_semantic_model::VarSemanticModel::build(&ast);
     let cop = T::default();
     let cop_name = RawSlice::from_str(<T as Cop>::NAME);
