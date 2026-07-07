@@ -11,15 +11,15 @@
 //! notes: >
 //!   Uses source-text scanning to detect the `::` separator since Murphy's
 //!   Send node does not preserve the double-colon vs dot distinction. The
-//!   Java interop guard mirrors RuboCop's `java_type_node?` node matcher
-//!   verbatim — `(send (const nil? :Java) _)` — i.e. a Send whose receiver
-//!   is the bare `Java` const AND which takes no arguments (the classic
-//!   `Java::int` constructor shape). This is an O(1) AST predicate on the
-//!   current Send, with no receiver-chain walk. Historical note: an
-//!   earlier iteration used `cx.call_receiver` to walk to the chain root,
-//!   which both diverged from upstream (`java_type_node?` never walked)
-//!   AND turned a linear `Java::a::b::c::...` input into O(N²) CPU (codex
-//!   2026-07-02 DoS finding); replacing the walk with the pattern match
+//!   Java interop guard uses `def_node_matcher!` with RuboCop's
+//!   `java_type_node?` pattern verbatim: `(send (const nil? :Java) _)` —
+//!   a Send whose receiver is the bare `Java` const AND which takes no
+//!   arguments (the classic `Java::int` constructor shape). This is an
+//!   O(1) AST predicate on the current Send, with no receiver-chain walk.
+//!   Historical note: an earlier iteration used `cx.call_receiver` to walk
+//!   to the chain root, which both diverged from upstream (`java_type_node?`
+//!   never walked) AND turned a linear `Java::a::b::c::...` input into
+//!   O(N²) CPU (codex 2026-07-02 DoS finding); the pattern-matcher rewrite
 //!   fixes both. `camel_case_method?` uses ASCII-uppercase to match
 //!   RuboCop's `/\A[A-Z]/`. `autocorrect_incompatible_with [RedundantSelf]`
 //!   is corrector-ordering metadata with no expression in Murphy's
@@ -31,9 +31,18 @@
 //!   RuboCop flags it. Affects only top-level-qualified `Java` interop.
 //! ```
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NodeId, Range, cop, def_node_matcher};
 
 const MSG: &str = "Do not use `::` for method calls.";
+
+// Mirrors RuboCop's `java_type_node?` matcher verbatim
+// (`lib/rubocop/cop/style/colon_method_call.rb`): a Send whose receiver is
+// the bare `Java` const AND which takes no arguments (the `Java::int`
+// constructor shape). RuboCop's pattern is a direct AST predicate on the
+// current Send — no receiver-chain walk — so the check is O(1). The nil-scope
+// match is deliberate; Murphy's parser collapses the cbase scope to `None`,
+// so `::Java::foo` slips through (parity gap murphy-nweq).
+def_node_matcher!(java_type_node, "(send (const nil? :Java) _)");
 
 #[derive(Default)]
 pub struct ColonMethodCall;
@@ -65,10 +74,8 @@ impl ColonMethodCall {
         {
             return;
         }
-        // Java interop guard: match RuboCop's `java_type_node?` pattern
-        // `(send (const nil? :Java) _)` — bare `Java` const receiver AND
-        // no arguments (the `Java::int` constructor shape).
-        if java_interop(node, cx) {
+        // Java interop guard: `(send (const nil? :Java) _)`.
+        if java_type_node(node, cx) {
             return;
         }
         let colon_range = Range {
@@ -78,27 +85,6 @@ impl ColonMethodCall {
         cx.emit_offense(colon_range, MSG, None);
         cx.emit_edit(colon_range, ".");
     }
-}
-
-/// Matches RuboCop's `java_type_node?` node pattern `(send (const nil? :Java) _)`:
-/// this Send has a bare `Java` const receiver AND takes no arguments. That
-/// pattern is a direct AST predicate on the current Send — RuboCop does not
-/// walk the receiver chain — so the check is O(1). The nil-scope match is
-/// deliberate: `cx.is_global_const` also accepts cbase (`::Java`), which
-/// RuboCop's `nil?` predicate rejects. Murphy's parser collapses the cbase
-/// scope to `None`, so `::Java::foo` still slips through (murphy-nweq).
-fn java_interop(node: NodeId, cx: &Cx<'_>) -> bool {
-    if cx.has_call_arguments(node) {
-        return false;
-    }
-    let Some(recv) = cx.call_receiver(node).get() else {
-        return false;
-    };
-    matches!(
-        *cx.kind(recv),
-        NodeKind::Const { scope, name }
-            if scope.get().is_none() && cx.symbol_str(name) == "Java"
-    )
 }
 
 #[cfg(test)]
