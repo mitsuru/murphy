@@ -9,25 +9,40 @@
 //! status: partial
 //! gap_issues: [murphy-nweq]
 //! notes: >
-//!   Uses source-text scanning since Murphy's Send node does not preserve
-//!   the double-colon vs dot distinction. Java interop guard mirrors
-//!   RuboCop's `java_interop?`: the receiver chain is walked down to its
-//!   root via `cx.call_receiver`, and the `::` is left alone when the root
-//!   is a bare `Java` constant (strictly nil scope — `is_global_const` is
-//!   deliberately avoided because it also accepts `::Java` / cbase, which
-//!   RuboCop flags). `camel_case_method?` uses ASCII-uppercase to match
+//!   Uses source-text scanning to detect the `::` separator since Murphy's
+//!   Send node does not preserve the double-colon vs dot distinction. The
+//!   Java interop guard uses `def_node_matcher!` with RuboCop's
+//!   `java_type_node?` pattern verbatim: `(send (const nil? :Java) _)` —
+//!   a Send whose receiver is the bare `Java` const AND which takes no
+//!   arguments (the classic `Java::int` constructor shape). This is an
+//!   O(1) AST predicate on the current Send, with no receiver-chain walk.
+//!   Historical note: an earlier iteration used `cx.call_receiver` to walk
+//!   to the chain root, which both diverged from upstream (`java_type_node?`
+//!   never walked) AND turned a linear `Java::a::b::c::...` input into
+//!   O(N²) CPU (codex 2026-07-02 DoS finding); the pattern-matcher rewrite
+//!   fixes both. `camel_case_method?` uses ASCII-uppercase to match
 //!   RuboCop's `/\A[A-Z]/`. `autocorrect_incompatible_with [RedundantSelf]`
 //!   is corrector-ordering metadata with no expression in Murphy's
 //!   single-cop harness.
-//!   Residual gap (murphy-nweq): Murphy's parser collapses the leading-`::`
-//!   cbase scope to `None` for receiver constants, so `::Java::foo` is
+//!   Residual gap (murphy-nweq): RuboCop's pattern is `(const nil? :Java)`
+//!   — nil scope strictly. Murphy's parser collapses the leading-`::` cbase
+//!   scope to `None` for receiver constants, so `::Java::foo` is
 //!   indistinguishable from `Java::foo` and is wrongly suppressed where
 //!   RuboCop flags it. Affects only top-level-qualified `Java` interop.
 //! ```
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NodeId, Range, cop, def_node_matcher};
 
 const MSG: &str = "Do not use `::` for method calls.";
+
+// Mirrors RuboCop's `java_type_node?` matcher verbatim
+// (`lib/rubocop/cop/style/colon_method_call.rb`): a Send whose receiver is
+// the bare `Java` const AND which takes no arguments (the `Java::int`
+// constructor shape). RuboCop's pattern is a direct AST predicate on the
+// current Send — no receiver-chain walk — so the check is O(1). The nil-scope
+// match is deliberate; Murphy's parser collapses the cbase scope to `None`,
+// so `::Java::foo` slips through (parity gap murphy-nweq).
+def_node_matcher!(java_type_node, "(send (const nil? :Java) _)");
 
 #[derive(Default)]
 pub struct ColonMethodCall;
@@ -42,10 +57,7 @@ pub struct ColonMethodCall;
 impl ColonMethodCall {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, .. } = *cx.kind(node) else {
-            return;
-        };
-        let Some(recv_id) = receiver.get() else {
+        let Some(recv_id) = cx.call_receiver(node).get() else {
             return;
         };
         let recv_end = cx.range(recv_id).end;
@@ -62,10 +74,8 @@ impl ColonMethodCall {
         {
             return;
         }
-        // Java interop guard: walk the receiver chain to its root and leave
-        // the `::` alone when the root is a bare `Java` constant
-        // (`Java::int.new(1)`). Mirrors RuboCop's `java_interop?`.
-        if java_interop(recv_id, cx) {
+        // Java interop guard: `(send (const nil? :Java) _)`.
+        if java_type_node(node, cx) {
             return;
         }
         let colon_range = Range {
@@ -76,28 +86,6 @@ impl ColonMethodCall {
         cx.emit_edit(colon_range, ".");
     }
 }
-
-/// Mirrors RuboCop's `java_interop?`: descend the receiver chain to its root
-/// (const nodes have no `.receiver`, so `cx.call_receiver` stops there) and
-/// return whether the root is a bare `Java` constant.
-fn java_interop(receiver: NodeId, cx: &Cx<'_>) -> bool {
-    let mut current = receiver;
-    while let Some(inner) = cx.call_receiver(current).get() {
-        current = inner;
-    }
-    // `java_root?` is strictly `(const nil? :Java)` — nil scope only. We avoid
-    // `cx.is_global_const`, which also accepts cbase (`::Java`), a case RuboCop
-    // flags rather than suppresses.
-    matches!(
-        *cx.kind(current),
-        NodeKind::Const { scope, name }
-            if scope.get().is_none() && cx.symbol_str(name) == "Java"
-    )
-}
-
-const _: () = {
-    let _ = std::mem::size_of::<OptNodeId>();
-};
 
 #[cfg(test)]
 mod tests {
@@ -147,26 +135,73 @@ mod tests {
 
     #[test]
     fn accepts_java_interop_bare_method() {
-        // `Java::foo` — root receiver is the bare `Java` constant; RuboCop's
-        // `java_interop?` guard leaves the `::` alone.
+        // `Java::foo` — the Send matches `(send (const nil? :Java) _)`:
+        // bare `Java` const receiver, no args. RuboCop's `java_type_node?`
+        // matches and leaves the `::` alone.
         test::<ColonMethodCall>().expect_no_offenses("Java::foo\n");
     }
 
     #[test]
+    fn flags_java_call_with_arguments() {
+        // `Java::foo(x)` — receiver is the bare `Java` const, but the Send
+        // takes an argument. `java_type_node?`'s trailing `_` matches only
+        // arg-less sends, so RuboCop flags this. Pins the args-emptiness
+        // check that distinguishes the correct match from a naive
+        // receiver-only check.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                Java::foo(x)
+                    ^^ Do not use `::` for method calls.
+            "},
+            "Java.foo(x)\n",
+        );
+    }
+
+    #[test]
     fn accepts_java_interop_constructor() {
+        // `Java::int.new(1)` — the inner `Java::int` Send matches
+        // `java_type_node?` (bare `Java`, no args) and is suppressed.
+        // The outer `.new(1)` uses `.` not `::` so it isn't checked.
         test::<ColonMethodCall>().expect_no_offenses("Java::int.new(1)\n");
     }
 
     #[test]
-    fn accepts_java_interop_chain() {
-        // Both `::` are suppressed because the chain root is the bare `Java`
-        // constant.
-        test::<ColonMethodCall>().expect_no_offenses("Java::foo::bar\n");
+    fn flags_java_interop_chain_outer() {
+        // `Java::foo::bar` — the inner `Java::foo` matches `java_type_node?`
+        // and is suppressed. The outer `::bar` has a Send receiver
+        // (`Java::foo`), not `(const nil? :Java)`, so it does NOT match and
+        // RuboCop flags it. This is the discriminator against the historical
+        // walk-based check that (wrongly) suppressed the outer link too.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                Java::foo::bar
+                         ^^ Do not use `::` for method calls.
+            "},
+            "Java::foo.bar\n",
+        );
+    }
+
+    #[test]
+    fn flags_java_interop_deep_chain() {
+        // `Java::a::b::c` — inner `Java::a` suppressed; `::b` and `::c` both
+        // flagged because their receivers are Sends, not bare `Java` consts.
+        // Also serves as a functional smoke test for the O(N²) DoS fix
+        // (codex-2026-07-02): dispatching the cop on every Send in a chain
+        // used to walk the receiver chain each time; with the direct
+        // `java_type_node?` predicate it is O(1) per Send.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                Java::a::b::c
+                       ^^ Do not use `::` for method calls.
+                          ^^ Do not use `::` for method calls.
+            "},
+            "Java::a.b.c\n",
+        );
     }
 
     #[test]
     fn flags_non_java_capitalized_receiver() {
-        // `Object::foo` — receiver is a constant but not `Java`; flagged.
+        // `Object::foo` — receiver is a Const but not bare `Java`; flagged.
         test::<ColonMethodCall>().expect_correction(
             indoc! {"
                 Object::foo
@@ -177,12 +212,67 @@ mod tests {
     }
 
     #[test]
+    fn flags_identifier_starting_with_java_prefix() {
+        // `Javanese::foo` — receiver is `Javanese`, not `Java`, so
+        // `java_type_node?` does not match. Flagged.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                Javanese::foo
+                        ^^ Do not use `::` for method calls.
+            "},
+            "Javanese.foo\n",
+        );
+    }
+
+    #[test]
+    fn flags_java_as_namespaced_const() {
+        // `SomeMod::Java::foo` — receiver Const is `SomeMod::Java`; its
+        // scope is `Some(SomeMod)`, not `nil`, so `(const nil? :Java)` does
+        // not match. Flagged.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                SomeMod::Java::foo
+                             ^^ Do not use `::` for method calls.
+            "},
+            "SomeMod::Java.foo\n",
+        );
+    }
+
+    #[test]
+    fn flags_java_indexed_root() {
+        // `Java[0]::foo` — outer `::foo`'s receiver is a Send (the `[]`
+        // call), not a Const, so `java_type_node?` does not match. Flagged.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                Java[0]::foo
+                       ^^ Do not use `::` for method calls.
+            "},
+            "Java[0].foo\n",
+        );
+    }
+
+    #[test]
+    fn flags_java_paren_method_call() {
+        // `Java(1)::foo` — `Java(1)` is a nil-receiver method call named
+        // `Java`, not the bare `Java` const, so the outer `::foo`'s receiver
+        // is a Send, not `(const nil? :Java)`. Flagged.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                Java(1)::foo
+                       ^^ Do not use `::` for method calls.
+            "},
+            "Java(1).foo\n",
+        );
+    }
+
+    #[test]
     fn cbase_java_receiver_parser_limited() {
-        // RuboCop's `java_root?` is strictly nil scope, so `::Java::foo` (an
-        // explicit top-level `::Java`) is NOT Java interop and RuboCop flags
-        // it. Murphy's parser collapses the leading-`::` cbase scope to `None`
-        // for receiver constants, so `::Java` is indistinguishable from a bare
-        // `Java` const here and the Java-interop guard suppresses the offense.
+        // RuboCop's pattern is `(const nil? :Java)` — nil scope strictly, so
+        // `::Java::foo` (an explicit top-level `::Java`) has cbase scope and
+        // does NOT match; RuboCop flags it. Murphy's parser collapses the
+        // leading-`::` cbase scope to `None` for receiver constants, so
+        // `::Java` is indistinguishable from a bare `Java` const here and
+        // the Java-interop guard suppresses the offense.
         // Residual parity gap tracked in murphy-nweq.
         test::<ColonMethodCall>().expect_no_offenses("::Java::foo\n");
     }
