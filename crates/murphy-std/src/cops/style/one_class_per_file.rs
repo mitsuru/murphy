@@ -47,61 +47,41 @@ pub struct OneClassPerFileOptions {
     options = OneClassPerFileOptions
 )]
 impl OneClassPerFile {
-    #[on_node(kind = "class")]
-    fn check_class(&self, node: NodeId, cx: &Cx<'_>) {
-        self.check_top_level(node, cx);
-    }
-
-    #[on_node(kind = "module")]
-    fn check_module(&self, node: NodeId, cx: &Cx<'_>) {
-        self.check_top_level(node, cx);
-    }
-}
-
-impl OneClassPerFile {
-    fn check_top_level(&self, node: NodeId, cx: &Cx<'_>) {
-        if !is_top_level(node, cx) {
+    // Dispatch once on the root statement list rather than per class/module
+    // node — otherwise each dispatch re-walks the list from the beginning to
+    // count preceding definitions, giving O(N^2) CPU cost on files with many
+    // top-level definitions (Codex 2026-07-02 attacker-controlled-source DoS
+    // finding, murphy-hup1).
+    //
+    // A single top-level definition makes the arena root the class/module
+    // itself (not a `Begin`), so this callback never fires and no offense is
+    // emitted — matching the "at most one" semantics. Only a root statement
+    // list can hold multiple definitions, and the root statement list is a
+    // `Begin` (not `Kwbegin`, which is `begin...end` and only appears as a
+    // nested expression).
+    #[on_node(kind = "begin")]
+    fn check_root_statement_list(&self, node: NodeId, cx: &Cx<'_>) {
+        if node != cx.root() {
             return;
         }
-        let opts = cx.options_or_default::<OneClassPerFileOptions>();
-        if is_allowed(node, cx, &opts) {
-            return;
-        }
-
-        // A single top-level definition makes the arena root the class/module
-        // itself (not a `Begin`), so there is nothing preceding it and it never
-        // fires. Only a root statement list can hold multiple definitions.
-        let NodeKind::Begin(list) = cx.kind(cx.root()) else {
+        let NodeKind::Begin(list) = cx.kind(node) else {
             return;
         };
+        let opts = cx.options_or_default::<OneClassPerFileOptions>();
 
-        let mut preceding = 0usize;
+        // RuboCop fires once `@top_level_definitions.length > 1`, i.e. for
+        // every non-allowed top-level definition after the first in source
+        // order. `AllowedClasses` entries are neither counted as "the first"
+        // nor flagged themselves, matching RuboCop's exclusion.
+        let mut seen_top_level_definition = false;
         for &child in cx.list(*list) {
-            if child == node {
-                // RuboCop fires once `@top_level_definitions.length > 1`, i.e.
-                // for every definition that has at least one non-allowed
-                // top-level definition before it in source order.
-                if preceding >= 1 {
-                    cx.emit_offense(offense_range(node, cx), MSG, None);
-                }
-                return;
+            if !is_class_or_module(child, cx) || is_allowed(child, cx, &opts) {
+                continue;
             }
-            if is_class_or_module(child, cx) && !is_allowed(child, cx, &opts) {
-                preceding += 1;
+            if seen_top_level_definition {
+                cx.emit_offense(offense_range(child, cx), MSG, None);
             }
-        }
-    }
-}
-
-/// Mirrors RuboCop's `top_level_definition?`: a node is top-level when it is the
-/// arena root, or a direct child of the root statement list. The root statement
-/// list is a `Begin` (`begin_type?`) — note this is NOT `Kwbegin`
-/// (`begin...end`), which is not a statement-sequence wrapper.
-fn is_top_level(node: NodeId, cx: &Cx<'_>) -> bool {
-    match cx.parent(node).get() {
-        None => true,
-        Some(parent) => {
-            matches!(cx.kind(parent), NodeKind::Begin(_)) && cx.parent(parent).get().is_none()
+            seen_top_level_definition = true;
         }
     }
 }
