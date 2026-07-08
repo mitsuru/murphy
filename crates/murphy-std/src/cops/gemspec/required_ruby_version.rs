@@ -147,10 +147,29 @@ fn is_dynamic_version(node: NodeId, cx: &Cx<'_>) -> bool {
     if is_variable_node(node, cx) {
         return true;
     }
-    // Clause 3: any descendant is a send or a variable.
-    cx.descendants(node)
-        .iter()
-        .any(|&d| matches!(cx.kind(d), NodeKind::Send { .. }) || is_variable_node(d, cx))
+    // Clause 3: any descendant is a send or a variable. Walk lazily so a
+    // nested `spec.required_ruby_version = spec.required_ruby_version = ...`
+    // chain short-circuits on the first dynamic child instead of
+    // materializing (and re-scanning) each overlapping RHS subtree per
+    // outer match — the outer walk visits every send too, so a full
+    // descendant Vec at each match yields O(N^2) work and allocation.
+    has_send_or_variable_descendant(node, cx)
+}
+
+fn has_send_or_variable_descendant(node: NodeId, cx: &Cx<'_>) -> bool {
+    let mut stack = cx.children(node);
+    stack.reverse();
+    while let Some(descendant) = stack.pop() {
+        if matches!(cx.kind(descendant), NodeKind::Send { .. })
+            || is_variable_node(descendant, cx)
+        {
+            return true;
+        }
+        let mut kids = cx.children(descendant);
+        kids.reverse();
+        stack.extend(kids);
+    }
+    false
 }
 
 /// RuboCop's `RuboCop::AST::Node::VARIABLES` plus the explicit `variable?`
@@ -440,6 +459,24 @@ mod tests {
             .expect_no_offenses(indoc! {r#"
                 Gem::Specification.new do |spec|
                   spec.required_ruby_version = @version
+                end
+            "#});
+    }
+
+    #[test]
+    fn dynamic_nested_required_ruby_version_chain_is_skipped() {
+        // Regression for a quadratic descendant scan: each outer assignment's
+        // RHS contains the remaining chained assignments, so dynamic detection
+        // must short-circuit instead of materializing every overlapping
+        // descendant subtree per match. Behaviorally each non-innermost RHS is
+        // an inner `required_ruby_version=` send whose receiver `spec` is a
+        // block-arg lvar → dynamic → skip. Only the innermost RHS is a bare
+        // string, and its value matches the target here → no offense.
+        test::<RequiredRubyVersion>()
+            .with_target_ruby_version(2, 5)
+            .expect_no_offenses(indoc! {r#"
+                Gem::Specification.new do |spec|
+                  spec.required_ruby_version = spec.required_ruby_version = spec.required_ruby_version = '>= 2.5.0'
                 end
             "#});
     }
