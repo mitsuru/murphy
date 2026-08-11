@@ -156,9 +156,6 @@ impl InvertibleUnlessCondition {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    let opts = cx.options_or_default::<InvertibleUnlessConditionOptions>();
-    let inverse_methods = effective_inverse_methods(&opts);
-
     // Only `unless`.
     if !cx.is_unless(node) {
         return;
@@ -171,6 +168,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     };
     let cond = *cond;
+
+    let opts = cx.options_or_default::<InvertibleUnlessConditionOptions>();
+    let inverse_methods = effective_inverse_methods(&opts);
 
     if !invertible(cond, cx, &inverse_methods) {
         return;
