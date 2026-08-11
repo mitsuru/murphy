@@ -11,9 +11,10 @@
 //! notes: >
 //!   Initial v1 port covers safe navigation on `self`, non-nil literals,
 //!   constants, guaranteed conversion receivers, and configured nil-safe
-//!   predicate methods in conditions. RuboCop's InferNonNilReceiver,
-//!   AllowedMethods/AdditionalNilMethods options, `||` default-literal removal,
-//!   and broader data-flow analysis are documented v1 gaps.
+//!   predicate methods in conditions. `AllowedMethods` is additive to the
+//!   intrinsic nil-safe methods; RuboCop's InferNonNilReceiver,
+//!   AdditionalNilMethods option, `||` default-literal removal, and broader
+//!   data-flow analysis are documented v1 gaps.
 //! ```
 
 use murphy_plugin_api::{cop, CopOptions, Cx, NodeId, NodeKind, Range};
@@ -168,16 +169,16 @@ mod tests {
     fn flags_configured_nil_safe_method_in_condition() {
         test::<RedundantSafeNavigation>()
             .with_options(&RedundantSafeNavigationOptions {
-                allowed_methods: vec!["presence_in".to_string()],
+                allowed_methods: vec!["presence".to_string()],
             })
             .expect_correction(
                 indoc! {r#"
-                    if attrs&.presence_in([1])
+                    if attrs&.presence
                             ^^ Redundant safe navigation detected, use `.` instead.
                       work
                     end
                 "#},
-                "if attrs.presence_in([1])\n  work\nend\n",
+                "if attrs.presence\n  work\nend\n",
             );
     }
 
@@ -185,7 +186,7 @@ mod tests {
     fn configured_methods_do_not_remove_intrinsic_nil_safe_methods() {
         test::<RedundantSafeNavigation>()
             .with_options(&RedundantSafeNavigationOptions {
-                allowed_methods: vec!["presence_in".to_string()],
+                allowed_methods: vec!["presence".to_string()],
             })
             .expect_correction(
                 indoc! {r#"
