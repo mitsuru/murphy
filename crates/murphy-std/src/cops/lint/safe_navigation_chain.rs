@@ -23,7 +23,7 @@
 //!   user-configured `AllowedMethods` is a documented gap.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
+use murphy_plugin_api::{cop, CopOptions, Cx, NodeId, NodeKind, Range};
 
 const MSG: &str = "Do not chain ordinary method call after safe navigation operator.";
 
@@ -59,6 +59,12 @@ const NIL_SAFE_METHODS: &[&str] = &[
     "itself",
 ];
 
+#[derive(CopOptions)]
+pub struct SafeNavigationChainOptions {
+    #[option(name = "AllowedMethods", default = [])]
+    pub allowed_methods: Vec<String>,
+}
+
 #[derive(Default)]
 pub struct SafeNavigationChain;
 
@@ -67,7 +73,7 @@ pub struct SafeNavigationChain;
     description = "Avoid ordinary method calls after safe navigation.",
     default_severity = "warning",
     default_enabled = true,
-    options = NoOptions,
+    options = SafeNavigationChainOptions,
 )]
 impl SafeNavigationChain {
     #[on_node(kind = "send")]
@@ -81,7 +87,11 @@ impl SafeNavigationChain {
         if !matches!(cx.kind(receiver), NodeKind::Csend { .. }) {
             return;
         }
-        if cx.method_name(node).is_some_and(is_nil_safe_method) {
+        let opts = cx.options_or_default::<SafeNavigationChainOptions>();
+        if cx
+            .method_name(node)
+            .is_some_and(|method| is_nil_safe_method(method, &opts))
+        {
             return;
         }
 
@@ -105,15 +115,16 @@ impl SafeNavigationChain {
     }
 }
 
-fn is_nil_safe_method(method: &str) -> bool {
+fn is_nil_safe_method(method: &str, opts: &SafeNavigationChainOptions) -> bool {
     NIL_SAFE_METHODS.contains(&method)
+        || opts.allowed_methods.iter().any(|allowed| allowed == method)
 }
 
 murphy_plugin_api::submit_cop!(SafeNavigationChain);
 
 #[cfg(test)]
 mod tests {
-    use super::SafeNavigationChain;
+    use super::{SafeNavigationChain, SafeNavigationChainOptions};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -173,5 +184,23 @@ mod tests {
             "#},
             "x&.foo&.presence_in([1])\n",
         );
+    }
+
+    #[test]
+    fn accepts_configured_presence_in_after_safe_navigation() {
+        test::<SafeNavigationChain>()
+            .with_options(&SafeNavigationChainOptions {
+                allowed_methods: vec!["presence_in".to_string()],
+            })
+            .expect_no_offenses("x&.foo.presence_in([1])\n");
+    }
+
+    #[test]
+    fn accepts_builtin_nil_predicate_with_configured_methods() {
+        test::<SafeNavigationChain>()
+            .with_options(&SafeNavigationChainOptions {
+                allowed_methods: vec!["presence_in".to_string()],
+            })
+            .expect_no_offenses("x&.foo.nil?\n");
     }
 }
