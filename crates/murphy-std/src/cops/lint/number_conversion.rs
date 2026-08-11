@@ -10,9 +10,9 @@
 //! gap_issues: []
 //! notes: >
 //!   Core checks for to_i, to_f, to_c, to_r on non-numeric receivers.
-//!   AllowedMethods and AllowedClasses options are supported.
-//!   Symbol forms (&:to_i, try(:to_f), send(:to_c)), AllowedPatterns (regex),
-//!   and autocorrect are v1 gaps.
+//!   AllowedMethods, AllowedClasses, and AllowedPatterns options are supported.
+//!   Symbol forms (&:to_i, try(:to_f), send(:to_c)) and autocorrect are v1
+//!   gaps.
 //! ```
 //!
 //! ## Matched shapes
@@ -31,6 +31,8 @@
 //!   may safely call number conversion methods.
 //! - `AllowedClasses` (default: `["Time", "DateTime"]`) — classes whose
 //!   instances may safely call number conversion methods.
+//! - `AllowedPatterns` (default: `[]`) — regexes matching method names whose
+//!   return values may safely call number conversion methods.
 //!
 //! ## Autocorrect
 //! None (v1 gap). RuboCop corrects to the corresponding Kernel constructor.
@@ -50,6 +52,9 @@ pub struct Options {
         description = "Methods whose return values may safely call number conversion methods."
     )]
     pub allowed_methods: Vec<String>,
+
+    #[option(name = "AllowedPatterns", default = [])]
+    pub allowed_patterns: Vec<String>,
 
     #[option(
         name = "AllowedClasses",
@@ -110,6 +115,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
             }
             // Skip if receiver method is in AllowedMethods
             if opts.allowed_methods.iter().any(|m| m == receiver_method) {
+                return;
+            }
+            if cx.matches_any_pattern(receiver_method, &opts.allowed_patterns) {
                 return;
             }
         }
@@ -314,6 +322,31 @@ mod tests {
     fn flags_non_allowed_method() {
         let opts = Options {
             allowed_methods: vec!["minutes".to_string()],
+            ..Default::default()
+        };
+        test::<NumberConversion>()
+            .with_options(&opts)
+            .expect_offense(indoc! {r#"
+                10.hours.to_i
+                ^^^^^^^^^^^^^ Replace unsafe number conversion with number class parsing, instead of using `10.hours.to_i`, use stricter `Integer(10.hours, 10)`.
+            "#});
+    }
+
+    #[test]
+    fn accepts_allowed_method_pattern() {
+        let opts = Options {
+            allowed_patterns: vec!["\\Amin".to_string()],
+            ..Default::default()
+        };
+        test::<NumberConversion>()
+            .with_options(&opts)
+            .expect_no_offenses("10.minutes.to_i\n");
+    }
+
+    #[test]
+    fn flags_method_not_matching_allowed_pattern() {
+        let opts = Options {
+            allowed_patterns: vec!["\\Amin".to_string()],
             ..Default::default()
         };
         test::<NumberConversion>()
