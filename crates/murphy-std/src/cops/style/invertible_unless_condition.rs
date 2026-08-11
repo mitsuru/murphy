@@ -10,8 +10,8 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Murphy handles: `!` negation, `InverseMethods` map (hardcoded default
-//!   matching RuboCop's yml default; not configurable in v1), `&&`/`||`
+//!   Murphy handles: `!` negation, configurable `InverseMethods` (overlaid
+//!   onto RuboCop's yml defaults), `&&`/`||`
 //!   logical operators (and/or keyword forms invert to &&/|| in message).
 //!   Autocorrect: replaces `unless` keyword with `if`; replaces each
 //!   invertible send selector with its inverse; replaces each and/or
@@ -19,7 +19,6 @@
 //!   Offense range: first source line of the node (consistent with sibling
 //!   cops like Style/NegatedUnless and Style/UnlessElse).
 //!   Parity gaps vs RuboCop:
-//!   - `InverseMethods` is not configurable; hardcoded to RuboCop's yml default.
 //!   - `begin` node (parenthesized condition like `unless (x != y)`) parses
 //!     as `NodeKind::Unknown` in Murphy's arena AST; offense silently skipped.
 //!   - `and`/`or` keyword operators invert to `&&`/`||` in the message and
@@ -44,8 +43,11 @@
 //! - For InverseMethods: replace selector with inverse method name
 //! - For `&&`/`||` (`and`/`or`): replace operator token with inverse
 
+use std::collections::BTreeMap;
+
 use murphy_plugin_api::{
-    Cx, NodeId, NodeKind, NodeList, NoOptions, OptNodeId, Range, SourceTokenKind, Symbol, cop,
+    ConfigError, CopOptions, Cx, NodeId, NodeKind, NodeList, OptNodeId, Range, SourceTokenKind,
+    Symbol, cop,
 };
 
 /// RuboCop's default InverseMethods map (bidirectional).
@@ -64,11 +66,76 @@ static INVERSE_METHODS: &[(&str, &str)] = &[
     ("odd?", "even?"),
 ];
 
-fn inverse_of(method: &str) -> Option<&'static str> {
+fn built_in_inverse_methods() -> BTreeMap<String, String> {
     INVERSE_METHODS
         .iter()
-        .find(|(k, _)| *k == method)
-        .map(|(_, v)| *v)
+        .map(|(method, inverse)| ((*method).to_string(), (*inverse).to_string()))
+        .collect()
+}
+
+/// Options for `Style/InvertibleUnlessCondition`.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct InvertibleUnlessConditionOptions {
+    pub inverse_methods: BTreeMap<String, String>,
+}
+
+impl CopOptions for InvertibleUnlessConditionOptions {
+    fn from_config_json(bytes: &[u8]) -> Result<Self, ConfigError> {
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(ConfigError::parse)?;
+        let obj = value.as_object().ok_or_else(ConfigError::not_an_object)?;
+
+        let Some(methods) = obj.get("InverseMethods") else {
+            return Ok(Self::default());
+        };
+        let methods = methods
+            .as_object()
+            .ok_or_else(|| ConfigError::type_mismatch("InverseMethods", "object"))?;
+
+        let mut inverse_methods = BTreeMap::new();
+        for (method, inverse) in methods {
+            let inverse = inverse.as_str().ok_or_else(|| {
+                ConfigError::type_mismatch(format!("InverseMethods.{method}"), "string")
+            })?;
+            inverse_methods.insert(
+                method.trim_start_matches(':').to_owned(),
+                inverse.trim_start_matches(':').to_owned(),
+            );
+        }
+
+        Ok(Self { inverse_methods })
+    }
+
+    fn to_config_json(&self) -> String {
+        let methods = self
+            .inverse_methods
+            .iter()
+            .map(|(method, inverse)| {
+                (
+                    method.clone(),
+                    serde_json::Value::String(inverse.clone()),
+                )
+            })
+            .collect();
+        let mut config = serde_json::Map::new();
+        config.insert(
+            "InverseMethods".to_owned(),
+            serde_json::Value::Object(methods),
+        );
+        serde_json::to_string(&serde_json::Value::Object(config)).unwrap_or_default()
+    }
+}
+
+fn effective_inverse_methods(
+    opts: &InvertibleUnlessConditionOptions,
+) -> BTreeMap<String, String> {
+    let mut methods = built_in_inverse_methods();
+    methods.extend(opts.inverse_methods.clone());
+    methods
+}
+
+fn inverse_of<'a>(method: &str, inverse_methods: &'a BTreeMap<String, String>) -> Option<&'a str> {
+    inverse_methods.get(method).map(String::as_str)
 }
 
 #[derive(Default)]
@@ -79,7 +146,7 @@ pub struct InvertibleUnlessCondition;
     description = "Favor `if` with inverted condition over `unless`.",
     default_severity = "warning",
     default_enabled = false,
-    options = NoOptions,
+    options = InvertibleUnlessConditionOptions,
 )]
 impl InvertibleUnlessCondition {
     #[on_node(kind = "if")]
@@ -89,6 +156,9 @@ impl InvertibleUnlessCondition {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    let opts = cx.options_or_default::<InvertibleUnlessConditionOptions>();
+    let inverse_methods = effective_inverse_methods(&opts);
+
     // Only `unless`.
     if !cx.is_unless(node) {
         return;
@@ -102,11 +172,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     };
     let cond = *cond;
 
-    if !invertible(cond, cx) {
+    if !invertible(cond, cx, &inverse_methods) {
         return;
     }
 
-    let preferred_cond = preferred_condition(cond, cx);
+    let preferred_cond = preferred_condition(cond, cx, &inverse_methods);
     let kw_loc = cx.if_keyword_loc(node);
     let current_kw = cx.raw_source(kw_loc);
     let current_cond_src = cx.raw_source(cx.range(cond));
@@ -136,11 +206,11 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     }
 
     // Autocorrect: invert the condition.
-    autocorrect_condition(cond, cx);
+    autocorrect_condition(cond, cx, &inverse_methods);
 }
 
 /// Returns true if the condition is invertible.
-fn invertible(node: NodeId, cx: &Cx<'_>) -> bool {
+fn invertible(node: NodeId, cx: &Cx<'_>, inverse_methods: &BTreeMap<String, String>) -> bool {
     match cx.kind(node) {
         NodeKind::Send { method, args, .. } => {
             let m = cx.symbol_str(*method);
@@ -154,10 +224,10 @@ fn invertible(node: NodeId, cx: &Cx<'_>) -> bool {
                     && is_class_inheritance_check(first_arg, cx) {
                         return false;
                     }
-            inverse_of(m).is_some()
+            inverse_of(m, inverse_methods).is_some()
         }
         NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
-            invertible(*lhs, cx) && invertible(*rhs, cx)
+            invertible(*lhs, cx, inverse_methods) && invertible(*rhs, cx, inverse_methods)
         }
         _ => false,
     }
@@ -175,19 +245,23 @@ fn is_class_inheritance_check(arg: NodeId, cx: &Cx<'_>) -> bool {
 }
 
 /// Build the preferred (inverted) condition string for the offense message.
-fn preferred_condition(node: NodeId, cx: &Cx<'_>) -> String {
+fn preferred_condition(
+    node: NodeId,
+    cx: &Cx<'_>,
+    inverse_methods: &BTreeMap<String, String>,
+) -> String {
     match cx.kind(node) {
         NodeKind::Send { receiver, method, args } => {
-            build_send_condition(node, *receiver, *method, *args, cx)
+            build_send_condition(node, *receiver, *method, *args, cx, inverse_methods)
         }
         NodeKind::And { lhs, rhs } => {
-            let lhs_str = preferred_condition(*lhs, cx);
-            let rhs_str = preferred_condition(*rhs, cx);
+            let lhs_str = preferred_condition(*lhs, cx, inverse_methods);
+            let rhs_str = preferred_condition(*rhs, cx, inverse_methods);
             format!("{lhs_str} || {rhs_str}")
         }
         NodeKind::Or { lhs, rhs } => {
-            let lhs_str = preferred_condition(*lhs, cx);
-            let rhs_str = preferred_condition(*rhs, cx);
+            let lhs_str = preferred_condition(*lhs, cx, inverse_methods);
+            let rhs_str = preferred_condition(*rhs, cx, inverse_methods);
             format!("{lhs_str} && {rhs_str}")
         }
         _ => cx.raw_source(cx.range(node)).to_owned(),
@@ -200,6 +274,7 @@ fn build_send_condition(
     method: Symbol,
     args: NodeList,
     cx: &Cx<'_>,
+    inverse_methods: &BTreeMap<String, String>,
 ) -> String {
     let m = cx.symbol_str(method);
     let recv_src = receiver.get().map(|r| cx.raw_source(cx.range(r)));
@@ -210,7 +285,7 @@ fn build_send_condition(
         return recv_src.unwrap_or("").to_owned();
     }
 
-    let inverse = inverse_of(m).unwrap_or(m);
+    let inverse = inverse_of(m, inverse_methods).unwrap_or(m);
 
     if arg_list.is_empty() {
         // Predicate or no-arg method: `recv.method?` -> `recv.inverse?`
@@ -247,11 +322,11 @@ fn build_send_condition(
 }
 
 /// Apply autocorrect to the condition node (recursively for And/Or).
-fn autocorrect_condition(node: NodeId, cx: &Cx<'_>) {
+fn autocorrect_condition(node: NodeId, cx: &Cx<'_>, inverse_methods: &BTreeMap<String, String>) {
     match cx.kind(node) {
         NodeKind::Send { method, .. } => {
             let method = *method;
-            autocorrect_send(node, method, cx);
+            autocorrect_send(node, method, cx, inverse_methods);
         }
         NodeKind::And { lhs, rhs } | NodeKind::Or { lhs, rhs } => {
             let (lhs, rhs) = (*lhs, *rhs);
@@ -261,14 +336,19 @@ fn autocorrect_condition(node: NodeId, cx: &Cx<'_>) {
             if let Some(op_range) = find_logical_op_token(lhs, rhs, cx) {
                 cx.emit_edit(op_range, inverse_op);
             }
-            autocorrect_condition(lhs, cx);
-            autocorrect_condition(rhs, cx);
+            autocorrect_condition(lhs, cx, inverse_methods);
+            autocorrect_condition(rhs, cx, inverse_methods);
         }
         _ => {}
     }
 }
 
-fn autocorrect_send(node: NodeId, method: Symbol, cx: &Cx<'_>) {
+fn autocorrect_send(
+    node: NodeId,
+    method: Symbol,
+    cx: &Cx<'_>,
+    inverse_methods: &BTreeMap<String, String>,
+) {
     let m = cx.symbol_str(method);
     let selector = cx.selector(node);
     if selector == Range::ZERO {
@@ -277,7 +357,7 @@ fn autocorrect_send(node: NodeId, method: Symbol, cx: &Cx<'_>) {
     if m == "!" {
         // Remove `!` selector entirely.
         cx.emit_edit(selector, "");
-    } else if let Some(inverse) = inverse_of(m) {
+    } else if let Some(inverse) = inverse_of(m, inverse_methods) {
         // Replace method name with its inverse.
         cx.emit_edit(selector, inverse);
     }
@@ -313,7 +393,8 @@ fn find_logical_op_token(lhs: NodeId, rhs: NodeId, cx: &Cx<'_>) -> Option<Range>
 
 #[cfg(test)]
 mod tests {
-    use super::InvertibleUnlessCondition;
+    use super::{InvertibleUnlessCondition, InvertibleUnlessConditionOptions};
+    use murphy_plugin_api::CopOptions;
     use murphy_plugin_api::test_support::{indoc, test};
 
     // ----- Simple negation -----
@@ -330,6 +411,47 @@ mod tests {
     }
 
     // ----- InverseMethods -----
+
+    #[test]
+    fn decodes_colon_prefixed_inverse_methods() {
+        let opts = InvertibleUnlessConditionOptions::from_config_json(
+            br#"{"InverseMethods":{":present?":":blank?"}}"#,
+        )
+        .expect("valid config");
+
+        assert_eq!(
+            opts.inverse_methods.get("present?"),
+            Some(&"blank?".to_string())
+        );
+    }
+
+    #[test]
+    fn configured_inverse_methods_preserve_built_in_methods() {
+        let opts = InvertibleUnlessConditionOptions::from_config_json(
+            br#"{"InverseMethods":{":present?":":blank?"}}"#,
+        )
+        .expect("valid config");
+
+        test::<InvertibleUnlessCondition>()
+            .with_options(&opts)
+            .expect_correction(
+                indoc! {"
+                    foo unless x.present?
+                    ^^^^^^^^^^^^^^^^^^^^^ Prefer `if x.blank?` over `unless x.present?`.
+                "},
+                "foo if x.blank?\n",
+            );
+
+        test::<InvertibleUnlessCondition>()
+            .with_options(&opts)
+            .expect_correction(
+                indoc! {"
+                    foo unless x.even?
+                    ^^^^^^^^^^^^^^^^^^ Prefer `if x.odd?` over `unless x.even?`.
+                "},
+                "foo if x.odd?\n",
+            );
+    }
 
     #[test]
     fn flags_unless_not_equal() {
