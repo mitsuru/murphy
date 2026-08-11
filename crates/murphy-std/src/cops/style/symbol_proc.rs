@@ -652,6 +652,23 @@ mod tests {
         test::<SymbolProc>().expect_no_offenses("define_method(:foo) { |foo| foo.bar }\n");
     }
 
+    #[test]
+    fn accepts_rails_allowed_methods() {
+        use super::Options;
+
+        test::<SymbolProc>()
+            .with_options(&Options {
+                allow_methods_with_arguments: false,
+                allow_comments: false,
+                allowed_methods: vec!["mail".to_string(), "respond_to".to_string()],
+                allowed_patterns: vec![],
+            })
+            .expect_no_offenses(indoc! {"
+                mail { |message| message.deliver }
+                respond_to { |format| format.html }
+            "});
+    }
+
     // --- Unsafe hash/array usage ---
 
     #[test]
