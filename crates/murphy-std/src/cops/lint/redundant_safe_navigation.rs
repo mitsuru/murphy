@@ -16,7 +16,7 @@
 //!   and broader data-flow analysis are documented v1 gaps.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, Range};
+use murphy_plugin_api::{cop, CopOptions, Cx, NodeId, NodeKind, Range};
 
 const MSG: &str = "Redundant safe navigation detected, use `.` instead.";
 const NIL_SAFE_METHODS: &[&str] = &[
@@ -29,6 +29,12 @@ const NIL_SAFE_METHODS: &[&str] = &[
 ];
 const GUARANTEED_INSTANCE_METHODS: &[&str] = &["to_s", "to_i", "to_f", "to_a", "to_h"];
 
+#[derive(CopOptions)]
+pub struct RedundantSafeNavigationOptions {
+    #[option(name = "AllowedMethods", default = [])]
+    pub allowed_methods: Vec<String>,
+}
+
 #[derive(Default)]
 pub struct RedundantSafeNavigation;
 
@@ -37,7 +43,7 @@ pub struct RedundantSafeNavigation;
     description = "Checks for redundant safe navigation calls.",
     default_severity = "warning",
     default_enabled = true,
-    options = NoOptions,
+    options = RedundantSafeNavigationOptions,
 )]
 impl RedundantSafeNavigation {
     #[on_node(kind = "csend")]
@@ -45,7 +51,8 @@ impl RedundantSafeNavigation {
         let NodeKind::Csend { receiver, .. } = *cx.kind(node) else {
             return;
         };
-        if !is_redundant_safe_navigation(node, receiver, cx) {
+        let opts = cx.options_or_default::<RedundantSafeNavigationOptions>();
+        if !is_redundant_safe_navigation(node, receiver, &opts, cx) {
             return;
         }
 
@@ -58,11 +65,16 @@ impl RedundantSafeNavigation {
     }
 }
 
-fn is_redundant_safe_navigation(node: NodeId, receiver: NodeId, cx: &Cx<'_>) -> bool {
+fn is_redundant_safe_navigation(
+    node: NodeId,
+    receiver: NodeId,
+    opts: &RedundantSafeNavigationOptions,
+    cx: &Cx<'_>,
+) -> bool {
     let receiver = unwrap_begin(receiver, cx);
     assume_receiver_instance_exists(receiver, cx)
         || guaranteed_instance_receiver(receiver, cx)
-        || (is_nil_safe_method(cx.method_name(node)) && is_condition(node, cx))
+        || (is_nil_safe_method(cx.method_name(node), opts) && is_condition(node, cx))
 }
 
 fn unwrap_begin(mut node: NodeId, cx: &Cx<'_>) -> NodeId {
@@ -92,8 +104,11 @@ fn guaranteed_instance_receiver(receiver: NodeId, cx: &Cx<'_>) -> bool {
             .is_some_and(|method| GUARANTEED_INSTANCE_METHODS.contains(&method))
 }
 
-fn is_nil_safe_method(method: Option<&str>) -> bool {
-    method.is_some_and(|method| NIL_SAFE_METHODS.contains(&method))
+fn is_nil_safe_method(method: Option<&str>, opts: &RedundantSafeNavigationOptions) -> bool {
+    method.is_some_and(|method| {
+        NIL_SAFE_METHODS.contains(&method)
+            || opts.allowed_methods.iter().any(|allowed| allowed == method)
+    })
 }
 
 fn is_condition(node: NodeId, cx: &Cx<'_>) -> bool {
@@ -111,7 +126,7 @@ murphy_plugin_api::submit_cop!(RedundantSafeNavigation);
 
 #[cfg(test)]
 mod tests {
-    use super::RedundantSafeNavigation;
+    use super::{RedundantSafeNavigation, RedundantSafeNavigationOptions};
     use murphy_plugin_api::test_support::{indoc, test};
 
     #[test]
@@ -147,6 +162,40 @@ mod tests {
             "#},
             "if attrs.respond_to?(:[])\n  work\nend\n",
         );
+    }
+
+    #[test]
+    fn flags_configured_nil_safe_method_in_condition() {
+        test::<RedundantSafeNavigation>()
+            .with_options(&RedundantSafeNavigationOptions {
+                allowed_methods: vec!["presence_in".to_string()],
+            })
+            .expect_correction(
+                indoc! {r#"
+                    if attrs&.presence_in([1])
+                            ^^ Redundant safe navigation detected, use `.` instead.
+                      work
+                    end
+                "#},
+                "if attrs.presence_in([1])\n  work\nend\n",
+            );
+    }
+
+    #[test]
+    fn configured_methods_do_not_remove_intrinsic_nil_safe_methods() {
+        test::<RedundantSafeNavigation>()
+            .with_options(&RedundantSafeNavigationOptions {
+                allowed_methods: vec!["presence_in".to_string()],
+            })
+            .expect_correction(
+                indoc! {r#"
+                    if attrs&.respond_to?(:[])
+                            ^^ Redundant safe navigation detected, use `.` instead.
+                      work
+                    end
+                "#},
+                "if attrs.respond_to?(:[])\n  work\nend\n",
+            );
     }
 
     #[test]
