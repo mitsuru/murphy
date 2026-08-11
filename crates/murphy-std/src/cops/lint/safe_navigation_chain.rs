@@ -21,7 +21,7 @@
 //!   `blank?` / `present?` / `presence` / `try` / `try!`; `presence_in` is
 //!   *not* intrinsically nil-safe and is flagged unless configured in
 //!   `AllowedMethods` (murphy-wcdv). Configured `AllowedMethods` entries are
-//!   additive to the hardcoded list.
+//!   merged with the intrinsic nil-safe defaults.
 //! ```
 
 use murphy_plugin_api::{cop, CopOptions, Cx, NodeId, NodeKind, Range};

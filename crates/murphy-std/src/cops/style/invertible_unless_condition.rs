@@ -10,8 +10,8 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Murphy handles: `!` negation, configurable `InverseMethods` (overlaid
-//!   onto RuboCop's yml defaults), `&&`/`||`
+//!   Murphy handles: `!` negation, configurable `InverseMethods` merged with
+//!   intrinsic defaults, `&&`/`||`
 //!   logical operators (and/or keyword forms invert to &&/|| in message).
 //!   Autocorrect: replaces `unless` keyword with `if`; replaces each
 //!   invertible send selector with its inverse; replaces each and/or

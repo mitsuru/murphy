@@ -11,8 +11,8 @@
 //! notes: >
 //!   Initial v1 port covers safe navigation on `self`, non-nil literals,
 //!   constants, guaranteed conversion receivers, and configured nil-safe
-//!   predicate methods in conditions. `AllowedMethods` is additive to the
-//!   intrinsic nil-safe methods; RuboCop's InferNonNilReceiver,
+//!   predicate methods in conditions. Configured `AllowedMethods` entries are
+//!   merged with the intrinsic nil-safe defaults; RuboCop's InferNonNilReceiver,
 //!   AdditionalNilMethods option, `||` default-literal removal, and broader
 //!   data-flow analysis are documented v1 gaps.
 //! ```
