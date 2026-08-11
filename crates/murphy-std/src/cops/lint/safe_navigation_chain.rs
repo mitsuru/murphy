@@ -17,10 +17,11 @@
 //!
 //!   `NIL_SAFE_METHODS` approximates RuboCop's `nil_methods` (the `NilMethods`
 //!   mixin: `nil.methods` in an ActiveSupport-loaded runtime, plus the cop's
-//!   `AllowedMethods`). It includes ActiveSupport's nil-safe `blank?` /
-//!   `present?` / `presence` / `try` / `try!`; `presence_in` is *not* nil-safe
-//!   and is correctly still flagged (murphy-wcdv). The list is hardcoded — a
-//!   user-configured `AllowedMethods` is a documented gap.
+//!   configured `AllowedMethods`). It includes ActiveSupport's nil-safe
+//!   `blank?` / `present?` / `presence` / `try` / `try!`; `presence_in` is
+//!   *not* intrinsically nil-safe and is flagged unless configured in
+//!   `AllowedMethods` (murphy-wcdv). Configured `AllowedMethods` entries are
+//!   additive to the hardcoded list.
 //! ```
 
 use murphy_plugin_api::{cop, CopOptions, Cx, NodeId, NodeKind, Range};
