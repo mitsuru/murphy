@@ -91,6 +91,14 @@ fn accepts_modifier_wrapped_def_instance() {
 }
 
 #[test]
+fn accepts_modifier_wrapped_def_after_inline_statement() {
+    // The modifier is not at the start of the line, so measuring the body
+    // against its column would produce a negative indentation width.
+    test::<IndentationWidth>()
+        .expect_no_offenses("class Foo\n  x = 1; private def foo\n    bar\n  end\nend\n");
+}
+
+#[test]
 fn flags_misindented_modifier_wrapped_def_body() {
     // The modifier base still catches genuine misindentation: `bar` is indented
     // 4 past the `private` column, not 2.

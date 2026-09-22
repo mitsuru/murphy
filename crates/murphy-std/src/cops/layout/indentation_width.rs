@@ -238,6 +238,11 @@ fn check_indentation(
     if base == Range::ZERO {
         return;
     }
+    // Column deltas assume the base starts its line. A mid-line base such as
+    // `private` in `x = 1; private def foo` can make the delta negative.
+    if !begins_its_line(cx, base.start) {
+        return;
+    }
     let Some(body) = body.get() else {
         return;
     };
