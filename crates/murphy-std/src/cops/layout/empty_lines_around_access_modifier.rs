@@ -130,6 +130,8 @@ struct Context {
     class_last_line: Option<u32>,
     /// 0-based first line of the enclosing block, or `None`.
     block_line: Option<u32>,
+    /// 0-based last line of the enclosing block, or `None`.
+    block_last_line: Option<u32>,
 }
 
 impl Context {
@@ -141,6 +143,7 @@ impl Context {
         let mut class_first_line = None;
         let mut class_last_line = None;
         let mut block_line = None;
+        let mut block_last_line = None;
 
         let mut current = cx.parent(node);
         while let Some(ancestor) = current.get() {
@@ -166,7 +169,9 @@ impl Context {
                         Some(line_of(cx.range(ancestor).end.saturating_sub(1), cx));
                 }
                 _ if cx.is_any_block_type(ancestor) && block_line.is_none() => {
-                    block_line = Some(line_of(cx.range(ancestor).start, cx));
+                    let range = cx.range(ancestor);
+                    block_line = Some(line_of(range.start, cx));
+                    block_last_line = Some(line_of(range.end.saturating_sub(1), cx));
                 }
                 _ => {}
             }
@@ -179,6 +184,7 @@ impl Context {
             class_first_line,
             class_last_line,
             block_line,
+            block_last_line,
         }
     }
 }
@@ -220,7 +226,9 @@ fn allowed_only_before_style(node: NodeId, ctx: &Context, cx: &Cx<'_>) -> bool {
 
 /// `empty_lines_around?` — blank before and after.
 fn empty_lines_around(ctx: &Context, cx: &Cx<'_>) -> bool {
-    previous_line_empty(ctx, cx) && next_line_empty(ctx, cx)
+    // The after-correction is suppressed at block tails, so do not leave an
+    // around-style offense that cannot be fixed without inserting before `end`.
+    previous_line_empty(ctx, cx) && (block_end(ctx) || next_line_empty(ctx, cx))
 }
 
 /// `previous_line_empty?(send_line)` — the nearest non-comment line above the
@@ -278,6 +286,12 @@ fn block_start(ctx: &Context) -> bool {
 /// `body_end?(line)` — the modifier is the last line of the class/module body.
 fn body_end(ctx: &Context) -> bool {
     ctx.class_last_line
+        .is_some_and(|last| ctx.send_last_line == last.saturating_sub(1))
+}
+
+/// `block_end?(line)` — the modifier is the last line of the enclosing block.
+fn block_end(ctx: &Context) -> bool {
+    ctx.block_last_line
         .is_some_and(|last| ctx.send_last_line == last.saturating_sub(1))
 }
 
@@ -537,6 +551,27 @@ mod tests {
         assert_eq!(offenses.len(), 1, "expected 1 offense, got {offenses:?}");
     }
 
+    #[test]
+    fn around_style_block_tail_correction_reaches_fixpoint() {
+        let src = "Class.new do\n  def bar; end\n  private\nend\n";
+        let corrected = "Class.new do\n  def bar; end\n\n  private\nend\n";
+        let result = run_cop_with_edits::<EmptyLinesAroundAccessModifier>(src);
+        assert_eq!(result.offenses.len(), 1, "got {:?}", result.offenses);
+        assert_eq!(result.edits.len(), 1, "got {:?}", result.edits);
+        let mut actual = src.to_owned();
+        for edit in result.edits.iter().rev() {
+            actual.replace_range(
+                edit.range.start as usize..edit.range.end as usize,
+                &edit.replacement,
+            );
+        }
+        assert_eq!(actual, corrected);
+        assert!(
+            run_cop::<EmptyLinesAroundAccessModifier>(&actual).is_empty(),
+            "correction should reach a fixpoint"
+        );
+    }
+
     // only_before style.
 
     fn only_before_opts() -> super::EmptyLinesAroundAccessModifierOptions {
@@ -566,6 +601,18 @@ mod tests {
         );
         assert_eq!(offenses.len(), 1, "expected 1 offense, got {offenses:?}");
         assert_eq!(offenses[0].message, "Remove a blank line after `private`.");
+    }
+
+    #[test]
+    fn only_before_block_tail_reports_missing_before_blank() {
+        let offenses = murphy_plugin_api::test_support::run_cop_with_options::<
+            EmptyLinesAroundAccessModifier,
+        >("Class.new do\n  def bar; end\n  module_function\nend\n", &only_before_opts());
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Keep a blank line before `module_function`."
+        );
     }
 
     /// Regression (Gemini PR #377): a non-special modifier at body end with a
