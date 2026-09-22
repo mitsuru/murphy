@@ -1,4 +1,4 @@
-//! 再帰ポストオーダー DFS による prism→arena 変換。
+//! ポストオーダー DFS による prism→arena 変換。深い receiver/path chain は反復処理する。
 
 use murphy_ast::{
     Ast, AstBuilder, MagicComment, MagicCommentKind, NodeId, NodeKind, NodeList, OptNodeId, Range,
@@ -2030,10 +2030,107 @@ impl Translator {
     /// 場合のみ args 末尾に `BlockPass` を付ける。`{ }`/`do end` の `BlockNode` は
     /// Task 6 で呼び出し側が `Block` ラップする（本ヘルパは素の Send/Csend を返す）。
     fn translate_call(&mut self, call: &prism::CallNode<'_>, range: Range) -> NodeId {
+        if let Some(id) = self.translate_receiver_only_call_chain(call, range) {
+            return id;
+        }
+        self.translate_call_recursive(call, range)
+    }
+
+    /// Translate receiver-only calls iteratively. A long `Java::a::b::...`
+    /// chain is represented by Prism as nested `CallNode` receivers; recursively
+    /// translating those receivers can overflow the Rust stack. Keep every Send
+    /// node and its metadata, but build the chain from the base receiver out.
+    fn translate_receiver_only_call_chain(
+        &mut self,
+        call: &prism::CallNode<'_>,
+        range: Range,
+    ) -> Option<NodeId> {
+        struct CallFrame {
+            method: murphy_ast::Symbol,
+            args: NodeList,
+            range: Range,
+            selector_range: Range,
+            safe_navigation: bool,
+            closing: Option<Range>,
+            call_operator: Option<Range>,
+        }
+
+        let mut frames = Vec::new();
+        let mut current = call.as_node();
+        while let Some(current_call) = current.as_call_node() {
+            let Some(receiver) = current_call.receiver() else {
+                break;
+            };
+            let has_arguments = current_call
+                .arguments()
+                .is_some_and(|args| args.arguments().iter().next().is_some());
+            if has_arguments || current_call.block().is_some() {
+                break;
+            }
+
+            let call_range = if frames.is_empty() {
+                range
+            } else {
+                Self::range(&current_call.location())
+            };
+            let method = self.sym(&current_call.name());
+            // The recursive translator creates each empty args list before it
+            // descends into the receiver. Keep that side-table ordering here.
+            let args = self.builder.push_list(&[]);
+            frames.push(CallFrame {
+                method,
+                args,
+                range: call_range,
+                selector_range: Self::opt_loc_range(current_call.message_loc()),
+                safe_navigation: current_call.is_safe_navigation(),
+                closing: current_call.closing_loc().map(|loc| Self::range(&loc)),
+                call_operator: current_call
+                    .call_operator_loc()
+                    .map(|loc| Self::range(&loc)),
+            });
+            current = receiver;
+        }
+
+        if frames.is_empty() {
+            return None;
+        }
+
+        let mut receiver = self.translate_node(&current);
+        for frame in frames.into_iter().rev() {
+            let receiver_id = receiver;
+            let kind = if frame.safe_navigation {
+                NodeKind::Csend {
+                    receiver: receiver_id,
+                    method: frame.method,
+                    args: frame.args,
+                }
+            } else {
+                NodeKind::Send {
+                    receiver: OptNodeId::some(receiver_id),
+                    method: frame.method,
+                    args: frame.args,
+                }
+            };
+            receiver = self
+                .builder
+                .push_named(kind, frame.range, frame.selector_range);
+            if let Some(closing) = frame.closing {
+                self.builder.add_call_closing_loc(receiver, closing);
+            }
+            if let Some(operator) = frame.call_operator {
+                self.builder.add_call_operator_loc(receiver, operator);
+            }
+        }
+        Some(receiver)
+    }
+
+    /// General recursive call lowering, retained for calls with arguments,
+    /// blocks, or no receiver. Their remaining nesting is translated normally.
+    fn translate_call_recursive(&mut self, call: &prism::CallNode<'_>, range: Range) -> NodeId {
         let method = self.sym(&call.name());
         let receiver = call.receiver();
         // `loc.name` には selector (e.g. `File.exists?` の `exists?` 部分)
-        // を入れる。implicit call (`foo.()`) 等は selector がないので
+        // を入れる。implicit call (`foo.()` 等) は selector がないので
         // `Range::ZERO` フォールバック。
         let selector_range = Self::opt_loc_range(call.message_loc());
 
@@ -2242,16 +2339,53 @@ impl Translator {
         cp: &prism::ConstantPathNode<'_>,
         range: Range,
     ) -> NodeId {
-        let scope = match cp.parent() {
-            Some(p) => OptNodeId::some(self.translate_node(&p)),
-            None => OptNodeId::NONE,
-        };
-        // `name` は `Option<ConstantId>`。`None`（壊れた path）なら Unknown。
-        let name = match cp.name() {
-            Some(cid) => self.sym(&cid),
-            None => return self.builder.push(NodeKind::Unknown, range),
-        };
-        self.builder.push(NodeKind::Const { scope, name }, range)
+        struct ConstantPathFrame {
+            name: Option<Vec<u8>>,
+            range: Range,
+        }
+
+        // ConstantPathNode::parent() is also left-deep for `A::B::C`. Keep one
+        // Const per segment, but collect the path iteratively so neither this
+        // translation nor its failure mode depends on the Rust stack size.
+        let mut frames = Vec::new();
+        let mut current = cp.as_node();
+        let mut scope = OptNodeId::NONE;
+        loop {
+            let Some(path) = current.as_constant_path_node() else {
+                scope = OptNodeId::some(self.translate_node(&current));
+                break;
+            };
+            let path_range = if frames.is_empty() {
+                range
+            } else {
+                Self::node_range(&current)
+            };
+            let name = path.name().map(|name| name.as_slice().to_vec());
+            frames.push(ConstantPathFrame {
+                name,
+                range: path_range,
+            });
+            match path.parent() {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+
+        // The former recursive implementation translated the scope first and
+        // interned each constant name while unwinding. Retain that order.
+        for frame in frames.into_iter().rev() {
+            let Some(name_bytes) = frame.name else {
+                scope = OptNodeId::some(self.builder.push(NodeKind::Unknown, frame.range));
+                continue;
+            };
+            let name_text = String::from_utf8_lossy(&name_bytes);
+            let name = self.builder.intern_symbol(&name_text);
+            let id = self
+                .builder
+                .push(NodeKind::Const { scope, name }, frame.range);
+            scope = OptNodeId::some(id);
+        }
+        scope.get().expect("a constant path always produces a node")
     }
 }
 
@@ -2259,6 +2393,27 @@ impl Translator {
 mod tests {
     use super::translate;
     use murphy_ast::{MagicCommentKind, NodeKind};
+
+    fn with_deep_translation_stack(run: impl FnOnce() + Send + 'static) {
+        if cfg!(debug_assertions) {
+            run();
+        } else {
+            std::thread::Builder::new()
+                .stack_size(8 * 1024 * 1024)
+                .spawn(run)
+                .expect("spawn deep translation test")
+                .join()
+                .expect("deep translation test thread must not panic");
+        }
+    }
+
+    fn deep_translation_test_depth() -> usize {
+        if cfg!(debug_assertions) {
+            2_000
+        } else {
+            10_000
+        }
+    }
 
     #[test]
     fn translates_structured_magic_comments() {
@@ -4559,5 +4714,51 @@ mod tests {
             }
             other => panic!("expected Rescue, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn translates_deep_double_colon_send_chain_without_recursion() {
+        let depth = deep_translation_test_depth();
+        with_deep_translation_stack(move || {
+            let source = format!("Java{}", "::a".repeat(depth));
+            let ast = translate(&source, "deep_send.rb");
+
+            let mut current = ast.root();
+            for _ in 0..depth {
+                match ast.kind(current) {
+                    NodeKind::Send { receiver, .. } => {
+                        current = receiver.get().expect("each chained send has a receiver");
+                    }
+                    other => panic!("expected a send in the chain, got {other:?}"),
+                }
+            }
+            assert!(
+                matches!(ast.kind(current), NodeKind::Const { scope, .. } if scope.is_none()),
+                "chain must terminate at the base constant"
+            );
+        });
+    }
+
+    #[test]
+    fn translates_deep_constant_path_without_recursion() {
+        let depth = deep_translation_test_depth();
+        with_deep_translation_stack(move || {
+            let source = format!("Java{}", "::A".repeat(depth));
+            let ast = translate(&source, "deep_const.rb");
+
+            let mut current = ast.root();
+            for _ in 0..depth {
+                match ast.kind(current) {
+                    NodeKind::Const { scope, .. } => {
+                        current = scope.get().expect("each nested constant has a scope");
+                    }
+                    other => panic!("expected a constant path node, got {other:?}"),
+                }
+            }
+            assert!(
+                matches!(ast.kind(current), NodeKind::Const { scope, .. } if scope.is_none()),
+                "path must terminate at the base constant"
+            );
+        });
     }
 }

@@ -502,6 +502,37 @@ impl<'a> Cx<'a> {
         unsafe { self.raw.var_model.as_ref() }
     }
 
+    /// Whether a Send node's canonical receiver signature matches any of the
+    /// supplied strings. The per-file model fingerprints no-argument Send/Const
+    /// receiver chains once, avoiding repeated recursive reconstruction.
+    ///
+    /// Returns `None` only when the file-level model is unavailable (e.g. a
+    /// hand-built raw test context); an unsupported receiver shape is `Some(false)`.
+    pub fn call_signature_matches_any(&self, node: NodeId, candidates: &[String]) -> Option<bool> {
+        let model = self.var_model()?;
+        let NodeKind::Send {
+            receiver, method, ..
+        } = *self.kind(node)
+        else {
+            return Some(false);
+        };
+        let method = self.symbol_str(method);
+        let signature = match receiver.get() {
+            Some(receiver) => {
+                let Some(prefix) = model.receiver_signature_fingerprint(receiver) else {
+                    return Some(false);
+                };
+                prefix.append(".", method)
+            }
+            None => crate::var_semantic_model::SignatureFingerprint::from_text(method),
+        };
+        Some(
+            candidates
+                .iter()
+                .any(|candidate| signature.matches(candidate)),
+        )
+    }
+
     /// Configured `AllCops.TargetRailsVersion`, if present.
     pub fn target_rails_version(&self) -> Option<RubyVersion> {
         RubyVersion::from_wire(self.raw.target_rails_version)
