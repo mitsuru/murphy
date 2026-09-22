@@ -1,6 +1,6 @@
 use crate::Severity;
 use murphy_plugin_api::{AllCopsContext, RubyVersion};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::ConfigError;
@@ -73,6 +73,9 @@ pub struct CopRule {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub options: BTreeMap<String, serde_json::Value>,
+    /// Option keys whose arrays union across layers, from global or cop-level
+    /// `inherit_mode.merge` settings.
+    pub inherit_mode_merge: BTreeSet<String>,
 }
 
 /// Metadata keys from RuboCop's default.yml that are NOT cop options.
@@ -96,6 +99,9 @@ pub struct DefaultCopRule {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub options: BTreeMap<String, serde_json::Value>,
+    /// Option keys whose arrays union across layers, from global or cop-level
+    /// `inherit_mode.merge` settings.
+    pub inherit_mode_merge: BTreeSet<String>,
 }
 
 /// The full set of defaults parsed from a bundled `default.yml`
@@ -129,10 +135,18 @@ impl DefaultCopsData {
             _ => return Self::default(),
         };
 
+        let global_merge_keys = doc
+            .get(&Yaml::String("inherit_mode".to_string()))
+            .map(parse_inherit_mode_merge)
+            .unwrap_or_default();
         let mut result = Self::default();
 
         for (key, value) in doc {
             let Yaml::String(section) = key else { continue };
+
+            if section == "inherit_mode" {
+                continue;
+            }
 
             if section == "AllCops" {
                 if let Yaml::Hash(all_cops) = value {
@@ -153,7 +167,9 @@ impl DefaultCopsData {
 
             // Treat as a cop section (e.g. "Style/Foo").
             if let Yaml::Hash(cop_map) = value {
-                let rule = parse_default_cop_rule(cop_map);
+                let mut rule = parse_default_cop_rule(cop_map);
+                rule.inherit_mode_merge
+                    .extend(global_merge_keys.iter().cloned());
                 result.cop_rules.insert(section, rule);
             }
         }
@@ -188,6 +204,9 @@ fn parse_default_cop_rule(map: yaml_rust2::yaml::Hash) -> DefaultCopRule {
             "Exclude" => {
                 rule.exclude = yaml_string_list(&value);
             }
+            "inherit_mode" => {
+                rule.inherit_mode_merge = parse_inherit_mode_merge(&value);
+            }
             other if METADATA_KEYS.contains(&other) => {
                 // Skip documentation/metadata keys.
             }
@@ -201,11 +220,40 @@ fn parse_default_cop_rule(map: yaml_rust2::yaml::Hash) -> DefaultCopRule {
     rule
 }
 
+/// Parse option keys listed by an `inherit_mode.merge` map.
+fn parse_inherit_mode_merge(value: &yaml_rust2::Yaml) -> BTreeSet<String> {
+    use yaml_rust2::Yaml;
+    let Yaml::Hash(modes) = value else {
+        return BTreeSet::new();
+    };
+    let Some(merge) = modes.get(&Yaml::String("merge".to_string())) else {
+        return BTreeSet::new();
+    };
+    match merge {
+        Yaml::Array(keys) => keys
+            .iter()
+            .filter_map(|key| match key {
+                Yaml::String(key) => Some(key.clone()),
+                _ => None,
+            })
+            .collect(),
+        Yaml::String(key) => [key.clone()].into_iter().collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
 /// Merge a later pack layer's [`DefaultCopRule`] over an existing base entry.
 /// Later layer wins per field; absent fields (`None` / empty `Vec`) keep the
 /// base value, so a pack that only sets `Exclude` does not wipe a base
-/// `Include` for the same cop.
+/// `Include` for the same cop. Arrays named by `inherit_mode.merge` union in
+/// base-first order.
 fn merge_default_cop_rule(base: &mut DefaultCopRule, layer: DefaultCopRule) {
+    let merge_keys = base
+        .inherit_mode_merge
+        .union(&layer.inherit_mode_merge)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
     if layer.enabled.is_some() {
         base.enabled = layer.enabled;
     }
@@ -213,13 +261,89 @@ fn merge_default_cop_rule(base: &mut DefaultCopRule, layer: DefaultCopRule) {
         base.severity = layer.severity;
     }
     if !layer.include.is_empty() {
-        base.include = layer.include;
+        base.include = if merge_keys.contains("Include") {
+            union_string_lists(&base.include, &layer.include)
+        } else {
+            layer.include
+        };
     }
     if !layer.exclude.is_empty() {
-        base.exclude = layer.exclude;
+        base.exclude = if merge_keys.contains("Exclude") {
+            union_string_lists(&base.exclude, &layer.exclude)
+        } else {
+            layer.exclude
+        };
     }
-    for (key, value) in layer.options {
-        base.options.insert(key, value);
+    merge_option_maps(&mut base.options, layer.options, &merge_keys);
+    base.inherit_mode_merge = merge_keys;
+}
+
+/// Merge option maps with RuboCop-style array union for the named keys.
+fn merge_option_maps(
+    base: &mut BTreeMap<String, serde_json::Value>,
+    top: BTreeMap<String, serde_json::Value>,
+    merge_keys: &BTreeSet<String>,
+) {
+    for (key, top_value) in top {
+        let value = if merge_keys.contains(&key) {
+            match (base.remove(&key), top_value) {
+                (
+                    Some(serde_json::Value::Array(mut base_items)),
+                    serde_json::Value::Array(top_items),
+                ) => {
+                    for item in top_items {
+                        if !base_items.contains(&item) {
+                            base_items.push(item);
+                        }
+                    }
+                    serde_json::Value::Array(base_items)
+                }
+                (_, top_value) => top_value,
+            }
+        } else {
+            top_value
+        };
+        base.insert(key, value);
+    }
+}
+
+/// Union string lists in layer order, dropping duplicates and preserving the
+/// first occurrence's position.
+fn union_string_lists(base: &[String], top: &[String]) -> Vec<String> {
+    dedup_preserving_order(base.iter().chain(top.iter()).cloned())
+}
+
+/// Resolve a cop-level path-scope list, unioning layers when its key is merged.
+fn resolve_cop_scope_list(
+    user: Option<&CopRule>,
+    defaults: Option<&DefaultCopRule>,
+    key: &str,
+) -> Option<Vec<String>> {
+    let (user_list, default_list) = match key {
+        "Include" => (
+            user.map(|rule| &rule.include),
+            defaults.map(|rule| &rule.include),
+        ),
+        "Exclude" => (
+            user.map(|rule| &rule.exclude),
+            defaults.map(|rule| &rule.exclude),
+        ),
+        _ => return None,
+    };
+    let user_list = user_list.filter(|list| !list.is_empty());
+    let default_list = default_list.filter(|list| !list.is_empty());
+    let merge = user.is_some_and(|rule| rule.inherit_mode_merge.contains(key))
+        || defaults.is_some_and(|rule| rule.inherit_mode_merge.contains(key));
+
+    if merge {
+        match (default_list, user_list) {
+            (Some(defaults), Some(user)) => Some(union_string_lists(defaults, user)),
+            (Some(defaults), None) => Some(defaults.clone()),
+            (None, Some(user)) => Some(user.clone()),
+            (None, None) => None,
+        }
+    } else {
+        user_list.or(default_list).cloned()
     }
 }
 
@@ -267,6 +391,8 @@ struct ParsedYaml {
     plugins: Vec<PluginConfig>,
     /// Paths from `inherit_from:` — consumed by `load_resolving_inherit`.
     inherit_from: Vec<String>,
+    /// Globally merged cop-option keys from top-level `inherit_mode.merge`.
+    inherit_mode_merge: BTreeSet<String>,
     /// True when `inherit_mode: merge: [Exclude]` is set. Governs whether the
     /// user's `AllCops.Exclude` *unions* with the default base layer (std core ∪
     /// pack defaults) rather than *replacing* it. Mirrors RuboCop's `inherit_mode`
@@ -281,6 +407,11 @@ impl ParsedYaml {
     /// to `base`. Cop rules are merged per-key (not whole-section replace).
     /// Plugins are concatenated (base first, then self).
     fn merge_over(self, base: ParsedYaml) -> ParsedYaml {
+        let inherit_mode_merge = self
+            .inherit_mode_merge
+            .union(&base.inherit_mode_merge)
+            .cloned()
+            .collect::<BTreeSet<_>>();
         ParsedYaml {
             target_ruby_version: self.target_ruby_version.or(base.target_ruby_version),
             target_rails_version: self.target_rails_version.or(base.target_rails_version),
@@ -294,7 +425,10 @@ impl ParsedYaml {
                 let mut merged = base.rules;
                 for (name, top_rule) in self.rules {
                     let base_rule = merged.remove(&name).unwrap_or_default();
-                    merged.insert(name, merge_cop_rule(top_rule, base_rule));
+                    merged.insert(
+                        name,
+                        merge_cop_rule(top_rule, base_rule, &inherit_mode_merge),
+                    );
                 }
                 merged
             },
@@ -308,6 +442,7 @@ impl ParsedYaml {
                 all
             },
             inherit_from: vec![],
+            inherit_mode_merge,
             // OR semantics: if any file in the inherit chain enables Exclude
             // merge, the merge applies. The root (`self`) is highest priority,
             // but a `true` from either layer is meaningful, so OR is correct.
@@ -320,6 +455,11 @@ impl ParsedYaml {
     fn into_murphy_config(self) -> (MurphyConfig, bool, bool) {
         let saw_include = self.include.is_some();
         let saw_exclude = self.exclude.is_some();
+        let mut rules = self.rules;
+        for rule in rules.values_mut() {
+            rule.inherit_mode_merge
+                .extend(self.inherit_mode_merge.iter().cloned());
+        }
         let cfg = MurphyConfig {
             target_ruby_version: self
                 .target_ruby_version
@@ -344,7 +484,7 @@ impl ParsedYaml {
             },
             cops: CopsConfig {
                 path: self.cops_path.unwrap_or_else(default_cops_path),
-                rules: self.rules,
+                rules,
             },
             plugins: self.plugins,
             base_defaults: DefaultCopsData::default(),
@@ -356,26 +496,40 @@ impl ParsedYaml {
 }
 
 /// Merge `top` cop rule (higher priority) over `base` (lower priority).
-/// Per-field: `top` wins when it carries an explicit value; `base` fills gaps.
-fn merge_cop_rule(top: CopRule, base: CopRule) -> CopRule {
+/// Per-field, `top` wins unless the key is listed by global or cop-level
+/// `inherit_mode.merge`, in which case array values union base-first.
+fn merge_cop_rule(top: CopRule, base: CopRule, global_merge_keys: &BTreeSet<String>) -> CopRule {
+    let cop_merge_keys = base
+        .inherit_mode_merge
+        .union(&top.inherit_mode_merge)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let merge_keys = cop_merge_keys
+        .union(global_merge_keys)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut options = base.options;
+    merge_option_maps(&mut options, top.options, &merge_keys);
+
     CopRule {
         enabled: top.enabled.or(base.enabled),
         severity: top.severity.or(base.severity),
-        include: if top.include.is_empty() {
+        include: if merge_keys.contains("Include") {
+            union_string_lists(&base.include, &top.include)
+        } else if top.include.is_empty() {
             base.include
         } else {
             top.include
         },
-        exclude: if top.exclude.is_empty() {
+        exclude: if merge_keys.contains("Exclude") {
+            union_string_lists(&base.exclude, &top.exclude)
+        } else if top.exclude.is_empty() {
             base.exclude
         } else {
             top.exclude
         },
-        options: {
-            let mut opts = base.options;
-            opts.extend(top.options);
-            opts
-        },
+        options,
+        inherit_mode_merge: cop_merge_keys,
     }
 }
 
@@ -631,24 +785,16 @@ impl MurphyConfig {
         let rule = self.cops.rules.get(name);
         let default_rule = self.base_defaults.cop_rules.get(name);
 
-        // Resolve Include and Exclude independently: user setting wins per-field;
-        // fall back to base_defaults for each field individually. This prevents
-        // a user-level Exclude from accidentally disabling a default Include scope.
-        let include = rule
-            .map(|r| &r.include)
-            .filter(|inc| !inc.is_empty())
-            .or_else(|| default_rule.map(|r| &r.include));
+        // Resolve Include and Exclude independently: user setting wins per-field
+        // unless that key is listed in the cop's `inherit_mode.merge`.
+        let include = resolve_cop_scope_list(rule, default_rule, "Include");
+        let exclude = resolve_cop_scope_list(rule, default_rule, "Exclude");
 
-        let exclude = rule
-            .map(|r| &r.exclude)
-            .filter(|exc| !exc.is_empty())
-            .or_else(|| default_rule.map(|r| &r.exclude));
-
-        let matches_include = match include {
+        let matches_include = match include.as_deref() {
             Some(inc) if !inc.is_empty() => globset_matches(inc, file),
             _ => true,
         };
-        let matches_exclude = match exclude {
+        let matches_exclude = match exclude.as_deref() {
             Some(exc) if !exc.is_empty() => globset_matches(exc, file),
             _ => false,
         };
@@ -725,18 +871,29 @@ impl MurphyConfig {
     }
 
     pub fn cop_options_json(&self, name: &str) -> Vec<u8> {
-        let default_opts = self.base_defaults.cop_rules.get(name).map(|r| &r.options);
-        let user_opts = self.cops.rules.get(name).map(|r| &r.options);
+        let default_rule = self.base_defaults.cop_rules.get(name);
+        let user_rule = self.cops.rules.get(name);
+        let default_opts = default_rule.map(|rule| &rule.options);
+        let user_opts = user_rule.map(|rule| &rule.options);
 
         // Fast path: skip cloning and serializing when both are empty (common case).
         if default_opts.is_none_or(|o| o.is_empty()) && user_opts.is_none_or(|o| o.is_empty()) {
             return b"{}".to_vec();
         }
 
-        // Start from base defaults, then overlay user options (user wins per key).
+        let merge_keys = default_rule
+            .into_iter()
+            .flat_map(|rule| rule.inherit_mode_merge.iter())
+            .chain(
+                user_rule
+                    .into_iter()
+                    .flat_map(|rule| rule.inherit_mode_merge.iter()),
+            )
+            .cloned()
+            .collect();
         let mut merged = default_opts.cloned().unwrap_or_default();
-        if let Some(opts) = user_opts {
-            merged.extend(opts.clone());
+        if let Some(rule) = user_rule {
+            merge_option_maps(&mut merged, rule.options.clone(), &merge_keys);
         }
         serde_json::to_vec(&merged).unwrap_or_else(|_| b"{}".to_vec())
     }
@@ -839,21 +996,10 @@ fn parse_yaml_str(text: &str) -> Result<ParsedYaml, ConfigError> {
                     parse_plugins(value).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
             }
             "inherit_mode" => {
-                // Only `merge:` containing `Exclude` is honoured (thin subset of
-                // RuboCop's inherit_mode). It flips `AllCops.Exclude` from
-                // replace-the-default to union-with-the-default. Other keys
-                // (`override`, per-cop inherit_mode) are not modelled.
-                if let Yaml::Hash(modes) = value
-                    && let Some(merge) = modes.get(&Yaml::String("merge".to_string()))
-                {
-                    parsed.exclude_merge = match merge {
-                        Yaml::Array(arr) => arr
-                            .iter()
-                            .any(|v| matches!(v, Yaml::String(s) if s == "Exclude")),
-                        Yaml::String(s) => s == "Exclude",
-                        _ => false,
-                    };
-                }
+                // `Exclude` also controls the AllCops discovery-list union; the
+                // full key set governs cop options during inheritance.
+                parsed.inherit_mode_merge = parse_inherit_mode_merge(&value);
+                parsed.exclude_merge = parsed.inherit_mode_merge.contains("Exclude");
             }
             _ => {
                 if let Yaml::Hash(cop_map) = value {
@@ -990,6 +1136,9 @@ fn parse_cop_rule(map: yaml_rust2::yaml::Hash) -> CopRule {
             }
             "Exclude" => {
                 rule.exclude = yaml_string_list(&value);
+            }
+            "inherit_mode" => {
+                rule.inherit_mode_merge = parse_inherit_mode_merge(&value);
             }
             other => {
                 if let Some(json_val) = yaml_to_json(value) {
@@ -1820,6 +1969,28 @@ Style/StringLiterals:
         assert_eq!(rule.severity, Some(crate::Severity::Warning));
     }
 
+    #[test]
+    fn pack_cop_inherit_mode_unions_option_arrays() {
+        let mut cfg = MurphyConfig::with_defaults(
+            "",
+            "Lint/UselessAccessModifier:\n  ContextCreatingMethods:\n    - core_method\n",
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&[
+            "Lint/UselessAccessModifier:\n  inherit_mode:\n    merge:\n      - ContextCreatingMethods\n  ContextCreatingMethods:\n    - rails_method\n",
+        ]);
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Lint/UselessAccessModifier")).unwrap();
+        assert_eq!(
+            options["ContextCreatingMethods"],
+            serde_json::json!(["core_method", "rails_method"])
+        );
+        assert!(
+            options.get("inherit_mode").is_none(),
+            "inherit_mode is config metadata, not a cop option"
+        );
+    }
+
     // --- inherit_from tests ---
 
     fn write_cfg(dir: &Path, name: &str, content: &str) {
@@ -1956,6 +2127,54 @@ Style/StringLiterals:
     }
 
     #[test]
+    fn inherit_mode_globally_merges_cop_option_arrays_across_inherited_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "Style/FormatStringToken:\n  EnforcedStyle: inherited_style\n  AllowedMethods:\n    - inherited\n    - shared\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from: base.yml\ninherit_mode:\n  merge:\n    - AllowedMethods\nStyle/FormatStringToken:\n  EnforcedStyle: project_style\n  AllowedMethods:\n    - shared\n    - project\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Style/FormatStringToken")).unwrap();
+        assert_eq!(
+            options["AllowedMethods"],
+            serde_json::json!(["inherited", "shared", "project"])
+        );
+        assert_eq!(
+            options["EnforcedStyle"], "project_style",
+            "non-listed options still use current-layer precedence"
+        );
+    }
+
+    #[test]
+    fn inherit_from_merges_cop_option_arrays_when_listed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "Style/FormatStringToken:\n  AllowedMethods:\n    - inherited\n    - shared\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from: base.yml\nStyle/FormatStringToken:\n  inherit_mode:\n    merge:\n      - AllowedMethods\n  AllowedMethods:\n    - shared\n    - project\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Style/FormatStringToken")).unwrap();
+        assert_eq!(
+            options["AllowedMethods"],
+            serde_json::json!(["inherited", "shared", "project"])
+        );
+    }
+
+    #[test]
     fn inherit_from_path_relative_to_config_file() {
         let dir = tempfile::TempDir::new().unwrap();
         let sub = dir.path().join("config");
@@ -2077,6 +2296,84 @@ Style/StringLiterals:
         assert!(
             cfg.cop_applies_to_file("RSpec/DescribeClass", Path::new("spec/models/foo_spec.rb")),
             "pack Exclude must not over-exclude spec/models"
+        );
+    }
+
+    #[test]
+    fn pack_global_inherit_mode_unions_option_arrays() {
+        let mut cfg = MurphyConfig::with_defaults(
+            "",
+            "Style/FormatStringToken:\n  AllowedMethods:\n    - core_method\n",
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&["inherit_mode:\n  merge:\n    - AllowedMethods\nStyle/FormatStringToken:\n  AllowedMethods:\n    - rails_method\n"]);
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Style/FormatStringToken")).unwrap();
+        assert_eq!(
+            options["AllowedMethods"],
+            serde_json::json!(["core_method", "rails_method"])
+        );
+    }
+
+    #[test]
+    fn cop_inherit_mode_unions_user_and_pack_option_arrays() {
+        let mut cfg = MurphyConfig::from_yaml_str(
+            "inherit_mode:\n  merge:\n    - AllowedMethods\nStyle/FormatStringToken:\n  AllowedMethods:\n    - project_method\n",
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&[
+            "Style/FormatStringToken:\n  AllowedMethods:\n    - redirect\n",
+        ]);
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Style/FormatStringToken")).unwrap();
+        assert_eq!(
+            options["AllowedMethods"],
+            serde_json::json!(["redirect", "project_method"])
+        );
+        assert!(
+            !cfg.cops.rules["Style/FormatStringToken"]
+                .options
+                .contains_key("inherit_mode"),
+            "cop inherit_mode must not leak into the cop's option JSON"
+        );
+    }
+
+    #[test]
+    fn cop_option_arrays_replace_pack_defaults_without_inherit_mode() {
+        let mut cfg = MurphyConfig::from_yaml_str(
+            "Style/FormatStringToken:\n  AllowedMethods:\n    - project_method\n",
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&[
+            "Style/FormatStringToken:\n  AllowedMethods:\n    - redirect\n",
+        ]);
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Style/FormatStringToken")).unwrap();
+        assert_eq!(
+            options["AllowedMethods"],
+            serde_json::json!(["project_method"])
+        );
+    }
+
+    #[test]
+    fn cop_inherit_mode_unions_user_and_pack_exclude_scopes() {
+        let mut cfg = MurphyConfig::from_yaml_str(
+            "RSpec/DescribeClass:\n  inherit_mode:\n    merge:\n      - Exclude\n  Exclude:\n    - '**/spec/models/**/*'\n",
+        )
+        .unwrap();
+        cfg.apply_pack_default_layers(&[
+            "RSpec/DescribeClass:\n  Exclude:\n    - '**/spec/requests/**/*'\n",
+        ]);
+        assert!(
+            !cfg.cop_applies_to_file("RSpec/DescribeClass", Path::new("spec/models/user_spec.rb")),
+            "user Exclude should still apply"
+        );
+        assert!(
+            !cfg.cop_applies_to_file(
+                "RSpec/DescribeClass",
+                Path::new("spec/requests/user_spec.rb")
+            ),
+            "pack Exclude should union with the user list"
         );
     }
 
