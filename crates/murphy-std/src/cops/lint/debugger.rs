@@ -301,8 +301,13 @@ impl Debugger {
             return;
         }
 
-        // Build the call's canonical signature and look it up in the
-        // configured `debugger_methods` list.
+        // Most sends cannot possibly match DebuggerMethods. Compare their
+        // cached receiver-chain fingerprint first; only rebuild the actual
+        // signature for a hash/length candidate (and still verify exact text).
+        if cx.call_signature_matches_any(node, &opts.debugger_methods) == Some(false) {
+            return;
+        }
+
         let Some(sig) = call_signature(cx, receiver, method_str) else {
             return;
         };
@@ -380,37 +385,57 @@ fn call_signature(cx: &Cx<'_>, receiver: OptNodeId, method: &str) -> Option<Stri
 }
 
 fn receiver_signature(cx: &Cx<'_>, id: NodeId) -> Option<String> {
-    match *cx.kind(id) {
-        // No-arg Send call, e.g. `binding` or `page`. Recurse into the
-        // receiver so multi-level chains like `Kernel.binding.irb` work:
-        // `irb`'s receiver is `binding` (Send, recv=Const(Kernel)) ->
-        // recurse -> "Kernel.binding"; outer result -> "Kernel.binding.irb".
-        NodeKind::Send {
-            receiver,
-            method,
-            args,
-        } if cx.list(args).is_empty() => {
-            let method_name = cx.symbol_str(method);
-            match receiver.get() {
-                None => Some(method_name.to_string()),
-                Some(recv_id) => {
-                    let receiver_sig = receiver_signature(cx, recv_id)?;
-                    Some(format!("{receiver_sig}.{method_name}"))
+    // Collect the outer-to-inner components, then emit them in source order.
+    // This is used only after a cached fingerprint matches a configured entry,
+    // so even a very long valid custom DebuggerMethods signature stays linear.
+    let mut components: Vec<(&'static str, String)> = Vec::new();
+    let mut current = id;
+    loop {
+        match *cx.kind(current) {
+            NodeKind::Send {
+                receiver,
+                method,
+                args,
+            } if cx.list(args).is_empty() => {
+                let method_name = cx.symbol_str(method).to_string();
+                match receiver.get() {
+                    Some(receiver) => {
+                        components.push((".", method_name));
+                        current = receiver;
+                    }
+                    None => {
+                        components.push(("", method_name));
+                        break;
+                    }
                 }
             }
-        }
-        NodeKind::Const { scope, name } => {
-            let name_str = cx.symbol_str(name);
-            match scope.get() {
-                Some(s) => {
-                    let outer = receiver_signature(cx, s)?;
-                    Some(format!("{outer}::{name_str}"))
+            NodeKind::Const { scope, name } => {
+                let name = cx.symbol_str(name).to_string();
+                match scope.get() {
+                    Some(scope) => {
+                        components.push(("::", name));
+                        current = scope;
+                    }
+                    None => {
+                        components.push(("", name));
+                        break;
+                    }
                 }
-                None => Some(name_str.to_string()),
             }
+            _ => return None,
         }
-        _ => None,
     }
+
+    let capacity = components
+        .iter()
+        .map(|(separator, component)| separator.len() + component.len())
+        .sum();
+    let mut signature = String::with_capacity(capacity);
+    for (separator, component) in components.into_iter().rev() {
+        signature.push_str(separator);
+        signature.push_str(&component);
+    }
+    Some(signature)
 }
 
 /// Returns `true` when the immediate parent of `node` is a no-arg Send
@@ -559,6 +584,29 @@ mod tests {
         // `foo.b` is not `binding.b` -- the receiver must literally be
         // the `binding` no-arg call.
         test::<Debugger>().expect_no_offenses("foo.b\nfoo.break\nfoo.irb\n");
+    }
+
+    #[test]
+    fn handles_deep_non_debugger_send_chain_without_recursive_signature_scan() {
+        let source = format!("Java{}", "::a".repeat(2_000));
+        test::<Debugger>().expect_no_offenses(&source);
+    }
+
+    #[test]
+    fn matches_deep_custom_debugger_signature_iteratively() {
+        const DEPTH: usize = 2_000;
+        let source = format!("Java{}", "::a".repeat(DEPTH));
+        let signature = format!("Java{}", ".a".repeat(DEPTH));
+        let annotated = format!(
+            "{source}\n{} Remove debugger entry point `{source}`.\n",
+            "^".repeat(source.len())
+        );
+        test::<Debugger>()
+            .with_options(&Options {
+                debugger_methods: vec![signature],
+                debugger_requires: Vec::new(),
+            })
+            .expect_offense(&annotated);
     }
 
     // --- parity gap tests ---

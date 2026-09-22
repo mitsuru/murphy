@@ -9,9 +9,51 @@ use std::collections::HashMap;
 
 use murphy_ast::{Ast, NodeId, NodeKind, Symbol};
 
+const SIGNATURE_HASH_OFFSET: u64 = 0xcbf29ce484222325;
+const SIGNATURE_HASH_PRIME: u64 = 0x100000001b3;
+
+/// A compact fingerprint for a receiver-chain signature.
+#[derive(Clone, Copy)]
+pub(crate) struct SignatureFingerprint {
+    hash: u64,
+    len: usize,
+}
+
+impl SignatureFingerprint {
+    pub(crate) fn from_text(text: &str) -> Self {
+        Self {
+            hash: signature_hash(SIGNATURE_HASH_OFFSET, text.as_bytes()),
+            len: text.len(),
+        }
+    }
+
+    pub(crate) fn append(&self, separator: &str, component: &str) -> Self {
+        let hash = signature_hash(self.hash, separator.as_bytes());
+        let hash = signature_hash(hash, component.as_bytes());
+        Self {
+            hash,
+            len: self.len + separator.len() + component.len(),
+        }
+    }
+
+    pub(crate) fn matches(&self, text: &str) -> bool {
+        self.len == text.len()
+            && self.hash == signature_hash(SIGNATURE_HASH_OFFSET, text.as_bytes())
+    }
+}
+
+fn signature_hash(mut hash: u64, bytes: &[u8]) -> u64 {
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(SIGNATURE_HASH_PRIME);
+    }
+    hash
+}
+
 /// The full variable semantic model for one file.
 pub struct VarSemanticModel {
     scopes: HashMap<NodeId, ScopeInfo>,
+    receiver_signatures: Vec<Option<SignatureFingerprint>>,
 }
 
 /// Information about one lexical scope.
@@ -1049,7 +1091,54 @@ impl VarSemanticModel {
             analyze_scope_is_referenced(ast, root_id, scope);
         }
 
-        VarSemanticModel { scopes }
+        let receiver_signatures = Self::build_receiver_signature_fingerprints(ast);
+        VarSemanticModel {
+            scopes,
+            receiver_signatures,
+        }
+    }
+
+    /// Receiver signature for a no-argument Send/Const chain, computed once
+    /// per node. The arena is built post-order, so each child fingerprint is
+    /// ready before its parent is visited here.
+    fn build_receiver_signature_fingerprints(ast: &Ast) -> Vec<Option<SignatureFingerprint>> {
+        let mut fingerprints: Vec<Option<SignatureFingerprint>> = vec![None; ast.len()];
+        for index in 0..ast.len() {
+            let node = NodeId(index as u32);
+            fingerprints[index] = match *ast.kind(node) {
+                NodeKind::Const { scope, name } => {
+                    let name = ast.interner().resolve(name.0);
+                    match scope.get() {
+                        Some(parent) => fingerprints[parent.0 as usize]
+                            .as_ref()
+                            .map(|prefix| prefix.append("::", name)),
+                        None => Some(SignatureFingerprint::from_text(name)),
+                    }
+                }
+                NodeKind::Send {
+                    receiver,
+                    method,
+                    args,
+                } if args.len == 0 => {
+                    let method = ast.interner().resolve(method.0);
+                    match receiver.get() {
+                        Some(parent) => fingerprints[parent.0 as usize]
+                            .as_ref()
+                            .map(|prefix| prefix.append(".", method)),
+                        None => Some(SignatureFingerprint::from_text(method)),
+                    }
+                }
+                _ => None,
+            };
+        }
+        fingerprints
+    }
+
+    pub(crate) fn receiver_signature_fingerprint(
+        &self,
+        node: NodeId,
+    ) -> Option<&SignatureFingerprint> {
+        self.receiver_signatures.get(node.0 as usize)?.as_ref()
     }
 
     /// Retrieve the `ScopeInfo` keyed by `boundary_node`.
@@ -1238,6 +1327,31 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn builds_receiver_signature_fingerprints_for_calls_and_constants() {
+        let ast = translate("Kernel.binding.pry", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let fingerprint = model
+            .receiver_signature_fingerprint(ast.root())
+            .expect("receiver signature for a no-argument call chain");
+        assert!(fingerprint.matches("Kernel.binding.pry"));
+        assert!(!fingerprint.matches("Kernel.binding.irb"));
+
+        let ast = translate("A::B", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        let fingerprint = model
+            .receiver_signature_fingerprint(ast.root())
+            .expect("receiver signature for a constant path");
+        assert!(fingerprint.matches("A::B"));
+
+        let ast = translate("foo(1).bar", "test.rb");
+        let model = VarSemanticModel::build(&ast);
+        assert!(
+            model.receiver_signature_fingerprint(ast.root()).is_none(),
+            "a call with arguments cannot be used as a receiver signature"
+        );
     }
 
     #[test]
