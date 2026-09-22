@@ -245,7 +245,8 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
     // the first newline lies *after* `cur` starts, so anchor at `cur`'s start
     // instead. This is the line below which blank lines are removed / above
     // which they are inserted.
-    let region_start = if newline_pos > begin_pos {
+    let same_line = newline_pos > begin_pos;
+    let region_start = if same_line {
         begin_pos
     } else {
         newline_pos + 1
@@ -290,13 +291,16 @@ fn autocorrect(prev: NodeId, cur: NodeId, count: usize, expected: usize, cx: &Cx
             pos = next_line_start;
         }
     } else {
-        // Insert `expected - count` newlines at the blank-line region start.
+        // Insert missing blank lines at the blank-line region start. If both
+        // definitions share a line, an additional newline is needed to move the
+        // second definition onto its own line before adding blank lines.
         let difference = expected - count;
+        let newlines = difference + usize::from(same_line);
         let anchor = Range {
             start: region_start as u32,
             end: region_start as u32,
         };
-        cx.emit_edit(anchor, &"\n".repeat(difference));
+        cx.emit_edit(anchor, &"\n".repeat(newlines));
     }
 }
 
@@ -304,8 +308,10 @@ murphy_plugin_api::submit_cop!(EmptyLineBetweenDefs);
 
 #[cfg(test)]
 mod tests {
-    use super::EmptyLineBetweenDefs;
-    use murphy_plugin_api::test_support::{indoc, run_cop_with_edits, test};
+    use super::{EmptyLineBetweenDefs, EmptyLineBetweenDefsOptions};
+    use murphy_plugin_api::test_support::{
+        indoc, run_cop_with_edits, run_cop_with_options, run_cop_with_options_and_edits, test,
+    };
 
     fn apply(source: &str, edits: &[murphy_plugin_api::test_support::CapturedEdit]) -> String {
         // Apply edits right-to-left so earlier offsets stay valid.
@@ -385,6 +391,23 @@ mod tests {
         let run = run_cop_with_edits::<EmptyLineBetweenDefs>(src);
         assert_eq!(run.offenses.len(), 1);
         assert_eq!(apply(src, &run.edits), "def a\nend\n\ndef b\nend\n");
+    }
+
+    #[test]
+    fn corrects_same_line_one_line_defs_when_adjacency_is_disabled() {
+        let src = "def a; end; def b; end\n";
+        let options = EmptyLineBetweenDefsOptions {
+            method_defs: true,
+            class_defs: true,
+            module_defs: true,
+            allow_adjacent_one_line_defs: false,
+            number_of_empty_lines: 1,
+        };
+        let run = run_cop_with_options_and_edits::<EmptyLineBetweenDefs>(src, &options);
+        assert_eq!(run.offenses.len(), 1);
+        let corrected = apply(src, &run.edits);
+        assert_eq!(corrected, "def a; end; \n\ndef b; end\n");
+        assert!(run_cop_with_options::<EmptyLineBetweenDefs>(&corrected, &options).is_empty());
     }
 
     #[test]
