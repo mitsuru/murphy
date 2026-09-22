@@ -89,13 +89,23 @@ impl SpaceAroundBlockParameters {
             return;
         };
         let arg_ids = cx.list(list);
+        // The translator may preserve a trailing comma as an `Unknown` arg.
+        // It is punctuation, not a block parameter, so exclude it from the
+        // first/last-parameter checks below.
+        let mut params = arg_ids;
+        if let Some(&last) = params.last()
+            && matches!(*cx.kind(last), NodeKind::Unknown)
+            && cx.raw_source(cx.range(last)) == ","
+        {
+            params = &params[..params.len() - 1];
+        }
         // `node.arguments?` — bail on empty (`{ }` / `{ || }`).
-        if arg_ids.is_empty() {
+        if params.is_empty() {
             return;
         }
 
-        let first = arg_ids[0];
-        let last = *arg_ids.last().unwrap();
+        let first = params[0];
+        let last = *params.last().unwrap();
 
         // RuboCop locates the parameter delimiters via `arguments.loc.begin` /
         // `arguments.loc.end`. For an ordinary block (`{ |x| }`, `do |x| end`,
@@ -119,8 +129,19 @@ impl SpaceAroundBlockParameters {
         if !open_ok {
             return;
         }
-        let Some(close) = cx.token_after(cx.range(last).end) else {
+        let Some(after_last) = cx.token_after(cx.range(last).end) else {
             return;
+        };
+        // Skip an optional trailing comma before checking the closing
+        // delimiter. Keep its end as the spacing boundary so autocorrect
+        // preserves the comma and only edits whitespace after it.
+        let (last_end, close) = if after_last.kind == SourceTokenKind::Comma {
+            let Some(close) = cx.token_after(after_last.range.end) else {
+                return;
+            };
+            (after_last.range.end, close)
+        } else {
+            (cx.range(last).end, after_last)
         };
         let close_ok = if paren_delimited {
             close.kind == SourceTokenKind::RightParen
@@ -144,12 +165,7 @@ impl SpaceAroundBlockParameters {
                     cx.range(first).start,
                     "Space before first",
                 );
-                check_no_space(
-                    cx,
-                    cx.range(last).end,
-                    close.range.start,
-                    "Space after last",
-                );
+                check_no_space(cx, last_end, close.range.start, "Space after last");
             }
             InsidePipesStyle::Space => {
                 // before-first: space required after opening pipe. RuboCop
@@ -176,17 +192,17 @@ impl SpaceAroundBlockParameters {
                 // highlights the last arg node and inserts after it.
                 check_space(
                     cx,
-                    cx.range(last).end,
+                    last_end,
                     close.range.start,
                     cx.range(last),
-                    cx.range(last).end,
+                    last_end,
                     "after last block parameter",
                 );
                 // extra space after last (more than one). `saturating_add` is
                 // defensive against u32 overflow at the source-length boundary.
                 check_no_space(
                     cx,
-                    cx.range(last).end.saturating_add(1),
+                    last_end.saturating_add(1),
                     close.range.start,
                     "Extra space after last",
                 );
@@ -207,7 +223,7 @@ impl SpaceAroundBlockParameters {
         }
 
         // --- check_each_arg (both styles): extra space before each arg ---
-        for &arg in arg_ids {
+        for &arg in params {
             check_each_arg_extra_space(cx, arg);
         }
     }
@@ -445,6 +461,21 @@ mod tests {
             "#},
             "{}.each { |x,| puts x }\n",
         );
+    }
+
+    #[test]
+    fn space_style_corrects_missing_space_after_trailing_comma() {
+        test::<SpaceAroundBlockParameters>()
+            .with_options(&SpaceAroundBlockParametersOptions {
+                enforced_style_inside_pipes: InsidePipesStyle::Space,
+            })
+            .expect_correction(
+                indoc! {r#"
+                    {}.each { | x, y,| puts x }
+                                   ^ Space after last block parameter missing.
+                "#},
+                "{}.each { | x, y, | puts x }\n",
+            );
     }
 
     #[test]
