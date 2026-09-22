@@ -170,6 +170,11 @@ fn allowed_method(node: NodeId, cx: &Cx<'_>) -> bool {
     if !matches!(*cx.kind(target), murphy_plugin_api::NodeKind::Send { .. }) {
         return false;
     }
+    // Only bare calls with arguments are module inclusions. A receiver call
+    // such as `obj.include(...)` or a bare `include()` is not one.
+    if cx.call_receiver(target).get().is_some() || cx.call_arguments(target).is_empty() {
+        return false;
+    }
     cx.method_name(target)
         .is_some_and(|m| MODULE_INCLUSION_METHODS.contains(&m))
 }
@@ -250,6 +255,20 @@ mod tests {
     fn accepts_grouped_module_inclusions() {
         test::<EmptyLinesAfterModuleInclusion>()
             .expect_no_offenses("class Foo\n  extend Bar\n  include Baz\n  prepend Qux\nend\n");
+    }
+
+    #[test]
+    fn receiver_method_does_not_count_as_grouped_module_inclusion() {
+        let src = "class Foo\n  include Bar\n  obj.include Baz\nend\n";
+        let offenses = run_cop::<EmptyLinesAfterModuleInclusion>(src);
+        assert_eq!(offenses.len(), 1, "expected an offense, got {offenses:?}");
+    }
+
+    #[test]
+    fn argumentless_method_does_not_count_as_grouped_module_inclusion() {
+        let src = "class Foo\n  include Bar\n  include()\nend\n";
+        let offenses = run_cop::<EmptyLinesAfterModuleInclusion>(src);
+        assert_eq!(offenses.len(), 1, "expected an offense, got {offenses:?}");
     }
 
     #[test]
