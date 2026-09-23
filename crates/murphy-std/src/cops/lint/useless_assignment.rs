@@ -1363,6 +1363,151 @@ mod tests {
     }
 
     #[test]
+    fn pre_begin_write_killed_by_body_and_every_resbody_flagged() {
+        // A prior write is dead when the no-exception body and every rescue
+        // arm overwrite it before any read. This deliberately extends the
+        // existing conservative model beyond RuboCop's current CFG behavior.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            x = 0
+            ^ Useless assignment to variable - `x`.
+            begin
+              x = 1
+            rescue
+              x = 2
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn pre_begin_write_with_conditional_body_overwrite_not_flagged() {
+        // The rescue body only runs on exceptions. If the conditional body
+        // write is skipped, the no-exception path still observes the old value.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            x = 0
+            begin
+              x = 1 if cond
+            rescue
+              x = 2
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn pre_begin_write_read_in_resbody_before_overwrite_not_flagged() {
+        // An exception before the body assignment leaves the old value visible
+        // to the handler's read.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            x = 0
+            begin
+              x = risky_work
+            rescue
+              use(x)
+              x = 2
+            else
+              x = 3
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn pre_begin_write_with_read_after_resbody_overwrite_not_flagged() {
+        // Keep pre-begin proof conservative when the handler reads the variable,
+        // even after an arm-local overwrite. This matches the existing
+        // addresses regression fixture's RuboCop behavior.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            x = 0
+            begin
+              x = 1
+            rescue
+              x = 2
+              use(x)
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn pre_begin_write_not_killed_by_conditional_rescue_not_flagged() {
+        // The rescue does not execute when the surrounding branch is skipped.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            x = 0
+            if cond
+              begin
+                x = 1
+              rescue
+                x = 2
+              end
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn outer_body_write_killed_by_nested_rescue_and_else_flagged() {
+        // The inner rescue's normal and handler exits overwrite the outer
+        // body's write; the outer rescue covers exceptions escaping the inner.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              x = 1
+              ^ Useless assignment to variable - `x`.
+              begin
+                work
+              rescue
+                x = 2
+              else
+                x = 3
+              end
+            rescue
+              x = 4
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn outer_body_write_with_nested_rescue_missing_normal_overwrite_not_flagged() {
+        // Without an inner else or body overwrite, successful completion of
+        // the inner begin preserves the outer value.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+              begin
+                work
+              rescue
+                x = 2
+              end
+            rescue
+              x = 4
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
+    fn outer_body_write_read_in_nested_rescue_before_overwrite_not_flagged() {
+        // A read inside the inner construct before its overwrite observes the
+        // outer write and must veto the composed kill.
+        test::<UselessAssignment>().expect_no_offenses(indoc! {r#"
+            begin
+              x = 1
+              begin
+                use(x)
+              rescue
+                x = 2
+              else
+                x = 3
+              end
+            rescue
+              x = 4
+            end
+            use(x)
+        "#});
+    }
+
+    #[test]
     fn begin_body_write_with_non_overwriting_rescue_not_flagged() {
         // FP guard: the `rescue` arm does NOT overwrite `x`, so on the
         // exception path the begin-body value reaches the read. RuboCop 1.87

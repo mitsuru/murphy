@@ -213,6 +213,19 @@ enum RescueArm {
     Resbody(NodeId),
 }
 
+/// Context for a distributed-kill proof across a `Rescue` construct.
+#[derive(Clone, Copy)]
+enum RescueKillContext {
+    /// A pre-begin write: keep the proof narrow by rejecting any read inside
+    /// the rescue, even when it follows an arm-local overwrite.
+    PreBegin,
+    /// A write in a protected body: one immediately following inner rescue may
+    /// provide the no-exception-path overwrite.
+    ProtectedBody,
+    /// A nested rescue: unmatched exceptions are checked by this outer rescue.
+    Nested(NodeId),
+}
+
 /// Nearest `Rescue` ancestor of `node` whose protected `body` arm (transitively)
 /// contains `node`, or `None` if there is none before `root`.
 fn enclosing_protected_rescue(ast: &Ast, root: NodeId, node: NodeId) -> Option<NodeId> {
@@ -272,61 +285,80 @@ fn rescue_arm_of(ast: &Ast, rescue: NodeId, node: NodeId) -> Option<RescueArm> {
     None
 }
 
-/// RuboCop-parity fallback for a begin-body write whose kill is *distributed*
-/// across an enclosing `Rescue`'s sibling arms.
+/// Returns the `Rescue` represented by a statement node, unwrapping only
+/// single-child `Begin` nodes introduced by the translator around one statement.
+fn rescue_in_single_statement(ast: &Ast, mut node: NodeId) -> Option<NodeId> {
+    loop {
+        match *ast.kind(node) {
+            NodeKind::Rescue { .. } => return Some(node),
+            NodeKind::Begin { .. } => {
+                let mut children = ast.children(node);
+                node = children.next()?;
+                if children.next().is_some() {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Finds a `Rescue` that is the next direct sibling statement after `node`.
+/// This deliberately narrow shape is used for writes immediately before a
+/// `begin..rescue` and for nested rescues that act as one outer-body event.
+/// Single-child `Begin` wrappers around the rescue are ignored, but a multi-
+/// statement wrapper is not treated as an unconditional single statement.
+fn immediately_following_rescue(ast: &Ast, root: NodeId, node: NodeId) -> Option<(NodeId, u32)> {
+    let parent = ast.parent(node).get()?;
+    let siblings: Vec<NodeId> = ast.children(parent).collect();
+    let index = siblings.iter().position(|&sibling| sibling == node)?;
+    let statement = *siblings.get(index + 1)?;
+    let rescue = rescue_in_single_statement(ast, statement)?;
+    if barrier_chain(ast, root, node) != barrier_chain(ast, root, rescue) {
+        return None;
+    }
+    Some((rescue, ast.range(statement).end))
+}
+
+/// Returns `true` if `node` is already inside any `Rescue` construct.
+fn has_rescue_ancestor(ast: &Ast, root: NodeId, node: NodeId) -> bool {
+    let mut current = node;
+    while let Some(parent) = ast.parent(current).get() {
+        if parent == root {
+            return false;
+        }
+        if matches!(*ast.kind(parent), NodeKind::Rescue { .. }) {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// RuboCop-parity fallback for a write whose kill is *distributed* across a
+/// `Rescue`'s sibling arms, plus two deliberately narrow extensions for known
+/// false negatives.
 ///
-/// The branch-chain dominance model treats the `else` and each `resbody` arm as
-/// mutually exclusive from the protected `body`, so a body write that is killed
-/// only by the *combination* of the no-exception and exception exits is never
-/// matched by a single prefix-dominator. This reconstructs that distributed kill
-/// by verifying, path by path, that every control-flow path leaving the body
-/// write reaches an unconditional overwrite before any read can observe it.
+/// The branch-chain dominance model treats `else` and each `resbody` arm as
+/// mutually exclusive from the protected `body`, so a write killed only by a
+/// combination of sibling arms is not matched by a single prefix-dominator.
+/// This checks the no-exception path and every handled-exception path, rejecting
+/// a kill if a compatible read can observe the source write first.
 ///
-/// `begin; x = 1; rescue; x = 3; else; x = 2; end; use(x)` — the no-exception
-/// path overwrites via `else` (`x = 2`), the exception path via the `resbody`
-/// (`x = 3`), so `x = 1` is useless (RuboCop 1.87 flags it).
+/// In addition to a write inside a protected body, the fallback handles a write
+/// immediately before a `Rescue` statement in the same statement list. It also
+/// treats one immediately following inner `Rescue` as a single no-exception-path
+/// kill for an enclosing rescue, but only after the inner construct independently
+/// proves that every body/else and `resbody` path overwrites the source write.
+/// The enclosing rescue's own `resbody` paths are still checked separately.
 ///
-/// ## Paths from a body write `W` (in `body` of `rescue`)
-///
-/// - **No-exception path:** the body runs to completion, then the `else` arm,
-///   then falls through past the construct. `W` is killed here by the earliest
-///   *unconditional* overwrite among the later begin-body writes (the body runs
-///   fully on this path) and the `else`-arm writes (`ne_kill`). With neither,
-///   the body value falls through intact and is live.
-/// - **Exception path (one per `resbody`):** an exception anywhere after `W`
-///   diverts into that `resbody`, then falls through. `W` is killed here only by
-///   an *unconditional* overwrite inside that `resbody` (`rb_kill`) — a later
-///   begin-body write does NOT help, since the exception may precede it. Every
-///   `resbody` must overwrite.
-///
-/// On each path an overwrite only kills `W` if no compatible read on that path
-/// observes `W` first. `compatible_reads` are the variable's reads after `W` on
-/// a control-flow-compatible path (pre-filtered by the caller via
-/// `paths_compatible`); each is classified by the arm it sits in.
-///
-/// ## Soundness (no false positives)
-///
-/// A write reached through an inner branch or a short-circuit `&&`/`||` is not
-/// counted as an unconditional overwrite (see `rescue_arm_of`). A path with no
-/// unconditional overwrite, or one whose overwrite is preceded by a read of
-/// `W`, leaves `W` observable and suppresses the kill. An exception that
-/// escapes `rescue` unhandled (no matching `resbody`) is handled by the
-/// `within_enclosing_exception_region` guard, which keeps the kill conservative
-/// when an enclosing `ensure`/`rescue` could observe the body write on the
-/// propagation path.
-///
-/// ## Known limitations (false-negative direction only, conservative)
-///
-/// - `rescue` nested in an enclosing `ensure`/`rescue` is skipped entirely by
-///   the guard above, even when no escaping exception actually reaches an
-///   un-overwritten reader.
-/// - A *pre-begin* write (before the `begin`) killed on every exit by the body
-///   and handler arms is not reached — this fallback only runs for writes
-///   *inside* the protected body (`enclosing_protected_rescue` gates it).
-/// - A nested inner `begin..rescue..else` that overwrites on all of its own
-///   exits cannot cover the *outer* rescue's no-exception path, because the
-///   inner writes sit behind the inner `Rescue` branch barrier and
-///   `rescue_arm_of` rejects them as not unconditional in the outer body.
+/// Unhandled exceptions are conservative: a top-level candidate is rejected if
+/// an enclosing `ensure`/`rescue` can observe the write, while a nested candidate
+/// is accepted only when unmatched inner exceptions flow directly to the outer
+/// rescue whose handlers are checked by this function. Rescues containing
+/// `retry` are rejected because their back-edge is not modeled here. The pre-begin
+/// form also rejects any compatible read inside the rescue, even after an
+/// arm-local overwrite; this keeps chained handler-read cases conservative.
 fn begin_body_distributed_kill(
     ast: &Ast,
     root: NodeId,
@@ -335,67 +367,143 @@ fn begin_body_distributed_kill(
     compatible_reads: &[&Reference],
 ) -> bool {
     let body_write = &assignments[body_idx];
-    let Some(rescue) = enclosing_protected_rescue(ast, root, body_write.node_id) else {
-        return false;
+    let (rescue, context) = match enclosing_protected_rescue(ast, root, body_write.node_id) {
+        Some(rescue) => (rescue, RescueKillContext::ProtectedBody),
+        None => {
+            // A source write outside any rescue may be killed by the immediately
+            // following rescue. Do not infer a pre-begin kill for writes already
+            // in another rescue arm, or where the rescue is hidden behind a branch.
+            if has_rescue_ancestor(ast, root, body_write.node_id) {
+                return false;
+            }
+            let Some((rescue, _)) = immediately_following_rescue(ast, root, body_write.node_id)
+            else {
+                return false;
+            };
+            (rescue, RescueKillContext::PreBegin)
+        }
     };
-    // Soundness guard against exceptions that escape `rescue` *unhandled*. The
-    // per-path model below only accounts for `rescue`'s own arms (no-exception
-    // → body/else, exception → a direct `resbody`). But an exception whose type
-    // no `resbody` matches bypasses every arm and propagates outward: if
-    // `rescue` is nested in an enclosing `ensure` (which always runs) or the
-    // protected `body` of an enclosing `rescue` (which may catch it), a reader
-    // on that propagation path observes the *un-overwritten* body write. We do
-    // not model those paths, so stay conservative (false-negative direction)
-    // whenever such an enclosing exception region exists.
-    if within_enclosing_exception_region(ast, root, rescue) {
+
+    rescue_distributed_kill(
+        ast,
+        root,
+        assignments,
+        body_idx,
+        compatible_reads,
+        rescue,
+        context,
+    )
+}
+
+/// Checks whether every path through `rescue` overwrites `write_idx` before a
+/// compatible read. `Nested` context is used only when an outer rescue handles
+/// unmatched exceptions from this rescue, so those paths are checked by the
+/// caller instead. `ProtectedBody` can compose one following inner rescue into
+/// its no-exception path; `PreBegin` rejects every compatible read in the rescue.
+fn rescue_distributed_kill(
+    ast: &Ast,
+    root: NodeId,
+    assignments: &[Assignment],
+    write_idx: usize,
+    compatible_reads: &[&Reference],
+    rescue: NodeId,
+    context: RescueKillContext,
+) -> bool {
+    let enclosing_rescue = match context {
+        RescueKillContext::Nested(outer) => Some(outer),
+        RescueKillContext::PreBegin | RescueKillContext::ProtectedBody => None,
+    };
+    let escaping_exception_observable = match enclosing_rescue {
+        Some(outer) => within_enclosing_exception_region_until(ast, root, rescue, Some(outer)),
+        None => within_enclosing_exception_region(ast, root, rescue),
+    };
+    if escaping_exception_observable || subtree_contains_retry(ast, rescue) {
         return false;
     }
+    if matches!(context, RescueKillContext::PreBegin)
+        && compatible_reads
+            .iter()
+            .any(|r| node_in_subtree(ast, rescue, r.node_id))
+    {
+        return false;
+    }
+
+    let body_write = &assignments[write_idx];
     let resbodies: Vec<NodeId> = ast
         .children(rescue)
         .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
         .collect();
 
-    // ── No-exception path ──
-    // Earliest unconditional overwrite among later begin-body writes (the body
-    // runs to completion on this path) and `else`-arm writes.
-    let ne_kill = assignments
+    let mut no_exception_kills: Vec<(u32, Option<NodeId>)> = assignments
         .iter()
         .enumerate()
-        .filter(|(j, w)| *j != body_idx && w.end > body_write.end)
+        .filter(|(j, w)| *j != write_idx && w.end > body_write.end)
         .filter(|(_, w)| {
             matches!(
                 rescue_arm_of(ast, rescue, w.node_id),
                 Some(RescueArm::Body) | Some(RescueArm::Else)
             )
         })
-        .map(|(_, w)| w.end)
-        .min();
-    let Some(ne_kill) = ne_kill else {
+        .map(|(_, w)| (w.end, None))
+        .collect();
+
+    // One immediately following inner rescue can provide an unconditional
+    // no-exception-path overwrite, provided every one of its own paths kills
+    // the source write before a read. Its unmatched exceptions are left for the
+    // enclosing rescue's per-resbody checks below.
+    let nested_kill = if matches!(context, RescueKillContext::ProtectedBody) {
+        immediately_following_rescue(ast, root, body_write.node_id).and_then(
+            |(inner_rescue, inner_end)| {
+                if !matches!(
+                    rescue_arm_of(ast, rescue, inner_rescue),
+                    Some(RescueArm::Body) | Some(RescueArm::Else)
+                ) {
+                    return None;
+                }
+                rescue_distributed_kill(
+                    ast,
+                    root,
+                    assignments,
+                    write_idx,
+                    compatible_reads,
+                    inner_rescue,
+                    RescueKillContext::Nested(rescue),
+                )
+                .then_some((inner_rescue, inner_end))
+            },
+        )
+    } else {
+        None
+    };
+    if let Some((inner, end)) = nested_kill {
+        no_exception_kills.push((end, Some(inner)));
+    }
+
+    let Some((ne_kill, nested_kill)) = no_exception_kills
+        .into_iter()
+        .min_by_key(|(kill_end, _)| *kill_end)
+    else {
         return false;
     };
-    // A read on the no-exception path (after `W`, not inside any `resbody`)
-    // positioned before `ne_kill` observes `W`.
     for r in compatible_reads {
-        if r.pos <= body_write.end {
-            continue;
-        }
-        if resbodies
-            .iter()
-            .any(|&rb| node_in_subtree(ast, rb, r.node_id))
+        if r.pos <= body_write.end
+            || resbodies
+                .iter()
+                .any(|&rb| node_in_subtree(ast, rb, r.node_id))
+            || nested_kill.is_some_and(|inner| node_in_subtree(ast, inner, r.node_id))
         {
-            continue; // exception-path read, handled per-resbody below
+            continue;
         }
         if r.pos < ne_kill {
             return false;
         }
     }
 
-    // ── Exception paths (one per resbody) ──
     for &rb in &resbodies {
         let rb_kill = assignments
             .iter()
             .enumerate()
-            .filter(|(j, _)| *j != body_idx)
+            .filter(|(j, _)| *j != write_idx)
             .filter(|(_, w)| {
                 matches!(
                     rescue_arm_of(ast, rescue, w.node_id),
@@ -407,7 +515,6 @@ fn begin_body_distributed_kill(
         let Some(rb_kill) = rb_kill else {
             return false;
         };
-        // A read inside this resbody positioned before its overwrite observes W.
         for r in compatible_reads {
             if node_in_subtree(ast, rb, r.node_id) && r.pos < rb_kill {
                 return false;
@@ -420,14 +527,26 @@ fn begin_body_distributed_kill(
 
 /// Returns `true` if `node` lies within the protected region of an enclosing
 /// exception construct before `root` — the `body` of an enclosing `Ensure`
-/// (its `ensure` clause always runs on an escaping exception) or the protected
+/// (whose `ensure` clause always runs on an escaping exception) or the protected
 /// `body` of an enclosing `Rescue` (which may catch an escaping exception).
-/// In either case an exception that escapes `node` unhandled can reach readers
-/// on the propagation path, which the distributed-kill fallback does not model.
+/// Such an exception can reach readers on the propagation path, which the
+/// distributed-kill fallback does not model.
 fn within_enclosing_exception_region(ast: &Ast, root: NodeId, node: NodeId) -> bool {
+    within_enclosing_exception_region_until(ast, root, node, None)
+}
+
+/// As above, but stop before `stop_rescue`. A nested rescue can use this when
+/// its unmatched exceptions are handled by that outer rescue, whose paths are
+/// checked separately by the caller.
+fn within_enclosing_exception_region_until(
+    ast: &Ast,
+    root: NodeId,
+    node: NodeId,
+    stop_rescue: Option<NodeId>,
+) -> bool {
     let mut current = node;
     while let Some(parent) = ast.parent(current).get() {
-        if parent == root {
+        if parent == root || Some(parent) == stop_rescue {
             return false;
         }
         match *ast.kind(parent) {
