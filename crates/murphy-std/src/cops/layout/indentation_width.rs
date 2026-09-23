@@ -120,9 +120,9 @@ impl IndentationWidth {
             return;
         }
         check_indentation(base, cx.if_then_branch(node), cx, options);
-        // The `else` branch indentation (relative to the `else` keyword) is a
-        // documented under-reporting gap: Murphy's Cx exposes no `else`-keyword
-        // location, and locating it via token scanning risks false positives.
+        // The if-else branch remains an under-reporting gap: Cx exposes no
+        // dedicated `IfNode` else-keyword range. Case-else keywords are
+        // recovered separately from a gap bounded by that node's AST children.
         // The `then` branch (the common case) is covered; `elsif` chains get
         // their own `on_if` visit. See the parity block.
     }
@@ -143,9 +143,10 @@ impl IndentationWidth {
             let base = cx.loc(when_node).keyword();
             check_indentation(base, cx.when_body(when_node), cx, options);
         }
-        if let Some(&last_when) = cx.case_when_branches(node).last() {
-            let base = cx.loc(last_when).keyword();
-            check_indentation(base, cx.case_else_branch(node), cx, options);
+        let else_branch = cx.case_else_branch(node);
+        if let Some(branch) = else_branch.get() {
+            let base = case_else_keyword(node, branch, cx);
+            check_indentation(base, else_branch, cx, options);
         }
     }
 
@@ -183,18 +184,80 @@ fn check_loop(node: NodeId, cx: &Cx<'_>, options: &IndentationWidthOptions) {
     check_indentation(base, loop_body(node, cx), cx, options);
 }
 
-/// `on_block`: the body is indented past the `end` keyword (the block opener's
-/// indentation base under the default `start_of_line` style).
+/// `on_block`: measure the body from the indentation of the block call's
+/// opening line. The closing `end`/`}` can be misaligned, so it is not a safe
+/// base. Skip the check if the call's start location cannot be recovered.
 fn check_block_body(node: NodeId, cx: &Cx<'_>, options: &IndentationWidthOptions) {
-    let end_kw = cx.loc(node).end_keyword();
-    if end_kw == Range::ZERO {
+    let base = block_body_base(node, cx);
+    if base == Range::ZERO {
         return;
     }
-    // `return unless begins_its_line?(end_loc)`.
-    if !begins_its_line(cx, end_kw.start) {
-        return;
+    check_indentation(base, cx.block_body(node), cx, options);
+}
+
+/// Find the first source token on the line where the block's call begins. This
+/// is the default start-of-line indentation base for both `do` and brace blocks,
+/// including calls written after an assignment on the same line.
+fn block_body_base(node: NodeId, cx: &Cx<'_>) -> Range {
+    let Some(call) = cx.block_call(node).get() else {
+        return Range::ZERO;
+    };
+    let call_start = cx.range(call).start as usize;
+    let source = cx.source().as_bytes();
+    if call_start > source.len() {
+        return Range::ZERO;
     }
-    check_indentation(end_kw, cx.block_body(node), cx, options);
+    let line_start = source[..call_start]
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    let mut base_start = line_start;
+    while base_start < call_start && matches!(source[base_start], b' ' | b'\t') {
+        base_start += 1;
+    }
+    let Some(token) = cx.token_after(base_start as u32) else {
+        return Range::ZERO;
+    };
+    if token.range.start != base_start as u32 {
+        return Range::ZERO;
+    }
+    token.range
+}
+
+/// Locate the `else` token belonging to a case node. Restrict the search to
+/// the gap after the final `when` (or subject) and before the else body, so an
+/// `else` nested inside a condition or branch cannot be mistaken for this one.
+fn case_else_keyword(case_node: NodeId, else_branch: NodeId, cx: &Cx<'_>) -> Range {
+    let branches = cx.case_when_branches(case_node);
+    let gap_start = if let Some(&last_when) = branches.last() {
+        cx.range(last_when).end
+    } else if let Some(subject) = cx.case_subject(case_node).get() {
+        cx.range(subject).end
+    } else {
+        let keyword = cx.loc(case_node).keyword();
+        if keyword == Range::ZERO {
+            return Range::ZERO;
+        }
+        keyword.end
+    };
+    let branch_start = cx.range(else_branch).start;
+    if gap_start > branch_start {
+        return Range::ZERO;
+    }
+    let gap = Range {
+        start: gap_start,
+        end: branch_start,
+    };
+    let mut matches = cx.tokens_in(gap).iter().filter_map(|token| {
+        (cx.token_text(*token) == "else").then_some(token.range)
+    });
+    let Some(keyword) = matches.next() else {
+        return Range::ZERO;
+    };
+    if matches.next().is_some() {
+        return Range::ZERO;
+    }
+    keyword
 }
 
 /// `check_members`: the first member of a class/module body is indented past
@@ -228,7 +291,7 @@ fn check_members(
 }
 
 /// RuboCop's `check_indentation(base_loc, body_node)` core. `base` is the
-/// keyword range; `body` is the construct's body.
+/// construct's indentation base; `body` is the construct's body.
 fn check_indentation(
     base: Range,
     body: OptNodeId,
