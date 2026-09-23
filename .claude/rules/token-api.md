@@ -21,8 +21,8 @@ use murphy_plugin_api::{Cx, Range, SourceToken, SourceTokenKind};
 | `LeftBrace` | `{` | Hash literal or brace block. NOT `#{` (interpolation) or `\-> {` (lambda begin) — those are `Other` |
 | `RightBrace` | `}` | Hash literal, brace block, or lambda body. String interpolation `}` is `Other` |
 | `Comma` | `,` | |
-| `HeredocStart` | `<<~RUBY` etc. | Token covers up to end of label (not `\n`) |
-| `HeredocEnd` | `RUBY` terminator | Token covers just the label, not its newline |
+| `HeredocStart` | `<<~RUBY` etc. | Token covers the opener through the end of its label (not `\n`) |
+| `HeredocEnd` | `RUBY` terminator | Token covers the terminator line, including its newline |
 | `Comment` | `# …` | |
 | `Newline` | `\n` | Significant newline |
 | `IgnoredNewline` | `\n` | Continuation newline (after `\`, inside `[]`, etc.) |
@@ -112,24 +112,35 @@ let paren = toks[idx..]
 
 See `crates/murphy-std/src/cops/layout/dot_position.rs` for full context.
 
-### Collect heredoc body ranges (FIFO, stack-based)
+### Collect heredoc body ranges (FIFO, stacked)
+
+When several heredocs share an opener line (for example,
+`foo(<<~A, <<~B)`), their bodies appear one after another. Do not use
+`HeredocStart.end + 1` as every body's start: that makes the ranges overlap.
+Queue each opener, then resolve the body at its matching `HeredocEnd` using a
+cursor that advances past each terminator line:
 
 ```rust
+use std::collections::VecDeque;
+
 fn heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
     let source = cx.source().as_bytes();
-    let mut starts: Vec<u32> = Vec::new();  // stack of (HeredocStart.end + 1)
+    let mut starts: VecDeque<u32> = VecDeque::new(); // opener token ends
     let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let mut cursor = 0u32;
 
     for tok in cx.sorted_tokens() {
         match tok.kind {
-            SourceTokenKind::HeredocStart => {
-                starts.push(tok.range.end + 1); // +1 skips the opener's \n
-            }
+            SourceTokenKind::HeredocStart => starts.push_back(tok.range.end),
             SourceTokenKind::HeredocEnd => {
-                if let Some(body_start) = starts.pop() {
-                    // end = start of terminator line (handles squiggly indent)
-                    let line_start = terminator_line_start(source, tok.range.start);
-                    ranges.push((body_start, line_start));
+                if let Some(opener_end) = starts.pop_front() {
+                    let opener_line_end = next_line_start(source, opener_end);
+                    let body_start = cursor.max(opener_line_end).min(source.len() as u32);
+                    let terminator_line_start = terminator_line_start(source, tok.range.start);
+                    // HeredocEnd includes its newline; scan from its start so
+                    // the cursor lands on the next body's first line.
+                    cursor = next_line_start(source, tok.range.start);
+                    ranges.push((body_start.min(terminator_line_start), terminator_line_start));
                 }
             }
             _ => {}
@@ -139,8 +150,10 @@ fn heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
 }
 ```
 
-See `crates/murphy-std/src/cops/layout/trailing_whitespace.rs` for
-`terminator_line_start` and the full implementation.
+`next_line_start` scans forward from its byte offset to the byte after the
+following `\n` (or returns EOF). See
+`crates/murphy-std/src/cops/layout/trailing_whitespace.rs` for the complete
+implementation and `terminator_line_start`.
 
 ### Check if a byte offset is inside any heredoc body
 
