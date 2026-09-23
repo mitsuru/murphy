@@ -1,4 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["spikes/*"]
+exclude = ["spikes/*", "vendor/mruby3-sys"]
+
+# Keep mruby3-sys pinned while propagating make failures and keeping mruby locks in OUT_DIR.
+[patch.crates-io]
+mruby3-sys = { path = "vendor/mruby3-sys" }
