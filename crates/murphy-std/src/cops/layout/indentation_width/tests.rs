@@ -237,3 +237,66 @@ fn flags_under_indented_if_body() {
         end
     "#});
 }
+
+#[test]
+fn accepts_case_else_body_indented_from_else_keyword() {
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        case x
+          when 1
+            a
+        else
+          b
+        end
+    "#});
+}
+
+#[test]
+fn flags_case_else_body_indented_from_the_wrong_keyword() {
+    test::<IndentationWidth>().expect_offense(indoc! {r#"
+        case x
+          when 1
+            a
+        else
+            b
+        ^^^^ Use 2 (not 4) spaces for indentation.
+        end
+    "#});
+}
+
+#[test]
+fn accepts_block_body_even_when_end_is_misaligned() {
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        foo do
+          bar
+            end
+    "#});
+}
+
+#[test]
+fn flags_block_body_aligned_to_misaligned_end() {
+    test::<IndentationWidth>().expect_offense(indoc! {r#"
+        foo do
+            bar
+        ^^^^ Use 2 (not 4) spaces for indentation.
+          end
+    "#});
+}
+
+#[test]
+fn flags_brace_block_body_against_its_opener_line() {
+    test::<IndentationWidth>().expect_offense(indoc! {r#"
+        foo {
+            bar
+        ^^^^ Use 2 (not 4) spaces for indentation.
+        }
+    "#});
+}
+
+#[test]
+fn accepts_assigned_block_body_indented_from_opener_line() {
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        result = foo do
+          bar
+        end
+    "#});
+}
