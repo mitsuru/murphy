@@ -689,12 +689,40 @@ fn receiver_chain_key(node: NodeId, cx: &Cx<'_>) -> Option<String> {
         NodeKind::Ivar(s) => Some(format!("ivar:{}", cx.symbol_str(*s))),
         NodeKind::Cvar(s) => Some(format!("cvar:{}", cx.symbol_str(*s))),
         NodeKind::Gvar(s) => Some(format!("gvar:{}", cx.symbol_str(*s))),
-        // Preserve the complete scoped constant: RuboCop keys const receivers
-        // by the const AST node, so `A::B` and `C::B` are distinct attributes.
-        NodeKind::Const { .. } => Some(format!("const:{}", cx.raw_source(cx.range(node)))),
+        NodeKind::Const { .. } => Some(format!("const:{}", constant_path_key(node, cx)?)),
         NodeKind::Send { .. } | NodeKind::Csend { .. } => attribute_chain_key(node, cx),
         _ => None,
     }
+}
+
+/// Canonicalize a constant scope and name without relying on source whitespace.
+/// Absolute paths retain their `::` root, so `A::B` and `::A::B` stay distinct.
+fn constant_path_key(node: NodeId, cx: &Cx<'_>) -> Option<String> {
+    let NodeKind::Const { scope, name } = cx.kind(node) else {
+        return None;
+    };
+    let name = cx.symbol_str(*name);
+    let path = match scope.get() {
+        None => {
+            let root = if cx.raw_source(cx.range(node)).starts_with("::") {
+                "absolute"
+            } else {
+                "relative"
+            };
+            format!("{root}::{name}")
+        }
+        Some(scope) if matches!(cx.kind(scope), NodeKind::Cbase) => format!("absolute::{name}"),
+        Some(scope) if matches!(cx.kind(scope), NodeKind::Const { .. }) => {
+            format!("{}::{name}", constant_path_key(scope, cx)?)
+        }
+        Some(scope) => {
+            // Preserve existing handling for non-constant scope expressions.
+            let scope_key = receiver_chain_key(scope, cx)
+                .unwrap_or_else(|| format!("source:{}", cx.raw_source(cx.range(scope))));
+            format!("scope:{scope_key}::{name}")
+        }
+    };
+    Some(path)
 }
 
 /// `node.loc.else.is?('else')` for an `if` node: is the keyword in the gap a
@@ -1101,6 +1129,36 @@ mod tests {
             .expect_offense(indoc! {"
                 def scoped; A::B.foo; C::B.foo; end
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `scoped` is too high. [<0, 2, 0> 2/0]
+            "});
+    }
+
+    #[test]
+    fn whitespace_variants_of_scoped_const_receivers_are_repeated_attributes() {
+        test::<AbcSize>()
+            .with_options(&AbcSizeOptions {
+                max: 0,
+                count_repeated_attributes: false,
+                allowed_methods: vec![],
+                allowed_patterns: vec![],
+            })
+            .expect_offense(indoc! {"
+                def scoped; A::B.foo; A::  B.foo; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `scoped` is too high. [<0, 1, 0> 1/0]
+            "});
+    }
+
+    #[test]
+    fn absolute_scoped_const_receiver_is_distinct_from_relative_path() {
+        test::<AbcSize>()
+            .with_options(&AbcSizeOptions {
+                max: 0,
+                count_repeated_attributes: false,
+                allowed_methods: vec![],
+                allowed_patterns: vec![],
+            })
+            .expect_offense(indoc! {"
+                def scoped; A::B.foo; ::A::B.foo; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `scoped` is too high. [<0, 2, 0> 2/0]
             "});
     }
 
