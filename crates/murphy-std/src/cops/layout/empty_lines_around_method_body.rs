@@ -27,10 +27,10 @@
 //!   (`endless_assignment_loc`); a `=` inside a default-argument value is not
 //!   matched. An offense fires when the body begins more than one line below
 //!   `=` AND the line directly after `=` is blank, with the message "Extra
-//!   empty line detected at method body beginning." The correction removes the
-//!   full run of blank lines after `=` (one idempotent edit), reaching the same
-//!   fixpoint RuboCop reaches by re-running its single-line removal. Verified
-//!   against RuboCop 1.86.2 (TargetRubyVersion 3.0).
+//!   empty line detected at method body beginning." Autocorrect removes one
+//!   blank-line terminator per pass, matching RuboCop's corrector; the fixpoint
+//!   loop removes a full run. Verified against RuboCop 1.86.2
+//!   (TargetRubyVersion 3.0).
 //!
 //!   ABI note: Murphy's empty `Args` node carries the whole-def range rather
 //!   than a parameter-list sub-range, so it cannot stand in for RuboCop's
@@ -46,7 +46,7 @@
 //!   nil, so the fallback is the def/method-name line.
 //! ```
 
-use crate::cops::util::{check_empty_lines_around_body_blank_run, physical_lines};
+use crate::cops::util::{check_empty_lines_around_body, physical_lines, EmptyLinesAroundBodyStyle};
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 #[derive(Default)]
@@ -96,7 +96,14 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let first_line = adjusted_first_line(node, cx);
 
     let last_line = line_1based(range.end.saturating_sub(1).max(range.start), cx);
-    check_empty_lines_around_body_blank_run(cx, "method", first_line, last_line);
+    check_empty_lines_around_body(
+        cx,
+        "method",
+        first_line,
+        last_line,
+        EmptyLinesAroundBodyStyle::NoEmptyLines,
+        EmptyLinesAroundBodyStyle::NoEmptyLines,
+    );
 }
 
 /// RuboCop's `node.endless?` (`loc.assignment` present). Keyed on the endless
@@ -129,10 +136,9 @@ fn is_endless(node: NodeId, cx: &Cx<'_>) -> bool {
 /// Murphy has no assignment-operator loc on `NodeLoc` for a `def`, so the `=`
 /// is located by a token scan between the method name (or parameter-list close)
 /// and the body's start. An offense is registered when the body begins more
-/// than one line below `=` AND the line directly after `=` is blank. The
-/// correction removes that blank line; mirroring this cop's body-boundary
-/// correction, the full run of consecutive blank lines is removed so a single
-/// pass reaches a clean fixpoint.
+/// than one line below `=` AND the line directly after `=` is blank. One
+/// byte is removed at the beginning of that line per correction pass, matching
+/// RuboCop's `line_range(...).resize(1)` correction.
 fn check_endless(node: NodeId, cx: &Cx<'_>) {
     let Some(body) = cx.def_body(node).get() else {
         return;
@@ -161,29 +167,18 @@ fn check_endless(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
+    // Match RuboCop's `line_range(...).resize(1)`: remove only one byte at
+    // the start of this blank line per correction pass.
+    let blank_line_range = Range {
+        start: after_line.start,
+        end: after_line.start.saturating_add(1).min(after_line.end),
+    };
     cx.emit_offense(
-        Range {
-            start: after_line.start,
-            end: after_line.end,
-        },
+        blank_line_range,
         "Extra empty line detected at method body beginning.",
         None,
     );
-
-    // Remove the full run of consecutive blank lines after `=` (one idempotent
-    // edit). RuboCop removes a single line per pass and re-runs to fixpoint;
-    // removing the whole run reaches the same end state in one pass.
-    let mut hi = after_idx;
-    while hi + 1 < lines.len() && lines[hi + 1].blank {
-        hi += 1;
-    }
-    cx.emit_edit(
-        Range {
-            start: after_line.start,
-            end: lines[hi].end,
-        },
-        "",
-    );
+    cx.emit_edit(blank_line_range, "");
 }
 
 /// The `=` operator range of an endless method (`def foo = body`), located by
@@ -717,15 +712,18 @@ mod tests {
         test::<EmptyLinesAroundMethodBody>().expect_no_offenses("def foo =\n  value\n");
     }
 
-    /// Two blank lines after `=` are collapsed in one offense's correction.
+    /// A single correction pass removes one blank-line terminator; a second
+    /// pass reaches the same fixpoint as RuboCop's iterative autocorrect.
     #[test]
-    fn corrects_multiple_blanks_after_endless_assignment() {
+    fn corrects_one_blank_per_pass_after_endless_assignment() {
         let src = "def foo =\n\n\n  value\n";
         let run = run_cop_with_edits::<EmptyLinesAroundMethodBody>(src);
-        let fixed = apply(src, &run.edits);
-        assert!(
-            run_cop::<EmptyLinesAroundMethodBody>(&fixed).is_empty(),
-            "not idempotent: {fixed:?}"
-        );
+        let once = apply(src, &run.edits);
+        assert_eq!(once, "def foo =\n\n  value\n");
+
+        let run2 = run_cop_with_edits::<EmptyLinesAroundMethodBody>(&once);
+        let twice = apply(&once, &run2.edits);
+        assert_eq!(twice, "def foo =\n  value\n");
+        assert!(run_cop::<EmptyLinesAroundMethodBody>(&twice).is_empty());
     }
 }

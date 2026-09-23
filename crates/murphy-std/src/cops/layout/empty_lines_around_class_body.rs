@@ -34,7 +34,7 @@
 //!       messages. Only `no_empty_lines` (the config default) is ported.
 //! ```
 
-use crate::cops::util::check_empty_lines_around_body_no_empty_lines;
+use crate::cops::util::{check_empty_lines_around_body, line_of, EmptyLinesAroundBodyStyle};
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
@@ -61,14 +61,34 @@ impl EmptyLinesAroundClassBody {
                 .unwrap_or(cx.range(node).start),
             _ => cx.range(node).start,
         };
-        check_empty_lines_around_body_no_empty_lines(node, header_anchor, "class", cx);
+        let range = cx.range(node);
+        let first_line = line_of(header_anchor, cx) as usize + 1;
+        let last_line = line_of(range.end.saturating_sub(1).max(range.start), cx) as usize + 1;
+        check_empty_lines_around_body(
+            cx,
+            "class",
+            first_line,
+            last_line,
+            EmptyLinesAroundBodyStyle::NoEmptyLines,
+            EmptyLinesAroundBodyStyle::NoEmptyLines,
+        );
     }
 
     #[on_node(kind = "sclass")]
     fn check_sclass(&self, node: NodeId, cx: &Cx<'_>) {
         // RuboCop: `on_sclass` calls `check(node, node.body)` with no adjusted
         // first line — the header is `class << expr`, anchored on the node start.
-        check_empty_lines_around_body_no_empty_lines(node, cx.range(node).start, "class", cx);
+        let range = cx.range(node);
+        let first_line = line_of(range.start, cx) as usize + 1;
+        let last_line = line_of(range.end.saturating_sub(1).max(range.start), cx) as usize + 1;
+        check_empty_lines_around_body(
+            cx,
+            "class",
+            first_line,
+            last_line,
+            EmptyLinesAroundBodyStyle::NoEmptyLines,
+            EmptyLinesAroundBodyStyle::NoEmptyLines,
+        );
     }
 }
 

@@ -721,308 +721,161 @@ pub fn nonempty_line_count(node: NodeId, cx: &Cx<'_>) -> usize {
 // - `cops::style::parentheses_around_condition::tests::no_offense_begin_end_condition`
 //   verifies `is_parenthesized` returns false for `begin...end`.
 
-// --- Layout/EmptyLinesAround*Body shared helpers (no_empty_lines style) ---
+// --- Layout/EmptyLinesAroundBody shared helper -------------------------------
 
-/// Returns the 0-based byte range of the physical line that contains
-/// `offset`, *excluding* the trailing `\n` (and a `\r` before it). Returns
-/// the whole-line span `[line_start, content_end)`.
-fn line_span_at(source: &[u8], offset: usize) -> (usize, usize) {
-    let line_start = source[..offset]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map_or(0, |pos| pos + 1);
-    let mut content_end = source[offset..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .map_or(source.len(), |pos| offset + pos);
-    if content_end > line_start && source[content_end - 1] == b'\r' {
-        content_end -= 1;
-    }
-    (line_start, content_end)
+/// Boundary behavior used by RuboCop's `EmptyLinesAroundBody` mixin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EmptyLinesAroundBodyStyle {
+    /// Disallow a blank line at the body boundary.
+    NoEmptyLines,
+    /// Require a blank line at the body boundary.
+    EmptyLines,
 }
 
-/// Returns the start offset of the line *following* the line that contains
-/// `offset`, or `None` if `offset` is on the last line of the source.
-fn next_line_start(source: &[u8], offset: usize) -> Option<usize> {
-    source[offset..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .map(|pos| offset + pos + 1)
-        .filter(|&start| start < source.len())
-}
-
-/// Returns the start offset of the line *preceding* the line that contains
-/// `offset`, or `None` if `offset` is on the first line of the source.
-fn prev_line_start(source: &[u8], offset: usize) -> Option<usize> {
-    let line_start = source[..offset]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map_or(0, |pos| pos + 1);
-    if line_start == 0 {
-        return None;
-    }
-    // The byte before `line_start - 1` is the `\n` that ends the previous line.
-    Some(
-        source[..line_start - 1]
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |pos| pos + 1),
-    )
-}
-
-/// Implements RuboCop's `EmptyLinesAroundBody` mixin for the default
-/// `no_empty_lines` `EnforcedStyle`: flags (and removes) a blank line at the
-/// beginning and/or end of a multi-line body.
-///
-/// - `header_anchor`: a byte offset somewhere on the construct's *header*
-///   line (RuboCop's `adjusted_first_line`). For a class with a superclass
-///   this is the superclass's last line; for a block it is the send node's
-///   last line; otherwise it is the node's own start.
-/// - `kind`: the `KIND` string used in the message (`class` / `block` /
-///   `begin`).
-///
-/// RuboCop's `&:empty?` predicate treats a line as blank only when it is
-/// *literally* empty after stripping the newline — a whitespace-only line is
-/// NOT blank. This matches that exactly (no `.trim()`).
-pub fn check_empty_lines_around_body_no_empty_lines(
-    node: NodeId,
-    header_anchor: u32,
-    kind: &str,
-    cx: &Cx<'_>,
-) {
-    // `return if node.single_line?`
-    if cx.is_single_line(node) {
-        return;
-    }
-
-    let source = cx.source().as_bytes();
-    let node_range = cx.range(node);
-    let header_anchor = header_anchor as usize;
-
-    // Beginning candidate: the line immediately after the header line
-    // (RuboCop's `processed_source.lines[first_line]`).
-    let begin_candidate = next_line_start(source, header_anchor);
-
-    // Ending candidate: the line immediately before the `end` line
-    // (RuboCop's `processed_source.lines[last_line - 2]`). The `end` line is
-    // the line containing the last byte of the node.
-    let end_byte = (node_range.end as usize).saturating_sub(1);
-    let end_candidate = prev_line_start(source, end_byte);
-
-    // Track which line we've already emitted an edit for, so a construct
-    // whose single inner line is both the beginning and ending candidate
-    // (e.g. `class Foo\n\nend`) does not produce overlapping edits.
-    let mut removed_line_start: Option<usize> = None;
-
-    let mut handle = |line_start: usize, location: &str| {
-        let (start, content_end) = line_span_at(source, line_start);
-        // `&:empty?` — literally empty (no whitespace-only allowance).
-        if start != content_end {
-            return;
-        }
-        let line_end = if content_end < source.len() {
-            content_end + 1
-        } else {
-            content_end
-        };
-        let range = Range {
-            start: start as u32,
-            end: line_end as u32,
-        };
-        let message = format!("Extra empty line detected at {kind} body {location}.");
-        cx.emit_offense(range, &message, None);
-        if removed_line_start != Some(start) {
-            cx.emit_edit(range, "");
-            removed_line_start = Some(start);
-        }
-    };
-
-    if let Some(begin_line) = begin_candidate {
-        handle(begin_line, "beginning");
-    }
-    if let Some(end_line) = end_candidate {
-        handle(end_line, "end");
-    }
-}
-
-// --- Layout/EmptyLinesAround{Module,Method}Body shared helpers (blank-run style) ---
-// NOTE: `check_empty_lines_around_body_blank_run` is a parallel-developed variant of
-// `check_empty_lines_around_body_no_empty_lines` above; they differ in signature and
-// autocorrect granularity (single line vs whole blank run). See bd issue for unification.
-
-/// Byte-offset boundaries of a physical source line, plus whether the line
-/// (excluding its trailing `\n`) is blank (only ASCII whitespace).
+/// Byte-offset boundaries of a physical source line, plus whether the line is
+/// empty after removing its line terminator. Whitespace-only lines are not
+/// empty, matching RuboCop's `String#empty?` checks.
 #[derive(Clone, Copy)]
 pub struct PhysicalLine {
     /// Byte offset of the first character of the line.
     pub start: u32,
     /// Byte offset just past the line's terminating `\n` (or EOF).
     pub end: u32,
-    /// `true` when the line contains only whitespace (RuboCop's `line.empty?`
-    /// where `lines` are already `chomp`ed, so a line of spaces is *not*
-    /// empty — but RuboCop strips the final `\n`; a line that is just `\n`
-    /// becomes `""` which is empty. We treat a line containing only the
-    /// newline as blank, matching RuboCop, and a whitespace-only line as
-    /// non-blank to match `String#empty?`).
+    /// True only when the line has no content after its line terminator is
+    /// removed. CRLF is treated as one line terminator.
     pub blank: bool,
 }
 
-/// Split `source` into physical lines with byte boundaries. The returned
-/// vector is 0-indexed; `lines[i]` is the (i+1)-th physical line.
-///
-/// A line's `blank` flag is `true` only when the line is exactly empty after
-/// removing its trailing `\n` — i.e. RuboCop's `processed_source.lines[i]`
-/// (which is `String#chomp`-ed) returns `""` and `"".empty?` is `true`.
-/// A line of spaces is therefore *not* blank, matching RuboCop's `&:empty?`.
+/// Split `source` into physical lines. The returned vector is 0-indexed.
+/// A line containing spaces is not blank, matching RuboCop's `&:empty?`.
 pub fn physical_lines(source: &str) -> Vec<PhysicalLine> {
     let bytes = source.as_bytes();
     let mut lines = Vec::new();
     let mut start = 0usize;
-    while start <= bytes.len() {
-        // EOF with no trailing newline already consumed.
-        if start == bytes.len() {
-            // A trailing empty "line" only exists if the source is empty or
-            // ended exactly on a `\n` (handled by the loop's end condition).
-            break;
-        }
+    while start < bytes.len() {
         let nl = bytes[start..].iter().position(|&b| b == b'\n');
-        let (content_end, next_start) = match nl {
-            Some(i) => (start + i, start + i + 1),
+        let (line_end, content_end) = match nl {
+            Some(i) => (start + i + 1, start + i),
             None => (bytes.len(), bytes.len()),
         };
-        // Normalize a CRLF terminator: `"\r\n"` leaves `content_end` one byte
-        // past `start`, so strip a trailing `\r` before the blank test —
-        // otherwise a visually empty CRLF line is mis-classified as non-blank.
+        // Normalize CRLF for the blank-line predicate. `line_end` retains the
+        // full source span so corrections can remove exactly one line-ending
+        // byte per RuboCop autocorrect pass (the leading `\r` for CRLF).
         let content_end = if content_end > start && bytes[content_end - 1] == b'\r' {
             content_end - 1
         } else {
             content_end
         };
-        let blank = content_end == start; // empty after chomp / CRLF-normalized
         lines.push(PhysicalLine {
             start: start as u32,
-            end: next_start as u32,
-            blank,
+            end: line_end as u32,
+            blank: content_end == start,
         });
         if nl.is_none() {
             break;
         }
-        start = next_start;
+        start = line_end;
     }
     lines
 }
 
-/// Shared port of RuboCop's `EmptyLinesAroundBody` mixin for the
-/// `no_empty_lines` style, used by `Layout/EmptyLinesAroundModuleBody` and
-/// `Layout/EmptyLinesAroundMethodBody`.
-///
-/// `first_line` / `last_line` are 1-based physical source line numbers of the
-/// construct (for method bodies, `first_line` is the *args' last line*, the
-/// `adjusted_first_line`). `kind` is the message noun (`"module"` /
-/// `"method"`).
-///
-/// Behaviour (mirrors the mixin's `check`/`check_both`/`check_source`):
-/// - `node.single_line?` → return (no offense). We treat `first_line ==
-///   last_line` as single-line.
-/// - **beginning**: the line at 0-index `first_line` (the line right after the
-///   opener). If blank → "Extra empty line detected at <kind> body beginning."
-/// - **end**: the line at 0-index `last_line - 2` (the line right before
-///   `end`). If blank → "Extra empty line detected at <kind> body end."
-///
-/// Each boundary fires independently, so `module Foo\n\nend` emits two
-/// offenses — exactly matching RuboCop. The autocorrect removes the full run
-/// of consecutive blank lines at the boundary; when the two boundaries
-/// resolve to the same blank-line run (the nil-body case) only one edit is
-/// emitted to keep the edits non-overlapping.
-pub fn check_empty_lines_around_body_blank_run(
+/// Check both body boundaries using RuboCop's one-line-per-boundary behavior.
+/// `first_line` and `last_line` are 1-based physical source lines. The styles
+/// can differ for `Layout/EmptyLinesAroundModuleBody`'s special styles.
+pub fn check_empty_lines_around_body(
     cx: &Cx<'_>,
     kind: &str,
     first_line: usize,
     last_line: usize,
+    beginning_style: EmptyLinesAroundBodyStyle,
+    ending_style: EmptyLinesAroundBodyStyle,
 ) {
-    // `return if node.single_line?`
+    // `node.single_line?` (or, for adjusted method headers, no line remains
+    // between the header and the closing `end`).
     if first_line >= last_line {
         return;
     }
 
     let lines = physical_lines(cx.source());
-
-    // RuboCop indexes `processed_source.lines` 0-based; `lines[first_line]` is
-    // the line after the 1-based `first_line`, and `lines[last_line - 2]` is
-    // the line before the 1-based `last_line`.
-    let begin_idx = first_line; // 0-based index of the line after the opener
-    let end_idx = last_line.checked_sub(2); // 0-based index of the line before `end`
-
-    // Track the blank-run byte range already scheduled for removal so the two
-    // boundaries do not emit overlapping edits when they target the same run.
-    let mut emitted_edit: Option<Range> = None;
-
-    if let Some(&line) = lines.get(begin_idx)
-        && line.blank
-    {
-        let range = blank_run_range(&lines, begin_idx, BlankRunDirection::Down);
-        cx.emit_offense(
-            Range {
-                start: line.start,
-                end: line.end,
-            },
-            &format!("Extra empty line detected at {kind} body beginning."),
-            None,
+    let mut removed_line: Option<Range> = None;
+    check_empty_lines_around_body_boundary(
+        cx,
+        kind,
+        first_line,
+        "beginning",
+        beginning_style,
+        &lines,
+        &mut removed_line,
+    );
+    if let Some(end_line) = last_line.checked_sub(2) {
+        check_empty_lines_around_body_boundary(
+            cx,
+            kind,
+            end_line,
+            "end",
+            ending_style,
+            &lines,
+            &mut removed_line,
         );
-        cx.emit_edit(range, "");
-        emitted_edit = Some(range);
-    }
-
-    if let Some(end_idx) = end_idx
-        && let Some(&line) = lines.get(end_idx)
-        && line.blank
-    {
-        let range = blank_run_range(&lines, end_idx, BlankRunDirection::Up);
-        cx.emit_offense(
-            Range {
-                start: line.start,
-                end: line.end,
-            },
-            &format!("Extra empty line detected at {kind} body end."),
-            None,
-        );
-        // Skip a duplicate/overlapping edit when the end boundary's
-        // blank run is the same run already removed at the beginning.
-        let overlaps = emitted_edit.is_some_and(|e| range.start < e.end && e.start < range.end);
-        if !overlaps {
-            cx.emit_edit(range, "");
-        }
     }
 }
 
-#[derive(Clone, Copy)]
-enum BlankRunDirection {
-    Down,
-    Up,
-}
-
-/// The byte range covering the maximal run of consecutive blank lines that
-/// includes `idx`, scanning down (toward EOF) or up (toward BOF). Used as the
-/// autocorrect removal range so all blank lines at a body boundary are removed
-/// in one edit.
-fn blank_run_range(lines: &[PhysicalLine], idx: usize, dir: BlankRunDirection) -> Range {
-    let mut lo = idx;
-    let mut hi = idx;
-    match dir {
-        BlankRunDirection::Down => {
-            while hi + 1 < lines.len() && lines[hi + 1].blank {
-                hi += 1;
+fn check_empty_lines_around_body_boundary(
+    cx: &Cx<'_>,
+    kind: &str,
+    line_index: usize,
+    location: &str,
+    style: EmptyLinesAroundBodyStyle,
+    lines: &[PhysicalLine],
+    removed_line: &mut Option<Range>,
+) {
+    let Some(line) = lines.get(line_index).copied() else {
+        return;
+    };
+    match style {
+        EmptyLinesAroundBodyStyle::NoEmptyLines if line.blank => {
+            // RuboCop removes a one-byte range at the beginning of the blank
+            // line, then re-runs autocorrect. For LF this is the newline; for
+            // CRLF it is the carriage return, with the remaining newline
+            // removed on the next fixpoint pass.
+            let range = Range {
+                start: line.start,
+                end: line.start.saturating_add(1).min(line.end),
+            };
+            cx.emit_offense(
+                range,
+                &format!("Extra empty line detected at {kind} body {location}."),
+                None,
+            );
+            let duplicate =
+                removed_line.is_some_and(|prev| prev.start == range.start && prev.end == range.end);
+            if !duplicate {
+                cx.emit_edit(range, "");
+                *removed_line = Some(range);
             }
         }
-        BlankRunDirection::Up => {
-            while lo > 0 && lines[lo - 1].blank {
-                lo -= 1;
-            }
+        EmptyLinesAroundBodyStyle::EmptyLines if !line.blank => {
+            let insertion_line = if location == "end" {
+                line_index.saturating_add(1)
+            } else {
+                line_index
+            };
+            let insert_at = lines
+                .get(insertion_line)
+                .map(|next| next.start)
+                .unwrap_or_else(|| cx.source().len() as u32);
+            let range = Range {
+                start: insert_at,
+                end: insert_at,
+            };
+            cx.emit_offense(
+                range,
+                &format!("Empty line missing at {kind} body {location}."),
+                None,
+            );
+            cx.emit_edit(range, "\n");
         }
-    }
-    Range {
-        start: lines[lo].start,
-        end: lines[hi].end,
+        _ => {}
     }
 }
 

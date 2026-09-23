@@ -36,7 +36,7 @@
 //!       has no inner line to flag, so this is inconsequential.
 //! ```
 
-use crate::cops::util::check_empty_lines_around_body_no_empty_lines;
+use crate::cops::util::{check_empty_lines_around_body, line_of, EmptyLinesAroundBodyStyle};
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
@@ -119,7 +119,16 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    check_empty_lines_around_body_no_empty_lines(node, opener_start, "block", cx);
+    let first_line = line_of(opener_start, cx) as usize + 1;
+    let last_line = line_of(closer_end.saturating_sub(1).max(opener_start), cx) as usize + 1;
+    check_empty_lines_around_body(
+        cx,
+        "block",
+        first_line,
+        last_line,
+        EmptyLinesAroundBodyStyle::NoEmptyLines,
+        EmptyLinesAroundBodyStyle::NoEmptyLines,
+    );
 }
 
 #[cfg(test)]
