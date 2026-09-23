@@ -12,7 +12,7 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.20.1]
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `Metrics::Utils::AbcSizeCalculator` and the
 //!   `MethodComplexity` mixin numerically (verified against rubocop 1.87.0
@@ -23,16 +23,11 @@
 //!   `on_block`/`on_numblock`/`on_itblock` dispatch). The default-config
 //!   path (`CountRepeatedAttributes: true`) matches rubocop; the non-default
 //!   `CountRepeatedAttributes: false` discount path invalidates tracked getter
-//!   chains after shorthand op-assigns to those attributes. One known gap
-//!   remains (murphy-e7bz.20.1 — see below).
-//!
-//!   Known gap (murphy-e7bz.20.1): a multiple assignment whose LHS targets
-//!   are *setter* or *index* writes (`self.x, self.y = 1, 2`) is undercounted
-//!   because murphy's translate layer emits `Unknown` for those mlhs targets,
-//!   so the calculator never sees the setter sends. RuboCop counts them
-//!   (`<2, 2, 0>`); murphy currently yields `<0, 0, 0>`. Plain local-variable
-//!   masgn targets (`a, b = 1, 2`) are unaffected. The fix belongs in
-//!   murphy-translate, not in this cop.
+//!   chains after shorthand op-assigns to those attributes. The
+//!   multiple-assignment setter/index target gap (murphy-e7bz.20.1) is fixed:
+//!   these targets now reach the calculator as setter sends and match RuboCop
+//!   (`<2, 2, 0>` for `self.x, self.y = 1, 2`; `<2, 6, 0>` for
+//!   `a[k], b[k] = 1, 2`).
 //!
 //!   The calculator walks the method body in post-order
 //!   (`visit_depth_last`) and accumulates three counters:
@@ -873,6 +868,28 @@ mod tests {
             .expect_offense(indoc! {"
                 def m5; self.value = 10; @count = 1; data, rest = split; end
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `m5` is too high. [<4, 2, 0> 4.47/0]
+            "});
+    }
+
+    #[test]
+    fn multiple_assignment_setter_targets_count_as_assignments_and_branches() {
+        // RuboCop 1.87.0: each mlhs setter send contributes A=1 and B=1.
+        test::<AbcSize>()
+            .with_options(&max0())
+            .expect_offense(indoc! {"
+                def m; self.x, self.y = 1, 2; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `m` is too high. [<2, 2, 0> 2.83/0]
+            "});
+    }
+
+    #[test]
+    fn multiple_assignment_index_targets_count_as_assignments_and_branches() {
+        // RuboCop 1.87.0: each []= target and its receiver/key sends are branches.
+        test::<AbcSize>()
+            .with_options(&max0())
+            .expect_offense(indoc! {"
+                def m; a[k], b[k] = 1, 2; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `m` is too high. [<2, 6, 0> 6.32/0]
             "});
     }
 
