@@ -1025,6 +1025,60 @@ fn lint_fix_and_fix_all_are_mutually_exclusive() {
     );
 }
 
+#[test]
+fn fix_all_deduplicates_same_position_method_paren_insertions() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("repro.rb");
+    fs::write(
+        dir.path().join(".murphy.yml"),
+        r#"AllCops:
+  TargetRubyVersion: 3.2
+Style/ArgumentsForwarding:
+  Enabled: true
+Style/MethodDefParentheses:
+  Enabled: true
+"#,
+    )
+    .expect("write .murphy.yml");
+    fs::write(
+        &path,
+        r#"def foo *args, **kwargs, &block
+  bar(*args, **kwargs, &block)
+end
+"#,
+    )
+    .expect("write repro.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--fix-all")
+        .arg("--format")
+        .arg("json")
+        .arg("repro.rb")
+        .assert()
+        .code(0);
+
+    let stdout = &assert.get_output().stdout;
+    let offenses: Vec<serde_json::Value> =
+        serde_json::from_slice(stdout).expect("stdout must be a JSON array");
+    assert!(
+        offenses.is_empty(),
+        "fix-all should converge cleanly: {offenses:?}"
+    );
+
+    let corrected = fs::read_to_string(&path).expect("read corrected file");
+    assert!(
+        corrected.lines().any(|line| line == "def foo(...)"),
+        "unexpected correction:\n{corrected}"
+    );
+    assert!(
+        corrected.lines().any(|line| line.trim() == "bar(...)"),
+        "unexpected correction:\n{corrected}"
+    );
+}
+
 // --- Phase 2 Task 6: directory / zero-arg discovery ---
 
 /// `murphy lint <dir>` discovers `.rb` files under the dir (default

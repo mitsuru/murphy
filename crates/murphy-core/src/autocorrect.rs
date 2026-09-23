@@ -26,6 +26,8 @@
 //! - **[`ConflictReason::Overlap`]** — the edit's byte range overlaps an already-
 //!   accepted edit in the stable total order.  Half-open `[start, end)` rule:
 //!   `a.start < b.end && b.start < a.end` is overlap; `a.end == b.start` is NOT.
+//!   Exact duplicate zero-width insertions at the same offset and with the same
+//!   replacement also conflict, so the requested text is inserted only once.
 //!
 //! ## Stable total order (PIN 3)
 //!
@@ -57,8 +59,9 @@ use std::collections::HashSet;
 /// do not conflate the two.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConflictReason {
-    /// The edit's byte range overlaps an already-accepted edit in the stable
-    /// total order (half-open `[start, end)` predicate).
+    /// The edit overlaps an already-accepted edit in the stable total order
+    /// (half-open `[start, end)` predicate), or is an exact duplicate zero-width
+    /// insertion at the same offset.
     Overlap,
     /// `start_offset > end_offset` — the range is inverted/malformed. The
     /// mruby blob decoder already drops these, but the public
@@ -124,7 +127,9 @@ pub struct ApplyOutcome {
 ///    when combined with a valid UTF-8 replacement (guaranteed by `.2` contract).
 /// 3. **Overlap detection**: an edit overlaps an already-accepted edit if
 ///    `accepted.start < edit.end && edit.start < accepted.end` (half-open
-///    `[start, end)` predicate).  Adjacent (`a.end == b.start`) is NOT overlap.
+///    `[start, end)` predicate). Adjacent ranges do not overlap. Exact duplicate
+///    zero-width insertions at the same offset and with the same replacement are
+///    also conflicts, so the same correction is applied only once.
 /// 4. **Apply winners** via `String::replace_range` in descending offset order,
 ///    keeping all lower offsets valid.
 /// 5. **Collect losers** into `conflicts`.
@@ -203,12 +208,15 @@ pub fn apply_edits_logged(source: &str, edits: &[Edit]) -> ApplyOutcome {
 
         // PIN 3: overlap check against all accepted edits.
         // Overlap predicate (half-open [start, end)): a.start < b.end && b.start < a.end.
-        // Touching (a.end == b.start) is NOT overlap.
+        // Exact duplicate zero-width insertions need an explicit check because
+        // the half-open predicate treats two empty ranges at the same offset as
+        // non-overlapping; applying both would duplicate punctuation.
         let mut conflict_winner: Option<Edit> = None;
         for winner in &accepted {
             let w_start = winner.range.start_offset as usize;
             let w_end = winner.range.end_offset as usize;
-            if w_start < end && start < w_end {
+            let duplicate_insertion = start == end && winner == edit;
+            if duplicate_insertion || (w_start < end && start < w_end) {
                 conflict_winner = Some(winner.clone());
                 break;
             }
@@ -453,5 +461,27 @@ where
                 conflicts: last_conflicts,
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConflictReason, apply_edits_logged};
+    use crate::offense::{Edit, Range};
+
+    #[test]
+    fn identical_zero_width_insertions_are_applied_once() {
+        let insert = Edit {
+            range: Range {
+                start_offset: 1,
+                end_offset: 1,
+            },
+            replacement: ")".to_owned(),
+        };
+        let outcome = apply_edits_logged("ab", &[insert.clone(), insert]);
+
+        assert_eq!(outcome.corrected, "a)b");
+        assert_eq!(outcome.conflicts.len(), 1);
+        assert_eq!(outcome.conflicts[0].reason, ConflictReason::Overlap);
     }
 }
