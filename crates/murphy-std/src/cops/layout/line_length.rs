@@ -34,17 +34,11 @@
 //!     exempt.
 //!
 //!   Gaps:
-//!   - AllowURI (default true): RuboCop builds a URI regex from Ruby's URI
-//!     parser and validates with `URI.parse`; that grammar cannot be faithfully
-//!     reproduced in Rust. Murphy uses a pragmatic `https?://…`-to-end-of-line
-//!     matcher (and the configured `URISchemes`); it is approximate. One known
-//!     divergence: RuboCop's `extend_end_position` has a YARD-comment branch
-//!     (`/{(\s|\S)*}$/`) that, on a line ending in `}`, extends a URI match to
-//!     the closing brace — so a `let(:value) { '…https://…  text' }` line whose
-//!     URI starts before `Max` is exempted even though the URI is mid-line.
-//!     Murphy does not reproduce this brace-extension (it would broaden the
-//!     exemption to any too-long line ending in `}`), so such lines may
-//!     false-positive; config todo-disable is the recommended workaround.
+//!   - AllowURI (default true): Murphy recognizes the configured `URISchemes`
+//!     with a lightweight parser rather than Ruby's `URI.parse`, so some URI
+//!     syntax differences remain. It reproduces RuboCop's end-position behavior
+//!     for lines containing `{` and ending in `}`: a valid URI before `Max` may
+//!     extend through the closing brace, including a spaced title after the URI.
 //!   - Tab width is hardcoded to 2 (RuboCop reads `Layout/IndentationStyle`'s
 //!     `IndentationWidth`; cross-cop config is not read, matching the
 //!     `Layout/ParameterAlignment` precedent). Only affects tab-indented lines.
@@ -344,21 +338,42 @@ fn comment_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// AllowURI exemption: a `scheme://…` URI starts before column `max` and runs
-/// to the end of the line. Approximate (see parity notes).
+/// AllowURI exemption: a configured `scheme://…` URI starts before column
+/// `max` and extends to the end of the line. Mirrors RuboCop's YARD-brace
+/// end-position extension for lines containing `{` and ending in `}`.
 fn uri_exempts(line: &str, max: usize, schemes: &[String]) -> bool {
+    let has_brace_tail = line.contains('{') && line.ends_with('}');
     for scheme in schemes {
         let needle = format!("{scheme}://");
         // Scan EVERY occurrence of the scheme on the line, not just the first:
         // a short URI earlier on the line must not mask a long URI that runs to
         // the line's end.
         for (pos, _) in line.match_indices(&needle) {
-            // The URI must start before column `max` and run to the end of the
-            // line (its tail contains no whitespace).
             let start_col = line[..pos].chars().count();
+            if start_col >= max {
+                continue;
+            }
+
             let tail = &line[pos..];
-            if start_col < max && !tail.chars().any(|c| c.is_whitespace()) {
+            if !tail.chars().any(|c| c.is_whitespace()) {
                 return true;
+            }
+
+            // RuboCop extends a URI match through the closing brace on any line
+            // containing `{` and ending in `}`. Its URI.parse validation means
+            // the URI token before the title must still have a non-empty
+            // authority; this is a lightweight approximation of that check.
+            if has_brace_tail {
+                let uri = tail.split(char::is_whitespace).next().unwrap_or_default();
+                let authority = uri
+                    .strip_prefix(&needle)
+                    .unwrap_or_default()
+                    .split(['/', '?', '#'])
+                    .next()
+                    .unwrap_or_default();
+                if !authority.is_empty() {
+                    return true;
+                }
             }
         }
     }
@@ -551,6 +566,29 @@ mod tests {
         let url = format!("https://example.com/{}", "a".repeat(130));
         let src = format!("# see {url}\n");
         assert!(run_cop::<LineLength>(&src).is_empty());
+    }
+
+    #[test]
+    fn uri_exempt_with_spaced_title_before_closing_brace() {
+        let url = format!("https://example.com/{}", "a".repeat(110));
+        let src = format!("let(:value) {{ '{url}  description' }}\n");
+        assert!(run_cop::<LineLength>(&src).is_empty());
+    }
+
+    #[test]
+    fn uri_with_spaced_title_is_not_exempt_without_closing_brace() {
+        let url = format!("https://example.com/{}", "a".repeat(110));
+        let src = format!("value = '{url}  description'\n");
+        assert_eq!(run_cop::<LineLength>(&src).len(), 1);
+    }
+
+    #[test]
+    fn uri_brace_extension_respects_allow_uri_option() {
+        let url = format!("https://example.com/{}", "a".repeat(110));
+        let src = format!("let(:value) {{ '{url}  description' }}\n");
+        let mut options = opts_max(120);
+        options.allow_uri = false;
+        assert_eq!(run_cop_with_options::<LineLength>(&src, &options).len(), 1);
     }
 
     #[test]
