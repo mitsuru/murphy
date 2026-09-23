@@ -12,7 +12,7 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.20.1, murphy-e7bz.20.2, murphy-e7bz.20.3, murphy-e7bz.20.4]
+//! gap_issues: [murphy-e7bz.20.1, murphy-e7bz.20.2, murphy-e7bz.20.3]
 //! notes: >
 //!   Mirrors RuboCop's `Metrics::Utils::AbcSizeCalculator` and the
 //!   `MethodComplexity` mixin numerically (verified against rubocop 1.87.0
@@ -22,8 +22,8 @@
 //!   `define_method(:name) { ... }`/numbered-param blocks via the
 //!   `on_block`/`on_numblock`/`on_itblock` dispatch). The default-config
 //!   path (`CountRepeatedAttributes: true`) matches rubocop; the non-default
-//!   `CountRepeatedAttributes: false` discount path has two known gaps
-//!   (murphy-e7bz.20.3, murphy-e7bz.20.4 — see below).
+//!   `CountRepeatedAttributes: false` discount path has one known gap
+//!   (murphy-e7bz.20.3 — see below).
 //!
 //!   Known gap (murphy-e7bz.20.1): a multiple assignment whose LHS targets
 //!   are *setter* or *index* writes (`self.x, self.y = 1, 2`) is undercounted
@@ -48,13 +48,6 @@
 //!   handles var-asgn and setter sends, so the later read stays discounted
 //!   and the branch count is undercounted (`foo.bar; foo.bar ||= baz;
 //!   foo.bar` → rubocop `<2, 4, 1>`). The fix belongs in this cop.
-//!
-//!   Known gap (murphy-e7bz.20.4): with `CountRepeatedAttributes: false`,
-//!   scoped-constant receivers collapse to their terminal name in the
-//!   discount key, so `A::B.foo` and `C::B.foo` are treated as the same
-//!   attribute and the second is wrongly discounted (rubocop keys by the
-//!   const AST node, keeping them distinct: `<0, 2, 0>`). The fix belongs
-//!   in this cop (`receiver_chain_key`).
 //!
 //!   The calculator walks the method body in post-order
 //!   (`visit_depth_last`) and accumulates three counters:
@@ -696,11 +689,9 @@ fn receiver_chain_key(node: NodeId, cx: &Cx<'_>) -> Option<String> {
         NodeKind::Ivar(s) => Some(format!("ivar:{}", cx.symbol_str(*s))),
         NodeKind::Cvar(s) => Some(format!("cvar:{}", cx.symbol_str(*s))),
         NodeKind::Gvar(s) => Some(format!("gvar:{}", cx.symbol_str(*s))),
-        // KNOWN GAP (murphy-e7bz.20.4): RuboCop keys const receivers by the
-        // const AST node, keeping scoped constants distinct (`A::B` != `C::B`).
-        // Using only the terminal name collapses them, so the second is wrongly
-        // discounted under `CountRepeatedAttributes: false`. Default unaffected.
-        NodeKind::Const { name, .. } => Some(format!("const:{}", cx.symbol_str(*name))),
+        // Preserve the complete scoped constant: RuboCop keys const receivers
+        // by the const AST node, so `A::B` and `C::B` are distinct attributes.
+        NodeKind::Const { .. } => Some(format!("const:{}", cx.raw_source(cx.range(node)))),
         NodeKind::Send { .. } | NodeKind::Csend { .. } => attribute_chain_key(node, cx),
         _ => None,
     }
@@ -1095,6 +1086,21 @@ mod tests {
             .expect_offense(indoc! {"
                 def d2; foo.bar; foo.baz; end
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `d2` is too high. [<0, 3, 0> 3/0]
+            "});
+    }
+
+    #[test]
+    fn scoped_const_receivers_are_distinct_when_count_repeated_attributes_false() {
+        test::<AbcSize>()
+            .with_options(&AbcSizeOptions {
+                max: 0,
+                count_repeated_attributes: false,
+                allowed_methods: vec![],
+                allowed_patterns: vec![],
+            })
+            .expect_offense(indoc! {"
+                def scoped; A::B.foo; C::B.foo; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `scoped` is too high. [<0, 2, 0> 2/0]
             "});
     }
 
