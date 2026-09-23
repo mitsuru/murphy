@@ -34,10 +34,9 @@
 //!   `single_line_ignoring_receiver?` because it compares only the brace
 //!   tokens, not the whole-node span.
 //!
-//!   RuboCop's `last_line_heredoc?` guard skips a call whose last argument
-//!   contains a heredoc (its `last_line` lands on the closer, not the arg).
-//!   Murphy reproduces this by skipping when a `HeredocStart` token falls
-//!   within the last argument's range.
+//!   RuboCop's `last_line_heredoc?` guard skips a call when a heredoc
+//!   terminator (`HeredocEnd`) in the last argument shares the closing
+//!   parenthesis's line.
 //!
 //!   Autocorrect: not implemented (v1 gap). RuboCop's corrector moves the
 //!   closing brace; the detect-only port ships without it.
@@ -117,13 +116,21 @@ fn spans_newline(src: &[u8], start: u32, end: u32) -> bool {
     start < end && src[start as usize..end as usize].contains(&b'\n')
 }
 
-/// Whether the last argument contains a heredoc opener (`HeredocStart` token)
-/// anywhere within its source range — RuboCop's `last_line_heredoc?` analog.
-fn last_arg_has_heredoc(last_arg: NodeId, cx: &Cx<'_>) -> bool {
+/// Whether two source offsets are on the same physical line.
+fn same_line(src: &[u8], a: u32, b: u32) -> bool {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    !src[lo as usize..hi as usize].contains(&b'\n')
+}
+
+/// Whether a heredoc terminator in the last argument shares the closing
+/// delimiter's line, matching RuboCop's `last_line_heredoc?` guard.
+fn last_line_heredoc(last_arg: NodeId, close_start: u32, cx: &Cx<'_>) -> bool {
+    let src = cx.source().as_bytes();
     let r = cx.range(last_arg);
     cx.tokens_in(r)
         .iter()
-        .any(|t| t.kind == SourceTokenKind::HeredocStart)
+        .filter(|tok| tok.kind == SourceTokenKind::HeredocEnd)
+        .any(|tok| same_line(src, tok.range.start, close_start))
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
@@ -150,11 +157,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let first_arg = args[0];
     let last_arg = args[args.len() - 1];
 
-    // `last_line_heredoc?` — RuboCop recursively descends the last argument
-    // looking for a heredoc whose closer lands on the call's last line. We
-    // approximate it by skipping when a `HeredocStart` token falls within the
-    // last argument's source range.
-    if last_arg_has_heredoc(last_arg, cx) {
+    // `last_line_heredoc?` — skip only when a heredoc terminator nested in the
+    // last argument shares the closing parenthesis's line.
+    if last_line_heredoc(last_arg, close.start, cx) {
         return;
     }
 
@@ -343,12 +348,13 @@ mod tests {
     }
 
     #[test]
-    fn accepts_heredoc_last_argument() {
-        test::<MultilineMethodCallBraceLayout>().expect_no_offenses(indoc! {"
+    fn flags_heredoc_last_argument_when_terminator_precedes_close() {
+        test::<MultilineMethodCallBraceLayout>().expect_offense(indoc! {"
             foo(a, <<~TEXT
               body
             TEXT
             )
+            ^ Closing method call brace must be on the same line as the last argument when opening brace is on the same line as the first argument.
         "});
     }
 }
