@@ -5,7 +5,7 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Style/SymbolProc
-//! upstream_version_checked: 1.86.2
+//! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues: []
 //! notes: >
@@ -18,6 +18,8 @@
 //!     - Itblock (Ruby 3.4 `it`): `map { it.upcase }` -> `map(&:upcase)`
 //!     - Lambda (->): `->(x) { x.method }` -> `lambda(&:method)`
 //!     - proc/Proc.new blocks: `proc { |x| x.method }` -> `proc(&:method)`
+//!     - `super` / `zsuper` dispatches, including explicit arguments and
+//!       `AllowMethodsWithArguments` handling.
 //!     - Blocks on calls with arguments:
 //!       `do_something(foo) { |o| o.bar }` -> `do_something(foo, &:bar)`
 //!     - AllowedMethods: default ["define_method"] (exact match on dispatch
@@ -125,6 +127,8 @@ fn check_any_block(node: NodeId, cx: &Cx<'_>, opts: &Options) {
     // Lambda `->` blocks have `NodeKind::Lambda` as call, not a Send; use "lambda".
     let block_method = if cx.is_lambda_literal(node) {
         "lambda"
+    } else if matches!(*cx.kind(call), NodeKind::Super(_) | NodeKind::Zsuper) {
+        "super"
     } else if let Some(m) = cx.method_name(call) {
         m
     } else {
@@ -161,7 +165,7 @@ fn check_any_block(node: NodeId, cx: &Cx<'_>, opts: &Options) {
     }
 
     // AllowMethodsWithArguments: skip if the call has arguments and option is true.
-    if opts.allow_methods_with_arguments && !cx.call_arguments(call).is_empty() {
+    if opts.allow_methods_with_arguments && !dispatch_arguments(call, cx).is_empty() {
         return;
     }
 
@@ -395,13 +399,13 @@ fn block_opener_to_closer(node: NodeId, cx: &Cx<'_>) -> Range {
                 // is later. (cx.range(call).end is the full CallNode range
                 // including block — cannot use it directly.)
                 let selector_end = cx.selector(call).end;
-                let paren_close_end = cx.loc(call).end().end;
+                let paren_close_end = dispatch_call_end_paren(call, cx).end;
                 selector_end.max(paren_close_end)
             }
         }
         NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => {
             let selector_end = cx.selector(send).end;
-            let paren_close_end = cx.loc(send).end().end;
+            let paren_close_end = dispatch_call_end_paren(send, cx).end;
             selector_end.max(paren_close_end)
         }
         _ => return node_range,
@@ -442,8 +446,51 @@ fn find_block_opener(search_from: u32, search_until: u32, cx: &Cx<'_>) -> Option
 // Autocorrect
 // ---------------------------------------------------------------------------
 
+fn dispatch_arguments<'a>(call: NodeId, cx: &'a Cx<'_>) -> &'a [NodeId] {
+    match *cx.kind(call) {
+        NodeKind::Super(args) => cx.list(args),
+        _ => cx.call_arguments(call),
+    }
+}
+
+fn dispatch_call_end_paren(call: NodeId, cx: &Cx<'_>) -> Range {
+    if !matches!(*cx.kind(call), NodeKind::Super(_)) {
+        return cx.loc(call).end();
+    }
+
+    // `LocRef::begin()` anchors calls at their selector. `super` has no name,
+    // and its expression range may not include its closing paren, so find the
+    // opening token immediately after the `super` keyword and match it here.
+    // This also avoids mistaking parentheses nested in command-style arguments
+    // (for example `super foo(bar)`) for `super`'s own argument list.
+    let selector = cx.selector(call);
+    if selector == Range::ZERO {
+        return Range::ZERO;
+    }
+    let tokens = cx.sorted_tokens();
+    let first = tokens.partition_point(|token| token.range.start < selector.end);
+    if tokens.get(first).is_none_or(|token| token.kind != SourceTokenKind::LeftParen) {
+        return Range::ZERO;
+    }
+
+    let mut depth = 0u32;
+    for token in &tokens[first..] {
+        match token.kind {
+            SourceTokenKind::LeftParen => depth += 1,
+            SourceTokenKind::RightParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return token.range;
+                }
+            }
+            _ => {}
+        }
+    }
+    Range::ZERO
+}
+
 fn autocorrect(node: NodeId, call: NodeId, method_name: &str, cx: &Cx<'_>) {
-    let args = cx.call_arguments(call);
+    let args = dispatch_arguments(call, cx);
     if args.is_empty() {
         autocorrect_without_args(node, call, method_name, cx);
     } else {
@@ -491,13 +538,12 @@ fn autocorrect_without_args(node: NodeId, call: NodeId, method_name: &str, cx: &
 
 /// Autocorrect for calls with arguments: append `&:method` to args, remove block.
 fn autocorrect_with_args(node: NodeId, call: NodeId, method_name: &str, cx: &Cx<'_>) {
-    let args = cx.call_arguments(call);
+    let args = dispatch_arguments(call, cx);
     let last_arg = *args.last().expect("has args");
     let last_arg_range = cx.range(last_arg);
     let node_range = cx.range(node);
 
-    let call_loc = cx.loc(call);
-    let call_end_paren = call_loc.end();
+    let call_end_paren = dispatch_call_end_paren(call, cx);
 
     if call_end_paren != Range::ZERO {
         // Parenthesised call `foo(a, b) { ... }`:
@@ -574,6 +620,85 @@ mod tests {
                        ^^^^^^^^^^^^^^ Pass `&:nil?` as an argument to `map` instead of a block.
             "},
             "foo.map(&:nil?)\n",
+        );
+    }
+
+    #[test]
+    fn corrects_zsuper_block() {
+        test::<SymbolProc>().expect_correction(
+            indoc! {"
+                def foo
+                  super { |x| x.foo }
+                        ^^^^^^^^^^^^^ Pass `&:foo` as an argument to `super` instead of a block.
+                end
+            "},
+            "def foo\n  super(&:foo)\nend\n",
+        );
+    }
+
+    #[test]
+    fn corrects_super_with_empty_parentheses() {
+        test::<SymbolProc>().expect_correction(
+            indoc! {"
+                def foo
+                  super() { |x| x.foo }
+                          ^^^^^^^^^^^^^ Pass `&:foo` as an argument to `super` instead of a block.
+                end
+            "},
+            "def foo\n  super(&:foo)\nend\n",
+        );
+    }
+
+    #[test]
+    fn corrects_super_with_arguments() {
+        test::<SymbolProc>().expect_correction(
+            indoc! {"
+                def foo(arg)
+                  super(arg) { |x| x.foo }
+                             ^^^^^^^^^^^^^ Pass `&:foo` as an argument to `super` instead of a block.
+                end
+            "},
+            "def foo(arg)\n  super(arg, &:foo)\nend\n",
+        );
+    }
+
+    #[test]
+    fn corrects_super_with_nested_argument_parentheses() {
+        test::<SymbolProc>().expect_correction(
+            indoc! {"
+                def foo
+                  super(foo(bar)) { |x| x.baz }
+                                  ^^^^^^^^^^^^^ Pass `&:baz` as an argument to `super` instead of a block.
+                end
+            "},
+            "def foo\n  super(foo(bar), &:baz)\nend\n",
+        );
+    }
+
+    #[test]
+    fn allows_super_with_arguments_when_configured() {
+        use super::Options;
+
+        test::<SymbolProc>()
+            .with_options(&Options {
+                allow_methods_with_arguments: true,
+                allow_comments: false,
+                allowed_methods: vec!["define_method".to_string()],
+                allowed_patterns: vec![],
+            })
+            .expect_no_offenses("def foo(arg)\n  super(arg) { |x| x.foo }\nend\n");
+    }
+
+    #[test]
+    fn corrects_numblock_with_zsuper_dispatch() {
+        test::<SymbolProc>().expect_correction(
+            indoc! {"
+                def foo
+                  super { _1.foo }
+                        ^^^^^^^^^^ Pass `&:foo` as an argument to `super` instead of a block.
+                end
+            "},
+            "def foo\n  super(&:foo)\nend\n",
         );
     }
 

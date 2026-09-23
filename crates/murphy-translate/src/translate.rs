@@ -1236,7 +1236,17 @@ impl Translator {
             let list = self.builder.push_list(&arg_ids);
             let super_id = self.builder.push(NodeKind::Super(list), range);
             return match block_to_wrap {
-                Some(bn) => self.translate_block(&bn, super_id, range),
+                Some(bn) => {
+                    // Prism's SuperNode range stops before its attached block;
+                    // the Block wrapper must extend through the block's closing
+                    // token while keeping the dispatch start at `super`.
+                    let block_range = Self::range(&bn.location());
+                    let full_range = Range {
+                        start: range.start,
+                        end: block_range.end,
+                    };
+                    self.translate_block(&bn, super_id, full_range)
+                }
                 None => super_id,
             };
         }
@@ -1245,7 +1255,16 @@ impl Translator {
             // `.block()` は `Option<BlockNode>`（`&blk` は構文上不可）。
             let zsuper = self.builder.push(NodeKind::Zsuper, range);
             return match fs.block() {
-                Some(bn) => self.translate_block(&bn, zsuper, range),
+                Some(bn) => {
+                    // As with explicit-argument `super`, the forwarding node
+                    // range omits the attached block's closing token.
+                    let block_range = Self::range(&bn.location());
+                    let full_range = Range {
+                        start: range.start,
+                        end: block_range.end,
+                    };
+                    self.translate_block(&bn, zsuper, full_range)
+                }
                 None => zsuper,
             };
         }
@@ -4139,6 +4158,23 @@ mod tests {
                 );
             }
             _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn super_block_range_includes_closing_delimiter() {
+        for source in [
+            "def f\n  super(1) { |x| x }\nend\n",
+            "def f\n  super { |x| x }\nend\n",
+        ] {
+            let ast = translate(source, "t.rb");
+            let block = ast
+                .descendants(ast.root())
+                .find(|&n| matches!(ast.kind(n), NodeKind::Block { .. }))
+                .expect("expected a Block node wrapping super");
+            let range = ast.loc(block).expression;
+            assert_eq!(range.start as usize, source.find("super").unwrap());
+            assert_eq!(range.end as usize, source.rfind('}').unwrap() + 1);
         }
     }
 
