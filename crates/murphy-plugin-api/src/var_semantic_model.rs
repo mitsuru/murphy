@@ -602,24 +602,17 @@ fn is_in_loop_body(ast: &Ast, root: NodeId, node: NodeId) -> bool {
 }
 
 /// Returns `true` if `node` is inside a `Rescue` whose resbody subtree contains
-/// a `Retry`. RuboCop treats such a `begin..rescue..end` as a loop
-/// (`process_rescue` -> `process_loop`), so writes inside it may be read on the
-/// next iteration via the retry back-edge and must not be flagged.
+/// a `Retry` and the variable has a read somewhere in that rescue. RuboCop
+/// treats such a `begin..rescue..end` as a loop (`process_rescue` ->
+/// `process_loop`), so a write to a referenced variable may be read on the next
+/// iteration via the retry back-edge and must not be flagged.
 ///
-/// This mirrors RuboCop 1.87's `process_rescue` -> `process_loop`: it
-/// loop-ifies the *whole* rescue, so — like the `is_in_loop_body`
-/// approximation — every write inside a retry-rescue is blanket-marked
-/// referenced. The descent over `subtree_contains_retry` matches RuboCop's
-/// detection scope (`resbody_node.each_descendant.any?(&:retry_type?)` also
-/// descends into nested `begin..rescue`).
-///
-/// KNOWN DIVERGENCE (false-negative, tracked in murphy-w5za): RuboCop still
-/// flags a write that has *no* reference anywhere in the loop, whereas this
-/// blanket-mark suppresses it — same approximation as the documented
-/// `while`/`until`/`for` loop-body handling. This also manifests when the
-/// `retry` lives in a nested *inner* rescue: a never-read write in the outer
-/// resbody is flagged by RuboCop but missed here. The case does not occur in
-/// the Mastodon corpus this fix targets; refining it is deferred to murphy-w5za.
+/// This mirrors RuboCop 1.87's retry handling: the whole rescue is loop-ified,
+/// including nested rescues, but only assignments whose variable is read in the
+/// loop are kept alive. The read can precede the write in source order because
+/// it may run on the next iteration. `subtree_contains_retry` descends through
+/// nested `begin..rescue` nodes to match RuboCop's
+/// `resbody_node.each_descendant.any?(&:retry_type?)` detection scope.
 ///
 /// `retry_cache` memoizes "does this `Rescue`'s resbody subtree contain a
 /// `Retry`" so the subtree DFS runs at most once per `Rescue` node across all
@@ -629,8 +622,13 @@ fn is_in_retry_rescue(
     ast: &Ast,
     root: NodeId,
     node: NodeId,
+    references: &[Reference],
     retry_cache: &mut HashMap<NodeId, bool>,
 ) -> bool {
+    if references.is_empty() {
+        return false;
+    }
+
     let mut current = node;
     while let Some(parent) = ast.parent(current).get() {
         if parent == root {
@@ -640,12 +638,16 @@ fn is_in_retry_rescue(
             // `ast.children(Rescue)` yields body + resbodies + else; only the
             // `Resbody` children carry the legal `retry` back-edge, so scan
             // those. Memoize per `Rescue` so this DFS runs at most once.
-            let contains = *retry_cache.entry(parent).or_insert_with(|| {
+            let contains_retry = *retry_cache.entry(parent).or_insert_with(|| {
                 ast.children(parent)
                     .filter(|&c| matches!(*ast.kind(c), NodeKind::Resbody { .. }))
                     .any(|rb| subtree_contains_retry(ast, rb))
             });
-            if contains {
+            if contains_retry
+                && references
+                    .iter()
+                    .any(|reference| node_in_subtree(ast, parent, reference.node_id))
+            {
                 return true;
             }
         }
@@ -732,10 +734,17 @@ fn analyze_scope_is_referenced(ast: &Ast, scope_root: NodeId, scope: &mut ScopeI
             let asgn_node = var.assignments[i].node_id;
             let asgn_end = var.assignments[i].end;
 
-            // Loop body OR retry-rescue (RuboCop process_loop): always
-            // referenced — the next iteration may read it.
+            // Ordinary loop bodies remain conservative. In a retry-rescue,
+            // keep a write only when this variable has a read inside the loop;
+            // the read may precede the write in source order on another pass.
             if is_in_loop_body(ast, scope_root, asgn_node)
-                || is_in_retry_rescue(ast, scope_root, asgn_node, &mut retry_cache)
+                || is_in_retry_rescue(
+                    ast,
+                    scope_root,
+                    asgn_node,
+                    &var.references,
+                    &mut retry_cache,
+                )
             {
                 var.assignments[i].is_referenced = true;
                 continue;

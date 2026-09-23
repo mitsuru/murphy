@@ -1738,5 +1738,47 @@ mod tests {
             end
         "#});
     }
+
+    #[test]
+    fn never_read_outer_resbody_write_is_not_kept_by_nested_retry() {
+        // A retry in a nested rescue loops only that inner rescue. It must not
+        // make a never-read write later in the outer resbody appear live.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              work
+            rescue OuterError
+              begin
+                inner_work
+              rescue InnerError
+                retry
+              end
+              x = 1
+              ^ Useless assignment to variable - `x`.
+            end
+        "#});
+    }
+
+    #[test]
+    fn retry_read_keeps_accumulator_live_but_flags_unrelated_write() {
+        // Reads of `attempts` in the retry loop keep its writes live, but must
+        // not hide the unrelated never-read `x` assignment in the outer resbody.
+        test::<UselessAssignment>().expect_offense(indoc! {r#"
+            begin
+              work
+            rescue OuterError
+              x = 1
+              ^ Useless assignment to variable - `x`.
+              attempts = 0
+              begin
+                inner_work
+              rescue InnerError
+                attempts += 1
+                retry if attempts < 3
+              end
+            end
+        "#});
+    }
+
+
 }
 murphy_plugin_api::submit_cop!(UselessAssignment);
