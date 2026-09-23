@@ -99,8 +99,8 @@ impl ItBlockParameter {
         let Some(body_id) = body.get() else {
             return;
         };
-        // Find all `_1` lvar descendants and flag each one.
-        let sym_1 = find_lvar_sym(cx, body_id, "_1");
+        // Find all `_1` parameter reads and flag each one.
+        let sym_1 = find_param_reads(cx, body_id, "_1");
         for lvar_id in sym_1 {
             cx.emit_offense(cx.range(lvar_id), MSG_USE_IT, None);
         }
@@ -123,7 +123,7 @@ impl ItBlockParameter {
                 let Some(body_id) = body.get() else {
                     return;
                 };
-                let lvars = find_lvar_sym(cx, body_id, "it");
+                let lvars = find_param_reads(cx, body_id, "it");
                 for lvar_id in lvars {
                     cx.emit_offense(cx.range(lvar_id), MSG_AVOID_IT, None);
                 }
@@ -159,22 +159,20 @@ impl ItBlockParameter {
         let Some(body_id) = cx.block_body(node).get() else {
             return;
         };
-        let lvars = find_lvar_sym(cx, body_id, name);
+        let lvars = find_param_reads(cx, body_id, name);
         for lvar_id in lvars {
             cx.emit_offense(cx.range(lvar_id), MSG_USE_IT, None);
         }
     }
 }
 
-/// Find all `Lvar` nodes in the subtree of `body` whose symbol text equals `target`.
-fn find_lvar_sym<'a>(cx: &'a Cx<'a>, body: NodeId, target: &str) -> Vec<NodeId> {
+/// Find parameter reads in `body` whose name matches `target`.
+fn find_param_reads<'a>(cx: &'a Cx<'a>, body: NodeId, target: &str) -> Vec<NodeId> {
     let mut result = Vec::new();
     // Include body itself in case it is directly an lvar.
     let candidates = std::iter::once(body).chain(cx.descendants(body));
     for id in candidates {
-        if let NodeKind::Lvar(sym) = *cx.kind(id)
-            && cx.symbol_str(sym) == target
-        {
+        if crate::cops::util::is_block_parameter_read(id, target, cx) {
             result.push(id);
         }
     }
@@ -328,6 +326,22 @@ mod tests {
         test::<ItBlockParameter>()
             .with_options(&opts(EnforcedStyle::Disallow))
             .expect_no_offenses("block { do_something(_1) }\n");
+    }
+
+    #[test]
+    fn disallow_ignores_method_call_inside_nested_method_definition() {
+        test::<ItBlockParameter>()
+            .with_options(&opts(EnforcedStyle::Disallow))
+            .expect_offense(indoc! {"
+                values.each do
+                  it.to_s
+                  ^^ Avoid using `it` block parameter.
+                  it()
+                  def nested
+                    it.to_s
+                  end
+                end
+            "});
     }
 
     #[test]

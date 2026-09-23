@@ -360,7 +360,7 @@ fn is_identity_block(block: NodeId, cx: &Cx<'_>) -> bool {
         }
         NodeKind::Numblock { max_n: 1, .. } => ParamRef::Numbered(1).matches_lvar(body, cx),
         NodeKind::Itblock { .. } => {
-            matches!(*cx.kind(body), NodeKind::Lvar(s) if cx.symbol_str(s) == "it")
+            crate::cops::util::is_block_parameter_read(body, "it", cx)
         }
         _ => false,
     }
@@ -421,7 +421,7 @@ fn is_counting_transform_block(block: NodeId, cx: &Cx<'_>) -> bool {
         }
         NodeKind::Numblock { max_n: 1, .. } => ParamRef::Numbered(1).matches_lvar(recv, cx),
         NodeKind::Itblock { .. } => {
-            matches!(*cx.kind(recv), NodeKind::Lvar(s) if cx.symbol_str(s) == "it")
+            crate::cops::util::is_block_parameter_read(recv, "it", cx)
         }
         _ => false,
     }

@@ -18,16 +18,14 @@
 //!   indexed-assignment node whose attribute *also* appears as a direct
 //!   assignment (`assignments.keys.intersection(indexed_assignments.keys)`).
 //!
-//!   Block-variable scoping: RuboCop's `assignment_method_declarations` /
-//!   `indexed_assignment_method_declarations` patterns restrict the receiver to
-//!   `(lvar {#match_block_variable_name? :_1 :it})` — the lvar must name the
-//!   `Gem::Specification.new` block parameter, or be the implicit `_1` / `it`.
-//!   We extract the block-variable name from the first `Gem::Specification.new`
-//!   (or `::Gem::Specification`) block (`do |spec|` → "spec") and accept that
-//!   name plus the always-allowed "_1" / "it" alternatives. The `_1` / `it`
-//!   alternatives are accepted unconditionally — RuboCop's pattern union admits
-//!   them even when no gemspec block is present (verified against standalone
-//!   rubocop 1.87.0: `_1` inside a non-gemspec `foo do … end` still matches).
+//!   Block-variable scoping: the receiver must read the `Gem::Specification.new`
+//!   block parameter, or an implicit `_1` / `it` parameter. Explicit variables
+//!   and `_1` are `Lvar` nodes; Ruby 3.4 `it` is a receiverless `Send` inside an
+//!   `Itblock`. We extract the explicit variable name from the first
+//!   `Gem::Specification.new` (or `::Gem::Specification`) block (`do |spec|` →
+//!   "spec") and also accept `_1` / `it` reads in their respective implicit
+//!   block nodes. The implicit alternatives do not require a gemspec block, as
+//!   verified against standalone rubocop 1.87.0.
 //!
 //!   Direct (regular) pass: a `Send` whose receiver is *directly* the block
 //!   lvar and whose selector `assignment_method?`s (ends with `=`, not a
@@ -167,12 +165,11 @@ fn indexed_assignment_attr<'a>(node: NodeId, accepted: &[&str], cx: &Cx<'a>) -> 
     cx.method_name(receiver)
 }
 
-/// True when `node` is `(lvar X)` for an accepted block-variable name `X`.
+/// True when `node` reads one of the accepted block-variable names.
 fn is_accepted_lvar(node: NodeId, accepted: &[&str], cx: &Cx<'_>) -> bool {
-    match *cx.kind(node) {
-        NodeKind::Lvar(sym) => accepted.contains(&cx.symbol_str(sym)),
-        _ => false,
-    }
+    accepted
+        .iter()
+        .any(|name| crate::cops::util::is_block_parameter_read(node, name, cx))
 }
 
 /// The explicit single block-parameter name of the first
@@ -395,6 +392,16 @@ mod tests {
               it.metadata = {}
               it.metadata['a'] = '1'
               ^^^^^^^^^^^^^^^^^^^^^^ Use consistent style for Gemspec attributes assignment.
+            end
+        "#});
+    }
+
+    #[test]
+    fn does_not_treat_method_named_it_as_the_block_parameter() {
+        test::<AttributeAssignment>().expect_no_offenses(indoc! {r#"
+            Gem::Specification.new do |spec|
+              it.metadata = {}
+              it.metadata['a'] = '1'
             end
         "#});
     }

@@ -2,6 +2,59 @@
 
 use murphy_plugin_api::{CommentDirectiveKind, Cx, NodeId, NodeKind, Range, SourceTokenKind};
 
+/// True when `node` reads `expected`, including an implicit Ruby 3.4 `it`
+/// parameter represented as a receiverless `send :it` inside an `Itblock`.
+///
+/// Callers should use this for a known block-parameter read, not as a general
+/// equivalence between local variables and method calls. Explicit `it()` calls
+/// and ordinary method calls named `it` do not match.
+pub fn is_block_parameter_read(node: NodeId, expected: &str, cx: &Cx<'_>) -> bool {
+    match *cx.kind(node) {
+        NodeKind::Lvar(sym) => cx.symbol_str(sym) == expected,
+        NodeKind::Send {
+            receiver,
+            method,
+            args,
+        } => {
+            expected == "it"
+                && receiver.get().is_none()
+                && cx.symbol_str(method) == "it"
+                && cx.list(args).is_empty()
+                && cx.raw_source(cx.range(node)) == "it"
+                && is_itblock_body_read(node, cx)
+        }
+        _ => false,
+    }
+}
+
+/// True if `node` is in an Itblock's lexical body. Nested blocks may read an
+/// enclosing `it` parameter, so keep walking through their bodies. Stop at
+/// method/class scopes, which do not capture block locals. A block's call child
+/// is outside its own parameter scope and may still belong to an outer block.
+fn is_itblock_body_read(node: NodeId, cx: &Cx<'_>) -> bool {
+    let mut child = node;
+    while let Some(parent) = cx.parent(child).get() {
+        match *cx.kind(parent) {
+            NodeKind::Itblock { send, body } => {
+                if body.get() == Some(child) {
+                    return true;
+                }
+                if send != child {
+                    return false;
+                }
+            }
+            NodeKind::Def { .. }
+            | NodeKind::Defs { .. }
+            | NodeKind::Class { .. }
+            | NodeKind::Module { .. }
+            | NodeKind::Sclass { .. } => return false,
+            _ => {}
+        }
+        child = parent;
+    }
+    false
+}
+
 /// Byte ranges of string/symbol literal *content* nodes (`Str`, `Sym`).
 ///
 /// A structural-looking token — most notably a lone `;` — whose position falls

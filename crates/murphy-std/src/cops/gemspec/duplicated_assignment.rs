@@ -15,16 +15,16 @@
 //!   Two disjoint passes mirror RuboCop's `process_assignment_method_nodes` and
 //!   `process_indexed_assignment_method_nodes`.
 //!
-//!   Block-variable scoping: RuboCop's `assignment_method_declarations` /
-//!   `indexed_assignment_method_declarations` patterns restrict the receiver to
-//!   `(lvar {#match_block_variable_name? :_1 :it})` — the lvar must name the
-//!   `Gem::Specification.new` block parameter, or be the implicit `_1`/`it`.
-//!   We extract the block-variable name from the first `Gem::Specification.new`
-//!   (or `::Gem::Specification`) block (`do |spec|` → "spec"; numblock → "_1";
-//!   itblock → "it") and accept that name plus the always-allowed "_1"/"it"
-//!   alternatives. This is parity-critical: `config.foo = 1; config.foo = 2`
-//!   inside the block (config != spec) is NOT flagged — verified against
-//!   standalone rubocop 1.87.0.
+//!   Block-variable scoping: the receiver must read the `Gem::Specification.new`
+//!   block parameter, or an implicit `_1` / `it` parameter. Explicit variables
+//!   and `_1` are `Lvar` nodes; Ruby 3.4 `it` is a receiverless `Send` inside an
+//!   `Itblock`. We extract the explicit variable name from the first
+//!   `Gem::Specification.new` (or `::Gem::Specification`) block (`do |spec|` →
+//!   "spec") and also accept `_1` / `it` reads in their respective implicit
+//!   block nodes. The implicit alternatives do not require a gemspec block, as
+//!   verified against standalone rubocop 1.87.0. This is parity-critical:
+//!   `config.foo = 1; config.foo = 2` inside the block (config != spec) is NOT
+//!   flagged.
 //!
 //!   Regular pass: a `Send` whose receiver is *directly* the block lvar and
 //!   whose selector `assignment_method?`s (ends with `=`, not a comparison —
@@ -226,12 +226,11 @@ fn indexed_assignment_label(node: NodeId, cx: &Cx<'_>) -> String {
     format!("{attr}[{key_src}]=")
 }
 
-/// True when `node` is `(lvar X)` for an accepted block-variable name `X`.
+/// True when `node` reads one of the accepted block-variable names.
 fn is_accepted_lvar(node: NodeId, accepted: &[&str], cx: &Cx<'_>) -> bool {
-    match *cx.kind(node) {
-        NodeKind::Lvar(sym) => accepted.contains(&cx.symbol_str(sym)),
-        _ => false,
-    }
+    accepted
+        .iter()
+        .any(|name| crate::cops::util::is_block_parameter_read(node, name, cx))
 }
 
 /// The explicit single block-parameter name of the first
@@ -481,6 +480,16 @@ mod tests {
               it.name = "x"
               it.name = "y"
               ^^^^^^^^^^^^^ `name=` method calls already given on line 2 of the gemspec.
+            end
+        "#});
+    }
+
+    #[test]
+    fn does_not_treat_method_named_it_as_the_block_parameter() {
+        test::<DuplicatedAssignment>().expect_no_offenses(indoc! {r#"
+            Gem::Specification.new do |spec|
+              it.name = "x"
+              it.name = "y"
             end
         "#});
     }

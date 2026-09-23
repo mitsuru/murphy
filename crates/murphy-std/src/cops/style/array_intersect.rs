@@ -467,7 +467,7 @@ fn extract_member_param(
     Some(array2)
 }
 
-/// Returns `Some(array2)` if `body` is `array2.member?(lvar_name)`.
+/// Returns `Some(array2)` if `body` is `array2.member?(parameter_read)`.
 fn extract_member_lvar(body: NodeId, lvar_name: &str, cx: &Cx<'_>) -> Option<NodeId> {
     let NodeKind::Send {
         receiver: body_recv,
@@ -485,10 +485,7 @@ fn extract_member_lvar(body: NodeId, lvar_name: &str, cx: &Cx<'_>) -> Option<Nod
     if args.len() != 1 {
         return None;
     }
-    let NodeKind::Lvar(lvar_sym) = *cx.kind(args[0]) else {
-        return None;
-    };
-    if cx.symbol_str(lvar_sym) != lvar_name {
+    if !crate::cops::util::is_block_parameter_read(args[0], lvar_name, cx) {
         return None;
     }
     Some(array2)

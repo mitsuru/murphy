@@ -175,10 +175,7 @@ fn check_select_block(block_node: NodeId, call: NodeId, body: NodeId, param: &st
     let Some(recv_id) = kind_recv.get() else {
         return;
     };
-    let NodeKind::Lvar(recv_sym) = *cx.kind(recv_id) else {
-        return;
-    };
-    if cx.symbol_str(recv_sym) != param {
+    if !crate::cops::util::is_block_parameter_read(recv_id, param, cx) {
         return;
     }
     // Exactly one argument — the class to pass to grep/grep_v.

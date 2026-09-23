@@ -336,17 +336,14 @@ fn unwrap_begin_single(node: NodeId, cx: &Cx<'_>) -> NodeId {
     node
 }
 
-/// Returns true if `node` is an `Lvar` matching the block parameter. For
-/// `IMPLICIT_ARG`, matches the numblock/itblock implicit name (`_1` or `it`).
+/// Returns true if `node` reads the block parameter. For `IMPLICIT_ARG`,
+/// matches the numblock/itblock implicit name (`_1` or `it`).
 fn is_block_arg_lvar(node: NodeId, sym: Symbol, cx: &Cx<'_>) -> bool {
-    let NodeKind::Lvar(s) = *cx.kind(node) else {
-        return false;
-    };
     if sym == IMPLICIT_ARG {
-        let name = cx.symbol_str(s);
-        name == "_1" || name == "it"
+        crate::cops::util::is_block_parameter_read(node, "_1", cx)
+            || crate::cops::util::is_block_parameter_read(node, "it", cx)
     } else {
-        s == sym
+        matches!(*cx.kind(node), NodeKind::Lvar(s) if s == sym)
     }
 }
 

@@ -12,7 +12,7 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.20.1, murphy-e7bz.20.2]
+//! gap_issues: [murphy-e7bz.20.1]
 //! notes: >
 //!   Mirrors RuboCop's `Metrics::Utils::AbcSizeCalculator` and the
 //!   `MethodComplexity` mixin numerically (verified against rubocop 1.87.0
@@ -23,8 +23,8 @@
 //!   `on_block`/`on_numblock`/`on_itblock` dispatch). The default-config
 //!   path (`CountRepeatedAttributes: true`) matches rubocop; the non-default
 //!   `CountRepeatedAttributes: false` discount path invalidates tracked getter
-//!   chains after shorthand op-assigns to those attributes. Two known gaps
-//!   remain (murphy-e7bz.20.1 and murphy-e7bz.20.2 — see below).
+//!   chains after shorthand op-assigns to those attributes. One known gap
+//!   remains (murphy-e7bz.20.1 — see below).
 //!
 //!   Known gap (murphy-e7bz.20.1): a multiple assignment whose LHS targets
 //!   are *setter* or *index* writes (`self.x, self.y = 1, 2`) is undercounted
@@ -33,13 +33,6 @@
 //!   (`<2, 2, 0>`); murphy currently yields `<0, 0, 0>`. Plain local-variable
 //!   masgn targets (`a, b = 1, 2`) are unaffected. The fix belongs in
 //!   murphy-translate, not in this cop.
-//!
-//!   Known gap (murphy-e7bz.20.2): inside a Ruby 3.4 `it`-param block
-//!   (`[1].each { it }`), murphy translates the implicit `it` to `(lvar it)`
-//!   rather than parser-gem's `(send nil :it)`, so the implicit-parameter
-//!   reference is not counted as a branch. RuboCop: `<0, 2, 1>`; murphy:
-//!   `<0, 1, 0>`. Numbered-param blocks (`_1`) and regular blocks match.
-//!   The fix belongs in murphy-translate.
 //!
 //!   The calculator walks the method body in post-order
 //!   (`visit_depth_last`) and accumulates three counters:
@@ -912,6 +905,18 @@ mod tests {
             .expect_offense(indoc! {"
                 define_method(\"sname\") { y = compute; z = process }
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `sname` is too high. [<2, 2, 0> 2.83/0]
+            "});
+    }
+
+    #[test]
+    fn bare_it_in_itblock_counts_as_branch() {
+        // RuboCop 1.87 keeps Itblock distinct and excludes it from COUNTED_NODES,
+        // so the block itself adds no condition; `each` and `send :it` are branches.
+        test::<AbcSize>()
+            .with_options(&max0())
+            .expect_offense(indoc! {"
+                def m; [1].each { it }; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `m` is too high. [<0, 2, 0> 2/0]
             "});
     }
 

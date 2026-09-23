@@ -310,7 +310,7 @@ fn itblock_matches(block_node: NodeId, method_name: &str, cx: &Cx<'_>) -> bool {
 // Body pattern predicates
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when `node` is `lvar_name.nil?` (Send or Csend, no args).
+/// Returns `true` when `node` calls `nil?` on the named block parameter.
 fn is_nil_call_on_lvar(node: NodeId, lvar_name: &str, cx: &Cx<'_>) -> bool {
     let (recv, method, args_list) = match *cx.kind(node) {
         NodeKind::Send { receiver, method, args } => (receiver.get(), method, cx.list(args)),
@@ -364,12 +364,9 @@ fn last_arg_name(args_node: NodeId, cx: &Cx<'_>) -> Option<String> {
     }
 }
 
-/// Returns `true` when `node` is `lvar(lvar_name)`.
+/// Returns `true` when `node` reads the named block parameter.
 fn is_lvar_named(node: NodeId, lvar_name: &str, cx: &Cx<'_>) -> bool {
-    match *cx.kind(node) {
-        NodeKind::Lvar(sym) => cx.symbol_str(sym) == lvar_name,
-        _ => false,
-    }
+    crate::cops::util::is_block_parameter_read(node, lvar_name, cx)
 }
 
 // ---------------------------------------------------------------------------

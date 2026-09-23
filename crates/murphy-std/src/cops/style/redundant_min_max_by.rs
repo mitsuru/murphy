@@ -199,7 +199,7 @@ fn numblock_body_is(block_node: NodeId, lvar_name_str: &str, cx: &Cx<'_>) -> boo
     body.get().is_some_and(|b| lvar_name(b, cx) == Some(lvar_name_str))
 }
 
-/// Returns `true` when the `Itblock` body is exactly `Lvar(lvar_name)`.
+/// Returns `true` when the `Itblock` body is exactly the `it` parameter read.
 fn itblock_body_is(block_node: NodeId, lvar_name_str: &str, cx: &Cx<'_>) -> bool {
     let NodeKind::Itblock { body, .. } = *cx.kind(block_node) else {
         return false;
@@ -207,10 +207,11 @@ fn itblock_body_is(block_node: NodeId, lvar_name_str: &str, cx: &Cx<'_>) -> bool
     body.get().is_some_and(|b| lvar_name(b, cx) == Some(lvar_name_str))
 }
 
-/// Returns the lvar name when `node` is a bare `Lvar`, otherwise `None`.
+/// Returns the parameter name for a bare local or implicit `it` read.
 fn lvar_name<'a>(node: NodeId, cx: &'a Cx<'_>) -> Option<&'a str> {
     match *cx.kind(node) {
         NodeKind::Lvar(sym) => Some(cx.symbol_str(sym)),
+        _ if crate::cops::util::is_block_parameter_read(node, "it", cx) => Some("it"),
         _ => None,
     }
 }
