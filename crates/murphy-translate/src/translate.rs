@@ -1814,10 +1814,9 @@ impl Translator {
         self.builder.push(NodeKind::Mlhs(list), range)
     }
 
-    /// 代入ターゲット（`LocalVariableTargetNode` 等、または入れ子の
-    /// `MultiTargetNode`）を翻訳する。target 系は値なし write ノードへ。
-    /// 対応 arm を持たないターゲット（constant/call/index target 等）は
-    /// `translate_node` に委譲する（多くは `Unknown` に落ちる、v1 許容）。
+    /// 代入ターゲット（変数・定数・入れ子の `MultiTargetNode`、attribute/index
+    /// targets）を write ノードまたは setter `Send` に翻訳する。
+    /// その他のターゲット形は `translate_node` に委譲する。
     fn translate_target(&mut self, node: &prism::Node<'_>) -> NodeId {
         let range = Self::node_range(node);
         if let Some(t) = node.as_local_variable_target_node() {
@@ -1860,6 +1859,61 @@ impl Translator {
                 range,
             );
         }
+        // Parser-gem represents attribute targets in `mlhs` as setter sends,
+        // even though the `=` token belongs to the enclosing multiple assignment.
+        if let Some(t) = node.as_call_target_node() {
+            let receiver = self.translate_node(&t.receiver());
+            let method = self.sym(&t.name());
+            let args = self.builder.push_list(&[]);
+            let target = self.builder.push_named(
+                NodeKind::Send {
+                    receiver: OptNodeId::some(receiver),
+                    method,
+                    args,
+                },
+                range,
+                Self::range(&t.message_loc()),
+            );
+            self.builder
+                .add_call_operator_loc(target, Self::range(&t.call_operator_loc()));
+            return target;
+        }
+        // An index target in `mlhs` is likewise a `send :[]=` with the index
+        // expressions as arguments; using Index/IndexAsgn here loses both the
+        // setter branch and assignment counts in Metrics/AbcSize.
+        if let Some(t) = node.as_index_target_node() {
+            let receiver = self.translate_node(&t.receiver());
+            let mut arg_ids = self.translate_arg_list(t.arguments());
+            if let Some(ba) = t.block() {
+                let expr = ba
+                    .expression()
+                    .map(|e| OptNodeId::some(self.translate_node(&e)))
+                    .unwrap_or(OptNodeId::NONE);
+                let block_pass = self
+                    .builder
+                    .push(NodeKind::BlockPass(expr), Self::range(&ba.location()));
+                arg_ids.push(block_pass);
+            }
+            let args = self.builder.push_list(&arg_ids);
+            let method = self.builder.intern_symbol("[]=");
+            let opening_range = Self::range(&t.opening_loc());
+            let closing_range = Self::range(&t.closing_loc());
+            let selector_range = Range {
+                start: opening_range.start,
+                end: closing_range.end,
+            };
+            let target = self.builder.push_named(
+                NodeKind::Send {
+                    receiver: OptNodeId::some(receiver),
+                    method,
+                    args,
+                },
+                range,
+                selector_range,
+            );
+            self.builder.add_call_closing_loc(target, closing_range);
+            return target;
+        }
         if let Some(mt) = node.as_multi_target_node() {
             return self.translate_mlhs(mt.lefts(), mt.rest(), mt.rights(), range);
         }
@@ -1897,7 +1951,8 @@ impl Translator {
                 range,
             );
         }
-        // call/index target 等は v1 では `translate_node` に委譲。
+        // Other target forms fall through to normal node translation; unsupported
+        // target shapes remain `Unknown` there.
         self.translate_node(node)
     }
 
@@ -3984,6 +4039,77 @@ mod tests {
                 NodeKind::Lvasgn { value, .. } => assert!(value.is_none()),
                 other => panic!("expected value-less Lvasgn target, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn translates_multiple_assignment_setter_targets_as_sends() {
+        let ast = translate("self.x, self.y = 1, 2", "t.rb");
+        let lhs = match ast.kind(ast.root()) {
+            NodeKind::Masgn { lhs, .. } => *lhs,
+            other => panic!("expected Masgn, got {other:?}"),
+        };
+        let targets: Vec<_> = ast.children(lhs).collect();
+        assert_eq!(targets.len(), 2);
+        for (target, expected) in targets.iter().zip(["x=", "y="]) {
+            let NodeKind::Send {
+                receiver,
+                method,
+                args,
+            } = ast.kind(*target)
+            else {
+                panic!("expected setter Send target, got {:?}", ast.kind(*target));
+            };
+            assert_eq!(ast.interner().resolve(method.0), expected);
+            assert!(matches!(
+                ast.kind(receiver.get().expect("setter receiver")),
+                NodeKind::SelfExpr
+            ));
+            assert_eq!(args.len, 0);
+        }
+    }
+
+    #[test]
+    fn translates_multiple_assignment_index_targets_as_setter_sends() {
+        let source = "a[k], b[k] = 1, 2";
+        let ast = translate(source, "t.rb");
+        let lhs = match ast.kind(ast.root()) {
+            NodeKind::Masgn { lhs, .. } => *lhs,
+            other => panic!("expected Masgn, got {other:?}"),
+        };
+        let targets: Vec<_> = ast.children(lhs).collect();
+        assert_eq!(targets.len(), 2);
+        for (target, expected_receiver) in targets.iter().zip(["a", "b"]) {
+            let NodeKind::Send {
+                receiver,
+                method,
+                args,
+            } = ast.kind(*target)
+            else {
+                panic!(
+                    "expected index setter Send target, got {:?}",
+                    ast.kind(*target)
+                );
+            };
+            assert_eq!(ast.interner().resolve(method.0), "[]=");
+            let selector = ast.loc(*target).name;
+            assert_eq!(
+                &source[selector.start as usize..selector.end as usize],
+                "[k]"
+            );
+            assert_eq!(args.len, 1);
+            let receiver_id = receiver.get().expect("index setter receiver");
+            let NodeKind::Send {
+                receiver,
+                method,
+                args,
+            } = ast.kind(receiver_id)
+            else {
+                panic!("expected receiver call, got {:?}", ast.kind(receiver_id));
+            };
+            assert!(receiver.is_none());
+            assert_eq!(ast.interner().resolve(method.0), expected_receiver);
+            assert_eq!(args.len, 0);
         }
     }
 
