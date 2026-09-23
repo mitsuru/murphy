@@ -12,7 +12,7 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.70, murphy-e7bz.71]
+//! gap_issues: [murphy-e7bz.70]
 //! notes: >
 //!   Mirrors RuboCop's `CodeLength` mixin + `Metrics::Utils::CodeLengthCalculator`,
 //!   verified numerically against standalone rubocop 1.87.0
@@ -62,11 +62,9 @@
 //!      (e.g. `def m(x = [\n…\n])` with `CountAsOne: ['array']`) is folded.
 //!      Murphy walks the body only, so such defaults are not folded (over-count).
 //!
-//!   Gap (murphy-e7bz.71): with `CountAsOne: ['heredoc']`, a *nested
-//!   interpolated* heredoc (`<<~OUTER` whose body holds `#{<<~INNER}`) is
-//!   mispaired by the shared `heredoc_end_line_of_opener` FIFO logic, so the
-//!   folded heredoc body extent is wrong (rubocop `[2/0]`, murphy `[4/0]`).
-//!   Default config (no `CountAsOne`) is unaffected and matches rubocop.
+//!   With `CountAsOne: ['heredoc']`, the shared token pairing matches starts
+//!   and terminators by delimiter label. This handles nested interpolated and
+//!   sibling heredocs without folding a body against another heredoc's end.
 //!
 //!   No autocorrect: RuboCop does not autocorrect this cop.
 //! ```
@@ -509,6 +507,34 @@ mod tests {
               TEXT
             end
         "});
+    }
+
+    #[test]
+    fn count_as_one_nested_interpolated_heredoc() {
+        let with_fold = MethodLengthOptions {
+            max: 0,
+            count_comments: false,
+            count_as_one: vec!["heredoc".to_string()],
+            allowed_methods: Vec::new(),
+            allowed_patterns: Vec::new(),
+        };
+        let src = indoc! {"
+            def m
+              x = <<~OUTER
+                line1
+                #{<<~INNER}
+                  inner1
+                  inner2
+                INNER
+                line2
+              OUTER
+              y = 1
+            end
+        "};
+        assert_eq!(
+            messages(&with_fold, src),
+            vec!["Method has too many lines. [2/0]".to_string()]
+        );
     }
 
     #[test]

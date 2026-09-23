@@ -945,27 +945,44 @@ fn is_heredoc_node(node: NodeId, cx: &Cx<'_>) -> bool {
 
 /// The 0-based source line of the `HeredocEnd` terminator for the heredoc whose
 /// `HeredocStart` opener begins at byte `opener_start`, or `None` when no
-/// heredoc opens there. Pairs openers to terminators FIFO via a stack, so
-/// stacked sibling heredocs on one line (`foo(<<~A, <<~B)`) resolve correctly.
-///
-/// KNOWN GAP (murphy-e7bz.71): FIFO pairing is wrong for *nested interpolated*
-/// heredocs (an OUTER heredoc whose body contains `#{<<~INNER}`), which close
-/// LIFO — the OUTER opener is mispaired with the INNER terminator. This only
-/// affects [`heredoc_length`] (the non-default `CountAsOne: [heredoc]` fold);
-/// [`node_line_span`] is unaffected because it takes the max end-line over all
-/// in-range openers, so the correct furthest terminator is found regardless of
-/// pairing (default config matches rubocop).
+/// heredoc opens there. Start and end tokens are paired by their delimiter
+/// labels, with FIFO pairing among pending heredocs that share a label. This
+/// preserves sibling heredoc order while correctly matching nested interpolated
+/// heredocs, whose terminators are not globally FIFO.
 fn heredoc_end_line_of_opener(opener_start: u32, cx: &Cx<'_>) -> Option<u32> {
-    let mut opener_stack: Vec<u32> = Vec::new(); // opener byte starts, FIFO order
+    let source = cx.source();
+    let mut openers: Vec<(Option<&str>, u32)> = Vec::new();
     for tok in cx.sorted_tokens() {
         match tok.kind {
-            SourceTokenKind::HeredocStart => opener_stack.push(tok.range.start),
+            SourceTokenKind::HeredocStart => {
+                let label = source
+                    .get(tok.range.start as usize..tok.range.end as usize)
+                    .and_then(heredoc_start_label);
+                openers.push((label, tok.range.start));
+            }
             SourceTokenKind::HeredocEnd => {
-                if opener_stack.is_empty() {
+                if openers.is_empty() {
                     continue;
                 }
-                // FIFO: the earliest-opened heredoc terminates first.
-                let opener = opener_stack.remove(0);
+                let end_label = source
+                    .get(tok.range.start as usize..tok.range.end as usize)
+                    .and_then(heredoc_end_label);
+                // Prefer the oldest opener with this label. Only fall back to
+                // FIFO when the end label itself could not be parsed; a known
+                // end label must never consume an opener with a different label.
+                let same_label = end_label.and_then(|label| {
+                    openers
+                        .iter()
+                        .position(|(open_label, _)| *open_label == Some(label))
+                });
+                let unknown_label = openers.iter().position(|(label, _)| label.is_none());
+                let opener_index = same_label
+                    .or(unknown_label)
+                    .or_else(|| end_label.is_none().then_some(0));
+                let Some(opener_index) = opener_index else {
+                    continue;
+                };
+                let (_, opener) = openers.remove(opener_index);
                 if opener == opener_start {
                     return Some(line_of(tok.range.start, cx));
                 }
@@ -974,6 +991,29 @@ fn heredoc_end_line_of_opener(opener_start: u32, cx: &Cx<'_>) -> Option<u32> {
         }
     }
     None
+}
+
+/// Extract the delimiter label from a Prism `HeredocStart` token's source text.
+fn heredoc_start_label(token_text: &str) -> Option<&str> {
+    let label = token_text.strip_prefix("<<")?;
+    let label = label
+        .strip_prefix('~')
+        .or_else(|| label.strip_prefix('-'))
+        .unwrap_or(label);
+    match label.as_bytes().first().copied() {
+        Some(quote @ (b'\'' | b'"' | b'`')) => label.get(1..)?.strip_suffix(quote as char),
+        Some(_) => Some(label),
+        None => None,
+    }
+}
+
+/// Extract the delimiter label from a Prism `HeredocEnd` token's source text.
+fn heredoc_end_label(token_text: &str) -> Option<&str> {
+    let line = token_text.trim_end_matches(['\n', '\r']);
+    let label = line
+        .trim_start_matches([' ', '\t'])
+        .trim_end_matches([' ', '\t']);
+    (!label.is_empty()).then_some(label)
 }
 
 /// The 0-based first and (heredoc-extended) last source line of a node's byte
@@ -1254,7 +1294,10 @@ fn inner_classlike_lines(node: NodeId, cx: &Cx<'_>) -> std::collections::HashSet
 
 #[cfg(test)]
 mod tests {
-    use super::{display_column, is_assignment_or_comparison_operator};
+    use super::{
+        display_column, heredoc_end_label, heredoc_start_label,
+        is_assignment_or_comparison_operator,
+    };
 
     #[test]
     fn display_column_matches_rubocop_unicode_display_width() {
@@ -1270,6 +1313,15 @@ mod tests {
         // Tabs count as 1 each, matching `Unicode::DisplayWidth.of("\t")` == 1
         // (the raw unicode-width crate reports 0 for control chars).
         assert_eq!(display_column("\t\t"), 2);
+    }
+
+    #[test]
+    fn heredoc_labels_ignore_quotes_and_indentation() {
+        assert_eq!(heredoc_start_label("<<~OUTER"), Some("OUTER"));
+        assert_eq!(heredoc_start_label("<<-'INNER'"), Some("INNER"));
+        assert_eq!(heredoc_start_label("<<\"TEXT\""), Some("TEXT"));
+        assert_eq!(heredoc_end_label("  OUTER\n"), Some("OUTER"));
+        assert_eq!(heredoc_end_label("\tINNER\r\n"), Some("INNER"));
     }
 
     #[test]
