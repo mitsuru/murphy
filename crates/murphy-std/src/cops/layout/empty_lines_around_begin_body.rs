@@ -31,7 +31,7 @@
 //!     "Extra empty line detected at begin body end."
 //! ```
 
-use crate::cops::util::check_empty_lines_around_body_no_empty_lines;
+use crate::cops::util::{check_empty_lines_around_body, line_of, EmptyLinesAroundBodyStyle};
 use murphy_plugin_api::{Cx, NoOptions, NodeId, SourceTokenKind, cop};
 
 /// Stateless unit struct, matching the const-metadata cop pattern (ADR 0035).
@@ -78,7 +78,16 @@ impl EmptyLinesAroundBeginBody {
         if !ends_with_end_keyword {
             return;
         }
-        check_empty_lines_around_body_no_empty_lines(node, start, "begin", cx);
+        let first_line = line_of(start, cx) as usize + 1;
+        let last_line = line_of(range.end.saturating_sub(1).max(range.start), cx) as usize + 1;
+        check_empty_lines_around_body(
+            cx,
+            "begin",
+            first_line,
+            last_line,
+            EmptyLinesAroundBodyStyle::NoEmptyLines,
+            EmptyLinesAroundBodyStyle::NoEmptyLines,
+        );
     }
 }
 

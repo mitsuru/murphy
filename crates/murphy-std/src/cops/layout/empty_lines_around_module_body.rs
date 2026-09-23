@@ -27,17 +27,20 @@
 //!   style except `no_empty_lines`. Single-line modules are skipped.
 //!
 //!   Each boundary fires independently, so `module Foo\n\nend` emits two
-//!   `no_empty_lines` offenses (matching RuboCop). Autocorrect removes the full
-//!   run of consecutive blank lines at each boundary (deduped when both
-//!   boundaries hit the same run) for `no_empty_lines`, and inserts a single
-//!   blank line for `empty_lines`.
+//!   `no_empty_lines` offenses (matching RuboCop). Each offense removes one
+//!   blank-line terminator per autocorrect pass; the fixpoint loop removes a
+//!   full run. Duplicate edits are suppressed when both boundaries hit the
+//!   same blank line. `empty_lines` inserts one blank line at each boundary.
 //!
 //!   ABI note: `NodeLoc` exposes only `expression`/`name` ranges, so the cop
 //!   works line-based off the module node's `expression` range, exactly as
 //!   RuboCop's mixin does (`node.source_range.first_line`/`last_line`).
 //! ```
 
-use crate::cops::util::{nth_line_start, physical_lines, PhysicalLine};
+use crate::cops::util::{
+    check_empty_lines_around_body, nth_line_start, physical_lines, EmptyLinesAroundBodyStyle,
+    PhysicalLine,
+};
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
 #[derive(Default)]
@@ -114,217 +117,62 @@ fn check(node: NodeId, body: Option<NodeId>, style: ModuleBodyStyle, cx: &Cx<'_>
     // 1-based physical line numbers of the module node's source range.
     let first_line = line_1based(range.start, cx);
     let last_line = line_1based(range.end.saturating_sub(1).max(range.start), cx);
-    let lines = physical_lines(cx.source());
 
-    match style {
+    let mut check_deferred = false;
+    let (beginning_style, ending_style) = match style {
+        ModuleBodyStyle::NoEmptyLines => (
+            EmptyLinesAroundBodyStyle::NoEmptyLines,
+            EmptyLinesAroundBodyStyle::NoEmptyLines,
+        ),
+        ModuleBodyStyle::EmptyLines => (
+            EmptyLinesAroundBodyStyle::EmptyLines,
+            EmptyLinesAroundBodyStyle::EmptyLines,
+        ),
         ModuleBodyStyle::EmptyLinesExceptNamespace => {
-            if is_namespace_one_child(body, cx) {
-                check_both(BoundaryStyle::NoEmptyLines, first_line, last_line, &lines, cx);
+            let boundary_style = if is_namespace_one_child(body, cx) {
+                EmptyLinesAroundBodyStyle::NoEmptyLines
             } else {
-                check_both(BoundaryStyle::EmptyLines, first_line, last_line, &lines, cx);
-            }
+                EmptyLinesAroundBodyStyle::EmptyLines
+            };
+            (boundary_style, boundary_style)
         }
         ModuleBodyStyle::EmptyLinesSpecial => {
-            check_empty_lines_special(body, first_line, last_line, &lines, cx);
-        }
-        ModuleBodyStyle::NoEmptyLines => {
-            check_both(BoundaryStyle::NoEmptyLines, first_line, last_line, &lines, cx);
-        }
-        ModuleBodyStyle::EmptyLines => {
-            check_both(BoundaryStyle::EmptyLines, first_line, last_line, &lines, cx);
-        }
-    }
-}
-
-/// The two terminal styles a boundary can be checked against.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BoundaryStyle {
-    NoEmptyLines,
-    EmptyLines,
-}
-
-/// `check_both(style, first_line, last_line)` — beginning and ending share the
-/// same boundary style. (RuboCop's `beginning_only`/`ending_only` variants are
-/// unused by the module-body cop.)
-fn check_both(
-    style: BoundaryStyle,
-    first_line: usize,
-    last_line: usize,
-    lines: &[PhysicalLine],
-    cx: &Cx<'_>,
-) {
-    // Track the blank-run removal already scheduled so the two boundaries do
-    // not emit overlapping edits when they resolve to the same run (the
-    // nil-body `module Foo\n\nend` case).
-    let mut emitted_removal: Option<Range> = None;
-    check_beginning(style, first_line, lines, cx, &mut emitted_removal);
-    check_ending(style, last_line, lines, cx, &mut emitted_removal);
-}
-
-/// `check_beginning` → `check_source(style, first_line, 'beginning')`.
-fn check_beginning(
-    style: BoundaryStyle,
-    first_line: usize,
-    lines: &[PhysicalLine],
-    cx: &Cx<'_>,
-    emitted_removal: &mut Option<Range>,
-) {
-    check_source(style, first_line, "beginning", lines, cx, emitted_removal);
-}
-
-/// `check_ending` → `check_source(style, last_line - 2, 'end')`.
-fn check_ending(
-    style: BoundaryStyle,
-    last_line: usize,
-    lines: &[PhysicalLine],
-    cx: &Cx<'_>,
-    emitted_removal: &mut Option<Range>,
-) {
-    let Some(line_no) = last_line.checked_sub(2) else {
-        return;
-    };
-    check_source(style, line_no, "end", lines, cx, emitted_removal);
-}
-
-/// `check_source(style, line_no, desc)` — `line_no` is the 0-based index into
-/// `processed_source.lines`.
-fn check_source(
-    style: BoundaryStyle,
-    line_no: usize,
-    desc: &str,
-    lines: &[PhysicalLine],
-    cx: &Cx<'_>,
-    emitted_removal: &mut Option<Range>,
-) {
-    let Some(&line) = lines.get(line_no) else {
-        return;
-    };
-    match style {
-        BoundaryStyle::NoEmptyLines => {
-            // `check_line(style, line_no, MSG_EXTRA, &:empty?)`
-            if line.blank {
-                emit_extra(line_no, desc, lines, cx, emitted_removal);
+            let Some(body) = body else { return };
+            if is_namespace_one_child(Some(body), cx) {
+                (
+                    EmptyLinesAroundBodyStyle::NoEmptyLines,
+                    EmptyLinesAroundBodyStyle::NoEmptyLines,
+                )
+            } else if first_child_requires_empty_line(body, cx) {
+                (
+                    EmptyLinesAroundBodyStyle::EmptyLines,
+                    EmptyLinesAroundBodyStyle::EmptyLines,
+                )
+            } else {
+                check_deferred = true;
+                (
+                    EmptyLinesAroundBodyStyle::NoEmptyLines,
+                    EmptyLinesAroundBodyStyle::EmptyLines,
+                )
             }
         }
-        BoundaryStyle::EmptyLines => {
-            // `check_line(style, line_no, MSG_MISSING) { |line| !line.empty? }`
-            if !line.blank {
-                emit_missing(line_no, desc, cx);
-            }
-        }
-    }
-}
-
-/// `no_empty_lines` offense + blank-run-removing autocorrect. The offense
-/// always fires (each boundary is independent, matching RuboCop); the
-/// removal edit is skipped when it overlaps a run already scheduled by the
-/// other boundary, to keep edits non-overlapping.
-fn emit_extra(
-    line_no: usize,
-    desc: &str,
-    lines: &[PhysicalLine],
-    cx: &Cx<'_>,
-    emitted_removal: &mut Option<Range>,
-) {
-    let line = lines[line_no];
-    let dir = if desc == "end" {
-        BlankRunDirection::Up
-    } else {
-        BlankRunDirection::Down
     };
-    let range = blank_run_range(lines, line_no, dir);
-    cx.emit_offense(
-        Range {
-            start: line.start,
-            end: line.end,
-        },
-        &format!("Extra empty line detected at {KIND} body {desc}."),
-        None,
-    );
-    let overlaps = emitted_removal.is_some_and(|e| range.start < e.end && e.start < range.end);
-    if !overlaps {
-        cx.emit_edit(range, "");
-        *emitted_removal = Some(range);
-    }
-}
 
-/// `empty_lines` offense + blank-line-inserting autocorrect.
-///
-/// RuboCop reports `source_range(buffer, line + offset, 0)` where `offset` is
-/// `2` for the end boundary and `1` for the beginning. That is the line at
-/// which the missing blank should be inserted (0-based `line + offset - 1`).
-fn emit_missing(line_no: usize, desc: &str, cx: &Cx<'_>) {
-    let insert_line = if desc == "end" {
-        // 1-based `line + 2` → 0-based `line + 1`.
-        line_no + 1
-    } else {
-        // 1-based `line + 1` → 0-based `line`.
-        line_no
-    };
-    let insert_at = nth_line_start(cx, insert_line as u32)
-        .unwrap_or_else(|| cx.source().len() as u32);
-    cx.emit_offense(
-        Range {
-            start: insert_at,
-            end: insert_at,
-        },
-        &format!("Empty line missing at {KIND} body {desc}."),
-        None,
-    );
-    cx.emit_edit(
-        Range {
-            start: insert_at,
-            end: insert_at,
-        },
-        "\n",
-    );
-}
-
-/// `check_empty_lines_special(body, first_line, last_line)`.
-fn check_empty_lines_special(
-    body: Option<NodeId>,
-    first_line: usize,
-    last_line: usize,
-    lines: &[PhysicalLine],
-    cx: &Cx<'_>,
-) {
-    // `return unless body`
-    let Some(body) = body else {
-        return;
-    };
-    if is_namespace_one_child(Some(body), cx) {
-        check_both(BoundaryStyle::NoEmptyLines, first_line, last_line, lines, cx);
-        return;
-    }
-    // The beginning and ending boundaries here are checked under different
-    // styles whose edits cannot coincide, but the shared dedup tracker is
-    // threaded for signature parity.
-    let mut emitted_removal: Option<Range> = None;
-    if first_child_requires_empty_line(body, cx) {
-        check_beginning(
-            BoundaryStyle::EmptyLines,
-            first_line,
-            lines,
-            cx,
-            &mut emitted_removal,
-        );
-    } else {
-        check_beginning(
-            BoundaryStyle::NoEmptyLines,
-            first_line,
-            lines,
-            cx,
-            &mut emitted_removal,
-        );
-        check_deferred_empty_line(body, lines, cx);
-    }
-    check_ending(
-        BoundaryStyle::EmptyLines,
-        last_line,
-        lines,
+    check_empty_lines_around_body(
         cx,
-        &mut emitted_removal,
+        KIND,
+        first_line,
+        last_line,
+        beginning_style,
+        ending_style,
     );
+
+    if check_deferred {
+        let lines = physical_lines(cx.source());
+        if let Some(body) = body {
+            check_deferred_empty_line(body, &lines, cx);
+        }
+    }
 }
 
 /// `check_deferred_empty_line(body)` — the first interior child that requires an
@@ -471,34 +319,7 @@ fn node_type_name(node: NodeId, cx: &Cx<'_>) -> &'static str {
     }
 }
 
-#[derive(Clone, Copy)]
-enum BlankRunDirection {
-    Down,
-    Up,
-}
 
-/// The byte range covering the maximal run of consecutive blank lines that
-/// includes `idx`, scanning toward EOF (`Down`) or BOF (`Up`).
-fn blank_run_range(lines: &[PhysicalLine], idx: usize, dir: BlankRunDirection) -> Range {
-    let mut lo = idx;
-    let mut hi = idx;
-    match dir {
-        BlankRunDirection::Down => {
-            while hi + 1 < lines.len() && lines[hi + 1].blank {
-                hi += 1;
-            }
-        }
-        BlankRunDirection::Up => {
-            while lo > 0 && lines[lo - 1].blank {
-                lo -= 1;
-            }
-        }
-    }
-    Range {
-        start: lines[lo].start,
-        end: lines[hi].end,
-    }
-}
 
 /// 1-based physical line of `offset`.
 fn line_1based(offset: u32, cx: &Cx<'_>) -> usize {
@@ -512,6 +333,10 @@ mod tests {
     use super::{
         EmptyLinesAroundModuleBody, EmptyLinesAroundModuleBodyOptions, ModuleBodyStyle,
     };
+    use crate::cops::layout::empty_lines_around_begin_body::EmptyLinesAroundBeginBody;
+    use crate::cops::layout::empty_lines_around_block_body::EmptyLinesAroundBlockBody;
+    use crate::cops::layout::empty_lines_around_class_body::EmptyLinesAroundClassBody;
+    use crate::cops::layout::empty_lines_around_method_body::EmptyLinesAroundMethodBody;
     use murphy_plugin_api::test_support::{
         run_cop, run_cop_with_edits, run_cop_with_options, run_cop_with_options_and_edits, test,
         CapturedEdit,
@@ -613,10 +438,63 @@ mod tests {
     }
 
     #[test]
-    fn corrects_multiple_blank_lines_at_beginning() {
+    fn corrects_one_blank_line_per_pass_at_beginning() {
         let src = "module Foo\n\n\n\n  x = 1\nend\n";
         let run = run_cop_with_edits::<EmptyLinesAroundModuleBody>(src);
-        assert_eq!(apply(src, &run.edits), "module Foo\n  x = 1\nend\n");
+        let once = apply(src, &run.edits);
+        assert_eq!(once, "module Foo\n\n\n  x = 1\nend\n");
+
+        let run2 = run_cop_with_edits::<EmptyLinesAroundModuleBody>(&once);
+        let twice = apply(&once, &run2.edits);
+        assert_eq!(twice, "module Foo\n\n  x = 1\nend\n");
+
+        let run3 = run_cop_with_edits::<EmptyLinesAroundModuleBody>(&twice);
+        let fixed = apply(&twice, &run3.edits);
+        assert_eq!(fixed, "module Foo\n  x = 1\nend\n");
+        assert!(run_cop::<EmptyLinesAroundModuleBody>(&fixed).is_empty());
+    }
+
+    #[test]
+    fn body_cops_remove_one_blank_line_per_boundary_per_pass() {
+        let class_src = "class Foo\n\n\n\n  body\n\n\n\nend\n";
+        let class_run = run_cop_with_edits::<EmptyLinesAroundClassBody>(class_src);
+        assert_eq!(class_run.offenses.len(), 2, "got {:?}", class_run.offenses);
+        assert_eq!(
+            apply(class_src, &class_run.edits),
+            "class Foo\n\n\n  body\n\n\nend\n"
+        );
+
+        let begin_src = "begin\n\n\n\n  body\n\n\n\nend\n";
+        let begin_run = run_cop_with_edits::<EmptyLinesAroundBeginBody>(begin_src);
+        assert_eq!(begin_run.offenses.len(), 2, "got {:?}", begin_run.offenses);
+        assert_eq!(
+            apply(begin_src, &begin_run.edits),
+            "begin\n\n\n  body\n\n\nend\n"
+        );
+
+        let block_src = "foo do\n\n\n\n  body\n\n\n\nend\n";
+        let block_run = run_cop_with_edits::<EmptyLinesAroundBlockBody>(block_src);
+        assert_eq!(block_run.offenses.len(), 2, "got {:?}", block_run.offenses);
+        assert_eq!(
+            apply(block_src, &block_run.edits),
+            "foo do\n\n\n  body\n\n\nend\n"
+        );
+
+        let module_src = "module Foo\n\n\n\n  body\n\n\n\nend\n";
+        let module_run = run_cop_with_edits::<EmptyLinesAroundModuleBody>(module_src);
+        assert_eq!(module_run.offenses.len(), 2, "got {:?}", module_run.offenses);
+        assert_eq!(
+            apply(module_src, &module_run.edits),
+            "module Foo\n\n\n  body\n\n\nend\n"
+        );
+
+        let method_src = "def foo\n\n\n\n  body\n\n\n\nend\n";
+        let method_run = run_cop_with_edits::<EmptyLinesAroundMethodBody>(method_src);
+        assert_eq!(method_run.offenses.len(), 2, "got {:?}", method_run.offenses);
+        assert_eq!(
+            apply(method_src, &method_run.edits),
+            "def foo\n\n\n  body\n\n\nend\n"
+        );
     }
 
     #[test]
