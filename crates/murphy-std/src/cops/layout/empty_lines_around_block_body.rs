@@ -95,7 +95,8 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         .take_while(|t| t.range.start >= node_range.start)
         .find(|t| {
             t.kind == SourceTokenKind::LeftBrace
-                || (t.kind == SourceTokenKind::Other && cx.raw_source(t.range) == "do")
+                || (t.kind == SourceTokenKind::Other
+                    && matches!(cx.raw_source(t.range), "do" | "{"))
         })
         .map(|t| t.range.start)
         .unwrap_or(node_range.start);
@@ -224,6 +225,17 @@ mod tests {
             "  Log.latest\n",
             "end\n",
         ));
+    }
+
+    #[test]
+    fn flags_blank_line_after_brace_with_multiline_lambda_parameters() {
+        let src = "f = ->(\n  x\n) {\n\n  x\n}\n";
+        let offenses = run_cop::<EmptyLinesAroundBlockBody>(src);
+        assert_eq!(offenses.len(), 1, "expected 1 offense, got {offenses:?}");
+        assert_eq!(
+            offenses[0].message,
+            "Extra empty line detected at block body beginning."
+        );
     }
 
     #[test]
