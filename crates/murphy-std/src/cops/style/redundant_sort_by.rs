@@ -175,12 +175,9 @@ fn match_identity_itblock(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
         return None;
     }
 
-    // Body must be `Lvar(it)`.
+    // Body must be the implicit `it` parameter read.
     let body_id = body.get()?;
-    let NodeKind::Lvar(sym) = *cx.kind(body_id) else {
-        return None;
-    };
-    if cx.symbol_str(sym) != "it" {
+    if !crate::cops::util::is_block_parameter_read(body_id, "it", cx) {
         return None;
     }
 

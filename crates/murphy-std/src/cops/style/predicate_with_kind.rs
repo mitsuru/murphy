@@ -122,15 +122,12 @@ fn check_predicate_block(
         return;
     }
 
-    // The kind-check receiver must be the block parameter (an `Lvar`), not an
-    // external variable or method call.
+    // The kind-check receiver must read the block parameter, not an external
+    // variable or method call. Implicit `it` is a receiverless send in Itblock.
     let Some(recv_id) = kind_recv.get() else {
         return;
     };
-    let NodeKind::Lvar(recv_sym) = *cx.kind(recv_id) else {
-        return;
-    };
-    if cx.symbol_str(recv_sym) != param {
+    if !crate::cops::util::is_block_parameter_read(recv_id, param, cx) {
         return;
     }
 

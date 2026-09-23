@@ -325,10 +325,19 @@ impl Translator {
             return self.builder.push(NodeKind::Lvar(name), range);
         }
         if node.as_it_local_variable_read_node().is_some() {
-            // `it` inside a parameterless block (Ruby 3.4) reads as the
-            // implicit `it` local — parser-gem's `(lvar :it)`.
-            let name = self.builder.intern_symbol("it");
-            return self.builder.push(NodeKind::Lvar(name), range);
+            // Prism exposes Ruby 3.4's implicit `it` parameter as a local read,
+            // but parser-gem (and RuboCop) represent it as `(send nil :it)`.
+            // Preserve that AST shape so downstream cops count the call.
+            let method = self.builder.intern_symbol("it");
+            let args = self.builder.push_list(&[]);
+            return self.builder.push(
+                NodeKind::Send {
+                    receiver: OptNodeId::NONE,
+                    method,
+                    args,
+                },
+                range,
+            );
         }
         if let Some(v) = node.as_instance_variable_read_node() {
             let name = self.sym(&v.name());
@@ -2225,7 +2234,7 @@ impl Translator {
         let body = self.translate_body(block.body());
         // `parameters()` は `Option<Node>`。`BlockParametersNode`（`|...|` 構文）
         // のほか、numbered（`_1`）/`it` パラメータノードがある。後者は専用の
-        // `Numblock`/`Itblock` へ（`_1` 本体は通常の lvar、`it` は下の専用 arm）。
+        // `Numblock`/`Itblock` へ（`_1` 本体は通常の lvar、`it` 本体は Send）。
         if let Some(params) = block.parameters() {
             if let Some(np) = params.as_numbered_parameters_node() {
                 return self.builder.push(
@@ -2943,12 +2952,56 @@ mod tests {
             }
             other => panic!("expected Numblock, got {other:?}"),
         }
-        // `it` パラメータブロック → Itblock, 本体の `it` は lvar。
+        let numblock = translate("foo.map { _1 }", "t.rb");
+        let NodeKind::Numblock { body, .. } = numblock.kind(numblock.root()) else {
+            panic!("expected Numblock");
+        };
+        let body = body.get().expect("numblock body");
+        assert!(matches!(
+            numblock.kind(body),
+            NodeKind::Lvar(name) if numblock.interner().resolve(name.0) == "_1"
+        ));
+        // `it` パラメータブロック → Itblock。参照は専用テストで Send を確認.
         let it = translate("foo { it.bar }", "t.rb");
         let NodeKind::Itblock { body, .. } = it.kind(it.root()) else {
             panic!("expected Itblock");
         };
         assert!(body.get().is_some());
+    }
+
+    #[test]
+    fn translates_itblock_references_as_method_sends() {
+        let bare_it = translate("foo { it }", "t.rb");
+        let NodeKind::Itblock { body, .. } = bare_it.kind(bare_it.root()) else {
+            panic!("expected Itblock");
+        };
+        let body = body.get().expect("itblock body");
+        let NodeKind::Send {
+            receiver,
+            method,
+            args,
+        } = bare_it.kind(body)
+        else {
+            panic!("expected bare `it` to translate to Send");
+        };
+        assert!(receiver.is_none());
+        assert_eq!(bare_it.interner().resolve(method.0), "it");
+        assert_eq!(args.len, 0);
+
+        let chained_it = translate("foo { it.bar }", "t.rb");
+        let NodeKind::Itblock { body, .. } = chained_it.kind(chained_it.root()) else {
+            panic!("expected Itblock");
+        };
+        let body = body.get().expect("itblock body");
+        let NodeKind::Send {
+            receiver, method, ..
+        } = chained_it.kind(body)
+        else {
+            panic!("expected `.bar` to translate to Send");
+        };
+        assert_eq!(chained_it.interner().resolve(method.0), "bar");
+        let it_send = receiver.get().expect("`it` receiver");
+        assert!(matches!(chained_it.kind(it_send), NodeKind::Send { .. }));
     }
 
     #[test]

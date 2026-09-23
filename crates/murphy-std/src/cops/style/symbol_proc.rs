@@ -259,9 +259,8 @@ fn extract_body_send<'a>(body_id: NodeId, param_sym: Symbol, cx: &'a Cx<'_>) -> 
 }
 
 /// Extract the method name from an implicit-parameter block body where the
-/// receiver is `Lvar(<expected>)` with no arguments. Shared by Numblock
-/// (`expected == "_1"`) and Itblock (`expected == "it"`); both represent their
-/// implicit parameter as an `Lvar` in the body subtree.
+/// receiver reads `<expected>` with no arguments. Numblock uses an `Lvar` for
+/// `_1`; Itblock uses a receiverless `send :it` for Ruby 3.4's implicit `it`.
 fn extract_body_send_implicit<'a>(
     body_id: NodeId,
     expected: &str,
@@ -276,10 +275,7 @@ fn extract_body_send_implicit<'a>(
         return None;
     };
     let recv_id = receiver.get()?;
-    let NodeKind::Lvar(sym) = *cx.kind(recv_id) else {
-        return None;
-    };
-    if cx.symbol_str(sym) != expected {
+    if !crate::cops::util::is_block_parameter_read(recv_id, expected, cx) {
         return None;
     }
     if !cx.list(args).is_empty() {
