@@ -86,10 +86,11 @@ impl TrailingWhitespace {
         // the string's runtime value). When AllowInHeredoc is true, we
         // also use these ranges to suppress offenses entirely.
         //
-        // Each HeredocStart / HeredocEnd pair brackets the body:
-        //   body_start = heredoc_start.end + 1 (skip the newline after the opener)
-        //   body_end   = heredoc_end.start
-        let heredoc_body_ranges = collect_heredoc_body_ranges(cx);
+        // Each HeredocStart / HeredocEnd pair brackets one body. Stacked
+        // heredocs share an opener line but their bodies do not overlap:
+        //   body_start = max(previous_body_end_line, line_after(opener_line))
+        //   body_end   = start of this heredoc's terminator line
+        let heredoc_body_ranges = collect_heredoc_body_ranges(bytes, cx.sorted_tokens());
 
         let mut line_start = 0usize;
         let mut i = 0usize;
@@ -117,37 +118,39 @@ impl TrailingWhitespace {
 }
 
 /// Collect (body_start, body_end) byte-offset pairs for all heredoc bodies
-/// in the file. Body bytes run from `heredoc_start.end + 1` (skipping the
-/// newline after the opener) to the start of the terminator line.
+/// in the file. Each body begins after its opener line or after the previous
+/// stacked heredoc's terminator line, whichever is later, and ends at the
+/// start of its own terminator line.
 ///
-/// Uses a FIFO queue so that multiple heredocs opened on the same line are
-/// matched in the order their openers appear. Ruby reads heredoc bodies
-/// sequentially: the first `HeredocEnd` terminates the earliest unmatched
-/// `HeredocStart`, not the most recently opened one (LIFO would mismatch
-/// openers and terminators when multiple heredocs are opened on one line).
-fn collect_heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
+/// Heredoc starts and ends are paired FIFO: Ruby consumes the earliest
+/// unmatched opener first. The running cursor keeps bodies opened on one line
+/// stacked rather than overlapping the same source range.
+fn collect_heredoc_body_ranges(
+    source: &[u8],
+    tokens: &[murphy_plugin_api::SourceToken],
+) -> Vec<(u32, u32)> {
     use std::collections::VecDeque;
-    let source = cx.source().as_bytes();
-    let tokens = cx.sorted_tokens();
     let mut starts: VecDeque<u32> = VecDeque::new();
     let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let mut cursor = 0u32;
 
     for tok in tokens {
         match tok.kind {
-            SourceTokenKind::HeredocStart => {
-                // +1 to skip the `\n` at the end of the opener line.
-                starts.push_back(tok.range.end + 1);
-            }
+            SourceTokenKind::HeredocStart => starts.push_back(tok.range.end),
             SourceTokenKind::HeredocEnd => {
-                if let Some(body_start) = starts.pop_front() {
-                    // The body ends at the start of the terminator line, not
-                    // at HeredocEnd.start. For squiggly heredocs, the terminator
-                    // may be indented (e.g., `  RUBY`), so HeredocEnd.start
-                    // points to `RUBY` while the line starts a few bytes earlier.
-                    // Using the line start avoids misidentifying the terminator
-                    // line as a body line in byte_in_heredoc_body.
-                    let terminator_line_start = terminator_line_start(source, tok.range.start);
-                    ranges.push((body_start, terminator_line_start));
+                if let Some(opener_end) = starts.pop_front() {
+                    // Scan from the opener token end to the next newline. This
+                    // handles multiple opener tokens on the same source line.
+                    let opener_line_end = next_line_start(source, opener_end);
+                    // Stack the body after the prior terminator line while
+                    // still placing a lone/first body after its opener line.
+                    let body_start = cursor.max(opener_line_end).min(source.len() as u32);
+                    let end = terminator_line_start(source, tok.range.start);
+                    // HeredocEnd spans its terminator newline, so advance from
+                    // the label start (not tok.range.end) to avoid skipping the
+                    // next body line.
+                    cursor = next_line_start(source, tok.range.start);
+                    ranges.push((body_start.min(end), end));
                 }
             }
             _ => {}
@@ -157,10 +160,20 @@ fn collect_heredoc_body_ranges(cx: &Cx<'_>) -> Vec<(u32, u32)> {
     ranges
 }
 
+/// Returns the byte after the newline in the line containing `pos`, or EOF.
+fn next_line_start(source: &[u8], pos: u32) -> u32 {
+    let pos = (pos as usize).min(source.len());
+    source[pos..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|i| (pos + i + 1) as u32)
+        .unwrap_or(source.len() as u32)
+}
+
 /// The byte offset of the first byte on the line that contains `pos`.
 /// Scans backwards from `pos` to find the preceding `\n` (or BOF).
 fn terminator_line_start(source: &[u8], pos: u32) -> u32 {
-    let pos = pos as usize;
+    let pos = (pos as usize).min(source.len());
     // Scan backwards to find the newline that ends the previous line.
     source[..pos]
         .iter()
@@ -217,7 +230,8 @@ fn is_trailing_ws(b: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{TrailingWhitespace, TrailingWhitespaceOptions};
+    use super::{collect_heredoc_body_ranges, TrailingWhitespace, TrailingWhitespaceOptions};
+    use murphy_plugin_api::{Range, SourceToken, SourceTokenKind};
     use murphy_plugin_api::test_support::test;
 
     fn allow_in_heredoc() -> TrailingWhitespaceOptions {
@@ -341,14 +355,58 @@ mod tests {
     // ----- Same-line multiple heredocs (FIFO ordering) ----------
 
     #[test]
-    fn allows_trailing_space_in_same_line_multiple_heredoc_bodies_with_allow_in_heredoc() {
-        // Ruby: `a = <<A; b = <<B` opens A first, then B.
-        // Bodies appear in FIFO order: A body first, then B body.
-        // With AllowInHeredoc: true, both bodies should be exempt.
-        // Source: "a = <<A; b = <<B\nbody_a   \nA\nbody_b   \nB\n"
+    fn stacked_heredoc_body_ranges_start_after_prior_terminator() {
+        let source = "foo(<<~A, <<~B)\nbody_a\nA\nbody_b\nB\n";
+        let offset = |needle: &str| source.find(needle).unwrap() as u32;
+        let a_start = offset("<<~A");
+        let b_start = offset("<<~B");
+        let a_end = offset("\nA\n") + 1;
+        let b_end = offset("\nB\n") + 1;
+        let tokens = [
+            SourceToken {
+                kind: SourceTokenKind::HeredocStart,
+                range: Range {
+                    start: a_start,
+                    end: a_start + 4,
+                },
+            },
+            SourceToken {
+                kind: SourceTokenKind::HeredocStart,
+                range: Range {
+                    start: b_start,
+                    end: b_start + 4,
+                },
+            },
+            SourceToken {
+                kind: SourceTokenKind::HeredocEnd,
+                range: Range {
+                    start: a_end,
+                    end: a_end + 2,
+                },
+            },
+            SourceToken {
+                kind: SourceTokenKind::HeredocEnd,
+                range: Range {
+                    start: b_end,
+                    end: b_end + 2,
+                },
+            },
+        ];
+        let header_end = source.find('\n').unwrap() as u32 + 1;
+
+        assert_eq!(
+            collect_heredoc_body_ranges(source.as_bytes(), &tokens),
+            vec![(header_end, a_end), (a_end + 2, b_end)]
+        );
+    }
+
+    #[test]
+    fn allows_trailing_space_in_stacked_heredoc_bodies_with_allow_in_heredoc() {
+        // Both body ranges start on their own first body line, after the
+        // shared opener line and then after the first heredoc's terminator.
         test::<TrailingWhitespace>()
             .with_options(&allow_in_heredoc())
-            .expect_no_offenses("a = <<A; b = <<B\nbody_a   \nA\nbody_b   \nB\n");
+            .expect_no_offenses("foo(<<~A, <<~B)\n  body_a   \nA\n  body_b   \nB\n");
     }
 
     #[test]
