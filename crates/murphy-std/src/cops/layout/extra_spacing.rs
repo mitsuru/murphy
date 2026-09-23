@@ -207,7 +207,16 @@ fn aligned_comment_offsets(cx: &Cx<'_>) -> HashSet<u32> {
         let c2 = win[1];
         let col1 = column_of(src, c1.range.start as usize);
         let col2 = column_of(src, c2.range.start as usize);
-        if col1 == col2 {
+        // Comments are aligned only when they occupy adjacent physical lines.
+        // Count from start to start so a code or blank line between them adds
+        // another newline; cap at two because larger counts are also non-adjacent.
+        let adjacent_lines = src[c1.range.start as usize..c2.range.start as usize]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .take(2)
+            .count()
+            == 1;
+        if col1 == col2 && adjacent_lines {
             aligned.insert(c1.range.start);
             aligned.insert(c2.range.start);
         }
@@ -474,6 +483,20 @@ mod tests {
             another_object.method(arg) # this is another comment
             some_object.method(arg)    # this is some comment
         "#});
+    }
+
+    #[test]
+    fn flags_comment_aligned_only_with_non_adjacent_comment() {
+        // The first two comments are adjacent and aligned. The final comment
+        // shares their column but is separated from them by code, so its extra
+        // spacing must still be flagged.
+        test::<ExtraSpacing>().expect_offense(indoc! {"
+            first = 1         # first comment
+            other = 2         # adjacent comment
+            code = 3
+            third = 4         # non-adjacent comment
+                     ^^^^^^^^ Unnecessary spacing detected.
+        "});
     }
 
     // ----- Multiline hash key->value gaps (ignored_ranges) ----------
