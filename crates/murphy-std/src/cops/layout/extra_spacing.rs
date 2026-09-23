@@ -26,14 +26,9 @@
 //!   precomputed same-column comment set (`aligned_locations`). Multiline-hash
 //!   key->value gaps are excluded (`ignored_ranges`) since `Layout/HashAlignment`
 //!   owns them.
-//!   Gaps (documented, not bypassed):
-//!     - `ForceEqualSignAlignment` (default false) is NOT implemented. It
-//!       forces `=` on consecutive assignment lines to align vertically, which
-//!       requires the multi-line `AlignmentCorrector`-style edit machinery
-//!       (insert/remove leading spaces across a window of assignment tokens)
-//!       that is not yet available across the single-surface ABI. With the
-//!       default config (false) the cop's behaviour is unaffected; only users
-//!       who opt in lose the `=`-alignment offense + correction.
+//!   `ForceEqualSignAlignment` is not implemented. Enabling it produces an
+//!   explicit unsupported-option offense instead of silently doing nothing;
+//!   the cop skips normal spacing checks for that file.
 //! ```
 
 use murphy_plugin_api::{
@@ -46,6 +41,8 @@ use std::collections::HashSet;
 pub struct ExtraSpacing;
 
 const MSG_UNNECESSARY: &str = "Unnecessary spacing detected.";
+const MSG_UNSUPPORTED_FORCE_EQUAL_SIGN_ALIGNMENT: &str =
+    "ForceEqualSignAlignment is not supported by Layout/ExtraSpacing.";
 
 /// Options for [`ExtraSpacing`].
 #[derive(CopOptions)]
@@ -67,7 +64,7 @@ pub struct ExtraSpacingOptions {
     #[option(
         name = "ForceEqualSignAlignment",
         default = false,
-        description = "Force `=` on consecutive assignment lines to align vertically (not yet implemented)."
+        description = "Unsupported: enabling this option reports an explicit offense."
     )]
     pub force_equal_sign_alignment: bool,
 }
@@ -84,6 +81,16 @@ impl ExtraSpacing {
     fn investigate(&self, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<ExtraSpacingOptions>();
         let src = cx.source().as_bytes();
+
+        if opts.force_equal_sign_alignment {
+            let end = cx.source().chars().next().map_or(0, |ch| ch.len_utf8() as u32);
+            cx.emit_offense(
+                Range { start: 0, end },
+                MSG_UNSUPPORTED_FORCE_EQUAL_SIGN_ALIGNMENT,
+                None,
+            );
+            return;
+        }
 
         // RuboCop: `return if processed_source.blank?`.
         if src.is_empty() {
@@ -319,6 +326,20 @@ mod tests {
             allow_before_trailing_comments: true,
             force_equal_sign_alignment: false,
         }
+    }
+
+    #[test]
+    fn explicitly_rejects_force_equal_sign_alignment() {
+        let opts = ExtraSpacingOptions {
+            allow_for_alignment: true,
+            allow_before_trailing_comments: false,
+            force_equal_sign_alignment: true,
+        };
+
+        test::<ExtraSpacing>().with_options(&opts).expect_offense(indoc! {r#"
+            x =  1
+            ^ ForceEqualSignAlignment is not supported by Layout/ExtraSpacing.
+        "#});
     }
 
     // ----- Core offense + correction --------------------------------
