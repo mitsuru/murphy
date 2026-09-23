@@ -200,6 +200,38 @@ fn lint_warns_and_continues_when_user_enables_a_disabled_cop() {
 }
 
 #[test]
+fn lint_does_not_call_a_default_disabled_builtin_cop_a_stub() {
+    let dir = tempdir().expect("create tempdir");
+    fs::write(
+        dir.path().join(".murphy.yml"),
+        "Bundler/GemVersion:\n  Enabled: true\n",
+    )
+    .expect("write .murphy.yml");
+    fs::write(dir.path().join("Gemfile"), "gem 'rack'\n").expect("write Gemfile");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .current_dir(dir.path())
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg("Gemfile")
+        .assert()
+        .code(1);
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("Bundler/GemVersion"),
+        "the explicitly enabled builtin cop must still report offenses; got stdout:\n{stdout}"
+    );
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).expect("utf-8 stderr");
+    assert!(
+        !stderr.contains("is a stub in the 'builtin' pack"),
+        "a real builtin implementation must not be labeled a stub; got stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn cops_list_rejects_unknown_format_value() {
     let dir = tempdir().expect("create tempdir");
 

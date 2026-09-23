@@ -217,11 +217,11 @@ fn write_json<W: Write>(out: &mut W, listings: &[Listing]) -> std::io::Result<()
     writeln!(out, "{body}")
 }
 
-/// Emit a warning for every cop the user explicitly enabled in
-/// `.murphy.yml` that is currently in the disabled registry. Called
-/// once per lint run (after config load, before any file is parsed) so
-/// the diagnostic surfaces even on a zero-file run. Skipping the cop
-/// itself happens for free — it has no `PluginCopV1` to dispatch.
+/// Emit a warning for explicitly enabled dynamic-pack stubs. Built-in cops
+/// may be disabled by default while still having a real implementation, so
+/// default enablement alone is not enough to classify them as stubs. Called
+/// once per lint run (after config load, before any file is parsed) so the
+/// diagnostic surfaces even on a zero-file run.
 pub fn warn_user_enabled_disabled(config: &MurphyConfig, registry: &murphy_core::CopRegistry) {
     // Warn only for stubs from dynamic packs (e.g. murphy-rails) where the cop's
     // default_enabled tristate says false — meaning it has no real implementation yet.
@@ -229,7 +229,7 @@ pub fn warn_user_enabled_disabled(config: &MurphyConfig, registry: &murphy_core:
     // Style/CollectionMethods) will work fine if the user enables them, so no warning.
     for (cop, pack_name) in registry.all_cops_with_packs() {
         let cop_default = murphy_plugin_api::tristate_from_wire(cop.default_enabled);
-        if cop_default == Some(false)
+        if is_disabled_dynamic_pack_stub(pack_name, cop_default)
             && let Ok(name) = std::str::from_utf8(unsafe { cop.name.as_bytes() })
             && config.is_explicitly_enabled(name)
         {
@@ -250,5 +250,33 @@ pub fn warn_user_enabled_disabled(config: &MurphyConfig, registry: &murphy_core:
                  `Enabled: true` in .murphy.yml is honoured but the cop will not run"
             );
         }
+    }
+}
+
+/// The registry's `builtin` pack contains real native implementations; its
+/// `default_enabled = false` value is a user-facing default, not a stub marker.
+/// Dynamic packs use that value for their migration stubs.
+fn is_disabled_dynamic_pack_stub(pack_name: &str, default_enabled: Option<bool>) -> bool {
+    pack_name != "builtin" && default_enabled == Some(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_disabled_dynamic_pack_stub;
+
+    #[test]
+    fn builtin_cops_disabled_by_default_are_not_stubs() {
+        assert!(!is_disabled_dynamic_pack_stub("builtin", Some(false)));
+    }
+
+    #[test]
+    fn disabled_dynamic_pack_cops_are_stub_candidates() {
+        assert!(is_disabled_dynamic_pack_stub("murphy-rails", Some(false)));
+    }
+
+    #[test]
+    fn enabled_or_unspecified_dynamic_cops_are_not_stub_candidates() {
+        assert!(!is_disabled_dynamic_pack_stub("murphy-rails", Some(true)));
+        assert!(!is_disabled_dynamic_pack_stub("murphy-rails", None));
     }
 }
