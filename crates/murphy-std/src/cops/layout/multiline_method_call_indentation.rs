@@ -6,56 +6,46 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Layout/MultilineMethodCallIndentation
-//! upstream_version_checked: 1.86.2
+//! upstream_version_checked: 1.87.0
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Ports the default `EnforcedStyle: aligned` style, semantic-alignment
-//!   case only. For a leading-dot continuation (`.method` / `&.method` that
-//!   begins its own line), RuboCop's `alignment_base` is
-//!   `semantic_alignment_base || syntactic_alignment_base`; the semantic base
-//!   wins first and is the dot of the first call in the chain that carries a
-//!   dot. Murphy aligns the continuation's `dot.column` with that anchor
-//!   dot's column and reports a misalignment offense on the
-//!   `dot..selector` range.
+//!   Ports the default `EnforcedStyle: aligned` semantic-alignment case and the
+//!   common leading-dot call-chain cases for `indented` and
+//!   `indented_relative_to_receiver`. Aligned continuations match the first
+//!   dotted call's column. `indented` continuations use the chain's line
+//!   indentation plus `IndentationWidth`; `indented_relative_to_receiver`
+//!   continuations use the first receiver's column plus that width. A cop-level
+//!   `IndentationWidth` overrides the resolved `Layout/IndentationWidth.Width`;
+//!   a null/unset value falls back to the resolved shared width. Relative style
+//!   accounts for `*` and `**` receiver wrappers.
 //!
-//!   Two RuboCop early-returns are reproduced verbatim and are what make the
-//!   `Enabled: true` default safe from false positives:
+//!   The parenthesized-call argument guard (`expect(foo.bar\n.baz)`) is
+//!   conservatively applied to all styles. RuboCop may use a regular-indentation
+//!   fallback for this shape; Murphy skips it. The aligned semantic path also
+//!   preserves these RuboCop guards:
 //!
-//!   - `semantic_alignment_node`: `return if argument_in_method_call(node,
-//!     :with_parentheses)` — a chain that is an argument inside a
-//!     parenthesized call (`expect(foo.bar\n.baz)`) is skipped; RuboCop
-//!     aligns those via the indentation fallback, not the semantic base.
-//!   - `first_call_alignment_node`: `return if node.loc.dot.line !=
-//!     node.first_line` — the anchor dot must sit on the chain expression's
-//!     first line. `obj\n.foo\n.bar` (receiver alone on line 1, first dot on
-//!     line 2) therefore has no semantic base and is skipped.
-//!   - `first_call_alignment_node`: `return if method_on_receiver_last_line?(
-//!     node, base_receiver, :begin)` — a chain whose base receiver is a
-//!     parenthesized / `begin...end` expression (`(a || b).foo\n.bar`) has no
-//!     semantic base. Murphy over-skips any `Begin` base receiver (safe
-//!     under-fire).
+//!   - `first_call_alignment_node`: the anchor dot must sit on the chain
+//!     expression's first line. `obj\n.foo\n.bar` therefore has no aligned
+//!     semantic base and is skipped by the aligned style.
+//!   - A chain whose base receiver is a parenthesized / `begin...end`
+//!     expression (`(a || b).foo\n.bar`) has no aligned semantic base. Murphy
+//!     over-skips any `Begin` base receiver for the aligned style.
 //!
 //!   Gaps (documented, not covered):
-//!   - `indented` and `indented_relative_to_receiver` styles.
-//!   - `IndentationWidth` interaction (only meaningful for `indented`).
-//!   - The `syntactic_alignment_base` fallbacks (assignment-RHS where the
-//!     anchor is not on line 1, operator-RHS, keyword-special indentation)
-//!     and the no-base `check_regular_indentation` fallback — all of which
-//!     `semantic_alignment_base` declines, returning nil.
-//!   - Hash-pair alignment (`hash_pair_aligned?` / `check_hash_pair_*`),
-//!     multi-line block-chain anchors (`find_multiline_block_chain_node`),
-//!     `get_dot_right_above`, and the receiver-last-line `begin`/`array`
-//!     special cases.
-//!   - Other grouped-expression contexts handled by `not_for_this_cop?`
-//!     beyond the `Begin` base-receiver skip above.
+//!   - The styles are currently enforced for leading-dot call chains with a
+//!     first dotted receiver. RuboCop's trailing-dot, selector-only, syntactic
+//!     alignment, and general no-base indentation paths are not ported.
+//!   - Hash-pair alignment, multiline block-chain anchors, `get_dot_right_above`,
+//!     and the receiver-last-line `begin`/`array` cases.
+//!   - Other grouped-expression contexts handled by `not_for_this_cop?`.
 //!   - Autocorrect (RuboCop realigns via `AlignmentCorrector`).
 //! ```
 //!
 //! ## Matched shapes
 //!
 //! `send`/`csend` nodes whose leading-dot selector begins its own line and is
-//! misaligned with the first dotted call in the chain (anchored on line 1).
+//! misindented relative to the selected `EnforcedStyle`.
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 
@@ -64,9 +54,8 @@ use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, 
 pub struct MultilineMethodCallIndentation;
 
 /// Options for [`MultilineMethodCallIndentation`]. `EnforcedStyle` matches
-/// RuboCop verbatim; the default is `aligned`. Only `aligned` is enforced;
-/// the other styles are accepted by the option parser but treated as a
-/// documented no-op gap.
+/// RuboCop verbatim; the default is `aligned`. `IndentationWidth` overrides the
+/// shared `Layout/IndentationWidth.Width` for the indented styles.
 #[derive(CopOptions)]
 pub struct MultilineMethodCallIndentationOptions {
     #[option(
@@ -75,6 +64,11 @@ pub struct MultilineMethodCallIndentationOptions {
         description = "How the method-name part of a multi-line method call is indented."
     )]
     pub enforced_style: IndentationStyle,
+    #[option(
+        name = "IndentationWidth",
+        description = "Indentation width in spaces (null/unset uses Layout/IndentationWidth.Width)."
+    )]
+    pub indentation_width: Option<i64>,
 }
 
 #[derive(CopOptionEnum, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +114,19 @@ fn column_of(offset: u32, src: &str) -> usize {
     src[line_start..offset as usize].chars().count()
 }
 
+/// Number of leading indentation columns on the line containing `offset`.
+fn indentation_of_line(offset: u32, src: &str) -> usize {
+    let bytes = src.as_bytes();
+    let line_start = bytes[..offset as usize]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |p| p + 1);
+    src[line_start..offset as usize]
+        .chars()
+        .take_while(|&ch| ch == ' ' || ch == '\t')
+        .count()
+}
+
 /// 1-based line of a byte offset. Used only for the offense message (cold
 /// path); same-line tests use [`spans_newline`] to stay O(span).
 fn line_of(offset: u32, src: &str) -> usize {
@@ -150,10 +157,11 @@ fn begins_its_line(offset: u32, src: &str) -> bool {
 
 fn check(node: NodeId, cx: &Cx<'_>) {
     let opts = cx.options_or_default::<MultilineMethodCallIndentationOptions>();
-    // Only the default `aligned` style is enforced (see parity notes).
-    if opts.enforced_style != IndentationStyle::Aligned {
-        return;
-    }
+    let style = opts.enforced_style;
+    let indentation_width = opts
+        .indentation_width
+        .unwrap_or(cx.indentation_width())
+        .max(0) as usize;
 
     // `relevant_node?` — only method calls with an explicit dot operator.
     let dot = cx.loc(node).dot();
@@ -168,13 +176,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     let src = cx.source();
 
-    // `right_hand_side` — when the dot and selector are on the same line, the
-    // RHS spans `dot.start..selector.end`; the offense highlights this range.
-    // `semantic_alignment_base` requires `rhs.source.start_with?('.', '&.')`,
-    // i.e. the dot leads (the continuation is a leading-dot line).
+    // `right_hand_side` — for the leading-dot shapes supported here, the RHS
+    // spans the dot through the selector and must begin its own line.
     let rhs_start = dot.start;
-    // The RHS begins its own line (`begins_its_line?(rhs)`), else the call is
-    // single-line or trailing-dot — not a semantic-alignment case.
     if !begins_its_line(rhs_start, src) {
         return;
     }
@@ -185,59 +189,81 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
 
-    // `first_call_has_a_dot` — the bottom-most call in the chain carrying a
-    // dot is the alignment anchor; `base` is the chain's base receiver.
+    // Locate the first dotted call in the receiver chain. `base` is the
+    // receiver before that first call and anchors the indented styles.
     let Some((anchor, base)) = first_dotted_call_in_chain(node, cx) else {
         return;
     };
-    // `first_call_alignment_node`: the node aligns to a *different* call.
-    if anchor == node {
-        return;
-    }
-    // `first_call_alignment_node`: `return if method_on_receiver_last_line?(
-    // node, base_receiver, :begin)` — when the chain's base receiver is a
-    // parenthesized / `begin...end` expression, RuboCop declines the semantic
-    // base. We over-skip (any `Begin` base receiver) which is a safe
-    // under-fire; RuboCop is the documented exception to "don't match Begin".
-    if matches!(cx.kind(base), NodeKind::Begin(_)) {
-        return;
-    }
-    let anchor_dot = cx.loc(anchor).dot();
-    if anchor_dot == Range::ZERO {
-        return;
-    }
-    // `first_call_alignment_node`: `return if node.loc.dot.line !=
-    // node.first_line` — the anchor dot must be on the chain expression's
-    // first line. The chain expression starts at the anchor's full range, so
-    // this holds when no newline separates the anchor's start from its dot.
-    let anchor_expr_start = cx.range(anchor).start;
-    if spans_newline(src, anchor_expr_start, anchor_dot.start) {
-        return;
-    }
-
-    let expected_column = column_of(anchor_dot.start, src);
+    let base_range = cx.range(base);
     let actual_column = column_of(dot.start, src);
-    if actual_column == expected_column {
-        return;
-    }
-
     let rhs_range = Range {
         start: rhs_start,
         end: selector.end,
     };
     let rhs_src = cx.raw_source(rhs_range);
-    // RuboCop's `base_source`: `@base.source[/[^\n]*/]` where `@base =
-    // anchor.dot.join(anchor.selector)`. Span the anchor's dot through its
-    // selector, then clip to the first line.
-    let anchor_selector = cx.loc(anchor).name;
-    let base_range = Range {
-        start: anchor_dot.start,
-        end: anchor_selector.end.max(anchor_dot.end),
+
+    let (expected_column, message) = match style {
+        IndentationStyle::Aligned => {
+            // The aligned style requires a distinct, first-line dotted anchor.
+            if anchor == node || matches!(cx.kind(base), NodeKind::Begin(_)) {
+                return;
+            }
+            let anchor_dot = cx.loc(anchor).dot();
+            if anchor_dot == Range::ZERO {
+                return;
+            }
+            let anchor_expr_start = cx.range(anchor).start;
+            if spans_newline(src, anchor_expr_start, anchor_dot.start) {
+                return;
+            }
+
+            let anchor_selector = cx.loc(anchor).name;
+            let anchor_base_range = Range {
+                start: anchor_dot.start,
+                end: anchor_selector.end.max(anchor_dot.end),
+            };
+            let anchor_base_src = cx.raw_source(anchor_base_range);
+            let anchor_base_src = anchor_base_src.split('\n').next().unwrap_or(anchor_base_src);
+            let base_line = line_of(anchor_dot.start, src);
+            (
+                column_of(anchor_dot.start, src),
+                format!("Align `{rhs_src}` with `{anchor_base_src}` on line {base_line}."),
+            )
+        }
+        IndentationStyle::Indented => {
+            let line_indent = indentation_of_line(base_range.start, src);
+            let used_indentation = actual_column as isize - line_indent as isize;
+            (
+                line_indent + indentation_width,
+                format!(
+                    "Use {indentation_width} (not {used_indentation}) spaces for indenting an expression spanning multiple lines."
+                ),
+            )
+        }
+        IndentationStyle::IndentedRelativeToReceiver => {
+            let splat_operator_width = cx.parent(node).get().map_or(0, |parent| {
+                match cx.kind(parent) {
+                    NodeKind::Splat(_) => 1,
+                    NodeKind::Kwsplat(_) => 2,
+                    _ => 0,
+                }
+            });
+            let extra_width = indentation_width.saturating_sub(splat_operator_width);
+            let base_src = cx.raw_source(base_range);
+            let base_src = base_src.split('\n').next().unwrap_or(base_src);
+            let base_line = line_of(base_range.start, src);
+            (
+                column_of(base_range.start, src) + extra_width,
+                format!(
+                    "Indent `{rhs_src}` {indentation_width} spaces more than `{base_src}` on line {base_line}."
+                ),
+            )
+        }
     };
-    let base_src = cx.raw_source(base_range);
-    let base_src = base_src.split('\n').next().unwrap_or(base_src);
-    let base_line = line_of(anchor_dot.start, src);
-    let message = format!("Align `{rhs_src}` with `{base_src}` on line {base_line}.");
+
+    if actual_column == expected_column {
+        return;
+    }
     cx.emit_offense(rhs_range, &message, None);
 }
 
@@ -290,10 +316,26 @@ mod tests {
         MultilineMethodCallIndentationOptions,
     };
     use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::CopOptions;
 
     fn indented() -> MultilineMethodCallIndentationOptions {
         MultilineMethodCallIndentationOptions {
             enforced_style: IndentationStyle::Indented,
+            indentation_width: None,
+        }
+    }
+
+    fn indented_with_width(width: i64) -> MultilineMethodCallIndentationOptions {
+        MultilineMethodCallIndentationOptions {
+            enforced_style: IndentationStyle::Indented,
+            indentation_width: Some(width),
+        }
+    }
+
+    fn indented_relative_to_receiver() -> MultilineMethodCallIndentationOptions {
+        MultilineMethodCallIndentationOptions {
+            enforced_style: IndentationStyle::IndentedRelativeToReceiver,
+            indentation_width: None,
         }
     }
 
@@ -401,16 +443,154 @@ mod tests {
         "});
     }
 
-    // ----- non-aligned styles are a documented no-op gap ------------------
+    // ----- indented styles -------------------------------------------------
 
     #[test]
-    fn indented_style_does_not_fire() {
+    fn indented_style_flags_misaligned_continuation() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented())
+            .expect_offense(indoc! {"
+                Thing.a
+                .c
+                ^^ Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+            "});
+    }
+
+    #[test]
+    fn indented_style_checks_the_first_leading_dot_call() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented())
+            .expect_offense(indoc! {"
+                Thing
+                .c
+                ^^ Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+            "});
+    }
+
+    #[test]
+    fn indented_style_uses_cop_indentation_width() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented_with_width(4))
+            .expect_offense(indoc! {"
+                Thing.a
+                  .c
+                  ^^ Use 4 (not 2) spaces for indenting an expression spanning multiple lines.
+            "});
+    }
+
+    #[test]
+    fn indented_style_falls_back_to_resolved_indentation_width() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented())
+            .with_indentation_width(4)
+            .expect_no_offenses(indoc! {"
+                Thing.a
+                    .c
+            "});
+    }
+
+    #[test]
+    fn relative_style_indents_from_the_receiver_column() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented_relative_to_receiver())
+            .expect_offense(indoc! {"
+                x = Thing.a
+                 .c
+                 ^^ Indent `.c` 2 spaces more than `Thing` on line 1.
+            "});
+    }
+
+    #[test]
+    fn relative_style_accepts_a_continuation_at_receiver_plus_width() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented_relative_to_receiver())
+            .expect_no_offenses(indoc! {"
+                x = Thing.a
+                      .c
+            "});
+    }
+
+    #[test]
+    fn indented_style_accepts_later_links_at_the_same_indentation() {
         test::<MultilineMethodCallIndentation>()
             .with_options(&indented())
             .expect_no_offenses(indoc! {"
                 Thing.a
-                .c
+                  .b
+                  .c
             "});
+    }
+
+    #[test]
+    fn relative_style_accepts_later_links_at_receiver_plus_width() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented_relative_to_receiver())
+            .expect_no_offenses(indoc! {"
+                x = Thing.a
+                      .b
+                      .c
+            "});
+    }
+
+    #[test]
+    fn relative_style_accounts_for_splat_operator_width() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented_relative_to_receiver())
+            .expect_no_offenses(indoc! {"
+                [
+                  *foo
+                    .bar
+                ]
+            "});
+    }
+
+    #[test]
+    fn relative_style_falls_back_to_resolved_indentation_width() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented_relative_to_receiver())
+            .with_indentation_width(4)
+            .expect_no_offenses(indoc! {"
+                x = Thing.a
+                        .c
+            "});
+    }
+
+    #[test]
+    fn relative_style_accounts_for_kwsplat_operator_width() {
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented_relative_to_receiver())
+            .expect_no_offenses(indoc! {"
+                [
+                  **foo
+                    .bar
+                ]
+            "});
+    }
+
+    #[test]
+    fn relative_style_uses_cop_indentation_width() {
+        let options = MultilineMethodCallIndentationOptions {
+            enforced_style: IndentationStyle::IndentedRelativeToReceiver,
+            indentation_width: Some(4),
+        };
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&options)
+            .expect_offense(indoc! {"
+                x = Thing.a
+                      .c
+                      ^^ Indent `.c` 4 spaces more than `Thing` on line 1.
+            "});
+    }
+
+    #[test]
+    fn null_indentation_width_preserves_enforced_style() {
+        let options = <MultilineMethodCallIndentationOptions as CopOptions>::from_config_json(
+            br#"{"EnforcedStyle":"indented","IndentationWidth":null}"#,
+        )
+        .expect("null IndentationWidth must decode the options struct");
+
+        assert!(options.enforced_style == IndentationStyle::Indented);
+        assert!(options.indentation_width.is_none());
     }
 }
 
