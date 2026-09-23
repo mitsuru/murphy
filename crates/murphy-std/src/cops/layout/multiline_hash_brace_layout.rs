@@ -29,9 +29,9 @@
 //!   `{` opener (the hash source must start with `{`), at least one element,
 //!   and skips when the `{` and `}` share a physical line.
 //!
-//!   RuboCop's `last_line_heredoc?` guard skips a hash whose last element
-//!   contains a heredoc. Murphy reproduces this by skipping when a
-//!   `HeredocStart` token falls within the last element's range.
+//!   RuboCop's `last_line_heredoc?` guard skips a hash when a heredoc
+//!   terminator (`HeredocEnd`) in the last element shares the closing brace's
+//!   line.
 //!
 //!   Autocorrect: not implemented (v1 gap). RuboCop's corrector moves the
 //!   closing brace; the detect-only port ships without it.
@@ -106,13 +106,21 @@ fn spans_newline(src: &[u8], start: u32, end: u32) -> bool {
     start < end && src[start as usize..end as usize].contains(&b'\n')
 }
 
-/// Whether the last element contains a heredoc opener (`HeredocStart` token)
-/// anywhere within its source range — RuboCop's `last_line_heredoc?` analog.
-fn last_element_has_heredoc(last_elem: NodeId, cx: &Cx<'_>) -> bool {
+/// Whether two source offsets are on the same physical line.
+fn same_line(src: &[u8], a: u32, b: u32) -> bool {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    !src[lo as usize..hi as usize].contains(&b'\n')
+}
+
+/// Whether a heredoc terminator in the last element shares the closing
+/// delimiter's line, matching RuboCop's `last_line_heredoc?` guard.
+fn last_line_heredoc(last_elem: NodeId, close_start: u32, cx: &Cx<'_>) -> bool {
+    let src = cx.source().as_bytes();
     let r = cx.range(last_elem);
     cx.tokens_in(r)
         .iter()
-        .any(|t| t.kind == SourceTokenKind::HeredocStart)
+        .filter(|tok| tok.kind == SourceTokenKind::HeredocEnd)
+        .any(|tok| same_line(src, tok.range.start, close_start))
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
@@ -149,12 +157,9 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     let first_elem = pairs[0];
     let last_elem = pairs[pairs.len() - 1];
 
-    // `last_line_heredoc?` — RuboCop recursively descends the last element
-    // looking for a heredoc whose closer lands on the literal's last line
-    // (which would make `last_line` unreliable). We approximate it by
-    // skipping when a `HeredocStart` token falls within the last element's
-    // source range (covers a heredoc nested as a pair's value).
-    if last_element_has_heredoc(last_elem, cx) {
+    // `last_line_heredoc?` — skip only when a heredoc terminator nested in the
+    // last element shares the closing brace's line.
+    if last_line_heredoc(last_elem, close.start, cx) {
         return;
     }
 
@@ -330,12 +335,13 @@ mod tests {
     }
 
     #[test]
-    fn accepts_heredoc_last_element() {
-        test::<MultilineHashBraceLayout>().expect_no_offenses(indoc! {"
+    fn flags_heredoc_last_element_when_terminator_precedes_close() {
+        test::<MultilineHashBraceLayout>().expect_offense(indoc! {"
             x = {a: 1, b: <<~TEXT
               body
             TEXT
             }
+            ^ Closing hash brace must be on the same line as the last hash element when opening brace is on the same line as the first hash element.
         "});
     }
 }
