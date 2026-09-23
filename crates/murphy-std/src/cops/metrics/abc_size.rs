@@ -12,7 +12,7 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.20.1, murphy-e7bz.20.2, murphy-e7bz.20.3]
+//! gap_issues: [murphy-e7bz.20.1, murphy-e7bz.20.2]
 //! notes: >
 //!   Mirrors RuboCop's `Metrics::Utils::AbcSizeCalculator` and the
 //!   `MethodComplexity` mixin numerically (verified against rubocop 1.87.0
@@ -22,8 +22,9 @@
 //!   `define_method(:name) { ... }`/numbered-param blocks via the
 //!   `on_block`/`on_numblock`/`on_itblock` dispatch). The default-config
 //!   path (`CountRepeatedAttributes: true`) matches rubocop; the non-default
-//!   `CountRepeatedAttributes: false` discount path has one known gap
-//!   (murphy-e7bz.20.3 — see below).
+//!   `CountRepeatedAttributes: false` discount path invalidates tracked getter
+//!   chains after shorthand op-assigns to those attributes. Two known gaps
+//!   remain (murphy-e7bz.20.1 and murphy-e7bz.20.2 — see below).
 //!
 //!   Known gap (murphy-e7bz.20.1): a multiple assignment whose LHS targets
 //!   are *setter* or *index* writes (`self.x, self.y = 1, 2`) is undercounted
@@ -39,15 +40,6 @@
 //!   reference is not counted as a branch. RuboCop: `<0, 2, 1>`; murphy:
 //!   `<0, 1, 0>`. Numbered-param blocks (`_1`) and regular blocks match.
 //!   The fix belongs in murphy-translate.
-//!
-//!   Known gap (murphy-e7bz.20.3): with `CountRepeatedAttributes: false`,
-//!   a shorthand op-assign onto an attribute (`foo.bar ||= x`, `foo.bar +=
-//!   x`) does not invalidate the tracked getter chain. RuboCop's
-//!   `setter_to_getter` treats `node.shorthand_asgn?` as a setter, so a
-//!   later `foo.bar` re-counts; murphy's `update_repeated_attribute` only
-//!   handles var-asgn and setter sends, so the later read stays discounted
-//!   and the branch count is undercounted (`foo.bar; foo.bar ||= baz;
-//!   foo.bar` → rubocop `<2, 4, 1>`). The fix belongs in this cop.
 //!
 //!   The calculator walks the method body in post-order
 //!   (`visit_depth_last`) and accumulates three counters:
@@ -453,15 +445,10 @@ impl<'a> AbcCalculator<'a> {
         !self.known_attributes.insert(chain)
     }
 
-    /// `update_repeated_attribute`: a setter (`var = x`, `self.foo = x`,
-    /// `var ||= x`) invalidates tracked chains rooted at that target.
-    ///
-    /// KNOWN GAP (murphy-e7bz.20.3): RuboCop's `setter_to_getter` also treats
-    /// `node.shorthand_asgn?` onto an attribute (`foo.bar ||= x`) as a setter
-    /// and invalidates the getter chain. This impl does not yet invalidate on
-    /// `OpAsgn`/`OrAsgn`/`AndAsgn` attribute targets, so a later identical
-    /// read stays discounted (undercounts branch under `CountRepeatedAttributes:
-    /// false`). Default config is unaffected.
+    /// `update_repeated_attribute`: variable reassignment, setter calls, and
+    /// shorthand attribute assignments invalidate tracked chains rooted at
+    /// their targets. Shorthand assignments visit their getter target first;
+    /// invalidate it at the parent so a later read starts a new chain.
     fn update_repeated_attribute(&mut self, node: NodeId, cx: &Cx<'a>) {
         match cx.kind(node) {
             // Variable reassignment clears everything rooted at that var.
@@ -480,6 +467,15 @@ impl<'a> AbcCalculator<'a> {
             NodeKind::Gvasgn { name, .. } => {
                 let prefix = format!("gvar:{}", cx.symbol_str(*name));
                 self.invalidate_prefix(&prefix);
+            }
+            // `foo.bar ||= x`, `foo.bar += x`, and `foo.bar &&= x`: the
+            // getter target was visited before its shorthand assignment.
+            NodeKind::OpAsgn { target, .. }
+            | NodeKind::OrAsgn { target, .. }
+            | NodeKind::AndAsgn { target, .. } => {
+                if let Some(chain) = attribute_chain_key(*target, cx) {
+                    self.invalidate_prefix(&chain);
+                }
             }
             // `self.foo = x` / `obj.foo = x`: delete the specific method.
             NodeKind::Send { .. } | NodeKind::Csend { .. } if cx.is_setter_method(node) => {
@@ -1099,6 +1095,51 @@ mod tests {
             .expect_offense(indoc! {"
                 def d1; foo.bar; foo.bar; end
                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `d1` is too high. [<0, 2, 0> 2/0]
+            "});
+    }
+
+    #[test]
+    fn attribute_or_assign_invalidates_repeated_attribute_chain() {
+        test::<AbcSize>()
+            .with_options(&AbcSizeOptions {
+                max: 0,
+                count_repeated_attributes: false,
+                allowed_methods: vec![],
+                allowed_patterns: vec![],
+            })
+            .expect_offense(indoc! {"
+                def m; foo.bar; foo.bar ||= baz; foo.bar; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `m` is too high. [<2, 4, 1> 4.58/0]
+            "});
+    }
+
+    #[test]
+    fn attribute_op_assign_invalidates_repeated_attribute_chain() {
+        test::<AbcSize>()
+            .with_options(&AbcSizeOptions {
+                max: 0,
+                count_repeated_attributes: false,
+                allowed_methods: vec![],
+                allowed_patterns: vec![],
+            })
+            .expect_offense(indoc! {"
+                def m; foo.bar; foo.bar += baz; foo.bar; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `m` is too high. [<2, 4, 0> 4.47/0]
+            "});
+    }
+
+    #[test]
+    fn attribute_and_assign_invalidates_repeated_attribute_chain() {
+        test::<AbcSize>()
+            .with_options(&AbcSizeOptions {
+                max: 0,
+                count_repeated_attributes: false,
+                allowed_methods: vec![],
+                allowed_patterns: vec![],
+            })
+            .expect_offense(indoc! {"
+                def m; foo.bar; foo.bar &&= baz; foo.bar; end
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Assignment Branch Condition size for `m` is too high. [<2, 4, 1> 4.58/0]
             "});
     }
 
