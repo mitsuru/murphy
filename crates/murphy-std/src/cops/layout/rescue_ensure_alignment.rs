@@ -23,13 +23,15 @@
 //!   whereas an implicit method-body wrapper (`:begin`) does not and is
 //!   skipped during the ancestor walk.
 //!
+//!   For blocks attached to multi-line calls, the
+//!   `aligned_with_line_break_method?` refinement is mirrored: when the block
+//!   opener shares a line with its leading dot or selector and `rescue`/`ensure`
+//!   is aligned to that token, no block/assignment alignment offense is emitted.
+//!
 //!   Gaps vs RuboCop (documented, not silently dropped):
 //!     * `Layout/BeginEndAlignment: EnforcedStyleAlignWith: start_of_line`
 //!       — cross-cop config that shifts the alignment column to the start of
 //!       the anchor's line. Murphy always aligns to the anchor keyword.
-//!     * `aligned_with_line_break_method?` — the leading-dot / selector
-//!       alignment refinement for blocks chained off a multi-line method
-//!       call. Murphy uses the block opener column unconditionally.
 //! ```
 //!
 //! ## Autocorrect
@@ -94,7 +96,7 @@ fn check(node: NodeId, kw_range: Range, cx: &Cx<'_>) {
         return;
     }
 
-    let Some(anchor) = alignment_node(node, cx) else {
+    let Some(anchor) = alignment_node(node, kw_range, cx) else {
         return;
     };
     let alignment_start = alignment_location(anchor, cx);
@@ -135,9 +137,17 @@ fn check(node: NodeId, kw_range: Range, cx: &Cx<'_>) {
 }
 
 /// Walk ancestors to find the alignment anchor, applying RuboCop's
-/// refinements for assignment RHS and access modifiers.
-fn alignment_node(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+/// refinements for line-break method chains, assignment RHS, and access modifiers.
+fn alignment_node(node: NodeId, kw_range: Range, cx: &Cx<'_>) -> Option<NodeId> {
     let ancestor = ancestor_anchor(node, cx)?;
+
+    // RuboCop does not select an alignment node when a block's rescue/ensure
+    // aligns with the leading dot or selector on the block opener's line.
+    // Apply this before assignment refinement: a chained block may be the RHS
+    // of `||=`, but the rescue still aligns to the dot/selector, not the `x`.
+    if aligned_with_line_break_method(ancestor, kw_range, cx) {
+        return None;
+    }
 
     // Assignment RHS: `x = begin ... rescue`. If the anchor's parent is an
     // assignment and they share a line, align to the assignment target. This
@@ -166,6 +176,66 @@ fn alignment_node(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     Some(ancestor)
 }
 
+/// RuboCop's `aligned_with_line_break_method?`: a block attached to a
+/// multi-line call has no alignment anchor when `rescue`/`ensure` is aligned
+/// with the leading call operator or selector on the block opener's line.
+fn aligned_with_line_break_method(block: NodeId, kw_range: Range, cx: &Cx<'_>) -> bool {
+    let Some(call) = cx.block_call(block).get() else {
+        return false;
+    };
+    let selector = cx.selector(call);
+    if selector.start == selector.end {
+        return false;
+    }
+    let Some(block_line) = block_opener_line(block, selector.end, cx) else {
+        return false;
+    };
+
+    let source = cx.source();
+    let kw_col = column_of(source, kw_range.start);
+    if let Some(dot) = cx.call_operator_loc(call)
+        && line_of(source, dot.start) == block_line
+        && column_of(source, dot.start) == kw_col
+    {
+        return true;
+    }
+
+    line_of(source, selector.start) == block_line && column_of(source, selector.start) == kw_col
+}
+
+/// Find the current block's `{`/`do` token between its call selector and body.
+/// Prism's block-body range begins at the opener; fall back to scanning the
+/// preceding tokens for an empty body.
+fn block_opener_line(block: NodeId, selector_end: u32, cx: &Cx<'_>) -> Option<usize> {
+    let source = cx.source();
+    let body_start = cx
+        .block_body(block)
+        .get()
+        .map_or(cx.range(block).end, |body| cx.range(body).start);
+    let tokens = cx.sorted_tokens();
+    let body_index = tokens.partition_point(|t| t.range.start < body_start);
+    if let Some(token) = tokens.get(body_index)
+        && is_block_opener_token(token, source)
+    {
+        return Some(line_of(source, token.range.start));
+    }
+
+    let start = tokens.partition_point(|t| t.range.start < selector_end);
+    if start >= body_index {
+        return None;
+    }
+    tokens[start..body_index]
+        .iter()
+        .rev()
+        .find(|token| is_block_opener_token(token, source))
+        .map(|token| line_of(source, token.range.start))
+}
+
+fn is_block_opener_token(token: &SourceToken, source: &str) -> bool {
+    token.kind == SourceTokenKind::LeftBrace
+        || (token.kind == SourceTokenKind::Other
+            && &source.as_bytes()[token.range.start as usize..token.range.end as usize] == b"do")
+}
 /// First ancestor that is a valid anchor type. A bare `Begin` (parser-gem
 /// `:begin`, the implicit method-body wrapper) is NOT an anchor — skip it and
 /// keep walking to the enclosing def/class/etc.
@@ -469,7 +539,7 @@ fn column_of(source: &str, offset: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::RescueEnsureAlignment;
-    use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::test_support::{indoc, run_cop, test};
 
     #[test]
     fn flags_misaligned_rescue_in_begin() {
@@ -682,6 +752,55 @@ mod tests {
               baz
             end
         "});
+    }
+
+    #[test]
+    fn accepts_rescue_aligned_with_leading_dot_in_multiline_chain() {
+        test::<RescueEnsureAlignment>().expect_no_offenses(indoc! {"
+            x ||= [1, 2]
+              .filter_map do |item|
+                item
+              rescue
+                nil
+              end
+        "});
+    }
+
+    #[test]
+    fn accepts_rescue_aligned_with_selector_in_multiline_chain() {
+        test::<RescueEnsureAlignment>().expect_no_offenses(indoc! {"
+            x ||= [1, 2]
+              .filter_map do |item|
+                item
+               rescue
+                nil
+              end
+        "});
+    }
+
+    #[test]
+    fn accepts_ensure_aligned_with_leading_dot_in_multiline_chain() {
+        test::<RescueEnsureAlignment>().expect_no_offenses(indoc! {"
+            x ||= [1, 2]
+              .filter_map do |item|
+                item
+              ensure
+                cleanup
+              end
+        "});
+    }
+
+    #[test]
+    fn flags_rescue_at_unrelated_column_in_multiline_chain() {
+        let src = indoc! {"
+            x ||= [1, 2]
+              .filter_map do |item|
+                item
+                rescue
+                  nil
+              end
+        "};
+        assert_eq!(run_cop::<RescueEnsureAlignment>(src).len(), 1);
     }
 
     #[test]
