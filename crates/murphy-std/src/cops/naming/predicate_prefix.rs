@@ -9,7 +9,7 @@
 //! upstream_cop: Naming/PredicatePrefix
 //! upstream_version_checked: 1.87.0
 //! status: partial
-//! gap_issues: [murphy-f0xe]
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `on_def`/`on_defs` (aliased) and `on_send` (dynamic
 //!   method-define macros) exactly for the default config (and any config whose
@@ -57,12 +57,11 @@
 //!   the default config (prefixes are mutually exclusive) and any non-overlapping
 //!   `NamePrefix`; verified against rubocop 1.87.0.
 //!
-//!   GAP (murphy-f0xe): `UseSorbetSigs` is exposed (default false, matching
-//!   default.yml) but is a no-op. With `UseSorbetSigs: true` RuboCop reports a
-//!   def offense only when the def has a preceding sibling
-//!   `sig { returns(T::Boolean) }`; Murphy ignores the flag and would
-//!   over-report. Default-config parity is unaffected since the default is
-//!   false. RuboCop's `validate_config` (raising when a `ForbiddenPrefixes`
+//!   `UseSorbetSigs: true` reports a definition only when the immediately
+//!   preceding sibling is a `sig { returns(T::Boolean) }` block. Murphy checks
+//!   that Sorbet shape and the exact `T::Boolean` source before reporting.
+//!
+//!   RuboCop's `validate_config` (raising when a `ForbiddenPrefixes`
 //!   entry is missing from `NamePrefix`) is not reproduced — it is a config
 //!   sanity check, not a behavioral difference on valid config.
 //! ```
@@ -146,9 +145,9 @@ impl PredicatePrefix {
         let Some(name) = cx.method_name(id) else {
             return;
         };
-        // GAP (murphy-f0xe): `UseSorbetSigs: true` should additionally require a
-        // preceding `sig { returns(T::Boolean) }`. Not implemented; the flag is
-        // a no-op so default-config (false) parity is preserved.
+        if opts.use_sorbet_sigs && !has_boolean_sorbet_sig(id, cx) {
+            return;
+        }
         if let Some(expected) = offense_rename(name, opts) {
             cx.emit_offense(def_name_range(id, name, cx), &rename_message(name, &expected), None);
         }
@@ -178,6 +177,38 @@ impl PredicatePrefix {
             cx.emit_offense(cx.range(first_arg), &rename_message(name, &expected), None);
         }
     }
+}
+
+/// True when the immediately preceding sibling matches Sorbet's boolean sig
+/// shape: `sig { returns(T::Boolean) }`.
+fn has_boolean_sorbet_sig(def: NodeId, cx: &Cx<'_>) -> bool {
+    let Some(sibling) = cx.left_sibling(def).get() else {
+        return false;
+    };
+    if !matches!(*cx.kind(sibling), NodeKind::Block { .. }) {
+        return false;
+    }
+    let Some(sig_call) = cx.block_call(sibling).get() else {
+        return false;
+    };
+    if !matches!(*cx.kind(sig_call), NodeKind::Send { .. })
+        || cx.call_receiver(sig_call).get().is_some()
+        || cx.method_name(sig_call) != Some("sig")
+    {
+        return false;
+    }
+    let Some(body) = cx.block_body(sibling).get() else {
+        return false;
+    };
+    if !matches!(*cx.kind(body), NodeKind::Send { .. }) || cx.method_name(body) != Some("returns")
+    {
+        return false;
+    }
+    let arguments = cx.call_arguments(body);
+    if arguments.len() != 1 {
+        return false;
+    }
+    cx.raw_source(cx.range(arguments[0])) == "T::Boolean"
 }
 
 /// Returns the expected (renamed) method name if `name` offends under any prefix
@@ -268,6 +299,16 @@ fn def_name_range(id: NodeId, name: &str, cx: &Cx<'_>) -> Range {
 mod tests {
     use super::{Options, PredicatePrefix};
     use murphy_plugin_api::test_support::{indoc, test};
+
+    fn options_with_sorbet_sigs() -> Options {
+        Options {
+            name_prefix: vec!["is_".into(), "has_".into(), "have_".into(), "does_".into()],
+            forbidden_prefixes: vec!["is_".into(), "has_".into(), "have_".into(), "does_".into()],
+            allowed_methods: vec!["is_a?".into()],
+            method_definition_macros: vec!["define_method".into(), "define_singleton_method".into()],
+            use_sorbet_sigs: true,
+        }
+    }
 
     // --- offenses (ground-truth carets/messages from rubocop 1.87.0) ---
 
@@ -466,6 +507,44 @@ mod tests {
         test::<PredicatePrefix>().with_options(&opts).expect_offense(indoc! {r#"
             def is_even(value)
                 ^^^^^^^ Rename `is_even` to `is_even?`.
+            end
+        "#});
+    }
+
+    // --- config: UseSorbetSigs ---
+
+    #[test]
+    fn use_sorbet_sigs_requires_a_boolean_signature() {
+        let opts = options_with_sorbet_sigs();
+        test::<PredicatePrefix>().with_options(&opts).expect_no_offenses(indoc! {r#"
+            class Foo
+              def is_ready?
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn use_sorbet_sigs_flags_def_with_boolean_signature() {
+        let opts = options_with_sorbet_sigs();
+        test::<PredicatePrefix>().with_options(&opts).expect_offense(indoc! {r#"
+            class Foo
+              sig { returns(T::Boolean) }
+              def is_ready?
+                  ^^^^^^^^^ Rename `is_ready?` to `ready?`.
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn use_sorbet_sigs_ignores_non_boolean_signature() {
+        let opts = options_with_sorbet_sigs();
+        test::<PredicatePrefix>().with_options(&opts).expect_no_offenses(indoc! {r#"
+            class Foo
+              sig { returns(String) }
+              def is_ready?
+              end
             end
         "#});
     }
