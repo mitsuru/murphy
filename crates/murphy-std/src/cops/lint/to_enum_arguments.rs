@@ -6,14 +6,16 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/ToEnumArguments
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues: [murphy-g65d]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Core RuboCop shapes implemented: missing/swapped positional arguments,
 //!   missing keyword/keyword-rest forwarding, __method__/__callee__/literal
 //!   method names, explicit self receiver, enum_for alias, and non-current
-//!   method guards. Known v1 limitation: wrapped method-name expressions such
-//!   as T.must(__callee__) are not resolved (murphy-g65d).
+//!   method guards. Single-argument wrapper calls such as T.must(__callee__)
+//!   or T.must(:foo) are unwrapped to resolve the inner method-name
+//!   expression (murphy-g65d); other wrappers (e.g. never_nullable(value))
+//!   remain ignored per upstream.
 //! ```
 
 use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, OptNodeId};
@@ -58,12 +60,49 @@ fn method_name_matches(method_arg: NodeId, def_node: NodeId, cx: &Cx<'_>) -> boo
     let Some(def_name) = cx.method_name(def_node) else {
         return false;
     };
-    match *cx.kind(method_arg) {
+    method_name_matches_inner(method_arg, def_name, cx, 0)
+}
+
+/// Resolve the method-name argument, unwrapping single-argument wrapper
+/// calls such as `T.must(__callee__)` or `T.must(:foo)`.
+///
+/// Upstream documents `T.must(__callee__)` as allowed with correct arguments;
+/// unwrapping lets us still flag missing/swapped arguments through the
+/// wrapper while continuing to ignore wrappers around unrelated expressions
+/// such as `never_nullable(value)`. Only the existing plugin API
+/// (`kind`/`list`/`symbol_str`) is used, so no ABI change is required.
+fn method_name_matches_inner(
+    node: NodeId,
+    def_name: &str,
+    cx: &Cx<'_>,
+    depth: usize,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match *cx.kind(node) {
         NodeKind::Sym(sym) => cx.symbol_str(sym) == def_name,
         NodeKind::Send { receiver, method, args } => {
-            receiver == OptNodeId::NONE
-                && cx.list(args).is_empty()
+            let args = cx.list(args);
+            if receiver == OptNodeId::NONE
+                && args.is_empty()
                 && matches!(cx.symbol_str(method), "__method__" | "__callee__")
+            {
+                return true;
+            }
+            // Single-argument wrapper (e.g. `T.must(__callee__)`): resolve inner.
+            if args.len() == 1 {
+                return method_name_matches_inner(args[0], def_name, cx, depth + 1);
+            }
+            false
+        }
+        NodeKind::Csend { args, .. } => {
+            let args = cx.list(args);
+            // Safe-navigation wrapper (e.g. `obj&.wrap(__callee__)`): resolve inner.
+            if args.len() == 1 {
+                return method_name_matches_inner(args[0], def_name, cx, depth + 1);
+            }
+            false
         }
         _ => false,
     }
@@ -241,5 +280,51 @@ mod tests {
                      ^^^^^^^^^^^^^^^^^^^^^^ Ensure you correctly provided all the arguments.
             end
         "#});
+    }
+
+    #[test]
+    fn accepts_wrapped_method_name_with_correct_arguments() {
+        test::<ToEnumArguments>().expect_no_offenses(indoc! {r#"
+            def foo(x, y = 1)
+              return to_enum(T.must(__callee__), x, y) unless block_given?
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_wrapped_method_name_with_missing_arguments() {
+        test::<ToEnumArguments>()
+            .expect_offense(indoc! {r#"
+                def foo(x, y = 1)
+                  return to_enum(T.must(__callee__), x) unless block_given?
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Ensure you correctly provided all the arguments.
+                end
+            "#})
+            .expect_offense(indoc! {r#"
+                def foo(x, y = 1)
+                  return to_enum(T.must(:foo), x) unless block_given?
+                         ^^^^^^^^^^^^^^^^^^^^^^^^ Ensure you correctly provided all the arguments.
+                end
+            "#});
+    }
+
+    #[test]
+    fn ignores_wrappers_around_other_methods() {
+        test::<ToEnumArguments>()
+            .expect_no_offenses(indoc! {r#"
+                def m(x)
+                  return to_enum(never_nullable(value), x) unless block_given?
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                def m(x)
+                  return to_enum(obj&.never_nullable(value), x) unless block_given?
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                def m(x)
+                  return to_enum(T.must(:not_m), x) unless block_given?
+                end
+            "#});
     }
 }
