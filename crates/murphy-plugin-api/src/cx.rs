@@ -581,6 +581,27 @@ impl<'a> Cx<'a> {
         self.raw.block_forwarding_explicit
     }
 
+    /// The run-wide resolved `Layout/EmptyLinesAroundBlockBody.EnforcedStyle`
+    /// == `"empty_lines"` flag (murphy-xjua).
+    ///
+    /// RuboCop's `Layout/EmptyLinesAroundAccessModifier#no_empty_lines_around_block_body?`
+    /// reads `config.for_enabled_cop('Layout/EmptyLinesAroundBlockBody')['EnforcedStyle']`
+    /// == `'no_empty_lines'`; this is its negation. Default `false` (RuboCop's
+    /// `no_empty_lines` default, and the value raw-ABI test harnesses observe
+    /// when they build `CxRaw` by hand). When `true`, the in-block
+    /// before/after-insert guards are skipped (the block body wants blanks).
+    pub fn block_body_empty_lines(&self) -> bool {
+        self.raw.block_body_empty_lines
+    }
+
+    /// RuboCop's `no_empty_lines_around_block_body?` — `true` when
+    /// `Layout/EmptyLinesAroundBlockBody` resolves to `no_empty_lines`
+    /// (the default), `false` when it resolves to `empty_lines` (or is
+    /// disabled, where `for_enabled_cop` yields no style).
+    pub fn no_empty_lines_around_block_body(&self) -> bool {
+        !self.raw.block_body_empty_lines
+    }
+
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
     pub fn alloc_node_slice(&self, elements: &[NodeId]) -> &'a [NodeId] {
         if elements.is_empty() {
@@ -3224,6 +3245,7 @@ mod tests {
             config_disabled_cops: std::ptr::null(),
             config_disabled_cops_len: 0,
             block_forwarding_explicit: false,
+            block_body_empty_lines: false,
         }
     }
 
@@ -3275,6 +3297,26 @@ mod tests {
         raw.block_forwarding_explicit = false;
         let cx = unsafe { Cx::from_raw(&raw) };
         assert!(!cx.block_forwarding_explicit());
+    }
+
+    #[test]
+    fn block_body_empty_lines_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+
+        raw.block_body_empty_lines = true;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.block_body_empty_lines());
+        assert!(!cx.no_empty_lines_around_block_body());
+
+        raw.block_body_empty_lines = false;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.block_body_empty_lines());
+        assert!(cx.no_empty_lines_around_block_body());
     }
 
     #[test]

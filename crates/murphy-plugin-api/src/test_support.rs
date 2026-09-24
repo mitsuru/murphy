@@ -337,6 +337,15 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Set the run-wide `Layout/EmptyLinesAroundBlockBody.EnforcedStyle`
+    /// == `"empty_lines"` flag — what `Cx::block_body_empty_lines()` returns
+    /// (murphy-xjua). Use this to exercise
+    /// `Layout/EmptyLinesAroundAccessModifier`'s dynamic in-block guards.
+    pub fn with_block_body_empty_lines(mut self, empty_lines: bool) -> Self {
+        self.context.block_body_empty_lines = empty_lines;
+        self
+    }
+
     /// Override the file path threaded into `Cx::file_path()` for this cop
     /// test. Defaults to `"t.rb"`. Use this for cops that inspect the source
     /// file name (e.g. `Naming/FileName`); the path is decoupled from the
@@ -851,6 +860,26 @@ pub fn run_cop_with_options_and_edits<T: NodeCop + Default>(
     run_cop_with_options_and_edits_json::<T>(source, &json)
 }
 
+/// `run_cop` companion that threads a run-wide [`crate::AllCopsContext`]
+/// (e.g. `block_body_empty_lines`) instead of default options. Used to
+/// exercise cross-cop signals (murphy-xjua) without custom options.
+pub fn run_cop_with_context<T: NodeCop + Default>(
+    source: &str,
+    ctx: crate::AllCopsContext,
+) -> Vec<CapturedOffense> {
+    run_cop_with_options_json_and_context::<T>(source, DEFAULT_OPTIONS_JSON, ctx)
+}
+
+/// `run_cop_with_edits` companion that threads a run-wide
+/// [`crate::AllCopsContext`]. Returns both offenses and edits so
+/// cross-cop correction branches (murphy-xjua) can assert edit counts.
+pub fn run_cop_with_context_and_edits<T: NodeCop + Default>(
+    source: &str,
+    ctx: crate::AllCopsContext,
+) -> CapturedRun {
+    run_cop_with_options_and_edits_json_and_context::<T>(source, DEFAULT_OPTIONS_JSON, ctx)
+}
+
 /// Internal raw-JSON entry point shared by every other dispatcher in
 /// this module. Not exposed: production tests should go through the
 /// typed wrappers so JSON shape stays an implementation detail.
@@ -1087,6 +1116,7 @@ fn cx_raw_for(
         config_disabled_cops: std::ptr::null(),
         config_disabled_cops_len: 0,
         block_forwarding_explicit: ctx.block_forwarding_explicit,
+        block_body_empty_lines: ctx.block_body_empty_lines,
     }
 }
 

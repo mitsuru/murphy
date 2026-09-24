@@ -262,6 +262,18 @@ pub struct CxRaw {
     /// numeric ABI is not bumped for tail-appended CxRaw fields. Read via
     /// `Cx::block_forwarding_explicit()`.
     pub block_forwarding_explicit: bool,
+    /// Resolved `Layout/EmptyLinesAroundBlockBody.EnforcedStyle == "empty_lines"`
+    /// (default `false`, i.e. RuboCop's `no_empty_lines` default). NOT an
+    /// `AllCops.*` key — it is the run-wide cross-cop signal RuboCop's
+    /// `Layout/EmptyLinesAroundAccessModifier#no_empty_lines_around_block_body?`
+    /// reads via `config.for_enabled_cop('Layout/EmptyLinesAroundBlockBody')`,
+    /// threaded here (murphy-bgd8 pattern, murphy-xjua) so the cop need not
+    /// perform its own cross-cop config lookup. Tail-appended into the trailing
+    /// padding after `block_forwarding_explicit` under ABI v4 lockstep, so this
+    /// field leaves `size_of::<CxRaw>()` unchanged. Per project policy the
+    /// numeric ABI is not bumped for tail-appended CxRaw fields. Read via
+    /// `Cx::block_body_empty_lines()`.
+    pub block_body_empty_lines: bool,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -302,6 +314,12 @@ pub struct CxRaw {
 /// `Naming/BlockForwarding.EnforcedStyle == "explicit"` flag, consumed by
 /// `Style/ArgumentsForwarding`) was tail-appended under ABI v4 lockstep; it is a
 /// trailing `bool`, so it grows `size_of::<CxRaw>()` by its alignment padding.
+/// `CxRaw::block_body_empty_lines` (the resolved
+/// `Layout/EmptyLinesAroundBlockBody.EnforcedStyle == "empty_lines"` flag,
+/// consumed by `Layout/EmptyLinesAroundAccessModifier`) was tail-appended into
+/// the trailing padding after `block_forwarding_explicit` under ABI v4 lockstep
+/// for murphy-xjua; it fits the existing tail padding so `size_of::<CxRaw>()`
+/// is unchanged.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -377,6 +395,16 @@ pub struct AllCopsContext {
     /// argument may be anonymized to `&`. Threaded into `CxRaw` (murphy-bgd8
     /// pattern); read via `Cx::block_forwarding_explicit()`.
     pub block_forwarding_explicit: bool,
+    /// Resolved `Layout/EmptyLinesAroundBlockBody.EnforcedStyle == "empty_lines"`
+    /// (default `false`, i.e. RuboCop\'s `no_empty_lines` default). NOT an
+    /// `AllCops.*` key — the run-wide cross-cop signal RuboCop\'s
+    /// `Layout/EmptyLinesAroundAccessModifier#no_empty_lines_around_block_body?`
+    /// reads via `config.for_enabled_cop(\'Layout/EmptyLinesAroundBlockBody\')`,
+    /// threaded here (murphy-bgd8 pattern) so the cop need not perform its own
+    /// cross-cop config lookup (murphy-xjua). Read via
+    /// `Cx::block_body_empty_lines()`; `!block_body_empty_lines` is
+    /// `no_empty_lines_around_block_body?`.
+    pub block_body_empty_lines: bool,
 }
 
 impl AllCopsContext {
@@ -402,6 +430,7 @@ impl Default for AllCopsContext {
             active_support_extensions_enabled: false,
             indentation_width: Self::DEFAULT_INDENTATION_WIDTH,
             block_forwarding_explicit: false,
+            block_body_empty_lines: false,
         }
     }
 }
@@ -571,6 +600,9 @@ mod tests {
         assert_eq!(offset_of!(CxRaw, config_disabled_cops), 248);
         assert_eq!(offset_of!(CxRaw, config_disabled_cops_len), 256);
         assert_eq!(offset_of!(CxRaw, block_forwarding_explicit), 264);
+        // murphy-xjua: tail-appended into the trailing padding after
+        // `block_forwarding_explicit` (264); size unchanged.
+        assert_eq!(offset_of!(CxRaw, block_body_empty_lines), 265);
         assert_eq!(size_of::<CxRaw>(), 272);
     }
 
