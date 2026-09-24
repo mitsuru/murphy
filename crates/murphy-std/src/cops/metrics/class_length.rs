@@ -11,7 +11,7 @@
 //! safe: true
 //! supports_autocorrect: false
 //! status: partial
-//! gap_issues: [murphy-e7bz.70]
+//! gap_issues: [murphy-e7bz.72]
 //! notes: >
 //!   Mirrors RuboCop's `Metrics::ClassLength` (`CodeLength` mixin +
 //!   `Metrics::Utils::CodeLengthCalculator`), verified numerically against
@@ -65,19 +65,14 @@
 //!   Fires when length > Max (default 100). Message:
 //!   "Class has too many lines. [length/Max]".
 //!
-//!   Gap (murphy-e7bz.70): the `omit_length` unbraced-hash fold subtraction is
-//!   not applied. This is the same shared `body_code_length` /
-//!   `classlike_code_length` limitation `Metrics/ModuleLength` and
-//!   `Metrics/MethodLength` document — RuboCop's `CodeLengthCalculator#omit_length`
-//!   subtracts the 1-2 "absent brace" lines when an unbraced trailing-hash kwargs
-//!   argument is folded as the sole argument of a parenthesized call. Demonstrated
-//!   (rubocop 1.87.0, Max 2, `CountAsOne: ['hash']`):
-//!   `class C; foo(\n a: 1,\n b: 2\n ); end` → rubocop no offense, Murphy `[3/2]`.
+//!   Folded unbraced hashes use RuboCop's `omit_length` byte-offset checks to
+//!   subtract each absent-brace line when the hash is the sole argument of a
+//!   parenthesized call.
 //!
-//!   Scope simplification mirrored from `Metrics/ModuleLength` (NOT a bug to fix
-//!   here): the casgn arm ignores RuboCop's `find_expression_within_parent`
-//!   (masgn / chained-assignment) fallback. (RuboCop's `class_definition?` imposes
-//!   no casgn-scope constraint, so scoped constant targets ARE handled — see (3).)
+//!   Known remaining scope gap: the `on_casgn` arm does not reproduce
+//!   RuboCop's `find_expression_within_parent` fallback for masgn/chained
+//!   assignments. The class-definition match itself still has no casgn-scope
+//!   constraint, so scoped constant targets are handled as described above.
 //!
 //!   No autocorrect: RuboCop does not autocorrect this cop.
 //! ```
@@ -172,7 +167,7 @@ impl ClassLength {
         };
         let opts = cx.options_or_default::<ClassLengthOptions>();
         let foldable_types: Vec<FoldableType> = parse_foldable_types(&opts.count_as_one);
-        let length = body_code_length(body, opts.count_comments, &foldable_types, cx);
+        let length = body_code_length(node, body, opts.count_comments, &foldable_types, cx);
         emit(cx.range(node), length, opts.max, cx);
     }
 
@@ -191,7 +186,7 @@ impl ClassLength {
         };
         let opts = cx.options_or_default::<ClassLengthOptions>();
         let foldable_types: Vec<FoldableType> = parse_foldable_types(&opts.count_as_one);
-        let length = body_code_length(body, opts.count_comments, &foldable_types, cx);
+        let length = body_code_length(block, body, opts.count_comments, &foldable_types, cx);
         emit(cx.range(block), length, opts.max, cx);
     }
 }
@@ -552,30 +547,20 @@ mod tests {
     }
 
     #[test]
-    fn omit_length_fold_gap_overcounts() {
-        // GAP (murphy-e7bz.70): RuboCop's `omit_length` subtracts the 1-2
-        // "absent brace" lines when an unbraced trailing-hash kwargs argument is
-        // folded as the sole arg of a parenthesized call. Murphy does not, so it
-        // over-counts. rubocop 1.87.0 (Max 2, CountAsOne ['hash']): no offense;
-        // Murphy: [3/2]. This test pins the current (divergent) behavior; flip it
-        // to `expect_no_offenses` when murphy-e7bz.70 lands.
+    fn count_as_one_unbraced_hash_omits_absent_brace_lines() {
         let with_fold = ClassLengthOptions {
             max: 2,
             count_comments: false,
             count_as_one: vec!["hash".to_string()],
         };
-        let src = indoc! {"
+        test::<ClassLength>().with_options(&with_fold).expect_no_offenses(indoc! {"
             class Foo
               foo(
                 a: 1,
                 b: 2
               )
             end
-        "};
-        assert_eq!(
-            messages(&with_fold, src),
-            vec!["Class has too many lines. [3/2]".to_string()]
-        );
+        "});
     }
 
     #[test]

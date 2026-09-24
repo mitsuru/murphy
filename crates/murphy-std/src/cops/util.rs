@@ -1,6 +1,7 @@
 //! Shared utilities for standard cops.
 
 use murphy_plugin_api::{CommentDirectiveKind, Cx, NodeId, NodeKind, Range, SourceTokenKind};
+use std::collections::{HashMap, HashSet};
 
 /// True when `node` reads `expected`, including an implicit Ruby 3.4 `it`
 /// parameter represented as a receiverless `send :it` inside an `Itblock`.
@@ -1044,48 +1045,84 @@ fn is_heredoc_node(node: NodeId, cx: &Cx<'_>) -> bool {
 /// labels, with FIFO pairing among pending heredocs that share a label. This
 /// preserves sibling heredoc order while correctly matching nested interpolated
 /// heredocs, whose terminators are not globally FIFO.
-fn heredoc_end_line_of_opener(opener_start: u32, cx: &Cx<'_>) -> Option<u32> {
-    let source = cx.source();
-    let mut openers: Vec<(Option<&str>, u32)> = Vec::new();
-    for tok in cx.sorted_tokens() {
-        match tok.kind {
-            SourceTokenKind::HeredocStart => {
-                let label = source
-                    .get(tok.range.start as usize..tok.range.end as usize)
-                    .and_then(heredoc_start_label);
-                openers.push((label, tok.range.start));
-            }
-            SourceTokenKind::HeredocEnd => {
-                if openers.is_empty() {
-                    continue;
-                }
-                let end_label = source
-                    .get(tok.range.start as usize..tok.range.end as usize)
-                    .and_then(heredoc_end_label);
-                // Prefer the oldest opener with this label. Only fall back to
-                // FIFO when the end label itself could not be parsed; a known
-                // end label must never consume an opener with a different label.
-                let same_label = end_label.and_then(|label| {
-                    openers
-                        .iter()
-                        .position(|(open_label, _)| *open_label == Some(label))
-                });
-                let unknown_label = openers.iter().position(|(label, _)| label.is_none());
-                let opener_index = same_label
-                    .or(unknown_label)
-                    .or_else(|| end_label.is_none().then_some(0));
-                let Some(opener_index) = opener_index else {
-                    continue;
-                };
-                let (_, opener) = openers.remove(opener_index);
-                if opener == opener_start {
-                    return Some(line_of(tok.range.start, cx));
-                }
-            }
-            _ => {}
+#[derive(Default)]
+struct HeredocEndIndex {
+    end_lines: HashMap<u32, u32>,
+}
+
+impl HeredocEndIndex {
+    /// Pair every heredoc opener inside the measured node once. Token scanning
+    /// starts at the node and stops after its last matching terminator, which
+    /// covers curly blocks whose AST range ends before a trailing heredoc while
+    /// avoiding scans of unrelated file tokens.
+    fn new(node: NodeId, cx: &Cx<'_>) -> Self {
+        let node_range = cx.range(node);
+        let target_openers: HashSet<u32> = cx
+            .tokens_in(node_range)
+            .iter()
+            .filter(|tok| tok.kind == SourceTokenKind::HeredocStart)
+            .map(|tok| tok.range.start)
+            .collect();
+        if target_openers.is_empty() {
+            return Self::default();
         }
+
+        let source = cx.source();
+        let scan_range = Range {
+            start: node_range.start,
+            end: u32::try_from(source.len()).expect("source length fits parser offsets"),
+        };
+        let mut openers: Vec<(Option<&str>, u32)> = Vec::new();
+        let mut end_lines = HashMap::with_capacity(target_openers.len());
+        let mut remaining = target_openers.len();
+        for tok in cx.tokens_in(scan_range) {
+            match tok.kind {
+                SourceTokenKind::HeredocStart => {
+                    let label = source
+                        .get(tok.range.start as usize..tok.range.end as usize)
+                        .and_then(heredoc_start_label);
+                    openers.push((label, tok.range.start));
+                }
+                SourceTokenKind::HeredocEnd => {
+                    if openers.is_empty() {
+                        continue;
+                    }
+                    let end_label = source
+                        .get(tok.range.start as usize..tok.range.end as usize)
+                        .and_then(heredoc_end_label);
+                    // Prefer the oldest opener with this label. Only fall back
+                    // to FIFO when a label could not be parsed; a known end
+                    // label must not consume an opener with a different label.
+                    let same_label = end_label.and_then(|label| {
+                        openers
+                            .iter()
+                            .position(|(open_label, _)| *open_label == Some(label))
+                    });
+                    let unknown_label = openers.iter().position(|(label, _)| label.is_none());
+                    let opener_index = same_label
+                        .or(unknown_label)
+                        .or_else(|| end_label.is_none().then_some(0));
+                    let Some(opener_index) = opener_index else {
+                        continue;
+                    };
+                    let (_, opener) = openers.remove(opener_index);
+                    if target_openers.contains(&opener) {
+                        end_lines.insert(opener, line_of(tok.range.start, cx));
+                        remaining -= 1;
+                        if remaining == 0 {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Self { end_lines }
     }
-    None
+
+    fn end_line(&self, opener_start: u32) -> Option<u32> {
+        self.end_lines.get(&opener_start).copied()
+    }
 }
 
 /// Extract the delimiter label from a Prism `HeredocStart` token's source text.
@@ -1111,14 +1148,47 @@ fn heredoc_end_label(token_text: &str) -> Option<&str> {
     (!label.is_empty()).then_some(label)
 }
 
+/// Source range used by `CodeLengthCalculator#code_length`. Prism gives a
+/// block-call send the enclosing block's full range; RuboCop's send node range
+/// ends at the call's arguments, before the block body. Trim that suffix when
+/// a send is the call child of a block node.
+fn code_length_range(node: NodeId, cx: &Cx<'_>) -> Range {
+    let range = cx.range(node);
+    let Some(parent) = cx.parent(node).get() else {
+        return range;
+    };
+    if cx.block_call(parent).get() != Some(node) {
+        return range;
+    }
+
+    let end = if cx.is_parenthesized(node) {
+        let closing_paren = cx.loc(node).end();
+        if closing_paren == Range::ZERO {
+            return range;
+        }
+        closing_paren.end
+    } else if let Some(last_argument) = cx.last_argument(node).get() {
+        cx.range(last_argument).end
+    } else {
+        cx.loc(node).name.end
+    };
+    if end < range.start || end > range.end {
+        return range;
+    }
+    Range {
+        start: range.start,
+        end,
+    }
+}
+
 /// The 0-based first and (heredoc-extended) last source line of a node's byte
 /// range. For a node containing a trailing heredoc whose AST range stops at the
 /// `<<~LABEL` opener, the last line is extended to the matching `HeredocEnd`
 /// token's line so the heredoc body is counted (RuboCop's
 /// `source_from_node_with_heredoc`). Robust whether or not Prism's range
 /// already reaches the terminator.
-fn node_line_span(node: NodeId, cx: &Cx<'_>) -> (u32, u32) {
-    let range = cx.range(node);
+fn node_line_span(node: NodeId, heredoc_ends: &HeredocEndIndex, cx: &Cx<'_>) -> (u32, u32) {
+    let range = code_length_range(node, cx);
     let first = line_of(range.start, cx);
     // `range.end` is one-past-the-last byte; the last *content* byte is
     // `range.end - 1`. Empty ranges collapse to a single line.
@@ -1126,13 +1196,11 @@ fn node_line_span(node: NodeId, cx: &Cx<'_>) -> (u32, u32) {
     let mut last = line_of(last_byte, cx);
 
     // Extend through heredoc bodies whose opener lies within the node range.
-    // RuboCop keys on the heredoc opener position, not the terminator, because
-    // a trailing heredoc's terminator can sit past the node's AST range.
-    for tok in cx.sorted_tokens() {
+    // The end index is built once for the measured node, so a trailing
+    // terminator may safely sit past this descendant's AST range.
+    for tok in cx.tokens_in(range) {
         if tok.kind == SourceTokenKind::HeredocStart
-            && tok.range.start >= range.start
-            && tok.range.start < range.end
-            && let Some(end_line) = heredoc_end_line_of_opener(tok.range.start, cx)
+            && let Some(end_line) = heredoc_ends.end_line(tok.range.start)
         {
             last = last.max(end_line);
         }
@@ -1141,8 +1209,13 @@ fn node_line_span(node: NodeId, cx: &Cx<'_>) -> (u32, u32) {
 }
 
 /// Count non-irrelevant lines in a node's (heredoc-extended) line span.
-fn count_lines(node: NodeId, count_comments: bool, cx: &Cx<'_>) -> i64 {
-    let (first, last) = node_line_span(node, cx);
+fn count_lines(
+    node: NodeId,
+    count_comments: bool,
+    heredoc_ends: &HeredocEndIndex,
+    cx: &Cx<'_>,
+) -> i64 {
+    let (first, last) = node_line_span(node, heredoc_ends, cx);
     (first..=last)
         .filter(|&line| !irrelevant_line(cx, line, count_comments))
         .count() as i64
@@ -1150,10 +1223,15 @@ fn count_lines(node: NodeId, count_comments: bool, cx: &Cx<'_>) -> i64 {
 
 /// RuboCop `CodeLengthCalculator#heredoc_length`: count non-irrelevant lines of
 /// the heredoc *body* and add 2 for the opening and closing delimiter lines.
-fn heredoc_length(node: NodeId, count_comments: bool, cx: &Cx<'_>) -> i64 {
+fn heredoc_length(
+    node: NodeId,
+    count_comments: bool,
+    heredoc_ends: &HeredocEndIndex,
+    cx: &Cx<'_>,
+) -> i64 {
     let range = cx.range(node);
     let opener_line = line_of(range.start, cx);
-    let end_line = heredoc_end_line_of_opener(range.start, cx).unwrap_or(opener_line);
+    let end_line = heredoc_ends.end_line(range.start).unwrap_or(opener_line);
     let body_count = if end_line > opener_line + 1 {
         (opener_line + 1..end_line)
             .filter(|&line| !irrelevant_line(cx, line, count_comments))
@@ -1167,11 +1245,16 @@ fn heredoc_length(node: NodeId, count_comments: bool, cx: &Cx<'_>) -> i64 {
 /// RuboCop `CodeLengthCalculator#code_length` for a non-classlike node: count
 /// non-irrelevant lines of the node's source span, with heredoc nodes counted
 /// via `heredoc_length`.
-fn code_length(node: NodeId, count_comments: bool, cx: &Cx<'_>) -> i64 {
+fn code_length(
+    node: NodeId,
+    count_comments: bool,
+    heredoc_ends: &HeredocEndIndex,
+    cx: &Cx<'_>,
+) -> i64 {
     if is_heredoc_node(node, cx) {
-        heredoc_length(node, count_comments, cx)
+        heredoc_length(node, count_comments, heredoc_ends, cx)
     } else {
-        count_lines(node, count_comments, cx)
+        count_lines(node, count_comments, heredoc_ends, cx)
     }
 }
 
@@ -1188,6 +1271,47 @@ fn foldable_node(node: NodeId, types: &[FoldableType], cx: &Cx<'_>) -> bool {
             )
         }
     })
+}
+
+/// RuboCop `CodeLengthCalculator#omit_length` for a folded implicit hash.
+/// Subtract the absent opening/closing brace lines only for a one-argument,
+/// parenthesized call. The comparisons are byte-offset adjacency checks, not
+/// line-number checks; each side contributes independently.
+fn omit_length(hash: NodeId, cx: &Cx<'_>) -> i64 {
+    if !matches!(*cx.kind(hash), NodeKind::Hash(_)) {
+        return 0;
+    }
+    let hash_range = cx.range(hash);
+    if cx.raw_source(hash_range).starts_with('{') {
+        return 0;
+    }
+    let Some(parent) = cx.parent(hash).get() else {
+        return 0;
+    };
+    if !matches!(
+        *cx.kind(parent),
+        NodeKind::Send { .. } | NodeKind::Csend { .. }
+    ) || cx.call_arguments(parent).len() > 1
+        || !cx.is_parenthesized(parent)
+    {
+        return 0;
+    }
+
+    let call_loc = cx.loc(parent);
+    let open_paren = call_loc.begin();
+    let close_paren = call_loc.end();
+    if open_paren == Range::ZERO || close_paren == Range::ZERO {
+        return 0;
+    }
+
+    let mut omitted = 0;
+    if open_paren.end != hash_range.start {
+        omitted += 1;
+    }
+    if close_paren.start != hash_range.end {
+        omitted += 1;
+    }
+    omitted
 }
 
 /// `true` when a node kind participates in the normalized foldable-descendant
@@ -1242,43 +1366,43 @@ fn collect_top_level_foldables(
     }
 }
 
-/// RuboCop `Metrics::Utils::CodeLengthCalculator#calculate` for a method/block
-/// **body** node: count non-irrelevant lines, then fold each enabled
-/// `CountAsOne` construct to a single line.
+/// RuboCop `Metrics::Utils::CodeLengthCalculator#calculate` for a measured
+/// method/block-like node: count its extracted body, then fold each enabled
+/// top-level `CountAsOne` descendant of the original node.
 ///
-/// `body` is the def/block body node (RuboCop's `extract_body(node)`); pass
-/// the body, not the enclosing `def`. Returns the code-line count used for the
-/// `[length/max]` message. Reusable by `ClassLength`/`ModuleLength`/
-/// `BlockLength` (each extracts its own body / classlike span).
+/// `node` is RuboCop's calculator seed (`def`/`block`/`casgn`/`sclass` as
+/// appropriate); `body` is `extract_body(node)`. Keeping both mirrors RuboCop's
+/// distinction between the counted body and the node whose descendants are
+/// folded. The node range also scopes token lookups so each metric visit does
+/// not rescan unrelated tokens from the whole file.
 pub fn body_code_length(
+    node: NodeId,
     body: NodeId,
     count_comments: bool,
     foldable_types: &[FoldableType],
     cx: &Cx<'_>,
 ) -> i64 {
-    let mut length = code_length(body, count_comments, cx);
+    let heredoc_ends = HeredocEndIndex::new(node, cx);
+    let mut length = if is_heredoc_node(body, cx) {
+        // RuboCop counts a heredoc body node's own source range as the base
+        // body; only descendant heredocs extend the source span here.
+        count_lines(body, count_comments, &HeredocEndIndex::default(), cx)
+    } else {
+        count_lines(body, count_comments, &heredoc_ends, cx)
+    };
     if foldable_types.is_empty() {
         return length;
     }
 
-    // RuboCop's `each_top_level_descendant` is seeded with the def/block
-    // *node*, whose direct child is the body. So the body node itself is a
-    // top-level fold candidate when it is a foldable kind (e.g. the whole body
-    // is a single multiline `foo(...)` call). Mirror that by checking the body
-    // first; only when it is not itself foldable do we recurse into its
-    // children.
     let mut descendants = Vec::new();
-    if matches_normalized_foldable(body, foldable_types, cx) {
-        descendants.push(body);
-    } else {
-        collect_top_level_foldables(body, foldable_types, cx, &mut descendants);
-    }
+    collect_top_level_foldables(node, foldable_types, cx, &mut descendants);
     for descendant in descendants {
         if !foldable_node(descendant, foldable_types, cx) {
             continue;
         }
-        let descendant_length = code_length(descendant, count_comments, cx);
+        let descendant_length = code_length(descendant, count_comments, &heredoc_ends, cx);
         length = length - descendant_length + 1;
+        length -= omit_length(descendant, cx);
     }
     length
 }
@@ -1300,10 +1424,10 @@ pub fn body_code_length(
 ///    blank/comment lines (`irrelevant_line?`).
 /// 3. `CountAsOne` folding via `each_top_level_descendant` seeded with the whole
 ///    class/module node: `length = length - code_length(descendant) + 1` per
-///    enabled foldable.
+///    enabled foldable, then `omit_length` for an eligible implicit hash.
 ///
-/// Like [`body_code_length`], the `omit_length` unbraced-hash subtraction is not
-/// applied (the same documented fold gap).
+/// Token lookups use this node's range, not the whole file, when extending a
+/// folded heredoc through its terminator.
 pub fn classlike_code_length(
     node: NodeId,
     count_comments: bool,
@@ -1339,6 +1463,8 @@ pub fn classlike_code_length(
         return length;
     }
 
+    let heredoc_ends = HeredocEndIndex::new(node, cx);
+
     // `each_top_level_descendant(@node, …)` is seeded with the whole class/
     // module node, halting at (and never recursing into) inner classlike nodes.
     let mut descendants = Vec::new();
@@ -1347,8 +1473,9 @@ pub fn classlike_code_length(
         if !foldable_node(descendant, foldable_types, cx) {
             continue;
         }
-        let descendant_length = code_length(descendant, count_comments, cx);
+        let descendant_length = code_length(descendant, count_comments, &heredoc_ends, cx);
         length = length - descendant_length + 1;
+        length -= omit_length(descendant, cx);
     }
     length
 }

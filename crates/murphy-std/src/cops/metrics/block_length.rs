@@ -11,8 +11,8 @@
 //! version_changed: "1.5"
 //! safe: true
 //! supports_autocorrect: false
-//! status: partial
-//! gap_issues: [murphy-e7bz.70]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `CodeLength` mixin + `Metrics::Utils::CodeLengthCalculator`
 //!   driven from `Metrics/BlockLength#on_block`, verified numerically against
@@ -41,7 +41,9 @@
 //!   Length = code-line count of the block body (RuboCop `code_length` via
 //!   `extract_body`): count source lines spanning the body's first..last line,
 //!   excluding blank lines and (when `CountComments` is false) `\A\s*#` comment
-//!   lines, with a trailing heredoc extended through its terminator.
+//!   lines. A body expression containing a heredoc descendant is extended
+//!   through its terminator; a body that is itself a heredoc literal retains its
+//!   source-range count.
 //!
 //!   `CountAsOne` (default `[]`) folds each top-level descendant of a named kind
 //!   (`array`/`hash`/`heredoc`/`method_call`) to a single line.
@@ -54,16 +56,11 @@
 //!   `argument_to_lambda_or_proc?` guard, so multiline `lambda { … }` and
 //!   `-> { … }` blocks ARE measured (matches rubocop 1.87.0).
 //!
-//!   Gap (murphy-e7bz.70), shared `CountAsOne` fold edge cases inherited from
-//!   the `body_code_length` calculator:
-//!   1. `omit_length`: RuboCop subtracts the 1-2 "absent brace" lines when an
-//!      unbraced trailing-hash kwargs argument is folded as the sole argument of
-//!      a parenthesized call. Murphy does not, so it over-counts by 1-2.
-//!   2. Node-seeded vs body-seeded fold: RuboCop seeds `each_top_level_descendant`
-//!      with the block *node*, so a foldable in the block's call/args (siblings
-//!      of the body, e.g. a multiline arg of the block's own method call) can be
-//!      folded. Murphy walks the body only, so such constructs are not folded
-//!      (over-count). Both are common-case-safe: ordinary block bodies match.
+//!   The fold walk is seeded by the measured block node, so it includes
+//!   foldables in the block call's arguments as well as in its body. An
+//!   unbraced hash folded as the sole argument of a parenthesized call also
+//!   uses RuboCop's `omit_length` byte-offset checks to subtract the absent
+//!   brace lines.
 //!
 //!   No autocorrect: RuboCop does not autocorrect this cop.
 //! ```
@@ -177,7 +174,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     };
     let foldable_types: Vec<FoldableType> = parse_foldable_types(&opts.count_as_one);
-    let length = body_code_length(body, opts.count_comments, &foldable_types, cx);
+    let length = body_code_length(node, body, opts.count_comments, &foldable_types, cx);
     if length <= opts.max {
         return;
     }
@@ -592,6 +589,68 @@ mod tests {
             messages(&opts(2), src),
             vec!["Block has too many lines. [4/2]".to_string()]
         );
+    }
+
+    #[test]
+    fn curly_block_direct_heredoc_counts_only_its_source_range() {
+        assert_eq!(
+            messages(&opts(0), "foo { <<~H }\none\ntwo\nH\n"),
+            vec!["Block has too many lines. [1/0]".to_string()]
+        );
+    }
+
+    #[test]
+    fn curly_block_heredoc_fold_finds_terminator_after_block_range() {
+        let with_fold = BlockLengthOptions {
+            max: -1,
+            count_comments: false,
+            count_as_one: vec!["heredoc".to_string()],
+            allowed_methods: vec!["refine".to_string()],
+            allowed_patterns: Vec::new(),
+        };
+        test::<BlockLength>()
+            .with_options(&with_fold)
+            .expect_no_offenses("foo { <<~H }\none\ntwo\nH\n");
+    }
+
+    #[test]
+    fn count_as_one_folds_block_call_arguments() {
+        let with_fold = BlockLengthOptions {
+            max: 0,
+            count_comments: false,
+            count_as_one: vec!["array".to_string()],
+            allowed_methods: vec!["refine".to_string()],
+            allowed_patterns: Vec::new(),
+        };
+        test::<BlockLength>().with_options(&with_fold).expect_no_offenses(indoc! {"
+            foo(
+              [
+                1,
+                2
+              ]
+            ) do
+              a = 1
+            end
+        "});
+    }
+
+    #[test]
+    fn count_as_one_unbraced_hash_omits_absent_brace_lines() {
+        let with_fold = BlockLengthOptions {
+            max: 1,
+            count_comments: false,
+            count_as_one: vec!["hash".to_string()],
+            allowed_methods: vec!["refine".to_string()],
+            allowed_patterns: Vec::new(),
+        };
+        test::<BlockLength>().with_options(&with_fold).expect_no_offenses(indoc! {"
+            foo do
+              bar(
+                a: 1,
+                b: 2
+              )
+            end
+        "});
     }
 
     #[test]
