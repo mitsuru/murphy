@@ -8,9 +8,8 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/DisjunctiveAssignmentInConstructor
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-ss0f
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Ported from RuboCop Lint/DisjunctiveAssignmentInConstructor. Dispatches
 //!   on `def` only (`def self.initialize` / defs is not checked, matching
@@ -19,14 +18,11 @@
 //!   like RuboCop's `check_body_lines`. Only an instance-variable LHS
 //!   (`@x ||= …`) is flagged — local/class/global-variable and constant
 //!   targets are skipped. The offense range and autocorrect target the `||=`
-//!   operator only, replacing it with `=`. Known divergence: RuboCop's
-//!   `check_body` only descends into an *implicit* multi-statement body
-//!   (parser `:begin`); an explicit `begin … end` body is `:kwbegin` and is
-//!   skipped. Murphy lowers both to `NodeKind::Begin`, so a constructor whose
-//!   body is an explicit `begin … end` block is descended into here and its
-//!   leading `@x ||= …` is flagged where RuboCop would not (a false positive).
-//!   This shape is contrived and not exercised by RuboCop's specs; tracked in
-//!   murphy-ss0f.
+//!   operator only, replacing it with `=`. RuboCop's `check_body` descends
+//!   into implicit multi-statement bodies (`:begin`) but skips explicit
+//!   `begin … end` bodies (`:kwbegin`). Murphy lowers both to
+//!   `NodeKind::Begin`, so `is_explicit_begin` checks the node's keyword range
+//!   for the literal `begin` token to preserve parity.
 //! ```
 //!
 //! ## Matched shapes
@@ -87,9 +83,19 @@ impl DisjunctiveAssignmentInConstructor {
 /// `Begin`; a single-statement body is the statement node itself.
 fn check_body(body: NodeId, cx: &Cx<'_>) {
     match *cx.kind(body) {
-        NodeKind::Begin(list) => check_body_lines(cx.list(list), cx),
+        NodeKind::Begin(list) if !is_explicit_begin(body, cx) => {
+            check_body_lines(cx.list(list), cx);
+        }
+        NodeKind::Begin(_) => {}
         _ => check_body_lines(&[body], cx),
     }
+}
+
+/// Murphy uses `NodeKind::Begin` for both implicit statement sequences and
+/// explicit `begin … end` bodies; RuboCop distinguishes the latter as `:kwbegin`.
+fn is_explicit_begin(node: NodeId, cx: &Cx<'_>) -> bool {
+    let keyword = cx.loc(node).keyword();
+    keyword != Range::ZERO && cx.raw_source(keyword) == "begin"
 }
 
 /// Flag the **leading run** of `or_asgn` statements; stop at the first line
@@ -223,6 +229,19 @@ mod tests {
     }
 
     // --- no offenses ---
+
+    #[test]
+    fn ignores_disjunctive_assignment_inside_explicit_begin_end() {
+        test::<DisjunctiveAssignmentInConstructor>().expect_no_offenses(indoc! {r#"
+            class Banana
+              def initialize
+                begin
+                  @delicious ||= true
+                end
+              end
+            end
+        "#});
+    }
 
     #[test]
     fn ignores_empty_constructor() {
