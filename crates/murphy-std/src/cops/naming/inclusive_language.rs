@@ -1365,6 +1365,18 @@ mod tests {
     }
 
     #[test]
+    fn check_strings_scans_heredoc_body_with_other_quote_in_label() {
+        let options = category_options(false, true, false);
+        let source = "text = <<\"can't\"\nwhitelist\ncan't\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(
+            offenses[0].range.start as usize,
+            source.find("whitelist").expect("heredoc body term"),
+        );
+    }
+
+    #[test]
     fn heredoc_string_autocorrection_changes_only_the_body() {
         let mut options = category_options(false, true, false);
         let blacklist = options

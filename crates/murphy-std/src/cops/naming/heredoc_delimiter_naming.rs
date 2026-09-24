@@ -159,7 +159,7 @@ fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
         match tok.kind {
             SourceTokenKind::HeredocStart => {
                 let opener_src = cx.raw_source(tok.range);
-                let label = delimiter_string(opener_src).map(str::to_owned).unwrap_or_default();
+                let label = heredoc_label(opener_src).map(str::to_owned).unwrap_or_default();
                 for (existing_opener, existing_label) in &pending {
                     if existing_label == &label {
                         ambiguous_openers.insert(existing_opener.start);
@@ -303,6 +303,23 @@ fn delimiter_string(opener: &str) -> Option<&str> {
     }
 }
 
+/// Parse the complete label needed to match an opener to its terminator. Unlike
+/// RuboCop's naming-cop extraction above, a quote that differs from the
+/// opening quote is part of a quoted Ruby label (for example, `<<"can't"`).
+fn heredoc_label(opener: &str) -> Option<&str> {
+    let rest = opener.strip_prefix("<<")?;
+    let rest = rest.strip_prefix('~').or_else(|| rest.strip_prefix('-')).unwrap_or(rest);
+    match rest.as_bytes().first().copied() {
+        Some(quote @ (b'\'' | b'"' | b'`')) => {
+            let body = &rest[1..];
+            let end = body.as_bytes().iter().position(|&byte| byte == quote)?;
+            let label = &body[..end];
+            (!label.is_empty()).then_some(label)
+        }
+        _ => delimiter_string(opener),
+    }
+}
+
 /// RuboCop `meaningful_delimiters?`: the delimiter must contain at least one
 /// word char (Ruby `\w` = ASCII `[A-Za-z0-9_]`) AND match none of the forbidden
 /// patterns.
@@ -350,8 +367,17 @@ fn ruby_regex_to_rust_pattern(literal: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{HeredocDelimiterNaming, Options, ruby_regex_to_rust_pattern};
+    use super::{
+        HeredocDelimiterNaming, Options, delimiter_string, heredoc_label, ruby_regex_to_rust_pattern,
+    };
     use murphy_plugin_api::test_support::{indoc, test};
+
+    #[test]
+    fn matching_uses_full_quoted_label_without_changing_rubocop_extraction() {
+        let opener = "<<\"can't\"";
+        assert_eq!(delimiter_string(opener), Some("can"));
+        assert_eq!(heredoc_label(opener), Some("can't"));
+    }
 
     // ---- default ForbiddenDelimiters (exercises the literal→Rust path) ----
 
