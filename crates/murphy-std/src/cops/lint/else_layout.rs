@@ -5,9 +5,8 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/ElseLayout
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-4m6o
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Detection mirrors RuboCop's on_if + check_else: for an `if`/`elsif` with a
 //!   real `else` keyword whose else-branch is a multi-statement begin, flag the
@@ -23,16 +22,21 @@
 //!   convention (shared with verified `Lint/MissingSuper`,
 //!   `crate::cops::util::first_line_range`) vs RuboCop's full `first_else` node
 //!   range; the start byte matches, so line/column is faithful (murphy-4k23
-//!   resolved). The autocorrect (insert newline + re-indent the else body) is
-//!   NOT ported in this pass (murphy-4m6o); detection only.
+//!   resolved). Autocorrect ports RuboCop's `insert_after(else, "\n")` +
+//!   `replace(else.end...first_else.begin, indentation(node))` as a single
+//!   gap replacement with `"\n" + indentation` (murphy-4m6o); `indentation`
+//!   is the `Alignment` mixin's `offset(node) + width` where `offset` is the
+//!   owning `if`/`elsif` keyword column and `width` is the run-wide
+//!   `Layout/IndentationWidth` (`cx.indentation_width()`, default 2).
 //! ```
 //!
-//! ## Deferred: the re-indent autocorrect
+//! ## Autocorrect
 //!
-//! RuboCop inserts a newline after `else` and replaces the gap with the
-//! conditional's indentation. Porting the indentation computation faithfully
-//! requires the `Alignment` mixin's column logic; it is deferred to a
-//! follow-up. Detection and message match RuboCop.
+//! Replaces the gap between `else` and the first else statement with
+//! `"\n" + indentation`, where `indentation` is the owning conditional's
+//! column plus `Layout/IndentationWidth`. Idempotent: the corrected layout
+//! puts the first else statement on its own line, so `same_line?` no longer
+//! fires.
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
 
@@ -76,13 +80,13 @@ impl ElseLayout {
         let Some(else_kw) = else_keyword_range(node, cx) else {
             return;
         };
-        check_else(else_id, else_kw, cx);
+        check_else(node, else_id, else_kw, cx);
     }
 }
 
 /// RuboCop `check_else`: the first statement of the else block is an offense if
 /// it sits on the same line as the `else` keyword.
-fn check_else(else_branch: NodeId, else_kw: Range, cx: &Cx<'_>) {
+fn check_else(if_node: NodeId, else_branch: NodeId, else_kw: Range, cx: &Cx<'_>) {
     // A true `elsif` carries no `else` keyword at this level, so the caller's
     // `else_keyword_range` already returned `None` and never reaches here. When
     // it *does* reach here the else slot may still be a nested `If` — that is
@@ -106,6 +110,42 @@ fn check_else(else_branch: NodeId, else_kw: Range, cx: &Cx<'_>) {
         "Odd `else` layout detected. Did you mean to use `elsif`?",
         None,
     );
+    // RuboCop `autocorrect`: `insert_after(else, "\n")` +
+    // `replace(else.end...first_else.begin, indentation(node))`. The two edits
+    // combine to `gap -> "\n" + indentation`, so Murphy emits a single gap
+    // replacement (avoids overlapping edits).
+    if else_kw.end < first_range.start {
+        let replacement = format!("\n{}", indentation(if_node, cx));
+        cx.emit_edit(
+            Range {
+                start: else_kw.end,
+                end: first_range.start,
+            },
+            &replacement,
+        );
+    }
+}
+
+/// RuboCop `Alignment#indentation(node)`: `offset(node)` (spaces matching the
+/// owning `if`/`elsif` keyword column) plus one indentation width
+/// (`Layout/IndentationWidth`, default 2).
+fn indentation(if_node: NodeId, cx: &Cx<'_>) -> String {
+    let keyword = cx.if_keyword_loc(if_node);
+    let base = if keyword != Range::ZERO {
+        keyword.start
+    } else {
+        cx.range(if_node).start
+    };
+    let width = cx.indentation_width().max(0) as usize;
+    " ".repeat(column_of(base, cx) + width)
+}
+
+/// 0-based byte column of `offset` (distance from its line start). Indentation
+/// is ASCII whitespace, so byte and character columns coincide here.
+fn column_of(offset: u32, cx: &Cx<'_>) -> usize {
+    let line = crate::cops::util::line_of(offset, cx);
+    let line_start = crate::cops::util::nth_line_start(cx, line).unwrap_or(0);
+    (offset - line_start) as usize
 }
 
 /// The `else` keyword token range for this `If` node, searched only in the gap
@@ -305,6 +345,135 @@ mod tests {
                  ^^^^^^^^ Odd `else` layout detected. Did you mean to use `elsif`?
               bar
             end
+            end
+        "#});
+    }
+
+    // === autocorrect (murphy-4m6o) ===
+
+    #[test]
+    fn corrects_else_body_onto_new_line() {
+        // RuboCop: `insert_after(else, "\\n")` + `replace(gap, indentation)`.
+        // `if` at column 0 + default width 2 → `"  "`.
+        test::<ElseLayout>().expect_correction(
+            indoc! {r#"
+                if something
+                  test
+                else something_else
+                     ^^^^^^^^^^^^^^ Odd `else` layout detected. Did you mean to use `elsif`?
+                  test2
+                end
+            "#},
+            indoc! {r#"
+                if something
+                  test
+                else
+                  something_else
+                  test2
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_indented_if_with_outer_column() {
+        // Owning `if` at column 2 → indent is 2 + 2 = 4 spaces (verified
+        // against standalone rubocop 1.87.0).
+        test::<ElseLayout>().expect_correction(
+            indoc! {r#"
+                def foo
+                  if something
+                    test
+                  else something_else
+                       ^^^^^^^^^^^^^^ Odd `else` layout detected. Did you mean to use `elsif`?
+                    test2
+                  end
+                end
+            "#},
+            indoc! {r#"
+                def foo
+                  if something
+                    test
+                  else
+                    something_else
+                    test2
+                  end
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_elsif_chain_else_with_elsif_column() {
+        // The offense owns to the `elsif` node (column 0) → 2-space indent.
+        test::<ElseLayout>().expect_correction(
+            indoc! {r#"
+                if a
+                  test
+                elsif b
+                  test2
+                else foo
+                     ^^^ Odd `else` layout detected. Did you mean to use `elsif`?
+                  bar
+                end
+            "#},
+            indoc! {r#"
+                if a
+                  test
+                elsif b
+                  test2
+                else
+                  foo
+                  bar
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_else_if_nested_if() {
+        // `else if` (space): the outer `if` owns the `else`; the nested `if`
+        // moves to its own line at the outer indent + width. The rest of the
+        // body is untouched — matching RuboCop (verified standalone).
+        test::<ElseLayout>().expect_correction(
+            indoc! {r#"
+                if something
+                  test
+                else if other
+                     ^^^^^^^^ Odd `else` layout detected. Did you mean to use `elsif`?
+                  bar
+                end
+                end
+            "#},
+            indoc! {r#"
+                if something
+                  test
+                else
+                  if other
+                  bar
+                end
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn correction_is_idempotent() {
+        // Re-feeding the corrected output yields no offenses and no edits.
+        test::<ElseLayout>().expect_no_offenses(indoc! {r#"
+            if something
+              test
+            else
+              something_else
+              test2
+            end
+        "#});
+        test::<ElseLayout>().expect_no_corrections(indoc! {r#"
+            if something
+              test
+            else
+              something_else
+              test2
             end
         "#});
     }
