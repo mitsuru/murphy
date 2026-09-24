@@ -285,25 +285,48 @@ fn merge_option_maps(
     merge_keys: &BTreeSet<String>,
 ) {
     for (key, top_value) in top {
-        let value = if merge_keys.contains(&key) {
-            match (base.remove(&key), top_value) {
-                (
-                    Some(serde_json::Value::Array(mut base_items)),
-                    serde_json::Value::Array(top_items),
-                ) => {
-                    for item in top_items {
-                        if !base_items.contains(&item) {
-                            base_items.push(item);
-                        }
-                    }
-                    serde_json::Value::Array(base_items)
-                }
-                (_, top_value) => top_value,
-            }
+        if let Some(base_value) = base.get_mut(&key) {
+            merge_option_value(base_value, top_value, merge_keys, merge_keys.contains(&key));
         } else {
-            top_value
-        };
-        base.insert(key, value);
+            base.insert(key, top_value);
+        }
+    }
+}
+
+/// RuboCop recursively merges option hashes; arrays replace unless their key is
+/// listed by `inherit_mode.merge` at the cop-option level. Updating existing
+/// object entries in place also preserves YAML insertion order for term maps.
+fn merge_option_value(
+    base: &mut serde_json::Value,
+    top: serde_json::Value,
+    merge_keys: &BTreeSet<String>,
+    merge_array: bool,
+) {
+    match (base, top) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(top)) => {
+            for (key, top_value) in top {
+                if let Some(base_value) = base.get_mut(&key) {
+                    merge_option_value(
+                        base_value,
+                        top_value,
+                        merge_keys,
+                        merge_keys.contains(&key),
+                    );
+                } else {
+                    base.insert(key, top_value);
+                }
+            }
+        }
+        (serde_json::Value::Array(base_items), serde_json::Value::Array(top_items))
+            if merge_array =>
+        {
+            for item in top_items {
+                if !base_items.contains(&item) {
+                    base_items.push(item);
+                }
+            }
+        }
+        (base, top) => *base = top,
     }
 }
 
@@ -2124,6 +2147,69 @@ Style/StringLiterals:
             "base option should be inherited"
         );
         assert_eq!(val["MaxCount"], 5, "current file option should be present");
+    }
+
+    #[test]
+    fn inherit_from_recursively_merges_nested_cop_option_hashes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "Naming/InclusiveLanguage:\n  FlaggedTerms:\n    shared:\n      Regex: /base/\n      WholeWord: true\n      Suggestions:\n        - base_suggestion\n    inherited:\n      Regex: /inherited/\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from: base.yml\nNaming/InclusiveLanguage:\n  FlaggedTerms:\n    shared:\n      Suggestions:\n        - project_suggestion\n    project_only:\n      Regex: /project/\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Naming/InclusiveLanguage")).unwrap();
+        let terms = &options["FlaggedTerms"];
+        assert_eq!(terms["shared"]["Regex"], "/base/");
+        assert!(terms["shared"]["WholeWord"].as_bool().unwrap());
+        assert_eq!(
+            terms["shared"]["Suggestions"],
+            serde_json::json!(["project_suggestion"])
+        );
+        assert_eq!(terms["inherited"]["Regex"], "/inherited/");
+        assert_eq!(terms["project_only"]["Regex"], "/project/");
+        let order: Vec<_> = terms
+            .as_object()
+            .expect("term map")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let index_of = |term| {
+            order
+                .iter()
+                .position(|candidate| *candidate == term)
+                .unwrap()
+        };
+        assert!(index_of("shared") < index_of("inherited"));
+        assert!(index_of("inherited") < index_of("project_only"));
+    }
+
+    #[test]
+    fn inherit_mode_merges_nested_arrays_in_cop_option_hashes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "Naming/InclusiveLanguage:\n  inherit_mode:\n    merge:\n      - Suggestions\n  FlaggedTerms:\n    shared:\n      Suggestions:\n        - common\n        - inherited\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from: base.yml\nNaming/InclusiveLanguage:\n  FlaggedTerms:\n    shared:\n      Suggestions:\n        - common\n        - project\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Naming/InclusiveLanguage")).unwrap();
+        assert_eq!(
+            options["FlaggedTerms"]["shared"]["Suggestions"],
+            serde_json::json!(["common", "inherited", "project"])
+        );
     }
 
     #[test]

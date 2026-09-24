@@ -21,7 +21,7 @@ linkme = "0.3"
 # because it is a third-party dependency, not a Murphy-internal crate —
 # the boundary gate only forbids non-`murphy-plugin-api` Murphy deps.
 # Also used by `tests/dep_boundary.rs` to parse `cargo metadata` output.
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 # East-Asian-wide-glyph display width for the shared `display_column` helper
 # (murphy-vafs). RuboCop's `Alignment#display_column` uses
 # `Unicode::DisplayWidth.of`; the alignment cops must match so a CJK glyph in
