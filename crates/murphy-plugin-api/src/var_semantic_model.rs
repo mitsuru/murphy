@@ -1379,6 +1379,36 @@ impl VarSemanticModel {
                     // Nested Mlhs (e.g. `(a, b), c = ...`).
                     Self::collect_mlhs_targets(ast, child, asgn_node, scope, scopes);
                 }
+                NodeKind::Splat(inner) => {
+                    // Rest target inside `Mlhs` (e.g. `*items, last = ...`):
+                    // `Splat(Lvasgn)` per `translate_mlhs`. Anonymous `*`
+                    // (`Splat(None)`) has no name to track. Mirrors RuboCop's
+                    // `multiple_assignment_node` splat traversal.
+                    if let Some(target) = inner.get() {
+                        match *ast.kind(target) {
+                            NodeKind::Lvasgn { name, .. }
+                                if !ast.interner().resolve(name.0).starts_with('_') =>
+                            {
+                                let end = ast.range(asgn_node).end;
+                                let target_scope =
+                                    Self::scope_containing_variable(scopes, scope, name)
+                                        .unwrap_or(scope);
+                                let scope_info =
+                                    scopes.get_mut(&target_scope).expect("scope must exist");
+                                let var = Self::find_or_declare_local(scope_info, name, target);
+                                var.assignments.push(Assignment {
+                                    node_id: target,
+                                    end,
+                                    is_referenced: false,
+                                });
+                            }
+                            NodeKind::Mlhs(_) => {
+                                Self::collect_mlhs_targets(ast, target, asgn_node, scope, scopes);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
         }
