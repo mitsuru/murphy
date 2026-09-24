@@ -6,19 +6,20 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/ShadowedException
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues: [murphy-brw4]
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Covers modifier rescue exclusion, empty rescue as StandardError, same-rescue
-//!   ancestor pairs, duplicate exceptions, and ordered/misordered multiple rescue
-//!   groups for common built-in exception classes. v1 cannot constant-resolve
-//!   arbitrary user exception classes, so unknown constants are conservatively
-//!   ignored except when shadowed by an earlier Exception group. Every `Errno::*`
-//!   constant is a `SystemCallError` subclass whose `<=>` is nil; RuboCop never
-//!   treats two `Errno` constants as comparable (even identical ones never
-//!   shadow), but a broad `Exception`/`StandardError`/`SystemCallError` rescue
-//!   does shadow a later `Errno::*` rescue. Modelled with a dedicated `Errno`
-//!   exception class so distinct siblings never collide.
+//!   Mirrors RuboCop's runtime hierarchy with a static built-in table
+//!   (core + common stdlib: IO/Timeout/Encoding/Math/Ractor/Regexp) so no
+//!   host constant resolution is needed and the plugin ABI is untouched.
+//!   Unknown constants, splats, and non-const expressions resolve to nil like
+//!   RuboCop's `Kernel.const_get` NameError path. Same-group `Exception` with
+//!   any sibling always flags; two direct `SystemCallError` children
+//!   (`Errno::*`) never compare — identical codes are excluded by RuboCop's
+//!   `Errno` check and siblings have nil `<=>` — so platform-specific Errno
+//!   numbers cannot change the outcome. Cross-group order uses RuboCop's
+//!   consecutive-pair `sorted?` with lexicographic array `<=>` (duplicates
+//!   across groups are sorted, an intervening unknown breaks shadowing).
 //! ```
 //!
 //! ## Matched shapes
@@ -60,15 +61,19 @@ impl ShadowedException {
             .map(|&resbody| exception_group(resbody, cx))
             .collect::<Vec<_>>();
 
-        for (&resbody, group) in rescues.iter().zip(groups.iter()) {
-            if contains_multiple_levels(group) {
-                cx.emit_offense(rescue_line_range(resbody, cx), MSG, None);
-                return;
+        if groups.iter().any(|group| contains_multiple_levels(group)) {
+            if let Some((resbody, _)) = rescues
+                .iter()
+                .zip(groups.iter())
+                .find(|(_, group)| contains_multiple_levels(group))
+            {
+                cx.emit_offense(rescue_line_range(*resbody, cx), MSG, None);
             }
+            return;
         }
 
-        for idx in 0..groups.len() {
-            if groups[idx + 1..].iter().any(|later| shadows_later(&groups[idx], later)) {
+        for (idx, pair) in groups.windows(2).enumerate() {
+            if !pair_sorted(&pair[0], &pair[1]) {
                 cx.emit_offense(rescue_line_range(rescues[idx], cx), MSG, None);
                 return;
             }
@@ -89,36 +94,36 @@ fn rescue_line_range(resbody: NodeId, cx: &Cx<'_>) -> Range {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ExceptionClass {
+/// A resolved exception reference. `None` in a group means nil in RuboCop:
+/// unknown constant, splat, or non-const expression (`Kernel.const_get`
+/// raised `NameError`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Exc {
+    /// Canonical known class, e.g. `StandardError`, `Timeout::Error`,
+    /// `IO::EAGAINWaitReadable`.
     Known(&'static str),
-    /// Any `Errno::*` (a `SystemCallError` subclass). RuboCop never treats two
-    /// distinct `Errno` constants as comparable (their `<=>` is nil), and even
-    /// identical ones do not shadow, so the specific name is not retained — a
-    /// single variant captures the per-class incomparability.
-    Errno,
-    Unknown,
-    Splat,
+    /// Any `Errno::*` direct `SystemCallError` child, e.g. `Errno::ENOENT`.
+    /// The specific name is retained so `Errno::EAGAIN` is recognised as the
+    /// parent of `IO::EAGAINWaitReadable`, while two distinct `Errno::*`
+    /// stay incomparable.
+    Errno(String),
 }
 
-fn exception_group(resbody: NodeId, cx: &Cx<'_>) -> Vec<ExceptionClass> {
+fn exception_group(resbody: NodeId, cx: &Cx<'_>) -> Vec<Option<Exc>> {
     let NodeKind::Resbody { exceptions, .. } = *cx.kind(resbody) else {
         return Vec::new();
     };
     let exceptions = cx.list(exceptions);
     if exceptions.is_empty() {
-        return vec![ExceptionClass::Known("StandardError")];
+        return vec![Some(Exc::Known("StandardError"))];
     }
     exceptions
         .iter()
         .map(|&node| match *cx.kind(node) {
-            NodeKind::Splat(_) => ExceptionClass::Splat,
+            NodeKind::Splat(_) => None,
             _ => match const_name(node, cx) {
-                Some(name) if name.starts_with("Errno::") => ExceptionClass::Errno,
-                Some(name) => known_exception_name(&name)
-                    .map(ExceptionClass::Known)
-                    .unwrap_or(ExceptionClass::Unknown),
-                None => ExceptionClass::Unknown,
+                Some(name) => resolve_exception(&name),
+                None => None,
             },
         })
         .collect()
@@ -136,26 +141,179 @@ fn const_name(node: NodeId, cx: &Cx<'_>) -> Option<String> {
     }
 }
 
-fn known_exception_name(name: &str) -> Option<&'static str> {
+fn resolve_exception(name: &str) -> Option<Exc> {
+    if let Some(short) = name.strip_prefix("Errno::") {
+        if short.is_empty() || short.contains(':') {
+            return None;
+        }
+        return Some(Exc::Errno(name.to_string()));
+    }
+    known_exception(name).map(Exc::Known)
+}
+
+fn known_exception(name: &str) -> Option<&'static str> {
     match name {
         "Exception" => Some("Exception"),
+        "NoMemoryError" => Some("NoMemoryError"),
+        "ScriptError" => Some("ScriptError"),
+        "LoadError" => Some("LoadError"),
+        "NotImplementedError" => Some("NotImplementedError"),
+        "SyntaxError" => Some("SyntaxError"),
+        "SecurityError" => Some("SecurityError"),
+        "SignalException" => Some("SignalException"),
+        "Interrupt" => Some("Interrupt"),
+        "SystemExit" => Some("SystemExit"),
+        "SystemStackError" => Some("SystemStackError"),
         "StandardError" => Some("StandardError"),
-        "RuntimeError" => Some("RuntimeError"),
+        "ArgumentError" => Some("ArgumentError"),
+        "UncaughtThrowError" => Some("UncaughtThrowError"),
+        "EncodingError" => Some("EncodingError"),
+        "Encoding::CompatibilityError" => Some("Encoding::CompatibilityError"),
+        "FiberError" => Some("FiberError"),
+        "IOError" => Some("IOError"),
+        "EOFError" => Some("EOFError"),
+        "IO::TimeoutError" => Some("IO::TimeoutError"),
+        "IndexError" => Some("IndexError"),
+        "KeyError" => Some("KeyError"),
+        "StopIteration" => Some("StopIteration"),
+        "ClosedQueueError" => Some("ClosedQueueError"),
+        "LocalJumpError" => Some("LocalJumpError"),
+        "Math::DomainError" => Some("Math::DomainError"),
         "NameError" => Some("NameError"),
         "NoMethodError" => Some("NoMethodError"),
-        "ZeroDivisionError" => Some("ZeroDivisionError"),
-        "ArgumentError" => Some("ArgumentError"),
+        "NoMatchingPatternError" => Some("NoMatchingPatternError"),
+        "NoMatchingPatternKeyError" => Some("NoMatchingPatternKeyError"),
+        "RangeError" => Some("RangeError"),
+        "FloatDomainError" => Some("FloatDomainError"),
+        "RegexpError" => Some("RegexpError"),
+        "Regexp::TimeoutError" => Some("Regexp::TimeoutError"),
+        "RuntimeError" => Some("RuntimeError"),
+        "FrozenError" => Some("FrozenError"),
+        "Ractor::Error" => Some("Ractor::Error"),
+        "Timeout::Error" => Some("Timeout::Error"),
+        "SocketError" => Some("SocketError"),
         "SystemCallError" => Some("SystemCallError"),
-        "Interrupt" => Some("Interrupt"),
-        "SignalException" => Some("SignalException"),
+        "ThreadError" => Some("ThreadError"),
+        "TypeError" => Some("TypeError"),
+        "ZeroDivisionError" => Some("ZeroDivisionError"),
+        "IO::EAGAINWaitReadable" => Some("IO::EAGAINWaitReadable"),
+        "IO::EAGAINWaitWritable" => Some("IO::EAGAINWaitWritable"),
+        "IO::EINPROGRESSWaitReadable" => Some("IO::EINPROGRESSWaitReadable"),
+        "IO::EINPROGRESSWaitWritable" => Some("IO::EINPROGRESSWaitWritable"),
         _ => None,
     }
 }
 
-fn contains_multiple_levels(group: &[ExceptionClass]) -> bool {
+fn canonical_name(exc: &Exc) -> &str {
+    match exc {
+        Exc::Known(name) => name,
+        Exc::Errno(name) => name.as_str(),
+    }
+}
+
+/// Direct superclass canonical name, mirroring `Class#superclass` in a
+/// RuboCop 1.87 runtime. Generic `Errno::*` are direct `SystemCallError`
+/// children.
+fn parent_of(name: &str) -> Option<&'static str> {
+    if let Some(known) = known_parent(name) {
+        return Some(known);
+    }
+    if name.starts_with("Errno::") {
+        return Some("SystemCallError");
+    }
+    None
+}
+
+fn known_parent(name: &str) -> Option<&'static str> {
+    match name {
+        "Exception" => None,
+        "NoMemoryError" => Some("Exception"),
+        "ScriptError" => Some("Exception"),
+        "LoadError" => Some("ScriptError"),
+        "NotImplementedError" => Some("ScriptError"),
+        "SyntaxError" => Some("ScriptError"),
+        "SecurityError" => Some("Exception"),
+        "SignalException" => Some("Exception"),
+        "Interrupt" => Some("SignalException"),
+        "SystemExit" => Some("Exception"),
+        "SystemStackError" => Some("Exception"),
+        "StandardError" => Some("Exception"),
+        "ArgumentError" => Some("StandardError"),
+        "UncaughtThrowError" => Some("ArgumentError"),
+        "EncodingError" => Some("StandardError"),
+        "Encoding::CompatibilityError" => Some("EncodingError"),
+        "FiberError" => Some("StandardError"),
+        "IOError" => Some("StandardError"),
+        "EOFError" => Some("IOError"),
+        "IO::TimeoutError" => Some("IOError"),
+        "IndexError" => Some("StandardError"),
+        "KeyError" => Some("IndexError"),
+        "StopIteration" => Some("IndexError"),
+        "ClosedQueueError" => Some("StopIteration"),
+        "LocalJumpError" => Some("StandardError"),
+        "Math::DomainError" => Some("StandardError"),
+        "NameError" => Some("StandardError"),
+        "NoMethodError" => Some("NameError"),
+        "NoMatchingPatternError" => Some("StandardError"),
+        "NoMatchingPatternKeyError" => Some("NoMatchingPatternError"),
+        "RangeError" => Some("StandardError"),
+        "FloatDomainError" => Some("RangeError"),
+        "RegexpError" => Some("StandardError"),
+        "Regexp::TimeoutError" => Some("RegexpError"),
+        "RuntimeError" => Some("StandardError"),
+        "FrozenError" => Some("RuntimeError"),
+        "Ractor::Error" => Some("RuntimeError"),
+        "Timeout::Error" => Some("RuntimeError"),
+        "SocketError" => Some("StandardError"),
+        "SystemCallError" => Some("StandardError"),
+        "ThreadError" => Some("StandardError"),
+        "TypeError" => Some("StandardError"),
+        "ZeroDivisionError" => Some("StandardError"),
+        "IO::EAGAINWaitReadable" => Some("Errno::EAGAIN"),
+        "IO::EAGAINWaitWritable" => Some("Errno::EAGAIN"),
+        "IO::EINPROGRESSWaitReadable" => Some("Errno::EINPROGRESS"),
+        "IO::EINPROGRESSWaitWritable" => Some("Errno::EINPROGRESS"),
+        _ => None,
+    }
+}
+
+fn is_ancestor(ancestor: &str, descendant: &str) -> bool {
+    let mut current = parent_of(descendant);
+    while let Some(parent) = current {
+        if parent == ancestor {
+            return true;
+        }
+        current = parent_of(parent);
+    }
+    false
+}
+
+/// True when both are direct `SystemCallError` children (`ancestors[1] ==
+/// SystemCallError` in RuboCop). RuboCop never treats such a pair as
+/// comparable: identical codes are excluded by the `Errno` check and
+/// siblings have nil `<=>`.
+fn is_errno_sibling_pair(a: &Exc, b: &Exc) -> bool {
+    parent_of(canonical_name(a)) == Some("SystemCallError")
+        && parent_of(canonical_name(b)) == Some("SystemCallError")
+}
+
+fn group_contains_exception(group: &[Option<Exc>]) -> bool {
+    group.iter().any(|exc| {
+        matches!(exc, Some(Exc::Known("Exception")))
+    })
+}
+
+fn contains_multiple_levels(group: &[Option<Exc>]) -> bool {
+    // Always treat `Exception` as the highest level exception.
+    if group.len() > 1 && group_contains_exception(group) {
+        return true;
+    }
     for i in 0..group.len() {
         for j in i + 1..group.len() {
-            if comparable_shadow(group[i], group[j]) || comparable_shadow(group[j], group[i]) {
+            let (Some(a), Some(b)) = (&group[i], &group[j]) else {
+                continue;
+            };
+            if same_group_shadows(a, b) {
                 return true;
             }
         }
@@ -163,50 +321,70 @@ fn contains_multiple_levels(group: &[ExceptionClass]) -> bool {
     false
 }
 
-fn shadows_later(earlier: &[ExceptionClass], later: &[ExceptionClass]) -> bool {
-    earlier.iter().any(|&a| {
-        later
-            .iter()
-            .any(|&b| comparable_shadow(a, b) || matches!(a, ExceptionClass::Known("Exception")))
-    })
+fn same_group_shadows(a: &Exc, b: &Exc) -> bool {
+    if is_errno_sibling_pair(a, b) {
+        return false;
+    }
+    let an = canonical_name(a);
+    let bn = canonical_name(b);
+    an == bn || is_ancestor(an, bn) || is_ancestor(bn, an)
 }
 
-fn comparable_shadow(a: ExceptionClass, b: ExceptionClass) -> bool {
+/// `Module#<=>` for two resolved classes: `0` if equal, `1` if `a` is an
+/// ancestor of `b`, `-1` if `b` is an ancestor of `a`, else nil.
+fn class_cmp(a: &Exc, b: &Exc) -> Option<i32> {
+    let an = canonical_name(a);
+    let bn = canonical_name(b);
+    if an == bn {
+        return Some(0);
+    }
+    if is_ancestor(an, bn) {
+        return Some(1);
+    }
+    if is_ancestor(bn, an) {
+        return Some(-1);
+    }
+    None
+}
+
+fn elem_cmp(a: &Option<Exc>, b: &Option<Exc>) -> Option<i32> {
     match (a, b) {
-        (ExceptionClass::Known(a), ExceptionClass::Known(b)) => a == b || is_ancestor(a, b),
-        // A broad class shadows a more specific `Errno::*` (a SystemCallError
-        // subclass) — `a` is an ancestor of `b`.
-        (ExceptionClass::Known(a), ExceptionClass::Errno) => is_errno_ancestor(a),
-        // Two `Errno::*` are never comparable (RuboCop's `<=>` is nil), so even
-        // identical ones never shadow. `Errno` never shadows a `Known` class.
-        (ExceptionClass::Errno, _) => false,
-        _ => false,
+        (None, None) => Some(0),
+        (None, _) | (_, None) => None,
+        (Some(a), Some(b)) => class_cmp(a, b),
     }
 }
 
-/// True when `a` is a class that is an ancestor of every `Errno::*` (i.e. a
-/// `SystemCallError` subclass). `Exception` and `StandardError` are above
-/// `SystemCallError`, which is the direct superclass of all `Errno` constants.
-fn is_errno_ancestor(a: &str) -> bool {
-    matches!(a, "Exception" | "StandardError" | "SystemCallError")
+/// Ruby `Array#<=>` for rescued groups, with `nil` for incomparable.
+fn array_cmp(x: &[Option<Exc>], y: &[Option<Exc>]) -> Option<i32> {
+    let common = x.len().min(y.len());
+    for i in 0..common {
+        match elem_cmp(&x[i], &y[i]) {
+            None => return None,
+            Some(0) => continue,
+            Some(ordered) => return Some(ordered),
+        }
+    }
+    if x.len() == y.len() {
+        Some(0)
+    } else if x.len() < y.len() {
+        Some(-1)
+    } else {
+        Some(1)
+    }
 }
 
-fn is_ancestor(a: &str, b: &str) -> bool {
-    match a {
-        "Exception" => b != "Exception",
-        "StandardError" => matches!(
-            b,
-            "RuntimeError"
-                | "NameError"
-                | "NoMethodError"
-                | "ZeroDivisionError"
-                | "ArgumentError"
-                | "SystemCallError"
-        ),
-        "NameError" => b == "NoMethodError",
-        "SignalException" => b == "Interrupt",
-        _ => false,
+fn pair_sorted(x: &[Option<Exc>], y: &[Option<Exc>]) -> bool {
+    if group_contains_exception(x) {
+        return false;
     }
+    if group_contains_exception(y)
+        || x.iter().all(|exc| exc.is_none())
+        || y.iter().all(|exc| exc.is_none())
+    {
+        return true;
+    }
+    (array_cmp(x, y).unwrap_or(0)) <= 0
 }
 
 #[cfg(test)]
@@ -229,17 +407,34 @@ mod tests {
     }
 
     #[test]
-    fn flags_shadowed_exception_with_intervening_unknown_rescue() {
-        test::<ShadowedException>().expect_offense(indoc! {r#"
+    fn accepts_broad_before_narrow_broken_by_unknown() {
+        // RuboCop only compares consecutive groups: an intervening unknown
+        // (`nil`) group is `none?` and counts as sorted, so the earlier
+        // `StandardError` does not shadow the later `RuntimeError`.
+        test::<ShadowedException>().expect_no_offenses(indoc! {r#"
             begin
               something
             rescue StandardError
-            ^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
               handle_standard_error
             rescue UnknownException
               handle_unknown
             rescue RuntimeError
               handle_runtime_error
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_exception_before_unknown() {
+        // `Exception` in an earlier group always shadows, even unknowns.
+        test::<ShadowedException>().expect_offense(indoc! {r#"
+            begin
+              a
+            rescue Exception
+            ^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+              b
+            rescue UnknownException
+              c
             end
         "#});
     }
@@ -263,6 +458,20 @@ mod tests {
                   foo
                 end
             "#});
+    }
+
+    #[test]
+    fn flags_exception_with_unknown_in_same_rescue() {
+        // `Exception` with any sibling in one group always flags, even when
+        // the sibling is unresolvable.
+        test::<ShadowedException>().expect_offense(indoc! {r#"
+            begin
+              something
+            rescue NonStandardError, Exception
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+              handle_error
+            end
+        "#});
     }
 
     #[test]
@@ -316,8 +525,9 @@ mod tests {
 
     #[test]
     fn accepts_duplicate_errno_in_one_group() {
-        // Even identical `Errno::*` constants do not shadow (their `<=>` is
-        // nil), unlike duplicate `NameError`. Clean.
+        // Even identical `Errno::*` constants do not shadow (their `Errno`
+        // codes compare equal, excluding the pair), unlike duplicate
+        // `NameError`. Clean.
         test::<ShadowedException>().expect_no_offenses(indoc! {r#"
             begin
               foo
@@ -356,6 +566,152 @@ mod tests {
               a
             rescue Errno::ENOENT
               b
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_builtin_hierarchy_beyond_core_ten() {
+        // The static table covers core built-ins beyond the original ten:
+        // `IOError` is the parent of `EOFError`, `StandardError` the parent
+        // of `IOError`, and `Timeout::Error`/`FrozenError` sit under
+        // `RuntimeError`.
+        test::<ShadowedException>()
+            .expect_offense(indoc! {r#"
+                begin
+                  something
+                rescue IOError
+                ^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+                  a
+                rescue EOFError
+                  b
+                end
+            "#})
+            .expect_offense(indoc! {r#"
+                begin
+                  something
+                rescue StandardError, IOError
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+                  foo
+                end
+            "#})
+            .expect_offense(indoc! {r#"
+                begin
+                  something
+                rescue RuntimeError
+                ^^^^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+                  a
+                rescue Timeout::Error
+                  b
+                end
+            "#});
+    }
+
+    #[test]
+    fn accepts_narrow_before_broad_and_unrelated_chains() {
+        test::<ShadowedException>()
+            .expect_no_offenses(indoc! {r#"
+                begin
+                  something
+                rescue EOFError
+                  a
+                rescue IOError
+                  b
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                begin
+                  a
+                rescue ArgumentError
+                  b
+                rescue Interrupt
+                  c
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                begin
+                  a
+                rescue Interrupt
+                  b
+                rescue ArgumentError
+                  c
+                end
+            "#});
+    }
+
+    #[test]
+    fn accepts_duplicates_across_groups_but_flags_same_group() {
+        // Identical classes across consecutive groups are `0 <= 0` sorted in
+        // RuboCop, so only same-group duplicates flag.
+        test::<ShadowedException>().expect_no_offenses(indoc! {r#"
+            begin
+              something
+            rescue NameError
+              a
+            rescue NameError
+              b
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_splat_and_unknown_shapes() {
+        test::<ShadowedException>()
+            .expect_no_offenses(indoc! {r#"
+                begin
+                  a
+                rescue *FOO
+                  b
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                begin
+                  a
+                rescue *FOO
+                  b
+                rescue *BAR
+                  c
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                begin
+                  a
+                rescue StandardError
+                  b
+                rescue *BAR
+                  c
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                begin
+                  a
+                rescue StandardError
+                  b
+                rescue UnknownException
+                  c
+                end
+            "#})
+            .expect_no_offenses(indoc! {r#"
+                begin
+                  a
+                rescue foo
+                  b
+                rescue [bar]
+                  c
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_exception_before_splat() {
+        test::<ShadowedException>().expect_offense(indoc! {r#"
+            begin
+              a
+            rescue Exception
+            ^^^^^^^^^^^^^^^^ Do not shadow rescued Exceptions.
+              b
+            rescue *BAR
+              c
             end
         "#});
     }
