@@ -1497,6 +1497,24 @@ impl Translator {
             return self.builder.push(NodeKind::Begin(list), range);
         }
 
+        // Bare `alias` has distinct Prism nodes for method and global-variable
+        // aliases. Preserve the parser-shaped Alias node for both; cops such as
+        // Naming/MethodName can then inspect only symbolic method names.
+        if let Some(alias) = node.as_alias_method_node() {
+            let new_name = self.translate_node(&alias.new_name());
+            let old_name = self.translate_node(&alias.old_name());
+            return self
+                .builder
+                .push(NodeKind::Alias { new_name, old_name }, range);
+        }
+        if let Some(alias) = node.as_alias_global_variable_node() {
+            let new_name = self.translate_node(&alias.new_name());
+            let old_name = self.translate_node(&alias.old_name());
+            return self
+                .builder
+                .push(NodeKind::Alias { new_name, old_name }, range);
+        }
+
         // Task 17 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
     }
@@ -3375,6 +3393,30 @@ mod tests {
             }
             other => panic!("expected RangeExpr, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn translates_method_and_global_aliases() {
+        let method = translate("alias badName old_name", "t.rb");
+        let NodeKind::Alias { new_name, old_name } = method.kind(method.root()) else {
+            panic!("expected Alias, got {:?}", method.kind(method.root()));
+        };
+        assert!(matches!(method.kind(*new_name), NodeKind::Sym(_)));
+        assert!(matches!(method.kind(*old_name), NodeKind::Sym(_)));
+        assert_eq!(method.raw_source(method.range(*new_name)), "badName");
+        assert_eq!(method.raw_source(method.range(*old_name)), "old_name");
+
+        let global = translate("alias $new $old", "t.rb");
+        let NodeKind::Alias { new_name, old_name } = global.kind(global.root()) else {
+            panic!(
+                "expected global Alias, got {:?}",
+                global.kind(global.root())
+            );
+        };
+        assert!(matches!(global.kind(*new_name), NodeKind::Gvar(_)));
+        assert!(matches!(global.kind(*old_name), NodeKind::Gvar(_)));
+        assert_eq!(global.raw_source(global.range(*new_name)), "$new");
+        assert_eq!(global.raw_source(global.range(*old_name)), "$old");
     }
 
     #[test]
