@@ -271,6 +271,7 @@ mod tests {
             config_disabled_cops: std::ptr::null(),
             config_disabled_cops_len: 0,
             block_forwarding_explicit: false,
+            block_body_empty_lines: false,
         }
     }
 

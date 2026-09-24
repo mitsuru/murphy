@@ -841,6 +841,7 @@ impl MurphyConfig {
             active_support_extensions_enabled: self.active_support_extensions_enabled,
             indentation_width: self.resolved_indentation_width(),
             block_forwarding_explicit: self.resolved_block_forwarding_explicit(),
+            block_body_empty_lines: self.resolved_block_body_empty_lines(),
         }
     }
 
@@ -860,6 +861,32 @@ impl MurphyConfig {
             .or_else(|| style(self.base_defaults.cop_rules.get(COP).map(|r| &r.options)))
             .as_deref()
             == Some("explicit")
+    }
+
+    /// RuboCop's `config.for_enabled_cop('Layout/EmptyLinesAroundBlockBody')`
+    /// `['EnforcedStyle']` resolved for this config: `true` when the style is
+    /// `empty_lines`, else `false` (RuboCop's `no_empty_lines` default).
+    /// Mirrors `for_enabled_cop` (not `for_cop`): when the cop is disabled the
+    /// lookup yields no style, so this returns `true` (treated as `empty_lines`,
+    /// i.e. the in-block guards are skipped). Read by
+    /// `Layout/EmptyLinesAroundAccessModifier` via `Cx::block_body_empty_lines()`
+    /// (murphy-xjua).
+    fn resolved_block_body_empty_lines(&self) -> bool {
+        const COP: &str = "Layout/EmptyLinesAroundBlockBody";
+        // `for_enabled_cop`: disabled cop yields no style → `empty_lines`
+        // (guards skipped), matching RuboCop's `nil == 'no_empty_lines'` → false.
+        if !self.cop_enabled(COP) {
+            return true;
+        }
+        let style = |opts: Option<&BTreeMap<String, serde_json::Value>>| {
+            opts.and_then(|o| o.get("EnforcedStyle"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        style(self.cops.rules.get(COP).map(|r| &r.options))
+            .or_else(|| style(self.base_defaults.cop_rules.get(COP).map(|r| &r.options)))
+            .as_deref()
+            == Some("empty_lines")
     }
 
     /// RuboCop's `config.for_cop('Layout/IndentationWidth')['Width']` resolved
@@ -1550,6 +1577,54 @@ mod tests {
         )
         .expect("config parses");
         assert!(!cfg.allcops_context().block_forwarding_explicit);
+    }
+
+    #[test]
+    fn allcops_context_resolves_block_body_empty_lines() {
+        // User `EnforcedStyle: empty_lines` flows into the context (drives
+        // `Layout/EmptyLinesAroundAccessModifier` in-block guards, murphy-xjua).
+        let cfg = MurphyConfig::from_yaml_str(
+            "Layout/EmptyLinesAroundBlockBody:\n  EnforcedStyle: empty_lines\n",
+        )
+        .expect("config parses");
+        assert!(cfg.allcops_context().block_body_empty_lines);
+
+        // Explicit `no_empty_lines` resolves to false.
+        let cfg = MurphyConfig::from_yaml_str(
+            "Layout/EmptyLinesAroundBlockBody:\n  EnforcedStyle: no_empty_lines\n",
+        )
+        .expect("config parses");
+        assert!(!cfg.allcops_context().block_body_empty_lines);
+
+        // Unconfigured -> RuboCop's `no_empty_lines` default (false).
+        // NOTE: empty config has no bundled defaults here; with real
+        // `base_defaults` (default.yml) the bundled `no_empty_lines` also
+        // resolves to false — covered by the `with_defaults` case below.
+        let cfg = MurphyConfig::from_yaml_str("").expect("empty config parses");
+        assert!(!cfg.allcops_context().block_body_empty_lines);
+
+        // Bundled default `empty_lines` is honoured when user does not set it.
+        let cfg = MurphyConfig::with_defaults(
+            "",
+            "Layout/EmptyLinesAroundBlockBody:\n  EnforcedStyle: empty_lines\n",
+        )
+        .expect("config parses");
+        assert!(cfg.allcops_context().block_body_empty_lines);
+
+        // User `no_empty_lines` overrides a bundled `empty_lines` default.
+        let cfg = MurphyConfig::with_defaults(
+            "Layout/EmptyLinesAroundBlockBody:\n  EnforcedStyle: no_empty_lines\n",
+            "Layout/EmptyLinesAroundBlockBody:\n  EnforcedStyle: empty_lines\n",
+        )
+        .expect("config parses");
+        assert!(!cfg.allcops_context().block_body_empty_lines);
+
+        // Disabled cop → `for_enabled_cop` yields no style → treated as
+        // `empty_lines` (true), matching RuboCop's `nil == 'no_empty_lines'`.
+        let cfg =
+            MurphyConfig::from_yaml_str("Layout/EmptyLinesAroundBlockBody:\n  Enabled: false\n")
+                .expect("config parses");
+        assert!(cfg.allcops_context().block_body_empty_lines);
     }
 
     #[test]

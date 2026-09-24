@@ -231,6 +231,7 @@ fn build_cx_raw(
         config_disabled_cops: config_disabled_cops.as_ptr(),
         config_disabled_cops_len: config_disabled_cops.len(),
         block_forwarding_explicit: ctx.block_forwarding_explicit,
+        block_body_empty_lines: ctx.block_body_empty_lines,
     }
 }
 
@@ -716,6 +717,69 @@ mod tests {
         );
 
         assert!(!BLOCK_FORWARDING_EXPLICIT_SEEN.load(Ordering::SeqCst));
+    }
+
+    // Per-test atomic for the murphy-xjua cross-cop signal.
+    static BLOCK_BODY_EMPTY_LINES_SEEN: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    unsafe extern "C" fn block_body_empty_lines_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let cx = unsafe { &*cx };
+        BLOCK_BODY_EMPTY_LINES_SEEN.store(cx.block_body_empty_lines, Ordering::SeqCst);
+        0
+    }
+    static BLOCK_BODY_EMPTY_LINES_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/BlockBodyEmptyLines"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: block_body_empty_lines_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_block_body_empty_lines_to_cx_raw() {
+        // The resolved `Layout/EmptyLinesAroundBlockBody.EnforcedStyle` flag
+        // threaded through the context reaches the cop's `CxRaw` (murphy-xjua).
+        BLOCK_BODY_EMPTY_LINES_SEEN.store(false, Ordering::SeqCst);
+        let ast = ast_nil_and_int();
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_context(
+            &ast,
+            &[&BLOCK_BODY_EMPTY_LINES_COP],
+            &mut sink,
+            AllCopsContext {
+                block_body_empty_lines: true,
+                ..AllCopsContext::default()
+            },
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(BLOCK_BODY_EMPTY_LINES_SEEN.load(Ordering::SeqCst));
+
+        // And the default (false) is faithfully threaded too.
+        BLOCK_BODY_EMPTY_LINES_SEEN.store(true, Ordering::SeqCst);
+        let mut sink = OffenseSink::new("t.rb");
+        run_cops_with_options_and_context(
+            &ast,
+            &[&BLOCK_BODY_EMPTY_LINES_COP],
+            &mut sink,
+            AllCopsContext::default(),
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(!BLOCK_BODY_EMPTY_LINES_SEEN.load(Ordering::SeqCst));
     }
 
     // (1) DispatchIndex correctly buckets the arena's nodes by tag.

@@ -6,29 +6,22 @@
 //! ```murphy-parity
 //! upstream: rubocop
 //! upstream_cop: Layout/EmptyLinesAroundAccessModifier
-//! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues: [murphy-xjua]
+//! upstream_version_checked: 1.87.0
+//! status: complete
+//! gap_issues: []
 //! notes: >
 //!   Ports `on_send` plus the `around`/`only_before` `EnforcedStyle`
 //!   helpers. RuboCop tracks the enclosing class/module/sclass and block
 //!   via per-file ivars set in `on_class`/`on_module`/`on_sclass`/`on_block`;
 //!   Murphy is stateless and derives those from the modifier's nearest
 //!   enclosing ancestors (`cx.parent` walk). Class/module/sclass-bodied
-//!   modifiers take the simple path; in-block modifiers honour the
-//!   `no_empty_lines` default of `Layout/EmptyLinesAroundBlockBody`
-//!   (first-child suppresses the before-insert, last-child suppresses the
-//!   after-insert). Messages match RuboCop's four context-dependent
-//!   strings. Autocorrect inserts/removes blank lines per style.
-//!   GAP (murphy-xjua): the cross-cop config lookup
-//!   (`no_empty_lines_around_block_body?`) is NOT read dynamically — the
-//!   single-surface ABI gives a cop only its own options, so this cop
-//!   assumes `Layout/EmptyLinesAroundBlockBody`'s default `no_empty_lines`.
-//!   Diverges only when that cop is configured to `empty_lines` AND the
-//!   modifier sits inside a `do…end`/`{}` block. Closing this gap requires a
-//!   cross-cop config-read facility on the `Cx` surface, which is an ABI
-//!   change outside cop-port scope (tracked in murphy-ilrx / murphy-y3h2); the
-//!   cop is already as faithful as the current single-surface ABI permits.
+//!   modifiers take the simple path; in-block modifiers read
+//!   `Layout/EmptyLinesAroundBlockBody.EnforcedStyle` dynamically via
+//!   `Cx::no_empty_lines_around_block_body()` (murphy-xjua, murphy-bgd8
+//!   pattern: host resolves `for_enabled_cop` into `AllCopsContext` and
+//!   threads it into `CxRaw` without a numeric ABI bump). Messages match
+//!   RuboCop's four context-dependent strings. Autocorrect inserts/removes
+//!   blank lines per style.
 //! ```
 //!
 //! ## Algorithm
@@ -328,10 +321,9 @@ fn should_insert_line_before(node: NodeId, ctx: &Context, cx: &Cx<'_>) -> bool {
         return false;
     }
     // `return true unless inside_block? && no_empty_lines_around_block_body?`
-    // `no_empty_lines_around_block_body?` is assumed true (the upstream
-    // default). So when the modifier is inside a block, fall through to the
-    // begin/first-child guard.
-    if !inside_block(node, cx) {
+    // — the sibling `Layout/EmptyLinesAroundBlockBody.EnforcedStyle` is read
+    // dynamically via `Cx::no_empty_lines_around_block_body()` (murphy-xjua).
+    if !inside_block(node, cx) || !cx.no_empty_lines_around_block_body() {
         return true;
     }
     // `return true unless node.parent.begin_type?`
@@ -347,7 +339,9 @@ fn should_insert_line_before(node: NodeId, ctx: &Context, cx: &Cx<'_>) -> bool {
 
 /// `should_insert_line_after?`
 fn should_insert_line_after(node: NodeId, cx: &Cx<'_>) -> bool {
-    if !inside_block(node, cx) {
+    // `return true unless inside_block? && no_empty_lines_around_block_body?`
+    // — dynamic sibling read (murphy-xjua); see `should_insert_line_before?`.
+    if !inside_block(node, cx) || !cx.no_empty_lines_around_block_body() {
         return true;
     }
     let Some(parent) = cx.parent(node).get() else {
@@ -643,6 +637,69 @@ mod tests {
                 );
             }
         }
+    }
+    // ── murphy-xjua: dynamic Layout/EmptyLinesAroundBlockBody.EnforcedStyle ──
+
+    /// With the default (`no_empty_lines`) sibling style, a modifier at block
+    /// tail suppresses the after-insert (1 edit). This is the baseline covered
+    /// by `around_style_block_tail_correction_reaches_fixpoint` above.
+    #[test]
+    fn empty_lines_block_body_inserts_after_at_block_tail() {
+        // `Class.new do … private` at block tail: with
+        // `EmptyLinesAroundBlockBody: empty_lines`, both before- and
+        // after-inserts fire (RuboCop's `should_insert_line_after?` returns
+        // true when `no_empty_lines_around_block_body?` is false).
+        let src = "Class.new do\n  def bar; end\n  private\nend\n";
+        let result =
+            murphy_plugin_api::test_support::run_cop_with_context_and_edits::<
+                EmptyLinesAroundAccessModifier,
+            >(src, murphy_plugin_api::AllCopsContext {
+                block_body_empty_lines: true,
+                ..murphy_plugin_api::AllCopsContext::default()
+            });
+        assert_eq!(result.offenses.len(), 1, "got {:?}", result.offenses);
+        assert_eq!(result.edits.len(), 2, "got {:?}", result.edits);
+        let mut actual = src.to_owned();
+        for edit in result.edits.iter().rev() {
+            actual.replace_range(
+                edit.range.start as usize..edit.range.end as usize,
+                &edit.replacement,
+            );
+        }
+        assert_eq!(
+            actual,
+            "Class.new do\n  def bar; end\n\n  private\n\nend\n"
+        );
+    }
+
+    #[test]
+    fn no_empty_lines_block_body_suppresses_after_at_block_tail() {
+        // Explicit default context: same source as above, but with
+        // `no_empty_lines` (the default) the after-insert is suppressed.
+        let src = "Class.new do\n  def bar; end\n  private\nend\n";
+        let result =
+            murphy_plugin_api::test_support::run_cop_with_context_and_edits::<
+                EmptyLinesAroundAccessModifier,
+            >(src, murphy_plugin_api::AllCopsContext::default());
+        assert_eq!(result.offenses.len(), 1, "got {:?}", result.offenses);
+        assert_eq!(result.edits.len(), 1, "got {:?}", result.edits);
+    }
+
+    #[test]
+    fn tester_with_block_body_empty_lines_matches_context_helper() {
+        // `Tester::with_block_body_empty_lines(true)` threads the same flag.
+        use murphy_plugin_api::test_support::test;
+        // Offense detection is identical; the difference is only in edits, so
+        // assert via the context helper that the tester path observes the flag
+        // without error (no offense when blanks already surround the modifier).
+        test::<EmptyLinesAroundAccessModifier>()
+            .with_block_body_empty_lines(true)
+            .expect_no_offenses(
+                "Class.new do\n  def bar; end\n\n  private\n\nend\n",
+            );
+        test::<EmptyLinesAroundAccessModifier>()
+            .with_block_body_empty_lines(false)
+            .expect_no_offenses("class Foo\n  def bar; end\n\n  private\n\n  def baz; end\nend\n");
     }
 }
 
