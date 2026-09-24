@@ -25,6 +25,50 @@ fn formats_human_output_with_progress_and_details() {
 }
 
 #[test]
+fn formats_multiple_human_locations_for_one_file_consistently() {
+    let path = std::env::temp_dir().join(format!(
+        "murphy-reporting-line-column-{}.rb",
+        std::process::id()
+    ));
+    std::fs::write(&path, "あ\nbar\n").expect("write source");
+    let file = path.to_string_lossy().into_owned();
+    let files = vec![file.clone()];
+    let offenses = vec![
+        Offense::new(
+            &file,
+            "Lint/First",
+            Range {
+                start_offset: 0,
+                end_offset: 1,
+            },
+            Severity::Warning,
+            "first offense",
+        ),
+        Offense::new(
+            &file,
+            "Lint/Second",
+            Range {
+                start_offset: 5,
+                end_offset: 6,
+            },
+            Severity::Warning,
+            "second offense",
+        ),
+    ];
+
+    let output = format_lint_output(&offenses, &files, OutputFormat::Human).expect("format human");
+    assert!(output.contains(&format!("{file}:1:1: C: Lint/First: first offense")));
+    // Columns are byte-based: the Japanese character occupies three bytes.
+    assert!(output.contains(&format!("{file}:2:2: C: Lint/Second: second offense")));
+    assert_eq!(
+        output,
+        format_lint_output(&offenses, &files, OutputFormat::Human).expect("format human again")
+    );
+
+    std::fs::remove_file(path).expect("remove source");
+}
+
+#[test]
 fn formats_progress_without_offense_details() {
     let offense = sample_offense();
 
