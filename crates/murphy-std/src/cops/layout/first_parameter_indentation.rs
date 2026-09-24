@@ -8,8 +8,7 @@
 //! upstream_cop: Layout/FirstParameterIndentation
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-4u8u
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `on_def`/`on_defs` via the `MultilineElementIndentation`
 //!   mixin's `check_first`. A method definition whose parameter list opens with
@@ -26,11 +25,24 @@
 //!   `configured_indentation_width` matches RuboCop: this cop's own
 //!   `IndentationWidth` override is honoured, and when unset the width falls
 //!   back to the run-wide resolved `Layout/IndentationWidth.Width` via
-//!   `cx.indentation_width()` (default 2) — murphy-kke2.
-//!   Known gaps versus RuboCop:
-//!   - The ambiguous/correct-style bookkeeping (`ambiguous_style_detected`,
-//!     `SupportedStyles` auto-detection) is not modelled; only the active
-//!     `EnforcedStyle` is enforced.
+//!   `cx.indentation_width()` (default 2) — murphy-kke2 (own override wins
+//!   over the cross-cop width; explicit `0` is honoured) — murphy-4u8u.
+//!   Ambiguous-style bookkeeping (`MultilineElementIndentation#check_first` /
+//!   `detected_styles_for_column`, `ambiguous_style_detected` /
+//!   `correct_style_detected` via `ConfigurableEnforcedStyle`) is modelled as
+//!   the pure `detected_styles` helper below: for this cop `left_parenthesis`
+//!   is always `nil` and `offset` always `0`, so a `consistent` hit also
+//!   reports `:special_inside_parentheses` (the mixin pushes it whenever
+//!   `left_parenthesis` is nil) and an `align_parentheses` hit reports only
+//!   itself — exactly as upstream computes. The *global* side of that
+//!   bookkeeping (`DetectedStyle` intersection across files,
+//!   `config_to_allow_offenses` for `--auto-gen-config`) only feeds
+//!   style-inference diagnostics and never changes which offenses fire, so it
+//!   is intentionally not persisted: Murphy is stateless per-file with no
+//!   `DisabledConfigFormatter` (same precedent as
+//!   `Layout/FirstArrayElementIndentation`, `Layout/CaseIndentation`, and
+//!   `Layout/SpaceAroundEqualsInParameterDefault`); only the active
+//!   `EnforcedStyle` is enforced.
 //! ```
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, Range, cop};
@@ -134,6 +146,20 @@ fn check(node: NodeId, cx: &Cx<'_>) {
     // (offset is always 0 for `on_def`).
     let expected_column = base_column + indentation_width;
 
+    // RuboCop's `check_first` bookkeeping (`detected_styles` /
+    // `ambiguous_style_detected` / `correct_style_detected`): model which
+    // styles the actual column satisfies. The result only feeds
+    // `--auto-gen-config` style inference and never changes whether an
+    // offense fires, so it is computed and intentionally discarded (Murphy is
+    // stateless per-file; no `DisabledConfigFormatter`). Kept as a named
+    // binding so the modelling is visible and unit-testable.
+    let _detected = detected_styles(
+        actual_column,
+        indentation_width,
+        first_non_whitespace_column(bytes, paren_line_start),
+        column_of(src, left_paren.start as usize),
+    );
+
     // `@column_delta = expected_column - actual_column`; offense iff non-zero.
     if expected_column == actual_column {
         return;
@@ -223,6 +249,50 @@ fn first_non_whitespace_byte(bytes: &[u8], line_start: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// Which `EnforcedStyle` values the actual column satisfies — RuboCop's
+/// `detected_styles_for_column` symbols for this cop. `SpecialInsideParentheses`
+/// is not in this cop's `SupportedStyles` (`[consistent, align_parentheses]`)
+/// but the shared mixin still reports it when `left_parenthesis` is nil, so it
+/// is modelled here for fidelity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectedStyle {
+    Consistent,
+    SpecialInsideParentheses,
+    AlignParentheses,
+}
+
+/// RuboCop's `MultilineElementIndentation#detected_styles_for_column`,
+/// specialized for `Layout/FirstParameterIndentation`: `check` always calls
+/// `check_first(first, left_brace = `(`, left_parenthesis = nil, offset = 0)`,
+/// so `base_column = actual_column - configured_indentation_width` and only
+/// the `left_brace` (`(`) column and its line's first-non-whitespace column
+/// participate. Mirrors upstream exactly:
+/// - `base == start_of_line` pushes `:consistent` *and*
+///   `:special_inside_parentheses` (the `unless left_parenthesis` branch —
+///   `left_parenthesis` is always nil here);
+/// - the `left_parenthesis.column + 1` branch never fires (nil);
+/// - `base == left_brace.column` pushes `:align_parentheses`
+///   (`brace_alignment_style`).
+fn detected_styles(
+    actual_column: usize,
+    indentation_width: usize,
+    start_of_line_column: usize,
+    paren_column: usize,
+) -> Vec<DetectedStyle> {
+    let base = actual_column as i64 - indentation_width as i64;
+    let mut styles = Vec::new();
+    if base == start_of_line_column as i64 {
+        styles.push(DetectedStyle::Consistent);
+        // `styles << :special_inside_parentheses unless left_parenthesis` —
+        // `left_parenthesis` is always nil for this cop.
+        styles.push(DetectedStyle::SpecialInsideParentheses);
+    }
+    if base == paren_column as i64 {
+        styles.push(DetectedStyle::AlignParentheses);
+    }
+    styles
 }
 
 #[cfg(test)]
@@ -352,6 +422,78 @@ mod tests {
             "#},
             "def self.some_method(\n  first_param,\nsecond_param)\n  123\nend\n",
         );
+    }
+
+    /// Own `IndentationWidth` wins over the run-wide
+    /// `Layout/IndentationWidth.Width` (murphy-4u8u): own 2 beats run-wide 4,
+    /// so 4-space indent is flagged with a 2-space message.
+    #[test]
+    fn own_override_wins_over_cross_cop_width() {
+        let opts = FirstParameterIndentationOptions {
+            enforced_style: FirstParameterIndentationStyle::Consistent,
+            indentation_width: Some(2),
+        };
+        test::<FirstParameterIndentation>()
+            .with_options(&opts)
+            .with_indentation_width(4)
+            .expect_correction(
+                indoc! {r#"
+                    def some_method(
+                        first_param,
+                        ^^^^^^^^^^^ Use 2 spaces for indentation in method args, relative to the start of the line where the left parenthesis is.
+                    second_param)
+                      123
+                    end
+                "#},
+                "def some_method(\n  first_param,\nsecond_param)\n  123\nend\n",
+            );
+    }
+
+    /// Explicit `IndentationWidth: 0` is honoured (not treated as unset):
+    /// base column 0 + 0 = 0, so a first parameter at column 0 is accepted.
+    #[test]
+    fn honors_zero_indentation_width() {
+        let opts = FirstParameterIndentationOptions {
+            enforced_style: FirstParameterIndentationStyle::Consistent,
+            indentation_width: Some(0),
+        };
+        test::<FirstParameterIndentation>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                def some_method(
+                first_param,
+                second_param)
+                  123
+                end
+            "#});
+    }
+
+    /// `detected_styles` models RuboCop's `detected_styles_for_column` for this
+    /// cop (`left_parenthesis` is always nil, offset always 0): a `consistent`
+    /// hit is ambiguous with `:special_inside_parentheses` (the mixin pushes
+    /// it whenever `left_parenthesis` is nil), exactly as upstream does.
+    #[test]
+    fn detected_styles_consistent_is_ambiguous() {
+        // `def some_method(`: `(` at column 15, start-of-line column 0.
+        // actual 2 with width 2 -> base 0 -> consistent (+ special_inside).
+        let styles = super::detected_styles(2, 2, 0, 15);
+        assert!(styles.contains(&super::DetectedStyle::Consistent));
+        assert!(styles.contains(&super::DetectedStyle::SpecialInsideParentheses));
+        assert!(!styles.contains(&super::DetectedStyle::AlignParentheses));
+    }
+
+    #[test]
+    fn detected_styles_align_parentheses() {
+        // actual 17 with width 2 -> base 15 -> align_parentheses only.
+        let styles = super::detected_styles(17, 2, 0, 15);
+        assert_eq!(styles, vec![super::DetectedStyle::AlignParentheses]);
+    }
+
+    #[test]
+    fn detected_styles_no_match() {
+        // actual 0 with width 2 -> base -2 matches neither base.
+        let styles = super::detected_styles(0, 2, 0, 15);
+        assert!(styles.is_empty());
     }
 }
 
