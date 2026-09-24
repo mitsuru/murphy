@@ -6,8 +6,8 @@
 //! upstream: rubocop
 //! upstream_cop: Style/ColonMethodCall
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues: [murphy-nweq]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Uses source-text scanning to detect the `::` separator since Murphy's
 //!   Send node does not preserve the double-colon vs dot distinction. The
@@ -24,11 +24,11 @@
 //!   RuboCop's `/\A[A-Z]/`. `autocorrect_incompatible_with [RedundantSelf]`
 //!   is corrector-ordering metadata with no expression in Murphy's
 //!   single-cop harness.
-//!   Residual gap (murphy-nweq): RuboCop's pattern is `(const nil? :Java)`
-//!   — nil scope strictly. Murphy's parser collapses the leading-`::` cbase
-//!   scope to `None` for receiver constants, so `::Java::foo` is
-//!   indistinguishable from `Java::foo` and is wrongly suppressed where
-//!   RuboCop flags it. Affects only top-level-qualified `Java` interop.
+//!   Cbase distinction (murphy-nweq): RuboCop's pattern is `(const nil? :Java)`
+//!   — nil scope strictly, so `::Java::foo` (cbase scope) does NOT match and
+//!   is flagged. Murphy's parser collapses the leading-`::` cbase scope to
+//!   `None` for receiver constants, so the guard re-checks the receiver's
+//!   raw source for a leading `::` and only suppresses the bare `Java` form.
 //! ```
 
 use murphy_plugin_api::{Cx, NodeId, Range, cop, def_node_matcher};
@@ -40,8 +40,9 @@ const MSG: &str = "Do not use `::` for method calls.";
 // the bare `Java` const AND which takes no arguments (the `Java::int`
 // constructor shape). RuboCop's pattern is a direct AST predicate on the
 // current Send — no receiver-chain walk — so the check is O(1). The nil-scope
-// match is deliberate; Murphy's parser collapses the cbase scope to `None`,
-// so `::Java::foo` slips through (parity gap murphy-nweq).
+// match is strict: `::Java` (cbase scope) does NOT match. Murphy's parser
+// collapses the cbase scope to `None`, so the caller re-checks the receiver's
+// raw source for a leading `::` (murphy-nweq).
 def_node_matcher!(java_type_node, "(send (const nil? :Java) _)");
 
 #[derive(Default)]
@@ -75,7 +76,13 @@ impl ColonMethodCall {
             return;
         }
         // Java interop guard: `(send (const nil? :Java) _)`.
-        if java_type_node(node, cx) {
+        // RuboCop's `nil?` is strict nil scope — `::Java` (cbase) does NOT
+        // match. Murphy's parser collapses the cbase scope to `None`, so
+        // distinguish via the receiver's raw source (mirrors BigDecimalNew
+        // and RedundantConstantBase cbase handling).
+        if java_type_node(node, cx)
+            && !cx.raw_source(cx.range(recv_id)).starts_with("::")
+        {
             return;
         }
         let colon_range = Range {
@@ -266,15 +273,47 @@ mod tests {
     }
 
     #[test]
-    fn cbase_java_receiver_parser_limited() {
+    fn flags_cbase_java_receiver() {
         // RuboCop's pattern is `(const nil? :Java)` — nil scope strictly, so
-        // `::Java::foo` (an explicit top-level `::Java`) has cbase scope and
-        // does NOT match; RuboCop flags it. Murphy's parser collapses the
-        // leading-`::` cbase scope to `None` for receiver constants, so
-        // `::Java` is indistinguishable from a bare `Java` const here and
-        // the Java-interop guard suppresses the offense.
-        // Residual parity gap tracked in murphy-nweq.
-        test::<ColonMethodCall>().expect_no_offenses("::Java::foo\n");
+        // `::Java::foo` (cbase scope) does NOT match `java_type_node?` and is
+        // flagged. Murphy's parser collapses the cbase scope to `None`, so
+        // the guard distinguishes via the receiver's leading `::` in source
+        // (murphy-nweq). Autocorrect keeps the cbase and only replaces the
+        // call operator: `::Java::foo` → `::Java.foo`.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                ::Java::foo
+                      ^^ Do not use `::` for method calls.
+            "},
+            "::Java.foo\n",
+        );
+    }
+
+    #[test]
+    fn flags_cbase_java_receiver_with_arguments() {
+        // `::Java::foo(x)` — cbase `::Java` never matches `java_type_node?`
+        // (both scope and args differ), so flagged like the bare form with args.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                ::Java::foo(x)
+                      ^^ Do not use `::` for method calls.
+            "},
+            "::Java.foo(x)\n",
+        );
+    }
+
+    #[test]
+    fn flags_cbase_java_constructor_inner() {
+        // `::Java::int.new(1)` — the inner `::Java::int` has a cbase receiver
+        // so it does NOT match `java_type_node?` and is flagged; the outer
+        // `.new(1)` uses `.` so it is untouched.
+        test::<ColonMethodCall>().expect_correction(
+            indoc! {"
+                ::Java::int.new(1)
+                      ^^ Do not use `::` for method calls.
+            "},
+            "::Java.int.new(1)\n",
+        );
     }
 }
 murphy_plugin_api::submit_cop!(ColonMethodCall);
