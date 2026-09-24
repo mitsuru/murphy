@@ -17,7 +17,7 @@ pub use translate::translate;
 /// **`NodeKind` の variant 追加・削除・並べ替えに伴って必ず bump。**
 /// バイナリ形式そのものを変える場合は代わりに
 /// [`murphy_ast::FORMAT_VERSION`] を bump する。
-pub const LAYER_VERSION: u32 = 5;
+pub const LAYER_VERSION: u32 = 6;
 
 #[cfg(test)]
 mod lib_tests {
@@ -26,8 +26,8 @@ mod lib_tests {
     #[test]
     fn layer_version_is_initialized() {
         // Anchors the current value. Bump alongside any prism→arena
-        // mapping change so cache invalidation kicks in. Last bumped to 5
-        // when Prism alias nodes started mapping to NodeKind::Alias.
-        assert_eq!(LAYER_VERSION, 5);
+        // mapping change so cache invalidation kicks in. Bumped to 6 when
+        // parenthesized patterns started using pattern-context lowering.
+        assert_eq!(LAYER_VERSION, 6);
     }
 }
