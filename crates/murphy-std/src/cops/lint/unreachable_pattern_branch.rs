@@ -11,8 +11,8 @@
 //! version_added: "1.85"
 //! safe: true
 //! supports_autocorrect: false
-//! status: partial
-//! gap_issues: [murphy-e7bz.19.1]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Faithful port of RuboCop's `on_case_match`: once an unguarded catch-all
 //!   `in` pattern is seen, every later `in` branch is flagged, and a trailing
@@ -26,13 +26,12 @@
 //!   (cf. `duplicate_branch`): the `in <pattern>` first line, or the `else`
 //!   keyword — matching RuboCop's single-line carets for these spec cases.
 //!
-//!   KNOWN GAP (parser limitation, not subsumption logic): Murphy's parser
-//!   lowers ANY parenthesized `in` pattern — `in (_)`, `in (_ | Integer)`,
-//!   `in (_ | Integer) => y` — to `Begin([Unknown])`, discarding the inner
-//!   pattern structure. The inner catch-all is therefore invisible, so the one
-//!   RuboCop spec case `in (_ | Integer) => y` does not fire. Tracked by
-//!   murphy-e7bz.19.1; the `catch_all_pattern?` recursion is already written to
-//!   handle it once the parser preserves parenthesized pattern internals.
+//!   The translator preserves parenthesized pattern internals in pattern
+//!   context (`MatchVar`, `MatchAlt`, etc.) while retaining the `Begin` source
+//!   wrapper. This makes the upstream catch-all case `in (_ | Integer) => y`
+//!   visible without changing ordinary expression-parentheses lowering.
+//!   Translation cache layer version is 6; the AST format and plugin ABI are
+//!   unchanged.
 //! ```
 //!
 //! ## Matched shapes
@@ -112,9 +111,8 @@ fn catch_all_pattern(pattern: NodeId, cx: &Cx<'_>) -> bool {
         NodeKind::MatchAlt { left, right } => {
             catch_all_pattern(left, cx) || catch_all_pattern(right, cx)
         }
-        // Parenthesized pattern — recurse through the single wrapped child.
-        // (Murphy currently lowers parenthesized patterns to `Begin([Unknown])`,
-        // so this recursion is a no-op in practice; see the parity GAP note.)
+        // Parenthesized pattern — unwrap its Begin source wrapper and recurse
+        // through the pattern-context child preserved by the translator.
         NodeKind::Begin(_) => {
             let inner = crate::cops::util::unwrap_parenthesized(pattern, cx);
             inner != pattern && catch_all_pattern(inner, cx)
@@ -312,6 +310,56 @@ mod tests {
             in Integer
             ^^^^^^^^^^ Unreachable `in` pattern branch detected.
               handle_integer
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_parenthesized_capture_with_catch_all_alternative() {
+        test::<UnreachablePatternBranch>().expect_offense(indoc! {r#"
+            case value
+            in (_ | Integer) => y
+              handle_other
+            in String
+            ^^^^^^^^^ Unreachable `in` pattern branch detected.
+              handle_string
+            end
+        "#});
+    }
+
+    #[test]
+    fn flags_parenthesized_wildcard_pattern() {
+        test::<UnreachablePatternBranch>().expect_offense(indoc! {r#"
+            case value
+            in (_)
+              handle_other
+            in String
+            ^^^^^^^^^ Unreachable `in` pattern branch detected.
+              handle_string
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_parenthesized_specific_alternation() {
+        test::<UnreachablePatternBranch>().expect_no_offenses(indoc! {r#"
+            case value
+            in (Integer | String)
+              handle_value
+            in Symbol
+              handle_symbol
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_guarded_parenthesized_catch_all_alternation() {
+        test::<UnreachablePatternBranch>().expect_no_offenses(indoc! {r#"
+            case value
+            in (_ | Integer) if value.positive?
+              handle_positive
+            in String
+              handle_string
             end
         "#});
     }

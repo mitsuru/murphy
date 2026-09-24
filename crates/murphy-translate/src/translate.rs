@@ -1522,6 +1522,24 @@ impl Translator {
     /// Translate a pattern-matching pattern node (the thing after `in`).
     fn translate_pattern(&mut self, node: &prism::Node<'_>) -> NodeId {
         let range = Self::node_range(node);
+        if let Some(parentheses) = node.as_parentheses_node() {
+            // A parenthesized pattern still uses the Begin wrapper that models
+            // source parentheses, but its contents must be translated in
+            // pattern context (`LocalVariableTargetNode` is a MatchVar here).
+            let ids: Vec<NodeId> = match parentheses.body() {
+                None => vec![],
+                Some(body) => match body.as_statements_node() {
+                    Some(stmts) => stmts
+                        .body()
+                        .iter()
+                        .map(|pattern| self.translate_pattern(&pattern))
+                        .collect(),
+                    None => vec![self.translate_pattern(&body)],
+                },
+            };
+            let list = self.builder.push_list(&ids);
+            return self.builder.push(NodeKind::Begin(list), range);
+        }
         if let Some(ap) = node.as_array_pattern_node() {
             // parser-gem: `(array_pattern <elem>...)` or
             // `(array_pattern_with_tail <elem>...)` (trailing comma).
@@ -1743,7 +1761,8 @@ impl Translator {
             };
             return self.builder.push(NodeKind::Pair { key, value }, range);
         }
-        if node.as_array_pattern_node().is_some()
+        if node.as_parentheses_node().is_some()
+            || node.as_array_pattern_node().is_some()
             || node.as_hash_pattern_node().is_some()
             || node.as_find_pattern_node().is_some()
             || node.as_alternation_pattern_node().is_some()
@@ -4845,6 +4864,105 @@ mod tests {
     }
 
     // ── murphy-j1j2 PM-D: advanced patterns ──────────────────────────────────
+
+    #[test]
+    fn translates_parenthesized_capture_pattern_in_pattern_context() {
+        let ast = translate(
+            "case x\nin (_ | Integer) => y\n  y\nin String\n  nil\nend\n",
+            "t.rb",
+        );
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        let match_as = ast
+            .descendants(ast.root())
+            .chain([ast.root()])
+            .find(|&node| matches!(ast.kind(node), NodeKind::MatchAs { .. }))
+            .expect("parenthesized capture pattern");
+        let NodeKind::MatchAs { value, name } = ast.kind(match_as) else {
+            unreachable!();
+        };
+        assert!(matches!(ast.kind(*name), NodeKind::MatchVar(_)));
+        let NodeKind::Begin(_) = ast.kind(*value) else {
+            panic!("parenthesized pattern must retain its Begin wrapper: {sexp}");
+        };
+        let mut begin_children = ast.children(*value);
+        let alt = begin_children
+            .next()
+            .expect("parenthesized alternation child");
+        assert!(begin_children.next().is_none());
+        let NodeKind::MatchAlt { left, right } = ast.kind(alt) else {
+            panic!("parenthesized pattern must retain MatchAlt: {sexp}");
+        };
+        assert!(matches!(ast.kind(*left), NodeKind::MatchVar(_)));
+        assert!(matches!(ast.kind(*right), NodeKind::Const { .. }));
+        assert!(
+            !sexp.contains("(unknown)"),
+            "pattern internals were lost: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_parenthesized_wildcard_pattern() {
+        let ast = translate("case x\nin (_)\n  1\nin String\n  2\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(begin"),
+            "parentheses wrapper expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(match_var :_)"),
+            "wildcard binding expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "pattern internals were lost: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_parenthesized_pattern_nested_in_array_pattern() {
+        let ast = translate("case x\nin [(_ | Integer)]\n  1\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(array_pattern"),
+            "array pattern expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(begin"),
+            "parentheses wrapper expected: {sexp}"
+        );
+        assert!(sexp.contains("(match_alt"), "alternation expected: {sexp}");
+        assert!(
+            sexp.contains("(match_var :_)"),
+            "wildcard binding expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "pattern internals were lost: {sexp}"
+        );
+    }
+
+    #[test]
+    fn translates_parenthesized_pattern_nested_in_hash_pattern() {
+        let ast = translate("case x\nin {foo: (_ | Integer)}\n  1\nend\n", "t.rb");
+        let sexp = murphy_ast::ast_to_sexp(&ast);
+        assert!(
+            sexp.contains("(hash_pattern"),
+            "hash pattern expected: {sexp}"
+        );
+        assert!(
+            sexp.contains("(begin"),
+            "parentheses wrapper expected: {sexp}"
+        );
+        assert!(sexp.contains("(match_alt"), "alternation expected: {sexp}");
+        assert!(
+            sexp.contains("(match_var :_)"),
+            "wildcard binding expected: {sexp}"
+        );
+        assert!(
+            !sexp.contains("(unknown)"),
+            "pattern internals were lost: {sexp}"
+        );
+    }
 
     #[test]
     fn translates_capture_pattern_match_as() {
