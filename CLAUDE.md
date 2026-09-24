@@ -72,12 +72,21 @@ Topic-scoped guides under `.claude/rules/` (read on demand, not loaded into cont
 
 ## Worktree Setup
 
-New git worktrees (`.claude/worktrees/*`, `.worktrees/*`) need `mise trust` inside the worktree before tools are visible. mruby3-sys's `build.rs` invokes `make -C mruby` which requires Ruby; without `mise` activation, the script silently emits no `libmruby.a` and later test links fail with `-lmruby` not found.
+New git worktrees (`.claude/worktrees/*`, `.worktrees/*`) need `mise trust` for the new path before tools are visible. Each worktree path is a separate trust entry, and `mise.toml` carries an `[env]` section so it falls outside mise's "safe config" exemption — until trusted, `mise exec` / `mise activate` provide no toolchain and fail with `Config files ... are not trusted`. In non-interactive shells (agents, CI) there is no trust prompt, so the failure looks silent: `mise exec -- cargo build` runs without Ruby on `PATH`.
+
+mruby3-sys's `build.rs` invokes `make -C mruby` which requires Ruby; without `mise` activation, the script silently emits no `libmruby.a` and later test links fail with `-lmruby` not found.
 
 ```bash
-mise trust                       # one-time per worktree
+git worktree add .claude/worktrees/<name> -b fix/<name>  # then trust the new path
+mise trust .claude/worktrees/<name>      # one-time per worktree (or run `mise trust` inside it)
 eval "$(mise activate bash)"     # per shell — exposes ruby/etc.
 cargo clean -p mruby3-sys && cargo build  # if libmruby.a is missing
+```
+
+Or use the helper so trust is never skipped:
+
+```bash
+scripts/worktree-add.sh .claude/worktrees/<name> -b fix/<name>
 ```
 
 ## Test Parallelism
