@@ -1,5 +1,5 @@
-//! `Naming/MethodName` — enforce the configured style (`snake_case` /
-//! `camelCase`) for method definition names (`def` / `defs`).
+//! `Naming/MethodName` — enforce `snake_case` / `camelCase` for method names
+//! in definitions, aliases, and method-generating declarations.
 //!
 //! ## RuboCop parity
 //!
@@ -8,7 +8,7 @@
 //! upstream_cop: Naming/MethodName
 //! upstream_version_checked: 1.87.0
 //! status: partial
-//! gap_issues: [murphy-e7bz.68]
+//! gap_issues: [murphy-e7bz.73, murphy-e7bz.74]
 //! notes: >
 //!   Faithful port of RuboCop's `on_def` (aliased to `on_defs`):
 //!
@@ -55,16 +55,19 @@
 //!   but is kept verbatim so the port matches RuboCop's source. Verified
 //!   column-for-column against rubocop 1.87.0 for both styles.
 //!
-//!   Known gaps vs RuboCop:
-//!     * The `on_send` handler family is NOT ported (gap issue
-//!       murphy-e7bz.68): `define_method`/`define_singleton_method`
-//!       dynamic definitions, `Struct.new`/`Data.define` member names,
-//!       `alias_method`, and `attr_accessor`/`attr_reader`/`attr_writer` accessor
-//!       names. Only literal `def`/`defs` are checked.
-//!     * `class_emitter_method?` is NOT implemented: RuboCop treats
-//!       `def self.Foo` as valid when a sibling `class Foo` exists in the same
-//!       parent scope (verified: such a def gets NO offense in rubocop). Murphy
-//!       flags it. This is a rare construct.
+//!   The `on_send` handler family is ported: static literal names from
+//!   `define_method`/`define_singleton_method`, `Struct.new`/`Data.define`,
+//!   `alias_method`, and nil-receiver `attr`/`attr_reader`/`attr_writer`/
+//!   `attr_accessor` calls. Unsupported dynamic/interpolated names remain
+//!   ignored, matching RuboCop's node matchers. Attached-block send ranges are
+//!   trimmed to the call, not the block body.
+//!
+//!   Remaining gaps vs RuboCop:
+//!     * Bare `alias new_name old_name` is not handled yet (gap issue
+//!       murphy-e7bz.74).
+//!     * `class_emitter_method?` is not implemented (gap issue murphy-e7bz.73):
+//!       RuboCop accepts a singleton method whose name matches a sibling class
+//!       in the same parent scope; Murphy still applies the style regex.
 //!     * `[[:lower:]]`/`[[:upper:]]` are Unicode-aware in Ruby; the byte checks
 //!       here are ASCII-only (the same documented limitation `Naming/VariableName`
 //!       and `Naming/ConstantName` carry). `Naming/AsciiIdentifiers` already
@@ -159,32 +162,236 @@ impl MethodName {
             .into_iter()
             .chain(std::iter::once(cx.root()))
         {
-            // `def`/`defs` only — the on_send handler family (define_method,
-            // Struct.new, alias_method, attr_accessor) is out of scope.
-            let name = match *cx.kind(id) {
-                NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => cx.symbol_str(name),
-                _ => continue,
+            match *cx.kind(id) {
+                NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => {
+                    let name = cx.symbol_str(name);
+
+                    // `return if node.operator_method? || matches_allowed_pattern?(name)`.
+                    // Both are early returns BEFORE the forbidden check.
+                    if method_predicates::is_operator_method(name)
+                        || cx.matches_any_pattern(name, &opts.allowed_patterns)
+                    {
+                        continue;
+                    }
+
+                    let range = def_name_range(id, name, cx);
+
+                    if forbidden_name(name, &opts, cx) {
+                        let msg = format!("`{name}` {MSG_FORBIDDEN}");
+                        cx.emit_offense(range, &msg, None);
+                    } else if !opts.enforced_style.matches(name) {
+                        // `check_name`: valid_name? is the style regex only —
+                        // AllowedPatterns was already handled by the early return above.
+                        let msg = format!("Use {} for method names.", opts.enforced_style.as_str());
+                        cx.emit_offense(range, &msg, None);
+                    }
+                }
+                NodeKind::Send { .. } => check_send(id, &opts, cx),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// RuboCop's `on_send` handler family. These checks run in the same linear
+/// tree walk as `def`/`defs`; only target send selectors inspect their args.
+fn check_send(node: NodeId, opts: &Options, cx: &Cx<'_>) {
+    let Some(selector) = cx.method_name(node) else {
+        return;
+    };
+    let args = cx.call_arguments(node);
+
+    if matches!(selector, "define_method" | "define_singleton_method") {
+        let Some(&first) = args.first() else {
+            return;
+        };
+        let Some(name) = literal_method_name(first, cx) else {
+            return;
+        };
+        // RuboCop passes the send node here. Its style range spans the
+        // selector's argument tail; a forbidden-name offense narrows back to
+        // the first argument in `register_forbidden_name`.
+        check_dynamic_name(node, name, true, opts, cx);
+        return;
+    }
+
+    if selector == "new" && const_receiver_is(node, "Struct", cx) {
+        let first_member = usize::from(
+            args.first()
+                .is_some_and(|&arg| matches!(*cx.kind(arg), NodeKind::Str(_))),
+        );
+        for &member in &args[first_member..] {
+            if let Some(name) = literal_method_name(member, cx) {
+                check_dynamic_name(member, name, true, opts, cx);
+            }
+        }
+        return;
+    }
+
+    if selector == "define" && const_receiver_is(node, "Data", cx) {
+        for &member in args {
+            if let Some(name) = literal_method_name(member, cx) {
+                check_dynamic_name(member, name, true, opts, cx);
+            }
+        }
+        return;
+    }
+
+    if selector == "alias_method" {
+        if args.len() == 2
+            && let Some(name) = literal_method_name(args[0], cx)
+        {
+            // `handle_alias_method` passes the first literal node, unlike
+            // `handle_define_method`, so the style range is just that name.
+            check_dynamic_name(args[0], name, true, opts, cx);
+        }
+        return;
+    }
+
+    if cx.call_receiver(node).get().is_none()
+        && matches!(selector, "attr" | "attr_reader" | "attr_writer" | "attr_accessor")
+    {
+        check_attribute_accessor(node, args, opts, cx);
+    }
+}
+
+/// `new_struct?` / `define_data?`: only bare or top-level-qualified constants
+/// match RuboCop's `(const {nil? cbase} :Name)` pattern.
+fn const_receiver_is(node: NodeId, expected: &str, cx: &Cx<'_>) -> bool {
+    let Some(receiver) = cx.call_receiver(node).get() else {
+        return false;
+    };
+    match *cx.kind(receiver) {
+        NodeKind::Const { scope, name } if cx.symbol_str(name) == expected => match scope.get() {
+            None => true,
+            Some(scope) => matches!(*cx.kind(scope), NodeKind::Cbase),
+        },
+        _ => false,
+    }
+}
+
+/// Static method-name values accepted by RuboCop's `sym_name` / `str_name`
+/// matchers. Interpolated strings/symbols and other expressions are ignored.
+fn literal_method_name<'a>(node: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
+    match *cx.kind(node) {
+        NodeKind::Sym(name) => Some(cx.symbol_str(name)),
+        NodeKind::Str(value) => Some(cx.string_str(value)),
+        _ => None,
+    }
+}
+
+/// `handle_method_name`: AllowedPatterns wins over forbidden names; operator
+/// names are exempt only after the forbidden check. `node` is either a literal
+/// name or the `define_method` send, matching RuboCop's distinct ranges.
+fn check_dynamic_name(
+    node: NodeId,
+    name: &str,
+    operator_methods_exempt: bool,
+    opts: &Options,
+    cx: &Cx<'_>,
+) {
+    if cx.matches_any_pattern(name, &opts.allowed_patterns) {
+        return;
+    }
+
+    if forbidden_name(name, opts, cx) {
+        let (range, reported_name) = match *cx.kind(node) {
+            NodeKind::Sym(_) | NodeKind::Str(_) => (cx.range(node), name),
+            _ => match cx.first_argument(node).get() {
+                Some(first) => (
+                    cx.range(first),
+                    literal_method_name(first, cx).unwrap_or(name),
+                ),
+                None => (cx.range(node), name),
+            },
+        };
+        let msg = format!("`{reported_name}` {MSG_FORBIDDEN}");
+        cx.emit_offense(range, &msg, None);
+    } else if !(opts.enforced_style.matches(name)
+        || operator_methods_exempt && method_predicates::is_operator_method(name))
+    {
+        let msg = format!("Use {} for method names.", opts.enforced_style.as_str());
+        cx.emit_offense(range_position(node, cx), &msg, None);
+    }
+}
+
+/// `handle_attr_accessor`: each offending member calls `add_offense` on the
+/// same send/member range. Collapse identical reports here, as the RuboCop
+/// offense collection does, while preserving the peculiar last-member range
+/// used by `register_forbidden_name`.
+fn check_attribute_accessor(node: NodeId, args: &[NodeId], opts: &Options, cx: &Cx<'_>) {
+    let Some(&last_arg) = args.last() else {
+        return;
+    };
+    let style_range = range_position(node, cx);
+    let forbidden_range = cx.range(last_arg);
+    let forbidden_reported_name = literal_method_name(last_arg, cx).unwrap_or("");
+    let mut style_emitted = false;
+    let mut forbidden_emitted = false;
+
+    for &arg in args {
+        let Some(name) = literal_method_name(arg, cx) else {
+            continue;
+        };
+        if cx.matches_any_pattern(name, &opts.allowed_patterns) {
+            continue;
+        }
+
+        if forbidden_name(name, opts, cx) {
+            if !forbidden_emitted {
+                let msg = format!("`{forbidden_reported_name}` {MSG_FORBIDDEN}");
+                cx.emit_offense(forbidden_range, &msg, None);
+                forbidden_emitted = true;
+            }
+        } else if !opts.enforced_style.matches(name) && !style_emitted {
+            let msg = format!("Use {} for method names.", opts.enforced_style.as_str());
+            cx.emit_offense(style_range, &msg, None);
+            style_emitted = true;
+        }
+    }
+}
+
+/// RuboCop's `range_position`: selector end + one byte through the node end,
+/// or the whole node when it has no selector (literal method-name nodes).
+fn range_position(node: NodeId, cx: &Cx<'_>) -> Range {
+    let mut expression = cx.range(node);
+    if let Some(parent) = cx.parent(node).get() {
+        let is_attached_block = match *cx.kind(parent) {
+            NodeKind::Block { call, .. } => call == node,
+            NodeKind::Numblock { send, .. } | NodeKind::Itblock { send, .. } => send == node,
+            _ => false,
+        };
+        if is_attached_block {
+            // Prism gives the send the attached block's full expression range,
+            // but RuboCop's `on_send` node ends before `do` / `{`. Use `)`
+            // only when it directly follows this call's selector; after a space,
+            // it may instead close a grouped command-style argument.
+            let loc = cx.loc(node);
+            let selector = loc.name;
+            let opening_paren = loc.begin();
+            let has_call_parens = selector != Range::ZERO && opening_paren.start == selector.end;
+            let closing_paren = if has_call_parens {
+                loc.end()
+            } else {
+                Range::ZERO
             };
+            expression.end = if closing_paren != Range::ZERO {
+                closing_paren.end
+            } else if let Some(last_arg) = cx.call_arguments(node).last() {
+                cx.range(*last_arg).end
+            } else {
+                selector.end
+            };
+        }
+    }
 
-            // `return if node.operator_method? || matches_allowed_pattern?(name)`.
-            // Both are early returns BEFORE the forbidden check.
-            if method_predicates::is_operator_method(name)
-                || cx.matches_any_pattern(name, &opts.allowed_patterns)
-            {
-                continue;
-            }
-
-            let range = def_name_range(id, name, cx);
-
-            if forbidden_name(name, &opts, cx) {
-                let msg = format!("`{name}` {MSG_FORBIDDEN}");
-                cx.emit_offense(range, &msg, None);
-            } else if !opts.enforced_style.matches(name) {
-                // `check_name`: valid_name? is the style regex only —
-                // AllowedPatterns was already handled by the early return above.
-                let msg = format!("Use {} for method names.", opts.enforced_style.as_str());
-                cx.emit_offense(range, &msg, None);
-            }
+    let selector = cx.loc(node).name;
+    if selector == Range::ZERO {
+        expression
+    } else {
+        Range {
+            start: selector.end.saturating_add(1),
+            end: expression.end,
         }
     }
 }
@@ -428,6 +635,126 @@ mod tests {
             obj.fooBar
             barBaz = 1
         "#});
+    }
+
+    #[test]
+    fn flags_dynamic_definition_names() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            define_method :badName, :extraName
+                          ^^^^^^^^^^^^^^^^^^^^ Use snake_case for method names.
+            define_method :blockName do
+                          ^^^^^^^^^^ Use snake_case for method names.
+              true
+            end
+            define_method(:parenthesizedBlock) { true }
+                          ^^^^^^^^^^^^^^^^^^^^ Use snake_case for method names.
+            define_singleton_method("badSingletonName")
+                                    ^^^^^^^^^^^^^^^^^^^ Use snake_case for method names.
+        "#});
+    }
+
+    #[test]
+    fn flags_struct_and_data_member_names() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            Struct.new(:badStructName)
+                       ^^^^^^^^^^^^^^ Use snake_case for method names.
+            ::Struct.new("Record", :badMemberName)
+                                   ^^^^^^^^^^^^^^ Use snake_case for method names.
+            Data.define("badDataName")
+                        ^^^^^^^^^^^^^ Use snake_case for method names.
+        "#});
+    }
+
+    #[test]
+    fn flags_alias_method_name_only() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            alias_method :badAliasName, :old_name
+                         ^^^^^^^^^^^^^ Use snake_case for method names.
+        "#});
+    }
+
+    #[test]
+    fn flags_attr_macro_member_names() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            attr_accessor :badAccessorName, :badOtherAccessor
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use snake_case for method names.
+            attr_accessor (:foo), :badName do
+                          ^^^^^^^^^^^^^^^^ Use snake_case for method names.
+              nil
+            end
+            attr_reader :badReaderName
+                        ^^^^^^^^^^^^^^ Use snake_case for method names.
+            attr_writer :badWriterName
+                        ^^^^^^^^^^^^^^ Use snake_case for method names.
+            attr :badAttrName
+                 ^^^^^^^^^^^^ Use snake_case for method names.
+        "#});
+    }
+
+    #[test]
+    fn flags_forbidden_dynamic_names() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            define_method :__send__, :otherBadName
+                          ^^^^^^^^^ `__send__` is forbidden, use another method name instead.
+            alias_method :__id__, :old_name
+                         ^^^^^^^ `__id__` is forbidden, use another method name instead.
+        "#});
+    }
+
+    #[test]
+    fn forbidden_attr_macro_preserves_rubocop_last_member_range() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            attr_accessor :__send__, :ok_name
+                                     ^^^^^^^^ `ok_name` is forbidden, use another method name instead.
+        "#});
+    }
+
+    #[test]
+    fn operator_names_are_exempt_except_for_attribute_macros() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            define_method :[]
+            attr_accessor :[]
+                          ^^^ Use snake_case for method names.
+            alias_method :[], :old_name
+        "#});
+    }
+
+    #[test]
+    fn ignores_nonliteral_or_unmatched_dynamic_definitions() {
+        test::<MethodName>().expect_no_offenses(indoc! {r#"
+            define_method(method_name)
+            define_method(:"bad#{name}")
+            alias_method :badAliasName
+            alias_method :badAliasName, :old_name, :extra
+            Struct.new("badClassName")
+            Other::Struct.new(:badMemberName)
+            Other::Data.define(:badDataName)
+            obj.attr_accessor :badAccessorName
+            self.attr_reader(:badReaderName)
+            attr_accessor method_name
+        "#});
+    }
+
+    #[test]
+    fn dynamic_allowed_pattern_precedes_forbidden_and_style() {
+        let options = Options {
+            allowed_patterns: vec!["badName".to_string()],
+            forbidden_patterns: vec!["badName".to_string()],
+            ..opts(MethodNameStyle::SnakeCase)
+        };
+        test::<MethodName>()
+            .with_options(&options)
+            .expect_no_offenses("define_method :badName\n");
+    }
+
+    #[test]
+    fn dynamic_names_use_configured_camel_case_style() {
+        test::<MethodName>()
+            .with_options(&opts(MethodNameStyle::CamelCase))
+            .expect_offense(indoc! {r#"
+                Data.define(:snake_name)
+                            ^^^^^^^^^^^ Use camelCase for method names.
+            "#});
     }
 
     // --- ForbiddenIdentifiers (default __id__/__send__) ---
