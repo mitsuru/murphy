@@ -13,7 +13,8 @@
 //!   Ported from RuboCop Lint/OrderedMagicComments.  Checks that encoding
 //!   magic comments (encoding/coding) appear before frozen_string_literal,
 //!   shareable_constant_value, rbs_inline, and typed magic comments in the
-//!   file's leading comment block.  Shebangs are skipped.  Emacs-style
+//!   file's leading comment region; blank lines are transparent up to the
+//!   first non-comment token. Shebangs are skipped. Emacs-style
 //!   comments (`# -*- key: value -*-`) are also supported.  Autocorrect
 //!   swaps the two offending lines.
 //! ```
@@ -61,7 +62,7 @@ impl OrderedMagicComments {
             return;
         }
 
-        let region_end = leading_comment_region_end(src);
+        let region_end = cx.leading_comment_region_end();
 
         // Collect magic comments in the leading region, in source order.
         let mut magic_comments: Vec<(Range, MagicCommentClassification)> = Vec::new();
@@ -258,38 +259,6 @@ fn strip_emacs_markers(bytes: &[u8]) -> Option<&[u8]> {
 }
 
 /// Compute the byte offset of the end of the leading comment region.
-/// Mirrors `Cx::leading_comment_region_end`.
-fn leading_comment_region_end(source: &[u8]) -> usize {
-    let mut line_start = 0;
-    while line_start < source.len() {
-        let line_end = source[line_start..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(source.len(), |pos| line_start + pos);
-        let mut content_end = line_end;
-        if content_end > line_start && source[content_end - 1] == b'\r' {
-            content_end -= 1;
-        }
-
-        // Skip shebang on line 0.
-        if line_start == 0 && source.starts_with(b"#!") {
-            line_start = line_end.saturating_add(1);
-            continue;
-        }
-
-        let mut first = line_start;
-        while first < content_end && source[first].is_ascii_whitespace() {
-            first += 1;
-        }
-        if first < content_end && source[first] == b'#' {
-            line_start = line_end.saturating_add(1);
-            continue;
-        }
-        return line_start;
-    }
-    source.len()
-}
-
 /// Check whether a comment at `comment_start` is an own-line comment
 /// (only whitespace before `#` on that line).
 fn is_own_line_comment(source: &[u8], comment_start: usize) -> bool {
@@ -355,6 +324,17 @@ mod tests {
     use murphy_plugin_api::test_support::{indoc, test};
 
     // --- offenses ---
+
+    #[test]
+    fn flags_encoding_after_frozen_string_literal_across_blank_line() {
+        test::<OrderedMagicComments>()
+            .expect_offense(indoc! {r#"
+                # frozen_string_literal: true
+
+                # encoding: ascii
+                ^^^^^^^^^^^^^^^^^ The encoding magic comment should precede all other magic comments.
+            "#});
+    }
 
     #[test]
     fn flags_encoding_after_frozen_string_literal() {

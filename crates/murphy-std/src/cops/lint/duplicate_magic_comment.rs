@@ -8,9 +8,8 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/DuplicateMagicComment
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-y8tm
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Ported from RuboCop Lint/DuplicateMagicComment. Buckets the leading
 //!   magic comments returned by `cx.magic_comments()` into `encoding` and
@@ -19,16 +18,11 @@
 //!   RuboCop). Within each bucket every occurrence after the first is flagged
 //!   on its whole line, and the autocorrect removes that whole line including
 //!   the trailing newline (`cx.range_by_whole_lines`). `cx.magic_comments()`
-//!   already restricts to the leading comment block, skips the shebang, and
-//!   classifies only `encoding`/`frozen_string_literal` — so
-//!   `shareable_constant_value`, `rbs_inline`, and `typed` are correctly out
-//!   of scope (that is `Lint/OrderedMagicComments`' concern), matching
-//!   RuboCop's `magic_comment_lines`. Known divergence (tracked in
-//!   murphy-y8tm): the shared `leading_comment_region_end` ends the leading
-//!   region at the first blank line, whereas RuboCop's region runs up to the
-//!   first non-comment *token* and treats blank lines as transparent. This
-//!   only matters for the pathological layout of two same-kind magic comments
-//!   separated by a blank line, which RuboCop flags and Murphy does not.
+//!   restricts to the leading comment region, skips the shebang, treats blank
+//!   lines as transparent, and classifies only `encoding`/`frozen_string_literal`
+//!   — so `shareable_constant_value`, `rbs_inline`, and `typed` are correctly
+//!   out of scope (that is `Lint/OrderedMagicComments`' concern), matching
+//!   RuboCop's `magic_comment_lines`.
 //! ```
 //!
 //! ## Matched shapes
@@ -241,16 +235,12 @@ mod tests {
     }
 
     #[test]
-    fn does_not_flag_blank_separated_duplicates_shared_region_boundary() {
-        // Documented divergence (murphy-y8tm): the shared
-        // `leading_comment_region_end` ends the leading region at the first
-        // blank line, so the second frozen comment falls outside the region
-        // and is not categorised. RuboCop, whose region runs to the first
-        // non-comment token, would flag the second comment.
-        test::<DuplicateMagicComment>().expect_no_offenses(indoc! {r#"
+    fn flags_duplicate_frozen_across_blank_line() {
+        test::<DuplicateMagicComment>().expect_offense(indoc! {r#"
             # frozen_string_literal: true
 
             # frozen_string_literal: true
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Duplicate magic comment detected.
         "#});
     }
 }

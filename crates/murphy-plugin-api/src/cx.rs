@@ -666,7 +666,9 @@ impl<'a> Cx<'a> {
         }
     }
 
-    fn leading_comment_region_end(&self) -> usize {
+    /// Return the byte offset of the first non-comment token after the leading
+    /// comment region. Shebangs, comments, and blank lines are transparent.
+    pub fn leading_comment_region_end(&self) -> usize {
         let source = self.source().as_bytes();
         let mut line_start = 0;
         while line_start < source.len() {
@@ -688,7 +690,7 @@ impl<'a> Cx<'a> {
             while first < content_end && source[first].is_ascii_whitespace() {
                 first += 1;
             }
-            if first < content_end && source[first] == b'#' {
+            if first == content_end || source[first] == b'#' {
                 line_start = line_end.saturating_add(1);
                 continue;
             }
