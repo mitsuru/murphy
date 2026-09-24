@@ -7,11 +7,10 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/FirstMethodArgumentLineBreak
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues:
-//!   - murphy-rt5p
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Mirrors RuboCop's `on_send`/`on_csend` via the shared
+//!   Mirrors RuboCop's `on_send`/`on_csend`/`on_super` via the shared
 //!   `FirstElementLineBreak#check_method_line_break` mixin: a parenthesized,
 //!   multi-line argument list whose first argument shares the call's opening
 //!   line is flagged, and an autocorrect inserts a newline before that first
@@ -20,12 +19,12 @@
 //!   into its pairs so each pair is treated as a positional "argument" when
 //!   deciding multi-line-ness (matching RuboCop's `args.concat(args.pop.children)`).
 //!   `AllowedMethods` (default `[]`) and `AllowMultilineFinalElement` (default
-//!   `false`) are supported. Known gaps versus RuboCop:
-//!   (1) `on_super` is not dispatched — RuboCop aliases `on_super` to the same
-//!       handler, but Murphy's `cx.call_arguments` only resolves `Send`/`Csend`
-//!       argument lists, so explicit-argument `super(...)` calls are not yet
-//!       checked. This is an ABI-shape limitation (no `Super` argument helper),
-//!       not a boundary bypass.
+//!   `false`) are supported. Explicit-argument `super(...)` (`NodeKind::Super`)
+//!   is dispatched via `on_super`; its argument list is resolved with the
+//!   existing `cx.kind` + `cx.list` surface (no ABI change) and its method name
+//!   maps to `"super"` for `AllowedMethods` (matching RuboCop's
+//!   `SuperNode#method_name == :super`). Bare `super` (`Zsuper`) carries no
+//!   arguments and is not checked.
 //! ```
 
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, cop};
@@ -67,20 +66,47 @@ impl FirstMethodArgumentLineBreak {
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
         check(node, cx);
     }
+
+    #[on_node(kind = "super")]
+    fn check_super(&self, node: NodeId, cx: &Cx<'_>) {
+        check(node, cx);
+    }
 }
 
 const MSG: &str = "Add a line break before the first argument of a multi-line method argument list.";
 
+/// Argument list for `send`/`csend`/`super` nodes. `cx.call_arguments` only
+/// resolves `Send`/`Csend`, so explicit-argument `super(...)`
+/// (`NodeKind::Super`) is resolved via `cx.list` (same pattern as
+/// `Style/SymbolProc::dispatch_arguments`). No ABI change: uses only the
+/// existing `cx.kind` + `cx.list` surface.
+fn dispatch_arguments<'a>(node: NodeId, cx: &'a Cx<'_>) -> &'a [NodeId] {
+    match *cx.kind(node) {
+        NodeKind::Super(list) => cx.list(list),
+        _ => cx.call_arguments(node),
+    }
+}
+
+/// Method-name selector for `AllowedMethods`. RuboCop's `SuperNode#method_name`
+/// is `:super`, while `cx.method_name` returns `None` for `Super`, so map
+/// `super(...)` to `"super"` here to keep `AllowedMethods: ["super"]` working.
+fn dispatch_method_name<'a>(node: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
+    match *cx.kind(node) {
+        NodeKind::Super(_) => Some("super"),
+        _ => cx.method_name(node),
+    }
+}
+
 fn check(node: NodeId, cx: &Cx<'_>) {
     // `return if allowed_method?(node.method_name)`
     let opts = cx.options_or_default::<FirstMethodArgumentLineBreakOptions>();
-    if let Some(name) = cx.method_name(node)
+    if let Some(name) = dispatch_method_name(node, cx)
         && opts.allowed_methods.iter().any(|m| m == name)
     {
         return;
     }
 
-    let args = cx.call_arguments(node);
+    let args = dispatch_arguments(node, cx);
     let Some(&first_arg) = args.first() else {
         return;
     };
@@ -319,6 +345,49 @@ mod tests {
             "#},
             "obj&.method(\nfoo, bar,\n  baz)\n",
         );
+    }
+
+    #[test]
+    fn flags_explicit_super_on_same_line() {
+        test::<FirstMethodArgumentLineBreak>().expect_correction(
+            indoc! {r#"
+                super(foo, bar,
+                      ^^^ Add a line break before the first argument of a multi-line method argument list.
+                  baz)
+            "#},
+            "super(\nfoo, bar,\n  baz)\n",
+        );
+    }
+
+    #[test]
+    fn accepts_super_with_line_break_before_first_arg() {
+        test::<FirstMethodArgumentLineBreak>().expect_no_offenses(indoc! {r#"
+            super(
+              foo, bar,
+              baz)
+        "#});
+    }
+
+    #[test]
+    fn accepts_super_without_parens() {
+        test::<FirstMethodArgumentLineBreak>().expect_no_offenses(indoc! {r#"
+            super foo, bar,
+              baz
+        "#});
+    }
+
+    #[test]
+    fn accepts_super_allowed_method() {
+        let opts = FirstMethodArgumentLineBreakOptions {
+            allow_multiline_final_element: false,
+            allowed_methods: vec!["super".to_string()],
+        };
+        test::<FirstMethodArgumentLineBreak>()
+            .with_options(&opts)
+            .expect_no_offenses(indoc! {r#"
+                super(foo, bar,
+                  baz)
+            "#});
     }
 }
 
