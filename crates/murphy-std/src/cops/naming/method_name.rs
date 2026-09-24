@@ -8,7 +8,7 @@
 //! upstream_cop: Naming/MethodName
 //! upstream_version_checked: 1.87.0
 //! status: partial
-//! gap_issues: [murphy-e7bz.73]
+//! gap_issues: []
 //! notes: >
 //!   Faithful port of RuboCop's `on_def` (aliased to `on_defs`):
 //!
@@ -67,20 +67,27 @@
 //!   operator return. Attached-block send ranges are trimmed to the call, not
 //!   the block body.
 //!
-//!   Remaining gaps vs RuboCop:
-//!     * `class_emitter_method?` is not implemented (gap issue murphy-e7bz.73):
-//!       RuboCop accepts a singleton method whose name matches a sibling class
-//!       in the same parent scope; Murphy still applies the style regex.
-//!     * `[[:lower:]]`/`[[:upper:]]` are Unicode-aware in Ruby; the byte checks
-//!       here are ASCII-only (the same documented limitation `Naming/VariableName`
-//!       and `Naming/ConstantName` carry). `Naming/AsciiIdentifiers` already
-//!       flags non-ASCII method names.
+//!   Class-emitter behavior is ported: a singleton method whose name exactly
+//!   matches the direct sibling class's `loc.name` source text (including any
+//!   qualification) is style-valid. Scope
+//!   selection climbs only through a contiguous chain of singleton definitions;
+//!   it does not cross other AST parents. Direct sibling class names are indexed
+//!   lazily once per selected scope, so repeated methods do not rescan it. This
+//!   exemption affects style checks only; forbidden-name and AllowedPatterns
+//!   precedence is unchanged.
+//!
+//!   Remaining limitation: Ruby's `[[:lower:]]`/`[[:upper:]]` regex classes are
+//!   Unicode-aware; the byte checks here are ASCII-only (the same documented
+//!   limitation `Naming/VariableName` and `Naming/ConstantName` carry).
+//!   `Naming/AsciiIdentifiers` already flags non-ASCII method names.
 //! ```
 //!
 //! ## Offense range
 //!
 //! `node.loc.name`: the bare method-name token including any trailing
 //! `=`/`?`/`!`, excluding a singleton receiver (`def self.x` → `x`).
+
+use std::collections::{HashMap, HashSet};
 
 use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, cop, method_predicates};
 
@@ -158,13 +165,14 @@ impl MethodName {
     fn check_file(&self, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<Options>();
 
-        // `descendants` excludes the root; chain it so a lone top-level `def`
-        // (whose root *is* the def) is also inspected.
-        for id in cx
-            .descendants(cx.root())
-            .into_iter()
-            .chain(std::iter::once(cx.root()))
-        {
+        // `descendants` excludes the root; append it to preserve top-level
+        // `def` handling. Class-emitter sibling names are indexed lazily for
+        // only the scopes that contain style-invalid singleton definitions.
+        let root = cx.root();
+        let mut nodes = cx.descendants(root);
+        nodes.push(root);
+        let mut class_names_by_scope = HashMap::new();
+        for id in nodes {
             match *cx.kind(id) {
                 NodeKind::Def { name, .. } | NodeKind::Defs { name, .. } => {
                     let name = cx.symbol_str(name);
@@ -182,9 +190,16 @@ impl MethodName {
                     if forbidden_name(name, &opts, cx) {
                         let msg = format!("`{name}` {MSG_FORBIDDEN}");
                         cx.emit_offense(range, &msg, None);
-                    } else if !opts.enforced_style.matches(name) {
-                        // `check_name`: valid_name? is the style regex only —
-                        // AllowedPatterns was already handled by the early return above.
+                    } else if !opts.enforced_style.matches(name)
+                        && !is_class_emitter_method(
+                            id,
+                            name,
+                            &mut class_names_by_scope,
+                            cx,
+                        )
+                    {
+                        // RuboCop's `valid_name?` accepts class-emitter
+                        // singleton methods after the style regex fails.
                         let msg = format!("Use {} for method names.", opts.enforced_style.as_str());
                         cx.emit_offense(range, &msg, None);
                     }
@@ -201,6 +216,67 @@ impl MethodName {
             }
         }
     }
+}
+
+/// RuboCop's `defs_type?`: Murphy represents singleton definitions as a
+/// `Def` with a receiver (or as a `Defs` node in legacy ASTs).
+fn is_singleton_method_definition(node: NodeId, cx: &Cx<'_>) -> bool {
+    match *cx.kind(node) {
+        NodeKind::Def { receiver, .. } => receiver.get().is_some(),
+        NodeKind::Defs { .. } => true,
+        _ => false,
+    }
+}
+
+/// Return the scope RuboCop selects for a class-emitter check. It climbs only
+/// through directly nested singleton method definitions, not through
+/// arbitrary block or instance-method nodes.
+fn class_emitter_scope(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    if !is_singleton_method_definition(node, cx) {
+        return None;
+    }
+
+    let mut current = node;
+    let mut parent = cx.parent(current).get()?;
+    while is_singleton_method_definition(parent, cx) {
+        current = parent;
+        parent = cx.parent(current).get()?;
+    }
+    Some(parent)
+}
+
+/// Match RuboCop's `class_emitter_method?` while scanning direct siblings once
+/// per relevant scope. The cache stays empty for files with no style-invalid
+/// singleton definitions.
+fn is_class_emitter_method<'a>(
+    node: NodeId,
+    name: &'a str,
+    class_names_by_scope: &mut HashMap<NodeId, HashSet<&'a str>>,
+    cx: &Cx<'a>,
+) -> bool {
+    let Some(scope) = class_emitter_scope(node, cx) else {
+        return false;
+    };
+
+    class_names_by_scope
+        .entry(scope)
+        .or_insert_with(|| {
+            cx.children(scope)
+                .into_iter()
+                .filter_map(|child| {
+                    let NodeKind::Class {
+                        name: class_name, ..
+                    } = *cx.kind(child)
+                    else {
+                        return None;
+                    };
+                    // RuboCop compares `c.loc.name` source text, so qualified
+                    // names such as `X::Foo` do not match method name `Foo`.
+                    Some(cx.raw_source(cx.range(class_name)))
+                })
+                .collect()
+        })
+        .contains(name)
 }
 
 /// RuboCop's `on_send` handler family. These checks run in the same linear
@@ -600,6 +676,128 @@ mod tests {
                      ^^^^^^^^^^^ Use snake_case for method names.
             end
         "#});
+    }
+
+    #[test]
+    fn accepts_direct_sibling_class_emitter_methods() {
+        test::<MethodName>().expect_no_offenses(indoc! {r#"
+            class Container
+            def self.Foo
+            end
+            class Foo
+            end
+            end
+
+            module ModuleContainer
+            def self.Model
+            end
+            class Model
+            end
+            end
+        "#});
+    }
+
+    #[test]
+    fn accepts_nested_singleton_class_emitter_methods() {
+        test::<MethodName>().expect_no_offenses(indoc! {r#"
+            class NestedEmitter
+            def self.included(base)
+            def base.Bar; end
+            end
+            class Bar
+            end
+            end
+        "#});
+    }
+
+    #[test]
+    fn class_emitter_method_is_valid_for_either_style() {
+        test::<MethodName>()
+            .with_options(&opts(MethodNameStyle::CamelCase))
+            .expect_no_offenses(indoc! {r#"
+                class CamelContainer
+                def self.Foo
+                end
+                class Foo
+                end
+                end
+            "#});
+    }
+
+    #[test]
+    fn class_emitter_requires_a_direct_sibling_class_and_singleton_method() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            class WrongSibling
+            def self.Foo
+                     ^^^ Use snake_case for method names.
+            end
+            class Bar
+            end
+            end
+
+            class InstanceMethod
+            def Foo
+                ^^^ Use snake_case for method names.
+            end
+            class Foo
+            end
+            end
+
+            class NestedSibling
+            def self.Baz
+                     ^^^ Use snake_case for method names.
+            end
+            class Inner
+            class Baz
+            end
+            end
+            end
+
+            class QualifiedSibling
+            def self.Named
+                     ^^^^^ Use snake_case for method names.
+            end
+            class Parent::Named
+            end
+            end
+
+            class ModuleSibling
+            def self.ModuleName
+                     ^^^^^^^^^^ Use snake_case for method names.
+            end
+            module ModuleName
+            end
+            end
+
+            class InterruptedNested
+            def self.included
+            value = 1
+            def self.Nested; end
+                     ^^^^^^ Use snake_case for method names.
+            end
+            class Nested
+            end
+            end
+        "#});
+    }
+
+    #[test]
+    fn class_emitter_exemption_does_not_override_forbidden_names() {
+        let options = Options {
+            forbidden_identifiers: vec!["Foo".to_string()],
+            ..opts(MethodNameStyle::SnakeCase)
+        };
+        test::<MethodName>()
+            .with_options(&options)
+            .expect_offense(indoc! {r#"
+                class Container
+                def self.Foo
+                         ^^^ `Foo` is forbidden, use another method name instead.
+                end
+                class Foo
+                end
+                end
+            "#});
     }
 
     // --- conforming / exempt (snake_case) ---
