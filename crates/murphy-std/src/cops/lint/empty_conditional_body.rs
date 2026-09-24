@@ -5,36 +5,32 @@
 //! upstream: rubocop
 //! upstream_cop: Lint/EmptyConditionalBody
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-g2lu
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Detection mirrors RuboCop's on_if: flags an `if`/`elsif`/`unless` whose
-//!   body (`if_branch`) is empty, skipping the single-line `if x then end`
-//!   form (RuboCop's `same_line?(loc.begin, loc.end)` guard) and, by default,
-//!   comment-only branches (AllowComments). `elsif` is a nested `If` node, so
-//!   the per-node handler fires once per branch (matching RuboCop's per-node
-//!   on_if). `AllowComments` defaults to `true` (matching RuboCop) and is read
-//!   live via `cx.options_or_default`, so a configured `AllowComments: false`
-//!   flags a comment-only branch at dispatch time. The offense highlight is
-//!   clamped to the node's first line — an accepted project-wide rendering
-//!   convention (shared with verified `Lint/MissingSuper`,
-//!   `crate::cops::util::first_line_range`); the start byte matches RuboCop's
-//!   keyword..else range, so line/column is faithful (murphy-4k23 resolved).
-//!   Remaining gap: the `flip_orphaned_else` autocorrect is NOT ported
-//!   (murphy-g2lu — genuinely structural: condition flip + branch removal +
-//!   line math; detection only).
+//!   Detection mirrors RuboCop's per-`if` handler, including single-line
+//!   suppression and `AllowComments` (default true). The offense highlight is
+//!   clamped to the node's first line, an accepted project-wide convention
+//!   shared with `Lint/MissingSuper`; its start byte matches RuboCop's
+//!   keyword-to-`else` range (murphy-4k23 resolved).
+//!
+//!   For an empty `if`/`unless` with a populated literal `else`, autocorrect
+//!   replaces `else` with the inverse keyword and condition, then removes the
+//!   empty branch using RuboCop's nested-branch vs whole-line range split.
+//!   It preserves the `elsif` offense but skips RuboCop 1.87.0's malformed
+//!   autocorrection for a multiline empty `elsif` with a final `else`; it also
+//!   skips heredoc conditions whose upstream correction can leave invalid Ruby.
+//!   Both safeguards leave the offense intact and avoid a destructive edit.
 //! ```
 //!
-//! ## Deferred: the `flip_orphaned_else` autocorrect
+//! ## Autocorrect
 //!
-//! RuboCop offers a contextual autocorrect that, when an empty `if` has an
-//! orphaned `else`, flips the condition (`if x` → `unless x`) and removes the
-//! empty branch. This is a structural rewrite with non-trivial line math; it
-//! is intentionally not ported in this pass. Detection and message match
-//! RuboCop; only the corrector is omitted.
+//! The contextual `flip_orphaned_else` rewrite applies only when the empty
+//! branch has a populated `else`: flip `if x` to `unless x` (or vice versa),
+//! replace the keyword, and remove the empty branch. Conditions containing a
+//! heredoc and `elsif` nodes are not autocorrected.
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 #[derive(Default)]
 pub struct EmptyConditionalBody;
@@ -93,6 +89,140 @@ impl EmptyConditionalBody {
             &format!("Avoid `{keyword}` branches without a body."),
             None,
         );
+        autocorrect_orphaned_else(node, cx);
+    }
+}
+
+/// The branch selected when the condition holds. Prism stores an `unless`
+/// body's statements in the `else_` slot to match parser-gem's AST.
+fn conditional_body(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    if cx.is_unless(node) {
+        cx.else_branch(node).get()
+    } else {
+        cx.if_branch(node).get()
+    }
+}
+
+/// The branch selected when the condition does not hold, accounting for the
+/// parser-gem slot swap used for `unless` nodes.
+fn conditional_else_branch(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    if cx.is_unless(node) {
+        cx.if_branch(node).get()
+    } else {
+        cx.else_branch(node).get()
+    }
+}
+
+/// RuboCop's `empty_if_branch?`: a missing or nonconditional parent selects
+/// the full branch-range deletion. For a parent conditional, it selects that
+/// deletion only when the parent's semantic body is an empty nested `if`.
+fn empty_if_branch(node: NodeId, cx: &Cx<'_>) -> bool {
+    let Some(parent) = cx.parent(node).get() else {
+        return false;
+    };
+    if !matches!(cx.kind(parent), NodeKind::If { .. }) {
+        return true;
+    }
+    let Some(parent_body) = conditional_body(parent, cx) else {
+        return true;
+    };
+    matches!(cx.kind(parent_body), NodeKind::If { .. })
+        && conditional_body(parent_body, cx).is_none()
+}
+
+/// Locate the literal `else` token between a condition and its populated
+/// else-branch. Token text is exact, so strings/comments containing `else`
+/// cannot be mistaken for the keyword.
+fn else_keyword_range(
+    condition: NodeId,
+    else_branch: NodeId,
+    cx: &Cx<'_>,
+) -> Option<Range> {
+    let condition_end = cx.range(condition).end;
+    let branch_start = cx.range(else_branch).start;
+    if condition_end > branch_start {
+        return None;
+    }
+    cx.tokens_in(Range {
+        start: condition_end,
+        end: branch_start,
+    })
+    .iter()
+    .find(|token| cx.token_text(**token) == "else")
+    .map(|token| token.range)
+}
+
+fn condition_contains_heredoc(condition: NodeId, cx: &Cx<'_>) -> bool {
+    cx.tokens_in(cx.range(condition))
+        .iter()
+        .any(|token| token.kind == SourceTokenKind::HeredocStart)
+}
+
+/// Flip an empty `if`/`unless` with a populated literal `else`. Keep the
+/// offense but avoid malformed corrections for upstream's `elsif` and heredoc
+/// edge cases.
+fn autocorrect_orphaned_else(node: NodeId, cx: &Cx<'_>) {
+    let inverse_keyword = cx.if_inverse_keyword(node);
+    if inverse_keyword.is_empty() {
+        // RuboCop 1.87.0's correction can corrupt an empty `elsif` followed by
+        // a final `else` because `inverse_keyword` is empty for `elsif`.
+        return;
+    }
+    let Some(condition) = cx.if_condition(node).get() else {
+        return;
+    };
+    if condition_contains_heredoc(condition, cx) {
+        // The condition's source range excludes its heredoc body, so the
+        // upstream whole-line deletion can strand the body and invalidate Ruby.
+        return;
+    }
+    let Some(else_branch) = conditional_else_branch(node, cx) else {
+        return;
+    };
+    let Some(else_range) = else_keyword_range(condition, else_branch, cx) else {
+        return;
+    };
+
+    let condition_source = cx.raw_source(cx.range(condition));
+    cx.emit_edit(
+        else_range,
+        &format!("{inverse_keyword} {condition_source}"),
+    );
+
+    let node_range = cx.range(node);
+    let deletion_range = if empty_if_branch(node, cx)
+        && !matches!(cx.kind(else_branch), NodeKind::If { .. })
+    {
+        Range {
+            start: node_range.start,
+            end: else_range.start,
+        }
+    } else {
+        deletion_range_through_line_end(
+            Range {
+                start: node_range.start,
+                end: cx.range(condition).end,
+            },
+            cx,
+        )
+    };
+    cx.emit_edit(deletion_range, "");
+}
+
+/// Extend the condition-header range through the end of its physical line,
+/// including the newline. This matches RuboCop's `deletion_range` behavior.
+fn deletion_range_through_line_end(range: Range, cx: &Cx<'_>) -> Range {
+    let source = cx.source().as_bytes();
+    let mut end = range.end as usize;
+    while end < source.len() && source[end] != b'\n' {
+        end += 1;
+    }
+    if end < source.len() {
+        end += 1;
+    }
+    Range {
+        start: range.start,
+        end: end as u32,
     }
 }
 
@@ -281,6 +411,172 @@ mod tests {
             else
             end
         "#});
+    }
+
+    #[test]
+    fn autocorrects_empty_if_with_populated_else() {
+        test::<EmptyConditionalBody>().expect_correction(
+            indoc! {r#"
+                if condition
+                ^^^^^^^^^^^^ Avoid `if` branches without a body.
+                else
+                  do_something
+                end
+            "#},
+            "unless condition\n  do_something\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_empty_unless_with_populated_else() {
+        test::<EmptyConditionalBody>().expect_correction(
+            indoc! {r#"
+                unless condition
+                ^^^^^^^^^^^^^^^^ Avoid `unless` branches without a body.
+                else
+                  do_something
+                end
+            "#},
+            "if condition\n  do_something\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_nested_empty_if_branch() {
+        test::<EmptyConditionalBody>().expect_correction(
+            indoc! {r#"
+                if outer
+                  if condition
+                  ^^^^^^^^^^^^ Avoid `if` branches without a body.
+                  else
+                    do_something
+                  end
+                end
+            "#},
+            "if outer\n  unless condition\n    do_something\n  end\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_inline_comment_when_comments_are_disallowed() {
+        test::<EmptyConditionalBody>()
+            .with_options(&Options { allow_comments: false }).expect_correction(
+            indoc! {r#"
+                if condition # empty
+                ^^^^^^^^^^^^^^^^^^^^ Avoid `if` branches without a body.
+                else
+                  do_something
+                end
+            "#},
+            "unless condition\n  do_something\nend\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_else_if_branch() {
+        test::<EmptyConditionalBody>().expect_correction(
+            indoc! {r#"
+                if condition
+                ^^^^^^^^^^^^ Avoid `if` branches without a body.
+                else
+                  if other
+                    do_other
+                  end
+                end
+            "#},
+            "unless condition\n  if other\n    do_other\n  end\nend\n",
+        );
+    }
+
+    #[test]
+    fn removes_empty_branch_lines_inside_method() {
+        test::<EmptyConditionalBody>().expect_correction(
+            indoc! {r#"
+                def m
+                  if condition
+                  ^^^^^^^^^^^^ Avoid `if` branches without a body.
+
+                  else
+                    do_something
+                  end
+                end
+            "#},
+            "def m\n  unless condition\n    do_something\n  end\nend\n",
+        );
+    }
+
+    #[test]
+    fn removes_comment_only_empty_branch_inside_method_when_comments_disallowed() {
+        test::<EmptyConditionalBody>()
+            .with_options(&Options { allow_comments: false }).expect_correction(
+            indoc! {r#"
+                def m
+                  if condition
+                  ^^^^^^^^^^^^ Avoid `if` branches without a body.
+                    # no body
+                  else
+                    do_something
+                  end
+                end
+            "#},
+            "def m\n  unless condition\n    do_something\n  end\nend\n",
+        );
+    }
+
+    #[test]
+    fn preserves_blank_line_before_else_if_inside_method() {
+        test::<EmptyConditionalBody>().expect_correction(
+            indoc! {r#"
+                def m
+                  if condition
+                  ^^^^^^^^^^^^ Avoid `if` branches without a body.
+
+                  else
+                    if other
+                      do_other
+                    end
+                  end
+                end
+            "#},
+            "def m\n  \n  unless condition\n    if other\n      do_other\n    end\n  end\nend\n",
+        );
+    }
+
+    #[test]
+    fn leaves_empty_elsif_with_final_else_offense_uncorrected() {
+        test::<EmptyConditionalBody>().expect_offense(indoc! {r#"
+            if condition
+              do_something
+            elsif other
+            ^^^^^^^^^^^ Avoid `elsif` branches without a body.
+            else
+              do_other
+            end
+        "#});
+        test::<EmptyConditionalBody>().expect_no_corrections(
+            "if condition\n  do_something\nelsif other\nelse\n  do_other\nend\n",
+        );
+    }
+
+    #[test]
+    fn leaves_heredoc_condition_offense_uncorrected() {
+        test::<EmptyConditionalBody>().expect_offense(indoc! {r#"
+            if <<~TEXT
+            ^^^^^^^^^^ Avoid `if` branches without a body.
+              condition
+            TEXT
+            else
+              do_something
+            end
+        "#});
+        test::<EmptyConditionalBody>().expect_no_corrections(
+            "if <<~TEXT\n  condition\nTEXT\nelse\n  do_something\nend\n",
+        );
+    }
+
+    #[test]
+    fn does_not_correct_empty_branch_without_else() {
+        test::<EmptyConditionalBody>().expect_no_corrections("if condition\nend\n");
     }
 
     #[test]
