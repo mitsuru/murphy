@@ -8,7 +8,7 @@
 //! upstream_cop: Naming/MethodName
 //! upstream_version_checked: 1.87.0
 //! status: partial
-//! gap_issues: [murphy-e7bz.73, murphy-e7bz.74]
+//! gap_issues: [murphy-e7bz.73]
 //! notes: >
 //!   Faithful port of RuboCop's `on_def` (aliased to `on_defs`):
 //!
@@ -34,8 +34,8 @@
 //!
 //!   ForbiddenIdentifiers defaults to `[__id__, __send__]` (RuboCop default.yml),
 //!   so with no config `def __send__` fires MSG_FORBIDDEN (verified). Identifier
-//!   matching uses RuboCop's `name.delete("@$")` then exact membership; method
-//!   names carry no sigil, so this is a plain exact compare in practice.
+//!   matching uses RuboCop's `name.delete("@$")` then exact membership; this
+//!   matters for unary operator aliases such as `+@`.
 //!   Allowed/Forbidden Patterns match the FULL method name (unanchored) via
 //!   `cx.matches_any_pattern`.
 //!
@@ -58,13 +58,16 @@
 //!   The `on_send` handler family is ported: static literal names from
 //!   `define_method`/`define_singleton_method`, `Struct.new`/`Data.define`,
 //!   `alias_method`, and nil-receiver `attr`/`attr_reader`/`attr_writer`/
-//!   `attr_accessor` calls. Unsupported dynamic/interpolated names remain
-//!   ignored, matching RuboCop's node matchers. Attached-block send ranges are
-//!   trimmed to the call, not the block body.
+//!   `attr_accessor` calls. Bare `alias new_name old_name` is handled when the
+//!   new name is a symbol; global-variable and interpolated names are ignored,
+//!   matching RuboCop's `on_alias` matcher. Unsupported dynamic/interpolated
+//!   send names remain ignored. For aliases, `handle_method_name` checks
+//!   AllowedPatterns, then forbidden names, then operator exemption/style (so
+//!   a forbidden `+@` alias still reports); this differs from `on_def`'s early
+//!   operator return. Attached-block send ranges are trimmed to the call, not
+//!   the block body.
 //!
 //!   Remaining gaps vs RuboCop:
-//!     * Bare `alias new_name old_name` is not handled yet (gap issue
-//!       murphy-e7bz.74).
 //!     * `class_emitter_method?` is not implemented (gap issue murphy-e7bz.73):
 //!       RuboCop accepts a singleton method whose name matches a sibling class
 //!       in the same parent scope; Murphy still applies the style regex.
@@ -184,6 +187,13 @@ impl MethodName {
                         // AllowedPatterns was already handled by the early return above.
                         let msg = format!("Use {} for method names.", opts.enforced_style.as_str());
                         cx.emit_offense(range, &msg, None);
+                    }
+                }
+                NodeKind::Alias { new_name, .. } => {
+                    // RuboCop's on_alias only handles symbolic method names;
+                    // global-variable and interpolated aliases are ignored.
+                    if let NodeKind::Sym(name) = *cx.kind(new_name) {
+                        check_dynamic_name(new_name, cx.symbol_str(name), true, &opts, cx);
                     }
                 }
                 NodeKind::Send { .. } => check_send(id, &opts, cx),
@@ -403,8 +413,7 @@ fn forbidden_name(name: &str, opts: &Options, cx: &Cx<'_>) -> bool {
 }
 
 /// RuboCop's `forbidden_identifier?`: `name.delete("@$")` then exact membership.
-/// Method names never carry `@`/`$`, so this is an exact compare in practice;
-/// the strip is kept for byte-for-byte fidelity with the mixin.
+/// This matters for unary operator names such as `+@` as well as other sigils.
 fn forbidden_identifier(name: &str, forbidden: &[String]) -> bool {
     if forbidden.is_empty() {
         return false;
@@ -671,6 +680,65 @@ mod tests {
             alias_method :badAliasName, :old_name
                          ^^^^^^^^^^^^^ Use snake_case for method names.
         "#});
+    }
+
+    #[test]
+    fn flags_bare_alias_new_name_with_exact_range() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            alias badName badOldName
+                  ^^^^^^^ Use snake_case for method names.
+            alias :badSymbolName :old_name
+                  ^^^^^^^^^^^^^^ Use snake_case for method names.
+        "#});
+    }
+
+    #[test]
+    fn bare_alias_ignores_old_global_and_interpolated_names() {
+        test::<MethodName>().expect_no_offenses(indoc! {r#"
+            alias good_name badOldName
+            alias [] get
+            alias $badName $old_name
+            alias :"bad#{name}" :old_name
+        "#});
+    }
+
+    #[test]
+    fn bare_alias_preserves_forbidden_and_allowed_pattern_precedence() {
+        test::<MethodName>().expect_offense(indoc! {r#"
+            alias __send__ old_name
+                  ^^^^^^^^ `__send__` is forbidden, use another method name instead.
+        "#});
+
+        let forbidden_operator = Options {
+            forbidden_identifiers: vec!["+".to_string()],
+            ..opts(MethodNameStyle::SnakeCase)
+        };
+        test::<MethodName>()
+            .with_options(&forbidden_operator)
+            .expect_offense(indoc! {r#"
+                alias :+@ :plus
+                      ^^^ `+@` is forbidden, use another method name instead.
+            "#});
+
+        let forbidden_pattern = Options {
+            forbidden_patterns: vec!["badName".to_string()],
+            ..opts(MethodNameStyle::SnakeCase)
+        };
+        test::<MethodName>()
+            .with_options(&forbidden_pattern)
+            .expect_offense(indoc! {r#"
+                alias badName old_name
+                      ^^^^^^^ `badName` is forbidden, use another method name instead.
+            "#});
+
+        let allowed_pattern = Options {
+            allowed_patterns: vec!["badName".to_string()],
+            forbidden_patterns: vec!["badName".to_string()],
+            ..opts(MethodNameStyle::SnakeCase)
+        };
+        test::<MethodName>()
+            .with_options(&allowed_pattern)
+            .expect_no_offenses("alias badName old_name\n");
     }
 
     #[test]
