@@ -10,8 +10,8 @@
 //! version_changed: "0.87"
 //! safe: true
 //! supports_autocorrect: false
-//! status: partial
-//! gap_issues: [murphy-e7bz.70]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `Metrics::ModuleLength` (`CodeLength` mixin +
 //!   `Metrics::Utils::CodeLengthCalculator`), verified numerically against
@@ -48,19 +48,11 @@
 //!   Fires when length > Max (default 100). Message:
 //!   "Module has too many lines. [length/Max]".
 //!
-//!   Gap (murphy-e7bz.70): the `omit_length` unbraced-hash fold subtraction is
-//!   not applied. This is the same shared `body_code_length` / fold-loop
-//!   limitation `Metrics/MethodLength` documents — both the `on_module`
-//!   (`classlike_code_length`) and `on_casgn` (`body_code_length`) paths omit
-//!   RuboCop's `CodeLengthCalculator#omit_length`, which subtracts the 1-2
-//!   "absent brace" lines when an unbraced trailing-hash kwargs argument is
-//!   folded as the sole argument of a parenthesized call. Demonstrated (rubocop
-//!   1.87.0, Max 2, `CountAsOne: ['hash']`):
-//!   `module M; foo(\n a: 1,\n b: 2\n ); end` → rubocop no offense, Murphy
-//!   `[3/2]`. (RuboCop's `each_top_level_descendant` also seeds the casgn fold
-//!   walk at the casgn node rather than the block body; that divergence is
-//!   benign here — the only extra candidate is the single-line `Module.new`
-//!   send, which folds to a no-op.)
+//!   Folded unbraced hashes use RuboCop's `omit_length` byte-offset checks to
+//!   subtract each absent-brace line when the hash is the sole argument of a
+//!   parenthesized call. For `on_casgn`, the fold walk is seeded by the casgn
+//!   node, matching RuboCop; its extra single-line `Module.new` send fold is a
+//!   no-op.
 //!
 //!   No autocorrect: RuboCop does not autocorrect this cop.
 //! ```
@@ -141,7 +133,7 @@ impl ModuleLength {
         };
         let opts = cx.options_or_default::<ModuleLengthOptions>();
         let foldable_types: Vec<FoldableType> = parse_foldable_types(&opts.count_as_one);
-        let length = body_code_length(body, opts.count_comments, &foldable_types, cx);
+        let length = body_code_length(node, body, opts.count_comments, &foldable_types, cx);
         emit(casgn_name_range(node, cx), length, opts.max, cx);
     }
 }
@@ -453,30 +445,20 @@ mod tests {
     }
 
     #[test]
-    fn omit_length_fold_gap_overcounts() {
-        // GAP (murphy-e7bz.70): RuboCop's `omit_length` subtracts the 1-2
-        // "absent brace" lines when an unbraced trailing-hash kwargs argument is
-        // folded as the sole arg of a parenthesized call. Murphy does not, so it
-        // over-counts. rubocop 1.87.0 (Max 2, CountAsOne ['hash']): no offense;
-        // Murphy: [3/2]. This test pins the current (divergent) behavior; flip
-        // it to `expect_no_offenses` when murphy-e7bz.70 lands.
+    fn count_as_one_unbraced_hash_omits_absent_brace_lines() {
         let with_fold = ModuleLengthOptions {
             max: 2,
             count_comments: false,
             count_as_one: vec!["hash".to_string()],
         };
-        let src = indoc! {"
+        test::<ModuleLength>().with_options(&with_fold).expect_no_offenses(indoc! {"
             module M
               foo(
                 a: 1,
                 b: 2
               )
             end
-        "};
-        assert_eq!(
-            messages(&with_fold, src),
-            vec!["Module has too many lines. [3/2]".to_string()]
-        );
+        "});
     }
 
     #[test]

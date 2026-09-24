@@ -11,15 +11,15 @@
 //! version_changed: "1.5"
 //! safe: true
 //! supports_autocorrect: false
-//! status: partial
-//! gap_issues: [murphy-e7bz.70]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `CodeLength` mixin + `Metrics::Utils::CodeLengthCalculator`,
 //!   verified numerically against standalone rubocop 1.87.0
 //!   (`--only Metrics/MethodLength`) for: plain code-line counts, `CountComments`,
 //!   blank-line exclusion, all four `CountAsOne` types (array/hash/heredoc/
 //!   method_call), heredoc-body extension, singleton defs, and `define_method`
-//!   blocks. One documented divergence remains (`omit_length`, below).
+//!   blocks, including parameter-default folds and implicit-hash omission.
 //!
 //!   Measured scopes (RuboCop `on_def`/`on_defs`/`on_block`):
 //!   - every `def`/`defs` whose body is non-empty;
@@ -35,9 +35,10 @@
 //!
 //!   Length = code-line count of the body (RuboCop `code_length`): count source
 //!   lines spanning the body's first..last line, excluding blank lines and (when
-//!   `CountComments` is false) `\A\s*#` comment lines. A trailing heredoc whose
-//!   AST range stops at the `<<~LABEL` opener is extended through its terminator
-//!   so its body lines are counted (`source_from_node_with_heredoc`).
+//!   `CountComments` is false) `\A\s*#` comment lines. A body expression
+//!   containing a heredoc descendant whose AST range stops at the `<<~LABEL`
+//!   opener is extended through its matching terminator. When the body node is
+//!   itself a heredoc literal, its own source range is counted.
 //!
 //!   `CountAsOne` (default `[]`) folds each top-level descendant of a named kind
 //!   (`array`/`hash`/`heredoc`/`method_call`) to a single line, via RuboCop's
@@ -50,17 +51,14 @@
 //!   measured node (RuboCop's non-LSP `node.source_range`).
 //!   `AllowedMethods`/`AllowedPatterns` skip by name.
 //!
-//!   Gap (murphy-e7bz.70), two `CountAsOne` fold edge cases:
-//!   1. `omit_length`: RuboCop's `CodeLengthCalculator#omit_length` subtracts
-//!      the 1-2 "absent brace" lines when an unbraced trailing-hash kwargs
-//!      argument is folded as the sole argument of a parenthesized call. Murphy
-//!      does not, so it over-counts by 1-2. Demonstrated (rubocop 1.87.0, Max 1,
-//!      `CountAsOne: ['hash']`): `def m; foo(\n a: 1,\n b: 2\n ); end` →
-//!      rubocop no offense, Murphy `[3/1]`.
-//!   2. Parameter-default folds: RuboCop's `each_top_level_descendant` is seeded
-//!      with the def *node*, so a multiline foldable inside a parameter default
-//!      (e.g. `def m(x = [\n…\n])` with `CountAsOne: ['array']`) is folded.
-//!      Murphy walks the body only, so such defaults are not folded (over-count).
+//!   The fold walk is seeded by the measured def/block node, not the extracted
+//!   body, so foldables in method parameter defaults and block-call arguments
+//!   are included. When a folded unbraced hash is the sole argument to a
+//!   parenthesized call, `omit_length` subtracts each absent-brace line using
+//!   RuboCop's byte-offset adjacency checks; other calls and braced hashes are
+//!   unchanged. Heredoc end positions are paired and cached once per measured
+//!   node, scanning only through its relevant terminators. Options are decoded
+//!   once per method/block visit.
 //!
 //!   With `CountAsOne: ['heredoc']`, the shared token pairing matches starts
 //!   and terminators by delimiter label. This handles nested interpolated and
@@ -134,10 +132,11 @@ impl MethodLength {
         let Some(name) = cx.method_name(node) else {
             return;
         };
-        if is_allowed(name, cx) {
+        let opts = cx.options_or_default::<MethodLengthOptions>();
+        if is_allowed(name, &opts, cx) {
             return;
         }
-        measure(node, cx.def_body(node).get(), cx);
+        measure(node, cx.def_body(node).get(), &opts, cx);
     }
 
     /// RuboCop `alias on_defs on_def`.
@@ -146,10 +145,11 @@ impl MethodLength {
         let Some(name) = cx.method_name(node) else {
             return;
         };
-        if is_allowed(name, cx) {
+        let opts = cx.options_or_default::<MethodLengthOptions>();
+        if is_allowed(name, &opts, cx) {
             return;
         }
-        measure(node, cx.def_body(node).get(), cx);
+        measure(node, cx.def_body(node).get(), &opts, cx);
     }
 
     /// RuboCop `on_block`: `define_method` blocks (any argument).
@@ -191,13 +191,14 @@ fn check_define_method_block(node: NodeId, cx: &Cx<'_>) {
     if cx.method_name(call) != Some("define_method") {
         return;
     }
+    let opts = cx.options_or_default::<MethodLengthOptions>();
     // `method_name.basic_literal? && allowed?(method_name.value)` → skip.
     if let Some(name) = basic_literal_name(call, cx)
-        && is_allowed(name, cx)
+        && is_allowed(name, &opts, cx)
     {
         return;
     }
-    measure(node, cx.block_body(node).get(), cx);
+    measure(node, cx.block_body(node).get(), &opts, cx);
 }
 
 /// The method name when the `define_method` call's first argument is a basic
@@ -216,8 +217,7 @@ fn basic_literal_name<'a>(call: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
 }
 
 /// RuboCop `allowed?`: AllowedMethods or AllowedPatterns match by name.
-fn is_allowed(method_name: &str, cx: &Cx<'_>) -> bool {
-    let opts = cx.options_or_default::<MethodLengthOptions>();
+fn is_allowed(method_name: &str, opts: &MethodLengthOptions, cx: &Cx<'_>) -> bool {
     opts.allowed_methods.iter().any(|m| m == method_name)
         || cx.matches_any_pattern(method_name, &opts.allowed_patterns)
 }
@@ -225,13 +225,17 @@ fn is_allowed(method_name: &str, cx: &Cx<'_>) -> bool {
 /// RuboCop `check_code_length`: compute the body code-line count and emit an
 /// offense when it exceeds `Max`. Empty bodies pass (`extract_body` → nil →
 /// length 0).
-fn measure(node: NodeId, body: Option<NodeId>, cx: &Cx<'_>) {
+fn measure(
+    node: NodeId,
+    body: Option<NodeId>,
+    opts: &MethodLengthOptions,
+    cx: &Cx<'_>,
+) {
     let Some(body) = body else {
         return;
     };
-    let opts = cx.options_or_default::<MethodLengthOptions>();
     let foldable_types: Vec<FoldableType> = parse_foldable_types(&opts.count_as_one);
-    let length = body_code_length(body, opts.count_comments, &foldable_types, cx);
+    let length = body_code_length(node, body, opts.count_comments, &foldable_types, cx);
     if length <= opts.max {
         return;
     }
@@ -572,6 +576,161 @@ mod tests {
               )
             end
         "});
+    }
+
+    #[test]
+    fn count_as_one_unbraced_hash_omits_absent_brace_lines() {
+        let with_fold = MethodLengthOptions {
+            max: 0,
+            count_comments: false,
+            count_as_one: vec!["hash".to_string()],
+            allowed_methods: Vec::new(),
+            allowed_patterns: Vec::new(),
+        };
+        // RuboCop's omit_length counts the opening and closing brace lines
+        // independently by comparing the call-paren and hash byte offsets.
+        for src in [
+            "def m\n  foo( a: 1, b: 2 )\nend\n",
+            "def m\n  foo( a: 1, b: 2)\nend\n",
+            "def m\n  foo(a: 1, b: 2 )\nend\n",
+        ] {
+            test::<MethodLength>()
+                .with_options(&with_fold)
+                .expect_no_offenses(src);
+        }
+
+        test::<MethodLength>()
+            .with_options(&MethodLengthOptions {
+                max: 1,
+                ..with_fold
+            })
+            .expect_no_offenses(indoc! {"
+                def m
+                  foo(
+                    a: 1,
+                    b: 2
+                  )
+                end
+            "});
+    }
+
+    #[test]
+    fn count_as_one_unbraced_hash_does_not_omit_with_another_argument() {
+        let with_fold = MethodLengthOptions {
+            max: 3,
+            count_comments: false,
+            count_as_one: vec!["hash".to_string()],
+            allowed_methods: Vec::new(),
+            allowed_patterns: Vec::new(),
+        };
+        let src = indoc! {"
+            def m
+              foo(
+                x,
+                a: 1,
+                b: 2
+              )
+            end
+        "};
+        assert_eq!(
+            messages(&with_fold, src),
+            vec!["Method has too many lines. [4/3]".to_string()]
+        );
+    }
+
+    #[test]
+    fn count_as_one_unbraced_hash_does_not_omit_without_parentheses() {
+        let with_fold = MethodLengthOptions {
+            max: 0,
+            count_comments: false,
+            count_as_one: vec!["hash".to_string()],
+            allowed_methods: Vec::new(),
+            allowed_patterns: Vec::new(),
+        };
+        let src = indoc! {"
+            def m
+              foo a: 1,
+                  b: 2
+            end
+        "};
+        assert_eq!(
+            messages(&with_fold, src),
+            vec!["Method has too many lines. [1/0]".to_string()]
+        );
+    }
+
+    #[test]
+    fn count_as_one_does_not_omit_braced_hash_lines() {
+        let with_fold = MethodLengthOptions {
+            max: 1,
+            count_comments: false,
+            count_as_one: vec!["hash".to_string()],
+            allowed_methods: Vec::new(),
+            allowed_patterns: Vec::new(),
+        };
+        let src = indoc! {"
+            def m
+              foo(
+                { a: 1,
+                  b: 2 }
+              )
+            end
+        "};
+        assert_eq!(
+            messages(&with_fold, src),
+            vec!["Method has too many lines. [3/1]".to_string()]
+        );
+    }
+
+    #[test]
+    fn count_as_one_folds_multiline_parameter_defaults() {
+        let with_fold = MethodLengthOptions {
+            max: 0,
+            count_comments: false,
+            count_as_one: vec!["array".to_string()],
+            allowed_methods: Vec::new(),
+            allowed_patterns: Vec::new(),
+        };
+        test::<MethodLength>().with_options(&with_fold).expect_no_offenses(indoc! {"
+            def m(x = [
+              1,
+              2
+            ])
+              a = 1
+            end
+        "});
+    }
+
+    #[test]
+    fn count_as_one_method_call_excludes_its_block_body() {
+        let with_fold = MethodLengthOptions {
+            max: 2,
+            count_comments: false,
+            count_as_one: vec!["method_call".to_string()],
+            allowed_methods: Vec::new(),
+            allowed_patterns: Vec::new(),
+        };
+        let src = indoc! {"
+            def m
+              foo(
+                1,
+                2
+              ) do
+                a = 1
+                b = 2
+              end
+            end
+        "};
+        let expected = vec!["Method has too many lines. [4/2]".to_string()];
+        assert_eq!(messages(&with_fold, src), expected);
+        // The unparenthesized/no-argument and command-call forms also end the
+        // send range before the attached block body.
+        for src in [
+            "def m\n  foo do\n    a = 1\n    b = 2\n  end\nend\n",
+            "def m\n  foo 1 do\n    a = 1\n    b = 2\n  end\nend\n",
+        ] {
+            assert_eq!(messages(&with_fold, src), expected);
+        }
     }
 
     #[test]
