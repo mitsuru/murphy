@@ -274,6 +274,18 @@ pub struct CxRaw {
     /// numeric ABI is not bumped for tail-appended CxRaw fields. Read via
     /// `Cx::block_body_empty_lines()`.
     pub block_body_empty_lines: bool,
+    /// Resolved `Layout/SpaceInsideBlockBraces.EnforcedStyle == "space"`
+    /// (default `true`, i.e. RuboCop's `space` default). NOT an `AllCops.*`
+    /// key — it is the run-wide cross-cop signal RuboCop's
+    /// `SpaceBeforePunctuation#space_required_after_lcurly?` reads via
+    /// `config.for_cop('Layout/SpaceInsideBlockBraces')`, threaded here
+    /// (murphy-bgd8 pattern, murphy-4qhr) so the cop need not perform its own
+    /// cross-cop config lookup. Tail-appended into the trailing padding after
+    /// `block_body_empty_lines` under ABI v4 lockstep, so this field leaves
+    /// `size_of::<CxRaw>()` unchanged. Per project policy the numeric ABI is
+    /// not bumped for tail-appended CxRaw fields. Read via
+    /// `Cx::block_braces_space()`.
+    pub block_braces_space: bool,
 }
 
 /// The plugin ABI version. A fresh v1 (ADR 0038-8): the pre-reboot ABI
@@ -320,6 +332,12 @@ pub struct CxRaw {
 /// the trailing padding after `block_forwarding_explicit` under ABI v4 lockstep
 /// for murphy-xjua; it fits the existing tail padding so `size_of::<CxRaw>()`
 /// is unchanged.
+/// `CxRaw::block_braces_space` (the resolved
+/// `Layout/SpaceInsideBlockBraces.EnforcedStyle == "space"` flag, consumed by
+/// `Layout/SpaceBeforeComma` / `Layout/SpaceBeforeSemicolon`) was tail-appended
+/// into the trailing padding after `block_body_empty_lines` under ABI v4
+/// lockstep for murphy-4qhr; it fits the existing tail padding so
+/// `size_of::<CxRaw>()` is unchanged.
 pub const MURPHY_PLUGIN_ABI_VERSION: u32 = 4;
 
 /// Ruby language version used for TargetRubyVersion gating.
@@ -405,6 +423,14 @@ pub struct AllCopsContext {
     /// `Cx::block_body_empty_lines()`; `!block_body_empty_lines` is
     /// `no_empty_lines_around_block_body?`.
     pub block_body_empty_lines: bool,
+    /// Resolved `Layout/SpaceInsideBlockBraces.EnforcedStyle == "space"`
+    /// (default `true`, i.e. RuboCop\'s `space` default). NOT an `AllCops.*`
+    /// key — the run-wide cross-cop signal RuboCop\'s
+    /// `SpaceBeforePunctuation#space_required_after_lcurly?` reads via
+    /// `config.for_cop(\'Layout/SpaceInsideBlockBraces\')`, threaded here
+    /// (murphy-bgd8 pattern) so the cop need not perform its own cross-cop
+    /// config lookup (murphy-4qhr). Read via `Cx::block_braces_space()`.
+    pub block_braces_space: bool,
 }
 
 impl AllCopsContext {
@@ -431,6 +457,7 @@ impl Default for AllCopsContext {
             indentation_width: Self::DEFAULT_INDENTATION_WIDTH,
             block_forwarding_explicit: false,
             block_body_empty_lines: false,
+            block_braces_space: true,
         }
     }
 }
@@ -603,6 +630,9 @@ mod tests {
         // murphy-xjua: tail-appended into the trailing padding after
         // `block_forwarding_explicit` (264); size unchanged.
         assert_eq!(offset_of!(CxRaw, block_body_empty_lines), 265);
+        // murphy-4qhr: tail-appended into the trailing padding after
+        // `block_body_empty_lines` (265); size unchanged.
+        assert_eq!(offset_of!(CxRaw, block_braces_space), 266);
         assert_eq!(size_of::<CxRaw>(), 272);
     }
 

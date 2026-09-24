@@ -67,10 +67,12 @@ fn space_missing(token1: SourceToken, token2: SourceToken) -> bool {
 
 /// RuboCop's `space_required_after?`: a `{` immediately before the
 /// punctuation is exempt when `Layout/SpaceInsideBlockBraces` uses the
-/// `space` style (its default). Murphy cannot read another cop's config from
-/// inside a cop, so it applies the default-style behavior unconditionally and
-/// exempts any preceding `{`. A `,`/`;` directly after `{` is a near-impossible
-/// Ruby shape, so this divergence is inert in practice.
-fn space_required_after(_cx: &Cx<'_>, token1: SourceToken) -> bool {
-    token1.kind == SourceTokenKind::LeftBrace
+/// `space` style (its default). The sibling style is read dynamically via
+/// `Cx::block_braces_space()` (murphy-4qhr, murphy-bgd8 pattern: host resolves
+/// `config.for_cop('Layout/SpaceInsideBlockBraces')['EnforcedStyle']` into
+/// `AllCopsContext` and threads it into `CxRaw` without a numeric ABI bump).
+/// A `,`/`;` directly after `{` is a near-impossible Ruby shape, so the
+/// exemption rarely fires in practice.
+fn space_required_after(cx: &Cx<'_>, token1: SourceToken) -> bool {
+    token1.kind == SourceTokenKind::LeftBrace && cx.space_required_after_lcurly()
 }

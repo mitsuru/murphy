@@ -346,6 +346,16 @@ impl<T: NodeCop + Default> Tester<T> {
         self
     }
 
+    /// Set the run-wide `Layout/SpaceInsideBlockBraces.EnforcedStyle`
+    /// == `"space"` flag — what `Cx::block_braces_space()` returns
+    /// (murphy-4qhr). Use this to exercise
+    /// `Layout/SpaceBeforeComma` / `Layout/SpaceBeforeSemicolon`'s dynamic
+    /// `{`-exemption (`space_required_after?`).
+    pub fn with_block_braces_space(mut self, space: bool) -> Self {
+        self.context.block_braces_space = space;
+        self
+    }
+
     /// Override the file path threaded into `Cx::file_path()` for this cop
     /// test. Defaults to `"t.rb"`. Use this for cops that inspect the source
     /// file name (e.g. `Naming/FileName`); the path is decoupled from the
@@ -1117,6 +1127,7 @@ fn cx_raw_for(
         config_disabled_cops_len: 0,
         block_forwarding_explicit: ctx.block_forwarding_explicit,
         block_body_empty_lines: ctx.block_body_empty_lines,
+        block_braces_space: ctx.block_braces_space,
     }
 }
 

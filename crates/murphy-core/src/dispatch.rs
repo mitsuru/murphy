@@ -232,6 +232,7 @@ fn build_cx_raw(
         config_disabled_cops_len: config_disabled_cops.len(),
         block_forwarding_explicit: ctx.block_forwarding_explicit,
         block_body_empty_lines: ctx.block_body_empty_lines,
+        block_braces_space: ctx.block_braces_space,
     }
 }
 
@@ -780,6 +781,69 @@ mod tests {
         );
 
         assert!(!BLOCK_BODY_EMPTY_LINES_SEEN.load(Ordering::SeqCst));
+    }
+
+    // Per-test atomic for the murphy-4qhr cross-cop signal.
+    static BLOCK_BRACES_SPACE_SEEN: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    unsafe extern "C" fn block_braces_space_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let cx = unsafe { &*cx };
+        BLOCK_BRACES_SPACE_SEEN.store(cx.block_braces_space, Ordering::SeqCst);
+        0
+    }
+    static BLOCK_BRACES_SPACE_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/BlockBracesSpace"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: block_braces_space_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_block_braces_space_to_cx_raw() {
+        // The resolved `Layout/SpaceInsideBlockBraces.EnforcedStyle` flag
+        // threaded through the context reaches the cop's `CxRaw` (murphy-4qhr).
+        BLOCK_BRACES_SPACE_SEEN.store(false, Ordering::SeqCst);
+        let ast = ast_nil_and_int();
+        let mut sink = OffenseSink::new("t.rb");
+
+        run_cops_with_options_and_context(
+            &ast,
+            &[&BLOCK_BRACES_SPACE_COP],
+            &mut sink,
+            AllCopsContext {
+                block_braces_space: false,
+                ..AllCopsContext::default()
+            },
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(!BLOCK_BRACES_SPACE_SEEN.load(Ordering::SeqCst));
+
+        // And the default (true, RuboCop's `space`) is faithfully threaded too.
+        BLOCK_BRACES_SPACE_SEEN.store(false, Ordering::SeqCst);
+        let mut sink = OffenseSink::new("t.rb");
+        run_cops_with_options_and_context(
+            &ast,
+            &[&BLOCK_BRACES_SPACE_COP],
+            &mut sink,
+            AllCopsContext::default(),
+            &[],
+            |_| b"{}".to_vec(),
+        );
+
+        assert!(BLOCK_BRACES_SPACE_SEEN.load(Ordering::SeqCst));
     }
 
     // (1) DispatchIndex correctly buckets the arena's nodes by tag.
