@@ -661,6 +661,10 @@ impl<'a> Cx<'a> {
             Some(MagicCommentKind::FrozenStringLiteral)
         } else if eq_normalized(key, "encoding") || eq_normalized(key, "coding") {
             Some(MagicCommentKind::Encoding)
+        } else if eq_normalized(key, "shareable_constant_value") {
+            Some(MagicCommentKind::ShareableConstantValue)
+        } else if eq_normalized(key, "warn_indent") {
+            Some(MagicCommentKind::WarnIndent)
         } else {
             None
         }
@@ -3393,6 +3397,28 @@ mod tests {
         let encoding = cx.encoding_comment().expect("encoding comment");
         assert_eq!(cx.raw_source(encoding.key_range), "coding");
         assert_eq!(cx.raw_source(encoding.value_range), "utf-8");
+    }
+
+    #[test]
+    fn magic_comment_helpers_parse_shareable_and_warn_indent() {
+        let src = "# shareable_constant_value: literal\n# warn_indent: true\nnil\n";
+        let ast = murphy_translate::translate(src, "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+
+        let comments = cx.magic_comments();
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].kind, MagicCommentKind::ShareableConstantValue);
+        assert_eq!(
+            cx.raw_source(comments[0].key_range),
+            "shareable_constant_value"
+        );
+        assert_eq!(comments[1].kind, MagicCommentKind::WarnIndent);
+        assert_eq!(cx.raw_source(comments[1].key_range), "warn_indent");
     }
 
     #[test]

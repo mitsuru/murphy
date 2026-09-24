@@ -101,6 +101,10 @@ impl Translator {
             Some(MagicCommentKind::FrozenStringLiteral)
         } else if eq_normalized(key, b"encoding") || eq_normalized(key, b"coding") {
             Some(MagicCommentKind::Encoding)
+        } else if eq_normalized(key, b"shareable_constant_value") {
+            Some(MagicCommentKind::ShareableConstantValue)
+        } else if eq_normalized(key, b"warn_indent") {
+            Some(MagicCommentKind::WarnIndent)
         } else {
             None
         }
@@ -2500,11 +2504,11 @@ mod tests {
 
     #[test]
     fn translates_structured_magic_comments() {
-        let src = "#!/usr/bin/env ruby\n# frozen_string_literal: true\n# encoding: utf-8\nnil\n";
+        let src = "#!/usr/bin/env ruby\n# frozen_string_literal: true\n# encoding: utf-8\n# shareable_constant_value: literal\n# warn_indent: true\nnil\n";
         let ast = translate(src, "t.rb");
         let comments = ast.magic_comments();
 
-        assert_eq!(comments.len(), 3);
+        assert_eq!(comments.len(), 5);
         assert_eq!(comments[0].kind, MagicCommentKind::Shebang);
         assert_eq!(ast.raw_source(comments[0].range), "#!/usr/bin/env ruby");
         assert_eq!(comments[1].kind, MagicCommentKind::FrozenStringLiteral);
@@ -2517,6 +2521,15 @@ mod tests {
         assert_eq!(comments[2].kind, MagicCommentKind::Encoding);
         assert_eq!(ast.raw_source(comments[2].key_range), "encoding");
         assert_eq!(ast.raw_source(comments[2].value_range), "utf-8");
+        assert_eq!(comments[3].kind, MagicCommentKind::ShareableConstantValue);
+        assert_eq!(
+            ast.raw_source(comments[3].key_range),
+            "shareable_constant_value"
+        );
+        assert_eq!(ast.raw_source(comments[3].value_range), "literal");
+        assert_eq!(comments[4].kind, MagicCommentKind::WarnIndent);
+        assert_eq!(ast.raw_source(comments[4].key_range), "warn_indent");
+        assert_eq!(ast.raw_source(comments[4].value_range), "true");
     }
 
     #[test]

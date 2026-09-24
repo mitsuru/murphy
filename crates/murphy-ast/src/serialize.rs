@@ -44,7 +44,10 @@ pub const MAGIC: &[u8; 8] = b"MURPHYAS";
 /// versions before reading the body.
 ///
 /// Version 8: adds the `magic_comments` side table after `call_operator_locs`.
-pub const FORMAT_VERSION: u32 = 8;
+///
+/// Version 9: adds `ShareableConstantValue` and `WarnIndent` discriminants to
+/// the serialized `MagicCommentKind` table.
+pub const FORMAT_VERSION: u32 = 9;
 
 /// Total header size in bytes. The body immediately follows. Downstream
 /// (cache, mmap) code can rely on this offset being fixed.
@@ -1040,6 +1043,8 @@ fn write_magic_comment(comment: MagicComment, out: &mut Vec<u8>) {
         MagicCommentKind::Shebang => 0,
         MagicCommentKind::FrozenStringLiteral => 1,
         MagicCommentKind::Encoding => 2,
+        MagicCommentKind::ShareableConstantValue => 3,
+        MagicCommentKind::WarnIndent => 4,
     };
     put_u8(out, kind);
     put_u8(out, comment.value_bool);
@@ -1053,6 +1058,8 @@ fn read_magic_comment(cur: &mut &[u8]) -> Result<MagicComment, SerError> {
         0 => MagicCommentKind::Shebang,
         1 => MagicCommentKind::FrozenStringLiteral,
         2 => MagicCommentKind::Encoding,
+        3 => MagicCommentKind::ShareableConstantValue,
+        4 => MagicCommentKind::WarnIndent,
         _ => return Err(SerError::BadDiscriminant),
     };
     let value_bool = get_u8(cur)?;
@@ -2438,6 +2445,31 @@ mod tests {
             value_range: r(25, 29),
             kind: MagicCommentKind::FrozenStringLiteral,
             value_bool: 1,
+        });
+        let ast = b.finish(root);
+
+        let restored = crate::Ast::from_bytes(&ast.to_bytes().unwrap()).expect("round-trip");
+        assert_eq!(restored.magic_comments(), ast.magic_comments());
+    }
+
+    #[test]
+    fn round_trip_new_magic_comment_kinds() {
+        let source = "# shareable_constant_value: literal\n# warn_indent: true\nnil\n";
+        let mut b = AstBuilder::new(source, "t.rb");
+        let root = b.push(NodeKind::Nil, r(56, 59));
+        b.add_magic_comment(MagicComment {
+            range: r(0, 35),
+            key_range: r(2, 26),
+            value_range: r(28, 35),
+            kind: MagicCommentKind::ShareableConstantValue,
+            value_bool: 0,
+        });
+        b.add_magic_comment(MagicComment {
+            range: r(36, 55),
+            key_range: r(38, 49),
+            value_range: r(51, 55),
+            kind: MagicCommentKind::WarnIndent,
+            value_bool: 0,
         });
         let ast = b.finish(root);
 

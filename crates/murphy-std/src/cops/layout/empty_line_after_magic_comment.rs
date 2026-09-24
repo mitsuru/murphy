@@ -7,21 +7,16 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/EmptyLineAfterMagicComment
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues: [murphy-dlko]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Direct port of RuboCop's `on_new_investigation`: find the LAST magic
 //!   comment that appears before any code, and if the immediately following
 //!   physical line is non-blank, flag the start of that line and insert a `\n`
-//!   before it.
-//!
-//!   Murphy's structured `magic_comments()` only recognizes
-//!   `frozen_string_literal` and `encoding`/`coding` (plus the file shebang,
-//!   which we deliberately exclude here — RuboCop's `MagicComment.parse` does
-//!   not treat `#!` as a magic comment). RuboCop additionally recognizes
-//!   `shareable_constant_value` and `warn_indent`; those keys are not modelled
-//!   by Murphy's magic-comment table yet, so a file whose only magic comment is
-//!   one of those is not flagged. Gap filed as murphy-dlko.
+//!   before it. Murphy's structured magic comments recognize
+//!   `frozen_string_literal`, `encoding`/`coding`, `shareable_constant_value`,
+//!   and `warn_indent`. The file shebang is excluded, matching RuboCop's
+//!   `MagicComment.parse`, which does not treat `#!` as a magic comment.
 //!
 //!   Message: "Add an empty line after magic comments."
 //!   Autocorrect: insert "\n" before the offending line.
@@ -115,6 +110,25 @@ mod tests {
         out.push_str(&edit.replacement);
         out.push_str(&source[edit.range.end as usize..]);
         out
+    }
+
+    #[test]
+    fn flags_after_shareable_constant_value_magic_comment() {
+        let src = "# shareable_constant_value: literal\nx = 0\n";
+        let run = run_cop_with_edits::<EmptyLineAfterMagicComment>(src);
+        assert_eq!(run.offenses.len(), 1);
+        assert_eq!(
+            apply(src, &run.edits),
+            "# shareable_constant_value: literal\n\nx = 0\n"
+        );
+    }
+
+    #[test]
+    fn flags_after_warn_indent_magic_comment() {
+        let src = "# warn_indent: true\nx = 0\n";
+        let run = run_cop_with_edits::<EmptyLineAfterMagicComment>(src);
+        assert_eq!(run.offenses.len(), 1);
+        assert_eq!(apply(src, &run.edits), "# warn_indent: true\n\nx = 0\n");
     }
 
     #[test]
