@@ -730,6 +730,8 @@ pub enum MagicCommentKind {
     Shebang,
     FrozenStringLiteral,
     Encoding,
+    ShareableConstantValue,
+    WarnIndent,
 }
 
 /// The owned source text and path for one file. All [`Range`] values index

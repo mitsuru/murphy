@@ -65,8 +65,11 @@ impl DuplicateMagicComment {
             let already_seen = match comment.kind {
                 MagicCommentKind::Encoding => std::mem::replace(&mut seen_encoding, true),
                 MagicCommentKind::FrozenStringLiteral => std::mem::replace(&mut seen_frozen, true),
-                // The shebang is not a duplicable magic comment kind.
-                MagicCommentKind::Shebang => continue,
+                // The shebang and unrelated magic comment kinds are not
+                // duplicated by this cop.
+                MagicCommentKind::Shebang
+                | MagicCommentKind::ShareableConstantValue
+                | MagicCommentKind::WarnIndent => continue,
             };
             if !already_seen {
                 continue;
@@ -216,6 +219,15 @@ mod tests {
             x = 1
             # frozen_string_literal: true
         "#});
+    }
+
+    #[test]
+    fn ignores_shareable_and_warn_indent_comments() {
+        test::<DuplicateMagicComment>().expect_no_offenses(
+            "# shareable_constant_value: literal\n# shareable_constant_value: none\n",
+        );
+        test::<DuplicateMagicComment>()
+            .expect_no_offenses("# warn_indent: true\n# warn_indent: false\n");
     }
 
     #[test]
