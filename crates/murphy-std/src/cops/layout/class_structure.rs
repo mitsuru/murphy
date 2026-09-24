@@ -7,8 +7,8 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/ClassStructure
 //! upstream_version_checked: 1.86.2
-//! status: partial
-//! gap_issues: [murphy-kse6]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Ports RuboCop's `on_class` (aliased `on_sclass`) detection: walks the class
 //!   body elements in source order, classifies each into a category, looks up
@@ -46,14 +46,24 @@
 //!   `ExpectedOrder: [module_inclusion, constants, public_class_methods,
 //!   initializer, public_methods, protected_methods, private_methods]`.
 //!
-//!   Gap (murphy-kse6): RuboCop's unsafe node-swap autocorrect
-//!   (`source_range_with_comment` + insert-before/remove) is NOT implemented.
-//!   The reordering is structural and unsafe (`SafeAutoCorrect: false`), and a
-//!   non-idempotent reordering corrector that corrupts source is worse than
-//!   none; detection ships first. Tracked in murphy-kse6.
+//!   Autocorrect (murphy-kse6) ports RuboCop's unsafe node-swap corrector:
+//!   the offending node is swapped one position upward past the nearest
+//!   non-ignored left sibling with a different classification
+//!   (`source_range_with_comment` + `insert_before`/`remove`). The swap carries
+//!   contiguous own-line comments above each node (Murphy's
+//!   `range_with_comments_and_lines`, mirroring RuboCop's `begin_pos_with_comment`
+//!   / `end_position_for` whole-line convention). Like upstream, the correction
+//!   is unsafe (`SafeAutoCorrect: false`, `safe_autocorrect = false` metadata)
+//!   and only runs under `-A`: visibility modifiers (`private`/`public` bare
+//!   sends) stay in place while methods move, so repeated passes bubble a node
+//!   left until the order converges. Dynamic constants (a `casgn` whose value
+//!   is a non-`freeze` method call, or `freeze` on a non-literal receiver) are
+//!   offense-only, matching RuboCop's `dynamic_constant?` guard; heredoc
+//!   constants are also offense-only because the heredoc body lives outside the
+//!   node's line range and a whole-line swap would corrupt source.
 //! ```
 
-use murphy_plugin_api::{ConfigError, CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{ConfigError, CopOptions, Cx, NodeId, NodeKind, Range, cop};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -182,6 +192,7 @@ impl CopOptions for ClassStructureOptions {
     description = "Enforces a configured order of definitions within a class body.",
     default_severity = "warning",
     default_enabled = false,
+    safe_autocorrect = false,
     options = ClassStructureOptions
 )]
 impl ClassStructure {
@@ -219,9 +230,136 @@ fn check(class_node: NodeId, cx: &Cx<'_>) {
             let message =
                 format!("`{category}` is supposed to appear before `{prev_category}`.");
             cx.emit_offense(cx.range(node), &message, None);
+            autocorrect(node, &category, cx, &opts);
         }
         previous = index;
     }
+}
+
+/// `autocorrect(corrector, node)` — swap the offending node one position upward
+/// past the nearest swappable left sibling, carrying contiguous own-line
+/// comments (RuboCop's `source_range_with_comment` + `insert_before`/`remove`).
+fn autocorrect(node: NodeId, category: &str, cx: &Cx<'_>, opts: &ClassStructureOptions) {
+    // `dynamic_constant?(node)` suppresses the correction entirely: every
+    // sibling would be ignored, so there is no swap target.
+    if dynamic_constant(node, cx) {
+        return;
+    }
+    let Some(previous) = swap_target(node, category, cx, opts) else {
+        return;
+    };
+    let current_range = source_range_with_comment(node, cx);
+    let previous_range = source_range_with_comment(previous, cx);
+    // Whole-line ranges of two same-line nodes coincide; swapping them would
+    // delete both lines' text. Upstream never sees this shape (its ranges are
+    // leading-newline based), so bail out instead of corrupting source.
+    if previous_range.end > current_range.start
+        || current_range.start < previous_range.start
+        || current_range.end <= current_range.start
+    {
+        return;
+    }
+    // Heredoc bodies live outside the opener's line range. A whole-line swap
+    // of a heredoc constant would strand the body/terminator, so stay
+    // offense-only when any heredoc token sits inside the swap span.
+    if swap_span_contains_heredoc(previous_range.start, current_range.end, cx) {
+        return;
+    }
+    let text = cx.raw_source(current_range).to_string();
+    if text.is_empty() {
+        return;
+    }
+    cx.emit_edit(
+        Range {
+            start: previous_range.start,
+            end: previous_range.start,
+        },
+        &text,
+    );
+    cx.emit_edit(current_range, "");
+}
+
+/// `node.left_siblings.reverse.find { !ignore_for_autocorrect?(node, sibling) }`.
+fn swap_target(
+    node: NodeId,
+    category: &str,
+    cx: &Cx<'_>,
+    opts: &ClassStructureOptions,
+) -> Option<NodeId> {
+    let mut sibling = cx.left_sibling(node);
+    while let Some(current) = sibling.get() {
+        if !ignore_for_autocorrect(node, category, current, cx, opts) {
+            return Some(current);
+        }
+        sibling = cx.left_sibling(current);
+    }
+    None
+}
+
+/// `ignore_for_autocorrect?(node, sibling)`.
+fn ignore_for_autocorrect(
+    node: NodeId,
+    category: &str,
+    sibling: NodeId,
+    cx: &Cx<'_>,
+    opts: &ClassStructureOptions,
+) -> bool {
+    if dynamic_constant(node, cx) {
+        return true;
+    }
+    let Some(sibling_class) = classify(sibling, cx, opts) else {
+        return true;
+    };
+    if sibling_class == category {
+        return true;
+    }
+    ignore(sibling, &sibling_class, cx, opts)
+}
+
+/// `dynamic_constant?(node)` — a namespace-less `casgn` whose value is a method
+/// call, except `freeze` on a recursive basic literal receiver.
+fn dynamic_constant(node: NodeId, cx: &Cx<'_>) -> bool {
+    let NodeKind::Casgn { scope, value, .. } = *cx.kind(node) else {
+        return false;
+    };
+    if scope.get().is_some() {
+        return false;
+    }
+    let Some(expression) = value.get() else {
+        return false;
+    };
+    // RuboCop checks `send_type?` only — `csend` and block calls are not
+    // dynamic constants.
+    if !matches!(*cx.kind(expression), NodeKind::Send { .. }) {
+        return false;
+    }
+    if cx.method_name(expression) != Some("freeze") {
+        return true;
+    }
+    // `freeze` with no receiver (`CONST = freeze`) has a nil receiver, and
+    // `nil&.recursive_basic_literal?` is falsy, so it stays dynamic.
+    match cx.call_receiver(expression).get() {
+        None => true,
+        Some(receiver) => !cx.is_recursive_basic_literal(receiver),
+    }
+}
+
+/// `source_range_with_comment(node)` — the node's whole-line range expanded
+/// through contiguous own-line comments above it.
+fn source_range_with_comment(node: NodeId, cx: &Cx<'_>) -> Range {
+    cx.range_with_comments_and_lines(node)
+}
+
+/// True when a heredoc start/end token lies inside `[start, end)`.
+fn swap_span_contains_heredoc(start: u32, end: u32, cx: &Cx<'_>) -> bool {
+    cx.sorted_tokens().iter().any(|token| {
+        matches!(
+            token.kind,
+            murphy_plugin_api::SourceTokenKind::HeredocStart
+                | murphy_plugin_api::SourceTokenKind::HeredocEnd
+        ) && token.range.start >= start
+            && token.range.start < end
+    })
 }
 
 /// `class_elements(class_node)` — the body's children (a `begin`'s children, or
@@ -476,7 +614,8 @@ murphy_plugin_api::submit_cop!(ClassStructure);
 mod tests {
     use super::{ClassStructure, ClassStructureOptions};
     use murphy_plugin_api::{
-        test_support::{run_cop_with_options, run_cop},
+        Cop,
+        test_support::{indoc, run_cop_with_edits, run_cop_with_options, run_cop, test},
         ConfigError, CopOptions,
     };
 
@@ -753,6 +892,213 @@ mod tests {
             "class Foo\n  def pub; end\n  CONST = 1\n  private_constant \"CON\\x53T\"\nend\n";
         let offenses = run_cop::<ClassStructure>(src);
         assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    // --- autocorrect (murphy-kse6): unsafe node-swap ---
+
+    #[test]
+    fn unsafe_autocorrect_metadata_is_declared() {
+        assert_eq!(
+            <ClassStructure as Cop>::SAFE_AUTOCORRECT,
+            Some(false),
+            "node-swap reordering is unsafe and must only run under -A"
+        );
+    }
+
+    #[test]
+    fn corrects_constant_before_module_inclusion() {
+        test::<ClassStructure>().expect_correction(
+            indoc! {r#"
+                class Foo
+                  CONST = 1
+                  include M
+                  ^^^^^^^^^ `module_inclusion` is supposed to appear before `constants`.
+                end
+            "#},
+            indoc! {r#"
+                class Foo
+                  include M
+                  CONST = 1
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_method_before_constant() {
+        test::<ClassStructure>().expect_correction(
+            indoc! {r#"
+                class Foo
+                  def pub; end
+                  CONST = 1
+                  ^^^^^^^^^ `constants` is supposed to appear before `public_methods`.
+                end
+            "#},
+            indoc! {r#"
+                class Foo
+                  CONST = 1
+                  def pub; end
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn correction_carries_comment_above_moved_node() {
+        test::<ClassStructure>().expect_correction(
+            indoc! {r#"
+                class Foo
+                  CONST = 1
+                  # comment for include
+                  include M
+                  ^^^^^^^^^ `module_inclusion` is supposed to appear before `constants`.
+                end
+            "#},
+            indoc! {r#"
+                class Foo
+                  # comment for include
+                  include M
+                  CONST = 1
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn correction_carries_comment_above_staying_node() {
+        // The staying node keeps its comment; the moved node is inserted above
+        // the whole comment block.
+        test::<ClassStructure>().expect_correction(
+            indoc! {r#"
+                class Foo
+                  # comment for CONST
+                  CONST = 1
+                  include M
+                  ^^^^^^^^^ `module_inclusion` is supposed to appear before `constants`.
+                end
+            "#},
+            indoc! {r#"
+                class Foo
+                  include M
+                  # comment for CONST
+                  CONST = 1
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn no_correction_for_dynamic_constant() {
+        // `CONST = foo` is a dynamic constant: offense is still reported, but
+        // no edits are emitted (RuboCop's `dynamic_constant?` guard).
+        let src = "class Foo\n  def pub; end\n  CONST = foo\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        test::<ClassStructure>().expect_no_corrections(src);
+    }
+
+    #[test]
+    fn no_correction_for_freeze_on_non_literal() {
+        // `CONST = FOO.freeze` — the receiver is not a recursive basic
+        // literal, so the constant is dynamic and stays offense-only.
+        let src = "class Foo\n  def pub; end\n  CONST = FOO.freeze\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        test::<ClassStructure>().expect_no_corrections(src);
+    }
+
+    #[test]
+    fn corrects_frozen_literal_constant() {
+        // `CONST = [1, 2].freeze` — `freeze` on a recursive basic literal is
+        // NOT dynamic, so the swap applies.
+        test::<ClassStructure>().expect_correction(
+            indoc! {r#"
+                class Foo
+                  def pub; end
+                  CONST = [1, 2].freeze
+                  ^^^^^^^^^^^^^^^^^^^^^ `constants` is supposed to appear before `public_methods`.
+                end
+            "#},
+            indoc! {r#"
+                class Foo
+                  CONST = [1, 2].freeze
+                  def pub; end
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn no_correction_for_heredoc_constant() {
+        // The heredoc body lives outside the opener's line range; a whole-line
+        // swap would strand it, so heredoc constants stay offense-only.
+        let src = "class Foo\n  def pub; end\n  CONST = <<~EOS\n    hi\n  EOS\nend\n";
+        let offenses = run_cop::<ClassStructure>(src);
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        test::<ClassStructure>().expect_no_corrections(src);
+    }
+
+    #[test]
+    fn skips_ignored_sibling_when_swapping() {
+        // `attr_reader` is ignored under the default config, so the offending
+        // `include` swaps past `CONST`, not past the ignored macro.
+        test::<ClassStructure>().expect_correction(
+            indoc! {r#"
+                class Foo
+                  attr_reader :x
+                  CONST = 1
+                  include M
+                  ^^^^^^^^^ `module_inclusion` is supposed to appear before `constants`.
+                end
+            "#},
+            indoc! {r#"
+                class Foo
+                  attr_reader :x
+                  include M
+                  CONST = 1
+                end
+            "#},
+        );
+    }
+
+    /// Convergence pin: repeated correction passes bubble the node left until
+    /// the class is ordered, and a final pass reports no offenses (idempotent
+    /// fixpoint). Mirrors RuboCop's multi-pass `-A` loop.
+    #[test]
+    fn correction_converges_to_ordered_class() {
+        let mut src = "class Foo\n  def pub; end\n  CONST = 1\n  include M\nend\n".to_string();
+        for _ in 0..5 {
+            let run = run_cop_with_edits::<ClassStructure>(&src);
+            if run.edits.is_empty() {
+                break;
+            }
+            src = apply_edits_for_test(&src, &run.edits);
+        }
+        assert_eq!(
+            src, "class Foo\n  include M\n  CONST = 1\n  def pub; end\nend\n",
+            "correction did not converge"
+        );
+        let offenses = run_cop::<ClassStructure>(&src);
+        assert!(offenses.is_empty(), "not idempotent: {offenses:?}");
+    }
+
+    /// Descending-start edit application, mirroring the host/test-harness
+    /// order so the convergence loop above observes the same source the
+    /// correction loop would produce.
+    fn apply_edits_for_test(
+        src: &str,
+        edits: &[murphy_plugin_api::test_support::CapturedEdit],
+    ) -> String {
+        let mut ordered: Vec<_> = edits.iter().collect();
+        ordered.sort_by_key(|b| std::cmp::Reverse(b.range.start));
+        let mut out = src.to_string();
+        for edit in ordered {
+            out.replace_range(
+                edit.range.start as usize..edit.range.end as usize,
+                &edit.replacement,
+            );
+        }
+        out
     }
 
     // --- option decoding error surface ---
