@@ -42,6 +42,7 @@
 //!   of a trailing options hash.
 //! ```
 
+use crate::cops::util::SourceLineIndex;
 use murphy_plugin_api::{Comment, CommentKind, CopOptions, Cx, NodeId, NodeKind, cop};
 
 const MSG: &str = "Missing gem description comment.";
@@ -76,8 +77,31 @@ pub struct GemCommentOptions {
     options = GemCommentOptions
 )]
 impl GemComment {
-    #[on_node(kind = "send", methods = ["gem"])]
-    fn check_send(&self, node: NodeId, cx: &Cx<'_>, opts: &GemCommentOptions) {
+    #[on_new_investigation]
+    fn check_file(&self, cx: &Cx<'_>) {
+        let opts = cx.options_or_default::<GemCommentOptions>();
+        let line_index = SourceLineIndex::new(cx.source());
+        let root = cx.root();
+
+        // Walk the AST once so the newline index is shared by every gem in the
+        // file instead of rebuilding or rescanning it for each send node.
+        for node in std::iter::once(root).chain(cx.descendants(root)) {
+            if !matches!(cx.kind(node), NodeKind::Send { .. })
+                || cx.method_name(node) != Some("gem")
+            {
+                continue;
+            }
+            self.check_send(node, cx, &opts, &line_index);
+        }
+    }
+
+    fn check_send(
+        &self,
+        node: NodeId,
+        cx: &Cx<'_>,
+        opts: &GemCommentOptions,
+        line_index: &SourceLineIndex,
+    ) {
         // RuboCop's `gem_declaration?`: `(send nil? :gem str ...)`.
         if cx.call_receiver(node).get().is_some() {
             return;
@@ -97,7 +121,7 @@ impl GemComment {
         }
 
         // `commented_any_descendant?`: skip if a describing comment is present.
-        if has_describing_comment(node, cx) {
+        if has_describing_comment(node, cx, line_index) {
             return;
         }
 
@@ -118,19 +142,19 @@ impl GemComment {
 /// is an *own-line* comment on the line immediately above the gem
 /// (`start_line - 1`). The own-line gate is what keeps a trailing comment on
 /// the *previous* statement's line from counting as this gem's leading comment.
-fn has_describing_comment(node: NodeId, cx: &Cx<'_>) -> bool {
+fn has_describing_comment(node: NodeId, cx: &Cx<'_>, line_index: &SourceLineIndex) -> bool {
     let range = cx.range(node);
-    let start_line = line_of(cx, range.start);
+    let start_line = line_index.line_of(range.start);
     // `range.end` is exclusive; step back one byte so a node ending exactly at a
     // newline boundary does not overshoot into the following line.
-    let end_line = line_of(cx, range.end.saturating_sub(1));
+    let end_line = line_index.line_of(range.end.saturating_sub(1));
 
     cx.comments().iter().any(|comment| {
-        let comment_line = line_of(cx, comment.range.start);
+        let comment_line = line_index.line_of(comment.range.start);
         if comment_line >= start_line && comment_line <= end_line {
             return true;
         }
-        comment_line + 1 == start_line && is_own_line_comment(*comment, cx)
+        comment_line + 1 == start_line && is_own_line_comment(*comment, cx, line_index)
     })
 }
 
@@ -141,10 +165,7 @@ fn checked_options_present(
     cx: &Cx<'_>,
     opts: &GemCommentOptions,
 ) -> bool {
-    if opts
-        .only_for
-        .iter()
-        .any(|o| o == VERSION_SPECIFIERS_OPTION)
+    if opts.only_for.iter().any(|o| o == VERSION_SPECIFIERS_OPTION)
         && version_specified_gem(args, cx)
     {
         return true;
@@ -233,24 +254,16 @@ fn hash_pair_symbol_key<'a>(pair: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
 
 /// A comment is "own-line" if everything before it on its line is whitespace
 /// (mirrors `Cx::is_own_line_comment`, which is not part of the public surface).
-fn is_own_line_comment(comment: Comment, cx: &Cx<'_>) -> bool {
+fn is_own_line_comment(comment: Comment, cx: &Cx<'_>, line_index: &SourceLineIndex) -> bool {
     if comment.kind != CommentKind::Inline {
         return false;
     }
     let source = cx.source().as_bytes();
     let start = comment.range.start as usize;
-    let line_start = source[..start]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map_or(0, |pos| pos + 1);
+    let line_start = line_index.line_start(comment.range.start);
     source[line_start..start]
         .iter()
         .all(|byte| byte.is_ascii_whitespace())
-}
-
-/// 1-based source line number of the byte `offset`.
-fn line_of(cx: &Cx<'_>, offset: u32) -> usize {
-    cx.source()[..offset as usize].matches('\n').count() + 1
 }
 
 murphy_plugin_api::submit_cop!(GemComment);
