@@ -8,7 +8,7 @@
 //! upstream_cop: Layout/CaseIndentation
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues: [murphy-vagp]
+//! gap_issues: []
 //! notes: >
 //!   Direct port of RuboCop's `on_case` / `on_case_match`. A separate offense
 //!   is registered for each misaligned `when`/`in` keyword. The check is:
@@ -44,20 +44,25 @@
 //!   (default 2) — murphy-kke2. (When `IndentOneStep` is false the width is
 //!   inert.)
 //!
+//!   `end_and_last_conditional_same_line?` (consulted only under
+//!   `EnforcedStyle: end`) is a faithful port of RuboCop's skip guard: the
+//!   `end` keyword line is compared against the `else` keyword line when an
+//!   `else` is present, else against the last branch's `begin` line (`then`
+//!   or `;`, `nil` when the branch uses a newline separator). `NodeLoc`
+//!   exposes neither sub-range, so both keyword lines are recovered via the
+//!   token API by scanning the gaps between branch bodies (`last-branch.end
+//!   .. else-body.start`, or `.. end.start` for an empty `else`) and between
+//!   the last branch's conditions and its body. Gap scans exclude nested
+//!   `case`/`if` keywords (they sit inside child node ranges) — murphy-vagp.
+//!
 //!   Gaps (documented, not bypassed):
 //!     * `correct_style_detected` / `opposite_style_detected` style-tracking
 //!       (RuboCop's `ConfigurableEnforcedStyle` learning) is not modelled;
 //!       Murphy is stateless per-file and only reports offenses.
-//!     * (murphy-vagp) `end_and_last_conditional_same_line?` — consulted only
-//!       under `EnforcedStyle: end` — approximates the same-line skip using
-//!       node ranges (the else/last-conditional node start lines) rather than
-//!       the `else`/`then` keyword lines RuboCop reads (`NodeLoc` exposes
-//!       neither). Diverges only when `end` shares a line with an else or last
-//!       conditional; the common `end`-on-its-own-line case is correct.
 //! ```
 
 use crate::cops::util::nth_line_start;
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, Range, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 /// Stateless unit struct (ADR 0035 const-metadata cop pattern).
 #[derive(Default)]
@@ -248,9 +253,26 @@ fn indentation_width(opts: &CaseIndentationOptions, fallback_width: i64) -> usiz
     }
 }
 
-/// `end_and_last_conditional_same_line?(node)` — the `end` keyword line equals
-/// the `else` line (when present) or the last branch's body `begin` line. Only
-/// consulted under `EnforcedStyle: end`.
+/// `end_and_last_conditional_same_line?(node)` — RuboCop's skip guard:
+///
+/// ```ruby
+/// end_line = node.loc.end&.line
+/// last_conditional_line = node.loc.else ? node.loc.else.line
+///                                        : node.child_nodes.last.loc.begin&.line
+/// end_line && last_conditional_line && end_line == last_conditional_line
+/// ```
+///
+/// Only consulted under `EnforcedStyle: end`. `NodeLoc` exposes neither the
+/// `else` keyword nor the last branch's `begin` (`then`/`;`) sub-range, so both
+/// lines are recovered via the token API (murphy-vagp):
+/// * `else` — the outer `else` token in the gap `last-branch.end ..
+///   else-body.start` (or `.. end.start` when the `else` body is empty/absent,
+///   which also covers an `else` keyword with an empty body). Gap scans exclude
+///   nested `case`/`if` keywords, which sit inside child node ranges.
+/// * `begin` — the last `when`/`in` branch's `then` (preferred, matching
+///   `WhenNode#then?`/`InPatternNode#then?`) or `;` token in the gap between its
+///   conditions/pattern-guard and its body. A newline separator yields no token
+///   (`nil` in RuboCop), so the guard returns `false`.
 fn end_and_last_conditional_same_line(node: NodeId, cx: &Cx<'_>) -> bool {
     let end_kw = cx.loc(node).end_keyword();
     if end_kw == Range::ZERO {
@@ -258,25 +280,124 @@ fn end_and_last_conditional_same_line(node: NodeId, cx: &Cx<'_>) -> bool {
     }
     let end_line = line_of(end_kw.start, cx);
 
-    let else_branch = cx
+    if let Some(else_tok) = outer_else_keyword(node, cx) {
+        return end_line == line_of(else_tok.start, cx);
+    }
+    // No `else` keyword — `node.child_nodes.last.loc.begin&.line`.
+    let last_branch = cx
+        .case_when_branches(node)
+        .last()
+        .or_else(|| cx.in_pattern_branches(node).last())
+        .copied();
+    match last_branch {
+        Some(b) => match branch_begin_keyword(b, cx) {
+            Some(begin_tok) => end_line == line_of(begin_tok.start, cx),
+            None => false,
+        },
+        None => false,
+    }
+}
+
+/// The outer `case`/`case_match` node's own `else` keyword, or `None` when the
+/// node has no `else` (RuboCop's `node.loc.else` existence check).
+///
+/// Located positionally in the gap after the last branch and before the `else`
+/// body (or before `end` when there is no `else` body, which covers both "no
+/// `else`" and "empty `else`" — the latter still has an `else` keyword).
+/// Tokens inside child nodes (subject, branches, bodies) belong to nested
+/// constructs and are excluded by the gap bounds.
+fn outer_else_keyword(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
+    let end_kw = cx.loc(node).end_keyword();
+    if end_kw == Range::ZERO {
+        return None;
+    }
+    let whens = cx.case_when_branches(node);
+    let ins = cx.in_pattern_branches(node);
+    let branches: &[NodeId] = if !whens.is_empty() { whens } else { ins };
+    let else_body = cx
         .case_else_branch(node)
         .get()
         .or_else(|| cx.case_match_else_branch(node).get());
-    let last_line = if let Some(else_node) = else_branch {
-        line_of(cx.range(else_node).start, cx)
+
+    let lower = if let Some(&last) = branches.last() {
+        cx.range(last).end
+    } else if let Some(subject) = cx
+        .case_subject(node)
+        .get()
+        .or_else(|| cx.case_match_subject(node).get())
+    {
+        cx.range(subject).end
     } else {
-        // `node.child_nodes.last.loc.begin&.line` — the last branch node.
-        let last_branch = cx
-            .case_when_branches(node)
-            .last()
-            .or_else(|| cx.in_pattern_branches(node).last())
-            .copied();
-        match last_branch {
-            Some(b) => line_of(cx.range(b).start, cx),
-            None => return false,
-        }
+        cx.range(node).start
     };
-    end_line == last_line
+    let upper = match else_body {
+        Some(body) => cx.range(body).start,
+        None => end_kw.start,
+    };
+    if lower >= upper {
+        return None;
+    }
+    find_keyword_in_gap(lower, upper, cx, "else")
+}
+
+/// The last `when`/`in` branch's `begin` keyword (`then`, else `;`), or `None`
+/// when the branch uses a newline separator (RuboCop's `loc.begin == nil`).
+///
+/// Located positionally in the gap between the branch's conditions (or
+/// pattern/guard for `in`) and its body (or the branch end when the body is
+/// empty). `then` is preferred over `;` to match the parser (`when 0; then x`
+/// reports `then`). Tokens inside child nodes belong to nested constructs and
+/// are excluded by the gap bounds.
+fn branch_begin_keyword(branch: NodeId, cx: &Cx<'_>) -> Option<Range> {
+    let (lower, upper) = match *cx.kind(branch) {
+        NodeKind::When { .. } => {
+            let conds = cx.when_conditions(branch);
+            let body = cx.when_body(branch).get();
+            let lower = conds
+                .last()
+                .map(|c| cx.range(*c).end)
+                .unwrap_or_else(|| cx.range(branch).start);
+            let upper = body
+                .map(|b| cx.range(b).start)
+                .unwrap_or_else(|| cx.range(branch).end);
+            (lower, upper)
+        }
+        NodeKind::InPattern { .. } => {
+            let pattern = cx.in_pattern_pattern(branch).get();
+            let guard = cx.in_pattern_guard(branch).get();
+            let body = cx.in_pattern_body(branch).get();
+            let lower = guard
+                .map(|g| cx.range(g).end)
+                .or_else(|| pattern.map(|p| cx.range(p).end))
+                .unwrap_or_else(|| cx.range(branch).start);
+            let upper = body
+                .map(|b| cx.range(b).start)
+                .unwrap_or_else(|| cx.range(branch).end);
+            (lower, upper)
+        }
+        _ => return None,
+    };
+    if lower >= upper {
+        return None;
+    }
+    // `then` first (parser preference), then `;` (e.g. `when 0; x`).
+    find_keyword_in_gap(lower, upper, cx, "then")
+        .or_else(|| find_keyword_in_gap(lower, upper, cx, ";"))
+}
+
+/// First token in the gap `[lower, upper)` whose source text is exactly `text`.
+/// Prism delimits tokens, so this is an exact-token match. `Range::ZERO` never
+/// matches: gaps are non-empty here and keyword tokens are non-zero-width.
+fn find_keyword_in_gap(lower: u32, upper: u32, cx: &Cx<'_>, text: &str) -> Option<Range> {
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.start < lower);
+    toks[idx..]
+        .iter()
+        .take_while(|t| t.range.start < upper)
+        .find(|t| {
+            t.kind == SourceTokenKind::Other && cx.raw_source(t.range) == text
+        })
+        .map(|t| t.range)
 }
 
 /// 0-based byte column of `offset` (distance from its line start). Indentation
@@ -428,6 +549,66 @@ mod tests {
         let src = "a = case n\n    when 0\n      x\nend\n";
         let run = run_cop_with_options_and_edits::<CaseIndentation>(src, &end_opts());
         assert_eq!(apply(src, &run.edits), "a = case n\nwhen 0\n      x\nend\n");
+    }
+
+    // --- murphy-vagp: else/then keyword lines (EnforcedStyle: end) ---
+
+    /// RuboCop reads `node.loc.else.line` (the `else` KEYWORD line), not the
+    /// else body start. `else` on line 4 with `y; end` on line 5 must NOT skip.
+    #[test]
+    fn end_style_flags_when_else_body_shares_end_line() {
+        let src = "a = case n\n    when 0\n      x\n    else\n      y; end\n";
+        let offenses = run_cop_with_options::<CaseIndentation>(src, &end_opts());
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(offenses[0].message, "Indent `when` as deep as `end`.");
+    }
+
+    /// Same layout for `case/in`: `else` keyword line 4 vs `end` line 5.
+    #[test]
+    fn end_style_flags_in_when_else_body_shares_end_line() {
+        let src = "a = case n\n    in 0\n      x\n    else\n      y; end\n";
+        let offenses = run_cop_with_options::<CaseIndentation>(src, &end_opts());
+        assert_eq!(offenses.len(), 1, "got {offenses:?}");
+        assert_eq!(offenses[0].message, "Indent `in` as deep as `end`.");
+    }
+
+    /// Empty `else` (`else; end`) still has an `else` keyword: `else` line 3
+    /// equals `end` line 3, so the check is skipped even though there is no
+    /// else body node.
+    #[test]
+    fn end_style_skips_when_empty_else_shares_end_line() {
+        let src = "a = case n\n    when 0 then x\n    else; end\n";
+        let offenses = run_cop_with_options::<CaseIndentation>(src, &end_opts());
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// RuboCop reads `child_nodes.last.loc.begin.line` (the last branch's
+    /// `then`/`;` line), not the `when` keyword line. Here `when` starts on
+    /// line 2 but `then` shares line 3 with `end`, so the check is skipped.
+    #[test]
+    fn end_style_skips_when_multiline_then_shares_end_line() {
+        let src = "case n\nwhen 0,\n1 then y; end\n";
+        let offenses = run_cop_with_options::<CaseIndentation>(src, &end_opts());
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// `when 0; x; end` — `loc.begin` is `;` on the `end` line, so skipped.
+    /// Guards the `;` half of `begin` (`then`/`;`, `nil` for newline).
+    #[test]
+    fn end_style_skips_when_semicolon_shares_end_line() {
+        let src = "case n\nwhen 0; x; end\n";
+        let offenses = run_cop_with_options::<CaseIndentation>(src, &end_opts());
+        assert!(offenses.is_empty(), "got {offenses:?}");
+    }
+
+    /// Nested-case disambiguation: the outer `else` (line 7, sharing `end`
+    /// line 7) is used, not the inner `else` (line 5). The misaligned outer
+    /// `when` would flag if checked, so empty means the outer skip applied.
+    #[test]
+    fn end_style_skips_outer_else_despite_nested_else() {
+        let src = "case a\nwhen 0\n  case b\n  when 1 then x\n  else y\n  end\nelse z; end\n";
+        let offenses = run_cop_with_options::<CaseIndentation>(src, &end_opts());
+        assert!(offenses.is_empty(), "got {offenses:?}");
     }
 
     // --- IndentOneStep: true ---
