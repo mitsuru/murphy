@@ -7,8 +7,8 @@
 //! upstream: rubocop
 //! upstream_cop: Naming/PredicateMethod
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues: [murphy-e7bz.69]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Faithful port of RuboCop's `on_def` (aliased to `on_defs`):
 //!
@@ -35,10 +35,10 @@
 //!       `s(:array)`),
 //!     * the body's last value (last child of a begin, or the body itself).
 //!   Then `process_return_values` recursively expands conditionals (if /
-//!   while / until / case) into branch last-values and `and`/`or` into their
-//!   clauses. Missing `else`/`when`-less branches and bodyless loops act as
-//!   implicit synthetic `nil` (verified column-for-column against rubocop
-//!   1.87.0).
+//!   while / until / case / case-in) into branch last-values and `and`/`or`
+//!   into their clauses. Missing `else`/`when`-less branches and bodyless loops
+//!   act as implicit synthetic `nil` (verified column-for-column against
+//!   rubocop 1.87.0).
 //!
 //!   Classification mirrors rubocop-ast predicates:
 //!     * `boolean_type?` — node is `true`/`false`;
@@ -67,17 +67,14 @@
 //!   receiver (shared with `Naming/MethodName`). Verified `def foo` col 5..7,
 //!   `def foo?` col 5..8, `def calls_pred` col 5..14, `def save!` col 5..9.
 //!
-//!   Known gaps vs RuboCop (gap issue murphy-e7bz.69; all are sound — they
-//!   under-report, never false-positive, because an unrecognised value is
-//!   classified non-boolean):
-//!     * `case`/`in` pattern matching (`case_match`) branches are not
-//!       expanded — `conditional?` covers it in RuboCop but Murphy treats the
-//!       whole `case_match` node as a single opaque (non-boolean) value;
-//!     * `rescue`/`ensure` (`kwbegin`) bodies are treated as their begin's
-//!       last value only, not per-branch like RuboCop's wider analysis;
-//!     * explicit `return` nodes nested inside a block/lambda literal inside
-//!       the method are still collected (matching RuboCop's `each_descendant`,
-//!       which does not stop at block boundaries) — this is intentional parity.
+//!   `case_match` (`case`/`in`) is a RuboCop conditional: each pattern branch
+//!   contributes its last value, and a missing `else` contributes synthetic
+//!   `nil`. Rescue/ensure nodes are not included in RuboCop's `conditional?` set;
+//!   their implicit value follows the enclosing begin's last-value behavior,
+//!   while explicit descendant returns are still collected. Explicit `return`
+//!   nodes nested inside a block/lambda literal inside the method are also
+//!   collected (matching RuboCop's `each_descendant`, which does not stop at
+//!   block boundaries).
 //! ```
 //!
 //! ## Offense range
@@ -415,6 +412,23 @@ fn extract_conditional_branches(node: NodeId, cx: &Cx<'_>) -> Vec<Value> {
             }
             branches
         }
+        NodeKind::CaseMatch {
+            in_patterns,
+            else_body,
+            ..
+        } => {
+            let mut branches: Vec<Value> = cx
+                .list(in_patterns)
+                .iter()
+                .map(|&pattern| match *cx.kind(pattern) {
+                    NodeKind::InPattern { body, .. } => branch_last_value(body.get(), cx),
+                    _ => Value::Nil,
+                })
+                .collect();
+            // RuboCop appends nil when `case_match` has no `else`.
+            branches.push(branch_last_value(else_body.get(), cx));
+            branches
+        }
         _ => vec![Value::Node(node)],
     }
 }
@@ -449,12 +463,16 @@ fn is_and_or(node: NodeId, cx: &Cx<'_>) -> bool {
     matches!(*cx.kind(node), NodeKind::And { .. } | NodeKind::Or { .. })
 }
 
-/// rubocop-ast `conditional?`: if / while / until / case. (`case_match` is a
-/// documented gap.)
+/// RuboCop `conditional?` — if / while / until / case / case_match. Rescue
+/// and ensure nodes are not included in RuboCop's conditional set.
 fn is_conditional(node: NodeId, cx: &Cx<'_>) -> bool {
     matches!(
         *cx.kind(node),
-        NodeKind::If { .. } | NodeKind::While { .. } | NodeKind::Until { .. } | NodeKind::Case { .. }
+        NodeKind::If { .. }
+            | NodeKind::While { .. }
+            | NodeKind::Until { .. }
+            | NodeKind::Case { .. }
+            | NodeKind::CaseMatch { .. }
     )
 }
 
@@ -587,6 +605,52 @@ mod tests {
               end
             end
         "#});
+    }
+
+    #[test]
+    fn case_in_all_boolean_branches_flags_non_predicate_method() {
+        // RuboCop `conditional?` includes case_match; each branch contributes
+        // its last value when an explicit else makes the match exhaustive.
+        test::<PredicateMethod>().expect_offense(indoc! {r#"
+            def foo
+                ^^^ Predicate method names should end with `?`.
+              case value
+              in 1
+                true
+              else
+                false
+              end
+            end
+        "#});
+    }
+
+    #[test]
+    fn case_in_without_else_adds_implicit_nil() {
+        // RuboCop appends nil for a missing case_match else branch.
+        test::<PredicateMethod>().expect_no_offenses(indoc! {"
+            def foo
+              case value
+              in 1
+                true
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn rescue_ensure_last_value_behavior_matches_rubocop() {
+        // RuboCop does not expand rescue/ensure as `conditional?` branches.
+        test::<PredicateMethod>().expect_no_offenses(indoc! {"
+            def foo
+              begin
+                true
+              rescue
+                false
+              ensure
+                true
+              end
+            end
+        "});
     }
 
     #[test]
