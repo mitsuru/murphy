@@ -7,7 +7,7 @@
 //! upstream: rubocop
 //! upstream_cop: Layout/EmptyLinesAroundAccessModifier
 //! upstream_version_checked: 1.87.0
-//! status: complete
+//! status: verified
 //! gap_issues: []
 //! notes: >
 //!   Ports `on_send` plus the `around`/`only_before` `EnforcedStyle`
