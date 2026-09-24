@@ -92,6 +92,7 @@ fn cx_raw_for<'a>(ast: &'a Ast, fns: &'a FnTable, cop_name: RawSlice) -> CxRaw {
         config_disabled_cops_len: 0,
         block_forwarding_explicit: false,
         block_body_empty_lines: false,
+        block_braces_space: true,
     }
 }
 

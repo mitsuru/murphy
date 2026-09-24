@@ -602,6 +602,27 @@ impl<'a> Cx<'a> {
         !self.raw.block_body_empty_lines
     }
 
+    /// The run-wide resolved `Layout/SpaceInsideBlockBraces.EnforcedStyle`
+    /// == `"space"` flag (murphy-4qhr).
+    ///
+    /// RuboCop's `SpaceBeforePunctuation#space_required_after_lcurly?` reads
+    /// `config.for_cop('Layout/SpaceInsideBlockBraces')['EnforcedStyle']`
+    /// (fallback `'space'`) `== 'space'`; this is that value. Default `true`
+    /// (RuboCop's `space` default, and the value raw-ABI test harnesses observe
+    /// when they build `CxRaw` by hand with the default). When `true`, a `{`
+    /// immediately before `,`/`;` exempts the space-before-punctuation offense
+    /// (the space is required by the sibling cop); when `false`
+    /// (`no_space` style), the gap is flagged.
+    pub fn block_braces_space(&self) -> bool {
+        self.raw.block_braces_space
+    }
+
+    /// RuboCop's `space_required_after_lcurly?` — `true` when
+    /// `Layout/SpaceInsideBlockBraces` resolves to `space` (the default).
+    pub fn space_required_after_lcurly(&self) -> bool {
+        self.raw.block_braces_space
+    }
+
     /// Allocate a dispatch-lifetime copy of `elements` in the host arena.
     pub fn alloc_node_slice(&self, elements: &[NodeId]) -> &'a [NodeId] {
         if elements.is_empty() {
@@ -3246,6 +3267,7 @@ mod tests {
             config_disabled_cops_len: 0,
             block_forwarding_explicit: false,
             block_body_empty_lines: false,
+            block_braces_space: true,
         }
     }
 
@@ -3317,6 +3339,26 @@ mod tests {
         let cx = unsafe { Cx::from_raw(&raw) };
         assert!(!cx.block_body_empty_lines());
         assert!(cx.no_empty_lines_around_block_body());
+    }
+
+    #[test]
+    fn block_braces_space_decodes_from_raw_context() {
+        let ast = murphy_translate::translate("nil\n", "t.rb");
+        let fns = FnTable {
+            emit_offense: noop_offense,
+            emit_edit: noop_edit,
+        };
+        let mut raw = cx_raw_for(&ast, &fns);
+
+        raw.block_braces_space = true;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(cx.block_braces_space());
+        assert!(cx.space_required_after_lcurly());
+
+        raw.block_braces_space = false;
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(!cx.block_braces_space());
+        assert!(!cx.space_required_after_lcurly());
     }
 
     #[test]
