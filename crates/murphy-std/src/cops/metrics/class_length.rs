@@ -10,8 +10,8 @@
 //! version_changed: "0.87"
 //! safe: true
 //! supports_autocorrect: false
-//! status: partial
-//! gap_issues: [murphy-e7bz.72]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `Metrics::ClassLength` (`CodeLength` mixin +
 //!   `Metrics::Utils::CodeLengthCalculator`), verified numerically against
@@ -46,16 +46,19 @@
 //!      (RuboCop's `class_definition?` matcher's block arm: `(any_block (send
 //!      #global_const?({:Struct :Class}) :new ...) _ $_)`). RuboCop computes
 //!      `block_node = node.expression` and passes the *block* (not the casgn) to
-//!      `check_code_length`. `code_length(block)` is not classlike, so it uses
-//!      `extract_body` → the block body → an ordinary body-line count, and
-//!      `location(block)` is the block's `source_range` (NOT the constant name —
-//!      this is the deliberate divergence from `Metrics/ModuleLength`, whose
-//!      `on_casgn` passes the casgn node and so highlights `loc.name`). The
-//!      offense range therefore spans `Class.new … end` / `Struct.new(…) … end`,
-//!      starting at the `Class`/`Struct` receiver. Because the match is on the
-//!      block, there is NO casgn-scope constraint (unlike ModuleLength's
-//!      `module_definition?` `casgn nil?`): a scoped target like
-//!      `Bar::Foo = Class.new do … end` still fires (verified == rubocop 1.87.0).
+//!      `check_code_length`. If `node.expression` is absent, RuboCop's
+//!      `find_expression_within_parent` also accepts an assignment parent's
+//!      expression or a multiple-assignment RHS. `code_length(block)` is not
+//!      classlike, so it uses `extract_body` → the block body → an ordinary
+//!      body-line count, and `location(block)` is the block's `source_range`
+//!      (NOT the constant name — this is the deliberate divergence from
+//!      `Metrics/ModuleLength`, whose `on_casgn` passes the casgn node and so
+//!      highlights `loc.name`). The offense range therefore spans
+//!      `Class.new … end` / `Struct.new(…) … end`, starting at the receiver.
+//!      Because the match is on the block, there is NO casgn-scope constraint
+//!      (unlike ModuleLength's `module_definition?` `casgn nil?`): a scoped
+//!      target like `Bar::Foo = Class.new do … end` still fires (verified ==
+//!      rubocop 1.87.0).
 //!
 //!   `CountAsOne` (default `[]`) folds each top-level descendant of a named kind
 //!   (`array`/`hash`/`heredoc`/`method_call`) to a single line, via RuboCop's
@@ -68,11 +71,6 @@
 //!   Folded unbraced hashes use RuboCop's `omit_length` byte-offset checks to
 //!   subtract each absent-brace line when the hash is the sole argument of a
 //!   parenthesized call.
-//!
-//!   Known remaining scope gap: the `on_casgn` arm does not reproduce
-//!   RuboCop's `find_expression_within_parent` fallback for masgn/chained
-//!   assignments. The class-definition match itself still has no casgn-scope
-//!   constraint, so scoped constant targets are handled as described above.
 //!
 //!   No autocorrect: RuboCop does not autocorrect this cop.
 //! ```
@@ -202,25 +200,45 @@ fn emit(range: Range, length: i64, max: i64, cx: &Cx<'_>) {
     cx.emit_offense(range, &message, None);
 }
 
-/// RuboCop's `on_casgn` path: `block_node = node.expression`, then
-/// `block_node.class_definition?` whose block arm is `(any_block (send
-/// #global_const?({:Struct :Class}) :new ...) _ $_)` — the casgn's value is a
-/// block on `Class.new` / `::Class.new` / `Struct.new` / `::Struct.new`. Returns
-/// the block node when matched.
+/// RuboCop's `on_casgn` path: use `node.expression` when present; otherwise
+/// apply `find_expression_within_parent` to the assignment parent (or the
+/// multiple-assignment parent of an `Mlhs`). The resulting expression must be a
+/// block on `Class.new` / `::Class.new` / `Struct.new` / `::Struct.new`, matching
+/// `class_definition?`'s `(any_block (send #global_const?({:Struct :Class})
+/// :new ...) _ $_)` arm.
 ///
 /// Unlike `Metrics/ModuleLength` (whose `module_definition?` matcher embeds a
 /// `casgn nil?` constraint), `class_definition?` is matched on the *block*, so it
 /// imposes NO constraint on the casgn's constant scope: a scoped target like
 /// `Bar::Foo = Class.new do … end` still fires (verified == rubocop 1.87.0).
-///
-/// (RuboCop's `find_expression_within_parent` masgn/chained-assignment fallback
-/// is intentionally not modelled — that pre-existing simplification is shared
-/// with `Metrics/ModuleLength`.)
 fn class_definition_block(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     let NodeKind::Casgn { value, .. } = *cx.kind(node) else {
         return None;
     };
-    let block = value.get()?;
+    let block = value.get().or_else(|| {
+        let parent = cx.parent(node).get()?;
+        let assignment = if cx.is_assignment(parent) {
+            parent
+        } else {
+            let parent_parent = cx.parent(parent).get()?;
+            if !matches!(*cx.kind(parent_parent), NodeKind::Masgn { .. }) {
+                return None;
+            }
+            // A multiple-assignment RHS is shared by every target. RuboCop
+            // deduplicates the identical offenses from multiple constant
+            // targets; let only the first constant target emit here.
+            if let NodeKind::Mlhs(targets) = *cx.kind(parent) {
+                let first_casgn = cx.list(targets).iter().copied().find(|&target| {
+                    matches!(*cx.kind(target), NodeKind::Casgn { .. })
+                });
+                if first_casgn != Some(node) {
+                    return None;
+                }
+            }
+            parent_parent
+        };
+        assignment_expression(assignment, cx)
+    })?;
     // `any_block` — Block/Numblock/Itblock; `cx.block_call` delegates each form.
     let call = cx.block_call(block).get()?;
     // `(send #global_const?({:Struct :Class}) :new ...)`.
@@ -232,6 +250,23 @@ fn class_definition_block(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
         return None;
     }
     Some(block)
+}
+
+/// Return the expression RuboCop exposes as `assignment.expression` for the
+/// assignment kinds that can parent a constant write.
+fn assignment_expression(assignment: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
+    match *cx.kind(assignment) {
+        NodeKind::Lvasgn { value, .. }
+        | NodeKind::Ivasgn { value, .. }
+        | NodeKind::Cvasgn { value, .. }
+        | NodeKind::Gvasgn { value, .. }
+        | NodeKind::Casgn { value, .. } => value.get(),
+        NodeKind::Masgn { rhs, .. } => Some(rhs),
+        NodeKind::OpAsgn { value, .. }
+        | NodeKind::OrAsgn { value, .. }
+        | NodeKind::AndAsgn { value, .. } => Some(value),
+        _ => None,
+    }
 }
 
 murphy_plugin_api::submit_cop!(ClassLength);
@@ -582,6 +617,42 @@ mod tests {
             messages(&opts(3), src),
             vec!["Class has too many lines. [4/3]".to_string()]
         );
+    }
+
+    #[test]
+    fn casgn_class_new_through_assignment_parent() {
+        // RuboCop's find_expression_within_parent handles a constant write
+        // whose value is the target of a shorthand assignment.
+        let src = indoc! {"
+            Foo = (Bar ||= Class.new do
+              a = 1
+              b = 2
+            end)
+        "};
+        let offenses = run_cop_with_options::<ClassLength>(src, &opts(1));
+        assert_eq!(offenses.len(), 1, "expected exactly one offense");
+        assert_eq!(offenses[0].message, "Class has too many lines. [2/1]");
+        assert_eq!(offenses[0].range.start, src.find("Class.new").unwrap() as u32);
+        let range = &src[offenses[0].range.start as usize..offenses[0].range.end as usize];
+        assert!(range.starts_with("Class.new do") && range.ends_with("end"));
+    }
+
+    #[test]
+    fn casgn_class_new_through_multiple_assignment_parent() {
+        // Both constant targets share the RHS. RuboCop emits one offense at
+        // the Struct.new block, not one per target.
+        let src = indoc! {"
+            Foo, Bar = Struct.new(:x) do
+              a = 1
+              b = 2
+            end
+        "};
+        let offenses = run_cop_with_options::<ClassLength>(src, &opts(1));
+        assert_eq!(offenses.len(), 1, "expected exactly one offense");
+        assert_eq!(offenses[0].message, "Class has too many lines. [2/1]");
+        assert_eq!(offenses[0].range.start, src.find("Struct.new").unwrap() as u32);
+        let range = &src[offenses[0].range.start as usize..offenses[0].range.end as usize];
+        assert!(range.starts_with("Struct.new(:x) do") && range.ends_with("end"));
     }
 
     #[test]
