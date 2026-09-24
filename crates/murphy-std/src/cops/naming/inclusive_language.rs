@@ -25,6 +25,7 @@
 //! regexp, xstring, and interpolated-symbol literals. We inspect those leaves
 //! only, so code inside `#{...}` remains governed by identifier/constant rules.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use murphy_plugin_api::regex::{Regex, RegexBuilder};
@@ -499,7 +500,15 @@ impl CompiledOptions {
     }
 
     fn find_term(&self, word: &str) -> Option<&CompiledTerm> {
-        self.terms.iter().find(|term| term.regex.is_match(word))
+        self.terms.iter().find(|term| {
+            if term.whole_word {
+                term.regex.find_iter(word).any(|matched| {
+                    whole_word_match(word, matched.start(), matched.end())
+                })
+            } else {
+                term.regex.is_match(word)
+            }
+        })
     }
 
     fn message(&self, word: &str, filepath: bool) -> String {
@@ -672,6 +681,7 @@ fn global_offense_range(_cx: &Cx<'_>) -> Range {
 
 fn check_source_range(range: Range, cx: &Cx<'_>, compiled: &CompiledOptions) {
     let text = cx.raw_source(range);
+    let mut emitted_ranges = HashSet::new();
     for word in compiled.scan_for_words(text) {
         // RuboCop 1.87.0's offense_range uses `token.text.index(word)` rather
         // than the WordLocation offset, so repeated identical terms highlight
@@ -685,6 +695,10 @@ fn check_source_range(range: Range, cx: &Cx<'_>, compiled: &CompiledOptions) {
             start,
             end: start + word.len() as u32,
         };
+        // Repeated matches can map to the same range; emit that offense and edit only once.
+        if !emitted_ranges.insert((offense_range.start, offense_range.end)) {
+            continue;
+        }
         let message = compiled.message(&word, false);
         cx.emit_offense(offense_range, &message, None);
         if let Some(replacement) = compiled.sole_suggestion(&word) {
@@ -719,10 +733,7 @@ fn collect_node_ranges(id: NodeId, options: &Options, cx: &Cx<'_>, out: &mut Vec
         NodeKind::Defs { receiver, name, .. } if options.enabled(CheckKind::Identifier) => {
             out.push(method_name_range(id, cx.symbol_str(name), Some(receiver), cx));
         }
-        NodeKind::Arg(name)
-        | NodeKind::Restarg(name)
-        | NodeKind::Kwarg(name)
-        | NodeKind::Kwrestarg(name)
+        NodeKind::Arg(name) | NodeKind::Restarg(name) | NodeKind::Kwrestarg(name)
         | NodeKind::Blockarg(name)
         | NodeKind::Shadowarg(name) => {
             push_named_range(id, cx.symbol_str(name), CheckKind::Identifier, options, cx, out);
@@ -730,7 +741,7 @@ fn collect_node_ranges(id: NodeId, options: &Options, cx: &Cx<'_>, out: &mut Vec
         NodeKind::MatchVar(name) if !is_shorthand_hash_pattern_binding(id, cx) => {
             push_named_range(id, cx.symbol_str(name), CheckKind::Identifier, options, cx, out);
         }
-        NodeKind::Optarg { name, .. } | NodeKind::Kwoptarg { name, .. } => {
+        NodeKind::Optarg { name, .. } => {
             push_named_range(id, cx.symbol_str(name), CheckKind::Identifier, options, cx, out);
         }
         NodeKind::Str(_) if options.enabled(CheckKind::String) => out.push(cx.range(id)),
@@ -928,10 +939,14 @@ fn scoped_name_range(id: NodeId, name: &str, scope: Option<NodeId>, cx: &Cx<'_>)
 
 fn method_name_range(id: NodeId, name: &str, receiver: Option<NodeId>, cx: &Cx<'_>) -> Range {
     let name_loc = cx.node(id).loc.name;
-    if name_loc != Range::ZERO && name_loc.end.saturating_sub(name_loc.start) >= name.len() as u32 {
+    if name_loc != Range::ZERO {
+        let name_len = name_loc
+            .end
+            .saturating_sub(name_loc.start)
+            .min(name.len() as u32);
         Range {
             start: name_loc.start,
-            end: name_loc.start + name.len() as u32,
+            end: name_loc.start + name_len,
         }
     } else {
         search_name_range(id, name, receiver.map(|receiver| cx.range(receiver).end), cx)
@@ -1151,6 +1166,26 @@ mod tests {
     }
 
     #[test]
+    fn whole_word_term_does_not_claim_another_terms_match() {
+        let config = br#"{"FlaggedTerms":{"foo":{"WholeWord":true,"Suggestions":["whole word"]},"custom":{"Regex":"xfoo","Suggestions":["custom"]}}}"#;
+        let options = Options::from_config_json(config).expect("valid option JSON");
+        let offenses = run_cop_with_options::<InclusiveLanguage>("xfoo\n", &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 0, end: 4 });
+        assert_eq!(offenses[0].message, "Consider replacing 'xfoo' with 'custom'.");
+    }
+
+    #[test]
+    fn explicit_regex_overrides_whole_word_option() {
+        let config = br#"{"FlaggedTerms":{"custom":{"Regex":"foo","WholeWord":true,"Suggestions":["regex"]}}}"#;
+        let options = Options::from_config_json(config).expect("valid option JSON");
+        let offenses = run_cop_with_options::<InclusiveLanguage>("xfoo\n", &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 1, end: 4 });
+        assert_eq!(offenses[0].message, "Consider replacing 'foo' with 'regex'.");
+    }
+
+    #[test]
     fn checks_strings_when_enabled_and_corrects_one_suggestion() {
         let options = Options {
             check_identifiers: false,
@@ -1268,6 +1303,36 @@ mod tests {
     }
 
     #[test]
+    fn repeated_flagged_words_emit_one_offense_and_edit() {
+        let config = br#"{"FlaggedTerms":{"whitelist":{"Suggestions":["allowlist"]}}}"#;
+        let options = Options::from_config_json(config).expect("valid option JSON");
+        test::<InclusiveLanguage>()
+            .with_options(&options)
+            .expect_correction(
+                indoc! {r#"
+                    whitelist_whitelist
+                    ^^^^^^^^^ Consider replacing 'whitelist' with 'allowlist'.
+                "#},
+                "allowlist_whitelist\n",
+            );
+    }
+
+    #[test]
+    fn setter_method_offense_excludes_assignment_suffix() {
+        let source = "def whitelist=(value)\nend\n";
+        let offenses = run_cop::<InclusiveLanguage>(source);
+        let start = source.find("whitelist=").unwrap() as u32;
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(
+            offenses[0].range,
+            Range {
+                start,
+                end: start + "whitelist".len() as u32,
+            }
+        );
+    }
+
+    #[test]
     fn flags_method_names_and_arguments_as_identifiers() {
         test::<InclusiveLanguage>().expect_offense(indoc! {r#"
             def whitelist(whitelist)
@@ -1280,23 +1345,9 @@ mod tests {
     }
 
     #[test]
-    fn flags_keyword_argument_names_as_identifiers() {
+    fn keyword_argument_labels_are_not_identifiers() {
         let source = "def method(whitelist:, blacklist: nil)\nend\n";
-        let offenses = run_cop::<InclusiveLanguage>(source);
-        let expected: Vec<_> = ["whitelist", "blacklist"]
-            .into_iter()
-            .map(|name| {
-                let start = source.find(name).unwrap() as u32;
-                Range {
-                    start,
-                    end: start + name.len() as u32,
-                }
-            })
-            .collect();
-        assert_eq!(
-            offenses.iter().map(|offense| offense.range).collect::<Vec<_>>(),
-            expected
-        );
+        assert!(run_cop::<InclusiveLanguage>(source).is_empty());
     }
 
     #[test]
