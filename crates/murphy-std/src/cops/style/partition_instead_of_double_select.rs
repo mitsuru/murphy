@@ -8,8 +8,8 @@
 //! upstream: rubocop
 //! upstream_cop: Style/PartitionInsteadOfDoubleSelect
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues: [murphy-e7bz.59.1]
+//! status: verified
+//! gap_issues: []
 //! notes: >
 //!   Flags two consecutive statements that call a select-family method
 //!   (`select`/`filter`/`find_all`) and `reject` (complementary pair, identical
@@ -30,14 +30,23 @@
 //!   container statement, including the multiline span when the offending
 //!   statement is a `do…end` block (verified against rubocop 1.87.0).
 //!
-//!   Autocorrect (the `select, reject = recv.partition { … }` rewrite, which
-//!   only fires in RuboCop when both statements are local-variable
-//!   assignments) is a v1 gap — tracked by murphy-e7bz.59.1. The cop is
-//!   `Safe: false` upstream, so offense-only is the conservative shipping
-//!   state. `Enabled: pending` upstream → `default_enabled = false`.
+//!   Autocorrect is ported for pairs of simple local-variable assignments:
+//!   order LHS variables by select/reject result, rewrite the select call's
+//!   selector to `partition`, replace the first assignment, and remove the
+//!   second statement's whole line (including its trailing comment). Other
+//!   assignment forms remain offense-only. The cop is `Safe: false`; both
+//!   `safe` and `safe_autocorrect` metadata reflect that. Corrections are
+//!   reserved in source order; if whole-line deletion overlaps the replacement
+//!   (same-line statements) or an earlier correction (adjacent matching
+//!   pairs), Murphy reports the offense but suppresses that conflicting fix.
+//!   Disjoint pairs in a longer run remain correctable. This avoids RuboCop's
+//!   corrector clobbering error while preserving non-overlapping edits.
+//!   `Enabled: pending` upstream → `default_enabled = false`.
 //! ```
 
-use murphy_plugin_api::{Cx, NodeId, NodeKind, SourceTokenKind, cop};
+use std::collections::BTreeMap;
+
+use murphy_plugin_api::{Cx, NodeId, NodeKind, Range, SourceTokenKind, cop};
 
 #[derive(Default)]
 pub struct PartitionInsteadOfDoubleSelect;
@@ -57,44 +66,32 @@ fn is_candidate_method(name: &str) -> bool {
     description = "Suggest `partition` over consecutive `select`/`reject` calls on the same receiver.",
     default_severity = "warning",
     default_enabled = false,
+    safe = false,
+    safe_autocorrect = false,
     options = murphy_plugin_api::NoOptions
 )]
 impl PartitionInsteadOfDoubleSelect {
-    /// Brace / `do…end` block: `arr.select { |x| … }`.
-    #[on_node(kind = "block")]
-    fn check_block(&self, node: NodeId, cx: &Cx<'_>) {
-        check_block_candidate(node, cx);
-    }
+    /// Scan one file in source order so the corrector can reserve non-overlapping
+    /// edits across adjacent matching pairs. Translation allocates arena nodes
+    /// in postorder, so candidate statements retain source order by node ID.
+    #[on_new_investigation]
+    fn check_file(&self, cx: &Cx<'_>) {
+        let mut reserved_edits = BTreeMap::new();
 
-    /// Numbered-parameter block: `arr.select { _1 > 0 }`.
-    #[on_node(kind = "numblock")]
-    fn check_numblock(&self, node: NodeId, cx: &Cx<'_>) {
-        check_block_candidate(node, cx);
-    }
-
-    /// `it`-parameter block: `arr.select { it > 0 }`.
-    #[on_node(kind = "itblock")]
-    fn check_itblock(&self, node: NodeId, cx: &Cx<'_>) {
-        check_block_candidate(node, cx);
-    }
-
-    /// Symbol-proc / block-pass send: `arr.select(&:positive?)`.
-    #[on_node(kind = "send", methods = ["select", "filter", "find_all", "reject"])]
-    fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        if has_block_pass_last_arg(node, cx) {
-            find_and_register_offense(node, cx);
-        }
-    }
-
-    /// Safe-navigation block-pass send: `arr&.select(&:positive?)`.
-    #[on_node(kind = "csend")]
-    fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        // `methods = [...]` is not supported on csend — filter manually.
-        let Some(name) = cx.method_name(node) else {
-            return;
-        };
-        if is_candidate_method(name) && has_block_pass_last_arg(node, cx) {
-            find_and_register_offense(node, cx);
+        for raw in 0..=cx.root().0 {
+            let node = NodeId(raw);
+            match cx.kind(node) {
+                NodeKind::Block { .. } | NodeKind::Numblock { .. } | NodeKind::Itblock { .. } => {
+                    check_block_candidate(node, &mut reserved_edits, cx);
+                }
+                NodeKind::Send { .. } | NodeKind::Csend { .. }
+                    if cx.method_name(node).is_some_and(is_candidate_method)
+                        && has_block_pass_last_arg(node, cx) =>
+                {
+                    find_and_register_offense(node, &mut reserved_edits, cx);
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -102,9 +99,13 @@ impl PartitionInsteadOfDoubleSelect {
 /// Block-handler entry: bail unless the block wraps a candidate
 /// select-family/`reject` call, then funnel into the shared logic with the
 /// *block* node as the candidate.
-fn check_block_candidate(block: NodeId, cx: &Cx<'_>) {
+fn check_block_candidate(
+    block: NodeId,
+    reserved_edits: &mut BTreeMap<u32, u32>,
+    cx: &Cx<'_>,
+) {
     if cx.method_name(block).is_some_and(is_candidate_method) {
-        find_and_register_offense(block, cx);
+        find_and_register_offense(block, reserved_edits, cx);
     }
 }
 
@@ -118,7 +119,11 @@ fn has_block_pass_last_arg(call: NodeId, cx: &Cx<'_>) -> bool {
 
 /// Mirror of RuboCop's `find_and_register_offense`: resolve the statement
 /// container, find its matching left sibling, and emit if the pair matches.
-fn find_and_register_offense(node: NodeId, cx: &Cx<'_>) {
+fn find_and_register_offense(
+    node: NodeId,
+    reserved_edits: &mut BTreeMap<u32, u32>,
+    cx: &Cx<'_>,
+) {
     let Some(container) = node_container(node, cx) else {
         return;
     };
@@ -138,7 +143,124 @@ fn find_and_register_offense(node: NodeId, cx: &Cx<'_>) {
     let message = format!(
         "Use `partition` instead of consecutive `{first}` and `{second}` calls."
     );
-    cx.emit_offense(cx.range(container), &message, None);
+    let offense_range = cx.range(container);
+    cx.emit_offense(offense_range, &message, None);
+
+    let Some((select_var, reject_var, partition_node)) =
+        autocorrect_parts(node, sibling, container, sibling_container, cx)
+    else {
+        return;
+    };
+
+    let replacement = format!(
+        "{select_var}, {reject_var} = {}",
+        build_partition_call(partition_node, cx)
+    );
+    let replace_range = cx.range(sibling_container);
+    let remove_range = cx.range_by_whole_lines(offense_range, true);
+
+    // Whole-line deletion can overlap either the replacement in this pair
+    // (when both calls share a line) or an edit reserved by an adjacent pair.
+    // Skip only the conflicting correction; retain disjoint pairs in a longer
+    // run rather than raising a corrector clobbering error.
+    if !reserve_non_overlapping_edits(reserved_edits, replace_range, remove_range) {
+        return;
+    }
+    cx.emit_edit(replace_range, &replacement);
+    cx.emit_edit(remove_range, "");
+}
+
+/// Return the select result variable, reject result variable, and matching
+/// select expression used as the `partition` call template.
+fn autocorrect_parts<'a>(
+    node: NodeId,
+    sibling: NodeId,
+    container: NodeId,
+    sibling_container: NodeId,
+    cx: &Cx<'a>,
+) -> Option<(&'a str, &'a str, NodeId)> {
+    let container_var = lvasgn_name(container, cx)?;
+    let sibling_var = lvasgn_name(sibling_container, cx)?;
+
+    if complementary_pair(node, sibling, cx) {
+        if cx.method_name(sibling).is_some_and(is_select_method) {
+            return Some((sibling_var, container_var, sibling));
+        }
+        return Some((container_var, sibling_var, node));
+    }
+
+    if same_method(node, sibling, cx) {
+        let node_is_negated = negated_body(node, sibling, cx);
+        let is_select = cx.method_name(node).is_some_and(is_select_method);
+        let node_is_truthy = is_select != node_is_negated;
+        let partition_node = if node_is_negated { sibling } else { node };
+        return if node_is_truthy {
+            Some((container_var, sibling_var, partition_node))
+        } else {
+            Some((sibling_var, container_var, partition_node))
+        };
+    }
+
+    None
+}
+
+fn lvasgn_name<'a>(container: NodeId, cx: &Cx<'a>) -> Option<&'a str> {
+    let NodeKind::Lvasgn { name, .. } = *cx.kind(container) else {
+        return None;
+    };
+    Some(cx.symbol_str(name))
+}
+
+/// Replace only the selector in the source form of the selected call/block.
+fn build_partition_call(node: NodeId, cx: &Cx<'_>) -> String {
+    let node_range = cx.range(node);
+    let source = cx.raw_source(node_range);
+    let call = call_of(node, cx);
+    let selector = cx.node(call).loc.name;
+    let selector_start = (selector.start - node_range.start) as usize;
+    let selector_end = (selector.end - node_range.start) as usize;
+
+    format!(
+        "{}partition{}",
+        &source[..selector_start],
+        &source[selector_end..]
+    )
+}
+
+fn ranges_overlap(left: Range, right: Range) -> bool {
+    left.start < right.end && right.start < left.end
+}
+
+/// Reserve two correction ranges unless either overlaps this pair or an
+/// earlier non-overlapping correction. The ordered map keeps checking a long
+/// sequence of candidate pairs logarithmic in the number of accepted edits.
+fn reserve_non_overlapping_edits(
+    reserved: &mut BTreeMap<u32, u32>,
+    first: Range,
+    second: Range,
+) -> bool {
+    if ranges_overlap(first, second) {
+        return false;
+    }
+
+    if overlaps_reserved(reserved, first) || overlaps_reserved(reserved, second) {
+        return false;
+    }
+
+    reserved.insert(first.start, first.end);
+    reserved.insert(second.start, second.end);
+    true
+}
+
+fn overlaps_reserved(reserved: &BTreeMap<u32, u32>, candidate: Range) -> bool {
+    reserved
+        .range(..=candidate.start)
+        .next_back()
+        .is_some_and(|(_, end)| *end > candidate.start)
+        || reserved
+            .range(candidate.start..)
+            .next()
+            .is_some_and(|(&start, _)| start < candidate.end)
 }
 
 /// Mirror of RuboCop's `node_container`:
@@ -639,4 +761,145 @@ mod tests {
             b = arr.select { |x| x > 0 }
         "});
     }
+    #[test]
+    fn mirrors_pending_unsafe_metadata() {
+        use murphy_plugin_api::Cop;
+
+        assert_eq!(<PartitionInsteadOfDoubleSelect as Cop>::DEFAULT_ENABLED, Some(false));
+        assert_eq!(<PartitionInsteadOfDoubleSelect as Cop>::SAFE, Some(false));
+        assert_eq!(<PartitionInsteadOfDoubleSelect as Cop>::SAFE_AUTOCORRECT, Some(false));
+    }
+
+    #[test]
+    fn autocorrects_select_reject_assignments_in_both_orders() {
+        test::<PartitionInsteadOfDoubleSelect>().expect_correction(
+            indoc! {r#"
+            positives = arr.select { |x| x > 0 }
+            negatives = arr.reject { |x| x > 0 }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `select` and `reject` calls.
+        "#},
+            "positives, negatives = arr.partition { |x| x > 0 }\n",
+        );
+
+        test::<PartitionInsteadOfDoubleSelect>().expect_correction(
+            indoc! {r#"
+            negatives = arr.reject { |x| x > 0 }
+            positives = arr.select { |x| x > 0 }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `reject` and `select` calls.
+        "#},
+            "positives, negatives = arr.partition { |x| x > 0 }\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_method_aliases_and_block_pass_predicates() {
+        test::<PartitionInsteadOfDoubleSelect>().expect_correction(
+            indoc! {r#"
+            positive = arr.filter(&:positive?)
+            negative = arr.reject(&:positive?)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `filter` and `reject` calls.
+        "#},
+            "positive, negative = arr.partition(&:positive?)\n",
+        );
+
+        test::<PartitionInsteadOfDoubleSelect>().expect_correction(
+            indoc! {r#"
+            positive = arr.find_all { |x| x.positive? }
+            negative = arr.reject(&:positive?)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `find_all` and `reject` calls.
+        "#},
+            "positive, negative = arr.partition { |x| x.positive? }\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_negated_same_method_pair_with_truthy_result_first() {
+        test::<PartitionInsteadOfDoubleSelect>().expect_correction(
+            indoc! {r#"
+            positive = arr.select { |x| x.positive? }
+            non_positive = arr.select { |x| !x.positive? }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `select` and `select` calls.
+        "#},
+            "positive, non_positive = arr.partition { |x| x.positive? }\n",
+        );
+
+        test::<PartitionInsteadOfDoubleSelect>().expect_correction(
+            indoc! {r#"
+            negative = arr.reject { |x| x.positive? }
+            positive = arr.reject { |x| !x.positive? }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `reject` and `reject` calls.
+        "#},
+            "positive, negative = arr.partition { |x| x.positive? }\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_safe_navigation_and_removes_the_whole_second_line() {
+        test::<PartitionInsteadOfDoubleSelect>().expect_correction(
+            indoc! {r#"
+            positives = arr&.select { |x| x > 0 } # first comment
+            # keep between
+            negatives = arr&.reject { |x| x > 0 } # remove second comment
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `select` and `reject` calls.
+        "#},
+            "positives, negatives = arr&.partition { |x| x > 0 } # first comment\n# keep between\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_only_two_local_variable_assignments() {
+        test::<PartitionInsteadOfDoubleSelect>().expect_offense(indoc! {r#"
+            positives = arr.select { |x| x > 0 }
+            @negatives = arr.reject { |x| x > 0 }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `select` and `reject` calls.
+        "#});
+        test::<PartitionInsteadOfDoubleSelect>().expect_no_corrections(indoc! {r#"
+            positives = arr.select { |x| x > 0 }
+            @negatives = arr.reject { |x| x > 0 }
+        "#});
+        test::<PartitionInsteadOfDoubleSelect>()
+            .expect_no_corrections("arr.select { |x| x > 0 }\narr.reject { |x| x > 0 }\n");
+    }
+
+    #[test]
+    fn skips_overlapping_same_line_assignment_correction() {
+        test::<PartitionInsteadOfDoubleSelect>().expect_offense(indoc! {r#"
+            positives = arr.select { |x| x > 0 }; negatives = arr.reject { |x| x > 0 }
+                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `select` and `reject` calls.
+        "#});
+        test::<PartitionInsteadOfDoubleSelect>().expect_no_corrections(
+            "positives = arr.select { |x| x > 0 }; negatives = arr.reject { |x| x > 0 }\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_disjoint_pairs_in_an_overlapping_candidate_chain() {
+        test::<PartitionInsteadOfDoubleSelect>().expect_correction(
+            indoc! {r#"
+            a = arr.select { |x| x > 0 }
+            b = arr.reject { |x| x > 0 }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `select` and `reject` calls.
+            c = arr.select { |x| x > 0 }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `reject` and `select` calls.
+            d = arr.reject { |x| x > 0 }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `select` and `reject` calls.
+        "#},
+            "a, b = arr.partition { |x| x > 0 }\nc, d = arr.partition { |x| x > 0 }\n",
+        );
+    }
+
+    #[test]
+    fn autocorrects_the_leftmost_pair_in_an_overlapping_chain() {
+        test::<PartitionInsteadOfDoubleSelect>().expect_correction(
+            indoc! {r#"
+            a = arr.select { |x| x > 0 }
+            b = arr.reject { |x| x > 0 }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `select` and `reject` calls.
+            c = arr.select { |x| x > 0 }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Use `partition` instead of consecutive `reject` and `select` calls.
+        "#},
+            "a, b = arr.partition { |x| x > 0 }\nc = arr.select { |x| x > 0 }\n",
+        );
+    }
+
 }
