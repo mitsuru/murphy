@@ -8,8 +8,7 @@
 //! upstream_cop: Layout/HeredocArgumentClosingParenthesis
 //! upstream_version_checked: 1.86.2
 //! status: partial
-//! gap_issues:
-//!   - murphy-boge
+//! gap_issues: []
 //! notes: >
 //!   Mirrors RuboCop's `on_send`/`on_csend` detection: a call passing a HEREDOC
 //!   argument whose closing `)` is **not** on the same line as the HEREDOC
@@ -25,17 +24,17 @@
 //!   The HEREDOC "opening line" is taken from the `HeredocStart` token's line
 //!   (RuboCop's `heredoc.last_line`, which for parser-gem is the pointer/opener
 //!   line, not the terminator line).
-//!   Known gap versus RuboCop:
-//!   (1) AUTOCORRECT IS NOT EMITTED. RuboCop's corrector relocates the `)` to
-//!       directly after the last argument and performs internal/external
-//!       trailing-comma juggling (`remove_internal_trailing_comma`,
-//!       `fix_external_trailing_comma`). That rewrite reorders source across the
-//!       HEREDOC body and is deferred; the cop reports the offense only. This is
-//!       a scope decision, not an ABI boundary bypass.
-//!   (2) `extract_heredoc` covers a direct HEREDOC argument and a HEREDOC nested
-//!       as a hash value, plus the single-line-send-with-HEREDOC-receiver shape
-//!       to the extent token ranges allow. Deeply chained HEREDOC receivers may
-//!       be under-detected.
+//!   Autocorrect relocates the `)` to directly after the last argument with
+//!   RuboCop's internal/external trailing-comma juggling
+//!   (`remove_internal_trailing_comma`, `fix_external_trailing_comma`): an
+//!   internal `,\n` after the last argument is dropped, and an external `,`
+//!   after the old `)` (up to 20 spaces out) is moved inside the new parens.
+//!   RuboCop's `autocorrect_incompatible_with [Style::TrailingCommaInArguments]`
+//!   has no Murphy equivalent and is not declared.
+//!   Known gap versus RuboCop: `extract_heredoc` covers a direct HEREDOC
+//!   argument and a HEREDOC nested as a hash value, plus the
+//!   single-line-send-with-HEREDOC-receiver shape to the extent token ranges
+//!   allow. Deeply chained HEREDOC receivers may be under-detected.
 //! ```
 
 use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, SourceTokenKind, cop};
@@ -99,6 +98,7 @@ fn check(node: NodeId, cx: &Cx<'_>) {
         return;
     }
     cx.emit_offense(close, MSG, None);
+    emit_correction(outermost, close, cx);
 }
 
 /// `extract_heredoc_argument`: the first argument of `node` that is, or
@@ -157,7 +157,11 @@ fn heredoc_opener_line(heredoc_arg: NodeId, cx: &Cx<'_>) -> Option<usize> {
 /// `outermost_send_on_same_line(heredoc)`: walk up parents until reaching a
 /// call node whose own argument list contains the previous node, that has a
 /// `(`, and whose closing `)` is on a different line than the HEREDOC opener.
-fn outermost_send_on_same_line(heredoc_arg: NodeId, opener_line: usize, cx: &Cx<'_>) -> Option<NodeId> {
+fn outermost_send_on_same_line(
+    heredoc_arg: NodeId,
+    opener_line: usize,
+    cx: &Cx<'_>,
+) -> Option<NodeId> {
     let mut previous = heredoc_arg;
     let mut current = cx.parent(previous).get()?;
     while !send_missing_closing_parens(current, previous, opener_line, cx) {
@@ -168,8 +172,16 @@ fn outermost_send_on_same_line(heredoc_arg: NodeId, opener_line: usize, cx: &Cx<
 }
 
 /// `send_missing_closing_parens?(parent, child, heredoc)`.
-fn send_missing_closing_parens(parent: NodeId, child: NodeId, opener_line: usize, cx: &Cx<'_>) -> bool {
-    let is_call = matches!(cx.kind(parent), NodeKind::Send { .. } | NodeKind::Csend { .. });
+fn send_missing_closing_parens(
+    parent: NodeId,
+    child: NodeId,
+    opener_line: usize,
+    cx: &Cx<'_>,
+) -> bool {
+    let is_call = matches!(
+        cx.kind(parent),
+        NodeKind::Send { .. } | NodeKind::Csend { .. }
+    );
     if !is_call {
         return false;
     }
@@ -207,7 +219,8 @@ fn subsequent_closing_parentheses_in_same_line(outermost: NodeId, cx: &Cx<'_>) -
     }
     let src = cx.source();
     same_line(outer_close.start, inner_close.start, src)
-        && column_of(src, outer_close.start as usize) == column_of(src, inner_close.start as usize) + 1
+        && column_of(src, outer_close.start as usize)
+            == column_of(src, inner_close.start as usize) + 1
 }
 
 /// `exist_argument_between_heredoc_end_and_closing_parentheses?`: between the
@@ -252,10 +265,179 @@ fn find_most_bottom_heredoc_end(node: NodeId, cx: &Cx<'_>) -> Option<u32> {
 
 /// The closing `)` of a call node's own argument list, or `Range::ZERO`.
 fn call_close_paren(node: NodeId, cx: &Cx<'_>) -> Range {
-    if !matches!(cx.kind(node), NodeKind::Send { .. } | NodeKind::Csend { .. }) {
+    if !matches!(
+        cx.kind(node),
+        NodeKind::Send { .. } | NodeKind::Csend { .. }
+    ) {
         return Range::ZERO;
     }
     cx.loc(node).end()
+}
+
+/// RuboCop's `autocorrect`: relocate the closing `)` to directly after the
+/// last argument, with internal/external trailing-comma juggling.
+///
+/// All byte arithmetic mirrors RuboCop's buffer-source indexing
+/// (`node.source_range.end_pos`, `node.children.last.source_range.end_pos`,
+/// `node.loc.end.begin_pos`); `)`/`,`/`\n`/` ` are ASCII so byte offsets
+/// stay on UTF-8 boundaries.
+fn emit_correction(outermost: NodeId, close: Range, cx: &Cx<'_>) {
+    let Some(last_arg) = cx.last_argument(outermost).get() else {
+        return;
+    };
+    let last_arg_end = cx.range(last_arg).end;
+    // RuboCop's `node.source_range.end_pos`.
+    let node_end = cx.range(outermost).end;
+    if node_end != close.end || node_end == 0 {
+        return;
+    }
+    let src = cx.source();
+    let bytes = src.as_bytes();
+    // The node must end with the `)` itself ...
+    if bytes.get(node_end as usize - 1) != Some(&b')') {
+        return;
+    }
+    // ... and the last argument must end before it.
+    if last_arg_end >= close.start {
+        return;
+    }
+
+    let external = external_trailing_comma_len(bytes, node_end);
+
+    // `remove_incorrect_closing_paren`: drop the whole `)` line when it only
+    // holds the paren (plus an immediately-adjacent `,`), else just the `)`.
+    // `incorrect_parenthesis_removal_end` folds an adjacent external comma
+    // into the same removal.
+    let removal_begin = if line_is_bare_closing_paren(src, close.start) {
+        line_start(bytes, close.start).saturating_sub(1)
+    } else {
+        close.start
+    };
+    let mut removal_end = node_end;
+    if bytes.get(node_end as usize) == Some(&b',') {
+        removal_end += 1;
+    }
+    if removal_begin < removal_end {
+        cx.emit_edit(
+            Range {
+                start: removal_begin,
+                end: removal_end,
+            },
+            "",
+        );
+    }
+
+    // `add_correct_closing_paren` + `add_correct_external_trailing_comma` as
+    // one combined insert (`)` or `),`) right after the last argument, so the
+    // two zero-width inserts never depend on edit-apply order.
+    cx.emit_edit(
+        Range {
+            start: last_arg_end,
+            end: last_arg_end,
+        },
+        if external.is_some() { ")," } else { ")" },
+    );
+
+    // `remove_internal_trailing_comma`.
+    if let Some(len) = internal_trailing_comma_len(src, last_arg_end, close.start) {
+        cx.emit_edit(
+            Range {
+                start: last_arg_end,
+                end: last_arg_end + len,
+            },
+            "",
+        );
+    }
+
+    // `remove_incorrect_external_trailing_comma`, unless the incorrect-paren
+    // removal above already consumed the adjacent comma.
+    if let Some(len) = external
+        && bytes.get(node_end as usize) != Some(&b',')
+    {
+        cx.emit_edit(
+            Range {
+                start: node_end,
+                end: node_end + len,
+            },
+            "",
+        );
+    }
+}
+
+/// `internal_trailing_comma_offset_from_last_arg`: byte length of the span
+/// from the last argument's end up to and including the first comma, when a
+/// comma precedes the first newline (`<<-SQL,\n`); `None` otherwise.
+fn internal_trailing_comma_len(src: &str, from: u32, to: u32) -> Option<u32> {
+    if from > to {
+        return None;
+    }
+    let slice = src.get(from as usize..to as usize)?;
+    let comma = slice.find(',')?;
+    let newline = slice.find('\n')?;
+    if comma > newline {
+        return None;
+    }
+    u32::try_from(comma + 1).ok()
+}
+
+/// `external_trailing_comma_offset_from_loc_end`: byte length of the span from
+/// the node's end over spaces (max 20, literal spaces only per RuboCop's
+/// `space?`) up to and including the comma; `None` when there is none.
+fn external_trailing_comma_len(bytes: &[u8], node_end: u32) -> Option<u32> {
+    let base = node_end as usize;
+    let mut offset = 0_usize;
+    while offset < 20 && bytes.get(base + offset) == Some(&b' ') {
+        offset += 1;
+    }
+    if bytes.get(base + offset) == Some(&b',') {
+        u32::try_from(offset + 1).ok()
+    } else {
+        None
+    }
+}
+
+/// `safe_to_remove_line_containing_closing_paren?`: the `)` line holds only
+/// the paren, spaces (at most 20 between `)` and `,`), and an optional comma.
+/// Checked against the full file line, mirroring
+/// `processed_source[node.loc.end.line - 1]` with `/^ *\) {0,20},{0,1} *$/`.
+fn line_is_bare_closing_paren(src: &str, offset: u32) -> bool {
+    let bytes = src.as_bytes();
+    let start = line_start(bytes, offset) as usize;
+    let end = bytes[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(bytes.len(), |p| start + p);
+    let line = &bytes[start..end];
+    let mut i = 0;
+    while i < line.len() && line[i] == b' ' {
+        i += 1;
+    }
+    if line.get(i) != Some(&b')') {
+        return false;
+    }
+    i += 1;
+    let mut spaces = 0;
+    while i < line.len() && line[i] == b' ' && spaces < 20 {
+        i += 1;
+        spaces += 1;
+    }
+    if line.get(i) == Some(&b',') {
+        i += 1;
+    }
+    while i < line.len() && line[i] == b' ' {
+        i += 1;
+    }
+    i == line.len()
+}
+
+/// Byte offset just after the previous `\n` — the start of the line
+/// containing `offset`.
+fn line_start(bytes: &[u8], offset: u32) -> u32 {
+    let end = (offset as usize).min(bytes.len());
+    bytes[..end]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |p| p as u32 + 1)
 }
 
 /// 1-based source line number containing byte `offset`.
@@ -399,14 +581,370 @@ mod tests {
         "#});
     }
 
+    // ---- autocorrect: relocate `)` after the last argument ----
+
     #[test]
-    fn emits_no_correction() {
-        // Autocorrect is intentionally not implemented (documented parity gap).
-        test::<HeredocArgumentClosingParenthesis>().expect_no_corrections(indoc! {r#"
-            foo(<<-SQL
-              bar
-            SQL
+    fn corrects_closing_paren_on_own_line() {
+        test::<HeredocArgumentClosingParenthesis>()
+            .expect_offense(indoc! {r#"
+                foo(<<-SQL
+                  bar
+                SQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#})
+            .expect_correction(
+                indoc! {r#"
+                    foo(<<-SQL
+                      bar
+                    SQL
+                    )
+                    ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+                "#},
+                indoc! {r#"
+                    foo(<<-SQL)
+                      bar
+                    SQL
+                "#},
             )
-        "#});
+            .expect_no_offenses(indoc! {r#"
+                foo(<<-SQL)
+                  bar
+                SQL
+            "#});
+    }
+
+    #[test]
+    fn corrects_internal_trailing_comma() {
+        // RuboCop spec "simple incorrect case comma": the `,` after the
+        // opener is dropped while the `)` moves up.
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo(<<-SQL,
+                  foo
+                SQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo(<<-SQL)
+                  foo
+                SQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_internal_trailing_comma_with_spaces() {
+        // RuboCop spec "simple incorrect case comma with spaces".
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo(<<-SQL    ,
+                  foo
+                SQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo(<<-SQL)
+                  foo
+                SQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_hash_heredoc_value() {
+        // RuboCop spec "simple incorrect case hash".
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo.bar(foo: <<-SQL
+                  foo
+                SQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo.bar(foo: <<-SQL)
+                  foo
+                SQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_nested_inner_heredoc_call() {
+        // RuboCop spec "nested incorrect case".
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo(foo.bar(<<-SQL)
+                  foo
+                SQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo(foo.bar(<<-SQL))
+                  foo
+                SQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_other_param_after_heredoc() {
+        // RuboCop spec "incorrect case with other param after".
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo.bar(<<-SQL, 123
+                  foo
+                SQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo.bar(<<-SQL, 123)
+                  foo
+                SQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_other_param_before_heredoc() {
+        // RuboCop spec "incorrect case with other param before".
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo.bar(123, <<-SQL
+                  foo
+                SQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo.bar(123, <<-SQL)
+                  foo
+                SQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_double_heredoc_args() {
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo(<<-SQL, 123, <<-NOSQL,
+                  bar
+                SQL
+                  baz
+                NOSQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo(<<-SQL, 123, <<-NOSQL)
+                  bar
+                SQL
+                  baz
+                NOSQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_call_after_closing_paren() {
+        // RuboCop spec "simple incorrect case with call after": the `)` line
+        // holds trailing `.baz`, so only the `)` itself is removed.
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo.bar(<<~SQL
+                  foo
+                SQL
+                ).baz
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo.bar(<<~SQL)
+                  foo
+                SQL
+                .baz
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_external_trailing_comma() {
+        // RuboCop spec "incorrect case nested method call with comma" (which
+        // needs `loop: false` there too): the external `,` after the old `)`
+        // moves inside the new parens. Like RuboCop, the single-pass result
+        // still flags the outer call — a second pass finishes the job (see
+        // `corrects_outer_call_on_second_pass`).
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                bar(
+                  foo.bar(123, <<-SQL
+                    foo
+                  SQL
+                  ),
+                  ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+                  456,
+                  789,
+                )
+            "#},
+            indoc! {r#"
+                bar(
+                  foo.bar(123, <<-SQL),
+                    foo
+                  SQL
+                  456,
+                  789,
+                )
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_outer_call_on_second_pass() {
+        // Second pass over `corrects_external_trailing_comma`'s output: the
+        // outer `)` relocates after `789` (dropping its internal `,`).
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                bar(
+                  foo.bar(123, <<-SQL),
+                    foo
+                  SQL
+                  456,
+                  789,
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                bar(
+                  foo.bar(123, <<-SQL),
+                    foo
+                  SQL
+                  456,
+                  789)
+            "#},
+        );
+    }
+
+    #[test]
+    fn third_pass_is_a_stable_no_op() {
+        // Idempotency: once the outer `)` sits right after the last argument,
+        // the correction removes and re-inserts the same `)` — the source is
+        // unchanged (the remaining offense itself matches RuboCop, whose
+        // `exist_argument_between...` skip also stays false here).
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                bar(
+                  foo.bar(123, <<-SQL),
+                    foo
+                  SQL
+                  456,
+                  789)
+                     ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                bar(
+                  foo.bar(123, <<-SQL),
+                    foo
+                  SQL
+                  456,
+                  789)
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_csend_receiver() {
+        // `&.` variant of the simple incorrect case.
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo&.bar(<<-SQL
+                  foo
+                SQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo&.bar(<<-SQL)
+                  foo
+                SQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn keeps_comma_inside_heredoc_body() {
+        // RuboCop spec "simple incorrect case comma with spaces and comma in
+        // heredoc": only the opener's trailing comma goes; the body comma
+        // (past the first newline) survives.
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo(<<-SQL    ,
+                  foo,
+                SQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo(<<-SQL)
+                  foo,
+                SQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_double_heredoc_on_next_line() {
+        // RuboCop spec "double case new line".
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                foo(
+                  <<-SQL, <<-NOSQL
+                  foo
+                SQL
+                  bar
+                NOSQL
+                )
+                ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+            "#},
+            indoc! {r#"
+                foo(
+                  <<-SQL, <<-NOSQL)
+                  foo
+                SQL
+                  bar
+                NOSQL
+            "#},
+        );
+    }
+
+    #[test]
+    fn corrects_spaced_external_trailing_comma() {
+        // RuboCop spec "incorrect case in array with spaced out comma".
+        test::<HeredocArgumentClosingParenthesis>().expect_correction(
+            indoc! {r#"
+                [
+                  foo.bar(123, <<-SQL
+                    foo
+                  SQL
+                  )      ,
+                  ^ Put the closing parenthesis for a method call with a HEREDOC parameter on the same line as the HEREDOC opening.
+                  456,
+                  789,
+                ]
+            "#},
+            indoc! {r#"
+                [
+                  foo.bar(123, <<-SQL),
+                    foo
+                  SQL
+                  456,
+                  789,
+                ]
+            "#},
+        );
     }
 }
