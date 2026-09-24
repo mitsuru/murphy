@@ -114,8 +114,12 @@ struct Heredoc {
     /// `node.loc.heredoc_end`: the terminator line (leading indent + label),
     /// trailing newline excluded.
     end_label: Range,
+    /// Source range of the body, excluding the opener and terminator lines.
+    body_range: Range,
     /// True when the heredoc has zero body bytes (`node.children.empty?`).
     body_is_empty: bool,
+    /// False when token labels were ambiguous or required a fallback pair.
+    safe_body: bool,
 }
 
 /// Pair `HeredocStart`/`HeredocEnd` tokens by delimiter LABEL.
@@ -140,11 +144,12 @@ struct Heredoc {
 /// opener_line_end).min(term_line_start)`; an empty body has `body_start >=
 /// term_line_start`.
 fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     let source = cx.source().as_bytes();
     // Pending openers in arrival order, each tagged with its delimiter label so a
     // terminator can be matched to the right opener even across LIFO nesting.
     let mut pending: Vec<(Range, String)> = Vec::new();
+    let mut ambiguous_openers = HashSet::new();
     let mut out: Vec<Heredoc> = Vec::new();
     // Per-opener-line body cursor: maps an opener line-start to the byte offset
     // just past the most recently consumed terminator that opened on that line.
@@ -155,6 +160,12 @@ fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
             SourceTokenKind::HeredocStart => {
                 let opener_src = cx.raw_source(tok.range);
                 let label = delimiter_string(opener_src).map(str::to_owned).unwrap_or_default();
+                for (existing_opener, existing_label) in &pending {
+                    if existing_label == &label {
+                        ambiguous_openers.insert(existing_opener.start);
+                        ambiguous_openers.insert(tok.range.start);
+                    }
+                }
                 pending.push((tok.range, label));
             }
             SourceTokenKind::HeredocEnd => {
@@ -167,14 +178,21 @@ fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
                 // among same-label openers); fall back to the earliest pending
                 // opener if no label matches (defensive — should not happen for
                 // valid source).
-                let idx = pending
-                    .iter()
-                    .position(|(_, label)| label == term_label)
-                    .or(if pending.is_empty() { None } else { Some(0) });
+                let (matching_idx, ambiguous_label) = {
+                    let mut matching = pending
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (_, label))| label == term_label);
+                    let index = matching.next().map(|(index, _)| index);
+                    (index, matching.next().is_some())
+                };
+                let safe_pair = matching_idx.is_some() && !ambiguous_label;
+                let idx = matching_idx.or(if pending.is_empty() { None } else { Some(0) });
                 let Some(idx) = idx else {
                     continue;
                 };
                 let (opener, _) = pending.remove(idx);
+                let safe_body = safe_pair && !ambiguous_openers.contains(&opener.start);
 
                 let opener_line = line_start(source, opener.start);
                 let opener_line_end = next_line_start(source, opener.end);
@@ -202,13 +220,45 @@ fn collect_heredocs(cx: &Cx<'_>) -> Vec<Heredoc> {
                         start: term_line_start,
                         end,
                     },
+                    body_range: Range {
+                        start: body_start,
+                        end: term_line_start,
+                    },
                     body_is_empty: body_start >= term_line_start,
+                    safe_body,
                 });
             }
             _ => {}
         }
     }
     out
+}
+
+/// Source body ranges keyed by heredoc opener, for cops that inspect string text.
+/// Unmatched or ambiguous heredocs retain a `None` entry so callers can skip
+/// their opener instead of scanning or autocorrecting delimiter text.
+pub(super) fn body_ranges(cx: &Cx<'_>) -> Vec<(Range, Option<Range>)> {
+    use std::collections::HashSet;
+
+    let heredocs = collect_heredocs(cx);
+    let mut matched: HashSet<u32> = HashSet::with_capacity(heredocs.len());
+    let mut ranges: Vec<_> = heredocs
+        .into_iter()
+        .map(|heredoc| {
+            matched.insert(heredoc.opener.start);
+            (
+                heredoc.opener,
+                heredoc.safe_body.then_some(heredoc.body_range),
+            )
+        })
+        .collect();
+    for token in cx.sorted_tokens() {
+        if token.kind == SourceTokenKind::HeredocStart && !matched.contains(&token.range.start) {
+            ranges.push((token.range, None));
+        }
+    }
+    ranges.sort_by_key(|(opener, _)| (opener.start, opener.end));
+    ranges
 }
 
 /// Byte offset of the first byte after the next `\n` at or after `from`, or the

@@ -364,6 +364,9 @@ impl Translator {
             let name = self.sym(&b.name());
             return self.builder.push(NodeKind::BackRef(name), range);
         }
+        if let Some(shareable) = node.as_shareable_constant_node() {
+            return self.translate_node(&shareable.write());
+        }
         if let Some(c) = node.as_constant_read_node() {
             let name = self.sym(&c.name());
             return self.builder.push(
@@ -1125,12 +1128,14 @@ impl Translator {
             let call = self
                 .builder
                 .push(NodeKind::Lambda, Self::range(&lam.operator_loc()));
-            let params_node = lam.parameters().and_then(|p| {
+            let block_parameters = lam.parameters();
+            let params_node = block_parameters.as_ref().and_then(|p| {
                 p.as_block_parameters_node()
                     .and_then(|bp| bp.parameters())
                     .or_else(|| p.as_parameters_node())
             });
-            let args = self.translate_parameters(params_node, range);
+            let block_locals = self.translate_block_locals(block_parameters.as_ref());
+            let args = self.translate_parameters(params_node, range, &block_locals);
             let body = self.translate_body(lam.body());
             return self
                 .builder
@@ -1180,7 +1185,7 @@ impl Translator {
                 .map(|r| OptNodeId::some(self.translate_node(&r)))
                 .unwrap_or(OptNodeId::NONE);
             let name = self.sym(&d.name());
-            let args = self.translate_parameters(d.parameters(), range);
+            let args = self.translate_parameters(d.parameters(), range, &[]);
             // body は foundational helper `translate_body`（`StatementsNode` を畳む）。
             let body = self.translate_body(d.body());
             return self.builder.push(
@@ -2359,7 +2364,8 @@ impl Translator {
         // `parameters()` は `Option<Node>`。`BlockParametersNode`（`|...|` 構文）
         // のほか、numbered（`_1`）/`it` パラメータノードがある。後者は専用の
         // `Numblock`/`Itblock` へ（`_1` 本体は通常の lvar、`it` 本体は Send）。
-        if let Some(params) = block.parameters() {
+        let block_parameters = block.parameters();
+        if let Some(params) = block_parameters.as_ref() {
             if let Some(np) = params.as_numbered_parameters_node() {
                 return self.builder.push(
                     NodeKind::Numblock {
@@ -2376,15 +2382,27 @@ impl Translator {
                     .push(NodeKind::Itblock { send: call, body }, range);
             }
         }
-        let params_node = block.parameters().and_then(|p| {
+        let params_node = block_parameters.as_ref().and_then(|p| {
             p.as_block_parameters_node()
                 .and_then(|bp| bp.parameters())
                 .or_else(|| p.as_parameters_node())
         });
+        let block_locals = self.translate_block_locals(block_parameters.as_ref());
         let block_loc = Self::range(&block.location());
-        let args = self.translate_parameters(params_node, block_loc);
+        let args = self.translate_parameters(params_node, block_loc, &block_locals);
         self.builder
             .push(NodeKind::Block { call, args, body }, range)
+    }
+
+    fn translate_block_locals(&mut self, parameters: Option<&prism::Node<'_>>) -> Vec<NodeId> {
+        let Some(parameters) = parameters.and_then(|node| node.as_block_parameters_node()) else {
+            return Vec::new();
+        };
+        parameters
+            .locals()
+            .iter()
+            .map(|local| self.translate_param(&local))
+            .collect()
     }
 
     /// `ParametersNode` → `Args` ノードの `NodeId`。requireds → optionals → rest
@@ -2394,6 +2412,7 @@ impl Translator {
         &mut self,
         params: Option<prism::ParametersNode<'_>>,
         args_range: Range,
+        block_locals: &[NodeId],
     ) -> NodeId {
         let mut ids: Vec<NodeId> = Vec::new();
         if let Some(p) = &params {
@@ -2419,6 +2438,7 @@ impl Translator {
                 ids.push(self.translate_param(&block.as_node()));
             }
         }
+        ids.extend_from_slice(block_locals);
         let list = self.builder.push_list(&ids);
         self.builder.push(NodeKind::Args(list), args_range)
     }
@@ -2465,6 +2485,8 @@ impl Translator {
                 NodeKind::Blockarg(self.opt_sym(p.name())),
                 Self::opt_loc_range(p.name_loc()),
             )
+        } else if let Some(local) = node.as_block_local_variable_node() {
+            (NodeKind::Shadowarg(self.sym(&local.name())), range)
         } else if let Some(mt) = node.as_multi_target_node() {
             return self.translate_mlhs_parameters(&mt, range);
         } else if let Some(splat) = node.as_splat_node() {
@@ -2490,7 +2512,11 @@ impl Translator {
             ids.push(self.translate_param(&parameter));
         }
         if let Some(rest) = multi_target.rest() {
-            ids.push(self.translate_param(&rest));
+            // Prism inserts an ImplicitRestNode for a trailing comma in a
+            // destructured parameter. It is syntax bookkeeping, not a binding.
+            if rest.as_splat_node().is_some() {
+                ids.push(self.translate_param(&rest));
+            }
         }
         for parameter in multi_target.rights().iter() {
             ids.push(self.translate_param(&parameter));
@@ -3197,6 +3223,62 @@ mod tests {
             })
             .collect();
         assert_eq!(block_names, ["whitelist", "value"]);
+
+        for source in ["def f((only,))\nend", "items.each { |(only,)| only }"] {
+            let singleton = translate(source, "t.rb");
+            let mlhs = singleton
+                .descendants(singleton.root())
+                .into_iter()
+                .find(|id| matches!(singleton.kind(*id), NodeKind::Mlhs(_)))
+                .expect("singleton destructured parameter is an Mlhs");
+            let params: Vec<_> = singleton.children(mlhs).collect();
+            assert_eq!(params.len(), 1, "unexpected implicit rest in {source:?}");
+            assert!(matches!(
+                singleton.kind(params[0]),
+                NodeKind::Arg(name) if singleton.interner().resolve(name.0) == "only"
+            ));
+        }
+    }
+
+    #[test]
+    fn translates_block_local_declarations_as_shadow_arguments() {
+        let source = "items.each { |item; blacklist| nil }";
+        let ast = translate(source, "t.rb");
+        let args = match ast.kind(ast.root()) {
+            NodeKind::Block { args, .. } => *args,
+            other => panic!("expected Block, got {other:?}"),
+        };
+        let params: Vec<_> = ast.children(args).collect();
+        assert_eq!(params.len(), 2);
+        assert!(
+            matches!(ast.kind(params[0]), NodeKind::Arg(name) if ast.interner().resolve(name.0) == "item")
+        );
+        assert!(
+            matches!(ast.kind(params[1]), NodeKind::Shadowarg(name) if ast.interner().resolve(name.0) == "blacklist")
+        );
+
+        let lambda = translate("f = ->(item; blacklist) { nil }\n", "t.rb");
+        let lambda_shadow = lambda
+            .descendants(lambda.root())
+            .into_iter()
+            .find(|id| matches!(lambda.kind(*id), NodeKind::Shadowarg(_)))
+            .expect("lambda block-local declaration");
+        assert!(matches!(
+            lambda.kind(lambda_shadow),
+            NodeKind::Shadowarg(name) if lambda.interner().resolve(name.0) == "blacklist"
+        ));
+    }
+
+    #[test]
+    fn translates_shareable_constant_wrapper_to_its_write() {
+        let ast = translate(
+            "# shareable_constant_value: literal\nBlacklist = []\n",
+            "t.rb",
+        );
+        assert!(matches!(
+            ast.kind(ast.root()),
+            NodeKind::Casgn { name, .. } if ast.interner().resolve(name.0) == "Blacklist"
+        ));
     }
 
     #[test]

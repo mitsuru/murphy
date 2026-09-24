@@ -5,7 +5,7 @@
 //! upstream_cop: Naming/InclusiveLanguage
 //! upstream_version_checked: 1.87.0
 //! status: partial
-//! gap_issues: [murphy-e7bz.41.1, murphy-e7bz.41.2]
+//! gap_issues: [murphy-e7bz.41.1, murphy-e7bz.41.2, murphy-e7bz.41.3]
 //! notes: >
 //!   Ports RuboCop's configurable FlaggedTerms, Check* switches, comments,
 //!   strings, symbols, identifiers, constants, variables, filepath scan,
@@ -16,14 +16,17 @@
 //!   The cop is disabled by default. Remaining limits: Rust `regex` lacks Ruby
 //!   look-around/backreferences, and config JSON loses YAML Regexp tags, making
 //!   tagged regexes and slash-delimited plain strings ambiguous. Filepath
-//!   offenses use `Range::ZERO` as Murphy's no-location approximation. AST
+//!   offenses use `Range::ZERO` as Murphy's no-location approximation. Heredoc
+//!   strings use label-paired body ranges; ambiguous or incomplete delimiters
+//!   are skipped so corrections cannot touch the opener or terminator. AST
 //!   ranges are collected once per file because the cop macro cannot combine
 //!   file and node handlers.
 //! ```
 //!
 //! The parser's `Str` leaves represent string content in plain, interpolated,
-//! regexp, xstring, and interpolated-symbol literals. We inspect those leaves
-//! only, so code inside `#{...}` remains governed by identifier/constant rules.
+//! regexp, xstring, and interpolated-symbol literals. Heredoc opener ranges are
+//! mapped to their bodies, excluding delimiters. We inspect string leaves only,
+//! so code inside `#{...}` remains governed by identifier/constant rules.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -459,44 +462,64 @@ impl CompiledOptions {
         }
     }
 
-    fn scan_for_words(&self, input: &str) -> Vec<String> {
+    fn scan_for_words(&self, input: &str) -> Vec<WordMatch> {
         if self.terms.is_empty() || input.is_empty() {
             return Vec::new();
         }
         let masked = self.mask_input(input);
         let mut candidates = Vec::new();
         for (term_index, term) in self.terms.iter().enumerate() {
-            for matched in term.regex.find_iter(&masked) {
-                if term.whole_word && !whole_word_match(&masked, matched.start(), matched.end()) {
+            for matched in term.regex.find_iter(&masked.text) {
+                if masked.overlaps_allowed_range(matched.start(), matched.end()) {
                     continue;
                 }
+                if term.whole_word
+                    && !whole_word_match(&masked.text, matched.start(), matched.end())
+                {
+                    continue;
+                }
+                let (Some(start), Some(end)) = (
+                    masked.source_offset(matched.start()),
+                    masked.source_offset(matched.end()),
+                ) else {
+                    continue;
+                };
                 candidates.push(WordMatch {
-                    start: matched.start(),
-                    end: matched.end(),
+                    start,
+                    end,
                     term_index,
                     word: matched.as_str().to_string(),
                 });
             }
         }
         select_non_overlapping(candidates)
-            .into_iter()
-            .map(|matched| matched.word)
-            .collect()
     }
 
-    fn mask_input(&self, input: &str) -> String {
+    fn mask_input(&self, input: &str) -> MaskedInput {
         let Some(regex) = &self.allowed_regex else {
-            return input.to_string();
+            return MaskedInput {
+                text: input.to_string(),
+                spans: Vec::new(),
+            };
         };
         let mut masked = String::with_capacity(input.len());
+        let mut spans = Vec::new();
         let mut cursor = 0;
         for matched in regex.find_iter(input) {
             masked.push_str(&input[cursor..matched.start()]);
+            let masked_start = masked.len();
             masked.extend(std::iter::repeat_n('*', matched.as_str().chars().count()));
+            let masked_end = masked.len();
+            spans.push(MaskedSpan {
+                masked_start,
+                masked_end,
+                source_start: matched.start(),
+                source_end: matched.end(),
+            });
             cursor = matched.end();
         }
         masked.push_str(&input[cursor..]);
-        masked
+        MaskedInput { text: masked, spans }
     }
 
     fn find_term(&self, word: &str) -> Option<&CompiledTerm> {
@@ -533,6 +556,43 @@ impl CompiledOptions {
     fn sole_suggestion(&self, word: &str) -> Option<&str> {
         self.find_term(word)
             .and_then(|term| term.sole_suggestion.as_deref())
+    }
+}
+
+struct MaskedSpan {
+    masked_start: usize,
+    masked_end: usize,
+    source_start: usize,
+    source_end: usize,
+}
+
+struct MaskedInput {
+    text: String,
+    spans: Vec<MaskedSpan>,
+}
+
+impl MaskedInput {
+    fn overlaps_allowed_range(&self, start: usize, end: usize) -> bool {
+        self.spans.iter().any(|span| {
+            span.masked_start < span.masked_end
+                && start < span.masked_end
+                && span.masked_start < end
+        })
+    }
+
+    fn source_offset(&self, masked_offset: usize) -> Option<usize> {
+        let mut byte_shrinkage = 0;
+        for span in &self.spans {
+            if masked_offset <= span.masked_start {
+                return Some(masked_offset + byte_shrinkage);
+            }
+            if masked_offset < span.masked_end {
+                return None;
+            }
+            byte_shrinkage += (span.source_end - span.source_start)
+                - (span.masked_end - span.masked_start);
+        }
+        Some(masked_offset + byte_shrinkage)
     }
 }
 
@@ -634,6 +694,11 @@ impl InclusiveLanguage {
         }
 
         let mut ranges = Vec::new();
+        let heredoc_ranges = if options.check_strings {
+            super::heredoc_delimiter_naming::body_ranges(cx)
+        } else {
+            Vec::new()
+        };
         if options.check_comments {
             ranges.extend(cx.comments().iter().map(|comment| comment.range));
         }
@@ -649,7 +714,7 @@ impl InclusiveLanguage {
                 .into_iter()
                 .chain(std::iter::once(root))
             {
-                collect_node_ranges(id, &options, cx, &mut ranges);
+                collect_node_ranges(id, &options, cx, &heredoc_ranges, &mut ranges);
             }
         }
         ranges.sort_by_key(|range| (range.start, range.end));
@@ -669,9 +734,13 @@ fn check_filepath(cx: &Cx<'_>, compiled: &CompiledOptions) {
         return;
     }
     let message = if words.len() == 1 {
-        compiled.message(&words[0], true)
+        compiled.message(&words[0].word, true)
     } else {
-        let joined = words.join("', '");
+        let joined = words
+            .iter()
+            .map(|matched| matched.word.as_str())
+            .collect::<Vec<_>>()
+            .join("', '");
         format!("Consider replacing '{joined}' in file path with other terms.")
     };
     cx.emit_offense(global_offense_range(cx), &message, None);
@@ -683,33 +752,34 @@ fn global_offense_range(_cx: &Cx<'_>) -> Range {
 
 fn check_source_range(range: Range, cx: &Cx<'_>, compiled: &CompiledOptions) {
     let text = cx.raw_source(range);
-    let mut emitted_ranges = HashSet::new();
-    for word in compiled.scan_for_words(text) {
-        // RuboCop 1.87.0's offense_range uses `token.text.index(word)` rather
-        // than the WordLocation offset, so repeated identical terms highlight
-        // their first occurrence. Keep that behavior for ASCII source. This
-        // byte-based search also keeps Murphy ranges valid for UTF-8 input.
-        let Some(offset) = text.find(&word) else {
-            continue;
-        };
-        let start = range.start + offset as u32;
-        let offense_range = Range {
-            start,
-            end: start + word.len() as u32,
-        };
-        // Repeated matches can map to the same range; emit that offense and edit only once.
-        if !emitted_ranges.insert((offense_range.start, offense_range.end)) {
+    let mut emitted_words = HashSet::new();
+    for matched in compiled.scan_for_words(text) {
+        // Preserve the match offset from the masked scan. Searching the original
+        // source for the word can select an earlier, AllowedRegex-masked match.
+        // RuboCop currently has this range bug; Murphy keeps corrections on the
+        // actual flagged occurrence instead.
+        if !emitted_words.insert(matched.word.clone()) {
             continue;
         }
-        let message = compiled.message(&word, false);
+        let offense_range = Range {
+            start: range.start + matched.start as u32,
+            end: range.start + matched.end as u32,
+        };
+        let message = compiled.message(&matched.word, false);
         cx.emit_offense(offense_range, &message, None);
-        if let Some(replacement) = compiled.sole_suggestion(&word) {
+        if let Some(replacement) = compiled.sole_suggestion(&matched.word) {
             cx.emit_edit(offense_range, replacement);
         }
     }
 }
 
-fn collect_node_ranges(id: NodeId, options: &Options, cx: &Cx<'_>, out: &mut Vec<Range>) {
+fn collect_node_ranges(
+    id: NodeId,
+    options: &Options,
+    cx: &Cx<'_>,
+    heredoc_ranges: &[(Range, Option<Range>)],
+    out: &mut Vec<Range>,
+) {
     match *cx.kind(id) {
         NodeKind::Lvar(_) | NodeKind::Lvasgn { .. } => {
             push_name_range(id, CheckKind::Identifier, options, cx, out);
@@ -746,9 +816,29 @@ fn collect_node_ranges(id: NodeId, options: &Options, cx: &Cx<'_>, out: &mut Vec
         NodeKind::Optarg { name, .. } => {
             push_named_range(id, cx.symbol_str(name), CheckKind::Identifier, options, cx, out);
         }
-        NodeKind::Str(_) if options.enabled(CheckKind::String) => out.push(cx.range(id)),
+        NodeKind::Str(_) if options.enabled(CheckKind::String) => {
+            push_string_range(id, cx, heredoc_ranges, out);
+        }
         NodeKind::Sym(_) => push_symbol_range(id, options, cx, out),
         _ => {}
+    }
+}
+
+fn push_string_range(
+    id: NodeId,
+    cx: &Cx<'_>,
+    heredoc_ranges: &[(Range, Option<Range>)],
+    out: &mut Vec<Range>,
+) {
+    let range = cx.range(id);
+    let key = (range.start, range.end);
+    match heredoc_ranges.binary_search_by_key(&key, |(opener, _)| (opener.start, opener.end)) {
+        Ok(index) => {
+            if let Some(body) = heredoc_ranges[index].1 {
+                out.push(body);
+            }
+        }
+        Err(_) => out.push(range),
     }
 }
 
@@ -951,7 +1041,15 @@ fn method_name_range(id: NodeId, name: &str, receiver: Option<NodeId>, cx: &Cx<'
             end: name_loc.start + name_len,
         }
     } else {
-        search_name_range(id, name, receiver.map(|receiver| cx.range(receiver).end), cx)
+        let from = receiver.map(|receiver| cx.range(receiver).end).or_else(|| {
+            if matches!(*cx.kind(id), NodeKind::Def { .. }) {
+                let keyword = cx.loc(id).keyword();
+                (keyword != Range::ZERO).then_some(keyword.end)
+            } else {
+                None
+            }
+        });
+        search_name_range(id, name, from, cx)
     }
 }
 
@@ -1252,6 +1350,63 @@ mod tests {
     }
 
     #[test]
+    fn check_strings_scans_heredoc_body_not_delimiters() {
+        let options = category_options(false, true, false);
+        let delimiter_only = "text = <<~WHITELIST\nclean body\nWHITELIST\n";
+        assert!(run_cop_with_options::<InclusiveLanguage>(delimiter_only, &options).is_empty());
+
+        let body_term = "text = <<~END\nwhitelist\nEND\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(body_term, &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(
+            offenses[0].range.start as usize,
+            body_term.find("whitelist").expect("body term"),
+        );
+    }
+
+    #[test]
+    fn heredoc_string_autocorrection_changes_only_the_body() {
+        let mut options = category_options(false, true, false);
+        let blacklist = options
+            .flagged_terms
+            .iter_mut()
+            .find(|(term, _)| term == "blacklist")
+            .expect("default blacklist term");
+        blacklist.1.suggestions = Some(serde_json::json!(["denylist"]));
+        test::<InclusiveLanguage>()
+            .with_options(&options)
+            .expect_correction(
+                indoc! {r#"
+                    text = <<~BLACKLIST
+                    blacklist
+                    ^^^^^^^^^ Consider replacing 'blacklist' with 'denylist'.
+                    BLACKLIST
+                "#},
+                "text = <<~BLACKLIST\ndenylist\nBLACKLIST\n",
+            );
+    }
+
+    #[test]
+    fn check_strings_scans_nested_interpolated_heredoc_bodies() {
+        let options = category_options(false, true, false);
+        let source = "x = <<~OUTER\n  #{<<~INNER}\n    blacklist\n  INNER\n  whitelist\nOUTER\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 2);
+        assert_eq!(offenses[0].range.start as usize, source.find("blacklist").unwrap());
+        assert_eq!(offenses[1].range.start as usize, source.find("whitelist").unwrap());
+    }
+
+    #[test]
+    fn check_strings_scans_multiple_heredoc_bodies() {
+        let options = category_options(false, true, false);
+        let source = "first, second = [<<~FIRST, <<~SECOND]\n  whitelist\nFIRST\n  blacklist\nSECOND\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 2);
+        assert_eq!(offenses[0].range.start as usize, source.find("whitelist").unwrap());
+        assert_eq!(offenses[1].range.start as usize, source.find("blacklist").unwrap());
+    }
+
+    #[test]
     fn allowed_regex_masks_phrase_from_comment() {
         let options = Options {
             check_identifiers: false,
@@ -1304,6 +1459,81 @@ mod tests {
         test::<InclusiveLanguage>()
             .with_options(&options)
             .expect_no_offenses("# master's degree\n");
+    }
+
+    #[test]
+    fn allowed_match_is_not_used_as_offense_or_autocorrect_range() {
+        let options = Options {
+            check_identifiers: false,
+            check_constants: false,
+            check_variables: false,
+            check_strings: false,
+            check_symbols: false,
+            check_comments: true,
+            check_filepaths: false,
+            flagged_terms: vec![(
+                "foo".to_string(),
+                FlaggedTermOptions {
+                    regex: Some("foo".to_string()),
+                    allowed_regex: vec!["foobar".to_string()],
+                    suggestions: Some(serde_json::json!(["bar"])),
+                    ..FlaggedTermOptions::default()
+                },
+            )],
+        };
+        let source = "# foobar foo\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 9, end: 12 });
+
+        let diagnostic = format!(
+            "# foobar foo\n{}^^^ Consider replacing 'foo' with 'bar'.\n",
+            " ".repeat(9),
+        );
+        test::<InclusiveLanguage>()
+            .with_options(&options)
+            .expect_correction(&diagnostic, "# foobar bar\n");
+    }
+
+    #[test]
+    fn allowed_unicode_match_does_not_shift_source_range() {
+        let options = Options {
+            check_identifiers: false,
+            check_constants: false,
+            check_variables: false,
+            check_strings: false,
+            check_symbols: false,
+            check_comments: true,
+            check_filepaths: false,
+            flagged_terms: vec![(
+                "foo".to_string(),
+                FlaggedTermOptions {
+                    regex: Some("foo".to_string()),
+                    allowed_regex: vec!["café".to_string()],
+                    ..FlaggedTermOptions::default()
+                },
+            )],
+        };
+        let source = "# café foo\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range.start as usize, source.find("foo").unwrap());
+    }
+
+    #[test]
+    fn blank_allowed_regex_entries_match_rubocop_zero_width_behavior() {
+        let config = br#"{"CheckIdentifiers":false,"CheckConstants":false,"CheckVariables":false,"CheckStrings":false,"CheckSymbols":false,"CheckComments":true,"CheckFilepaths":false,"FlaggedTerms":{"master":{"AllowedRegex":["","master's degree"]},"degree":{"Suggestions":["qualification"]}}}"#;
+        let options = Options::from_config_json(config).expect("valid option JSON");
+        let master = options
+            .flagged_terms
+            .iter()
+            .find(|(term, _)| term == "master")
+            .expect("custom master term");
+        assert_eq!(master.1.allowed_regex, ["", "master's degree"]);
+        let offenses = run_cop_with_options::<InclusiveLanguage>("# master's degree\n", &options);
+        assert_eq!(offenses.len(), 2);
+        assert_eq!(offenses[0].range, Range { start: 2, end: 8 });
+        assert_eq!(offenses[1].range, Range { start: 11, end: 17 });
     }
 
     #[test]
@@ -1413,6 +1643,37 @@ mod tests {
     }
 
     #[test]
+    fn short_method_name_range_starts_after_def_keyword() {
+        let options = Options {
+            check_identifiers: true,
+            check_constants: false,
+            check_variables: false,
+            check_strings: false,
+            check_symbols: false,
+            check_comments: false,
+            check_filepaths: false,
+            flagged_terms: vec![(
+                "f".to_string(),
+                FlaggedTermOptions {
+                    regex: Some("f".to_string()),
+                    suggestions: Some(serde_json::json!(["method"])),
+                    ..FlaggedTermOptions::default()
+                },
+            )],
+        };
+        let source = "def f; end\n";
+        let offenses = run_cop_with_options::<InclusiveLanguage>(source, &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 4, end: 5 });
+        test::<InclusiveLanguage>()
+            .with_options(&options)
+            .expect_correction(
+                "def f; end\n    ^ Consider replacing 'f' with 'method'.\n",
+                "def method; end\n",
+            );
+    }
+
+    #[test]
     fn flags_destructured_method_and_block_arguments() {
         let source = "def f((blacklist, value))\nend\nitems.each { |(whitelist, value)| value }\n";
         let offenses = run_cop::<InclusiveLanguage>(source);
@@ -1430,6 +1691,22 @@ mod tests {
             offenses.iter().map(|offense| offense.range).collect::<Vec<_>>(),
             expected
         );
+    }
+
+    #[test]
+    fn flags_block_local_declarations_as_identifiers() {
+        let source = "items.each { |; blacklist| nil }\n";
+        let offenses = run_cop::<InclusiveLanguage>(source);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range.start as usize, source.find("blacklist").unwrap());
+    }
+
+    #[test]
+    fn flags_constants_wrapped_in_shareable_constant_nodes() {
+        let source = "# shareable_constant_value: literal\nBlacklist = []\n";
+        let offenses = run_cop::<InclusiveLanguage>(source);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range.start as usize, source.find("Blacklist").unwrap());
     }
 
     #[test]
