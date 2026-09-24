@@ -10,14 +10,15 @@
 //! upstream: rubocop
 //! upstream_cop: Gemspec/DeprecatedAttributeAssignment
 //! upstream_version_checked: 1.87.0
-//! status: partial
-//! gap_issues: [murphy-mc15]
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Detection is verified byte-for-byte against standalone rubocop 1.87.0.
-//!   The single accepted gap is autocorrect: RuboCop `extend AutoCorrector`s a
-//!   line-removal corrector (`range_by_whole_lines(..., include_final_newline:
-//!   true)` → `corrector.remove`); Murphy ships detection-only here. Tracked by
-//!   murphy-mc15.
+//!   Detection and whole-line removal autocorrect are verified byte-for-byte
+//!   against standalone RuboCop 1.87.0. The corrector removes
+//!   `cx.range_by_whole_lines(cx.range(assignment), true)`, including the final
+//!   newline. Only the first deprecated assignment per specification block is
+//!   emitted, so blocks with multiple deprecated assignments require multiple
+//!   `--fix` passes to reach the fixpoint.
 //!
 //!   Mirrors RuboCop's `on_block`: for each `Gem::Specification.new` /
 //!   `::Gem::Specification.new` block (matched via the same
@@ -107,8 +108,11 @@ impl DeprecatedAttributeAssignment {
                 .into_iter()
                 .find_map(|desc| deprecated_assignment(desc, block_parameter, cx))
             {
+                let assignment_range = cx.range(assignment);
                 let message = format!("Do not set `{attr}` in gemspec.");
-                cx.emit_offense(cx.range(assignment), &message, None);
+                cx.emit_offense(assignment_range, &message, None);
+                let removal = cx.range_by_whole_lines(assignment_range, true);
+                cx.emit_edit(removal, "");
             }
         }
     }
@@ -227,7 +231,7 @@ murphy_plugin_api::submit_cop!(DeprecatedAttributeAssignment);
 #[cfg(test)]
 mod tests {
     use super::DeprecatedAttributeAssignment;
-    use murphy_plugin_api::test_support::{indoc, test};
+    use murphy_plugin_api::test_support::{CapturedEdit, indoc, run_cop_with_edits, test};
 
     #[test]
     fn flags_test_files_direct_assignment() {
@@ -315,6 +319,53 @@ mod tests {
               ^^^^^^^^^^^^^^^^^^ Do not set `date` in gemspec.
             end
         "#});
+    }
+
+    #[test]
+    fn autocorrect_removes_deprecated_assignment_line() {
+        test::<DeprecatedAttributeAssignment>().expect_correction(
+            indoc! {r#"
+                Gem::Specification.new do |spec|
+                  spec.test_files = Dir.glob("test/**/*")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Do not set `test_files` in gemspec.
+                  spec.name = "x"
+                end
+            "#},
+            indoc! {r#"
+                Gem::Specification.new do |spec|
+                  spec.name = "x"
+                end
+            "#},
+        );
+    }
+
+    #[test]
+    fn repeated_autocorrect_reaches_fixpoint_one_assignment_per_pass() {
+        let apply_edit = |source: &str, edit: &CapturedEdit| {
+            format!(
+                "{}{}{}",
+                &source[..edit.range.start as usize],
+                edit.replacement,
+                &source[edit.range.end as usize..]
+            )
+        };
+        let source = "Gem::Specification.new do |spec|\n  spec.test_files = \"x\"\n  spec.date = \"2020\"\nend\n";
+        let first = run_cop_with_edits::<DeprecatedAttributeAssignment>(source);
+        assert_eq!(first.offenses.len(), 1);
+        assert_eq!(first.edits.len(), 1);
+
+        let once = apply_edit(source, &first.edits[0]);
+        assert!(!once.contains("test_files"));
+        assert!(once.contains("spec.date"));
+        let second = run_cop_with_edits::<DeprecatedAttributeAssignment>(&once);
+        assert_eq!(second.offenses.len(), 1);
+        assert_eq!(second.edits.len(), 1);
+
+        let twice = apply_edit(&once, &second.edits[0]);
+        assert!(!twice.contains("spec.date"));
+        let final_run = run_cop_with_edits::<DeprecatedAttributeAssignment>(&twice);
+        assert!(final_run.offenses.is_empty());
+        assert!(final_run.edits.is_empty());
     }
 
     #[test]
