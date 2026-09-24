@@ -443,6 +443,48 @@ fn in_range(inner: Range, outer: Range) -> bool {
     inner.start >= outer.start && inner.end <= outer.end
 }
 
+/// Per-file index for mapping byte offsets to 1-based source lines.
+///
+/// Building the index is O(N) in source size; each lookup is O(log L), where
+/// L is the number of line breaks. This avoids rescanning the source prefix for
+/// every node or comment in cops that make many line-number queries.
+pub struct SourceLineIndex {
+    newline_offsets: Vec<usize>,
+}
+
+impl SourceLineIndex {
+    /// Index every newline byte once. Offsets are bytes, matching Prism ranges.
+    pub fn new(source: &str) -> Self {
+        let newline_offsets = source
+            .as_bytes()
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, &byte)| (byte == b'\n').then_some(offset))
+            .collect();
+        Self { newline_offsets }
+    }
+
+    /// Return the 1-based line containing `offset`.
+    pub fn line_of(&self, offset: u32) -> usize {
+        self.preceding_newlines(offset) + 1
+    }
+
+    /// Return the byte offset of the start of the line containing `offset`.
+    pub fn line_start(&self, offset: u32) -> usize {
+        let preceding = self.preceding_newlines(offset);
+        if preceding == 0 {
+            0
+        } else {
+            self.newline_offsets[preceding - 1] + 1
+        }
+    }
+
+    fn preceding_newlines(&self, offset: u32) -> usize {
+        self.newline_offsets
+            .partition_point(|&newline| newline < offset as usize)
+    }
+}
+
 /// The 0-based source line that contains byte `offset` (number of `\n`
 /// bytes strictly before `offset`). Faithful to RuboCop's 1-based
 /// `loc.line` only up to a constant offset — the `Layout/First*LineBreak`
@@ -1348,9 +1390,42 @@ fn inner_classlike_lines(node: NodeId, cx: &Cx<'_>) -> std::collections::HashSet
 #[cfg(test)]
 mod tests {
     use super::{
-        display_column, heredoc_end_label, heredoc_start_label,
+        SourceLineIndex, display_column, heredoc_end_label, heredoc_start_label,
         is_assignment_or_comparison_operator,
     };
+
+    #[test]
+    fn source_line_index_matches_prefix_newline_counts_for_byte_offsets() {
+        let source = "あ\né\n";
+        let lines = SourceLineIndex::new(source);
+
+        // Include offsets inside multibyte characters and at newline bytes:
+        // source offsets are bytes, and a newline advances the line only after
+        // its own byte position.
+        for offset in 0..=source.len() {
+            let expected = source.as_bytes()[..offset]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count()
+                + 1;
+            assert_eq!(lines.line_of(offset as u32), expected, "line at {offset}");
+            let expected_start = source.as_bytes()[..offset]
+                .iter()
+                .rposition(|&byte| byte == b'\n')
+                .map_or(0, |newline| newline + 1);
+            assert_eq!(
+                lines.line_start(offset as u32),
+                expected_start,
+                "line start at {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_line_index_handles_empty_and_single_line_sources() {
+        assert_eq!(SourceLineIndex::new("").line_of(0), 1);
+        assert_eq!(SourceLineIndex::new("one line").line_of(8), 1);
+    }
 
     #[test]
     fn display_column_matches_rubocop_unicode_display_width() {

@@ -87,6 +87,7 @@
 //!   rewriting correction that the offense already guides the user to perform.
 //! ```
 
+use crate::cops::util::SourceLineIndex;
 use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
 
 /// Options for [`OrderedDependencies`].
@@ -120,6 +121,7 @@ impl OrderedDependencies {
     #[on_new_investigation]
     fn check_file(&self, cx: &Cx<'_>) {
         let opts = cx.options_or_default::<OrderedDependenciesOptions>();
+        let line_index = SourceLineIndex::new(cx.source());
         let root = cx.root();
 
         // Whole-AST source-order walk → `spec.add_*dependency 'name'` calls.
@@ -133,15 +135,15 @@ impl OrderedDependencies {
 
         // 1-based source lines of own-line comments, used to walk the contiguous
         // comment block above a node when comments are not separators.
-        let comment_lines: Vec<usize> = own_line_comment_lines(cx);
+        let comment_lines = own_line_comment_lines(cx, &line_index);
 
         for pair in declarations.windows(2) {
             let previous = &pair[0];
             let current = &pair[1];
 
-            let previous_last_line = line_of(cx, cx.range(previous.node).end);
+            let previous_last_line = line_index.line_of(cx.range(previous.node).end);
             let current_first_line =
-                source_range_first_line(current.node, &comment_lines, &opts, cx);
+                source_range_first_line(current.node, &comment_lines, &opts, cx, &line_index);
             if previous_last_line != current_first_line.saturating_sub(1) {
                 continue;
             }
@@ -244,14 +246,15 @@ fn source_range_first_line(
     comment_lines: &[usize],
     opts: &OrderedDependenciesOptions,
     cx: &Cx<'_>,
+    line_index: &SourceLineIndex,
 ) -> usize {
-    let node_line = line_of(cx, cx.range(node).start);
+    let node_line = line_index.line_of(cx.range(node).start);
     if opts.treat_comments_as_group_separators {
         return node_line;
     }
     // Walk upward over the contiguous block of own-line comments directly above.
     let mut first_line = node_line;
-    while first_line > 1 && comment_lines.contains(&(first_line - 1)) {
+    while first_line > 1 && comment_lines.binary_search(&(first_line - 1)).is_ok() {
         first_line -= 1;
     }
     first_line
@@ -260,22 +263,21 @@ fn source_range_first_line(
 /// 1-based source lines of own-line comments (the first non-whitespace
 /// character on the line is `#`). These are the lines RuboCop's
 /// `ast_with_comments` can attach to a following node.
-fn own_line_comment_lines(cx: &Cx<'_>) -> Vec<usize> {
+fn own_line_comment_lines(cx: &Cx<'_>, line_index: &SourceLineIndex) -> Vec<usize> {
     let source = cx.source();
-    cx.comments()
+    let mut comment_lines: Vec<usize> = cx
+        .comments()
         .iter()
         .filter(|comment| {
             let start = comment.range.start as usize;
-            let line_start = source[..start].rfind('\n').map_or(0, |pos| pos + 1);
+            let line_start = line_index.line_start(comment.range.start);
             source[line_start..start].chars().all(char::is_whitespace)
         })
-        .map(|comment| line_of(cx, comment.range.start))
-        .collect()
-}
-
-/// 1-based source line number of the byte `offset`.
-fn line_of(cx: &Cx<'_>, offset: u32) -> usize {
-    cx.source()[..offset as usize].matches('\n').count() + 1
+        .map(|comment| line_index.line_of(comment.range.start))
+        .collect();
+    comment_lines.sort_unstable();
+    comment_lines.dedup();
+    comment_lines
 }
 
 murphy_plugin_api::submit_cop!(OrderedDependencies);
