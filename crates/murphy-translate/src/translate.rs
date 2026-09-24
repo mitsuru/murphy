@@ -1514,6 +1514,15 @@ impl Translator {
                 .builder
                 .push(NodeKind::Alias { new_name, old_name }, range);
         }
+        if let Some(undef) = node.as_undef_node() {
+            let names: Vec<_> = undef
+                .names()
+                .iter()
+                .map(|name| self.translate_node(&name))
+                .collect();
+            let names = self.builder.push_list(&names);
+            return self.builder.push(NodeKind::Undef(names), range);
+        }
 
         // Task 17 以降、ここに各ノード種の arm を足していく。
         self.builder.push(NodeKind::Unknown, range)
@@ -3436,6 +3445,18 @@ mod tests {
         assert!(matches!(global.kind(*old_name), NodeKind::Gvar(_)));
         assert_eq!(global.raw_source(global.range(*new_name)), "$new");
         assert_eq!(global.raw_source(global.range(*old_name)), "$old");
+    }
+
+    #[test]
+    fn translates_undef_names() {
+        let ast = translate("undef badName, :badSymbol", "t.rb");
+        assert!(matches!(ast.kind(ast.root()), NodeKind::Undef(_)));
+        let names: Vec<_> = ast.children(ast.root()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(matches!(ast.kind(names[0]), NodeKind::Sym(_)));
+        assert!(matches!(ast.kind(names[1]), NodeKind::Sym(_)));
+        assert_eq!(ast.raw_source(ast.range(names[0])), "badName");
+        assert_eq!(ast.raw_source(ast.range(names[1])), ":badSymbol");
     }
 
     #[test]

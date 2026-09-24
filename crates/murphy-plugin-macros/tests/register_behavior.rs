@@ -69,20 +69,28 @@ fn register_entry_point_fills_the_plugin_registration() {
 
     let cops = unsafe { std::slice::from_raw_parts(reg.cops_ptr, reg.cops_len) };
 
-    assert_eq!(unsafe { cops[0].name.as_bytes() }, b"Plugin/NoTabs");
-    assert_eq!(unsafe { cops[0].description.as_bytes() }, b"");
-    assert_eq!(cops[0].kinds_len, 1);
+    // Linker inventory order can vary with the workspace feature graph.
+    let no_tabs = cops
+        .iter()
+        .find(|cop| unsafe { cop.name.as_bytes() == b"Plugin/NoTabs" })
+        .expect("NoTabs registration is present");
+    let no_spaces = cops
+        .iter()
+        .find(|cop| unsafe { cop.name.as_bytes() == b"Plugin/NoSpaces" })
+        .expect("NoSpaces registration is present");
 
-    assert_eq!(unsafe { cops[1].name.as_bytes() }, b"Plugin/NoSpaces");
+    assert_eq!(unsafe { no_tabs.description.as_bytes() }, b"");
+    assert_eq!(no_tabs.kinds_len, 1);
+
     assert_eq!(
-        unsafe { cops[1].description.as_bytes() },
+        unsafe { no_spaces.description.as_bytes() },
         b"Forbids trailing spaces."
     );
     assert_eq!(
-        cops[1].default_severity,
+        no_spaces.default_severity,
         Severity::to_wire(Some(Severity::Warning))
     );
-    assert_eq!(cops[1].kinds_len, 2);
+    assert_eq!(no_spaces.kinds_len, 2);
 }
 
 #[test]
