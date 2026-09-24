@@ -500,6 +500,8 @@ impl CompiledOptions {
     }
 
     fn find_term(&self, word: &str) -> Option<&CompiledTerm> {
+        // Match RuboCop's `find_flagged_term` lookup on the isolated word, while
+        // retaining whole-word boundaries for earlier terms that only match a substring.
         self.terms.iter().find(|term| {
             if term.whole_word {
                 term.regex.find_iter(word).any(|matched| {
@@ -1007,7 +1009,8 @@ fn suggestion_to_string(value: &serde_json::Value) -> String {
 
 fn sole_suggestion(suggestions: Option<&serde_json::Value>) -> Option<String> {
     match suggestions? {
-        serde_json::Value::String(value) => Some(value.clone()),
+        // A blank replacement can delete the flagged source, so treat it as no safe correction.
+        serde_json::Value::String(value) if !value.trim().is_empty() => Some(value.clone()),
         serde_json::Value::Array(values) if values.len() == 1 => {
             sole_suggestion(values.first())
         }
@@ -1048,6 +1051,23 @@ mod tests {
             BlacklistEntry = 1
             ^^^^^^^^^ Consider replacing 'Blacklist' with 'denylist' or 'block'.
         "#});
+    }
+
+    #[test]
+    fn flags_constants_in_constant_path_compound_assignments() {
+        let source = "Config::Blacklist ||= []\nConfig::Blacklist += []\nConfig::Blacklist &&= []\n";
+        let offenses = run_cop::<InclusiveLanguage>(source);
+        let expected: Vec<_> = source
+            .match_indices("Blacklist")
+            .map(|(start, name)| Range {
+                start: start as u32,
+                end: (start + name.len()) as u32,
+            })
+            .collect();
+        assert_eq!(
+            offenses.iter().map(|offense| offense.range).collect::<Vec<_>>(),
+            expected
+        );
     }
 
     #[test]
@@ -1186,6 +1206,22 @@ mod tests {
     }
 
     #[test]
+    fn term_lookup_matches_rubocop_on_the_isolated_match() {
+        let config = br#"{"FlaggedTerms":{"custom":{"Regex":"slave","Suggestions":["sailor"]}}}"#;
+        let options = Options::from_config_json(config).expect("valid option JSON");
+        let offenses = run_cop_with_options::<InclusiveLanguage>("enslaved = 1\n", &options);
+        assert_eq!(offenses.len(), 1);
+        assert_eq!(offenses[0].range, Range { start: 2, end: 7 });
+        assert_eq!(
+            offenses[0].message,
+            "Consider replacing 'slave' with 'replica', 'secondary', or 'follower'."
+        );
+        test::<InclusiveLanguage>()
+            .with_options(&options)
+            .expect_no_corrections("enslaved = 1\n");
+    }
+
+    #[test]
     fn checks_strings_when_enabled_and_corrects_one_suggestion() {
         let options = Options {
             check_identifiers: false,
@@ -1236,6 +1272,38 @@ mod tests {
         test::<InclusiveLanguage>()
             .with_options(&options)
             .expect_no_offenses("# master's degree is an allowed phrase\n");
+    }
+
+    #[test]
+    fn allowed_regex_masks_other_terms_like_rubocop() {
+        let options = Options {
+            check_identifiers: false,
+            check_constants: false,
+            check_variables: false,
+            check_strings: false,
+            check_symbols: false,
+            check_comments: true,
+            check_filepaths: false,
+            flagged_terms: vec![
+                (
+                    "master".to_string(),
+                    FlaggedTermOptions {
+                        allowed_regex: vec![r"master's degree".to_string()],
+                        ..FlaggedTermOptions::default()
+                    },
+                ),
+                (
+                    "degree".to_string(),
+                    FlaggedTermOptions {
+                        suggestions: Some(serde_json::json!(["qualification"])),
+                        ..FlaggedTermOptions::default()
+                    },
+                ),
+            ],
+        };
+        test::<InclusiveLanguage>()
+            .with_options(&options)
+            .expect_no_offenses("# master's degree\n");
     }
 
     #[test]
@@ -1345,6 +1413,26 @@ mod tests {
     }
 
     #[test]
+    fn flags_destructured_method_and_block_arguments() {
+        let source = "def f((blacklist, value))\nend\nitems.each { |(whitelist, value)| value }\n";
+        let offenses = run_cop::<InclusiveLanguage>(source);
+        let expected: Vec<_> = ["blacklist", "whitelist"]
+            .into_iter()
+            .map(|name| {
+                let start = source.find(name).unwrap() as u32;
+                Range {
+                    start,
+                    end: start + name.len() as u32,
+                }
+            })
+            .collect();
+        assert_eq!(
+            offenses.iter().map(|offense| offense.range).collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
     fn keyword_argument_labels_are_not_identifiers() {
         let source = "def method(whitelist:, blacklist: nil)\nend\n";
         assert!(run_cop::<InclusiveLanguage>(source).is_empty());
@@ -1376,6 +1464,24 @@ mod tests {
     #[test]
     fn default_multiple_suggestions_do_not_autocorrect() {
         test::<InclusiveLanguage>().expect_no_corrections("whitelist_users = []\n");
+    }
+
+    #[test]
+    fn blank_sole_suggestions_do_not_autocorrect() {
+        for suggestion in [
+            serde_json::json!(""),
+            serde_json::json!("   "),
+            serde_json::json!([""]),
+        ] {
+            let config = serde_json::json!({
+                "FlaggedTerms": { "foo": { "Suggestions": suggestion } }
+            });
+            let encoded = serde_json::to_vec(&config).expect("encode options");
+            let options = Options::from_config_json(&encoded).expect("valid option JSON");
+            test::<InclusiveLanguage>()
+                .with_options(&options)
+                .expect_no_corrections("foo = 1\n");
+        }
     }
 
     #[test]

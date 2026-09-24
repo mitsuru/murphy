@@ -430,9 +430,8 @@ impl Translator {
         }
 
         // --- op-assign (`+=` / `||=` / `&&=`) ---
-        // lvar/ivar/cvar/gvar/const の 5 ファミリ × operator/or/and の 3 種を
+        // lvar/ivar/cvar/gvar/const と constant-path の operator/or/and write を
         // 翻訳する。`target` は値なし write ノード（`*asgn` の `value` が `None`）。
-        // constant-path ターゲット系は arm を持たず `Unknown` に落ちる（設計どおり）。
         if let Some(w) = node.as_local_variable_operator_write_node() {
             let name = self.sym(&w.name());
             let target = self.builder.push(
@@ -636,6 +635,26 @@ impl Translator {
                 },
                 Self::range(&w.name_loc()),
             );
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::AndAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_constant_path_operator_write_node() {
+            let target = self.translate_constant_path_write_target(&w.target());
+            let op = self.sym(&w.binary_operator());
+            let value = self.translate_node(&w.value());
+            return self
+                .builder
+                .push(NodeKind::OpAsgn { target, op, value }, range);
+        }
+        if let Some(w) = node.as_constant_path_or_write_node() {
+            let target = self.translate_constant_path_write_target(&w.target());
+            let value = self.translate_node(&w.value());
+            return self.builder.push(NodeKind::OrAsgn { target, value }, range);
+        }
+        if let Some(w) = node.as_constant_path_and_write_node() {
+            let target = self.translate_constant_path_write_target(&w.target());
             let value = self.translate_node(&w.value());
             return self
                 .builder
@@ -2446,14 +2465,58 @@ impl Translator {
                 NodeKind::Blockarg(self.opt_sym(p.name())),
                 Self::opt_loc_range(p.name_loc()),
             )
+        } else if let Some(mt) = node.as_multi_target_node() {
+            return self.translate_mlhs_parameters(&mt, range);
+        } else if let Some(splat) = node.as_splat_node() {
+            return self.translate_destructured_rest_parameter(&splat, range);
         } else if node.as_forwarding_parameter_node().is_some() {
             // `def f(...)` — the forward-all `...` parameter.
             (NodeKind::ForwardArgs, range)
         } else {
-            // `MultiTargetNode`（分割代入パラメータ）等は Task 16 / Unknown。
             return self.builder.push(NodeKind::Unknown, range);
         };
         self.builder.push_named(kind, range, name_range)
+    }
+
+    /// Lower destructured method and block parameters to an `Mlhs` with named
+    /// parameter children so cops can inspect each binding independently.
+    fn translate_mlhs_parameters(
+        &mut self,
+        multi_target: &prism::MultiTargetNode<'_>,
+        range: Range,
+    ) -> NodeId {
+        let mut ids = Vec::new();
+        for parameter in multi_target.lefts().iter() {
+            ids.push(self.translate_param(&parameter));
+        }
+        if let Some(rest) = multi_target.rest() {
+            ids.push(self.translate_param(&rest));
+        }
+        for parameter in multi_target.rights().iter() {
+            ids.push(self.translate_param(&parameter));
+        }
+        let list = self.builder.push_list(&ids);
+        self.builder.push(NodeKind::Mlhs(list), range)
+    }
+
+    /// A splat inside a destructured parameter is a rest argument, not an
+    /// unknown expression. Preserve its name location without the `*` sigil.
+    fn translate_destructured_rest_parameter(
+        &mut self,
+        splat: &prism::SplatNode<'_>,
+        range: Range,
+    ) -> NodeId {
+        let Some(expression) = splat.expression() else {
+            let empty_name = self.builder.intern_symbol("");
+            return self.builder.push(NodeKind::Restarg(empty_name), range);
+        };
+        let Some(parameter) = expression.as_required_parameter_node() else {
+            return self.builder.push(NodeKind::Unknown, range);
+        };
+        let name = self.sym(&parameter.name());
+        let name_range = Self::node_range(&expression);
+        self.builder
+            .push_named(NodeKind::Restarg(name), range, name_range)
     }
 
     /// `Option<ConstantId>` → `Symbol`。`None`（匿名 `*`/`**`/`&`）は空文字
@@ -2463,6 +2526,32 @@ impl Translator {
             Some(c) => self.sym(&c),
             None => self.builder.intern_symbol(""),
         }
+    }
+
+    /// Build the write target for a constant-path operator assignment.
+    fn translate_constant_path_write_target(
+        &mut self,
+        target: &prism::ConstantPathNode<'_>,
+    ) -> NodeId {
+        let range = Self::range(&target.location());
+        let Some(constant) = target.name() else {
+            return self.builder.push(NodeKind::Unknown, range);
+        };
+        let name = self.sym(&constant);
+        let name_range = Self::range(&target.name_loc());
+        let scope = match target.parent() {
+            Some(parent) => OptNodeId::some(self.translate_node(&parent)),
+            None => OptNodeId::NONE,
+        };
+        self.builder.push_named(
+            NodeKind::Casgn {
+                scope,
+                name,
+                value: OptNodeId::NONE,
+            },
+            range,
+            name_range,
+        )
     }
 
     /// `ConstantPathNode`（`A::B` / `::B`）→ `Const { scope, name }`。
@@ -3053,6 +3142,61 @@ mod tests {
             },
             other => panic!("expected Block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn translates_destructured_method_and_block_parameters() {
+        let method = translate("def f((blacklist, value))\nend", "t.rb");
+        let args = match method.kind(method.root()) {
+            NodeKind::Def { args, .. } => *args,
+            other => panic!("expected Def, got {other:?}"),
+        };
+        let method_params: Vec<_> = method.children(args).collect();
+        assert_eq!(method_params.len(), 1);
+        assert!(matches!(method.kind(method_params[0]), NodeKind::Mlhs(_)));
+        let method_names: Vec<_> = method
+            .children(method_params[0])
+            .map(|id| match method.kind(id) {
+                NodeKind::Arg(name) => method.interner().resolve(name.0).to_string(),
+                other => panic!("expected parameter Arg, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(method_names, ["blacklist", "value"]);
+
+        let rest_method = translate("def f((first, *rest))\nend", "t.rb");
+        let rest_args = match rest_method.kind(rest_method.root()) {
+            NodeKind::Def { args, .. } => *args,
+            other => panic!("expected Def, got {other:?}"),
+        };
+        let rest_mlhs = rest_method
+            .children(rest_args)
+            .next()
+            .expect("destructured parameter");
+        let rest_params: Vec<_> = rest_method.children(rest_mlhs).collect();
+        assert_eq!(rest_params.len(), 2);
+        assert!(matches!(
+            rest_method.kind(rest_params[0]),
+            NodeKind::Arg(name) if rest_method.interner().resolve(name.0) == "first"
+        ));
+        assert!(matches!(
+            rest_method.kind(rest_params[1]),
+            NodeKind::Restarg(name) if rest_method.interner().resolve(name.0) == "rest"
+        ));
+
+        let block = translate("items.each { |(whitelist, value)| value }", "t.rb");
+        let mlhs = block
+            .descendants(block.root())
+            .into_iter()
+            .find(|id| matches!(block.kind(*id), NodeKind::Mlhs(_)))
+            .expect("destructured block parameter is an Mlhs");
+        let block_names: Vec<_> = block
+            .children(mlhs)
+            .map(|id| match block.kind(id) {
+                NodeKind::Arg(name) => block.interner().resolve(name.0).to_string(),
+                other => panic!("expected parameter Arg, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(block_names, ["whitelist", "value"]);
     }
 
     #[test]
@@ -4016,15 +4160,30 @@ mod tests {
     }
 
     #[test]
-    fn constant_path_target_op_assign_is_unknown_not_panic() {
-        // `A::B += 1`（ConstantPathOperatorWriteNode）も v1 では Unknown 許容。
-        // `A::B ||= 1` / `A::B &&= 1`（ConstantPath{Or,And}WriteNode）も同様。
+    fn constant_path_operator_writes_keep_the_constant_assignment_target() {
         for src in ["A::B += 1", "A::B ||= 1", "A::B &&= 1"] {
             let ast = translate(src, "t.rb");
-            assert!(
-                matches!(ast.kind(ast.root()), NodeKind::Unknown),
-                "expected Unknown for `{src}`"
-            );
+            let target = match ast.kind(ast.root()) {
+                NodeKind::OpAsgn { target, .. }
+                | NodeKind::OrAsgn { target, .. }
+                | NodeKind::AndAsgn { target, .. } => *target,
+                other => panic!("expected constant-path op-assign for `{src}`, got {other:?}"),
+            };
+            let NodeKind::Casgn { scope, name, .. } = ast.kind(target) else {
+                panic!(
+                    "expected Casgn target for `{src}`, got {:?}",
+                    ast.kind(target)
+                );
+            };
+            assert_eq!(ast.interner().resolve(name.0), "B");
+            let scope = scope.get().expect("qualified constant has a scope");
+            let NodeKind::Const { name, .. } = ast.kind(scope) else {
+                panic!(
+                    "expected const scope for `{src}`, got {:?}",
+                    ast.kind(scope)
+                );
+            };
+            assert_eq!(ast.interner().resolve(name.0), "A");
         }
     }
 
