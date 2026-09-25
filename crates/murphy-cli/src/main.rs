@@ -16,6 +16,7 @@
 //!   S-expression text. `-` reads from stdin. The printer lives in
 //!   `murphy_ast::ast_to_sexp` (re-exported via `murphy_core`).
 //! - `murphy lsp` — JSON-RPC LSP server (see `lsp.rs`).
+//! - `murphy install --git-hook [--tool lefthook|pre-commit|overcommit|all]` — scaffold git-hook configs (see `install.rs`).
 //!
 //! `murphy lint --profile / --profile-format` await re-introduction
 //! once the new dispatcher carries its own per-cop timing path (.22
@@ -23,6 +24,7 @@
 
 mod cops;
 mod explain;
+mod install;
 mod lsp;
 mod plugins;
 
@@ -139,6 +141,8 @@ enum CliCommand {
     TestCop(TestCopArgs),
     /// Maintain staged plugin packs in `.murphy/plugins/`.
     Plugins(PluginsArgs),
+    /// Scaffold git-hook configs (lefthook / pre-commit / overcommit).
+    Install(InstallArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -339,6 +343,38 @@ struct PluginsSyncArgs {
     /// Dry run for CI: warn on stale without copying (exit 2 when stale).
     #[arg(long)]
     check: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct InstallArgs {
+    /// Generate git-hook scaffold files.
+    #[arg(long = "git-hook")]
+    git_hook: bool,
+    /// Which hook-framework scaffold to generate.
+    #[arg(long, value_enum, default_value = "lefthook")]
+    tool: InstallToolArg,
+    /// Overwrite existing scaffold files.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InstallToolArg {
+    Lefthook,
+    PreCommit,
+    Overcommit,
+    All,
+}
+
+impl From<InstallToolArg> for install::HookTool {
+    fn from(tool: InstallToolArg) -> Self {
+        match tool {
+            InstallToolArg::Lefthook => install::HookTool::Lefthook,
+            InstallToolArg::PreCommit => install::HookTool::PreCommit,
+            InstallToolArg::Overcommit => install::HookTool::Overcommit,
+            InstallToolArg::All => install::HookTool::All,
+        }
+    }
 }
 
 #[cfg_attr(not(feature = "mruby-user-cops"), allow(dead_code))]
@@ -1254,6 +1290,7 @@ fn run(args: &[String]) -> Result<u8, AppError> {
         CliCommand::NewCop(new_cop_args) => new_cop_command(&new_cop_args.cop),
         CliCommand::TestCop(test_cop_args) => test_cop_command(&test_cop_args.spec_files),
         CliCommand::Plugins(plugins_args) => run_plugins(&plugins_args),
+        CliCommand::Install(install_args) => run_install(&install_args),
     }
 }
 
@@ -1285,6 +1322,14 @@ fn run_plugins(args: &PluginsArgs) -> Result<u8, AppError> {
             check: sync_args.check,
         }),
     }
+}
+
+fn run_install(args: &InstallArgs) -> Result<u8, AppError> {
+    install::run_install(&install::InstallOptions {
+        git_hook: args.git_hook,
+        tool: args.tool.into(),
+        force: args.force,
+    })
 }
 
 fn run_lint(args: &LintArgs) -> Result<u8, AppError> {
