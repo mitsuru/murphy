@@ -12,11 +12,15 @@
 //! status: verified
 //! gap_issues: []
 //! notes: >
+//!   Verbatim port of the `is_a?`/`kind_of?` call head
+//!   `(call _ {:is_a? :kind_of?} ...)` (murphy-s1yc.5): `call` = `{send csend}`
+//!   covers safe-navigation (`x&.kind_of?`), mirroring RuboCop's
+//!   `alias on_csend on_send`; the `_` receiver binds an absent (receiverless
+//!   `kind_of?(y)`) or present receiver per murphy-if9y; trailing `...`
+//!   absorbs any argument list (upstream has no arg-count guard — any call to
+//!   is_a?/kind_of? is flagged when it does not match the enforced style).
 //!   Full port. Both EnforcedStyle modes (is_a? default, kind_of?) are supported.
-//!   Both send and csend are handled (mirrors RuboCop's `alias on_csend on_send`).
 //!   Offense range and autocorrect target the selector only (loc.name).
-//!   No argument-count guard (RuboCop has none either — any call to is_a?/kind_of?
-//!   is flagged when it does not match the enforced style).
 //! ```
 //!
 //! ## Matched shapes
@@ -29,7 +33,14 @@
 //!
 //! Surgical rename of the selector (`loc.name`) only.
 
-use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptionEnum, CopOptions, Cx, NodeId, cop, def_node_matcher};
+
+// Verbatim port of the `is_a?`/`kind_of?` call head (murphy-s1yc.5):
+// `(call _ {:is_a? :kind_of?} ...)` — `call` = `{send csend}` covers
+// safe-navigation (`x&.kind_of?`); the `_` receiver binds an absent
+// (receiverless `kind_of?(y)`) or present receiver; trailing `...` absorbs
+// any argument list, so the EnforcedStyle guard below applies separately.
+def_node_matcher!(class_check_call, "(call _ {:is_a? :kind_of?} ...)");
 
 #[derive(Default)]
 pub struct ClassCheck;
@@ -79,16 +90,18 @@ impl ClassCheck {
 
     #[on_node(kind = "csend")]
     fn check_csend(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Csend { method, .. } = *cx.kind(node) else {
-            return;
-        };
-        if matches!(cx.symbol_str(method), "is_a?" | "kind_of?") {
-            check(node, cx);
-        }
+        check(node, cx);
     }
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
+    // Verbatim `(call _ {:is_a? :kind_of?} ...)` head: filters to `is_a?` /
+    // `kind_of?` calls on either `send` or `csend` (safe-navigation), with
+    // any receiver (absent or present). Trailing `...` matches any arg list,
+    // so the EnforcedStyle guard below applies separately.
+    if !class_check_call(node, cx) {
+        return;
+    }
     let opts = cx.options_or_default::<ClassCheckOptions>();
     let method_name = cx.method_name(node).unwrap_or_default();
 
@@ -195,6 +208,49 @@ mod tests {
                 enforced_style: ClassCheckStyle::KindOf,
             })
             .expect_no_offenses("x&.kind_of? y\n");
+    }
+
+    // --- Characterization (murphy-s1yc.5): pin the exact node set the
+    // hand-rolled send/csend dispatch matches, so the verbatim
+    // `(call _ {:is_a? :kind_of?} ...)` port can be proven byte-identical.
+    // `call` = `{send csend}` covers safe-navigation; `_` binds the absent
+    // (receiverless) slot per if9y; trailing `...` absorbs any arg list
+    // (upstream has no arg-count guard).
+
+    #[test]
+    fn s1yc5_flags_bare_kind_of_corrects_to_is_a() {
+        // Bare `kind_of?(y)` matches: `_` binds the nil-filled receiver.
+        test::<ClassCheck>().expect_correction(
+            indoc! {r#"
+                kind_of?(y)
+                ^^^^^^^^ Prefer `Object#is_a?` over `Object#kind_of?`.
+            "#},
+            "is_a?(y)\n",
+        );
+    }
+
+    #[test]
+    fn s1yc5_accepts_bare_is_a_in_default_mode() {
+        // Bare `is_a?(y)` in default mode: matcher matches, style filter rejects.
+        test::<ClassCheck>().expect_no_offenses("is_a?(y)\n");
+    }
+
+    #[test]
+    fn s1yc5_flags_kind_of_without_args() {
+        // No-arg `x.kind_of?`: matcher `...` matches zero args, no arg guard upstream.
+        test::<ClassCheck>().expect_correction(
+            indoc! {r#"
+                x.kind_of?
+                  ^^^^^^^^ Prefer `Object#is_a?` over `Object#kind_of?`.
+            "#},
+            "x.is_a?\n",
+        );
+    }
+
+    #[test]
+    fn s1yc5_accepts_unrelated_method() {
+        // `x.foo(y)`: matcher rejects non-union method.
+        test::<ClassCheck>().expect_no_offenses("x.foo(y)\n");
     }
 }
 
