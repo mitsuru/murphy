@@ -23,7 +23,15 @@
 //!   1.87.0). All spec-covered shapes are unaffected; the guard only fixes
 //!   that untested invalid-output edge.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, RubyVersion, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, RubyVersion, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/ErbNewArguments` matcher
+// `erb_new_with_non_keyword_arguments` is
+// `(send (const {nil? cbase} :ERB) :new $...)`. In Murphy `::ERB`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare
+// and `::`-prefixed forms — equivalent to the prior `is_erb_const`
+// check. The argument capture (`$...`) stays hand-rolled below.
+def_node_matcher!(erb_new, "(send (const nil? :ERB) :new ...)");
 
 #[derive(Default)]
 pub struct ErbNewArguments;
@@ -48,11 +56,11 @@ impl ErbNewArguments {
         {
             return;
         }
-        let NodeKind::Send { receiver, args, .. } = *cx.kind(node) else { return; };
-        let Some(receiver) = receiver.get() else { return; };
-        if !is_erb_const(receiver, cx) {
+        // `(send (const nil? :ERB) :new ...)` — top-level `ERB.new`.
+        if !erb_new(node, cx) {
             return;
         }
+        let NodeKind::Send { args, .. } = *cx.kind(node) else { return; };
         let args = cx.list(args);
         if args.is_empty() || correct_arguments(args, cx) {
             return;
@@ -71,10 +79,6 @@ impl ErbNewArguments {
             cx.emit_edit(range, &corrected_arguments(args, cx));
         }
     }
-}
-
-fn is_erb_const(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(*cx.kind(node), NodeKind::Const { scope, name } if cx.symbol_str(name) == "ERB" && scope.get().is_none_or(|s| matches!(cx.kind(s), NodeKind::Cbase)))
 }
 
 fn correct_arguments(args: &[NodeId], cx: &Cx<'_>) -> bool {
@@ -281,6 +285,29 @@ mod tests {
     #[test]
     fn accepts_single_argument() {
         test::<ErbNewArguments>().expect_no_offenses("ERB.new(str)\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.2): pin the exact node set
+    // the hand-rolled `is_erb_const` predicate matches, so the
+    // `(send (const nil? :ERB) :new ...)` refactor can be proven
+    // equivalent. `::ERB` collapses to `Const{scope:None}` in Murphy, so a
+    // single `nil?` scope covers bare + `::`-prefixed forms (pinned by
+    // `flags_and_corrects_cbase_receiver`).
+
+    #[test]
+    fn boundary_ignores_namespaced_erb_new() {
+        // `Foo::ERB` has a non-nil const scope, so it is not flagged.
+        test::<ErbNewArguments>()
+            .expect_no_offenses("Foo::ERB.new(str, nil, '-', '@output_buffer')\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_erb_new() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<ErbNewArguments>()
+            .expect_no_offenses("ERB&.new(str, nil, '-', '@output_buffer')\n");
     }
 
     #[test]

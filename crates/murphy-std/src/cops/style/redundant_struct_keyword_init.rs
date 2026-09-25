@@ -39,7 +39,16 @@
 //! trailing `Hash` argument containing a `keyword_init: true|nil` pair (and no
 //! `keyword_init: false` pair).
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/RedundantStructKeywordInit` matcher `struct_new?`
+// is `(call (const {nil? cbase} :Struct) :new ...)`. In Murphy `::Struct`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare
+// and `::`-prefixed forms — equivalent to the prior `is_global_const`
+// check. `call` covers both `send` and `csend`, matching the two
+// `#[on_node]` handlers above (pinned by `flags_safe_navigation`).
+// The trailing-hash `keyword_init` inspection stays hand-rolled below.
+def_node_matcher!(struct_new, "(call (const nil? :Struct) :new ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -69,11 +78,9 @@ impl RedundantStructKeywordInit {
 }
 
 fn check(node: NodeId, cx: &Cx<'_>) {
-    // Receiver must be exactly `Struct` or `::Struct` (nil / cbase scope).
-    let Some(recv_id) = cx.call_receiver(node).get() else {
-        return;
-    };
-    if !cx.is_global_const(recv_id, "Struct") {
+    // `(call (const nil? :Struct) :new ...)` — top-level `Struct.new`,
+    // including the `&.` form (as RuboCop's `(call ...)` pattern).
+    if !struct_new(node, cx) {
         return;
     }
 

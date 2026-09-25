@@ -12,7 +12,17 @@
 //!   `standard_error`. The `EnforcedStyle` option is exported in the
 //!   schema but runtime reads come from `Default` (v1 limitation).
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/InheritException` matcher `class_new_call?` is
+// `(send (const {cbase nil?} :Class) :new $(const {cbase nil?} _))`.
+// In Murphy `::Class` collapses to `Const{scope:None}`, so a single `nil?`
+// scope covers bare and `::`-prefixed forms — equivalent to the prior
+// `is_global_const` check. The argument capture (`$(const ...)`) stays
+// hand-rolled below. The class-form `exception_class?` check
+// (`is_exception_const`) is not a node matcher upstream, so it stays
+// hand-rolled too.
+def_node_matcher!(class_new_call, "(send (const nil? :Class) :new ...)");
 
 #[derive(Default)]
 pub struct InheritException;
@@ -56,9 +66,8 @@ impl InheritException {
 
     #[on_node(kind = "send", methods = ["new"])]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let receiver = cx.call_receiver(node);
-        let Some(recv_id) = receiver.get() else { return; };
-        if !cx.is_global_const(recv_id, "Class") {
+        // `(send (const nil? :Class) :new ...)` — top-level `Class.new`.
+        if !class_new_call(node, cx) {
             return;
         }
         let args = cx.call_arguments(node);
@@ -177,6 +186,36 @@ mod tests {
             "#},
             "C = Class.new(StandardError)\n",
         );
+    }
+
+    // --- Boundary characterization (murphy-ft88.2): pin the exact node set
+    // the hand-rolled `Class`-receiver check matches, so the
+    // `(send (const nil? :Class) :new ...)` refactor can be proven
+    // equivalent. The `$(const ...)` argument capture stays hand-rolled
+    // below (as with batch-3 IoSelect). `::Class` collapses to
+    // `Const{scope:None}` in Murphy, so a single `nil?` scope covers bare
+    // + `::`-prefixed forms.
+
+    #[test]
+    fn boundary_flags_cbase_class_new() {
+        test::<InheritException>().expect_offense(indoc! {r#"
+            C = ::Class.new(Exception)
+                            ^^^^^^^^^ Inherit from `StandardError` instead of `Exception`.
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_class_new() {
+        // `Foo::Class` has a non-nil const scope, so it is not flagged.
+        test::<InheritException>().expect_no_offenses("C = Foo::Class.new(Exception)\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_class_new() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it, and `#[on_node(kind = "send")]`
+        // never dispatches on it.
+        test::<InheritException>().expect_no_offenses("C = Class&.new(Exception)\n");
     }
 }
 murphy_plugin_api::submit_cop!(InheritException);
