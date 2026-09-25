@@ -330,10 +330,10 @@ fn section_visibility(cx: &Cx<'_>, node: NodeId) -> Option<String> {
 fn has_module_function(cx: &Cx<'_>, node: NodeId) -> bool {
     for anc in cx.ancestors(node) {
         match *cx.kind(anc) {
-            NodeKind::Module { body, .. } => {
-                if body_has_module_function(cx, body.get()) {
-                    return true;
-                }
+            NodeKind::Module { body, .. }
+                if body_has_module_function(cx, body.get()) =>
+            {
+                return true;
             }
             NodeKind::Begin(list) => {
                 for &kid in cx.list(list) {
