@@ -5,20 +5,17 @@
 //! upstream: rubocop-rspec
 //! upstream_cop: RSpec/DescribeClass
 //! upstream_version_checked: 3.7.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-iwsr
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Audited against rubocop-rspec 3.7.0 for murphy-h8ke. Top-level gating
-//!   mirrors TopLevelGroup (begin/class/module walk), the string_constant?
-//!   regex is ASCII-faithful to upstream, IgnoredMetadata defaults and
-//!   sym-pair matching mirror upstream, receiver gating (bare plus
-//!   RSpec/::RSpec) mirrors `#rspec?`, and the five spec-dir Excludes are
-//!   layered via the pack config. Residual gap in murphy-iwsr: non-literal
-//!   first args (calls, variables, numbers, hashes) are skipped while
-//!   upstream flags any non-const non-string-constant (conservative stance,
-//!   pinned by tests); `class << self` wrapping counts as top-level while
-//!   upstream ignores sclass.
+//!   Audited against rubocop-rspec 3.7.0 for murphy-h8ke; murphy-iwsr closed.
+//!   Top-level gating mirrors TopLevelGroup (begin/class/module walk,
+//!   sclass excluded), the string_constant? regex is ASCII-faithful to
+//!   upstream, IgnoredMetadata defaults and sym-pair matching mirror
+//!   upstream, receiver gating (bare plus RSpec/::RSpec) mirrors `#rspec?`,
+//!   the five spec-dir Excludes are layered via the pack config, and
+//!   non-const non-string-constant first args (calls, variables, numbers,
+//!   arrays, hashes) are flagged per upstream `not_a_const_described`.
 //! //! ```
 //!
 //! `RSpec.describe`/`describe` block should be the class or module
@@ -36,9 +33,10 @@
 //!
 //! In Murphy this is the same shape: a describe Send qualifies as
 //! top-level when it is the `call` of a `Block`, and every ancestor of
-//! that `Block` up to the root is one of `Begin`/`Class`/`Module`/
-//! `Sclass`. Hitting any other node kind (a sibling `Block`, an `If`,
-//! a `Def`, etc.) means the describe is nested and the cop bails.
+//! that `Block` up to the root is one of `Begin`/`Class`/`Module`.
+//! Hitting any other node kind (a sibling `Block`, an `Sclass`
+//! (`class << self`), an `If`, a `Def`, etc.) means the describe is
+//! nested and the cop bails.
 //!
 //! ## Receiver shapes
 //!
@@ -56,6 +54,12 @@
 //!
 //! ## First-argument classification
 //!
+//! Mirrors upstream `not_a_const_described` (`$[!const !#string_constant?]`):
+//! any non-const first argument that is not a string constant is flagged.
+//!
+//! - **`NodeKind::Const { .. }`** → OK (single-name `Foo` and scoped
+//!   `Foo::Bar` both encode here; nested scope ids are walked
+//!   transparently because `Const { scope }` chains).
 //! - **`NodeKind::Str`** → emit, *unless* the string content looks
 //!   like a constant path: `Thing`, `Some::Thing`, `VERSION`,
 //!   `Some::VERSION`, `::Some::VERSION`. Mirrors RuboCop-RSpec's
@@ -63,19 +67,13 @@
 //!   Ruby's no-`/u` `\w`). These string forms are used with
 //!   `Object.const_get(self.class.description)` patterns so the
 //!   subject genuinely *is* a constant — just not statically.
-//! - **`NodeKind::Dstr`** (string interpolation) → emit. Interpolated
-//!   strings can't be string constants — RuboCop's `string_constant?`
-//!   short-circuits on `str_type?` and lets `Dstr` fall through.
-//! - **`NodeKind::Sym`** → emit. Symbols are never class references.
-//! - **`NodeKind::Const { .. }`** → OK (single-name `Foo` and scoped
-//!   `Foo::Bar` both encode here; nested scope ids are walked
-//!   transparently because `Const { scope }` chains).
-//! - **Anything else** (variable read, method call, expression, …) →
-//!   skip. Static analysis cannot tell whether the runtime value is a
-//!   class, and a false-positive on a domain DSL is worse than a
-//!   tolerated miss. (RuboCop's stricter `$[!const !#string_constant?]`
-//!   would flag these too; Murphy keeps the conservative stance
-//!   established when the cop was first ported.)
+//! - **Anything else** → emit: `Sym`, `Dstr` (interpolated strings
+//!   can't be string constants — RuboCop's `string_constant?`
+//!   short-circuits on `str_type?`), method calls (`Send`/`Csend`),
+//!   variable reads (`Lvar`/`Ivar`/`Cvar`/`Gvar`), literals (`Int`,
+//!   `Float`, `Array`, `Hash`, …). A hash first arg such as
+//!   `describe foo: :bar` is flagged unless the trailing-hash
+//!   `IgnoredMetadata` exception below applies.
 //!
 //! ## `IgnoredMetadata`
 //!
@@ -275,8 +273,9 @@ fn receiver_is_rspec_or_bare(cx: &Cx<'_>, receiver: OptNodeId) -> bool {
 }
 
 /// `true` when `send` is the call of a `Block` and every ancestor of
-/// that `Block` is one of `Begin`/`Class`/`Module`/`Sclass` up to the
-/// root. Mirrors upstream's `TopLevelGroup#top_level_nodes` traversal.
+/// that `Block` is one of `Begin`/`Class`/`Module` up to the root.
+/// Mirrors upstream's `TopLevelGroup#top_level_nodes` traversal, which
+/// does not walk through `sclass` (`class << self`).
 fn is_top_level_describe(cx: &Cx<'_>, send: NodeId) -> bool {
     let Some(block_id) = cx.parent(send).get() else {
         return false;
@@ -287,10 +286,7 @@ fn is_top_level_describe(cx: &Cx<'_>, send: NodeId) -> bool {
     let mut cur = block_id;
     while let Some(p) = cx.parent(cur).get() {
         match *cx.kind(p) {
-            NodeKind::Begin(_)
-            | NodeKind::Class { .. }
-            | NodeKind::Module { .. }
-            | NodeKind::Sclass { .. } => {
+            NodeKind::Begin(_) | NodeKind::Class { .. } | NodeKind::Module { .. } => {
                 cur = p;
             }
             _ => return false,
@@ -299,14 +295,17 @@ fn is_top_level_describe(cx: &Cx<'_>, send: NodeId) -> bool {
     true
 }
 
-/// `true` when the first positional argument is the literal shape the
-/// cop wants to flag — a non-constant-looking string, an interpolated
-/// string, or a symbol.
+/// `true` when the first positional argument is not a constant and not a
+/// string constant — mirrors upstream `not_a_const_described`
+/// (`$[!const !#string_constant?]`). Only `Const` and constant-looking
+/// `Str` are accepted; every other shape (method calls, variable reads,
+/// numbers, arrays, hashes, symbols, interpolated strings, …) is flagged
+/// unless `IgnoredMetadata` applies.
 fn flagable_first_arg(cx: &Cx<'_>, arg: NodeId) -> bool {
     match *cx.kind(arg) {
+        NodeKind::Const { .. } => false,
         NodeKind::Str(string_id) => !looks_like_constant_path(cx.string_str(string_id)),
-        NodeKind::Dstr(_) | NodeKind::Sym(_) => true,
-        _ => false,
+        _ => true,
     }
 }
 
@@ -724,25 +723,78 @@ mod tests {
             "#});
     }
 
-    // === Conservative-flagging stance pins (NOT widened to non-literal args) ===
+    // === Upstream parity: any non-const non-string-constant first arg (murphy-iwsr) ===
 
     #[test]
-    fn ignores_non_literal_first_arg_method_call() {
-        // RuboCop would flag (`!const !#string_constant?` captures
-        // any non-const). Murphy keeps the conservative stance from
-        // the original port — a method call's runtime value can't be
-        // statically known.
-        test::<DescribeClass>().expect_no_offenses(indoc! {r#"
+    fn flags_non_literal_first_arg_method_call() {
+        // Mirrors upstream `not_a_const_described` (`$[!const
+        // !#string_constant?]`): any non-const first arg is flagged,
+        // including method calls.
+        test::<DescribeClass>().expect_offense(indoc! {r#"
                 describe foo_helper.thing do
+                         ^^^^^^^^^^^^^^^^ The first argument to describe should be the class or module being tested.
                 end
             "#});
     }
 
     #[test]
-    fn ignores_non_literal_first_arg_variable() {
-        test::<DescribeClass>().expect_no_offenses(indoc! {r#"
+    fn flags_non_literal_first_arg_variable() {
+        // Local variable first arg — upstream flags; so do we.
+        test::<DescribeClass>().expect_offense(indoc! {r#"
                 klass = SomeClass
                 describe klass do
+                         ^^^^^ The first argument to describe should be the class or module being tested.
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_non_literal_first_arg_int() {
+        test::<DescribeClass>().expect_offense(indoc! {r#"
+                describe 123 do
+                         ^^^ The first argument to describe should be the class or module being tested.
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_non_literal_first_arg_ivar() {
+        test::<DescribeClass>().expect_offense(indoc! {r#"
+                describe @klass do
+                         ^^^^^^ The first argument to describe should be the class or module being tested.
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_non_literal_first_arg_array() {
+        test::<DescribeClass>().expect_offense(indoc! {r#"
+                describe [Foo] do
+                         ^^^^^ The first argument to describe should be the class or module being tested.
+                end
+            "#});
+    }
+
+    #[test]
+    fn flags_hash_first_arg_without_ignored_metadata() {
+        // `describe foo: :bar` — the hash first arg is non-const and
+        // `foo: :bar` is not in default `IgnoredMetadata`, so it is an
+        // offense per upstream.
+        test::<DescribeClass>().expect_offense(indoc! {r#"
+                describe foo: :bar do
+                         ^^^^^^^^^ The first argument to describe should be the class or module being tested.
+                end
+            "#});
+    }
+
+    #[test]
+    fn ignores_describe_inside_sclass() {
+        // `class << self` wrapping is NOT top-level upstream:
+        // `TopLevelGroup` only walks begin/class/module, not sclass.
+        test::<DescribeClass>().expect_no_offenses(indoc! {r#"
+                class << self
+                  describe "bad describe" do
+                  end
                 end
             "#});
     }
