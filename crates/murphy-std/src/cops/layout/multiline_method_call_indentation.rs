@@ -13,8 +13,11 @@
 //!   Ports the default `EnforcedStyle: aligned` semantic-alignment case and the
 //!   common leading-dot call-chain cases for `indented` and
 //!   `indented_relative_to_receiver`. Aligned continuations match the first
-//!   dotted call's column. `indented` continuations use the chain's line
-//!   indentation plus `IndentationWidth`; `indented_relative_to_receiver`
+//!   dotted call's column. `indented` continuations use the chain-top call's
+//!   first-line indentation plus `IndentationWidth` (RuboCop's
+//!   `left_hand_side`, so command-call-argument chains like
+//!   `expect(A)\n.to b(:c)\n.with(x)` are measured from the first line);
+//!   `indented_relative_to_receiver`
 //!   continuations use the first receiver's column plus that width. A cop-level
 //!   `IndentationWidth` overrides the resolved `Layout/IndentationWidth.Width`;
 //!   a null/unset value falls back to the resolved shared width. Relative style
@@ -231,7 +234,15 @@ fn check(node: NodeId, cx: &Cx<'_>) {
             )
         }
         IndentationStyle::Indented => {
-            let line_indent = indentation_of_line(base_range.start, src);
+            // RuboCop's `left_hand_side`: continuations indent relative to
+            // the chain-top call's first line, not the base receiver's line.
+            // The two differ when the base sits on a later line — e.g. a
+            // paren-less command call's argument absorbing the chain
+            // (`expect(A)\n.to b(:c)\n.with(x)` parses `.with` onto `b(:c)`
+            // while the chain top `.to` starts on the first line).
+            let top = chain_top(base, cx);
+            let top_start = cx.range(top).start;
+            let line_indent = indentation_of_line(top_start, src);
             let used_indentation = actual_column as isize - line_indent as isize;
             (
                 line_indent + indentation_width,
@@ -284,6 +295,25 @@ fn first_dotted_call_in_chain(node: NodeId, cx: &Cx<'_>) -> Option<(NodeId, Node
         }
         current = cx.parent(current).get()?;
     }
+}
+
+/// Climb from the chain's base receiver to the topmost enclosing dotted
+/// call — RuboCop's `MultilineExpressionIndentation#left_hand_side` (which
+/// starts at the checked node's receiver and climbs while the parent is a
+/// dotted, non-assignment call, regardless of receiver/argument position).
+fn chain_top(base: NodeId, cx: &Cx<'_>) -> NodeId {
+    let mut top = base;
+    while let Some(parent) = cx.parent(top).get() {
+        let is_dotted_call = matches!(
+            cx.kind(parent),
+            NodeKind::Send { .. } | NodeKind::Csend { .. }
+        ) && cx.loc(parent).dot() != Range::ZERO;
+        if !is_dotted_call || cx.is_assignment_method(parent) {
+            break;
+        }
+        top = parent;
+    }
+    top
 }
 
 /// Whether `node`'s chain top is an argument of a parenthesized call —
@@ -564,6 +594,35 @@ mod tests {
                   **foo
                     .bar
                 ]
+            "});
+    }
+
+    #[test]
+    fn indented_style_accepts_command_call_argument_chain() {
+        // RuboCop parity (mastodon FP cluster): a paren-less command call's
+        // argument absorbs the following leading-dot chain, and RuboCop's
+        // `left_hand_side` still climbs to the chain top (first line), so a
+        // continuation at first-line indent + width is correctly indented.
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented())
+            .expect_no_offenses(indoc! {"
+                expect(AccountFilter)
+                  .to have_received(:new)
+                  .with(hash_including(params))
+            "});
+    }
+
+    #[test]
+    fn indented_style_flags_misindented_command_call_argument_chain() {
+        // True-positive pin for the chain-top base: dedenting `.with` to
+        // column 0 is still an offense (verified against rubocop 1.91.0).
+        test::<MultilineMethodCallIndentation>()
+            .with_options(&indented())
+            .expect_offense(indoc! {"
+                expect(AccountFilter)
+                  .to have_received(:new)
+                .with(hash_including(params))
+                ^^^^^ Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
             "});
     }
 
