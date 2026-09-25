@@ -357,7 +357,7 @@ fn rails_pack_excludes_db_schema_from_discovery() {
     // union) → `discover_with_config`. The user also sets its own Exclude with
     // `inherit_mode: merge: [Exclude]`, so the pack default must *union* with
     // the user list rather than be replaced by it.
-    use murphy_core::{discover_with_config, CopRegistry, MurphyConfig};
+    use murphy_core::{CopRegistry, MurphyConfig, discover_with_config};
 
     let rails = rails_pack_path()
         .canonicalize()
