@@ -592,9 +592,17 @@ fn present_decoder(field: &ParsedField, key: &str, wire: &str) -> TokenStream {
                 let __arr = __v.as_array().ok_or_else(|| #mismatch)?;
                 let mut __out = ::std::vec::Vec::with_capacity(__arr.len());
                 for __item in __arr {
-                    __out.push(::std::string::String::from(
-                        __item.as_str().ok_or_else(|| #mismatch)?,
-                    ));
+                    if let Some(__str) = __item.as_str() {
+                        __out.push(::std::string::String::from(__str));
+                    } else if let Some(__obj) = __item.as_object() {
+                        let __inner = __obj
+                            .get("__ruby_regexp__")
+                            .and_then(|__inner| __inner.as_str())
+                            .ok_or_else(|| #mismatch)?;
+                        __out.push(::std::string::String::from(__inner));
+                    } else {
+                        return ::core::result::Result::Err(#mismatch);
+                    }
                 }
                 __out
             }
@@ -634,6 +642,12 @@ fn present_decoder(field: &ParsedField, key: &str, wire: &str) -> TokenStream {
 }
 
 /// Decoder for a `String` value, applying `enum_values` if present.
+///
+/// Accepts either a plain JSON string or a `{"__ruby_regexp__": raw}`
+/// object preserving a YAML `!ruby/regexp` tag (murphy-e7bz.41.1). Derived
+/// cops treat the tagged form as its raw scalar (e.g. `"/foo/i"`), matching
+/// the pre-tag-preservation behaviour; `Naming/InclusiveLanguage` has a
+/// manual `CopOptions` impl that distinguishes the two for RuboCop parity.
 fn string_decoder(
     field: &ParsedField,
     key: &str,
@@ -655,7 +669,16 @@ fn string_decoder(
     };
     quote! {
         {
-            let __s = __v.as_str().ok_or_else(|| #mismatch)?;
+            let __s: &str = if let Some(__str) = __v.as_str() {
+                __str
+            } else if let Some(__obj) = __v.as_object() {
+                __obj
+                    .get("__ruby_regexp__")
+                    .and_then(|__inner| __inner.as_str())
+                    .ok_or_else(|| #mismatch)?
+            } else {
+                return ::core::result::Result::Err(#mismatch);
+            };
             #enum_check
             ::std::string::String::from(__s)
         }

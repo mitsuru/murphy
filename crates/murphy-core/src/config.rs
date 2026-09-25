@@ -124,9 +124,9 @@ impl DefaultCopsData {
     /// Unrecognised top-level keys are silently ignored.
     /// Parse failures are silently skipped.
     pub fn from_yaml(text: &str) -> Self {
-        use yaml_rust2::{Yaml, YamlLoader};
+        use yaml_rust2::Yaml;
 
-        let docs = match YamlLoader::load_from_str(text) {
+        let docs = match load_yaml_preserving_regexp(text) {
             Ok(d) => d,
             Err(_) => return Self::default(),
         };
@@ -1481,9 +1481,10 @@ impl MurphyConfig {
 /// Validates glob patterns at parse time. `inherit_from` paths are stored
 /// verbatim and not resolved — only [`load_resolving_inherit`] does that.
 fn parse_yaml_str(text: &str) -> Result<ParsedYaml, ConfigError> {
-    use yaml_rust2::{Yaml, YamlLoader};
+    use yaml_rust2::Yaml;
 
-    let docs = YamlLoader::load_from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+    let docs =
+        load_yaml_preserving_regexp(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
 
     let doc = match docs.into_iter().next() {
         None => return Ok(ParsedYaml::default()),
@@ -1780,6 +1781,193 @@ fn validate_glob_patterns(patterns: &[String]) -> Result<(), ConfigError> {
         .map_err(|e| ConfigError::BadGlob(e.to_string()))
 }
 
+/// JSON key that preserves YAML `!ruby/regexp` tags through the
+/// YAML → JSON option pipeline (murphy-e7bz.41.1).
+///
+/// A tagged scalar `!ruby/regexp /foo/i` becomes
+/// `{"__ruby_regexp__": "/foo/i"}`; plain strings stay strings, so
+/// `Regex: '/foo/'` (plain, matches literal slashes) and
+/// `Regex: !ruby/regexp '/foo/'` (tagged, matches `foo`) stay
+/// distinguishable after `cop_options_json`. Mirrors Ruby Psych, which
+/// carries the `!ruby/regexp` tag as `Tag("!", "ruby/regexp")`.
+pub(crate) const RUBY_REGEXP_JSON_KEY: &str = "__ruby_regexp__";
+
+fn is_ruby_regexp_tag(handle: &str, suffix: &str) -> bool {
+    suffix == "ruby/regexp" || suffix.ends_with("/ruby/regexp") || handle.ends_with("ruby/regexp")
+}
+
+fn parse_f64_preserving(v: &str) -> Option<f64> {
+    match v {
+        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => Some(f64::INFINITY),
+        "-.inf" | "-.Inf" | "-.INF" => Some(f64::NEG_INFINITY),
+        ".nan" | ".NaN" | ".NAN" => Some(f64::NAN),
+        _ if v.as_bytes().iter().any(u8::is_ascii_digit) => v.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// Load YAML documents while preserving `!ruby/regexp` tags.
+///
+/// `yaml-rust2::YamlLoader` drops tags (both plain `/foo/` and tagged
+/// `!ruby/regexp /foo/` become `Yaml::String("/foo/")`). This loader mirrors
+/// `YamlLoader` exactly except tagged scalars become
+/// `Yaml::Hash({String("__ruby_regexp__"): String(raw)})`, which
+/// `yaml_to_json` then turns into `{"__ruby_regexp__": raw}`. The tag check
+/// runs before the `style != Plain` early-return so quoted
+/// `!ruby/regexp '/foo/'` (SingleQuoted, as in RuboCop's default.yml) is
+/// preserved too. All other scalars, mappings, sequences, aliases, and
+/// anchors behave identically to `YamlLoader`.
+fn load_yaml_preserving_regexp(
+    text: &str,
+) -> Result<Vec<yaml_rust2::Yaml>, yaml_rust2::scanner::ScanError> {
+    use std::collections::BTreeMap;
+    use std::mem;
+    use yaml_rust2::Yaml;
+    use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser};
+    use yaml_rust2::scanner::{Marker, ScanError, TScalarStyle};
+    use yaml_rust2::yaml::Hash;
+
+    #[derive(Default)]
+    struct Loader {
+        docs: Vec<Yaml>,
+        doc_stack: Vec<(Yaml, usize)>,
+        key_stack: Vec<Yaml>,
+        anchor_map: BTreeMap<usize, Yaml>,
+        error: Option<ScanError>,
+    }
+
+    impl MarkedEventReceiver for Loader {
+        fn on_event(&mut self, ev: Event, mark: Marker) {
+            if self.error.is_some() {
+                return;
+            }
+            if let Err(e) = self.on_event_impl(ev, mark) {
+                self.error = Some(e);
+            }
+        }
+    }
+
+    impl Loader {
+        fn on_event_impl(&mut self, ev: Event, mark: Marker) -> Result<(), ScanError> {
+            match ev {
+                Event::DocumentStart | Event::Nothing | Event::StreamStart | Event::StreamEnd => {}
+                Event::DocumentEnd => match self.doc_stack.len() {
+                    0 => self.docs.push(Yaml::BadValue),
+                    1 => self.docs.push(self.doc_stack.pop().unwrap().0),
+                    _ => unreachable!(),
+                },
+                Event::SequenceStart(aid, _) => {
+                    self.doc_stack.push((Yaml::Array(Vec::new()), aid));
+                }
+                Event::SequenceEnd => {
+                    let node = self.doc_stack.pop().unwrap();
+                    self.insert_new_node(node, mark)?;
+                }
+                Event::MappingStart(aid, _) => {
+                    self.doc_stack.push((Yaml::Hash(Hash::new()), aid));
+                    self.key_stack.push(Yaml::BadValue);
+                }
+                Event::MappingEnd => {
+                    self.key_stack.pop().unwrap();
+                    let node = self.doc_stack.pop().unwrap();
+                    self.insert_new_node(node, mark)?;
+                }
+                Event::Scalar(v, style, aid, tag) => {
+                    let node = if let Some(tag) = tag {
+                        if is_ruby_regexp_tag(&tag.handle, &tag.suffix) {
+                            let mut h = Hash::new();
+                            h.insert(
+                                Yaml::String(RUBY_REGEXP_JSON_KEY.to_string()),
+                                Yaml::String(v),
+                            );
+                            Yaml::Hash(h)
+                        } else if style != TScalarStyle::Plain {
+                            Yaml::String(v)
+                        } else if tag.handle == "tag:yaml.org,2002:" {
+                            match tag.suffix.as_ref() {
+                                "bool" => match v.as_str() {
+                                    "true" | "True" | "TRUE" => Yaml::Boolean(true),
+                                    "false" | "False" | "FALSE" => Yaml::Boolean(false),
+                                    _ => Yaml::BadValue,
+                                },
+                                "int" => match v.parse::<i64>() {
+                                    Err(_) => Yaml::BadValue,
+                                    Ok(v) => Yaml::Integer(v),
+                                },
+                                "float" => match parse_f64_preserving(&v) {
+                                    Some(_) => Yaml::Real(v),
+                                    None => Yaml::BadValue,
+                                },
+                                "null" => match v.as_ref() {
+                                    "~" | "null" => Yaml::Null,
+                                    _ => Yaml::BadValue,
+                                },
+                                _ => Yaml::String(v),
+                            }
+                        } else {
+                            Yaml::String(v)
+                        }
+                    } else if style != TScalarStyle::Plain {
+                        Yaml::String(v)
+                    } else {
+                        Yaml::from_str(&v)
+                    };
+                    self.insert_new_node((node, aid), mark)?;
+                }
+                Event::Alias(id) => {
+                    let n = match self.anchor_map.get(&id) {
+                        Some(v) => v.clone(),
+                        None => Yaml::BadValue,
+                    };
+                    self.insert_new_node((n, 0), mark)?;
+                }
+            }
+            Ok(())
+        }
+
+        fn insert_new_node(&mut self, node: (Yaml, usize), mark: Marker) -> Result<(), ScanError> {
+            if node.1 > 0 {
+                self.anchor_map.insert(node.1, node.0.clone());
+            }
+            if self.doc_stack.is_empty() {
+                self.doc_stack.push(node);
+            } else {
+                let parent = self.doc_stack.last_mut().unwrap();
+                match *parent {
+                    (Yaml::Array(ref mut v), _) => v.push(node.0),
+                    (Yaml::Hash(ref mut h), _) => {
+                        let cur_key = self.key_stack.last_mut().unwrap();
+                        if cur_key.is_badvalue() {
+                            *cur_key = node.0;
+                        } else {
+                            let mut newkey = Yaml::BadValue;
+                            mem::swap(&mut newkey, cur_key);
+                            if h.insert(newkey, node.0).is_some() {
+                                let inserted_key = h.back().unwrap().0;
+                                return Err(ScanError::new_string(
+                                    mark,
+                                    format!("{inserted_key:?}: duplicated key in mapping"),
+                                ));
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let mut parser = Parser::new(text.chars());
+    let mut loader = Loader::default();
+    parser.load(&mut loader, true)?;
+    if let Some(e) = loader.error {
+        Err(e)
+    } else {
+        Ok(loader.docs)
+    }
+}
+
 /// Convert a yaml-rust2 `Yaml` value to a `serde_json::Value`.
 ///
 /// Returns `None` for YAML-specific types with no JSON equivalent (aliases,
@@ -1845,9 +2033,10 @@ fn yaml_string_list(yaml: &yaml_rust2::Yaml) -> Vec<String> {
 /// Near-identity transform: injects `AllCops.CopsPath: cops` and emits plugin
 /// rename hints. All cop rules pass through verbatim.
 pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigError> {
-    use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
+    use yaml_rust2::{Yaml, YamlEmitter};
 
-    let docs = YamlLoader::load_from_str(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
+    let docs =
+        load_yaml_preserving_regexp(text).map_err(|e| ConfigError::BadYaml(e.to_string()))?;
 
     let doc = match docs.into_iter().next() {
         None => return Ok(String::new()),
@@ -1954,7 +2143,16 @@ pub fn migrate_rubocop_yml_to_murphy_yml(text: &str) -> Result<String, ConfigErr
 
     // Strip the leading "---\n" document separator that YamlEmitter always emits.
     let yaml_body = yaml_out.strip_prefix("---\n").unwrap_or(&yaml_out);
-    out.push_str(yaml_body);
+    // Restore `!ruby/regexp` tags preserved as `__ruby_regexp__` sentinel
+    // mappings (murphy-e7bz.41.1). `YamlEmitter` has no tag support, so
+    // `Regex: {__ruby_regexp__: /foo/}` dumps as `Regex:\n  __ruby_regexp__: /foo/`;
+    // rewriting `__ruby_regexp__:` (with colon) to `!ruby/regexp` (no colon)
+    // yields `Regex:\n  !ruby/regexp /foo/`, which re-parses to the same
+    // tagged scalar (block `key:\n  value` form). Array items
+    // `- __ruby_regexp__: /foo/` similarly become `- !ruby/regexp /foo/`.
+    let sentinel_with_colon = format!("{RUBY_REGEXP_JSON_KEY}:");
+    let restored = yaml_body.replace(&sentinel_with_colon, "!ruby/regexp");
+    out.push_str(&restored);
 
     Ok(out)
 }
@@ -2983,6 +3181,95 @@ Style/StringLiterals:
         };
         assert!(index_of("shared") < index_of("inherited"));
         assert!(index_of("inherited") < index_of("project_only"));
+    }
+
+    #[test]
+    fn ruby_regexp_tags_survive_yaml_to_json() {
+        // murphy-e7bz.41.1: `!ruby/regexp` must not collapse to a plain
+        // string; tagged and plain slash-delimited stay distinguishable.
+        let cfg = MurphyConfig::from_yaml_str(
+            "Naming/InclusiveLanguage:\n  FlaggedTerms:\n    tagged:\n      Regex: !ruby/regexp '/foo/'\n    plain:\n      Regex: '/foo/'\n",
+        )
+        .expect("config parses");
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Naming/InclusiveLanguage")).unwrap();
+        assert_eq!(
+            options["FlaggedTerms"]["tagged"]["Regex"],
+            serde_json::json!({"__ruby_regexp__": "/foo/"}),
+            "tagged must become an object"
+        );
+        assert_eq!(
+            options["FlaggedTerms"]["plain"]["Regex"], "/foo/",
+            "plain must stay a string"
+        );
+    }
+
+    #[test]
+    fn ruby_regexp_tags_survive_inherit_from_merge() {
+        // Base tagged, project plain-overrides one term and adds another;
+        // types must survive `merge_option_value` recursion.
+        let dir = tempfile::TempDir::new().unwrap();
+        write_cfg(
+            dir.path(),
+            "base.yml",
+            "Naming/InclusiveLanguage:\n  FlaggedTerms:\n    shared:\n      Regex: !ruby/regexp '/base/'\n    inherited:\n      Regex: !ruby/regexp '/inherited/'\n",
+        );
+        write_cfg(
+            dir.path(),
+            ".murphy.yml",
+            "inherit_from: base.yml\nNaming/InclusiveLanguage:\n  FlaggedTerms:\n    shared:\n      Regex: '/plain/'\n    project_only:\n      Regex: !ruby/regexp '/project/'\n",
+        );
+        let cfg = MurphyConfig::load(dir.path()).expect("load succeeds");
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Naming/InclusiveLanguage")).unwrap();
+        assert_eq!(
+            options["FlaggedTerms"]["shared"]["Regex"], "/plain/",
+            "project plain must replace base tagged as a string"
+        );
+        assert_eq!(
+            options["FlaggedTerms"]["inherited"]["Regex"],
+            serde_json::json!({"__ruby_regexp__": "/inherited/"}),
+            "inherited tagged must stay an object"
+        );
+        assert_eq!(
+            options["FlaggedTerms"]["project_only"]["Regex"],
+            serde_json::json!({"__ruby_regexp__": "/project/"}),
+            "project tagged must stay an object"
+        );
+    }
+
+    #[test]
+    fn ruby_regexp_arrays_survive_yaml_to_json() {
+        let cfg = MurphyConfig::from_yaml_str(
+            "Naming/InclusiveLanguage:\n  FlaggedTerms:\n    t:\n      AllowedRegex:\n        - !ruby/regexp /foo/\n        - plain\n",
+        )
+        .expect("config parses");
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Naming/InclusiveLanguage")).unwrap();
+        assert_eq!(
+            options["FlaggedTerms"]["t"]["AllowedRegex"],
+            serde_json::json!([{"__ruby_regexp__": "/foo/"}, "plain"])
+        );
+    }
+
+    #[test]
+    fn migrate_restores_ruby_regexp_tags() {
+        let out = migrate_rubocop_yml_to_murphy_yml(
+            "Naming/InclusiveLanguage:\n  FlaggedTerms:\n    t:\n      Regex: !ruby/regexp '/foo/'\n",
+        )
+        .expect("migrate succeeds");
+        assert!(
+            out.contains("!ruby/regexp"),
+            "migrated YAML must keep the tag, got: {out}"
+        );
+        // Roundtrip: migrated output re-parses to a tagged object.
+        let cfg = MurphyConfig::from_yaml_str(&out).expect("migrated output must load");
+        let options: serde_json::Value =
+            serde_json::from_slice(&cfg.cop_options_json("Naming/InclusiveLanguage")).unwrap();
+        assert_eq!(
+            options["FlaggedTerms"]["t"]["Regex"],
+            serde_json::json!({"__ruby_regexp__": "/foo/"})
+        );
     }
 
     #[test]
