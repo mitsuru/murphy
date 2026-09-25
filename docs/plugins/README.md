@@ -81,6 +81,10 @@ Official packs are catalogued in the thin registry (C1; ADR 0049) and
 installed into `.murphy.yml` with `murphy add murphy-rails` (guide:
 `docs/guides/pack-registry.md`).
 
+Official config presets (`minimal` / `recommended` / `shopify` /
+`rails-strict`) are builtin layers selected via `extends: murphy:<name>` or
+`--preset` (C3; ADR 0050, guide: `docs/guides/presets.md`).
+
 ## Future: `murphy plugin new`
 
 A `murphy plugin new murphy-foo` subcommand — a thin wrapper over

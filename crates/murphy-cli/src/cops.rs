@@ -64,10 +64,15 @@ pub enum Format {
     Json,
 }
 
-pub fn list_with_format(format: Format) -> Result<u8, AppError> {
-    let config =
-        MurphyConfig::load_with_defaults(Path::new("."), murphy_std::BUNDLED_DEFAULTS_YAML)
-            .map_err(|e| AppError::setup(e.to_string()))?;
+/// List cops with a builtin preset layer (C3).
+/// Precedence: bundled defaults < file `extends:` < `--preset` < user config.
+pub fn list_with_format_and_preset(format: Format, preset: Option<&str>) -> Result<u8, AppError> {
+    let config = MurphyConfig::load_with_defaults_and_preset(
+        Path::new("."),
+        murphy_std::BUNDLED_DEFAULTS_YAML,
+        preset,
+    )
+    .map_err(|e| AppError::setup(e.to_string()))?;
 
     // Build the same registry the lint flow uses (builtin pack +
     // configured `.so` cop packs), then enumerate via
