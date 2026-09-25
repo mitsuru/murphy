@@ -106,6 +106,17 @@ mod tests {
     }
 
     #[test]
+    fn flags_bare_hash_receiver() {
+        // Outer `(call _ ...)` `_` binds an absent hash receiver too (if9y):
+        // standalone `RuboCop::AST::NodePattern` matches `key?(foo.object_id)`
+        // (=> true), so the verbatim port must flag it as well.
+        test::<HashCompareByIdentity>().expect_offense(indoc! {r#"
+            key?(foo.object_id)
+            ^^^^^^^^^^^^^^^^^^^ Use `Hash#compare_by_identity` instead of using `object_id` for keys.
+        "#});
+    }
+
+    #[test]
     fn accepts_non_object_id_keys() {
         test::<HashCompareByIdentity>().expect_no_offenses("hash.key?(foo)\n");
     }
