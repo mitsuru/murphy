@@ -44,7 +44,21 @@
 //! raise RuntimeError, 'msg', caller   # 3 args -- not flagged
 //! ```
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Style/RedundantException` matchers are
+// `exploded?` = `(send nil? ${:raise :fail} (const {nil? cbase} :RuntimeError) $_)`
+// and `compact?` =
+// `(send nil? {:raise :fail} $(send (const {nil? cbase} :RuntimeError) :new $_))`.
+// In Murphy `::RuntimeError` collapses to `Const{scope:None}`, so a single
+// `nil?` scope covers bare and `::`-prefixed forms \u2014 equivalent to the
+// prior `is_global_const` checks. The outer `raise`/`fail` dispatch stays
+// hand-rolled (`#[on_node(kind = "send")]` is send-only, nil receiver), as do
+// the message-argument guards (`$_` captures) and autocorrect below.
+// The compact inner uses explicit `Send` matching, so `&.` (`csend`) never
+// matches \u2014 pinned by `boundary_ignores_csend_compact`.
+def_node_matcher!(runtime_error_const, "(const nil? :RuntimeError)");
+def_node_matcher!(runtime_error_new, "(send (const nil? :RuntimeError) :new ...)");
 
 /// Stateless unit struct.
 #[derive(Default)]
@@ -78,23 +92,22 @@ fn check(node: NodeId, cx: &Cx<'_>) {
 
     let args = cx.list(args);
 
-    // Try exploded pattern: raise RuntimeError, message (exactly 2 args)
-    if args.len() == 2 && cx.is_global_const(args[0], "RuntimeError") {
+    // Try exploded pattern: raise RuntimeError, message (exactly 2 args).
+    // `(const nil? :RuntimeError)` \u2014 top-level `RuntimeError` argument.
+    if args.len() == 2 && runtime_error_const(args[0], cx) {
         let message = args[1];
         cx.emit_offense(cx.range(node), MSG_1, None);
         autocorrect_exploded(args[0], message, cx);
         return;
     }
 
-    // Try compact pattern: raise RuntimeError.new(message) (exactly 1 arg = send :new)
+    // Try compact pattern: raise RuntimeError.new(message) (exactly 1 arg).
+    // `(send (const nil? :RuntimeError) :new ...)` \u2014 top-level
+    // `RuntimeError.new`; the 1-argument `$_` guard stays hand-rolled below.
     if args.len() == 1 {
         let arg = args[0];
-        if let NodeKind::Send { receiver: new_recv, args: new_args, .. } = *cx.kind(arg)
-            && let Some(recv_id) = new_recv.get()
-                && cx.is_global_const(recv_id, "RuntimeError")
-                    && cx.method_name(arg) == Some("new")
-                {
-                    let new_args_list = cx.list(new_args);
+        if runtime_error_new(arg, cx) {
+                    let new_args_list = cx.call_arguments(arg);
                     if new_args_list.len() == 1 {
                         let message = new_args_list[0];
                         cx.emit_offense(cx.range(node), MSG_2, None);
@@ -300,6 +313,38 @@ mod tests {
     fn no_offense_raise_with_receiver() {
         // `obj.raise RuntimeError, 'message'` -- has a receiver, not flagged
         test::<RedundantException>().expect_no_offenses("obj.raise RuntimeError, 'message'\n");
+    }
+
+    // --- Boundary characterization (murphy-ft88.4): pin the exact node set
+    // the hand-rolled `is_global_const(receiver, "RuntimeError")` predicates
+    // match, so the verbatim `(const nil? :RuntimeError)` /
+    // `(send (const nil? :RuntimeError) :new ...)` refactor can be proven
+    // equivalent. `::RuntimeError` collapses to `Const{scope:None}` in Murphy,
+    // so a single `nil?` scope covers bare + `::`-prefixed forms. `&.` is a
+    // `csend` node, not `send`; RuboCop\'s `(send ...)` pattern does not match
+    // it, and the explicit `Send` guard rejects it.
+
+    #[test]
+    fn boundary_flags_cbase_compact() {
+        test::<RedundantException>().expect_offense(indoc! {r#"
+            raise ::RuntimeError.new('message')
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Redundant `RuntimeError.new` call can be replaced with just the message.
+        "#});
+    }
+
+    #[test]
+    fn boundary_ignores_namespaced_compact() {
+        // `Foo::RuntimeError` has a non-nil const scope, so it is not flagged.
+        test::<RedundantException>()
+            .expect_no_offenses("raise Foo::RuntimeError.new('message')\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend_compact() {
+        // `&.` is a `csend` node, not `send`; RuboCop\'s `(send ...)` pattern
+        // does not match it, and the explicit `Send` guard rejects it.
+        test::<RedundantException>()
+            .expect_no_offenses("raise RuntimeError&.new('message')\n");
     }
 }
 
