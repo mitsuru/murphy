@@ -7,9 +7,15 @@
 //! upstream_version_checked: 2.35.0
 //! status: partial
 //! gap_issues:
-//!   - murphy-h8ke
+//!   - murphy-31sx
 //! notes: >
-//!   Backfilled metadata; full upstream parity audit still needs to confirm no remaining behavior gaps.
+//!   Audited against rubocop-rails 2.35.0 for murphy-h8ke. The
+//!   conservative/aggressive receiver gates, the uniq-selector offense
+//!   range, and the distinct-insert autocorrect all match upstream.
+//!   Residual gaps tracked in murphy-31sx: numblock/itblock `uniq`
+//!   (`pluck(:x).uniq { _1 }` is flagged; upstream `[!^any_block]` ignores
+//!   every block form); zero-arg `pluck.uniq` and uniq-with-args are
+//!   skipped while upstream `...` wildcards match them (near-dead code).
 //! ```
 //!
 //! recommend `distinct.pluck(:col)`. `uniq` materialises the entire

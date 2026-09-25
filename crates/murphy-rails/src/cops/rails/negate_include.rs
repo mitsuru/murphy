@@ -5,11 +5,19 @@
 //! upstream: rubocop-rails
 //! upstream_cop: Rails/NegateInclude
 //! upstream_version_checked: 2.35.0
-//! status: partial
-//! gap_issues:
-//!   - murphy-h8ke
+//! status: verified
+//! gap_issues: []
 //! notes: >
-//!   Backfilled metadata; full upstream parity audit still needs to confirm no remaining behavior gaps.
+//!   Audited against rubocop-rails 2.35.0 for murphy-h8ke: the NodePattern
+//!   `(send (send $!nil? :include? $_) :!)` is mirrored exactly (non-nil
+//!   receiver, exactly one inner arg, zero-arg outer `!`), including the
+//!   `not` keyword form (same Send shape). RESTRICT_ON_SEND `%i[!]` is
+//!   mirrored by `methods = ["!"]`. The two-edit autocorrect (delete the
+//!   negation prefix, rename the selector) is output-equivalent to
+//!   upstream's full-node replace. Parenthesised `!(x.include?(y))` misses
+//!   on both sides (Begin wrapper around the inner Send). `Enabled: pending`
+//!   maps to `default_enabled = true`; `Safe: false` is documented in the
+//!   module docs.
 //! ```
 //!
 //! `x.exclude?(y)` (an ActiveSupport monkey-patch on Enumerable that
