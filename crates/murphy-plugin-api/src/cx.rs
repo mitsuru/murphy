@@ -2907,7 +2907,12 @@ impl<'a> Cx<'a> {
     /// Reads the run-wide `CxRaw::config_disabled_cops` slice the host fills
     /// from `.murphy.yml` `Enabled: false` rules. Non-UTF-8 entries are
     /// skipped.
-    fn config_disabled_cops(&self) -> impl Iterator<Item = &'a str> {
+    ///
+    /// Exposed for `Lint/MissingCopEnableDirective` (murphy-3bod) so a
+    /// `disable` of a config-disabled cop until EOF is accepted, mirroring
+    /// RuboCop's `acceptable_range?`. Reads the existing `CxRaw` tail field;
+    /// no wire change, no ABI bump.
+    pub fn config_disabled_cops(&self) -> impl Iterator<Item = &'a str> {
         let slices = unsafe {
             slice(
                 self.raw.config_disabled_cops,
