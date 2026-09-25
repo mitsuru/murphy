@@ -82,6 +82,11 @@
 //! - `RSpec/NoExpectationExample` — examples must contain an expectation (murphy-4gd.3.16).
 //! - `RSpec/OverwritingSetup` — no duplicate `let` / `subject` definitions (murphy-4gd.3.16).
 //! - `RSpec/Pending` — no pending or skipped examples (murphy-4gd.3.16).
+//! - `RSpec/PendingWithoutReason` — pending/skipped examples need a reason (murphy-4gd.3.17).
+//! - `RSpec/PredicateMatcher` — prefer predicate matchers (murphy-4gd.3.17).
+//! - `RSpec/ReceiveCounts` — prefer `once`/`twice` helpers (murphy-4gd.3.17).
+//! - `RSpec/ReceiveMessages` — prefer `receive_messages` (murphy-4gd.3.17).
+//! - `RSpec/RedundantAround` — no redundant `around` hooks (murphy-4gd.3.17).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
