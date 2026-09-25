@@ -52,6 +52,11 @@
 //! - `RSpec/ExcessiveDocstringSpacing` — no excessive whitespace in descriptions (murphy-4gd.3.10).
 //! - `RSpec/ExpectActual` — actual value in `expect(...)` (murphy-4gd.3.10).
 //! - `RSpec/ExpectChange` — consistent `change` style (murphy-4gd.3.10).
+//! - `RSpec/ExpectOutput` — `expect { ... }.to output` over `$stdout` mutation (murphy-4gd.3.11).
+//! - `RSpec/HooksBeforeExamples` — hooks above examples (murphy-4gd.3.11).
+//! - `RSpec/ImplicitBlockExpectation` — no implicit block expectations (murphy-4gd.3.11).
+//! - `RSpec/ImplicitExpect` — consistent `is_expected` / `should` style (murphy-4gd.3.11).
+//! - `RSpec/ImplicitSubject` — explicit vs implicit subject style (murphy-4gd.3.11).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
