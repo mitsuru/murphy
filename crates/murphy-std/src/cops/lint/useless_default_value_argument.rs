@@ -27,7 +27,17 @@
 //!
 //! Remove the default value argument and the comma before it.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, OptNodeId, Range, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/UselessDefaultValueArgument` `Array.new` matcher is
+// `(call (const {nil? cbase} :Array) :new ...)`. In Murphy `::Array`
+// collapses to `Const{scope:None}`, so a single `nil?` scope covers bare
+// and `::`-prefixed forms — equivalent to the prior hand-rolled const
+// check. `call` covers both `send` and `csend`, matching the two
+// `#[on_node]` handlers above (pinned by `boundary_flags_csend_array_new`).
+// The `fetch` branch and the 2-argument/block-parent guards stay
+// hand-rolled below.
+def_node_matcher!(array_new, "(call (const nil? :Array) :new ...)");
 
 #[derive(Default)]
 pub struct UselessDefaultValueArgument;
@@ -84,7 +94,7 @@ impl UselessDefaultValueArgument {
                 self.check_fetch(receiver_opt, args_list, cx);
             }
             "new" => {
-                self.check_array_new(receiver_opt, args_list, cx);
+                self.check_array_new(node, args_list, cx);
             }
             _ => {}
         }
@@ -127,21 +137,11 @@ impl UselessDefaultValueArgument {
         self.emit_offense_and_correct(args_list[0], default_value, cx);
     }
 
-    fn check_array_new(&self, receiver_opt: OptNodeId, args_list: &[NodeId], cx: &Cx<'_>) {
-        // Receiver must be a const reference to `Array`.
-        let Some(recv_id) = receiver_opt.get() else {
-            return;
-        };
-        let NodeKind::Const { scope, name } = *cx.kind(recv_id) else {
-            return;
-        };
-        if cx.symbol_str(name) != "Array" {
-            return;
-        }
-        let scope_ok = scope
-            .get()
-            .is_none_or(|s| matches!(*cx.kind(s), NodeKind::Cbase));
-        if !scope_ok {
+    fn check_array_new(&self, node: NodeId, args_list: &[NodeId], cx: &Cx<'_>) {
+        // `(call (const nil? :Array) :new ...)` — top-level `Array.new`,
+        // including the `&.` form (both `#[on_node]` handlers route here,
+        // as RuboCop's `(call ...)` pattern).
+        if !array_new(node, cx) {
             return;
         }
 
@@ -268,6 +268,31 @@ mod tests {
         test::<UselessDefaultValueArgument>().expect_offense(indoc! {r#"
             ::Array.new(size, default_value) { block_value }
                               ^^^^^^^^^^^^^ Block supersedes default value argument.
+        "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88.3): pin the exact node set
+    // the hand-rolled `Array` const check matches, so the
+    // `(call (const nil? :Array) :new ...)` refactor can be proven
+    // equivalent. `::Array` collapses to `Const{scope:None}` in Murphy, so a
+    // single `nil?` scope covers bare + `::`-prefixed forms (pinned by
+    // `flags_array_new_with_cbase`). `call` covers both `send` and `csend`,
+    // matching the two `#[on_node]` handlers above.
+
+    #[test]
+    fn boundary_ignores_namespaced_array_new() {
+        // `Foo::Array` has a non-nil const scope, so it is not flagged.
+        test::<UselessDefaultValueArgument>()
+            .expect_no_offenses("Foo::Array.new(size, default_value) { block_value }\n");
+    }
+
+    #[test]
+    fn boundary_flags_csend_array_new() {
+        // `&.` is a `csend` node; `call` covers both dispatch kinds and both
+        // `#[on_node]` handlers route to `check_array_new`, so it flags.
+        test::<UselessDefaultValueArgument>().expect_offense(indoc! {r#"
+            Array&.new(size, default_value) { block_value }
+                             ^^^^^^^^^^^^^ Block supersedes default value argument.
         "#});
     }
 
