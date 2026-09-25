@@ -405,148 +405,23 @@ submit_cop!(BulkChangeTable);
 // `FindEach` promoted to real cop in
 // `cops::rails::find_each`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/FreezeTime
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct FreezeTime;
+// `FreezeTime` promoted to real cop in
+// `cops::rails::freeze_time`.
 
-#[cop(
-    name = "Rails/FreezeTime",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl FreezeTime {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(FreezeTime);
+// `HasAndBelongsToMany` promoted to real cop in
+// `cops::rails::has_and_belongs_to_many`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/HasAndBelongsToMany
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct HasAndBelongsToMany;
+// `HasManyOrHasOneDependent` promoted to real cop in
+// `cops::rails::has_many_or_has_one_dependent`.
 
-#[cop(
-    name = "Rails/HasAndBelongsToMany",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl HasAndBelongsToMany {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(HasAndBelongsToMany);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/HasManyOrHasOneDependent
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct HasManyOrHasOneDependent;
-
-#[cop(
-    name = "Rails/HasManyOrHasOneDependent",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl HasManyOrHasOneDependent {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(HasManyOrHasOneDependent);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/HelperInstanceVariable
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct HelperInstanceVariable;
-
-#[cop(
-    name = "Rails/HelperInstanceVariable",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl HelperInstanceVariable {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(HelperInstanceVariable);
+// `HelperInstanceVariable` promoted to real cop in
+// `cops::rails::helper_instance_variable`.
 
 // `HttpPositionalArguments` promoted to real cop in
 // `cops::rails::http_positional_arguments`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/HttpStatusNameConsistency
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct HttpStatusNameConsistency;
-
-#[cop(
-    name = "Rails/HttpStatusNameConsistency",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl HttpStatusNameConsistency {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(HttpStatusNameConsistency);
+// `HttpStatusNameConsistency` promoted to real cop in
+// `cops::rails::http_status_name_consistency`.
 
 /// ## RuboCop parity
 ///
