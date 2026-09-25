@@ -33,6 +33,10 @@ linkme = "0.3"
 # Ruby source. Production plugins never use this path; the cdylib
 # binary stays free of murphy-translate.
 murphy-translate = { path = "../murphy-translate", optional = true }
+# Optional, test-support only: harvest prism diagnostics so `test_support`
+# threads `parse_diagnostics` into `Cx` (murphy-zpgm). Already compiled via
+# `murphy-translate`, so this adds no new native build.
+murphy-prism = { path = "../murphy-prism", optional = true }
 # Optional, test-support only: re-exported as
 # `murphy_plugin_api::test_support::indoc` so plugin packs writing
 # `#[cfg(test)] mod tests` get the heredoc-style fixture writer
@@ -45,7 +49,7 @@ indoc = { version = "2", optional = true }
 # `[dev-dependencies]` to write `#[cfg(test)] mod tests` against its
 # cops without rebuilding the `CxRaw` + sink plumbing or pulling in
 # `indoc` directly. See `src/test_support.rs`.
-test-support = ["dep:murphy-translate", "dep:indoc"]
+test-support = ["dep:murphy-translate", "dep:indoc", "dep:murphy-prism"]
 
 [dev-dependencies]
 # Real prism parse in cx.rs unit tests (loc_keyword_def).

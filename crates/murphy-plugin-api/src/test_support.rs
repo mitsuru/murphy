@@ -41,8 +41,8 @@ use std::{fs, vec::Vec};
 use murphy_ast::Ast;
 
 use crate::{
-    Cop, CopOptions, Cx, CxRaw, FnTable, NodeCop, NodeId, OptionSpec, PluginCopV1, Range, RawEdit,
-    RawOffense, RawSlice, Severity,
+    Cop, CopOptions, Cx, CxRaw, FnTable, NodeCop, NodeId, OptionSpec, ParseDiagnostic, PluginCopV1,
+    Range, RawEdit, RawOffense, RawSlice, Severity,
 };
 
 /// Re-export of [`indoc::indoc!`] so plugin packs writing
@@ -829,6 +829,31 @@ unsafe extern "C" fn record_edit(sink_ptr: *mut std::ffi::c_void, e: *const RawE
     });
 }
 
+/// Harvest prism diagnostics for `source` (murphy-zpgm).
+///
+/// Mirrors `murphy-core::parse::collect_parse_diagnostics` without depending
+/// on `murphy-core` (which depends on this crate). Empty when the file parses
+/// cleanly. Oversized sources (> u32::MAX bytes) yield empty — the host
+/// surfaces that shape as a structured error instead.
+fn collect_test_parse_diagnostics(source: &str) -> Vec<(String, Range)> {
+    if source.len() > u32::MAX as usize {
+        return Vec::new();
+    }
+    let result = murphy_prism::parse(source.as_bytes());
+    result
+        .errors()
+        .map(|err| {
+            let loc = err.location();
+            let range = Range {
+                start: loc.start_offset() as u32,
+                end: loc.end_offset() as u32,
+            };
+            let message = String::from_utf8_lossy(err.message().as_bytes()).into_owned();
+            (message, range)
+        })
+        .collect()
+}
+
 /// Parse `source` as Ruby, drive `T::check` over every relevant node,
 /// and return the captured offenses in emission order. The cop sees an
 /// empty options JSON blob — every field of its `Options` struct falls
@@ -979,7 +1004,30 @@ fn run_cop_with_options_and_edits_json_and_context_and_path<T: NodeCop + Default
         ptr: options_json.as_ptr(),
         len: options_json.len(),
     };
-    let raw = cx_raw_for(&ast, &fns, cop_name, &sink, options_slice, &var_model, ctx);
+    // Harvest prism diagnostics so `Cx::parse_diagnostics()` works in tests
+    // (murphy-zpgm). The owned `messages` outlive the wire slice and the
+    // dispatch loop below (same function scope).
+    let owned = collect_test_parse_diagnostics(source);
+    let wire: Vec<ParseDiagnostic> = owned
+        .iter()
+        .map(|(message, range)| ParseDiagnostic {
+            message: RawSlice {
+                ptr: message.as_ptr(),
+                len: message.len(),
+            },
+            range: *range,
+        })
+        .collect();
+    let raw = cx_raw_for(
+        &ast,
+        &fns,
+        cop_name,
+        &sink,
+        options_slice,
+        &var_model,
+        ctx,
+        &wire,
+    );
     let cx = unsafe { Cx::from_raw(&raw) };
 
     if T::KINDS.is_empty() {
@@ -1078,6 +1126,7 @@ fn apply_captured_edits(source: &str, edits: &[CapturedEdit]) -> String {
 /// Build a `CxRaw` borrowing from `ast`, `fns`, `sink`, `var_model`, and the
 /// caller's per-test options JSON blob. The returned value contains raw
 /// pointers; the caller keeps all five alive for the duration of the dispatch.
+#[allow(clippy::too_many_arguments)]
 fn cx_raw_for(
     ast: &Ast,
     fns: &FnTable,
@@ -1086,6 +1135,7 @@ fn cx_raw_for(
     options_json: RawSlice,
     var_model: &crate::var_semantic_model::VarSemanticModel,
     ctx: crate::AllCopsContext,
+    parse_diagnostics: &[ParseDiagnostic],
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -1129,6 +1179,12 @@ fn cx_raw_for(
         block_forwarding_explicit: ctx.block_forwarding_explicit,
         block_body_empty_lines: ctx.block_body_empty_lines,
         block_braces_space: ctx.block_braces_space,
+        parse_diagnostics: if parse_diagnostics.is_empty() {
+            std::ptr::null()
+        } else {
+            parse_diagnostics.as_ptr()
+        },
+        parse_diagnostics_len: parse_diagnostics.len(),
     }
 }
 

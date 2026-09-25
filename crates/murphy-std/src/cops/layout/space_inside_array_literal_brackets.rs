@@ -576,7 +576,7 @@ mod tests {
 
     fn apply_edits(src: &str, edits: &[murphy_plugin_api::test_support::CapturedEdit]) -> String {
         let mut ordered: Vec<_> = edits.iter().collect();
-        ordered.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+        ordered.sort_by_key(|b| std::cmp::Reverse(b.range.start));
         let mut out = src.to_owned();
         for e in ordered {
             out.replace_range(e.range.start as usize..e.range.end as usize, &e.replacement);

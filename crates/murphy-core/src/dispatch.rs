@@ -33,9 +33,12 @@ use std::ffi::c_void;
 use murphy_ast::{Ast, NodeId, NodeKind};
 use murphy_plugin_api::var_semantic_model::VarSemanticModel;
 use murphy_plugin_api::{
-    AllCopsContext, CxRaw, FnTable, NodeKindTag as PluginNodeKindTag, PluginCopV1, RawEdit,
-    RawOffense, RawSlice, RubyVersion, SEVERITY_UNSET,
+    AllCopsContext, CxRaw, FnTable, NodeKindTag as PluginNodeKindTag,
+    ParseDiagnostic as WireParseDiagnostic, PluginCopV1, RawEdit, RawOffense, RawSlice,
+    RubyVersion, SEVERITY_UNSET,
 };
+
+use crate::parse::ParseDiagnostic as OwnedParseDiagnostic;
 
 /// The `NodeKindTag` for [`NodeKind::Send`] (frozen by ADR 0037).
 /// Mirrors `murphy-plugin-api::NodeKindTag::of(&NodeKind::Send {…})`
@@ -190,6 +193,7 @@ fn build_cx_raw(
     node_slice_arena: &mut NodeSliceArena,
     ctx: AllCopsContext,
     config_disabled_cops: &[RawSlice],
+    parse_diagnostics: &[WireParseDiagnostic],
 ) -> CxRaw {
     let p = ast.raw_parts();
     let file_path = ast.path().to_str().unwrap_or("");
@@ -233,6 +237,12 @@ fn build_cx_raw(
         block_forwarding_explicit: ctx.block_forwarding_explicit,
         block_body_empty_lines: ctx.block_body_empty_lines,
         block_braces_space: ctx.block_braces_space,
+        parse_diagnostics: if parse_diagnostics.is_empty() {
+            std::ptr::null()
+        } else {
+            parse_diagnostics.as_ptr()
+        },
+        parse_diagnostics_len: parse_diagnostics.len(),
     }
 }
 
@@ -285,11 +295,56 @@ pub fn run_cops_with_options_and_context(
     // `Copy`/`Default` `AllCopsContext`, which a `&[RawSlice]` would burden with
     // a lifetime parameter. Bundle here if the positional list grows further.
     config_disabled_cops: &[RawSlice],
+    options_for: impl FnMut(&str) -> Vec<u8>,
+) {
+    run_cops_with_options_context_and_diagnostics(
+        ast,
+        cops,
+        sink,
+        ctx,
+        config_disabled_cops,
+        &[],
+        options_for,
+    );
+}
+
+/// Dispatch with prism parse diagnostics threaded into every cop's `Cx`
+/// for `Lint/Syntax` parity (murphy-zpgm).
+///
+/// `parse_diagnostics` is the owned harvest from
+/// [`crate::parse::collect_parse_diagnostics`] (empty when the file parsed
+/// cleanly). The wire [`WireParseDiagnostic`] slice borrows the owned
+/// messages for the dispatch duration; the caller keeps `parse_diagnostics`
+/// alive across the call (it does — the slice is borrowed here).
+pub fn run_cops_with_options_context_and_diagnostics(
+    ast: &Ast,
+    cops: &[&PluginCopV1],
+    sink: &mut OffenseSink,
+    ctx: AllCopsContext,
+    // See `run_cops_with_options_and_context` for why this stays a separate
+    // borrowed param.
+    config_disabled_cops: &[RawSlice],
+    parse_diagnostics: &[OwnedParseDiagnostic],
     mut options_for: impl FnMut(&str) -> Vec<u8>,
 ) {
     let var_model = VarSemanticModel::build(ast);
     let index = DispatchIndex::build(ast);
     let mut node_slice_arena = NodeSliceArena::default();
+    // Wire view borrowing the owned messages. `wire` outlives the dispatch
+    // loop below (same function scope), so the `CxRaw` pointer stays valid.
+    let wire: Vec<WireParseDiagnostic> = parse_diagnostics
+        .iter()
+        .map(|d| WireParseDiagnostic {
+            message: RawSlice {
+                ptr: d.message.as_ptr(),
+                len: d.message.len(),
+            },
+            range: murphy_ast::Range {
+                start: d.range.start_offset,
+                end: d.range.end_offset,
+            },
+        })
+        .collect();
     let mut base = build_cx_raw(
         ast,
         sink,
@@ -297,6 +352,7 @@ pub fn run_cops_with_options_and_context(
         &mut node_slice_arena,
         ctx,
         config_disabled_cops,
+        &wire,
     );
     for cop in cops {
         base.cop_name = cop.name;
@@ -851,6 +907,72 @@ mod tests {
         );
 
         assert!(BLOCK_BRACES_SPACE_SEEN.load(Ordering::SeqCst));
+    }
+
+    // Per-test atomic for the murphy-zpgm parse-diagnostics signal.
+    static PARSE_DIAGNOSTICS_SEEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+    unsafe extern "C" fn parse_diagnostics_dispatch(_node: NodeId, cx: *const CxRaw) -> i32 {
+        let cx = unsafe { &*cx };
+        PARSE_DIAGNOSTICS_SEEN.store(cx.parse_diagnostics_len, Ordering::SeqCst);
+        0
+    }
+    static PARSE_DIAGNOSTICS_COP: PluginCopV1 = PluginCopV1 {
+        size: std::mem::size_of::<PluginCopV1>(),
+        name: RawSlice::from_str("Test/ParseDiagnostics"),
+        description: RawSlice::from_str(""),
+        default_severity: SEVERITY_UNSET,
+        default_enabled: 255,
+        safe: 255,
+        safe_autocorrect: 255,
+        minimum_target_ruby_version: 0,
+        maximum_target_ruby_version: 0,
+        options_ptr: std::ptr::null(),
+        options_len: 0,
+        kinds_ptr: NIL_KINDS.as_ptr(),
+        kinds_len: NIL_KINDS.len(),
+        dispatch: parse_diagnostics_dispatch,
+        send_methods_ptr: std::ptr::null(),
+        send_methods_len: 0,
+    };
+
+    #[test]
+    fn dispatch_passes_parse_diagnostics_to_cx_raw() {
+        use crate::parse::collect_parse_diagnostics;
+
+        let ast = ast_nil_and_int();
+        // Empty diagnostics thread as empty.
+        PARSE_DIAGNOSTICS_SEEN.store(usize::MAX, Ordering::SeqCst);
+        let mut sink = OffenseSink::new("t.rb");
+        run_cops_with_options_context_and_diagnostics(
+            &ast,
+            &[&PARSE_DIAGNOSTICS_COP],
+            &mut sink,
+            AllCopsContext::default(),
+            &[],
+            &[],
+            |_| b"{}".to_vec(),
+        );
+        assert_eq!(PARSE_DIAGNOSTICS_SEEN.load(Ordering::SeqCst), 0);
+
+        // Non-empty diagnostics thread with length preserved.
+        let diags = collect_parse_diagnostics("def (\n");
+        assert!(!diags.is_empty(), "fixture must yield diagnostics");
+        PARSE_DIAGNOSTICS_SEEN.store(usize::MAX, Ordering::SeqCst);
+        let mut sink = OffenseSink::new("t.rb");
+        run_cops_with_options_context_and_diagnostics(
+            &ast,
+            &[&PARSE_DIAGNOSTICS_COP],
+            &mut sink,
+            AllCopsContext::default(),
+            &[],
+            &diags,
+            |_| b"{}".to_vec(),
+        );
+        assert_eq!(
+            PARSE_DIAGNOSTICS_SEEN.load(Ordering::SeqCst),
+            diags.len(),
+            "dispatch must thread every diagnostic into CxRaw"
+        );
     }
 
     // (1) DispatchIndex correctly buckets the arena's nodes by tag.
