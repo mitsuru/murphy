@@ -1,12 +1,15 @@
 # Murphy rails pack bundled defaults — mirrors rubocop-rails 2.x config/default.yml.
 #
 # This file carries the non-`Rails/` cop overrides that rubocop-rails ships in
-# its own `config/default.yml`. RuboCop applies a plugin's default config as a
-# layer beneath the user's `.rubocop.yml`, so a project that loads
-# `rubocop-rails` (here: `murphy-rails`) inherits these option/exclude defaults
-# unless it overrides them. Murphy mirrors that by merging this file's cop rules
-# into the bundled-defaults layer (`apply_pack_default_layers`). Keep in sync
-# with the pinned rubocop-rails version when bumping parity.
+# its own `config/default.yml`, plus per-cop `Include`/`Exclude` file scopes
+# for ported `Rails/*` cops whose upstream defaults restrict the files they
+# run on (the engine's `cop_applies_to_file` gate reads them from this layer).
+# RuboCop applies a plugin's default config as a layer beneath the user's
+# `.rubocop.yml`, so a project that loads `rubocop-rails` (here: `murphy-rails`)
+# inherits these option/exclude defaults unless it overrides them. Murphy
+# mirrors that by merging this file's cop rules into the bundled-defaults
+# layer (`apply_pack_default_layers`). Keep in sync with the pinned
+# rubocop-rails version when bumping parity.
 AllCops:
   ActiveSupportExtensionsEnabled: true
   # Mirrors rubocop-rails-2.x config/default.yml AllCops.Exclude. These join
@@ -108,3 +111,24 @@ Style/SymbolProc:
     - define_method
     - mail
     - respond_to
+
+# --- Ported `Rails/*` file scopes (subset of upstream defaults) ---
+# Only cops already ported to real (non-stub) implementations are listed; add
+# entries here as further cops are ported (murphy-4gd.1).
+
+Rails/HttpPositionalArguments:
+  # Upstream only runs in spec/test files; without this the routing-DSL
+  # `get :export, constraints: {...}` in `config/routes/*.rb` false-fires
+  # (Mastodon murphy-bjrg.3).
+  Include:
+    - '**/spec/**/*'
+    - '**/test/**/*'
+
+# --- Ported `Rails/*` opt-out defaults (subset of upstream defaults) ---
+# Cops below are opt-in upstream (`Enabled: false`); the pack layer must
+# reproduce that so they stay silent unless the user enables them
+# (Mastodon murphy-bjrg.3: `Rails/DefaultScope` flagged `default_scope`
+# in `app/models/status.rb` although upstream leaves it disabled).
+
+Rails/DefaultScope:
+  Enabled: false

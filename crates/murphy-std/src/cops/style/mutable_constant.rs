@@ -190,9 +190,13 @@ fn is_freeze_call(node: NodeId, cx: &Cx<'_>) -> bool {
 /// The flagged set is `cx.is_mutable_literal` **minus**:
 /// - `Regexp` and `RangeExpr` (frozen since Ruby 3.0+, which Murphy targets)
 /// - plain `Str` when `# frozen_string_literal: true` is present (already frozen)
+/// - uninterpolated heredoc `Dstr` (all-`Str` children, source starts with
+///   `<<`) when the pragma is present — RuboCop's `uninterpolated_heredoc?`
+///   (Mastodon murphy-bjrg.3: multi-line `<<~RSA` key fixtures).
 ///
-/// `Dstr` and `Xstr` are included regardless of the pragma because dstr is NOT
-/// frozen by `frozen_string_literal: true` in Ruby 3.0+ (mirrors RedundantFreeze).
+/// Interpolated `Dstr` and `Xstr` are flagged regardless of the pragma because
+/// interpolated strings are NOT frozen by `frozen_string_literal: true` in
+/// Ruby 3.0+ (mirrors RedundantFreeze).
 fn is_flagged_mutable_literal(node: NodeId, cx: &Cx<'_>) -> bool {
     match cx.kind(node) {
         // Regexp is frozen in Ruby 3.0+ — don't flag.
@@ -207,9 +211,36 @@ fn is_flagged_mutable_literal(node: NodeId, cx: &Cx<'_>) -> bool {
                 true
             }
         }
-        // All other mutable literals (Array, Hash, Dstr, Xstr) are flagged.
+        // Uninterpolated heredoc: skip if frozen_string_literal: true.
+        NodeKind::Dstr(parts) => {
+            if is_uninterpolated_heredoc(node, cx.list(*parts), cx) && frozen_pragma_enabled(cx) {
+                false
+            } else {
+                cx.is_mutable_literal(node)
+            }
+        }
+        // All other mutable literals (Array, Hash, Xstr) are flagged.
         _ => cx.is_mutable_literal(node),
     }
+}
+
+/// RuboCop's `uninterpolated_heredoc?` (`node.dstr_type? && node.heredoc?`
+/// with all-`str` children): the `dstr` source opens with `<<` and no child
+/// is an interpolation (every part is a plain `Str`).
+fn is_uninterpolated_heredoc(node: NodeId, parts: &[NodeId], cx: &Cx<'_>) -> bool {
+    if !cx.raw_source(cx.range(node)).starts_with("<<") {
+        return false;
+    }
+    parts
+        .iter()
+        .all(|&part| matches!(*cx.kind(part), NodeKind::Str(_)))
+}
+
+/// True when the file carries `# frozen_string_literal: true`
+/// (`value_bool == 1` is the parsed-true encoding).
+fn frozen_pragma_enabled(cx: &Cx<'_>) -> bool {
+    cx.frozen_string_literal_comment()
+        .is_some_and(|comment| comment.value_bool == 1)
 }
 
 /// Returns true for values that should be flagged in `strict` mode.
@@ -279,6 +310,46 @@ mod tests {
     #[test]
     fn accepts_frozen_array() {
         test::<MutableConstant>().expect_no_offenses("CONST = [1, 2, 3].freeze\n");
+    }
+
+    // ----- Heredocs (Mastodon bjrg.3) -----
+    // RuboCop's `uninterpolated_heredoc?`: a heredoc `dstr` whose children
+    // are all plain `str` (no interpolation) is frozen by
+    // `# frozen_string_literal: true` and must not flag (verified vs
+    // RuboCop 1.91.0). Multi-line heredocs surface as `dstr` in the arena.
+
+    #[test]
+    fn accepts_uninterpolated_heredoc_with_frozen_pragma() {
+        test::<MutableConstant>().expect_no_offenses(
+            "# frozen_string_literal: true\nA = <<~RSA\n  x\n  y\nRSA\n",
+        );
+    }
+
+    #[test]
+    fn accepts_dash_heredoc_with_frozen_pragma() {
+        test::<MutableConstant>().expect_no_offenses(
+            "# frozen_string_literal: true\nA = <<-RSA\n  x\n  y\nRSA\n",
+        );
+    }
+
+    #[test]
+    fn flags_interpolated_heredoc_with_frozen_pragma() {
+        // Interpolation keeps the heredoc mutable even with the pragma.
+        let src = "# frozen_string_literal: true\nA = <<~RSA\n  x\n  #{y}\nRSA\n";
+        assert_eq!(
+            murphy_plugin_api::test_support::run_cop::<MutableConstant>(src).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn flags_uninterpolated_heredoc_without_pragma() {
+        // No magic comment → the heredoc is mutable and still flags.
+        let src = "A = <<~RSA\n  x\n  y\nRSA\n";
+        assert_eq!(
+            murphy_plugin_api::test_support::run_cop::<MutableConstant>(src).len(),
+            1
+        );
     }
 
     // ----- Hash literals -----

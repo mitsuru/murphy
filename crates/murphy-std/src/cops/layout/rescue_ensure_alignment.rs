@@ -29,9 +29,13 @@
 //!   is aligned to that token, no block/assignment alignment offense is emitted.
 //!
 //!   Gaps vs RuboCop (documented, not silently dropped):
-//!     * `Layout/BeginEndAlignment: EnforcedStyleAlignWith: start_of_line`
-//!       — cross-cop config that shifts the alignment column to the start of
-//!       the anchor's line. Murphy always aligns to the anchor keyword.
+//!     * `Layout/BeginEndAlignment: EnforcedStyleAlignWith` non-default styles
+//!       (`keyword`, `begin`) — cross-cop config Murphy cannot read. Only the
+//!       `start_of_line` default (align to the anchor line's indent) is
+//!       modelled.
+//!     * Assignment-anchor message snippets use the anchor's construct opener
+//!       (`x = foo do`) where RuboCop prints just the target name (`x`);
+//!       columns (which drive offenses) match.
 //! ```
 //!
 //! ## Autocorrect
@@ -309,9 +313,25 @@ fn access_modifier_parent(node: NodeId, cx: &Cx<'_>) -> Option<NodeId> {
     None
 }
 
-/// The byte offset to align to — the anchor keyword's start.
+/// The byte offset to align to — RuboCop's `alignment_location` under the
+/// default `Layout/BeginEndAlignment: EnforcedStyleAlignWith: start_of_line`:
+/// the first non-whitespace character of the anchor's first line
+/// (`start_line_range`), NOT the anchor keyword itself. A mid-line anchor such
+/// as a block (`x = foo do ... rescue`) or a same-line assignment aligns
+/// `rescue`/`ensure` with the line's indent. (Murphy cannot read the sibling
+/// cop's config, so only the `start_of_line` default is modelled.)
 fn alignment_location(anchor: NodeId, cx: &Cx<'_>) -> u32 {
-    cx.range(anchor).start
+    let source = cx.source().as_bytes();
+    let start = cx.range(anchor).start as usize;
+    let line_start = source[..start]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |pos| pos + 1);
+    let mut indent_end = line_start;
+    while indent_end < start && matches!(source[indent_end], b' ' | b'\t') {
+        indent_end += 1;
+    }
+    indent_end as u32
 }
 
 /// End offset for the `beginning` snippet shown in the message, mirroring
@@ -811,6 +831,64 @@ mod tests {
               rescue
               ^^^^^^ `rescue` at 3, 2 is not aligned with `private def test` at 1, 0.
               'baz'
+            end
+        "});
+    }
+}
+
+
+#[cfg(test)]
+mod bjrg3_tests {
+    use super::RescueEnsureAlignment;
+    use murphy_plugin_api::test_support::test;
+    use murphy_plugin_api::test_support::indoc;
+
+    #[test]
+    fn accepts_rescue_aligned_with_assignment_line_start() {
+        // Mastodon app/services/activitypub/process_status_update_service.rb:
+        // `rescue` aligns with the start of the assignment line (`current_tags`,
+        // col 2), not with the mid-line block send (`@raw_tags`, col 34).
+        // RuboCop 1.91.0 full-config reports no offense (verified).
+        test::<RescueEnsureAlignment>().expect_no_offenses(indoc! {"
+            def update_tags!
+              current_tags = @status.tags = @raw_tags.flat_map do |tag|
+                Tag.find(tag)
+              rescue ActiveRecord::RecordInvalid
+                []
+              end
+            end
+        "});
+    }
+
+    #[test]
+    fn accepts_rescue_after_chained_block_call_aligned_with_line_start() {
+        // Mastodon app/lib/link_details_extractor.rb: the block result is
+        // chained (`.first`), so the anchor stays the block — but alignment is
+        // still the first line's indent (`@structured_data`, col 2), not the
+        // block send (`document`, col 25). RuboCop 1.91.0: no offense.
+        test::<RescueEnsureAlignment>().expect_no_offenses(indoc! {"
+            def foo(document)
+              @structured_data ||= document.xpath('a').filter_map do |element|
+                element.content
+              rescue JSON::ParserError
+                next
+              end.first
+            end
+        "});
+    }
+
+    #[test]
+    fn flags_rescue_misaligned_from_assignment_line_start() {
+        // True pin: `rescue` at col 4 against a col-2 assignment line still
+        // flags after the start-of-line fix.
+        test::<RescueEnsureAlignment>().expect_offense(indoc! {"
+            def update_tags!
+              current_tags = @status.tags = @raw_tags.flat_map do |tag|
+                Tag.find(tag)
+                rescue ActiveRecord::RecordInvalid
+                ^^^^^^ `rescue` at 4, 4 is not aligned with `current_tags = @status.tags = @raw_tags.flat_map do` at 2, 2.
+                []
+              end
             end
         "});
     }

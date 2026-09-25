@@ -436,6 +436,115 @@ fn lint_inner_directive_after_comment_text_is_honored() {
         .stdout("[]\n");
 }
 
+/// A full-line `# rubocop:disable-next <Cop>` suppresses the cop on the next
+/// line only (RuboCop 1.91 next-statement scope; Mastodon bjrg.3:
+/// `twitter_regex.rb` LineLength, `setting.rb` MissingRespondToMissing).
+#[test]
+fn lint_disable_next_suppresses_next_line_only() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("next_line.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable-next Lint/Debugger\ndebugger\ndebugger\n",
+    )
+    .expect("write next_line.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "disable-next must suppress the next line but not the line after, got {parsed:?}"
+    );
+    assert_eq!(parsed[0]["cop_name"], "Lint/Debugger");
+}
+
+/// `# rubocop:disable-next all` quiets every cop on the next line (a bare
+/// `# rubocop:disable-next` with no list is malformed upstream and suppresses
+/// nothing — `Lint/CopDirectiveSyntax` owns that case).
+#[test]
+fn lint_disable_next_all_suppresses_every_cop_next_line() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("bare_next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:disable-next all\ndebugger\n",
+    )
+    .expect("write bare_next.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
+/// A trailing `code # rubocop:disable-next <Cop>` attaches to nothing —
+/// RuboCop only honors next-statement directives on comment-only lines.
+#[test]
+fn lint_trailing_disable_next_is_ignored() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("trailing_next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\ndebugger # rubocop:disable-next Lint/Debugger\ndebugger\n",
+    )
+    .expect("write trailing_next.rb");
+
+    let assert = Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(1);
+
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout must be a JSON array");
+    assert_eq!(
+        parsed.len(),
+        2,
+        "a trailing disable-next must suppress nothing, got {parsed:?}"
+    );
+}
+
+/// `# rubocop:todo-next` is RuboCop's alias of `disable-next` and suppresses
+/// the next line the same way.
+#[test]
+fn lint_todo_next_suppresses_next_line() {
+    let dir = tempdir().expect("create tempdir");
+    let path = dir.path().join("todo_next.rb");
+    fs::write(
+        &path,
+        "# frozen_string_literal: true\n\n# rubocop:todo-next Lint/Debugger\ndebugger\n",
+    )
+    .expect("write todo_next.rb");
+
+    Command::cargo_bin("murphy")
+        .expect("murphy binary builds")
+        .arg("lint")
+        .arg("--format")
+        .arg("json")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .stdout("[]\n");
+}
+
 /// A trailing `code # rubocop:disable <Cop>` is line-local — it must NOT suppress
 /// the cop on subsequent lines (RuboCop comment-directive scope).
 #[test]

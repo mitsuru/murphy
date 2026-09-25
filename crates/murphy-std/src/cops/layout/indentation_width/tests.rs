@@ -264,20 +264,24 @@ fn flags_case_else_body_indented_from_the_wrong_keyword() {
 }
 
 #[test]
-fn accepts_block_body_even_when_end_is_misaligned() {
-    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+fn flags_block_body_when_end_is_misaligned() {
+    // RuboCop bases the body on `end` (`start_of_line`): `bar` at column 2 is
+    // -2 past the column-4 `end`, so this flags (verified vs RuboCop 1.91.0).
+    test::<IndentationWidth>().expect_offense(indoc! {r#"
         foo do
           bar
+          ^^ Use 2 (not -2) spaces for indentation.
             end
     "#});
 }
 
 #[test]
-fn flags_block_body_aligned_to_misaligned_end() {
-    test::<IndentationWidth>().expect_offense(indoc! {r#"
+fn accepts_block_body_aligned_past_misaligned_end() {
+    // `bar` at column 4 is exactly 2 past the column-2 `end` — RuboCop
+    // accepts (verified vs RuboCop 1.91.0).
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
         foo do
             bar
-        ^^^^ Use 2 (not 4) spaces for indentation.
           end
     "#});
 }
@@ -298,5 +302,98 @@ fn accepts_assigned_block_body_indented_from_opener_line() {
         result = foo do
           bar
         end
+    "#});
+}
+
+// ── Mastodon batch-3 FPs (murphy-bjrg.3): block body measures from `end` ────
+// RuboCop's default `EnforcedStyleAlignWith: start_of_line` bases the block
+// body on the closing `end`/`}` when it begins its line — NOT on the call's
+// opening line. Each shape below is a reduced Mastodon hit that RuboCop 1.91.0
+// (full config, TargetRubyVersion 3.3) accepts.
+
+#[test]
+fn accepts_hash_body_inside_do_block() {
+    // app/lib/annual_report/top_hashtags.rb: the `{` body sits 16 past the
+    // `top:` line but exactly 2 past the block's `end`.
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        def generate
+          {
+            top: items.map do |x|
+                            {
+                              name: x,
+                            }
+                          end,
+          }
+        end
+    "#});
+}
+
+#[test]
+fn accepts_chained_call_inside_brace_block() {
+    // app/models/tag.rb (`scope :recently_used, lambda { ... }`): the chain
+    // body is 24 past the statement start but 2 past the closing `}`.
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        scope :recently_used, lambda { |account|
+                                joins(:statuses)
+                                  .where(x: 1)
+                              }
+    "#});
+}
+
+#[test]
+fn accepts_chain_block_body_past_receiver() {
+    // app/workers/move_worker.rb: `.in_batches do` body is 4 past the chain
+    // receiver start but 2 past the block's `end`.
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        source_local_followers
+          .where(x: 1)
+          .in_batches do |follows|
+            ListAccount.where(follow: follows)
+          end
+    "#});
+}
+
+#[test]
+fn accepts_brace_body_after_chained_do_block() {
+    // spec/support/fasp/provider_request_helper.rb: the `{` body is 4 past
+    // the `stub_request` line but 2 past the block's `end`.
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        stub_request(method, url)
+          .to_return do |_request|
+            {
+              status: 200,
+            }
+          end
+    "#});
+}
+
+#[test]
+fn accepts_rspec_allow_chain_block_body() {
+    // spec/workers/tagged_collection_resolve_worker_spec.rb: `allow(...).to`
+    // chain block body 4 past `allow` but 2 past the block's `end`.
+    test::<IndentationWidth>().expect_no_offenses(indoc! {r#"
+        allow(service_double)
+          .to receive(:call)
+          .with(uri, anything) do
+            Fabricate(:thing, uri: uri)
+          end
+    "#});
+}
+
+#[test]
+fn accepts_block_body_when_end_shares_its_line() {
+    // `end` not first on its line → RuboCop skips `on_block` entirely.
+    test::<IndentationWidth>().expect_no_offenses("foo do\n  bar end\n");
+}
+
+#[test]
+fn flags_block_body_measured_from_misaligned_end() {
+    // `end` at column 4, body at column 2 → `Use 2 (not -2)`: the body must
+    // sit 2 past `end`, so this under-indented body still flags (true pin).
+    test::<IndentationWidth>().expect_offense(indoc! {r#"
+        foo do
+          bar
+          ^^ Use 2 (not -2) spaces for indentation.
+            end
     "#});
 }

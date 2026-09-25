@@ -11,11 +11,13 @@
 //! gap_issues: []
 //! notes: >
 //!   Detection-only port of RuboCop's core check: for each block-introducing
-//!   keyword (`def`/`defs`, `class`/`module`, `if`, `while`/`until`,
+//!   construct (`def`/`defs`, `class`/`module`, `if`, `while`/`until`,
 //!   `case`/`when`, brace/`do` block), the body's column must be exactly
-//!   `Width` (default 2) past the keyword's column — RuboCop's
+//!   `Width` (default 2) past the construct's indentation base — RuboCop's
 //!   `column_offset_between(body.loc, base_loc)` compared to
-//!   `configured_indentation_width`. The `skip_check?` guards are ported
+//!   `configured_indentation_width`. For blocks the base is the closing
+//!   `end`/`}` under the default `EnforcedStyleAlignWith: start_of_line`
+//!   (murphy-bjrg.3), not the call's opening line. The `skip_check?` guards are ported
 //!   faithfully (they are the false-positive gate): same-line body, body that
 //!   is not the first non-whitespace on its line (`else do_something`), and
 //!   body starting with a bare access modifier. The offense covers the body's
@@ -58,7 +60,7 @@
 //!   `Layout/IndentationWidth` itself is the identity here).
 //! ```
 
-use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, cop};
+use murphy_plugin_api::{CopOptions, Cx, NodeId, NodeKind, OptNodeId, Range, SourceTokenKind, cop};
 
 #[derive(Default)]
 pub struct IndentationWidth;
@@ -184,44 +186,39 @@ fn check_loop(node: NodeId, cx: &Cx<'_>, options: &IndentationWidthOptions) {
     check_indentation(base, loop_body(node, cx), cx, options);
 }
 
-/// `on_block`: measure the body from the indentation of the block call's
-/// opening line. The closing `end`/`}` can be misaligned, so it is not a safe
-/// base. Skip the check if the call's start location cannot be recovered.
+/// `on_block`: RuboCop's default `EnforcedStyleAlignWith: start_of_line`
+/// (`block_body_indentation_base`) bases the body on the closing `end`/`}` —
+/// and skips the check entirely when the closer does not begin its line.
+/// (`relative_to_receiver` bases on the dot/selector via sibling-cop config
+/// Murphy cannot read, so only `start_of_line` is modelled.)
 fn check_block_body(node: NodeId, cx: &Cx<'_>, options: &IndentationWidthOptions) {
-    let base = block_body_base(node, cx);
-    if base == Range::ZERO {
+    let Some(base) = block_end_delimiter(node, cx) else {
+        return;
+    };
+    if !begins_its_line(cx, base.start) {
         return;
     }
     check_indentation(base, cx.block_body(node), cx, options);
 }
 
-/// Find the first source token on the line where the block's call begins. This
-/// is the default start-of-line indentation base for both `do` and brace blocks,
-/// including calls written after an assignment on the same line.
-fn block_body_base(node: NodeId, cx: &Cx<'_>) -> Range {
-    let Some(call) = cx.block_call(node).get() else {
-        return Range::ZERO;
-    };
-    let call_start = cx.range(call).start as usize;
+/// The closing delimiter token (`end` / `}`) of a block — the token ending
+/// exactly at the block's expression end. `None` when no such delimiter token
+/// is found. (Same shape as the sibling `Layout/BlockAlignment` helper.)
+fn block_end_delimiter(node: NodeId, cx: &Cx<'_>) -> Option<Range> {
+    let block_end = cx.range(node).end;
     let source = cx.source().as_bytes();
-    if call_start > source.len() {
-        return Range::ZERO;
+    let toks = cx.sorted_tokens();
+    let idx = toks.partition_point(|t| t.range.end < block_end);
+    let tok = toks.get(idx)?;
+    if tok.range.end == block_end
+        && (tok.kind == SourceTokenKind::RightBrace
+            || (tok.kind == SourceTokenKind::Other
+                && &source[tok.range.start as usize..tok.range.end as usize] == b"end"))
+    {
+        Some(tok.range)
+    } else {
+        None
     }
-    let line_start = source[..call_start]
-        .iter()
-        .rposition(|&byte| byte == b'\n')
-        .map_or(0, |newline| newline + 1);
-    let mut base_start = line_start;
-    while base_start < call_start && matches!(source[base_start], b' ' | b'\t') {
-        base_start += 1;
-    }
-    let Some(token) = cx.token_after(base_start as u32) else {
-        return Range::ZERO;
-    };
-    if token.range.start != base_start as u32 {
-        return Range::ZERO;
-    }
-    token.range
 }
 
 /// Locate the `else` token belonging to a case node. Restrict the search to
