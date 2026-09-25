@@ -628,6 +628,309 @@ fn oneof_head_with_concrete_children_skips_arity_incompatible_member() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// 3c. OneOf head with CONCRETE children in bool-expression contexts
+// (murphy-6q71). `lower_bool_node` / `lower_bool_anyorder_probe_node` dispatch
+// a concrete-child OneOf per union-variant schema via `lower_bool_exact_node`
+// / `lower_bool_anyorder_probe_exact_node`; a member that cannot fit the
+// children gets no arm (`false`), mirroring the C interpreter. `Head::Any`
+// with concrete children stays rejected in both backends. All patterns below
+// use fixed-slot-only children (`_ :foo`); `List`-slot children stay a
+// compile error in bool contexts (pre-existing v1 restriction).
+// ────────────────────────────────────────────────────────────────────────
+
+def_node_matcher!(b_not_oneof_foo, "!({send csend} _ :foo)");
+def_node_matcher!(b_union_oneof_foo_or_int, "{({send int} _ :foo) int}");
+def_node_matcher!(b_descend_oneof_foo, "`({send csend} _ :foo)");
+def_node_matcher!(b_anyorder_oneof_foo, "(array <({send int} _ :foo) int>)");
+
+#[test]
+fn oneof_with_concrete_children_in_not_agrees() {
+    // `!({send csend} _ :foo)` — homogeneous union, distinct slot shapes
+    // (`send` receiver is `RecvOptNode`, `csend` receiver is `Node`).
+    let mut b = AstBuilder::new("!oneof", "t.rb");
+    let foo = b.intern_symbol("foo");
+    let bar = b.intern_symbol("bar");
+    let xsym = b.intern_symbol("x");
+    let empty = b.push_list(&[]);
+    let recv1 = b.push(NodeKind::Lvar(xsym), r());
+    let send_foo = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv1),
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    let recv2 = b.push(NodeKind::Lvar(xsym), r());
+    let send_bar = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv2),
+            method: bar,
+            args: empty,
+        },
+        r(),
+    );
+    let recv3 = b.push(NodeKind::Lvar(xsym), r());
+    let csend_foo = b.push(
+        NodeKind::Csend {
+            receiver: recv3,
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    let recv4 = b.push(NodeKind::Lvar(xsym), r());
+    let csend_bar = b.push(
+        NodeKind::Csend {
+            receiver: recv4,
+            method: bar,
+            args: empty,
+        },
+        r(),
+    );
+    let int_node = b.push(NodeKind::Int(5), r());
+    let root_list = b.push_list(&[send_foo, send_bar, csend_foo, csend_bar, int_node]);
+    let root = b.push(NodeKind::Begin(root_list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    for (subject, expect, label) in [
+        (send_foo, false, "send :foo"),
+        (send_bar, true, "send :bar"),
+        (csend_foo, false, "csend :foo"),
+        (csend_bar, true, "csend :bar"),
+        (int_node, true, "int (tag outside union)"),
+    ] {
+        assert_eq!(
+            b_not_oneof_foo(subject, &cx),
+            expect,
+            "B: !({{send csend}} _ :foo) on {label}"
+        );
+        assert_c_matches("!({send csend} _ :foo)", &ast, subject, expect);
+    }
+}
+
+#[test]
+fn oneof_with_concrete_children_in_union_agrees() {
+    // `{({send int} _ :foo) int}` — heterogeneous union inside `{}`: the
+    // `int` member has no v1 schema so it gets no bool dispatch arm (falls to
+    // `false`), mirroring the C interpreter's per-node `false`. The outer
+    // `int` arm keeps int subjects matching.
+    let mut b = AstBuilder::new("union oneof", "t.rb");
+    let foo = b.intern_symbol("foo");
+    let bar = b.intern_symbol("bar");
+    let xsym = b.intern_symbol("x");
+    let empty = b.push_list(&[]);
+    let recv1 = b.push(NodeKind::Lvar(xsym), r());
+    let send_foo = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv1),
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    let recv2 = b.push(NodeKind::Lvar(xsym), r());
+    let send_bar = b.push(
+        NodeKind::Send {
+            receiver: OptNodeId::some(recv2),
+            method: bar,
+            args: empty,
+        },
+        r(),
+    );
+    let int_node = b.push(NodeKind::Int(5), r());
+    let recv3 = b.push(NodeKind::Lvar(xsym), r());
+    let csend_foo = b.push(
+        NodeKind::Csend {
+            receiver: recv3,
+            method: foo,
+            args: empty,
+        },
+        r(),
+    );
+    let root_list = b.push_list(&[send_foo, send_bar, int_node, csend_foo]);
+    let root = b.push(NodeKind::Begin(root_list), r());
+    let ast = b.finish(root);
+    let fns = fns();
+    let raw = cx_raw_for(&ast, &fns);
+    let cx = unsafe { Cx::from_raw(&raw) };
+
+    for (subject, expect, label) in [
+        (send_foo, true, "send :foo (oneof arm)"),
+        (send_bar, false, "send :bar (neither arm)"),
+        (int_node, true, "int (outer int arm)"),
+        (csend_foo, false, "csend (tag outside inner union)"),
+    ] {
+        assert_eq!(
+            b_union_oneof_foo_or_int(subject, &cx),
+            expect,
+            "B: {{({{send int}} _ :foo) int}} on {label}"
+        );
+        assert_c_matches("{({send int} _ :foo) int}", &ast, subject, expect);
+    }
+}
+
+#[test]
+fn oneof_with_concrete_children_in_descend_agrees() {
+    // `` `({send csend} _ :foo) `` — backtick routes its body through
+    // `lower_bool`, so the OneOf-with-children dispatches per variant there
+    // too. Subjects are `begin` parents; only those with a `:foo` send/csend
+    // descendant match.
+    let pat = "`({send csend} _ :foo)";
+    let build_begin = |method_name: &str, make_csend: bool| {
+        let mut b = AstBuilder::new("descend oneof", "t.rb");
+        let method = b.intern_symbol(method_name);
+        let xsym = b.intern_symbol("x");
+        let empty = b.push_list(&[]);
+        let recv = b.push(NodeKind::Lvar(xsym), r());
+        let call = if make_csend {
+            b.push(
+                NodeKind::Csend {
+                    receiver: recv,
+                    method,
+                    args: empty,
+                },
+                r(),
+            )
+        } else {
+            b.push(
+                NodeKind::Send {
+                    receiver: OptNodeId::some(recv),
+                    method,
+                    args: empty,
+                },
+                r(),
+            )
+        };
+        let list = b.push_list(&[call]);
+        let begin = b.push(NodeKind::Begin(list), r());
+        let ast = b.finish(begin);
+        (ast, begin)
+    };
+
+    for (method_name, make_csend, expect, label) in [
+        ("foo", false, true, "begin(send :foo)"),
+        ("bar", false, false, "begin(send :bar)"),
+        ("foo", true, true, "begin(csend :foo)"),
+        ("bar", true, false, "begin(csend :bar)"),
+    ] {
+        let (ast, begin) = build_begin(method_name, make_csend);
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(
+            b_descend_oneof_foo(begin, &cx),
+            expect,
+            "B: {pat} on {label}"
+        );
+        assert_c_matches(pat, &ast, begin, expect);
+    }
+
+    // A `begin` of only ints has no send/csend descendant — must miss.
+    {
+        let mut b = AstBuilder::new("descend ints", "t.rb");
+        let i1 = b.push(NodeKind::Int(1), r());
+        let i2 = b.push(NodeKind::Int(2), r());
+        let list = b.push_list(&[i1, i2]);
+        let begin = b.push(NodeKind::Begin(list), r());
+        let ast = b.finish(begin);
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert!(
+            !b_descend_oneof_foo(begin, &cx),
+            "B: {pat} must NOT match begin(int, int)"
+        );
+        assert_c_matches(pat, &ast, begin, false);
+    }
+}
+
+#[test]
+fn oneof_with_concrete_children_in_anyorder_agrees() {
+    // `(array <({send int} _ :foo) int>)` — anyorder probe routes its
+    // elements through `lower_bool_anyorder_probe_node`, so the OneOf arm
+    // dispatches per variant there too. The `int` union member has no schema
+    // (no arm → `false`); the outer `int` element keeps `[send-:foo, int]`
+    // matching in either order.
+    let pat = "(array <({send int} _ :foo) int>)";
+    let build_array = |send_method: Option<&str>, ints: &[i64], send_first: bool| {
+        let mut b = AstBuilder::new("anyorder oneof", "t.rb");
+        let foo = b.intern_symbol("foo");
+        let bar = b.intern_symbol("bar");
+        let xsym = b.intern_symbol("x");
+        let empty = b.push_list(&[]);
+        let mut elems: Vec<NodeId> = Vec::new();
+        let mut send_node: Option<NodeId> = None;
+        if let Some(m) = send_method {
+            let method = if m == "foo" { foo } else { bar };
+            let recv = b.push(NodeKind::Lvar(xsym), r());
+            let s = b.push(
+                NodeKind::Send {
+                    receiver: OptNodeId::some(recv),
+                    method,
+                    args: empty,
+                },
+                r(),
+            );
+            send_node = Some(s);
+        }
+        let mut int_nodes: Vec<NodeId> = Vec::new();
+        for v in ints {
+            int_nodes.push(b.push(NodeKind::Int(*v), r()));
+        }
+        if send_first {
+            if let Some(s) = send_node {
+                elems.push(s);
+            }
+            elems.extend(int_nodes.iter().cloned());
+        } else {
+            elems.extend(int_nodes.iter().cloned());
+            if let Some(s) = send_node {
+                elems.push(s);
+            }
+        }
+        let list = b.push_list(&elems);
+        let arr = b.push(NodeKind::Array(list), r());
+        let ast = b.finish(arr);
+        (ast, arr)
+    };
+
+    for (send_method, ints, send_first, expect, label) in [
+        (Some("foo"), vec![1], true, true, "[send-:foo, int]"),
+        (
+            Some("foo"),
+            vec![1],
+            false,
+            true,
+            "[int, send-:foo] (reversed)",
+        ),
+        (Some("bar"), vec![1], true, false, "[send-:bar, int]"),
+        (
+            Some("bar"),
+            vec![1],
+            false,
+            false,
+            "[int, send-:bar] (reversed)",
+        ),
+        (None, vec![1, 2], true, false, "[int, int]"),
+    ] {
+        let (ast, arr) = build_array(send_method, &ints, send_first);
+        let fns = fns();
+        let raw = cx_raw_for(&ast, &fns);
+        let cx = unsafe { Cx::from_raw(&raw) };
+        assert_eq!(
+            b_anyorder_oneof_foo(arr, &cx),
+            expect,
+            "B: {pat} on {label}"
+        );
+        assert_c_matches(pat, &ast, arr, expect);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // 4. Union / Not.
 // ────────────────────────────────────────────────────────────────────────
 
