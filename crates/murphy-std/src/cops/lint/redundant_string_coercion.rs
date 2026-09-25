@@ -9,14 +9,25 @@
 //! status: partial
 //! gap_issues: []
 //! notes: >
-//!   Initial port covers `to_s` without arguments in interpolation and in bare
-//!   `print`, `puts`, and `warn` arguments, including implicit receiver `to_s`.
-//!   Known v1 limitation: interpolation handling depends on Murphy's `Dstr` /
-//!   `Begin` lowering and may not cover every regexp/symbol/xstr interpolation
-//!   variant that RuboCop's interpolation mixin visits.
+//!   Verbatim port of RuboCop's `to_s_without_args?` matcher `(call _ :to_s)`
+//!   (murphy-s1yc). `call` = `{send csend}` covers safe-navigation
+//!   (`foo&.to_s`); the `_` receiver binds an absent (receiverless `to_s`)
+//!   or present receiver; strict arity (no trailing `...`) means zero args
+//!   only (`foo.to_s(8)` does not match). Initial port covers `to_s` without
+//!   arguments in interpolation and in bare `print`, `puts`, and `warn`
+//!   arguments, including implicit receiver `to_s`. Known v1 limitation:
+//!   interpolation handling depends on Murphy's `Dstr` / `Begin` lowering and
+//!   may not cover every regexp/symbol/xstr interpolation variant that
+//!   RuboCop's interpolation mixin visits.
 //! ```
 
-use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind};
+use murphy_plugin_api::{cop, Cx, NoOptions, NodeId, NodeKind, def_node_matcher};
+
+// Verbatim port of RuboCop's `to_s_without_args?` (murphy-s1yc):
+// `(call _ :to_s)` — `call` = `{send csend}` covers safe-navigation, the `_`
+// receiver binds an absent (receiverless) or present receiver, and strict
+// arity (no trailing `...`) requires exactly zero arguments.
+def_node_matcher!(to_s_without_args, "(call _ :to_s)");
 
 const MSG_DEFAULT: &str = "Redundant use of `Object#to_s` in %<context>s.";
 const MSG_SELF: &str = "Use `self` instead of `Object#to_s` in %<context>s.";
@@ -92,11 +103,7 @@ fn interpolation_expression_parent(node: NodeId, container: NodeId, cx: &Cx<'_>)
 }
 
 fn is_to_s_without_args(node: NodeId, cx: &Cx<'_>) -> bool {
-    matches!(
-        cx.kind(node),
-        NodeKind::Send { .. } | NodeKind::Csend { .. }
-    ) && cx.method_name(node) == Some("to_s")
-        && cx.call_arguments(node).is_empty()
+    to_s_without_args(node, cx)
 }
 
 fn register_offense(node: NodeId, context: &str, cx: &Cx<'_>) {
@@ -150,5 +157,43 @@ mod tests {
             .expect_no_offenses("p value.to_s\n")
             .expect_no_offenses("puts value.to_s(8)\n")
             .expect_no_offenses("obj.puts value.to_s\n");
+    }
+
+    #[test]
+    fn flags_csend_to_s_in_interpolation() {
+        // Verbatim `(call _ :to_s)` covers safe-navigation: `call` =
+        // `{send csend}`, so `foo&.to_s` matches exactly like RuboCop.
+        test::<RedundantStringCoercion>().expect_correction(
+            indoc! {r##"
+                "result is #{value&.to_s}"
+                                    ^^^^ Redundant use of `Object#to_s` in interpolation.
+            "##},
+            "\"result is #{value}\"\n",
+        );
+    }
+
+    #[test]
+    fn flags_receiverless_to_s_in_interpolation() {
+        // The `_` receiver binds the absent (nil-filled) slot, so a bare
+        // `to_s` matches — same as RuboCop (murphy-if9y).
+        test::<RedundantStringCoercion>().expect_correction(
+            indoc! {r##"
+                "result is #{to_s}"
+                             ^^^^ Use `self` instead of `Object#to_s` in interpolation.
+            "##},
+            "\"result is #{self}\"\n",
+        );
+    }
+
+    #[test]
+    fn accepts_to_s_with_args_in_interpolation() {
+        // Strict arity (no trailing `...`): `to_s(8)` does not match.
+        test::<RedundantStringCoercion>().expect_no_offenses("\"result is #{value.to_s(8)}\"\n");
+    }
+
+    #[test]
+    fn accepts_csend_to_s_with_args() {
+        // `foo&.to_s(8)` has an argument, so it does not match.
+        test::<RedundantStringCoercion>().expect_no_offenses("puts value&.to_s(8)\n");
     }
 }
