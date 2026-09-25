@@ -92,6 +92,11 @@
 //! - `RSpec/RepeatedDescription` — no repeated descriptions (murphy-4gd.3.18).
 //! - `RSpec/RepeatedExample` — no repeated examples (murphy-4gd.3.18).
 //! - `RSpec/RepeatedExampleGroupBody` — no repeated group bodies (murphy-4gd.3.18).
+//! - `RSpec/RepeatedExampleGroupDescription` — no repeated group descriptions (murphy-4gd.3.19).
+//! - `RSpec/RepeatedIncludeExample` — no repeated shared-example includes (murphy-4gd.3.19).
+//! - `RSpec/RepeatedSubjectCall` — no repeated `subject` calls (murphy-4gd.3.19).
+//! - `RSpec/ReturnFromStub` — consistent stub return style (murphy-4gd.3.19).
+//! - `RSpec/ScatteredLet` — keep `let` definitions together (murphy-4gd.3.19).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.

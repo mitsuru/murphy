@@ -555,3 +555,52 @@ pub(crate) fn is_subject_block(cx: &Cx<'_>, id: NodeId) -> bool {
     };
     receiver == OptNodeId::NONE && matches!(cx.symbol_str(method), "subject" | "subject!")
 }
+
+/// `true` when `id` is a recursive literal or constant.
+///
+/// Mirrors RuboCop's `recursive_literal_or_const?`: plain literals
+/// (`nil`, booleans, numbers, strings, symbols, regexps without
+/// interpolation, ranges of literals), constants, and compound
+/// literals (`Array`, `Hash`, `Pair`) whose children all qualify.
+/// Anything dynamic (`Send`, `Block`, variable reads, interpolated
+/// strings) is `false`.
+///
+/// Shared by `RSpec/RepeatedIncludeExample` (all args must be static)
+/// and `RSpec/ReturnFromStub` (stub return values must be static).
+pub(crate) fn is_recursive_literal_or_const(cx: &Cx<'_>, id: NodeId) -> bool {
+    match *cx.kind(id) {
+        NodeKind::Nil
+        | NodeKind::True_
+        | NodeKind::False_
+        | NodeKind::Int(_)
+        | NodeKind::Float(_)
+        | NodeKind::Str(_)
+        | NodeKind::Sym(_)
+        | NodeKind::Complex(_)
+        | NodeKind::Rational(_)
+        | NodeKind::Regopt(_) => true,
+        NodeKind::Const { scope, .. } => scope
+            .get()
+            .is_none_or(|s| is_recursive_literal_or_const(cx, s)),
+        NodeKind::Array(list) | NodeKind::Hash(list) => cx
+            .list(list)
+            .iter()
+            .all(|&child| is_recursive_literal_or_const(cx, child)),
+        NodeKind::Pair { key, value } => {
+            is_recursive_literal_or_const(cx, key) && is_recursive_literal_or_const(cx, value)
+        }
+        NodeKind::RangeExpr { begin_, end_, .. } => {
+            begin_
+                .get()
+                .is_none_or(|b| is_recursive_literal_or_const(cx, b))
+                && end_
+                    .get()
+                    .is_none_or(|e| is_recursive_literal_or_const(cx, e))
+        }
+        NodeKind::Regexp { parts, .. } => cx
+            .list(parts)
+            .iter()
+            .all(|&child| is_recursive_literal_or_const(cx, child)),
+        _ => false,
+    }
+}
