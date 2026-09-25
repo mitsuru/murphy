@@ -27,9 +27,17 @@
 //! `URI.encode_www_form_component`, `URI.decode_www_form`, etc.)
 //! depends on the specific use case and is not safe to automate.
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, cop, def_node_matcher};
 
-const OBSOLETE_METHODS: &[&str] = &["escape", "unescape", "encode", "decode"];
+// RuboCop parity: `Lint/UriEscapeUnescape` matcher is
+// `(send (const {nil? cbase} :URI) {:escape :unescape :encode :decode} ...)`.
+// In Murphy `::URI` collapses to `Const{scope:None}`, so a single `nil?`
+// scope covers bare and `::`-prefixed forms — equivalent to the prior
+// `is_global_const` check.
+def_node_matcher!(
+    uri_escape_unescape,
+    "(send (const nil? :URI) {:escape :unescape :encode :decode} ...)"
+);
 
 const ESCAPE_REPLACEMENTS: &str =
     "`CGI.escape`, `URI.encode_www_form` or `URI.encode_www_form_component`";
@@ -61,15 +69,14 @@ pub struct UriEscapeUnescape;
 impl UriEscapeUnescape {
     #[on_node(kind = "send")]
     fn check_send(&self, node: NodeId, cx: &Cx<'_>) {
-        let NodeKind::Send { receiver, method, .. } = *cx.kind(node) else { return; };
-        let method_str = cx.symbol_str(method);
-        if !OBSOLETE_METHODS.contains(&method_str) {
+        // `(send (const nil? :URI) {:escape :unescape :encode :decode} ...)`
+        // — top-level `URI.escape` family.
+        if !uri_escape_unescape(node, cx) {
             return;
         }
-        let Some(receiver_id) = receiver.get() else { return; };
-        if !cx.is_global_const(receiver_id, "URI") {
+        let Some(method_str) = cx.method_name(node) else {
             return;
-        }
+        };
         cx.emit_offense(cx.range(node), &message(method_str), None);
     }
 }
@@ -149,6 +156,24 @@ mod tests {
             ::URI.decode(enc_uri)
             ^^^^^^^^^^^^^^^^^^^^^ `URI.decode` method is obsolete and should not be used. Instead, use `CGI.unescape`, `URI.decode_www_form` or `URI.decode_www_form_component` depending on your specific use case.
         "#});
+    }
+
+    // --- Boundary characterization (murphy-ft88): pin the exact node set
+    // the hand-rolled `is_global_const` predicate matches, so the
+    // `(send (const nil? :URI) {:escape :unescape :encode :decode} ...)`
+    // refactor can be proven equivalent.
+
+    #[test]
+    fn boundary_ignores_namespaced_uri() {
+        // `Foo::URI` has a non-nil const scope, so it is not flagged.
+        test::<UriEscapeUnescape>().expect_no_offenses("Foo::URI.escape('x')\n");
+    }
+
+    #[test]
+    fn boundary_ignores_csend() {
+        // `&.` is a `csend` node, not `send`; RuboCop's `(send ...)`
+        // pattern does not match it.
+        test::<UriEscapeUnescape>().expect_no_offenses("URI&.escape('x')\n");
     }
 }
 
