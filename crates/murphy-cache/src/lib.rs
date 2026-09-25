@@ -18,11 +18,20 @@
 //!
 //! `version_key = sha256(murphy_version_bytes || target_triple_bytes ||
 //!                       layer_version_le_bytes)`.
+//!
+//! The per-file lint-result cache lives in [`ResultCache`] (A5,
+//! `murphy-fmw.1.1`; see `results.rs`): same root, `results/` subdir,
+//! keyed by `content_hash` + a result version key that mixes the AST
+//! version key with the caller's cop-pack + config fingerprint, so stale
+//! configs never read stale results.
 
 use murphy_ast::Ast;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+mod results;
+pub use results::{MAX_RESULT_BYTES, ResultCache, derive_result_version_key};
 
 /// Environment variable that, when set to any value, disables the cache.
 const DISABLE_ENV: &str = "MURPHY_NO_CACHE";
@@ -146,6 +155,52 @@ pub fn derive_version_key(layer_version: u32) -> [u8; 32] {
     h.update(b"\0");
     h.update(layer_version.to_le_bytes());
     h.finalize().into()
+}
+
+/// The default on-disk cache root (`$XDG_CACHE_HOME/murphy/v1`, or
+/// `$HOME/.cache/murphy/v1` when `XDG_CACHE_HOME` is unset). Returns
+/// `None` when neither base directory can be resolved. Does not create
+/// the directory and does not consult `MURPHY_NO_CACHE` — callers decide
+/// open vs stat vs clean.
+pub fn default_cache_root() -> Option<PathBuf> {
+    let base = xdg_cache_home()?;
+    Some(base.join("murphy").join(FORMAT_DIR))
+}
+
+/// Walk the default cache root and count entries. Returns
+/// `(ast_files, result_files, total_bytes)`. Missing root ⇒ `(0, 0, 0)`.
+/// Used by `murphy cache stat`. Best-effort: unreadable files are skipped.
+pub fn cache_stats(root: &Path) -> (usize, usize, u64) {
+    let mut ast = 0usize;
+    let mut results = 0usize;
+    let mut bytes = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let is_result = p.parent().is_some_and(|par| {
+                par.file_name().is_some_and(|n| n == "results")
+                    || p.ancestors()
+                        .any(|a| a.file_name().is_some_and(|n| n == "results"))
+            });
+            match p.extension().and_then(|e| e.to_str()) {
+                Some("ast") => ast += 1,
+                Some("json") if is_result => results += 1,
+                _ => continue,
+            }
+            if let Ok(md) = entry.metadata() {
+                bytes = bytes.saturating_add(md.len());
+            }
+        }
+    }
+    (ast, results, bytes)
 }
 
 fn xdg_cache_home() -> Option<PathBuf> {

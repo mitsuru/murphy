@@ -8,6 +8,7 @@ name = "murphy"
 path = "src/main.rs"
 
 [dependencies]
+murphy-ast = { path = "../murphy-ast" }
 murphy-core = { path = "../murphy-core" }
 murphy-cache = { path = "../murphy-cache" }
 murphy-translate = { path = "../murphy-translate" }
