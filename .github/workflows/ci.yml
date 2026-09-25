@@ -107,6 +107,35 @@ jobs:
       - name: cargo test --no-fail-fast
         run: cargo test --workspace --no-fail-fast
 
+  ruby-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise)
+        uses: jdx/mise-action@v2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+
+      - name: Build debug binary for wrapper fallback
+        run: cargo build -p murphy-cli
+
+      - name: Ruby wrapper tests
+        run: |
+          ruby -Ilib -Itest test/test_native.rb
+          ruby -Ilib -Itest test/test_version_sync.rb
+
+      - name: bundle exec smoke
+        run: |
+          bundle install --local
+          bundle exec murphy --help
+          bundle exec murphy lint --help
+
+      - name: gem build smoke
+        run: gem build murphy.gemspec
+
   markdownlint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -117,7 +146,7 @@ jobs:
   check:
     if: always()
     runs-on: ubuntu-latest
-    needs: [fmt, cargo-check, test, clippy, full-test, markdownlint]
+    needs: [fmt, cargo-check, test, clippy, full-test, ruby-smoke, markdownlint]
     steps:
       - name: Check required job results
         env:

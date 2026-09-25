@@ -4,6 +4,8 @@
 # Rust build output (root workspace, spikes, any crate)
 target/
 *.gem
+/libexec/
+Gemfile.lock
 .DS_Store
 # Stray artifact emitted in CWD by `cargo test`'s merged doctest compilation.
 librust_out.rlib

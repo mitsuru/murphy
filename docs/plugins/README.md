@@ -69,6 +69,14 @@ Multi-arch matrix releases are a future option — the template's CI builds
 and tests the host arch only; the `lib/<arch>/` slots are where cross-built
 binaries go. There is no marketplace or `murphy plugin install <name>` yet.
 
+Packs also ship as Ruby gems (C2; ADR 0048): a `murphy-*` gem holding
+`murphy-plugin.toml` (+ `lib/<arch>/` cdylibs) at its root, under
+`<gem>/murphy/`, or as a legacy `lib/lib<name>.so` is auto-discovered
+from `plugins = ["murphy-foo"]` under `bundle exec` (highest installed
+version wins). The `murphy` binary itself installs via
+`gem install murphy --platform <tag>`. Full guide:
+`docs/guides/gem-distribution.md`.
+
 ## Future: `murphy plugin new`
 
 A `murphy plugin new murphy-foo` subcommand — a thin wrapper over
