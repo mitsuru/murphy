@@ -1740,33 +1740,8 @@ impl InverseOf {
 }
 submit_cop!(InverseOf);
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/LexicallyScopedActionFilter
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct LexicallyScopedActionFilter;
-
-#[cop(
-    name = "Rails/LexicallyScopedActionFilter",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl LexicallyScopedActionFilter {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(LexicallyScopedActionFilter);
+// `LexicallyScopedActionFilter` promoted to real cop in
+// `cops::rails::lexically_scoped_action_filter`.
 
 /// ## RuboCop parity
 ///
