@@ -35,7 +35,7 @@ honour `--no-cache` and `MURPHY_NO_CACHE`.
 
 ### 2. Cache key mixes cop pack version + config (stale-cache avoidance)
 
-```
+```text
 ast_key    = sha256(content_hash || version_key)
 result_key = sha256(content_hash || result_version_key)
 version_key        = sha256(murphy_version || target_triple || layer_version)
