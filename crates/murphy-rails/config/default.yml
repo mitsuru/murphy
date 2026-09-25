@@ -123,6 +123,12 @@ Rails/ActionControllerTestCase:
   Include:
     - '**/test/**/*.rb'
 
+Rails/ActionFilter:
+  Enabled: false
+  Include:
+    - '**/app/controllers/**/*.rb'
+    - '**/app/mailers/**/*.rb'
+
 Rails/ApplicationRecord:
   Exclude:
     - 'db/**/*.rb'
