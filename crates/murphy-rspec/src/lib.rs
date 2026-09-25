@@ -47,6 +47,11 @@
 //! - `RSpec/EmptyLineAfterHook` — blank line after hooks (murphy-4gd.3.9).
 //! - `RSpec/EmptyLineAfterSubject` — blank line after `subject` (murphy-4gd.3.9).
 //! - `RSpec/EmptyMetadata` — no empty metadata hash (murphy-4gd.3.9).
+//! - `RSpec/EmptyOutput` — no empty-string `output` matcher (murphy-4gd.3.10).
+//! - `RSpec/ExampleWording` — example wording style (murphy-4gd.3.10).
+//! - `RSpec/ExcessiveDocstringSpacing` — no excessive whitespace in descriptions (murphy-4gd.3.10).
+//! - `RSpec/ExpectActual` — actual value in `expect(...)` (murphy-4gd.3.10).
+//! - `RSpec/ExpectChange` — consistent `change` style (murphy-4gd.3.10).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
