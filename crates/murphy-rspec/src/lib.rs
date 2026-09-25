@@ -5,6 +5,10 @@
 //! - `RSpec/ExampleLength` — line cap on example bodies (murphy-6bv).
 //! - `RSpec/MultipleExpectations` — `expect(...)` count cap per
 //!   example (murphy-6tq).
+//! - `RSpec/DescribeSymbol` — avoid describing symbols (murphy-4gd.3.1).
+//! - `RSpec/Focus` — flags focused specs (murphy-4gd.3.1).
+//! - `RSpec/EmptyHook` — flags empty hooks (murphy-4gd.3.1).
+//! - `RSpec/MultipleDescribes` — multiple top-level groups (murphy-4gd.3.1).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
