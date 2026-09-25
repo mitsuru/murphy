@@ -550,6 +550,23 @@ mod tests {
     }
 
     #[test]
+    fn extracts_residual_validation() {
+        // `presence` plus another validation, only some keys redundant:
+        // drops `:account` from the original and appends a residual
+        // `validates :account, uniqueness: true`.
+        test::<RedundantPresenceValidationOnBelongsTo>().expect_correction(
+            indoc! {r#"
+                class User
+                  belongs_to :account
+                  validates :account, :name, presence: true, uniqueness: true
+                                             ^^^^^^^^^^^^^^ Remove explicit presence validation for `account`.
+                end
+            "#},
+            "class User\n  belongs_to :account\n  validates :name, presence: true, uniqueness: true\n  validates :account, uniqueness: true\nend\n",
+        );
+    }
+
+    #[test]
     fn gated_below_rails_50() {
         test::<RedundantPresenceValidationOnBelongsTo>()
             .with_target_rails_version(4, 2)

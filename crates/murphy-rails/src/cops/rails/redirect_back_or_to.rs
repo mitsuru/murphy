@@ -214,6 +214,17 @@ mod tests {
     }
 
     #[test]
+    fn corrects_fallback_second() {
+        test::<RedirectBackOrTo>().expect_correction(
+            indoc! {r#"
+                redirect_back(allow_other_host: false, fallback_location: root_path)
+                ^^^^^^^^^^^^^ Use `redirect_back_or_to` instead of `redirect_back` with `:fallback_location` keyword argument.
+            "#},
+            "redirect_back_or_to(root_path, allow_other_host: false)\n",
+        );
+    }
+
+    #[test]
     fn gated_below_rails_70() {
         test::<RedirectBackOrTo>()
             .with_target_rails_version(6, 1)
