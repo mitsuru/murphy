@@ -215,14 +215,16 @@ fn flags_describe_with_interpolated_string_first_arg() {
 }
 
 #[test]
-fn does_not_flag_describe_with_variable_first_arg() {
-    // `describe subject_under_test do ... end` — variable first-arg is
-    // unknowable statically; the cop must skip rather than guess.
+fn flags_describe_with_variable_first_arg() {
+    // `describe subject_under_test do ... end` — upstream
+    // `not_a_const_described` flags any non-const first arg (murphy-iwsr).
     let (_code, offs) =
         run_with_pack("subject_under_test = Widget\ndescribe subject_under_test do\nend\n");
-    assert!(
-        offenses_named(&offs, "RSpec/DescribeClass").is_empty(),
-        "variable first-arg must not be flagged; got {offs:?}"
+    let hits = offenses_named(&offs, "RSpec/DescribeClass");
+    assert_eq!(
+        hits.len(),
+        1,
+        "variable first-arg must be flagged per upstream; got {offs:?}"
     );
 }
 
