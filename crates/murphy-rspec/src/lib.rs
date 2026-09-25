@@ -37,6 +37,11 @@
 //! - `RSpec/ContextWording` — `context` docstring prefix style (murphy-4gd.3.7).
 //! - `RSpec/DescribedClassModuleWrapping` — no specs inside `module` (murphy-4gd.3.7).
 //! - `RSpec/ExampleWithoutDescription` — examples need descriptions (murphy-4gd.3.7).
+//! - `RSpec/DescribedClass` — prefer `described_class` helper (murphy-4gd.3.8).
+//! - `RSpec/Dialect` — custom RSpec dialect preferences (murphy-4gd.3.8).
+//! - `RSpec/DuplicatedMetadata` — no duplicated metadata (murphy-4gd.3.8).
+//! - `RSpec/EmptyExampleGroup` — no empty example groups (murphy-4gd.3.8).
+//! - `RSpec/EmptyLineAfterExample` — blank line after examples (murphy-4gd.3.8).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
