@@ -64,8 +64,8 @@ fn install_git_hook_all_writes_all_three() {
     install(dir.path(), &["--git-hook", "--tool", "all"]).success();
 
     for file in ["lefthook.yml", ".pre-commit-config.yaml", ".overcommit.yml"] {
-        let body = fs::read_to_string(dir.path().join(file))
-            .unwrap_or_else(|_| panic!("{file} written"));
+        let body =
+            fs::read_to_string(dir.path().join(file)).unwrap_or_else(|_| panic!("{file} written"));
         assert!(
             body.contains("murphy lint"),
             "{file} must run murphy lint, got:\n{body}"
