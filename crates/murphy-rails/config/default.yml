@@ -305,6 +305,10 @@ Rails/TimeZoneAssignment:
     - '**/spec/**/*.rb'
     - '**/test/**/*.rb'
 
+Rails/Validation:
+  Include:
+    - '**/app/models/**/*.rb'
+
 # --- Ported `Rails/*` opt-out defaults (subset of upstream defaults) ---
 # Cops below are opt-in upstream (`Enabled: false`); the pack layer must
 # reproduce that so they stay silent unless the user enables them
