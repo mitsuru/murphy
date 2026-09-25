@@ -32,6 +32,7 @@ pub mod gem_discovery;
 #[cfg(feature = "mruby-user-cops")]
 mod mruby;
 mod offense;
+pub mod pack_registry;
 mod parse;
 pub mod plugin_loader;
 pub mod plugin_manifest;
