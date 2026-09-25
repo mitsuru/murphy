@@ -24,7 +24,25 @@
 
 use std::collections::HashSet;
 
-use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop};
+use murphy_plugin_api::{Cx, NoOptions, NodeId, NodeKind, cop, def_node_matcher};
+
+// RuboCop parity: `Lint/DuplicateRequire` receiver guards are bare (`nil?`)
+// and `Kernel` top-level (`(const {nil? cbase} :Kernel)`), methods
+// `:require` / `:require_relative`.
+// In Murphy `::Kernel` collapses to `Const{scope:None}`: `nil?` covers bare +
+// `::` for `Kernel` (namespaced `Foo::Kernel` still accepts — pinned by
+// `boundary_accepts_namespaced_kernel_require`). `call` covers both `Send`
+// and `Csend` (pinned by `boundary_flags_csend_kernel_require`), matching the
+// generic `method_name` + `call_receiver` dispatch below. Argument dedup
+// (`method + first_argument source`) stays hand-rolled below.
+def_node_matcher!(
+    require_bare,
+    "(call nil? {:require :require_relative} ...)"
+);
+def_node_matcher!(
+    require_kernel,
+    "(call (const nil? :Kernel) {:require :require_relative} ...)"
+);
 
 #[derive(Default)]
 pub struct DuplicateRequire;
@@ -64,15 +82,15 @@ impl DuplicateRequire {
 /// Returns the require-method name (`require` / `require_relative`) if `node`
 /// is a bare or `Kernel`-receiver call to one of them, else `None`.
 fn require_method<'a>(cx: &Cx<'a>, node: NodeId) -> Option<&'a str> {
-    let method = cx.method_name(node)?;
-    if method != "require" && method != "require_relative" {
+    // `(call nil? {:require :require_relative} ...)` (bare) or
+    // `(call (const nil? :Kernel) {:require :require_relative} ...)`
+    // (`Kernel` / `::Kernel`, top-level only). `call` covers `Send` + `Csend`.
+    if !require_bare(node, cx) && !require_kernel(node, cx) {
         return None;
     }
-    match cx.call_receiver(node).get() {
-        None => Some(method),
-        Some(receiver) if cx.is_global_const(receiver, "Kernel") => Some(method),
-        Some(_) => None,
-    }
+    // The matcher already constrains the method to `require` /
+    // `require_relative`; return it for the dedup key.
+    cx.method_name(node)
 }
 
 murphy_plugin_api::submit_cop!(DuplicateRequire);
@@ -152,5 +170,42 @@ mod tests {
                 require 'bar'
             "#},
         );
+    }
+
+    // --- Boundary characterization (murphy-ft88.7): pin the exact node set
+    // the hand-rolled `require` guard matches, so the verbatim
+    // `(call nil? {:require :require_relative} ...)` +
+    // `(call (const nil? :Kernel) {:require :require_relative} ...)` refactor
+    // can be proven equivalent. `::Kernel` collapses to `Const{scope:None}`:
+    // `nil?` covers bare + `::`. `call` covers `Send` + `Csend`.
+
+    #[test]
+    fn boundary_flags_cbase_kernel_require() {
+        // `::Kernel` collapses to scope-less Const: `nil?` covers bare + `::`.
+        test::<DuplicateRequire>().expect_offense(indoc! {r#"
+            ::Kernel.require 'foo'
+            ::Kernel.require 'foo'
+            ^^^^^^^^^^^^^^^^^^^^^^ Duplicate `require` detected.
+        "#});
+    }
+
+    #[test]
+    fn boundary_accepts_namespaced_kernel_require() {
+        // `Foo::Kernel` is scoped: `is_global_const` rejects, no dedup.
+        test::<DuplicateRequire>().expect_no_offenses(indoc! {r#"
+            Foo::Kernel.require 'foo'
+            Foo::Kernel.require 'foo'
+        "#});
+    }
+
+    #[test]
+    fn boundary_flags_csend_kernel_require() {
+        // `&.` is `csend`; `call` covers `Send` + `Csend`, and the
+        // hand-rolled `method_name` + `call_receiver` is generic over both.
+        test::<DuplicateRequire>().expect_offense(indoc! {r#"
+            Kernel&.require 'foo'
+            Kernel&.require 'foo'
+            ^^^^^^^^^^^^^^^^^^^^^ Duplicate `require` detected.
+        "#});
     }
 }
