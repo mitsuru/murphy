@@ -11,14 +11,19 @@
 //! 4. user-local `dirs::data_dir()/murphy/plugins/`
 //!    (XDG `$XDG_DATA_HOME/murphy/plugins` on Linux).
 //!
-//! Within a directory the loader looks for `lib<sanitized>.{so,dylib}`
-//! where `<sanitized>` is `name` with `-` replaced by `_` (Cargo cdylib
-//! naming convention — `murphy-rails` → `libmurphy_rails.so`).
+//! Within a directory the loader first probes the pack-dir form
+//! `<dir>/<name>/` holding a `murphy-plugin.toml` manifest (ADR 0046 —
+//! the cdylib under its `lib/` is used), then falls back to the legacy
+//! `lib<sanitized>.{so,dylib}` file where `<sanitized>` is `name` with
+//! `-` replaced by `_` (Cargo cdylib naming convention — `murphy-rails`
+//! → `libmurphy_rails.so`). The fallback keeps pre-manifest search-path
+//! layouts working unchanged.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::plugin_loader::{LoadKind, PluginLoadDiagnostic, ResolveFailure};
+use crate::plugin_manifest::{is_pack_dir, resolve_pack_cdylib};
 use crate::{ConfigError, PluginConfig};
 
 const MAX_PLUGIN_NAME_LEN: usize = 64;
@@ -80,6 +85,38 @@ pub fn lib_filename(name: &str) -> String {
     format!("lib{sanitized}.{ext}")
 }
 
+/// Probe one search dir for a plugin `name`: the pack-dir form first
+/// (`<dir>/<name>/murphy-plugin.toml` + `lib/` cdylib, ADR 0046), then the
+/// legacy `lib<sanitized>.{so,dylib}` file.
+///
+/// A pack dir whose manifest is broken or whose `lib/` holds no cdylib is
+/// skipped (falling through to the legacy file, then the next dir) — a
+/// half-installed pack must not shadow a working copy later in the path.
+/// Use the `Detailed { path }` form to surface manifest errors directly.
+fn find_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
+    let pack_dir = dir.join(name);
+    if is_pack_dir(&pack_dir)
+        && let Ok(cdylib) = resolve_pack_cdylib(&pack_dir)
+        && cdylib.is_file()
+    {
+        return Some(cdylib);
+    }
+    let legacy = dir.join(lib_filename(name));
+    legacy.is_file().then_some(legacy)
+}
+
+/// Map a `Detailed { path }` (project-root-joined) to the cdylib the
+/// loader opens: a pack dir (`murphy-plugin.toml` + `lib/`, ADR 0046)
+/// resolves to its cdylib; anything else passes through unchanged (the
+/// legacy direct-`.so` reference).
+fn normalize_pack_path(path: &Path) -> Result<PathBuf, ConfigError> {
+    if !is_pack_dir(path) {
+        return Ok(path.to_path_buf());
+    }
+    resolve_pack_cdylib(path)
+        .map_err(|e| ConfigError::Io(format!("plugin pack `{}`: {e}", path.display())))
+}
+
 /// Resolve a plugin `name` into an absolute path using the given
 /// `overrides` map (from `Detailed { name, path }` entries) and the
 /// ordered `search_dirs` list. Pure function — used directly in tests; the
@@ -95,9 +132,8 @@ pub fn resolve_plugin_name_with_search_dirs(
     }
     let filename = lib_filename(name);
     for dir in search_dirs {
-        let candidate = dir.join(&filename);
-        if candidate.exists() {
-            return Ok(candidate);
+        if let Some(pack_cdylib) = find_in_dir(dir, name) {
+            return Ok(pack_cdylib);
         }
     }
     Err(ResolveFailure {
@@ -168,12 +204,16 @@ pub fn plan_plugin_loads(
         if !seen.insert(name.clone()) {
             continue;
         }
-        let path = match plugin {
+        let raw = match plugin {
             // For a Detailed entry we know `overrides` has the resolved
             // path — same data we just inserted above.
             PluginConfig::Detailed(_) => overrides[name].clone(),
             PluginConfig::Name(_) => resolve_plugin_name(name, project_root, &overrides)?,
         };
+        // A `Detailed` path may point at a pack dir instead of a direct
+        // `.so` (ADR 0046); a `Name` pinned via overrides may too. The
+        // loader below only ever opens a cdylib, so normalize here.
+        let path = normalize_pack_path(&raw)?;
         plan.push((name.clone(), path));
     }
     Ok(plan)
@@ -437,5 +477,140 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].0, "murphy-rails");
         assert_eq!(plan[0].1, expected);
+    }
+
+    /// Build a pack dir `<parent>/<name>/` with a manifest + one cdylib
+    /// under `lib/<arch>/`. Returns the cdylib path.
+    fn write_pack_dir(parent: &Path, name: &str) -> PathBuf {
+        let pack = parent.join(name);
+        let arch = pack.join("lib").join("linux-x86_64");
+        std::fs::create_dir_all(&arch).expect("mkdir lib/<arch>");
+        std::fs::write(
+            pack.join(crate::plugin_manifest::MANIFEST_FILENAME),
+            format!("[plugin]\nname = \"{name}\"\nversion = \"0.1.0\"\nmurphy-api-version = 4\n"),
+        )
+        .expect("write manifest");
+        let cdylib = arch.join(format!("lib{}.so", name.replace('-', "_")));
+        std::fs::write(&cdylib, b"").expect("write fake .so");
+        cdylib
+    }
+
+    #[test]
+    fn search_prefers_pack_dir_over_legacy_so() {
+        // ADR 0046 §3: `<dir>/<name>/` (manifest + lib/) wins over the
+        // legacy `<dir>/lib<sanitized>.so` in the same dir.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pack_cdylib = write_pack_dir(dir.path(), "murphy-rails");
+        std::fs::write(dir.path().join(lib_filename("murphy-rails")), b"")
+            .expect("write legacy .so");
+
+        let got = resolve_plugin_name_with_search_dirs(
+            "murphy-rails",
+            &BTreeMap::new(),
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
+        assert_eq!(got, pack_cdylib);
+    }
+
+    #[test]
+    fn search_falls_back_to_legacy_when_pack_dir_is_broken() {
+        // A half-installed pack (manifest but no cdylib) must not shadow
+        // the working legacy file in the same dir.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pack = dir.path().join("murphy-rails");
+        std::fs::create_dir_all(pack.join("lib")).expect("mkdir");
+        std::fs::write(
+            pack.join(crate::plugin_manifest::MANIFEST_FILENAME),
+            "[plugin]\nname = \"murphy-rails\"\nversion = \"1\"\nmurphy-api-version = 4\n",
+        )
+        .expect("write manifest");
+        let legacy = dir.path().join(lib_filename("murphy-rails"));
+        std::fs::write(&legacy, b"").expect("write legacy .so");
+
+        let got = resolve_plugin_name_with_search_dirs(
+            "murphy-rails",
+            &BTreeMap::new(),
+            &[dir.path().to_path_buf()],
+        )
+        .unwrap();
+        assert_eq!(got, legacy);
+    }
+
+    #[test]
+    fn plan_normalizes_detailed_pack_dir_to_its_cdylib() {
+        // `Detailed { path }` accepts a pack dir (ADR 0046 §3): the plan
+        // carries the resolved cdylib, so the loader below is unchanged.
+        let project = tempfile::tempdir().expect("tempdir");
+        let cdylib = write_pack_dir(project.path(), "vendor-pack");
+        let plugins = vec![PluginConfig::Detailed(PluginDetailed {
+            name: "vendor-pack".to_string(),
+            path: PathBuf::from("./vendor-pack"),
+        })];
+        let plan = plan_plugin_loads(project.path(), &plugins).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].0, "vendor-pack");
+        assert_eq!(plan[0].1, cdylib);
+    }
+
+    #[test]
+    fn plan_passes_detailed_direct_so_through_unchanged() {
+        // Backward compatibility: a direct `.so` path is untouched.
+        let project = tempfile::tempdir().expect("tempdir");
+        let so = project.path().join("libfoo.so");
+        std::fs::write(&so, b"").expect("write fake .so");
+        let plugins = vec![PluginConfig::Detailed(PluginDetailed {
+            name: "foo".to_string(),
+            path: PathBuf::from("./libfoo.so"),
+        })];
+        let plan = plan_plugin_loads(project.path(), &plugins).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].1, so);
+    }
+
+    #[test]
+    fn plan_errors_on_pack_dir_without_cdylib() {
+        // A `Detailed` pack dir with an empty `lib/` is a user error with
+        // a manifest-shaped message — not a silent dlopen of a directory.
+        let project = tempfile::tempdir().expect("tempdir");
+        let pack = project.path().join("broken-pack");
+        std::fs::create_dir_all(pack.join("lib")).expect("mkdir");
+        std::fs::write(
+            pack.join(crate::plugin_manifest::MANIFEST_FILENAME),
+            "[plugin]\nname = \"broken-pack\"\nversion = \"1\"\nmurphy-api-version = 4\n",
+        )
+        .expect("write manifest");
+        let plugins = vec![PluginConfig::Detailed(PluginDetailed {
+            name: "broken-pack".to_string(),
+            path: PathBuf::from("./broken-pack"),
+        })];
+        let err = plan_plugin_loads(project.path(), &plugins).expect_err("must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no cdylib"),
+            "error must explain the pack dir holds no cdylib: {msg}"
+        );
+    }
+
+    #[test]
+    fn plan_name_pinned_by_detailed_pack_dir_override_loads_once() {
+        // `Name` + same-name `Detailed`-as-pack-dir dedups to one load of
+        // the pack's cdylib (override pin flows through normalization).
+        //
+        // Safety: see `resolve_wrapper_finds_lib_in_project_local_dot_murphy_plugins`.
+        unsafe { std::env::remove_var("MURPHY_PLUGIN_PATH") };
+
+        let project = tempfile::tempdir().expect("tempdir");
+        let cdylib = write_pack_dir(project.path(), "murphy-rails");
+        let plugins = vec![
+            PluginConfig::Name("murphy-rails".to_string()),
+            PluginConfig::Detailed(PluginDetailed {
+                name: "murphy-rails".to_string(),
+                path: PathBuf::from("./murphy-rails"),
+            }),
+        ];
+        let plan = plan_plugin_loads(project.path(), &plugins).unwrap();
+        assert_eq!(plan.len(), 1, "single load expected: {plan:?}");
+        assert_eq!(plan[0].1, cdylib);
     }
 }
