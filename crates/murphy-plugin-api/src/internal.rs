@@ -41,6 +41,7 @@ pub const fn build_cop<C: NodeCop + Default>() -> PluginCopV1 {
         safe: tristate_to_wire(C::SAFE),
         safe_autocorrect: tristate_to_wire(C::SAFE_AUTOCORRECT),
         minimum_target_ruby_version: RubyVersion::to_wire(C::MINIMUM_TARGET_RUBY_VERSION),
+        maximum_target_ruby_version: RubyVersion::to_wire(C::MAXIMUM_TARGET_RUBY_VERSION),
     }
 }
 

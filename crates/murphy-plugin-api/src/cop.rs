@@ -42,6 +42,10 @@ pub trait Cop: Send + Sync + 'static {
     /// Minimum `AllCops.TargetRubyVersion` required for this cop to run.
     /// `None` means no version gating.
     const MINIMUM_TARGET_RUBY_VERSION: Option<RubyVersion> = None;
+
+    /// Maximum `AllCops.TargetRubyVersion` this cop runs on.
+    /// `None` means no upper gating (runs on any newer Ruby).
+    const MAXIMUM_TARGET_RUBY_VERSION: Option<RubyVersion> = None;
 }
 
 #[cfg(test)]
@@ -66,5 +70,6 @@ mod tests {
         assert_eq!(<Stub as Cop>::SAFE, None); // default
         assert_eq!(<Stub as Cop>::SAFE_AUTOCORRECT, None); // default
         assert_eq!(<Stub as Cop>::MINIMUM_TARGET_RUBY_VERSION, None); // default
+        assert_eq!(<Stub as Cop>::MAXIMUM_TARGET_RUBY_VERSION, None); // default
     }
 }

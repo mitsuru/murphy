@@ -466,6 +466,7 @@ mod tests {
             safe: 255,
             safe_autocorrect: 255,
             minimum_target_ruby_version: 0,
+            maximum_target_ruby_version: 0,
             options_ptr: std::ptr::null(),
             options_len: 0,
             kinds_ptr: FAKE_KINDS.as_ptr(),

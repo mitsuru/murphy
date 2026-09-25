@@ -176,6 +176,7 @@ mod option_key_pascal_case_guard_tests {
             safe: 255,
             safe_autocorrect: 255,
             minimum_target_ruby_version: 0,
+            maximum_target_ruby_version: 0,
         }
     }
 

@@ -326,6 +326,8 @@ impl CopRegistry {
 
 fn cop_supports_target_ruby_version(cop: &PluginCopV1, target: RubyVersion) -> bool {
     RubyVersion::from_wire(cop.minimum_target_ruby_version).is_none_or(|minimum| target >= minimum)
+        && RubyVersion::from_wire(cop.maximum_target_ruby_version)
+            .is_none_or(|maximum| target <= maximum)
 }
 
 /// Enumerate `<root>/<cops_path>/*.rb` (flat, non-recursive), filtered
@@ -393,6 +395,16 @@ mod tests {
             Some(murphy_plugin_api::RubyVersion::new(3, 2));
     }
 
+    #[derive(Default)]
+    struct Ruby30MaxBuiltin;
+
+    impl Cop for Ruby30MaxBuiltin {
+        type Options = NoOptions;
+        const NAME: &'static str = "Stub/Ruby30Max";
+        const MAXIMUM_TARGET_RUBY_VERSION: Option<murphy_plugin_api::RubyVersion> =
+            Some(murphy_plugin_api::RubyVersion::new(3, 0));
+    }
+
     impl NodeCop for StubBuiltin {
         const KINDS: &'static [NodeKindTag] = &[];
         fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
@@ -403,10 +415,17 @@ mod tests {
         fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
     }
 
+    impl NodeCop for Ruby30MaxBuiltin {
+        const KINDS: &'static [NodeKindTag] = &[];
+        fn check(&self, _node: NodeId, _cx: &Cx<'_>) {}
+    }
+
     static STUB_BUILTIN_COP: PluginCopV1 =
         murphy_plugin_api::__internal::build_cop::<StubBuiltin>();
     static RUBY32_BUILTIN_COP: PluginCopV1 =
         murphy_plugin_api::__internal::build_cop::<Ruby32Builtin>();
+    static RUBY30_MAX_BUILTIN_COP: PluginCopV1 =
+        murphy_plugin_api::__internal::build_cop::<Ruby30MaxBuiltin>();
     static STUB_BUILTINS: &[&PluginCopV1] = &[&STUB_BUILTIN_COP];
 
     #[test]
@@ -463,5 +482,38 @@ mod tests {
         let reg = CopRegistry::discover(dir.path(), builtins).expect("discover Ok");
 
         assert_eq!(reg.cop_names(), vec!["Stub/Builtin".to_string()]);
+    }
+
+    #[test]
+    fn discover_skips_cops_above_maximum_target_ruby_version() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::fs::write(
+            dir.path().join(".murphy.yml"),
+            "AllCops:\n  TargetRubyVersion: 3.1\n",
+        )
+        .expect("write .murphy.yml");
+        let builtins = &[&STUB_BUILTIN_COP, &RUBY30_MAX_BUILTIN_COP];
+
+        let reg = CopRegistry::discover(dir.path(), builtins).expect("discover Ok");
+
+        assert_eq!(reg.cop_names(), vec!["Stub/Builtin".to_string()]);
+    }
+
+    #[test]
+    fn discover_keeps_cops_at_or_below_maximum_target_ruby_version() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        std::fs::write(
+            dir.path().join(".murphy.yml"),
+            "AllCops:\n  TargetRubyVersion: 3.0\n",
+        )
+        .expect("write .murphy.yml");
+        let builtins = &[&STUB_BUILTIN_COP, &RUBY30_MAX_BUILTIN_COP];
+
+        let reg = CopRegistry::discover(dir.path(), builtins).expect("discover Ok");
+
+        assert_eq!(
+            reg.cop_names(),
+            vec!["Stub/Builtin".to_string(), "Stub/Ruby30Max".to_string()]
+        );
     }
 }

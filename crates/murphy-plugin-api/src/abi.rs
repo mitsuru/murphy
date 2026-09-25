@@ -513,6 +513,12 @@ pub struct PluginCopV1 {
     /// Minimum `AllCops.TargetRubyVersion` required for this cop. `0` means
     /// no minimum, so the cop always participates after normal enablement.
     pub minimum_target_ruby_version: u16,
+    /// Maximum `AllCops.TargetRubyVersion` this cop runs on. `0` means no
+    /// maximum. Tail-appended into the trailing padding after
+    /// `minimum_target_ruby_version` under ABI v4 lockstep (murphy-n0ua), so
+    /// `size_of::<PluginCopV1>()` is unchanged. Per project policy the numeric
+    /// ABI is not bumped for tail-appended fields.
+    pub maximum_target_ruby_version: u16,
 }
 
 // Safety: PluginCopV1 is an immutable descriptor of non-owning views and
@@ -700,6 +706,8 @@ mod tests {
         assert_eq!(offset_of!(PluginCopV1, safe), 104);
         assert_eq!(offset_of!(PluginCopV1, safe_autocorrect), 105);
         assert_eq!(offset_of!(PluginCopV1, minimum_target_ruby_version), 106);
+        // murphy-n0ua: tail-appended into the trailing padding; size unchanged.
+        assert_eq!(offset_of!(PluginCopV1, maximum_target_ruby_version), 108);
         assert_eq!(size_of::<PluginCopV1>(), 112);
     }
 
