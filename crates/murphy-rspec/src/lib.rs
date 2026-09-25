@@ -67,6 +67,11 @@
 //! - `RSpec/LeakyConstantDeclaration` — stub constants, don't declare them (murphy-4gd.3.13).
 //! - `RSpec/LetBeforeExamples` — `let` before examples (murphy-4gd.3.13).
 //! - `RSpec/LetSetup` — no unreferenced `let!` setup (murphy-4gd.3.13).
+//! - `RSpec/AlignLeftLetBrace` — align `{` of adjacent lets (murphy-4gd.3.14).
+//! - `RSpec/AlignRightLetBrace` — align `}` of adjacent lets (murphy-4gd.3.14).
+//! - `RSpec/MessageChain` — no `receive_message_chain` / `stub_chain` (murphy-4gd.3.14).
+//! - `RSpec/MessageExpectation` — consistent `allow` / `expect` style (murphy-4gd.3.14).
+//! - `RSpec/MessageSpies` — set message expectations with spies (murphy-4gd.3.14).
 //!
 //! Source layout: each namespace lives under `src/cops/<namespace>/`
 //! so the file path tells you the cop's id at a glance.
