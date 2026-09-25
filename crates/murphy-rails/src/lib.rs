@@ -612,61 +612,11 @@ submit_cop!(BulkChangeTable);
 // `ToSWithArgument` promoted to real cop in
 // `cops::rails::to_s_with_argument`.
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/TopLevelHashWithIndifferentAccess
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct TopLevelHashWithIndifferentAccess;
+// `TopLevelHashWithIndifferentAccess` promoted to real cop in
+// `cops::rails::top_level_hash_with_indifferent_access`.
 
-#[cop(
-    name = "Rails/TopLevelHashWithIndifferentAccess",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl TopLevelHashWithIndifferentAccess {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(TopLevelHashWithIndifferentAccess);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/TransactionExitStatement
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct TransactionExitStatement;
-
-#[cop(
-    name = "Rails/TransactionExitStatement",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl TransactionExitStatement {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(TransactionExitStatement);
+// `TransactionExitStatement` promoted to real cop in
+// `cops::rails::transaction_exit_statement`.
 
 // `UniqBeforePluck` promoted to real cop in
 // `cops::rails::uniq_before_pluck`.
@@ -699,33 +649,8 @@ impl UniqueValidationWithoutIndex {
 }
 submit_cop!(UniqueValidationWithoutIndex);
 
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
-/// upstream_cop: Rails/UnknownEnv
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct UnknownEnv;
-
-#[cop(
-    name = "Rails/UnknownEnv",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl UnknownEnv {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(UnknownEnv);
+// `UnknownEnv` promoted to real cop in
+// `cops::rails::unknown_env`.
 
 /// ## RuboCop parity
 ///
