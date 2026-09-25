@@ -2537,34 +2537,6 @@ submit_cop!(ReflectionClassName);
 ///
 /// ```murphy-parity
 /// upstream: rubocop-rails
-/// upstream_cop: Rails/RefuteMethods
-/// upstream_version_checked: 2.35.0
-/// status: stub
-/// gap_issues:
-///   - murphy-4gd.1
-/// notes: >
-///   Arena-migration stub registered for config/listing compatibility; real implementation is pending.
-/// ```
-///
-#[derive(Default)]
-pub struct RefuteMethods;
-
-#[cop(
-    name = "Rails/RefuteMethods",
-    description = "Rails cop pending arena migration (cf. murphy-au8). Stub registered for config compatibility.",
-    default_enabled = false,
-    options = NoOptions,
-)]
-impl RefuteMethods {
-    #[on_new_investigation]
-    fn investigate(&self, _cx: &Cx<'_>) {}
-}
-submit_cop!(RefuteMethods);
-
-/// ## RuboCop parity
-///
-/// ```murphy-parity
-/// upstream: rubocop-rails
 /// upstream_cop: Rails/RelativeDateConstant
 /// upstream_version_checked: 2.35.0
 /// status: stub
