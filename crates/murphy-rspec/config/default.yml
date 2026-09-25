@@ -2,14 +2,17 @@
 # `config/default.yml` for the subset of per-cop file scoping that cannot be
 # expressed through `#[cop]` / `#[option]` metadata.
 #
-# Only `RSpec/DescribeClass: Exclude` is carried here: rubocop-rspec excludes
-# the non-class spec directories (features/requests/routing/system/views) from
-# this cop, since those specs describe behaviour with a string subject rather
-# than a constant. Without this layer Murphy fires `RSpec/DescribeClass` across
-# `spec/requests`, `spec/system`, etc. (275 false positives on mastodon).
+# - `RSpec/DescribeClass: Exclude`: rubocop-rspec excludes the non-class spec
+#   directories (features/requests/routing/system/views) from this cop, since
+#   those specs describe behaviour with a string subject rather than a
+#   constant. Without this layer Murphy fires `RSpec/DescribeClass` across
+#   `spec/requests`, `spec/system`, etc. (275 false positives on mastodon).
+# - `RSpec/BeforeAfterAll: Exclude`: rubocop-rspec excludes the helper files
+#   (`spec_helper`, `rails_helper`, `support/**`) from this cop, since global
+#   setup there legitimately uses `:all` / `:context` scope.
 #
-# The cop's other defaults (Enabled, Severity, IgnoredMetadata) are already
-# encoded in the cop's Rust metadata / hand-rolled options, so they are not
+# The cops' other defaults (Enabled, Severity, IgnoredMetadata) are already
+# encoded in the cops' Rust metadata / hand-rolled options, so they are not
 # duplicated here.
 RSpec/DescribeClass:
   Exclude:
@@ -18,3 +21,8 @@ RSpec/DescribeClass:
     - "**/spec/routing/**/*"
     - "**/spec/system/**/*"
     - "**/spec/views/**/*"
+RSpec/BeforeAfterAll:
+  Exclude:
+    - "**/spec/spec_helper.rb"
+    - "**/spec/rails_helper.rb"
+    - "**/spec/support/**/*.rb"
